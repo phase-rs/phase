@@ -7,6 +7,8 @@
 
 pub mod support;
 
+mod anzrag_must_be_blocked;
+
 mod a_killer_among_us;
 mod aang_compound_tail;
 mod aang_journey_partial_fail_to_find_2722;
@@ -390,6 +392,7 @@ mod cut_a_deal_draw_this_way_count;
 mod damage_done_once_by_controller_player_recipients;
 mod damage_prevention_formula;
 mod damage_redirect_target_constraints;
+mod damaged_player_counter_branch;
 mod dandan_analysis_ai_support_reads;
 mod dandan_declare_round;
 mod dandan_free_reveal;

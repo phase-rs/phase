@@ -7345,6 +7345,11 @@ scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
 scryfall_id = "b41a1ff1-8e72-4269-825c-aaa12b3a4dca"
 
 [[token.source_card_refs]]
+card_name = "Halo Fountain"
+scryfall_oracle_id = "36a9de4c-8073-475d-8679-e50844eef09e"
+scryfall_id = "e881bf86-4e57-4995-a498-261ad0addc10"
+
+[[token.source_card_refs]]
 card_name = "Grand Crescendo"
 scryfall_oracle_id = "dc600c06-8239-409e-b53d-20f813a3f5e7"
 scryfall_id = "a149748e-f192-4ec6-bae3-5a18ffcec140"
@@ -9532,6 +9537,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -12541,7 +12547,10 @@ preset_id = "0bf9405a-0801-5565-872f-1b372c7e68f2"
 id = "0bfa7d0c-9a5d-58a2-aa93-ffe0f6aa1f08"
 category = "Creature"
 fidelity = "Full"
-source_card_names = ["Research // Development"]
+source_card_names = [
+    "Chandra, Pride of Avishkar",
+    "Research // Development",
+]
 set_code = "OGW"
 set_name = "Oath of the Gatewatch"
 collector_number = "9"
@@ -21132,6 +21141,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -23112,6 +23122,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -23332,6 +23343,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -25590,6 +25602,37 @@ scryfall_id = "5326a876-0c56-4368-af10-e9bbd1188d45"
 scryfall_id = "84bb0127-b093-47a0-94ea-30e28e238b67"
 scryfall_oracle_id = "496e1083-c792-40a4-adf4-fec1d559cd5e"
 preset_id = "1af48e93-6b04-524c-b0e3-0ef30485d6b0"
+
+[[token]]
+id = "1afb8317-f5f2-5699-a164-204aab69dff5"
+category = "Creature"
+fidelity = "Full"
+source_card_names = ["Sandwurm Convergence"]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "2925"
+released_at = "2019-12-02"
+type_line = "Token Creature — Wurm"
+
+[token.body]
+display_name = "Wurm"
+power = 5
+toughness = 5
+core_types = ["Creature"]
+subtypes = ["Wurm"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Sandwurm Convergence"
+scryfall_oracle_id = "429eff2b-635b-43f6-b20f-82e25992c0b9"
+scryfall_id = "d846ccfe-e4d3-48cb-b334-76e1880636d5"
+
+[token.token_image_ref]
+scryfall_id = "6476a5e8-938d-4ca8-bb45-725ab1bd4a38"
+scryfall_oracle_id = "1adf3c28-58c0-4239-ba4a-c53d345709b4"
+preset_id = "1afb8317-f5f2-5699-a164-204aab69dff5"
 
 [[token]]
 id = "1b4d784e-c529-565b-9d81-2c8ae732cc16"
@@ -29259,6 +29302,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -30490,6 +30534,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -30679,6 +30724,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -31894,6 +31940,7 @@ fidelity = "PartialMissingAbilities"
 source_card_names = [
     "Niko Aris",
     "Niko, Light of Hope",
+    "Niko, Spark of Victory",
 ]
 set_code = "DSK"
 set_name = "Duskmourn: House of Horror"
@@ -35059,6 +35106,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -36214,6 +36262,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -36462,6 +36511,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -38982,6 +39032,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -39203,6 +39254,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -40270,6 +40322,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -59537,6 +59590,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -60573,6 +60627,424 @@ scryfall_id = "87f6aaba-ad2d-41ea-8d07-21c67d384aa0"
 scryfall_id = "6bc05773-3721-4748-a218-97868e544b90"
 scryfall_oracle_id = "6f80811b-fdc7-4fb9-ac61-d8b51c28fe7f"
 preset_id = "4667d9dc-90d5-5b6c-b112-fbd4d7511b96"
+
+[[token]]
+id = "468bef4e-1a93-53eb-adc0-e2c803a6c533"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Alchemist's Talent",
+    "Alicia Masters, Skilled Sculptor",
+    "An Offer You Can't Refuse",
+    "Ancestors' Aid",
+    "Ancient Adamantoise",
+    "Ancient Copper Dragon",
+    "Ant-Man's Army",
+    "Ant-Man, Elusive Avenger",
+    "Ashling's Command",
+    "Atsushi, the Blazing Sky",
+    "Avengers: Under Siege",
+    "Axgard Artisan",
+    "Baeloth Barrityl, Entertainer",
+    "Bank Job",
+    "Battle Angels of Tyr",
+    "Beamtown Beatstick",
+    "Bejeweled Warg",
+    "Beza, the Bounding Spring",
+    "Big Score",
+    "Big Spender",
+    "Bilbo's Gambit",
+    "Bilbo, Retired Burglar",
+    "Bill Ferny, Bree Swindler",
+    "Black Market Connections",
+    "Black Market Tycoon",
+    "Blood Money",
+    "Bloodroot Apothecary",
+    "Blooming Blast",
+    "Bonehoard Dracosaur",
+    "Boneyard Desecrator",
+    "Bootleggers' Stash",
+    "Bottle-Cap Blast",
+    "Boxing Ring",
+    "Brass's Bounty",
+    "Brazen Freebooter",
+    "Breeches, Eager Pillager",
+    "Bucknard's Everfull Purse",
+    "Burakos, Party Leader",
+    "Burdened Aerialist",
+    "Buy Your Silence",
+    "Captain Lannery Storm",
+    "Careening Mine Cart",
+    "Casey & Raph, Hotheads",
+    "Cataclysmic Prospecting",
+    "Cavern-Hoard Dragon",
+    "Centrifuge",
+    "Charming Scoundrel",
+    "Chira, All In",
+    "City of Death",
+    "Cloud, Ex-SOLDIER",
+    "Coin of Mastery",
+    "Collector's Vault",
+    "Common Crook",
+    "Contested Game Ball",
+    "Contract Hero",
+    "Contract Killing",
+    "Corsair Captain",
+    "Covetous Elegy",
+    "Crack Open",
+    "Creative Outburst",
+    "Crossover Collaboration",
+    "Culmination of Studies",
+    "Currency Converter",
+    "Cutthroat Negotiator",
+    "Daily Bugle Newspaper",
+    "Deadeye Plunderers",
+    "Deadly Derision",
+    "Deadly Dispute",
+    "Death to Our Enemies",
+    "Decadent Dragon // Expensive Taste",
+    "Depths of Desire",
+    "Descent into Avernus",
+    "Diamond Pick-Axe",
+    "Dihada, Binder of Wills",
+    "Dire Fleet Hoarder",
+    "Discerning Financier",
+    "Dockside Extortionist",
+    "Don Andres, the Renegade",
+    "Done for the Day",
+    "Dori, Bearer of Friends",
+    "Dragon-Cursed Halls",
+    "Dungeon of the Mad Mage",
+    "Dungeoneer's Pack",
+    "Edward Kenway",
+    "Elemental Masterpiece",
+    "Emissary Green",
+    "Enterprising Scallywag",
+    "Erestor of the Council",
+    "Evin, Waterdeep Opportunist",
+    "Excavation Technique",
+    "Exhibition Magician",
+    "Exit Through the Grift Shop",
+    "Fable of the Mirror-Breaker // Reflection of Kiki-Jiki",
+    "Fae Offering",
+    "Fain, the Broker",
+    "Fake Your Own Death",
+    "Flamekin Gildweaver",
+    "Flick a Coin",
+    "Forging the Tyrite Sword",
+    "Forsworn Paladin",
+    "Fountainport",
+    "Furnace Reins",
+    "Gadrak, the Crown-Scourge",
+    "Gala Greeters",
+    "Galadriel, Gift-Giver",
+    "Galazeth Prismari",
+    "Ganax, Astral Hunter",
+    "Gemcutter Buccaneer",
+    "Generous Plunderer",
+    "Gilded Ghoda",
+    "Gilded Pinions",
+    "Gimli of the Glittering Caves",
+    "Gleaming Barrier",
+    "Gleaming Splendor",
+    "Glittermonger",
+    "Gluntch, the Bestower",
+    "Glóin, Dwarf Emissary",
+    "Goblin Airbrusher",
+    "Goblin Glasswright // Craft with Pride",
+    "Goblin Shaman",
+    "Gold Pan",
+    "Gold Rush",
+    "Goldlust Triad",
+    "Goldspan Dragon",
+    "Goldvein Hydra",
+    "Goldvein Pick",
+    "Gonti, Night Minister",
+    "Gorbag of Minas Morgul",
+    "Grabby Giant // That's Mine",
+    "Grand Nagus Zek",
+    "Great Train Heist",
+    "Greedy Freebooter",
+    "Grilka, Widowed Warrior",
+    "Grim Bounty",
+    "Grim Hireling",
+    "Guild Artisan",
+    "Halo Scarab",
+    "Heap Gate",
+    "Heartless Pillage",
+    "Hell to Pay",
+    "Henry Wu, InGen Geneticist",
+    "Herald of Hadar",
+    "Heroes for Hire",
+    "Hit the Mother Lode",
+    "Hoard Hauler",
+    "Hoard Robber",
+    "Hoarding Ogre",
+    "Hornswoggle",
+    "Hullbreacher",
+    "Ignacio of Myra's Marvels",
+    "Impetuous Lootmonger",
+    "Improvised Weaponry",
+    "Impulsive Pilferer",
+    "Indulge // Excess",
+    "Ingenious Mastery",
+    "Inspired Tinkering",
+    "Instrument of the Bards",
+    "Invasion of Ergamon // Truga Cliffcharger",
+    "Involuntary Employment",
+    "Iron Man, Titan of Innovation",
+    "J. Jonah Jameson",
+    "Jan Jansen, Chaos Crafter",
+    "Jared Carthalion",
+    "Jewel Thief",
+    "Jewel-Eyed Cobra",
+    "Jolene, Plundering Pugilist",
+    "Jolene, the Plunder Queen",
+    "Kain, Traitorous Dragoon",
+    "Kalain, Reclusive Painter",
+    "Kamachal, Ship's Mascot",
+    "Kellogg, Dangerous Mind",
+    "Kerblam! Warehouse",
+    "Kheru Goldkeeper",
+    "Killmonger, Ruthless Usurper",
+    "Kingpin, Wilson Fisk",
+    "Knuckles the Echidna",
+    "Korvold and the Noble Thief",
+    "Lara Croft, Tomb Raider",
+    "Life Insurance",
+    "Lobelia Sackville-Baggins",
+    "Locke, Treasure Hunter",
+    "Long-Bodied Grey Dog",
+    "Loot Dispute",
+    "Lost Mine of Phandelver",
+    "Lotho, Corrupt Shirriff",
+    "Luck Bobblehead",
+    "Luke Cage, Hero for Hire",
+    "Luxurious Locomotive",
+    "Magda, Brazen Outlaw",
+    "Magda, the Hoardmaster",
+    "Magic Pot",
+    "Magma Opus",
+    "Magmatic Galleon",
+    "Mahadi, Emporium Master",
+    "Malcolm, Keen-Eyed Navigator",
+    "Malik, Grim Manipulator",
+    "Marching Duodrone",
+    "Mari, the Killing Quill",
+    "Marut",
+    "Mary Read and Anne Bonny",
+    "Master of Ceremonies",
+    "Mastermind Plum",
+    'Meet and Greet "Sisay"',
+    "Megaton's Fate",
+    "Meticulous Artisan",
+    "Mine Raider",
+    "Mines of Moria",
+    "Misfortune Teller",
+    "Monologue Tax",
+    "Monument to Endurance",
+    "Most Wanted",
+    "Mr. House, President and CEO",
+    "My Wealth Will Bury You",
+    "Namazu Trader",
+    "New New York",
+    "Noble's Purse",
+    "Noggle Robber",
+    "North Pole Research Base",
+    "Nuka-Cola Vending Machine",
+    "Oath of the Grey Host",
+    "Ognis, the Dragon's Lash",
+    "Old Gnawbone",
+    "Old Rutstein",
+    "Olivia, Opulent Outlaw",
+    "Orcrist, Goblin-cleaver",
+    "Orochi Soul-Reaver",
+    "Pain Distributor",
+    "Patient Naturalist",
+    "Patron of the Arts",
+    "Petty Larceny",
+    "Pick-a-Beeble",
+    "Pictures of Spider-Man",
+    "Piggy Bank",
+    "Pinkie Pie",
+    "Pirate's Pillage",
+    "Pirate's Prize",
+    "Pitiless Plunderer",
+    "Plundering Barbarian",
+    "Plundering Pirate",
+    "Poetic Ingenuity",
+    "Prismari Command",
+    "Prized Statue",
+    "Prizefight",
+    "Professional Face-Breaker",
+    "Professional Wrestler",
+    "Prompto Argentum",
+    "Prosper, Tome-Bound",
+    "Prosperous Bandit",
+    "Prosperous Innkeeper",
+    "Prosperous Partnership",
+    "Prosperous Pirates",
+    "Prosperous Thief",
+    "Prying Blade",
+    "Puppet Master, String Puller",
+    "Quark, Humble Proprietor",
+    "RMS Titanic",
+    "Racketeer Boss",
+    "Ragavan, Nimble Pilferer",
+    "Rain of Riches",
+    "Ramirez DePietro, Pillager",
+    "Rankle and Torbran",
+    "Rapacious Dragon",
+    "Rashmi and Ragavan",
+    "Reckless Endeavor",
+    "Reckless Lackey",
+    "Reckless Ransacking",
+    "Reckoner Bankbuster // Reckoner Bankbuster",
+    "Redcap Thief",
+    "Redrock Sentinel",
+    "Relic Retriever",
+    "Rev, Tithe Extractor",
+    "Revel in Riches",
+    "Riveteers Requisitioner",
+    "Rocketeer Boostbuggy",
+    "Rom and Leeta, Unlikely Pair",
+    "Rose Room Treasurer",
+    "Ruthless Knave",
+    "Ruthless Technomancer",
+    "Safana, Calimport Cutthroat",
+    "Sailor of Means",
+    "Sanar, Unfinished Genius // Wild Idea",
+    "Sarkhan, Dragon Ascendant",
+    "Savvy Profiteer",
+    "Scion of Opulence",
+    "Scuzzback Scrounger",
+    "Season of the Bold",
+    "Seize the Spoils",
+    "Seize the Spotlight",
+    "Setzer, Wandering Gambler",
+    "Shambling Ghast",
+    "Shiny Impetus",
+    "Sidequest: Hunt the Mark // Yiazmat, Ultimate Mark",
+    "Skullport Merchant",
+    "Smashing Success",
+    "Smaug",
+    "Smaug the Impenetrable",
+    "Smaug the Magnificent",
+    "Smaug, Wicked Worm",
+    "Smoke Blessing",
+    "Smoke Spirits' Aid",
+    "Smothering Tithe",
+    "Smuggler's Share",
+    "Song of Eärendil",
+    "Sonic the Hedgehog",
+    "Spectrox Mines",
+    "Spell Swindle",
+    "Spiked Pit Trap",
+    "Spiteful Banditry",
+    "Spiteful Repossession",
+    "Stark Industries Executive",
+    "Sticky Fingers",
+    "Stimulus Package",
+    "Storm the Vault // Vault of Catlacan",
+    "Storm-Kiln Artist",
+    "Strike It Rich",
+    "Sudden Breakthrough",
+    "Summon: Yojimbo",
+    "Surly Badgersaur",
+    "Swarming of Moria",
+    "Swashbuckler Extraordinaire",
+    "Sword of Wealth and Power",
+    "Tataru Taru",
+    "Tavern Scoundrel",
+    "Temporal Conqueror",
+    "Tempting Contract",
+    "Teval's Judgment",
+    "The Balrog of Moria",
+    "The Belligerent",
+    "The Ghoul, Gunslinger",
+    "The Gold Saucer",
+    "The Golden City of Orazca",
+    "The Inner Light",
+    "The Matrix of Time",
+    "The Misty Mountains Cold",
+    "The Reaver Cleaver",
+    "The Sackville-Bagginses",
+    "The Third Doctor",
+    "The Western Cloud",
+    "There and Back Again",
+    "Thieves' Tools",
+    "Thorin, Company's Leader",
+    "Thorin, King of Durin's Folk",
+    "Ticket Tortoise",
+    "Tireless Provisioner",
+    "Tivit, Seller of Secrets",
+    "Tokka & Rahzar, Unsupervised",
+    "Treasure Chest",
+    "Treasure Dredger",
+    "Treasure Map // Treasure Cove",
+    "Treasure Vault",
+    "Trove of Temptation",
+    "Typhoid Mary, Fractured",
+    "Ultimate Green Goblin",
+    "Undercity // The Initiative",
+    "Undercity Dire Rat",
+    "Undercity Scrounger",
+    "Unexpected Windfall",
+    "Urabrask // The Great Work",
+    "Vaan, Street Thief",
+    "Vault 21: House Gambit",
+    "Vault Robber",
+    "Vazi, Keen Negotiator",
+    "Village Pillagers",
+    "Visions of Ruin",
+    "Volatile Fault",
+    "Vraska, Relic Seeker",
+    "Vraska, the Cutting Glare",
+    "Wanted Scoundrels",
+    "Warren Soultrader",
+    "Widespread Thieving",
+    "Wily Goblin",
+    "Wish Good Luck",
+    "Xorn",
+    "You Find a Cursed Idol",
+    "You've Been Caught Stealing",
+    "Young Red Dragon // Bathe in Gold",
+    "Zhentarim Bandit",
+    "Ziatora, the Incinerator",
+    "Zidane, Tantalus Thief",
+]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "2931"
+released_at = "2019-12-02"
+type_line = "Token Artifact — Treasure"
+rules_text = "{T}, Sacrifice this token: Add one mana of any color."
+
+[token.category.PredefinedArtifact]
+kind = "Treasure"
+
+[token.body]
+display_name = "Treasure"
+core_types = ["Artifact"]
+subtypes = ["Treasure"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Big Score"
+scryfall_oracle_id = "a5cbd257-c836-493e-bb1a-76242619dea2"
+scryfall_id = "843795d1-8f12-43af-bac6-319fbdaa0b18"
+
+[[token.source_card_refs]]
+card_name = "Revel in Riches"
+scryfall_oracle_id = "cc3fcd26-c088-4335-9a35-0e11019e3d5b"
+scryfall_id = "c2dd1b8b-49bd-483c-8374-a74c242d06fa"
+
+[token.token_image_ref]
+scryfall_id = "c860c832-ab9d-4618-9d7b-6e9e2807c885"
+scryfall_oracle_id = "3c549374-6c37-42e0-8d88-a8555d46732d"
+preset_id = "468bef4e-1a93-53eb-adc0-e2c803a6c533"
 
 [[token]]
 id = "46975349-d474-5b3d-b815-bfce19065623"
@@ -65628,6 +66100,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -70890,6 +71363,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -75482,6 +75956,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -87212,6 +87687,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -95008,6 +95484,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -97087,6 +97564,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -97373,6 +97851,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -101822,6 +102301,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -102193,6 +102673,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -106230,6 +106711,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -115765,6 +116247,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -117263,6 +117746,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -118447,6 +118931,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -119407,6 +119892,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -122779,6 +123265,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -124780,6 +125267,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -125467,6 +125955,7 @@ fidelity = "PartialMissingAbilities"
 source_card_names = [
     "Niko Aris",
     "Niko, Light of Hope",
+    "Niko, Spark of Victory",
 ]
 set_code = "KHM"
 set_name = "Kaldheim"
@@ -128277,6 +128766,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -133838,7 +134328,10 @@ preset_id = "8f3edb7e-8740-527a-8958-28586368747e"
 id = "8f415ec3-6027-5569-828e-7555c462953c"
 category = "Creature"
 fidelity = "Full"
-source_card_names = ["Research // Development"]
+source_card_names = [
+    "Chandra, Pride of Avishkar",
+    "Research // Development",
+]
 set_code = "CON"
 set_name = "Conflux"
 collector_number = "2"
@@ -136012,6 +136505,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -139151,6 +139645,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -139824,6 +140319,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -140362,6 +140858,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -141252,6 +141749,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -142245,6 +142743,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -144266,7 +144765,10 @@ preset_id = "99859c93-5f3d-5dc3-ace1-f8c1802706f8"
 id = "99a2d3f7-bda1-5a31-8a8f-c11d0c7a2437"
 category = "Creature"
 fidelity = "Full"
-source_card_names = ["Research // Development"]
+source_card_names = [
+    "Chandra, Pride of Avishkar",
+    "Research // Development",
+]
 set_code = "C20"
 set_name = "Commander 2020"
 collector_number = "10"
@@ -148252,6 +148754,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -148441,6 +148944,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -158115,6 +158619,7 @@ source_card_names = [
     "Tireless Provisioner",
     "Tivit, Seller of Secrets",
     "Tokka & Rahzar, Unsupervised",
+    "Treasure",
     "Treasure Chest",
     "Treasure Dredger",
     "Treasure Map // Treasure Cove",
@@ -158358,11 +158863,6 @@ scryfall_id = "c88eb33d-efba-4ad9-878f-f051079c9bce"
 card_name = "Revel in Riches"
 scryfall_oracle_id = "cc3fcd26-c088-4335-9a35-0e11019e3d5b"
 scryfall_id = "22ddde38-79e0-48f2-9920-b66f6399b077"
-
-[[token.source_card_refs]]
-card_name = "Big Score"
-scryfall_oracle_id = "a5cbd257-c836-493e-bb1a-76242619dea2"
-scryfall_id = "843795d1-8f12-43af-bac6-319fbdaa0b18"
 
 [[token.source_card_refs]]
 card_name = "Smothering Tithe"
@@ -159727,6 +160227,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -162474,6 +162975,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -162745,6 +163247,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -169993,7 +170496,10 @@ preset_id = "b754db78-cd98-5f25-84f4-0367b66da7ed"
 id = "b7d2f111-d79c-5faf-9aa4-99e4ecd723f6"
 category = "Creature"
 fidelity = "Full"
-source_card_names = ["Zendikar's Roil"]
+source_card_names = [
+    "Nissa, Pride of Zendikar",
+    "Zendikar's Roil",
+]
 set_code = "ORI"
 set_name = "Magic Origins"
 collector_number = "8"
@@ -171411,6 +171917,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -173783,6 +174290,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -176601,6 +177109,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -179312,6 +179821,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -181315,6 +181825,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -184920,6 +185431,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -187798,6 +188310,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -195968,6 +196481,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -196644,6 +197158,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -202795,6 +203310,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -203255,6 +203771,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -205855,6 +206372,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -209388,6 +209906,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -213545,6 +214064,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -219529,6 +220049,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -224139,6 +224660,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -224403,7 +224925,10 @@ preset_id = "f282f43b-3966-5b9c-b2da-bbb804c11b6d"
 id = "f28d4676-a810-5daf-81eb-0678fc840250"
 category = "Creature"
 fidelity = "Full"
-source_card_names = ["Zendikar's Roil"]
+source_card_names = [
+    "Nissa, Pride of Zendikar",
+    "Zendikar's Roil",
+]
 set_code = "ZNC"
 set_name = "Zendikar Rising Commander"
 collector_number = "8"
@@ -228722,6 +229247,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -229902,6 +230428,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -233391,6 +233918,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -234781,6 +235309,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -235224,6 +235753,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
@@ -240565,6 +241095,7 @@ source_card_names = [
     "Restless Cottage",
     "Return from the Wilds",
     "Revive the Shire",
+    "Rocco, Snack Supplier",
     "Rocco, Street Chef",
     "Rosie Cotton of South Lane",
     "Sam, Loyal Attendant",
