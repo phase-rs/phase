@@ -300,6 +300,14 @@ pub fn resolve(
             crate::game::announcement_triggers::take_inline_trigger_span(state, events, copied_at);
         if !owned.is_empty() {
             crate::game::triggers::collect_triggers_into_deferred(state, &[spell_copied]);
+            // CR 603.2c: collected once, here. Claim the occurrence so no later collector of
+            // this action (the priority pass, the CopyRetarget walk) collects it again.
+            crate::game::announcement_triggers::claim_ordinary_collected_span(
+                state,
+                events,
+                copied_at,
+                copied_at + 1,
+            );
         }
     }
 
@@ -402,11 +410,13 @@ fn drain_spell_copied_observer_triggers(
     spell_copied_collected: bool,
 ) -> Result<(), EffectError> {
     if spell_copied_collected {
-        if let Some(wf) =
-            crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement(
-                state, events,
-            )
-        {
+        // CR 603.2c: the resolving effect's buffer is the reducer action's, so
+        // the drain's window ranges are claimed for the post-action pipeline.
+        if let Some(wf) = crate::game::triggers::drain_on_action_buffer(
+            state,
+            events,
+            crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement,
+        ) {
             state.waiting_for = wf;
         }
     }

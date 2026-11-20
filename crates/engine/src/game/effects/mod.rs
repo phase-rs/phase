@@ -1050,6 +1050,7 @@ fn forwarded_zone_result_from_events<'a>(
             .map(|pin| TargetRef::Object(pin.object_id))
             .collect(),
         object_incarnations: arrivals,
+        phase_population: false,
     }
 }
 
@@ -1513,6 +1514,7 @@ pub(crate) fn settle_empty_forwarded_zone_result(state: &mut GameState, producer
             child.context.forwarded_result_context = Some(Box::new(ForwardedResultContext {
                 targets: Vec::new(),
                 object_incarnations: Vec::new(),
+                phase_population: false,
             }));
         }
     }
@@ -1722,6 +1724,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             chain.context.forwarded_result_context = Some(Box::new(ForwardedResultContext {
                 targets: Vec::new(),
                 object_incarnations: Vec::new(),
+                phase_population: false,
             }));
         }
         let enclosing_die_publication = state.die_result_publication.take();
@@ -3951,11 +3954,11 @@ fn park_player_scope_queue_end(
     }
 }
 
-/// CR 118.12 + CR 608.2c: Complete the original rider of a paused
-/// `Effect::PayCost` only after its typed cost root has settled. The root owns
-/// the parent effect while a mana-source cost move is paused, so this replays
-/// the same child hand-off the ordinary chain walker would have performed.
-pub(crate) fn resolve_effect_pay_cost_rider(
+/// CR 608.2c + CR 603.12: Resolve `ability`'s rider the way the chain walker would after the
+/// parent effect completed — inheriting the parent's targets (the selected card a "when you do,
+/// exile that card" rider reads) and chain context. The single hand-off for a parent whose
+/// effect was completed outside the chain walker (a paused cost, a resumed copy settlement).
+pub(crate) fn resolve_rider_with_parent_context(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
@@ -4177,7 +4180,7 @@ fn damaged_object_context_from_events(
 fn referentless_chain_instruction_object(
     state: &GameState,
     ability: &ResolvedAbility,
-) -> Option<ObjectId> {
+) -> Option<ObjectIncarnationRef> {
     if crate::game::targeting::parent_chain_referents(state, ability).is_some() {
         return None;
     }
@@ -4185,7 +4188,7 @@ fn referentless_chain_instruction_object(
         .effect_context_object
         .as_ref()
         .filter(|snapshot| snapshot.is_current(state))
-        .map(|snapshot| snapshot.object_id)
+        .map(|snapshot| ObjectIncarnationRef::of(snapshot.object_id, snapshot.incarnation))
 }
 
 /// CR 608.2c: capture a single creature tapped by the parent instruction as the
@@ -5613,6 +5616,29 @@ pub(crate) fn apply_parent_chain_context(
     child.context.settled_damage_guards = child_settled_guards;
     child.context.parked_damage_batch = child_parked_batch;
     child.context.face_down_in_exile |= child_face_down_in_exile;
+    // CR 608.2c: a phase action's resolved population is a one-hop input to
+    // the application-filter consumer the phase branch bound it to. It is not
+    // a producer's `forward_result` antecedent for the rest of the chain: a
+    // later instruction owns its own declarations, and a numbered
+    // `ParentTargetSlot` keeps indexing the DECLARED slots rather than the
+    // population. A zone-move `forward_result` context, by contrast,
+    // intentionally stays readable by later instructions.
+    //
+    // Known, deliberate limit: a DESCENDANT of the consuming rider is also a
+    // later instruction, so it reads the chain root's declared targets rather
+    // than the population. Every printed phase rider is immediate — Barn's
+    // "they phase out … those permanents phase in" is a separate delayed
+    // trigger that carries its own `parent_target_snapshot`, not a chain
+    // descendant — so re-stamping a descendant would reintroduce exactly the
+    // cross-instruction leak scoping this population removes.
+    if child
+        .context
+        .forwarded_result_context
+        .as_ref()
+        .is_some_and(|result| result.phase_population)
+    {
+        child.context.forwarded_result_context = None;
+    }
     for event in child_duration_events {
         if !child.context.duration_events.contains(&event) {
             child.context.duration_events.push(event);
@@ -9926,6 +9952,7 @@ fn instruction_outlives_declined_gate(
         illegal_target_slots: _,
         unjudged_target_slots: _,
         illegal_local_target_slots: _,
+        declared_player_target_slots: _, // announce-time role identity, no per-seat read
         controller: _,
         original_controller: _,
         context: _,
@@ -14573,6 +14600,7 @@ fn fan_out_head_is_allowlisted(head: &ResolvedAbility) -> bool {
         illegal_target_slots: _,         // CR 608.2b legality stamp
         unjudged_target_slots: _,        // CR 608.2b legality stamp
         illegal_local_target_slots: _,   // CR 608.2b legality stamp
+        declared_player_target_slots: _, // CR 115.1 declared player-role identity
         controller: _,                   // player id
         original_controller: _,          // player id
         scoped_player: _,                // the seat's binding
@@ -17196,6 +17224,119 @@ fn pump_run_feeds_tracked_set_grant(ability: &ResolvedAbility) -> bool {
     false
 }
 
+/// CR 608.2c: True for a filter that names the phase action's resolved
+/// population itself, not an object population that merely reads the parent
+/// referent through a controller/owner qualifier.
+fn is_phase_population_referent(filter: &TargetFilter) -> bool {
+    // CR 608.2c: only the broad `ParentTarget` anaphor names the producer's
+    // forwarded result as a population. A `ParentTargetSlot { index }` is a
+    // NUMBERED declared slot of the resolving chain: it is owned by the later
+    // declaration that created it, so a phase result must never replace it.
+    matches!(filter, TargetFilter::ParentTarget)
+}
+
+/// CR 608.2c: True when `effect` is the population-shaped continuous rider
+/// that consumes a preceding phase action's result. An independently targeted
+/// rider is excluded even when its controller qualifier names the parent.
+fn phase_rider_reads_phase_population(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } if target.as_ref().is_none_or(is_phase_population_referent)
+            && static_abilities.iter().any(|static_def| {
+                static_def
+                    .affected
+                    .as_ref()
+                    .is_some_and(is_phase_population_referent)
+            })
+    )
+}
+
+/// CR 115.1 + CR 702.26b: the population a phase instruction hands to its
+/// following rider. Explicit object targets are the SELECTED population — a
+/// selected Aura is included even though it phased out indirectly with its host,
+/// while an incidental attachment is not. A mass phase action declares no
+/// object target, so it falls back to the DIRECTLY phased creatures; indirect
+/// attachments ride with their host rather than becoming separate members.
+fn phase_result_objects(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    effect_events: &[GameEvent],
+) -> Vec<ObjectId> {
+    match &ability.effect {
+        Effect::PhaseOut { .. } | Effect::PhaseIn { .. } => {
+            let declared_explicit: Vec<ObjectId> = ability
+                .targets
+                .iter()
+                .filter_map(|target| match target {
+                    TargetRef::Object(id) => Some(*id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect();
+            if declared_explicit.is_empty() {
+                // A mass phase action declares no object target. Its affected
+                // creatures are the directly phased objects; indirect
+                // attachments ride with them and are not separate members of
+                // "each creature target player controls". A phase-in has no
+                // indirect marker, so every phase-in event belongs.
+                effect_events
+                    .iter()
+                    .filter_map(|event| match event {
+                        GameEvent::PermanentPhasedOut {
+                            object_id,
+                            indirect: false,
+                        } => Some(*object_id),
+                        GameEvent::PermanentPhasedIn { object_id }
+                            if matches!(&ability.effect, Effect::PhaseIn { .. }) =>
+                        {
+                            Some(*object_id)
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                // CR 115.1 + CR 702.26b: the phase handler publishes the
+                // objects it actually changed phase status for. A selected
+                // attachment that phased out indirectly with its selected host
+                // still has its own event; a stale pinned target that the
+                // handler dropped (CR 400.7) has none, so the raw declared ID
+                // must not be repinned downstream.
+                let actual: HashSet<ObjectId> = effect_events
+                    .iter()
+                    .filter_map(|event| match (&ability.effect, event) {
+                        (
+                            Effect::PhaseOut { .. },
+                            GameEvent::PermanentPhasedOut { object_id, .. },
+                        ) => Some(*object_id),
+                        (Effect::PhaseIn { .. }, GameEvent::PermanentPhasedIn { object_id }) => {
+                            Some(*object_id)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                // CR 400.7 + CR 603.7c: membership is the SELECTED occurrence
+                // as it exists now, not the bare storage id. A stale selected
+                // occurrence must not be re-admitted just because a new
+                // incarnation of the same id appears in the incidental event
+                // slice. Preserve selection order among live occurrences.
+                ability
+                    .live_object_targets(state)
+                    .into_iter()
+                    .filter_map(|target| match target {
+                        TargetRef::Object(id) => Some(id),
+                        TargetRef::Player(_) => None,
+                    })
+                    .filter(|object_id| actual.contains(object_id))
+                    .collect()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn affected_objects_from_events(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -17213,6 +17354,28 @@ fn affected_objects_from_events(
                 } else {
                     None
                 }
+            })
+            .collect(),
+        // CR 702.26b: the DIRECTLY phased permanents are the mass population
+        // a following "they"/"those creatures" instruction names. An
+        // attachment phased out indirectly with its host is not a separate
+        // member of that population; a selected attachment is carried
+        // separately by `phase_result_objects`' explicit-target branch.
+        Effect::PhaseOut { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PermanentPhasedOut {
+                    object_id,
+                    indirect: false,
+                } => Some(*object_id),
+                _ => None,
+            })
+            .collect(),
+        Effect::PhaseIn { .. } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PermanentPhasedIn { object_id } => Some(*object_id),
+                _ => None,
             })
             .collect(),
         // CR 508.1a + CR 608.2c + CR 603.7c + CR 611.2c + CR 615.11 (issue
@@ -23309,6 +23472,7 @@ fn set_player_scope_sacrifice_waiting_for(
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
 }
 
@@ -26054,6 +26218,7 @@ fn resolve_chain_body(
                 .map(|&pid| {
                     let mut seat = per_target.clone();
                     seat.targets = vec![TargetRef::Player(pid)];
+                    seat.declared_player_target_slots.clear();
                     seat.multi_target = None;
                     (pid, seat)
                 })
@@ -28670,6 +28835,17 @@ fn resolve_chain_body(
         vec![]
     };
     let effect_events = &events[events_before..];
+    // CR 608.2c: collect the phase population only when the immediate rider
+    // actually consumes it. The owned vector ends the borrow of `events` before
+    // later resolution steps mutate the event log.
+    let phase_result_for_rider = (matches!(
+        &ability.effect,
+        Effect::PhaseOut { .. } | Effect::PhaseIn { .. }
+    ) && ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(|sub| phase_rider_reads_phase_population(&sub.effect)))
+    .then(|| phase_result_objects(state, ability, effect_events));
     // CR 608.2c + CR 608.2h: a later instruction may read a public-to-hidden
     // move's last-known controller/owner metadata, without treating the hidden
     // object itself as an available parent referent.
@@ -30110,6 +30286,18 @@ fn resolve_chain_body(
         });
         let sub = bound_sub.as_ref().unwrap_or(sub);
 
+        // CR 608.2c: only a population-shaped continuous rider needs the phase
+        // action's resolved set forwarded. A direct `ParentTarget` instruction
+        // (Oubliette's "Tap that creature as it phases in") is bound by the
+        // ordinary parent-target propagation and must keep that path. A
+        // `GenericEffect` that declares its own real target keeps that target's
+        // authority even when its controller qualifier names the parent: the
+        // qualifier parameterizes the rider's own population, it does not make
+        // the parent's phase result the rider's antecedent. Only a pure
+        // `ParentTarget`/`ParentTargetSlot` referent on both the instruction and
+        // its application filter forwards the phase population.
+        let phase_rider_reads_population = phase_rider_reads_phase_population(&sub.effect);
+
         // CR 608.2c + CR 609.3: A zone-choice partition already bound this sub's
         // complement, and that binding is EMPTY — the pick exhausted the eligible
         // pool, so "the other" names no object at all
@@ -30254,6 +30442,36 @@ fn resolve_chain_body(
                 ForwardedResultContext::from_object_ids(state, &forwarded_objects),
                 attachment_candidates,
             );
+            progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
+        } else if matches!(
+            &ability.effect,
+            Effect::PhaseOut { .. } | Effect::PhaseIn { .. }
+        ) && phase_rider_reads_population
+        {
+            // CR 608.2c: a phase instruction's resolved population is the
+            // antecedent for a following `ParentTarget` continuous rider.
+            // Forward the actual objects through the result-binding authority
+            // a producer uses, marked as a phase population so the hand-off
+            // below keeps it scoped to this application-filter consumer.
+            // `effect.rs`'s inherited-target path then binds one transient
+            // effect per phased permanent. Install the context even when the
+            // set is EMPTY: a completed zero-object phase action must bind no
+            // rider, not fall back to the player-only parent target.
+            let mut sub_with_context = sub.as_ref().clone();
+            apply_parent_chain_context(
+                &mut sub_with_context,
+                ability,
+                effect_context_object.as_ref(),
+                state,
+            );
+            // CR 608.2c: phase-out/phase-in affect a resolved population, not a
+            // declared object target. The vector was collected only because
+            // this immediate rider was recognized as its consumer.
+            sub_with_context.context.forwarded_result_context =
+                Some(Box::new(ForwardedResultContext::phase_population(
+                    state,
+                    phase_result_for_rider.as_deref().unwrap_or(&[]),
+                )));
             progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
@@ -31906,6 +32124,263 @@ fn shared_quality_operand_values(
     }
 }
 
+/// CR 608.2c + CR 608.2h + CR 400.7: the object an `AbilityCondition::TargetMatchesFilter`
+/// reads, with the incarnation that proves WHICH object it is.
+struct ConditionReferent {
+    id: ObjectId,
+    /// The announced (declared target) or event-recorded incarnation. `None` when
+    /// nothing proves the incarnation (a referent resolved from the live board, a
+    /// legacy save): the read then keeps the id-keyed chain it always had.
+    pin: Option<ObjectIncarnationRef>,
+    /// The scope the referent was resolved under. An `ObjectScope::EventSource` referent whose
+    /// incarnation has no surviving last-known-information record answers false (the engine
+    /// limit) instead of reading whatever object now holds the storage id.
+    scope: ObjectScope,
+}
+
+/// CR 603.2 + CR 608.2h: the incarnation of the spell a `SpellCopied` event (or a `SpellCast`
+/// whose trigger carries no pin) names. The event carries none, so it is read from the object: still on the stack, the
+/// live incarnation; otherwise the incarnation of its latest recorded exit, which for a
+/// spell countered or otherwise moved off the stack before its trigger resolves is the stack
+/// exit that `exit_lki_for_incarnation` answers from (limit: a spell that went on to leave
+/// exile or the battlefield before the trigger resolved has a later record, which answers
+/// instead). `None` when no record survives.
+fn spell_event_incarnation(state: &GameState, id: ObjectId) -> Option<ObjectIncarnationRef> {
+    if let Some(object) = state.objects.get(&id).filter(|o| o.zone == Zone::Stack) {
+        return Some(ObjectIncarnationRef::from_object(object));
+    }
+    state
+        .lki_by_incarnation
+        .get(&id)
+        .and_then(|history| history.keys().max().copied())
+        .map(|incarnation| ObjectIncarnationRef::of(id, incarnation))
+}
+
+/// CR 608.2c + CR 603.2: resolve the referent of a `TargetMatchesFilter` condition.
+///
+/// `ObjectScope::Target` (the default) is, in order: an explicit declared `subject_slot`;
+/// the node's own resolution-bound attachment-host recipient; the ability's first object
+/// target (with its announced pin); else, in a chain that declares no referent, the object
+/// the preceding instruction actually acted on (`referentless_chain_instruction_object`);
+/// else, for subject-based triggers that carry no chosen target, the triggering event's
+/// subject. `ObjectScope::EventSource` is the object the
+/// current trigger event names even when the node also declares a target. Every other
+/// scope has no referent here (the parser never writes one): the condition is false.
+fn resolve_condition_referent(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    subject_slot: Option<usize>,
+    subject: &ObjectScope,
+) -> Option<ConditionReferent> {
+    use crate::game::targeting;
+    let unpinned = |id| ConditionReferent {
+        id,
+        pin: None,
+        scope: ObjectScope::Target,
+    };
+    match subject {
+        ObjectScope::EventSource => {
+            let event = state.current_trigger_event.as_ref()?;
+            let id = targeting::extract_source_from_event(event)?;
+            // Only the two spell events need a spell-specific pin; every other event names its own
+            // object's incarnation through the one shared authority, `event_context_incarnation`.
+            let pin = if let GameEvent::SpellCast {
+                card_id: _,
+                controller: _,
+                object_id: _,
+                cast_mana_value: _,
+            } = event
+            {
+                // CR 601.2i + CR 400.7: a cast trigger names the occurrence it was put on the
+                // stack for (`triggering_spell_identity`), so a same-id recast cannot answer for it.
+                Some(
+                    targeting::triggering_spell_identity(state)
+                        .or_else(|| spell_event_incarnation(state, id))?,
+                )
+            } else if let GameEvent::SpellCopied {
+                card_id: _,
+                controller: _,
+                object_id: _,
+                original_id: _,
+            } = event
+            {
+                Some(spell_event_incarnation(state, id)?)
+            } else {
+                targeting::event_context_incarnation(&TargetFilter::TriggeringSource, event, id)
+            };
+            Some(ConditionReferent {
+                id,
+                pin,
+                scope: ObjectScope::EventSource,
+            })
+        }
+        ObjectScope::Target => {
+            // CR 608.2c: An explicit `subject_slot` tests a specific declared
+            // chain slot (Malamet's condition reads slot 0, the you-control
+            // fighter) — the current node's local `targets` were overwritten by
+            // most-recent-only chain propagation, so resolve against the
+            // flattened root chain instead of `targets.first()`. CR 608.2b: "If
+            // part of the effect requires information about an illegal target,
+            // it fails to determine any such information", so a slot that was
+            // an illegal target at resolution tests as unmatched.
+            if let Some(index) = subject_slot {
+                return match targeting::resolve_live_parent_slot_from_root(state, ability, index) {
+                    Some(TargetRef::Object(id)) => Some(unpinned(id)),
+                    Some(TargetRef::Player(_)) | None => None,
+                };
+            }
+            // CR 608.2c + CR 301.5a + CR 301.5f: "put a +1/+1 counter on
+            // equipped creature if it's red" — the anaphor names this
+            // instruction's own recipient, the source's attachment host bound
+            // as the instruction resolves (CR 115.10a: not a target, so no
+            // slot carries it). A singular anaphor needs a unique referent: no
+            // host (unattached Equipment) leaves "it" without one, so the
+            // condition is false rather than falling through to an unrelated
+            // trigger-event subject. An Equipment or Aura has at most one host
+            // (CR 301.5c, CR 303.4d); two or more can only come from a
+            // non-attachment source's filter fallback, which no card in this
+            // class reaches, and likewise has no unique referent. CR 603.4
+            // does not apply — the "if" does not follow the trigger
+            // condition, so it is checked only here, on resolution.
+            if let Some(hosts) = ability.effect.target_filter().and_then(|recipient| {
+                targeting::resolution_bound_attachment_hosts(state, ability, recipient)
+            }) {
+                return match hosts.as_slice() {
+                    [host] => Some(unpinned(*host)),
+                    [] | [_, _, ..] => None,
+                };
+            }
+            // CR 400.7 + CR 608.2b: the first object target keeps its announced
+            // incarnation, so a target that has since changed zones is recognised as
+            // departed rather than read as the new object at the same storage id.
+            if let Some((index, id)) = ability.targets.iter().enumerate().find_map(|(i, t)| match t
+            {
+                TargetRef::Object(id) => Some((i, *id)),
+                TargetRef::Player(_) => None,
+            }) {
+                return Some(ConditionReferent {
+                    id,
+                    pin: ability.target_pin_at(index),
+                    scope: ObjectScope::Target,
+                });
+            }
+            // CR 608.2c + CR 614.9: in a chain that declares no referent, the object
+            // the preceding instruction actually acted on — Marauding Raptor's damage
+            // recipient after any redirection, not the creature the damage was aimed at.
+            if let Some(pin) = referentless_chain_instruction_object(state, ability) {
+                return Some(ConditionReferent {
+                    id: pin.object_id,
+                    pin: Some(pin),
+                    scope: ObjectScope::Target,
+                });
+            }
+            // CR 603.2 + CR 400.7: no chosen target — the triggering event's subject object,
+            // with the incarnation the event itself proves (Tribute to the World Tree: the
+            // entrant may be gone before the trigger resolves, and its last known power is
+            // read from the snapshot of THAT incarnation's exit).
+            targeting::resolve_event_context_target(
+                state,
+                &TargetFilter::TriggeringSource,
+                ability.source_id,
+            )
+            .and_then(|t| match t {
+                TargetRef::Object(id) => Some(ConditionReferent {
+                    id,
+                    pin: state.current_trigger_event.as_ref().and_then(|event| {
+                        targeting::event_context_incarnation(
+                            &TargetFilter::TriggeringSource,
+                            event,
+                            id,
+                        )
+                    }),
+                    scope: ObjectScope::Target,
+                }),
+                TargetRef::Player(_) => None,
+            })
+        }
+        ObjectScope::Source
+        | ObjectScope::Recipient
+        | ObjectScope::CostPaidObject
+        | ObjectScope::Anaphoric
+        | ObjectScope::Demonstrative
+        | ObjectScope::AmassedArmy
+        | ObjectScope::EventTarget
+        | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard
+        | ObjectScope::BatchSource
+        | ObjectScope::ChainRootTarget
+        | ObjectScope::GrantingObject
+        | ObjectScope::SpecificObject { .. } => None,
+    }
+}
+
+/// CR 608.2c + CR 608.2h + CR 400.7: evaluate `filter` against the condition's referent.
+///
+/// The basis is chosen by WHERE the referent is, not by the clause's tense. A referent
+/// whose proven incarnation is still the live object in its expected zone is read live
+/// (CR 608.2h: "the current information of that object"). A referent that has moved reads
+/// the last known information recorded for THAT incarnation at its exit
+/// (`exit_lki_for_incarnation`), so a later object at the same storage id, or a stale
+/// id-keyed cache entry, can never answer in its place. With no incarnation proof, or no
+/// surviving record for an announced target, the id-keyed chain applies unchanged:
+/// past tense (`use_lki`) reads the id-keyed LKI cache, else the live object.
+fn evaluate_target_matches_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+    use_lki: bool,
+    subject_slot: Option<usize>,
+    subject: &ObjectScope,
+) -> bool {
+    let Some(referent) = resolve_condition_referent(state, ability, subject_slot, subject) else {
+        return false;
+    };
+    let id = referent.id;
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    if use_lki {
+        if let Some(GameEvent::ZoneChanged {
+            object_id: _,
+            from: _,
+            to: _,
+            record,
+        }) = state.current_trigger_event.as_ref()
+        {
+            if record.object_id == id {
+                return crate::game::filter::matches_target_filter_on_zone_change_record(
+                    state, record, filter, &ctx,
+                );
+            }
+        }
+    }
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation on the live object.
+    let live = || crate::game::filter::matches_target_filter(state, id, filter, &ctx);
+    let id_keyed_chain = || {
+        if use_lki {
+            // CR 400.7: Check last-known information for past-tense conditions.
+            // Try LKI cache first, fall back to current state if object still exists.
+            if let Some(lki) = state.lki_cache.get(&id) {
+                return crate::game::filter::matches_target_filter_on_lki_snapshot(
+                    state, id, lki, filter, &ctx,
+                );
+            }
+        }
+        live()
+    };
+    match referent.pin {
+        Some(pin) if pin.is_current(state) => live(),
+        Some(pin) => {
+            match crate::game::filter::exit_lki_for_incarnation(state, id, pin.incarnation) {
+                Some(lki) => crate::game::filter::matches_target_filter_on_lki_snapshot(
+                    state, id, lki, filter, &ctx,
+                ),
+                None if matches!(referent.scope, ObjectScope::EventSource) => false,
+                None => id_keyed_chain(),
+            }
+        }
+        None => id_keyed_chain(),
+    }
+}
+
 /// CR 608.2c: Evaluate a condition against the current game state and ability context.
 /// Returns whether the condition is met. Handles all `AbilityCondition` variants as
 /// pure boolean evaluators — callers are responsible for any terminal control flow
@@ -32582,123 +33057,9 @@ pub(crate) fn evaluate_condition(
             filter,
             use_lki,
             subject_slot,
+            subject,
         } => {
-            // CR 608.2c: An explicit `subject_slot` tests a specific declared
-            // chain slot (Malamet's condition reads slot 0, the you-control
-            // fighter) — the current node's local `targets` were overwritten by
-            // most-recent-only chain propagation, so resolve against the
-            // flattened root chain instead of `targets.first()`. CR 608.2b: "If
-            // part of the effect requires information about an illegal target,
-            // it fails to determine any such information", so a slot that was
-            // an illegal target at resolution tests as unmatched.
-            // CR 608.2c + CR 603.2: without a slot, "that creature" / "it" is, in
-            // order: the node's own resolution-bound attachment-host recipient;
-            // else the ability's first object target; else, in a chain that
-            // declares no referent, the object the preceding instruction
-            // actually acted on (`referentless_chain_instruction_object` —
-            // Marauding Raptor's damage recipient after any redirection,
-            // CR 614.9); else — for subject-based triggers that carry no chosen
-            // target — the triggering event's subject object. The last tier
-            // mirrors the `ParentTargetController` fallback (targeting.rs): when
-            // `targets` has no object, resolve the anaphor against
-            // `TriggeringSource` from the current trigger event.
-            let target_id = if let Some(index) = subject_slot {
-                match crate::game::targeting::resolve_live_parent_slot_from_root(
-                    state, ability, *index,
-                ) {
-                    Some(TargetRef::Object(id)) => Some(id),
-                    _ => None,
-                }
-            } else if let Some(hosts) = ability.effect.target_filter().and_then(|recipient| {
-                crate::game::targeting::resolution_bound_attachment_hosts(state, ability, recipient)
-            }) {
-                // CR 608.2c + CR 301.5a + CR 301.5f: "put a +1/+1 counter on
-                // equipped creature if it's red" — the anaphor names this
-                // instruction's own recipient, the source's attachment host bound
-                // as the instruction resolves (CR 115.10a: not a target, so no
-                // slot carries it). Read it from the same authority the effect
-                // uses. A singular anaphor needs a unique referent: no host
-                // (unattached Equipment) leaves "it" without one, so the
-                // condition is false rather than falling through to an unrelated
-                // trigger-event subject. An Equipment or Aura has at most one host
-                // (CR 301.5c, CR 303.4d); two or more can only come from a
-                // non-attachment source's filter fallback, which no card in this
-                // class reaches, and likewise has no unique referent. CR 603.4
-                // does not apply — the "if" does not follow the trigger
-                // condition, so it is checked only here, on resolution.
-                match hosts.as_slice() {
-                    [host] => Some(*host),
-                    _ => None,
-                }
-            } else {
-                ability
-                    .targets
-                    .iter()
-                    .find_map(|t| match t {
-                        TargetRef::Object(id) => Some(*id),
-                        _ => None,
-                    })
-                    .or_else(|| referentless_chain_instruction_object(state, ability))
-                    .or_else(|| {
-                        crate::game::targeting::resolve_event_context_target(
-                            state,
-                            &TargetFilter::TriggeringSource,
-                            ability.source_id,
-                        )
-                        .and_then(|t| match t {
-                            TargetRef::Object(id) => Some(id),
-                            TargetRef::Player(_) => None,
-                        })
-                    })
-            };
-            let matched = if let Some(id) = target_id {
-                if *use_lki {
-                    if let Some(GameEvent::ZoneChanged { record, .. }) =
-                        state.current_trigger_event.as_ref()
-                    {
-                        if record.object_id == id {
-                            return crate::game::filter::matches_target_filter_on_zone_change_record(
-                                state,
-                                record,
-                                filter,
-                                &crate::game::filter::FilterContext::from_ability(ability),
-                            );
-                        }
-                    }
-                    // CR 400.7: Check last-known information for past-tense conditions.
-                    // Try LKI cache first, fall back to current state if object still exists.
-                    if let Some(lki) = state.lki_cache.get(&id) {
-                        crate::game::filter::matches_target_filter_on_lki_snapshot(
-                            state,
-                            id,
-                            lki,
-                            filter,
-                            &crate::game::filter::FilterContext::from_ability(ability),
-                        )
-                    } else {
-                        // Object still exists — check current state.
-                        // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-                        crate::game::filter::matches_target_filter(
-                            state,
-                            id,
-                            filter,
-                            &crate::game::filter::FilterContext::from_ability(ability),
-                        )
-                    }
-                } else {
-                    // Check current state for present-tense conditions.
-                    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-                    crate::game::filter::matches_target_filter(
-                        state,
-                        id,
-                        filter,
-                        &crate::game::filter::FilterContext::from_ability(ability),
-                    )
-                }
-            } else {
-                false
-            };
-            matched
+            evaluate_target_matches_filter(state, ability, filter, *use_lki, *subject_slot, subject)
         }
         // CR 608.2c + CR 603.2: "if it targets a [filter]" — check the triggering
         // spell's committed targets (Flurry on Shiko and Narset, Unified).
@@ -33834,6 +34195,7 @@ mod tests {
                                         Some(Box::new(ForwardedResultContext {
                                             targets: vec![],
                                             object_incarnations: vec![],
+                                            phase_population: false,
                                         }));
                                 }
                                 "detached-tail" => {
@@ -43840,6 +44202,7 @@ mod tests {
             filter,
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         };
         for (label, condition, consumes) in [
             ("direct tracked-set filter", gate(tracked.clone()), true),
@@ -44687,6 +45050,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
 
         crate::game::engine::apply(
@@ -49250,6 +49614,7 @@ mod tests {
             filter: TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
             use_lki: true,
             subject_slot: None,
+            subject: ObjectScope::Target,
         });
         let ability = ResolvedAbility::new(
             Effect::Bounce {
@@ -51015,6 +51380,546 @@ mod tests {
         assert!(
             state.objects.get(&noncreature).unwrap().tapped,
             "non-gained object must not be included in the tracked set"
+        );
+    }
+
+    /// CR 115.1 + CR 702.26b: a phase instruction hands its SELECTED objects
+    /// to a following rider. A selected attachment is kept even when it phased
+    /// out indirectly with its host (Barn); an incidental attachment is not
+    /// (Oubliette). A mass phase action uses only directly phased creatures.
+    #[test]
+    fn phase_result_objects_use_selected_targets_not_incidental_attachments() {
+        let host = ObjectId(1);
+        let aura = ObjectId(2);
+        let direct = GameEvent::PermanentPhasedOut {
+            object_id: host,
+            indirect: false,
+        };
+        let indirect = GameEvent::PermanentPhasedOut {
+            object_id: aura,
+            indirect: true,
+        };
+
+        let selected = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(host), TargetRef::Object(aura)],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        let state = GameState::new_two_player(42);
+        assert_eq!(
+            phase_result_objects(&state, &selected, &[direct.clone(), indirect.clone()]),
+            vec![host, aura],
+            "the selected host and selected Aura must both forward"
+        );
+
+        let mass = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        assert_eq!(
+            phase_result_objects(&state, &mass, &[direct, indirect]),
+            vec![host],
+            "a mass phase action must not add an incidental indirect attachment"
+        );
+    }
+
+    /// CR 115.1 + CR 400.7 + CR 702.26b: the forwarded phase population is the
+    /// objects the handler actually changed, not the raw declared IDs. A stale
+    /// pinned phase-in target publishes no event and must not be repinned; a
+    /// selected attachment that phased out indirectly with its selected host
+    /// does publish one and must stay in the set.
+    #[test]
+    fn phase_result_objects_publish_handler_results_not_stale_declared_ids() {
+        let host = ObjectId(1);
+        let selected_aura = ObjectId(2);
+        let stale = ObjectId(3);
+        let incidental = ObjectId(4);
+
+        let phase_out = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(host), TargetRef::Object(selected_aura)],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        let phase_out_events = [
+            GameEvent::PermanentPhasedOut {
+                object_id: host,
+                indirect: false,
+            },
+            GameEvent::PermanentPhasedOut {
+                object_id: selected_aura,
+                indirect: true,
+            },
+            GameEvent::PermanentPhasedOut {
+                object_id: incidental,
+                indirect: true,
+            },
+        ];
+        assert_eq!(
+            phase_result_objects(
+                &GameState::new_two_player(42),
+                &phase_out,
+                &phase_out_events
+            ),
+            vec![host, selected_aura],
+            "selected indirect attachment stays; incidental attachment and stale ID do not"
+        );
+
+        let phase_in = ResolvedAbility::new(
+            Effect::PhaseIn {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(host), TargetRef::Object(stale)],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        let phase_in_events = [GameEvent::PermanentPhasedIn { object_id: host }];
+        assert_eq!(
+            phase_result_objects(&GameState::new_two_player(42), &phase_in, &phase_in_events),
+            vec![host],
+            "a stale declared phase-in target must not be repinned or forwarded"
+        );
+
+        // CR 400.7 + CR 603.7c: the stale selected occurrence must not be
+        // re-admitted merely because a NEW incarnation of the same storage id
+        // phases in indirectly with a live host.
+        let mut state = GameState::new_two_player(42);
+        let returned = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(77),
+            PlayerId(1),
+            "Returned Aura".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&returned).unwrap().incarnation = 2;
+        let mut stale_phase_in = ResolvedAbility::new(
+            Effect::PhaseIn {
+                target: TargetFilter::ParentTarget,
+            },
+            vec![TargetRef::Object(returned)],
+            ObjectId(9),
+            PlayerId(0),
+        );
+        stale_phase_in.target_incarnations =
+            vec![crate::types::identifiers::ObjectIncarnationRef::of(
+                returned, 1,
+            )];
+        assert!(
+            phase_result_objects(
+                &state,
+                &stale_phase_in,
+                &[GameEvent::PermanentPhasedIn {
+                    object_id: returned
+                }]
+            )
+            .is_empty(),
+            "an incidental phase-in of a new incarnation must not revive the stale selected occurrence"
+        );
+    }
+
+    /// CR 608.2c + CR 608.2b: a `GenericEffect` that independently declares its
+    /// own target must keep that target even when its controller qualifier reads
+    /// the parent referent. The parent phase result is not its antecedent.
+    #[test]
+    fn phase_result_does_not_override_an_independently_targeted_rider() {
+        let mut state = GameState::new_two_player(42);
+        let phased = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Phased A".to_string(),
+            Zone::Battlefield,
+        );
+        let rider_target = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Rider B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [phased, rider_target] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+        let source = ObjectId(99);
+        let rider = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: crate::types::keywords::Keyword::Flying,
+                    }])],
+                duration: None,
+                target: Some(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::ParentTargetController),
+                )),
+                end_cost: None,
+            },
+            vec![TargetRef::Object(rider_target)],
+            source,
+            PlayerId(0),
+        );
+        let chain = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(phased)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(rider);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        let bound = state
+            .transient_continuous_effects
+            .iter()
+            .find(|effect| effect.source_id == source)
+            .expect("the rider must install a transient effect");
+        assert_eq!(
+            bound.affected,
+            TargetFilter::SpecificObject { id: rider_target },
+            "the rider must bind its independently declared target, not the phased object"
+        );
+    }
+
+    /// CR 608.2c + CR 702.26b: a phase action's resolved population is scoped to
+    /// the immediate application-filter consumer. The grant that consumes the
+    /// population binds the object the phase action changed; a following
+    /// numbered `ParentTargetSlot` still indexes the DECLARED slots and must not
+    /// read the phase result in the population grant's place.
+    #[test]
+    fn phase_population_stays_with_its_rider_and_a_numbered_slot_keeps_its_declaration() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Barn".to_string(),
+            Zone::Battlefield,
+        );
+        let declared = create_object(
+            &mut state,
+            CardId(2),
+            P0,
+            "Declared".to_string(),
+            Zone::Battlefield,
+        );
+        let phased = create_object(
+            &mut state,
+            CardId(3),
+            P0,
+            "Phased".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [declared, phased] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let population_grant = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    }])],
+                duration: None,
+                target: Some(TargetFilter::ParentTarget),
+                end_cost: None,
+            },
+            vec![],
+            source,
+            P0,
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTargetSlot { index: 0 })
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])],
+                duration: None,
+                target: Some(TargetFilter::ParentTargetSlot { index: 0 }),
+                end_cost: None,
+            },
+            vec![],
+            source,
+            P0,
+        ));
+        let chain = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(declared)],
+            source,
+            P0,
+        )
+        .sub_ability(
+            ResolvedAbility::new(
+                Effect::PhaseOut {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                vec![TargetRef::Object(phased)],
+                source,
+                P0,
+            )
+            .sub_ability(population_grant),
+        );
+        state.resolving_stack_entry = Some(crate::types::game_state::StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: P0,
+            kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(chain.clone()),
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        let affected_for = |keyword: Keyword| {
+            state
+                .transient_continuous_effects
+                .iter()
+                .find(|effect| {
+                    effect
+                        .modifications
+                        .contains(&ContinuousModification::AddKeyword {
+                            keyword: keyword.clone(),
+                        })
+                })
+                .map(|effect| effect.affected.clone())
+                .unwrap_or_else(|| panic!("missing grant for {keyword:?}"))
+        };
+        assert_eq!(
+            affected_for(Keyword::Flying),
+            TargetFilter::SpecificObject { id: phased },
+            "the population grant must bind the object the phase action changed"
+        );
+        assert_eq!(
+            affected_for(Keyword::Haste),
+            TargetFilter::SpecificObject { id: declared },
+            "the numbered slot must index the declared slot, not the phase population"
+        );
+    }
+
+    /// CR 608.2c + CR 115.1: a numbered-slot rider is not a phase-population
+    /// consumer. Directly following the phase action, it binds the slot declared
+    /// before the phase action rather than indexing the phase result by number.
+    #[test]
+    fn phase_population_is_not_forwarded_to_a_numbered_slot_rider() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Barn".to_string(),
+            Zone::Battlefield,
+        );
+        let declared = create_object(
+            &mut state,
+            CardId(2),
+            P0,
+            "Declared".to_string(),
+            Zone::Battlefield,
+        );
+        let phased = create_object(
+            &mut state,
+            CardId(3),
+            P0,
+            "Phased".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [declared, phased] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let chain = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(declared)],
+            source,
+            P0,
+        )
+        .sub_ability(
+            ResolvedAbility::new(
+                Effect::PhaseOut {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                vec![TargetRef::Object(phased)],
+                source,
+                P0,
+            )
+            .sub_ability(ResolvedAbility::new(
+                Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(TargetFilter::ParentTargetSlot { index: 0 })
+                        .modifications(vec![ContinuousModification::AddKeyword {
+                            keyword: Keyword::Flying,
+                        }])],
+                    duration: None,
+                    target: Some(TargetFilter::ParentTargetSlot { index: 0 }),
+                    end_cost: None,
+                },
+                vec![],
+                source,
+                P0,
+            )),
+        );
+        state.resolving_stack_entry = Some(crate::types::game_state::StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: P0,
+            kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(chain.clone()),
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "the slot rider must still install its grant"
+        );
+        assert_eq!(
+            state.transient_continuous_effects[0].affected,
+            TargetFilter::SpecificObject { id: declared },
+            "slot 0 names the declaration before the phase action, not the phase result"
+        );
+    }
+
+    /// CR 608.2c: a phase population is consumed by its application-filter
+    /// rider and is spent there. A later instruction that declares its own B
+    /// owns that referent, so a grant riding it binds B — never the phased A
+    /// the earlier rider consumed.
+    #[test]
+    fn phase_population_is_not_reused_by_a_later_declaration() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Barn".to_string(),
+            Zone::Battlefield,
+        );
+        let phased = create_object(
+            &mut state,
+            CardId(2),
+            P0,
+            "Phased A".to_string(),
+            Zone::Battlefield,
+        );
+        let newly_declared = create_object(
+            &mut state,
+            CardId(3),
+            P0,
+            "Newly Declared B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [phased, newly_declared] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+
+        let population_rider = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(TargetFilter::ParentTarget)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    }])],
+                duration: None,
+                target: Some(TargetFilter::ParentTarget),
+                end_cost: None,
+            },
+            vec![],
+            source,
+            P0,
+        )
+        .sub_ability(
+            // The newly declared B: an instruction that owns its own referent.
+            ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                vec![TargetRef::Object(newly_declared)],
+                source,
+                P0,
+            )
+            .sub_ability(ResolvedAbility::new(
+                Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(TargetFilter::ParentTarget)
+                        .modifications(vec![ContinuousModification::AddKeyword {
+                            keyword: Keyword::Haste,
+                        }])],
+                    duration: None,
+                    target: Some(TargetFilter::ParentTarget),
+                    end_cost: None,
+                },
+                vec![],
+                source,
+                P0,
+            )),
+        );
+        let chain = ResolvedAbility::new(
+            Effect::PhaseOut {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![TargetRef::Object(phased)],
+            source,
+            P0,
+        )
+        .sub_ability(population_rider);
+        state.resolving_stack_entry = Some(crate::types::game_state::StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: P0,
+            kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(chain.clone()),
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        let affected_for = |keyword: Keyword| {
+            state
+                .transient_continuous_effects
+                .iter()
+                .find(|effect| {
+                    effect
+                        .modifications
+                        .contains(&ContinuousModification::AddKeyword {
+                            keyword: keyword.clone(),
+                        })
+                })
+                .map(|effect| effect.affected.clone())
+                .unwrap_or_else(|| panic!("missing grant for {keyword:?}"))
+        };
+        assert_eq!(
+            affected_for(Keyword::Flying),
+            TargetFilter::SpecificObject { id: phased },
+            "the population rider binds the object the phase action changed"
+        );
+        assert_eq!(
+            affected_for(Keyword::Haste),
+            TargetFilter::SpecificObject { id: newly_declared },
+            "a later declaration owns its referent; the phase population must not be reused"
         );
     }
 
@@ -53566,6 +54471,7 @@ mod tests {
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
         state.park_ability_continuation(PendingContinuation::new(
             Box::new(ResolvedAbility::new(
@@ -53615,6 +54521,7 @@ mod tests {
                 is_cost_payment: false,
                 enters_modified_if: None,
                 duration: None,
+                privacy_zones: None,
             },
             GameAction::SelectCards {
                 cards: vec![second],

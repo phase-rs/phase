@@ -416,6 +416,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes<'_> {
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no dynamic read
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no dynamic read
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp, no dynamic read
+        declared_player_target_slots: _, // CR 115.1 announced player-role identity, no dynamic read
         controller: _,           // player id
         original_controller: _,  // player id
         scoped_player: _,        // player id (iteration binding)
@@ -4412,8 +4413,13 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes<'_> {
             filter,
             use_lki: _,
             subject_slot: _,
+            subject,
         } => {
             let mut acc = Axes::NONE;
+            // CR 603.2: `EventSource` reads the object the current trigger event
+            // names; `Target` (the default) is declared state. One axes mapping for
+            // every `ObjectScope`, shared with the quantity scan.
+            acc = acc.or(scan_object_scope(subject));
             acc = acc.or(scan_target_filter(
                 filter,
                 FilterReadContext::SnapshotOrEvent,
@@ -6539,6 +6545,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes<'_> {
             defender.as_ref().map_or(Axes::NONE, scan_controller_ref)
         }
         FilterProp::ProtectorMatches { controller } => scan_controller_ref(controller),
+        FilterProp::CastThisTurn { caster } => scan_controller_ref(caster),
         FilterProp::Owned { controller } => scan_controller_ref(controller),
         FilterProp::AttachedTo { to: AttachmentReferent::Player { player } } => scan_controller_ref(player),
         FilterProp::HasAttachment { controller, .. } => {
@@ -9125,8 +9132,6 @@ fn scan_activation_restriction(
         | ActivationRestriction::DuringYourTurn
         | ActivationRestriction::DuringYourUpkeep
         | ActivationRestriction::DuringCombat
-        | ActivationRestriction::BeforeAttackersDeclared
-        | ActivationRestriction::BeforeCombatDamage
         | ActivationRestriction::OnlyOnceEachTurn
         | ActivationRestriction::OnlyOnce
         | ActivationRestriction::MaxTimesEachTurn { count: _ }
@@ -9143,6 +9148,16 @@ fn scan_activation_restriction(
             maximum: _,
         }
         | ActivationRestriction::MatchesCardCastTiming => Axes::NONE,
+        // The turn's step tally: a bare window closes once the first combat phase has ended.
+        ActivationRestriction::BeforeAttackersDeclared
+        | ActivationRestriction::BeforeCombatDamage => Axes {
+            event: false,
+            sibling: SiblingReads::None,
+            projected: true,
+            source_counters: false,
+            history: HistoryReads::NONE,
+            that_player: false,
+        },
     }
 }
 

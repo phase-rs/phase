@@ -609,16 +609,7 @@ pub fn apply_resolved_stack_entry_finalize(
         );
     }
     if let Some(occurrence) = command.resulting_cast_occurrence {
-        let matching_record = usize::try_from(occurrence.turn_journal_index)
-            .ok()
-            .and_then(|index| {
-                state
-                    .spells_cast_this_turn_by_player
-                    .get(&occurrence.caster)
-                    .and_then(|records| records.get(index))
-            })
-            .is_some_and(|record| record.spell_object_id == Some(command.object));
-        if !matching_record {
+        if !crate::game::ledger::cast_occurrence_is_current(state, occurrence, command.object) {
             return Err(
                 ResolvedStackEntryFinalizeReplayInvariantError::CastOccurrenceMismatch(
                     command.object,
@@ -1128,6 +1119,19 @@ pub(crate) fn effective_stack_ability<'a>(
         ability: None,
         is_pending: false,
     }
+}
+
+/// CR 608.2b + CR 608.2h: countered or fizzled spells restore their normal
+/// face before zone delivery. Preserve their stack face first, before the
+/// replacement pipeline can park the move. Successful resolutions capture
+/// at exit, then restore the face in `finish_spell_stack_exit`.
+pub(super) fn restore_alternative_spell_face_before_zone_delivery(
+    state: &mut GameState,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+) {
+    super::zones::capture_exit_lki(state, object_id, Vec::new());
+    restore_alternative_spell_normal_face(state, object_id, casting_variant);
 }
 
 pub(crate) fn restore_alternative_spell_normal_face(
@@ -2860,7 +2864,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                         Zone::Graveyard
                     };
                     if casting_variant.restores_front_face_after_stack_exit() {
-                        restore_alternative_spell_normal_face(state, entry.id, casting_variant);
+                        restore_alternative_spell_face_before_zone_delivery(
+                            state,
+                            entry.id,
+                            casting_variant,
+                        );
                     }
                     // CR 608.2n + CR 614.6: route the stack → graveyard/exile
                     // move through the pipeline so self-scoped `Moved` redirects
@@ -4881,6 +4889,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
+        declared_player_target_slots: _, // CR 115.1 announce-time role identity; batch candidacy is shape-only
         controller: _,
         original_controller,
         scoped_player,
@@ -5143,6 +5152,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
+        declared_player_target_slots: _, // CR 115.1 announce-time role identity; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -5384,6 +5394,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         illegal_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp; batch candidacy is shape-only
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp; batch candidacy is shape-only
+        declared_player_target_slots: _, // CR 115.1 announce-time role identity; batch candidacy is shape-only
         controller: _,
         original_controller: _,
         scoped_player,
@@ -5800,6 +5811,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         illegal_target_slots: a_illegal_target_slots,
         unjudged_target_slots: a_unjudged_target_slots,
         illegal_local_target_slots: a_illegal_local_target_slots,
+        declared_player_target_slots: a_declared_player_target_slots,
         // CR 608.2e: a player-scope driver's transient capture, never on a
         // stack entry; guaranteed `None` ONE HOP upstream by the
         // batch-candidate checks, like the modal ordinal.
@@ -5896,6 +5908,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         illegal_target_slots: b_illegal_target_slots,
         unjudged_target_slots: b_unjudged_target_slots,
         illegal_local_target_slots: b_illegal_local_target_slots,
+        declared_player_target_slots: b_declared_player_target_slots,
         // CR 608.2e: a player-scope driver's transient capture, never on a
         // stack entry; guaranteed `None` ONE HOP upstream by the
         // batch-candidate checks, like the modal ordinal.
@@ -5938,6 +5951,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_illegal_target_slots == b_illegal_target_slots
         && a_unjudged_target_slots == b_unjudged_target_slots
         && a_illegal_local_target_slots == b_illegal_local_target_slots
+        && a_declared_player_target_slots == b_declared_player_target_slots
         && a_controller == b_controller
         && a_scoped_player == b_scoped_player
         && a_kind == b_kind

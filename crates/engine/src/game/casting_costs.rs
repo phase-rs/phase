@@ -2998,8 +2998,14 @@ pub(super) fn drain_deferred_triggers_after_stack_object_announcement(
     {
         return waiting_for;
     }
-    crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
-        .unwrap_or(waiting_for)
+    // CR 603.2c: every caller runs inside the reducer action on its own buffer,
+    // so the drain's window ranges are claimed for the post-action pipeline.
+    crate::game::triggers::drain_on_action_buffer(
+        state,
+        events,
+        crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement,
+    )
+    .unwrap_or(waiting_for)
 }
 
 /// CR 601.2c + CR 115.1: Find the next "of an opponent's choice" slot group — an
@@ -19668,14 +19674,16 @@ pub(super) fn max_x_value_excluding(
                 spell_ctx.as_ref(),
                 object_id,
             );
-            let tap = tap_mode
-                .filter(|mode| {
-                    state.objects.get(&id).is_some_and(|o| {
-                        super::casting::tap_payment_eligible(state, o, player, *mode)
-                    })
+            if mana != 0 {
+                return mana;
+            }
+            // CR 101.2 + CR 701.26a: a prohibition on tapping overrides tap-payment permission.
+            u32::from(tap_mode.is_some_and(|mode| {
+                state.objects.get(&id).is_some_and(|object| {
+                    super::casting::tap_payment_eligible(state, object, player, mode)
+                        && !super::restrictions::object_cant_tap(state, id)
                 })
-                .map_or(0, |_| 1);
-            mana.max(tap)
+            }))
         })
         .sum();
     // CR 702.66a-b: Delve applies after total cost is determined and can pay

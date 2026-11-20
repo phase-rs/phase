@@ -1023,6 +1023,33 @@ where
     None
 }
 
+/// Like [`scan_at_word_boundaries`] but returns the first successful match's
+/// byte offset and remaining input. Callers that need to split the original
+/// text around the match should use this instead of duplicating the cursor
+/// traversal locally.
+pub fn scan_at_word_boundaries_with_offset<'a, O, F>(
+    text: &'a str,
+    mut combinator: F,
+) -> Option<(usize, O, &'a str)>
+where
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
+{
+    let mut remaining = text;
+    let mut offset = 0;
+    while !remaining.is_empty() {
+        if let Ok((rest, val)) = combinator(remaining) {
+            return Some((offset, val, rest));
+        }
+        if let Some(rel) = remaining.find(' ') {
+            offset += rel + 1;
+            remaining = remaining[rel + 1..].trim_start();
+        } else {
+            break;
+        }
+    }
+    None
+}
+
 /// Like [`scan_at_word_boundaries`] but returns the **last** successful match,
 /// together with the byte offset where that match began.
 pub fn scan_last_at_word_boundaries_with_offset<'a, O, F>(
@@ -1401,6 +1428,46 @@ pub fn split_once_on<'a>(
     let (rest, before) = take_until(separator).parse(input)?;
     let (after, _) = tag(separator).parse(rest)?;
     Ok(("", (before, after)))
+}
+
+/// Templated Oracle list grammar, not a CR construct: a single leg, a two-leg
+/// "X or Y", or an Oxford-comma list "X, Y, ..., or Z" (the comma before the
+/// closing "or" is optional). Each leg is parsed by `leg`.
+///
+/// A list is closed only by an "or" leg, so an unclosed comma run ("a Demon,
+/// Zombies you control ...") is not read as a list: the result rolls back to
+/// the legs up to the last closing leg, or to the first leg, and the remainder
+/// starts at that point (the following ", " is left for the caller).
+pub fn parse_or_closed_list<'a, T, F>(mut leg: F) -> impl FnMut(&'a str) -> OracleResult<'a, Vec<T>>
+where
+    F: FnMut(&'a str) -> OracleResult<'a, T>,
+{
+    move |input: &'a str| {
+        let (mut rest, first) = leg(input)?;
+        let mut legs = vec![first];
+        let mut closed = (1usize, rest);
+        while let Ok((after_separator, closes)) = alt((
+            value(
+                true,
+                alt((tag::<_, _, OracleError<'_>>(", or "), tag(" or "))),
+            ),
+            value(false, tag(", ")),
+        ))
+        .parse(rest)
+        {
+            let Ok((after_leg, next)) = leg(after_separator) else {
+                break;
+            };
+            legs.push(next);
+            rest = after_leg;
+            if closes {
+                closed = (legs.len(), rest);
+            }
+        }
+        let (count, end) = closed;
+        legs.truncate(count);
+        Ok((end, legs))
+    }
 }
 
 /// Parse a superlative adjective into its corresponding `AggregateFunction`.
@@ -2493,6 +2560,22 @@ mod tests {
             parse_loyalty_symbol_delta("[+1], and you may"),
             Ok((", and you may", 1)),
         );
+    }
+
+    /// The or-closed list grammar reads an Oxford-comma list closed by "or",
+    /// and rolls an unclosed comma run back to its first leg, leaving the
+    /// comma for the caller.
+    #[test]
+    fn or_closed_list_rolls_back_unclosed_comma_run() {
+        let mut list = parse_or_closed_list(parse_number);
+        assert_eq!(list("1, 2, or 3"), Ok(("", vec![1, 2, 3])));
+        assert_eq!(list("1 or 2 tokens"), Ok((" tokens", vec![1, 2])));
+        assert_eq!(list("1, 2, 3 tokens"), Ok((", 2, 3 tokens", vec![1])));
+        assert_eq!(
+            list("1, 2, or 3, 4 tokens"),
+            Ok((", 4 tokens", vec![1, 2, 3]))
+        );
+        assert!(list("tokens").is_err());
     }
 
     /// Everything that is not a signed nonzero digit count stays declined: `[0]`

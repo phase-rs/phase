@@ -1156,6 +1156,40 @@ pub(crate) fn transient_grants_static_mode_to_object(
     false
 }
 
+/// CR 611.2c + CR 101.2: a resolved countering prohibition modifies the rules,
+/// so its spell population is read live rather than installed as an ability.
+/// CR 109.5: "you" remains the resolving ability's controller after its source leaves.
+pub(crate) fn transient_cant_be_countered_prohibits(
+    state: &GameState,
+    object_id: ObjectId,
+) -> bool {
+    if !state.stack.iter().any(|entry| {
+        entry.id == object_id
+            && matches!(
+                entry.kind,
+                crate::types::game_state::StackEntryKind::Spell { .. }
+            )
+    }) {
+        return false;
+    }
+    state.transient_continuous_effects.iter().any(|tce| {
+        tce.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBeCountered
+                }
+            )
+        }) && crate::game::layers::transient_effect_is_live(state, tce)
+            && matches_target_filter(
+                state,
+                object_id,
+                &tce.affected,
+                &FilterContext::from_source_with_controller(tce.source_id, tce.controller),
+            )
+    })
+}
+
 /// CR 611.2c + CR 613.11 + CR 109.5: True iff a live resolution-created effect
 /// ("creatures you control can't be the targets of spells or abilities your
 /// opponents control this turn", "target creature can't be the target of ...")
@@ -1376,8 +1410,7 @@ pub fn player_mana_spend_permission_for_spell_object(
         if obj.controller != player_id {
             continue;
         }
-        let ctx = FilterContext::from_source_with_controller(obj.id, player_id);
-        if matches_target_filter(state, spell_id, filter, &ctx) {
+        if super::casting::spell_matches_cost_filter(state, player_id, spell_id, filter, obj.id) {
             granted = Some(granted.map_or(concession, |g| g.union(concession)));
         }
     }
