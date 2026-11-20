@@ -3554,12 +3554,7 @@ pub enum DamagePostLossStage {
 /// lifelink share was already folded into `lifelink_by_source` at park time),
 /// so the post-replacement funnel never drains it directly. The snapshot
 /// carries source identity/incarnation (CR 400.7), controller (CR 702.15b),
-/// keywords, and `lifelink_bonus`; the pre-damage loyalty/defense below ride
-/// alongside it (CR 120.10 measures planeswalker/battle excess against the
-/// values *before* the damage was dealt, and loyalty removal already ran by
-/// park time). Creature excess still recomputes from post-counter state at
-/// resume (toughness/`damage_marked` are untouched by the counter placement),
-/// so the resumed record matches the never-paused path on both axes.
+/// keywords, and `lifelink_bonus`; the `excess` below rides alongside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingDamagePostCounter {
     /// CR 400.7: the damage context at pause time (source identity/incarnation,
@@ -3569,15 +3564,8 @@ pub struct PendingDamagePostCounter {
     pub target: TargetRef,
     /// The post-replacement damage amount.
     pub actual_amount: u32,
-    /// CR 120.10: the target's loyalty *before* the damage was dealt, captured
-    /// before loyalty removal (which runs ahead of the wither arm). `None`
-    /// when the target is not a planeswalker (or has no loyalty field).
-    #[serde(default)]
-    pub loyalty_before: Option<u32>,
-    /// CR 120.10: the target's defense *before* the damage was dealt, captured
-    /// before defense removal. `None` when the target is not a battle.
-    #[serde(default)]
-    pub defense_before: Option<u32>,
+    /// CR 120.4a + CR 120.10: the excess computed before the counters were placed; the resume never recomputes it.
+    pub excess: u32,
     /// CR 510.2: a combat leg's post-counter work, owned by the batch remnant
     /// rather than the shared drain (see the struct docs).
     #[serde(default)]
@@ -18735,6 +18723,48 @@ impl GameState {
         }
     }
 
+    /// CR 402.3: the exact paused producer's scan scope for an
+    /// `EffectZoneChoice`, used by viewer projection so privacy is decided
+    /// independently of the prompt's validation `zone`.
+    ///
+    /// Only the current paused instruction (active continuation root or
+    /// resolving stack ability) may answer. Walking later instructions would
+    /// let a public ordering/sacrifice prompt inherit a following operation's
+    /// private zone.
+    pub(crate) fn effect_zone_choice_privacy_scope(&self) -> Option<Vec<Zone>> {
+        let WaitingFor::EffectZoneChoice { effect_kind, .. } = &self.waiting_for else {
+            return None;
+        };
+        if !matches!(
+            effect_kind,
+            crate::types::ability::EffectKind::ChangeZone
+                | crate::types::ability::EffectKind::ChangeZoneAll
+                | crate::types::ability::EffectKind::BounceAll
+        ) {
+            return None;
+        }
+
+        fn scope(ability: &crate::types::ability::ResolvedAbility) -> Option<Vec<Zone>> {
+            let target = match &ability.effect {
+                crate::types::ability::Effect::ChangeZone { target, .. }
+                | crate::types::ability::Effect::ChangeZoneAll { target, .. }
+                | crate::types::ability::Effect::BounceAll { target, .. } => target,
+                _ => return None,
+            };
+            let zones = target.extract_zones();
+            (!zones.is_empty()).then_some(zones)
+        }
+
+        self.active_ability_continuation()
+            .and_then(|continuation| scope(&continuation.chain))
+            .or_else(|| {
+                self.resolving_stack_entry
+                    .as_ref()
+                    .and_then(|entry| entry.ability())
+                    .and_then(scope)
+            })
+    }
+
     /// CR 109.5 + CR 611.2a: drop any restored restriction whose affected player
     /// is still the raw `RestrictionPlayerScope::SourceController` placeholder
     /// (Conduit of Worlds' "you can't cast additional spells this turn").
@@ -21144,6 +21174,13 @@ pub enum WaitingFor {
         /// performer.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         performed_by: Option<PlayerId>,
+        /// CR 402.3: the producer-captured scan scope for THIS choice. It
+        /// belongs to the prompt, so it is retired atomically when an accepted
+        /// answer replaces `waiting_for` and it survives save/restore with the
+        /// prompt. Only a scope that reaches a hidden zone is stored; archived
+        /// prompts omit the field and fall back to the exact paused producer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        privacy_zones: Option<Vec<Zone>>,
     },
     /// Player chooses which drawn-this-turn hand cards to put on top of their
     /// library. Each unchosen required card is kept by paying life.
@@ -37705,6 +37742,20 @@ impl GameState {
         }
     }
 
+    /// CR 732.1b: retires the action-scoped journal entries a committed repetition of a taken
+    /// shortcut recorded from journal position `start` on.
+    ///
+    /// CR 601.2 + CR 733.1: a live cast reversal reads the entries since its cast began, so
+    /// nothing is retired under one. A confirmed take installs none, and is offered only where
+    /// a player has priority, so none is live while its repetitions commit.
+    pub(crate) fn retire_repetition_journal(&mut self, start: usize) {
+        if self.spell_cast_reversal.is_some() {
+            return;
+        }
+        self.resolved_rules_journal
+            .retire_action_scoped_since(start);
+    }
+
     /// CR 118.3a: defensively guarantee every unit in `player`'s mana pool carries
     /// a unique, nonzero `pip_id`, re-stamping the `ManaPipId(0)` sentinel and any
     /// duplicate. Production mana is stamped on entry via [`Self::add_mana_to_pool`],
@@ -45398,6 +45449,125 @@ mod drain_stack_reentrancy_tests {
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation,
     };
+
+    /// CR 402.3 + CR 608.2: a public battlefield sacrifice prompt must not
+    /// inherit the private scope of a later hand ChangeZone instruction in the
+    /// same chain (Strefan's Blood-token sacrifice followed by a Vampire put).
+    /// The producer-paused authority declines non-ChangeZone prompts, and the
+    /// observer sees the sacrifice envelope exactly.
+    #[test]
+    fn sacrifice_prompt_does_not_inherit_a_later_hand_change_zone_scope() {
+        let mut state = GameState::new_two_player(42);
+        let blood = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(9_001),
+            PlayerId(0),
+            "Blood".to_string(),
+            Zone::Battlefield,
+        );
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
+            privacy_zones: None,
+            player: PlayerId(0),
+            cards: vec![blood],
+            count: 2,
+            min_count: 2,
+            up_to: false,
+            source_id: ObjectId(100),
+            effect_kind: crate::types::ability::EffectKind::Sacrifice,
+            zone: Zone::Battlefield,
+            destination: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+            face_down_profile: None,
+            with_entry_effect: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            count_param: 0,
+            library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
+            mass_library_order: None,
+            is_cost_payment: false,
+            enters_modified_if: None,
+            duration: None,
+        };
+        let target = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::creature().properties(vec![
+                crate::types::ability::FilterProp::InAnyZone {
+                    zones: vec![Zone::Hand, Zone::Command],
+                },
+            ]),
+        );
+        let chain = Box::new(ResolvedAbility::new(
+            Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                origin: None,
+                destination: Zone::Battlefield,
+                target,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                library_shuffle: Default::default(),
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        ));
+        let pending = PendingContinuation::new(chain, &state);
+        state
+            .resolution_stack
+            .push_ability_continuation(AbilityContinuationFrame {
+                pending,
+                choose_zone_trigger_context: None,
+            });
+
+        assert!(
+            state.effect_zone_choice_privacy_scope().is_none(),
+            "a sacrifice prompt must not read the following hand leg's scope"
+        );
+        let WaitingFor::EffectZoneChoice { privacy_zones, .. } = &state.waiting_for else {
+            panic!("the sacrifice prompt must be open");
+        };
+        assert!(
+            privacy_zones.is_none(),
+            "a public battlefield choice carries no producer privacy scope"
+        );
+        let observer = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        let WaitingFor::EffectZoneChoice {
+            zone,
+            cards,
+            count,
+            min_count,
+            up_to,
+            ..
+        } = &observer.waiting_for
+        else {
+            panic!("observer must retain the sacrifice prompt");
+        };
+        assert_eq!(
+            *zone,
+            Zone::Battlefield,
+            "a sacrifice prompt's validation zone must not be rewritten from a later hand leg"
+        );
+        assert_eq!(cards, &vec![blood]);
+        assert_eq!(
+            (*count, *min_count, *up_to),
+            (2, 2, false),
+            "the public sacrifice envelope must stay exact for observers"
+        );
+    }
 
     fn ready_drain(name: &str) -> PostReplacementDrain {
         PostReplacementDrain::ready(PostReplacementContinuation::Template(Box::new(
@@ -58009,6 +58179,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                     Some(Box::new(crate::types::ability::ForwardedResultContext {
                         targets: vec![target],
                         object_incarnations: vec![reference],
+                        phase_population: false,
                     }));
             }
             AbilityPinSlot::ForwardedZoneSelection => {
@@ -63985,6 +64156,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         }));
         variants.push(Box::new(WaitingFor::DefilerPayment {
             player: PlayerId(0),
@@ -65162,6 +65334,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
         let json = serde_json::to_string(&wf).unwrap();
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
@@ -66636,6 +66809,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
         let json = serde_json::to_string(&wf).expect("serialize");
         // Modern shape must be emitted, NOT the legacy bool field.
@@ -66689,6 +66863,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
     fn effect_zone_choice_performer_roundtrips_and_defaults_when_missing() {
         let wf = |performed_by| WaitingFor::EffectZoneChoice {
             performed_by,
+            privacy_zones: None,
             player: PlayerId(0),
             cards: vec![ObjectId(7)],
             count: 1,
