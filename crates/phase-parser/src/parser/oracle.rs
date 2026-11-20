@@ -10849,6 +10849,8 @@ fn resolve_guards_in_continuous_mod(modification: &mut ContinuousModification) {
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // Scalar designation payload: no nested guards to descend into.
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -11879,6 +11881,8 @@ fn demote_lifetimes_in_modification(modification: &mut ContinuousModification) {
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // No lifetimes to demote: the designation payload is fully owned.
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -12501,6 +12505,9 @@ pub fn render_modification_descriptions(
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // Nothing per-modification to render: the static's description comes
+        // from the Oracle line, same as its source-controller sibling.
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -13169,10 +13176,9 @@ fn parse_activation_during_role_gate(i: &str) -> OracleResult<'_, ActivationRest
 /// gate. Each phrasing maps to an EXISTING enforced variant, so no new variant is
 /// introduced:
 /// - "before the combat damage step" / "before combat damage [has been dealt]"
-///   → `BeforeCombatDamage` (CR 510; enforced = `BeginCombat | DeclareAttackers
-///   | DeclareBlockers`) — Angus Mackenzie, Save Point.
+///   → `BeforeCombatDamage` (CR 510) — Angus Mackenzie, Save Point.
 /// - "before attackers are declared" / "before combat" → `BeforeAttackersDeclared`
-///   (CR 508.1; enforced = `PreCombatMain | BeginCombat`) — Arcum's Whistle.
+///   (CR 508.1) — Arcum's Whistle.
 ///
 /// The combat-damage arm is tried BEFORE the `before combat` arm, which is a
 /// prefix of "before combat damage" and would otherwise shadow it; within that

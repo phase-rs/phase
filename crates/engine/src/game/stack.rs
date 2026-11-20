@@ -11970,10 +11970,9 @@ mod tests {
             use triggers::TriggerCollectionRequester::Ordinary;
 
             fn printing(set_code: &str) -> DisplayOnly<Option<SharedPrinting>> {
-                DisplayOnly::new(Some(SharedPrinting::new(CardPrinting {
-                    set_code: set_code.to_string(),
-                    collector_number: "1".to_string(),
-                })))
+                DisplayOnly::new(Some(SharedPrinting::new(CardPrinting::owner(
+                    set_code, "1",
+                ))))
             }
 
             /// A battlefield object carrying `printing`, and its public look-back.
