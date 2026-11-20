@@ -349,37 +349,48 @@ function ProfileCard({
       </Field>
 
       <Field label={t("llm.apiKey")}>
-        <input
-          type="password"
-          autoComplete="off"
-          spellCheck={false}
-          value={profile.apiKey}
-          placeholder={entry?.requiresApiKey ? t("llm.apiKeyPlaceholder") : t("llm.apiKeyOptional")}
-          aria-label={t("llm.apiKey")}
-          onChange={(e) => onChange({ apiKey: e.target.value })}
-          className={FIELD_CLASS}
-        />
-        {profile.enabled && isMissingApiKey(profile, catalog) ? (
-          <p role="status" className="mt-1 text-[11px] leading-relaxed text-amber-300">
-            {t("llm.apiKeyMissing")}
-          </p>
-        ) : null}
-        <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
-          {t("llm.apiKeyStorage")}
-          {entry?.apiKeyUrl ? (
-            <>
-              {" "}
-              <a
-                href={entry.apiKeyUrl}
-                target="_blank"
-                rel="noreferrer noopener"
-                className="text-sky-300 underline"
-              >
-                {t("llm.apiKeyGet")}
-              </a>
-            </>
+        <div className="flex flex-col gap-2">
+          <input
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            value={profile.apiKey}
+            placeholder={entry?.requiresApiKey ? t("llm.apiKeyPlaceholder") : t("llm.apiKeyOptional")}
+            aria-label={t("llm.apiKey")}
+            onChange={(e) => onChange({ apiKey: e.target.value })}
+            className={FIELD_CLASS}
+          />
+          <label className={`${TOUCH_TARGET} flex cursor-pointer items-center gap-2 text-sm text-slate-300`}>
+            <input
+              type="checkbox"
+              checked={profile.rememberApiKey}
+              onChange={(e) => onChange({ rememberApiKey: e.target.checked })}
+              className="h-4 w-4 rounded border-white/20 bg-black/30 text-sky-500 focus:ring-sky-400 focus:ring-2"
+            />
+            <span>{t("llm.rememberApiKey")}</span>
+          </label>
+          {profile.enabled && isMissingApiKey(profile, catalog) ? (
+            <p role="status" className="mt-1 text-[11px] leading-relaxed text-amber-300">
+              {t("llm.apiKeyMissing")}
+            </p>
           ) : null}
-        </p>
+          <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+            {t("llm.apiKeyStorage")}
+            {entry?.apiKeyUrl ? (
+              <>
+                {" "}
+                <a
+                  href={entry.apiKeyUrl}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="text-sky-300 underline"
+                >
+                  {t("llm.apiKeyGet")}
+                </a>
+              </>
+            ) : null}
+          </p>
+        </div>
       </Field>
 
       {/* Offered only where the engine's catalog says the protocol has message

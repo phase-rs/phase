@@ -16708,6 +16708,7 @@ fn latched_property_kind(
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -18664,7 +18665,8 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
 
         // ---- Nested player predicates and controller scopes: recurse. ----
         FilterProp::ControllerMatches { player } => player_filter_binding_diverges(player),
-        FilterProp::Owned { controller } | FilterProp::ProtectorMatches { controller } => {
+        FilterProp::CastThisTurn { caster: controller }
+        | FilterProp::Owned { controller } | FilterProp::ProtectorMatches { controller } => {
             controller_ref_binding_diverges(controller)
         }
         // CR 303.4 + CR 301.5: the player referent is a `ControllerRef` like

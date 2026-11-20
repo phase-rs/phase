@@ -7,7 +7,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until, take_while1};
-use nom::character::complete::{multispace1, satisfy};
+use nom::character::complete::{alphanumeric1, multispace1, satisfy};
 use nom::combinator::{
     all_consuming, consumed, eof, map, map_opt, map_res, not, opt, peek, value, verify,
 };
@@ -20,7 +20,7 @@ use super::duration::parse_cast_snapshot_suffix;
 use super::error::{oracle_err, OracleResult};
 use super::primitives::{
     parse_article, parse_color, parse_core_type, parse_counter_type_typed, parse_keyword_name,
-    parse_number, scan_at_word_boundaries, scan_preceded,
+    parse_number, parse_or_closed_list, scan_at_word_boundaries, scan_preceded,
 };
 use super::target::{
     parse_controller_phrase, parse_type_filter_word, ControllerForm, ControllerSubject,
@@ -50,6 +50,7 @@ use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerCounterKind;
+use crate::types::text_grammar::parse_article_number;
 use crate::types::zones::Zone;
 
 /// Parse a quantity expression: either a fractional expression, a dynamic reference,
@@ -915,6 +916,32 @@ pub fn parse_quantity_expr_number(input: &str) -> OracleResult<'_, QuantityExpr>
         map(parse_number, |n| QuantityExpr::Fixed { value: n as i32 }),
     ))
     .parse(input)
+}
+
+/// Parse an exact-value disjunction of literal numbers (or X): "N or M" and
+/// "N, M, ..., or K" (the Oxford comma is optional). Each leg is a
+/// [`parse_quantity_expr_number`] that is not an article and ends at a word
+/// boundary. The article exclusion is `parse_number`'s own article atom
+/// ([`parse_article_number`]), so "a"/"an" before a space, punctuation or the
+/// end ("or a, draw a card") is never read as the leg 1. The list stops before any trailing
+/// ", <clause>", so it never consumes a clause comma.
+///
+/// English disjunction, not a CR construct: it carries no game rule of its
+/// own. Its consumers attach the stat semantics ("power 4, 5, or 6",
+/// "mana value 4 or 5"). Fails with fewer than two legs, so a caller never
+/// receives a degenerate one-element "list".
+pub fn parse_number_disjunction(input: &str) -> OracleResult<'_, Vec<QuantityExpr>> {
+    let (rest, legs) = parse_or_closed_list(|i| {
+        terminated(
+            preceded(not(parse_article_number), parse_quantity_expr_number),
+            not(alphanumeric1),
+        )
+        .parse(i)
+    })(input)?;
+    if legs.len() < 2 {
+        return Err(oracle_err(input));
+    }
+    Ok((rest, legs))
 }
 
 /// Parse a dynamic quantity reference from Oracle text.
@@ -4800,23 +4827,33 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             },
             tag("total amount of life your opponents have lost this turn"),
         ),
-        value(
-            QuantityRef::LifeLost {
-                player: PlayerScope::Opponent {
-                    aggregate: AggregateFunction::Sum,
-                },
+        // CR 119.3 + CR 608.2h: total the selected players' losses at resolution.
+        map(
+            preceded(
+                (opt(tag("the ")), tag("total life lost by ")),
+                terminated(
+                    alt((
+                        value(
+                            PlayerScope::Opponent {
+                                aggregate: AggregateFunction::Sum,
+                            },
+                            tag("your opponents"),
+                        ),
+                        value(
+                            PlayerScope::AllPlayers {
+                                aggregate: AggregateFunction::Sum,
+                                exclude: None,
+                            },
+                            tag("all players"),
+                        ),
+                    )),
+                    tag(" this turn"),
+                ),
+            ),
+            |player| QuantityRef::LifeLost {
+                player,
                 window: TurnWindow::ThisTurn,
             },
-            tag("the total life lost by your opponents this turn"),
-        ),
-        value(
-            QuantityRef::LifeLost {
-                player: PlayerScope::Opponent {
-                    aggregate: AggregateFunction::Sum,
-                },
-                window: TurnWindow::ThisTurn,
-            },
-            tag("total life lost by your opponents this turn"),
         ),
         value(
             QuantityRef::LifeLost {
@@ -8638,6 +8675,71 @@ mod tests {
     };
     use crate::types::mana::ManaColor;
 
+    fn fixed_legs(values: &[i32]) -> Vec<QuantityExpr> {
+        values
+            .iter()
+            .map(|&value| QuantityExpr::Fixed { value })
+            .collect()
+    }
+
+    // ── `parse_number_disjunction`: the exact-value number list of a stat
+    // qualifier ("power 4, 5, or 6"), which must stop before the clause comma.
+
+    #[test]
+    fn number_disjunction_serial_stops_at_clause_comma() {
+        // Sarkhan's Unsealing (the text after "with power ").
+        assert_eq!(
+            parse_number_disjunction("4, 5, or 6, this enchantment deals 4 damage to any target."),
+            Ok((
+                ", this enchantment deals 4 damage to any target.",
+                fixed_legs(&[4, 5, 6])
+            ))
+        );
+        // Kozilek's Unsealing (the text after "with mana value ").
+        assert_eq!(
+            parse_number_disjunction(
+                "4, 5, or 6, create two 0/1 colorless eldrazi spawn creature tokens"
+            ),
+            Ok((
+                ", create two 0/1 colorless eldrazi spawn creature tokens",
+                fixed_legs(&[4, 5, 6])
+            ))
+        );
+        // A single number before a clause comma is not a list (Firemind's
+        // Foresight: "an instant card with mana value 3, reveal it, ...").
+        assert!(parse_number_disjunction("3, reveal it, and put it into your hand.").is_err());
+        // An "or" comparator closes no number leg (Bitter Work; As Foretold).
+        assert!(parse_number_disjunction("4 or greater, draw a card").is_err());
+        assert!(
+            parse_number_disjunction("x or less, where x is the number of time counters on ~")
+                .is_err()
+        );
+        // "base" is not a number leg (Vhati il-Dal).
+        assert!(parse_number_disjunction("1 or base toughness 1").is_err());
+        // The article guard: "a" never reads as the leg 1, before a space or
+        // before punctuation (the closing "or a," would otherwise make the
+        // clause commas list-internal, reading [4, 5, 1]).
+        assert!(parse_number_disjunction("a creature spell with power 4, 5, or 6").is_err());
+        assert!(parse_number_disjunction("4, 5, or a, draw a card").is_err());
+    }
+
+    #[test]
+    fn number_disjunction_two_legs() {
+        // Transit Mage.
+        assert_eq!(
+            parse_number_disjunction("4 or 5, reveal it, put it into your hand, then shuffle."),
+            Ok((
+                ", reveal it, put it into your hand, then shuffle.",
+                fixed_legs(&[4, 5])
+            ))
+        );
+        // Frodo, Determined Hero.
+        assert_eq!(
+            parse_number_disjunction("2 or 3 to ~."),
+            Ok((" to ~.", fixed_legs(&[2, 3])))
+        );
+    }
+
     // ── `PopulationAnaphor` / `parse_population_anaphor` (CR 608.2c): the
     // demonstrative population of a leading for-each clause, across the
     // pronoun form, the "those"/"these" determiners, type words and subtypes.
@@ -12222,17 +12324,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_quantity_ref_total_life_lost_by_opponents() {
-        let (rest, q) =
-            parse_quantity_ref("the total life lost by your opponents this turn").unwrap();
-        assert!(matches!(
-            q,
-            QuantityRef::LifeLost {
-                player: PlayerScope::Opponent { .. },
-                ..
+    fn parse_quantity_ref_total_life_lost_by_players() {
+        for (players, player) in [
+            (
+                "your opponents",
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            ),
+            (
+                "all players",
+                PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Sum,
+                    exclude: None,
+                },
+            ),
+        ] {
+            let expected = QuantityRef::LifeLost {
+                player,
+                window: TurnWindow::ThisTurn,
+            };
+            for article in ["", "the "] {
+                let text = format!("{article}total life lost by {players} this turn");
+                assert_eq!(parse_quantity_ref(&text).unwrap(), ("", expected.clone()));
             }
-        ));
-        assert_eq!(rest, "");
+        }
     }
 
     #[test]

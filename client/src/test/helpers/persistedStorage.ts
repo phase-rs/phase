@@ -12,12 +12,9 @@
  * suites opt into `@vitest-environment jsdom` and patch `Storage.prototype` to
  * observe writes, and a global stand-in would make those patches blind.
  */
-function installTestLocalStorage(): void {
-  const ambient = (globalThis as { localStorage?: Partial<Storage> }).localStorage;
-  if (typeof ambient?.setItem === "function") return;
-
+function createTestStorage(): Storage {
   const entries = new Map<string, string>();
-  const storage: Storage = {
+  return {
     get length() {
       return entries.size;
     },
@@ -31,9 +28,23 @@ function installTestLocalStorage(): void {
       entries.set(String(key), String(value));
     },
   };
+}
 
+function installTestLocalStorage(): void {
+  const ambient = (globalThis as { localStorage?: Partial<Storage> }).localStorage;
+  if (typeof ambient?.setItem === "function") return;
   Object.defineProperty(globalThis, "localStorage", {
-    value: storage,
+    value: createTestStorage(),
+    configurable: true,
+    writable: true,
+  });
+}
+
+function installTestSessionStorage(): void {
+  const ambient = (globalThis as { sessionStorage?: Partial<Storage> }).sessionStorage;
+  if (typeof ambient?.setItem === "function") return;
+  Object.defineProperty(globalThis, "sessionStorage", {
+    value: createTestStorage(),
     configurable: true,
     writable: true,
   });
@@ -45,3 +56,4 @@ function installTestLocalStorage(): void {
 // BEFORE the store it exercises — by the time a test body runs, the store has
 // already captured whatever storage existed at import time.
 installTestLocalStorage();
+installTestSessionStorage();

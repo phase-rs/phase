@@ -34,7 +34,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::game::combat::AttackTarget;
+use crate::game::combat::{live_transient_block_restrictions, AttackTarget};
 use crate::game::engine::SimulationProbeGuard;
 use crate::game::functioning_abilities::game_functioning_statics;
 use crate::game::layers::transient_effect_is_live;
@@ -1038,7 +1038,8 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         // ControllerChoseLabel reads the controller's per-player anchor state.
         // ControllerMatches reads live per-turn history (damage ledger, life
         // tallies) via the controller's inner PlayerFilter predicate.
-        FilterProp::ControllerChoseLabel { .. }
+        FilterProp::CastThisTurn { .. }
+        | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
@@ -1416,6 +1417,12 @@ impl LegalityPoisonGates {
                 && transient_effect_is_live(state, tce)
         }) {
             g.has_declare_attacker = true;
+        }
+
+        // CR 509.1b: A live blocker restriction can distinguish attackers
+        // whose object fingerprints match.
+        if !g.has_declare_blocker {
+            g.has_declare_blocker = live_transient_block_restrictions(state).next().is_some();
         }
 
         // One battlefield scan: goaded creatures (CR 508.1d remote
@@ -2834,6 +2841,11 @@ mod tests {
     /// #5/#6/#14: FilterProp SAFE/POISON partition and combinator propagation.
     #[test]
     fn filterprop_classifier_partition() {
+        assert!(!filterprop_reads_only_candidate_fp(
+            &FilterProp::CastThisTurn {
+                caster: crate::types::ability::ControllerRef::You,
+            }
+        ));
         assert!(filterprop_reads_only_candidate_fp(&FilterProp::Tapped));
         assert!(filterprop_reads_only_candidate_fp(&FilterProp::Named {
             name: "Squirrel".to_string()

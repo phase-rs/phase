@@ -1591,3 +1591,226 @@ fn a_spell_payment_releases_its_spare_improvise_tap() {
 
     assert_spare_taps_released(&runner, &artifacts, 4);
 }
+
+/// CR 101.2 + CR 701.67a: Waterbend cannot count a creature prohibited from tapping.
+#[test]
+fn waterbend_x_excludes_a_permanent_that_cannot_tap() {
+    use engine::game::planechase::{active_plane, PlanarDieFace};
+    use engine::types::card_type::{CoreType, Supertype};
+    use engine::types::format::FormatConfig;
+    use engine::types::game_state::{ConvokeMode, GameRng};
+
+    let mut ceilings = [[0; 2]; 2];
+    for (mode_index, payment_mode) in [CastPaymentMode::Auto, CastPaymentMode::Manual]
+        .into_iter()
+        .enumerate()
+    {
+        for (helper_index, restricted) in [false, true].into_iter().enumerate() {
+            let mut scenario = GameScenario::new_with_format(FormatConfig::planechase(), 2, 42);
+            scenario.at_phase(Phase::PreCombatMain);
+            for player in [P0, P1] {
+                scenario.with_library_top(player, &["Island"; 4]);
+            }
+            let plane = real(&mut scenario, P0, "Ood Sphere", Zone::Command);
+            let katara = real(
+                &mut scenario,
+                P1,
+                "Katara, Water Tribe's Hope",
+                Zone::Battlefield,
+            );
+            let helper = scenario.add_vanilla(P1, 1, 1);
+            let mut runner = scenario.build();
+            runner.state_mut().planar_controller = Some(P0);
+            assert_eq!(active_plane(runner.state()), Some(plane));
+            let objects = &runner.state().objects;
+            let plane_types = &objects[&plane].base_card_types;
+            assert_eq!(plane_types.core_types, [CoreType::Plane]);
+            assert!(plane_types.supertypes.is_empty());
+            assert_eq!(plane_types.subtypes, ["Horsehead Nebula"]);
+            let katara_types = &objects[&katara].base_card_types;
+            assert_eq!(katara_types.core_types, [CoreType::Creature]);
+            assert_eq!(katara_types.supertypes, [Supertype::Legendary]);
+            assert_eq!(katara_types.subtypes.len(), 3);
+            for subtype in ["Human", "Warrior", "Ally"] {
+                assert!(katara_types.subtypes.iter().any(|ty| ty == subtype));
+            }
+            assert_eq!(
+                (objects[&katara].base_power, objects[&katara].base_toughness),
+                (Some(3), Some(3)),
+            );
+
+            // Select a deterministic seed, then obtain the trigger from the actual public roll.
+            let chaos = |event: &GameEvent| {
+                matches!(
+                    event,
+                    GameEvent::PlanarDieRolled {
+                        player_id: P0,
+                        face: PlanarDieFace::Chaos,
+                    }
+                )
+            };
+            let seed = (0..512)
+                .find(|&seed| {
+                    let mut trial = GameRunner::from_state(runner.state().clone());
+                    trial.state_mut().rng = GameRng::seed_from_u64(seed);
+                    trial
+                        .act(GameAction::RollPlanarDie)
+                        .is_ok_and(|result| result.events.iter().any(chaos))
+                })
+                .expect("a deterministic seed rolls Chaos");
+            runner.state_mut().rng = GameRng::seed_from_u64(seed);
+            let rolled = runner.act(GameAction::RollPlanarDie).unwrap();
+            assert!(rolled.events.iter().any(chaos));
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: restricted.then_some(TargetRef::Object(helper)),
+                })
+                .unwrap();
+            assert_eq!(runner.state().stack.back().unwrap().source_id, plane);
+            runner.resolve_top();
+
+            // Reach the opponent's turn through public actions; the prohibition survives untap.
+            let victim_has_priority = |runner: &GameRunner| {
+                runner.state().active_player == P1
+                    && runner.state().phase == Phase::PreCombatMain
+                    && matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { player: P1 }
+                    )
+            };
+            for _ in 0..40 {
+                if victim_has_priority(&runner) {
+                    break;
+                }
+                let action = match runner.state().waiting_for {
+                    WaitingFor::Priority { player: _ } => GameAction::PassPriority,
+                    WaitingFor::DeclareAttackers {
+                        player: _,
+                        valid_attacker_ids: _,
+                        valid_attack_targets: _,
+                        valid_attack_targets_by_attacker: _,
+                        attacker_constraints: _,
+                    } => GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    },
+                    WaitingFor::DeclareBlockers {
+                        player: _,
+                        valid_blocker_ids: _,
+                        valid_block_targets: _,
+                        block_requirements: _,
+                        blocker_constraints: _,
+                        must_be_blocked_targets: _,
+                        block_capacities: _,
+                    } => GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    },
+                    ref prompt => panic!("unexpected prompt before Katara's turn: {prompt:?}"),
+                };
+                runner.act(action).unwrap();
+            }
+            assert!(victim_has_priority(&runner));
+            let victim = &runner.state().objects[&helper];
+            assert!(!victim.tapped);
+            assert_eq!(victim.goaded_by.contains(&P0), restricted);
+            assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+
+            let announced = runner
+                .act(GameAction::ActivateAbility {
+                    source_id: katara,
+                    ability_index: 0,
+                    payment_mode,
+                })
+                .unwrap();
+            let WaitingFor::ChooseXValue {
+                player: P1,
+                min: 1,
+                max,
+                pending_cast: _,
+                convoke_mode: Some(ConvokeMode::Waterbend),
+                x_cost_previews: _,
+            } = announced.waiting_for
+            else {
+                panic!(
+                    "Waterbend X must remain available: {:?}",
+                    announced.waiting_for,
+                );
+            };
+            ceilings[mode_index][helper_index] = max;
+
+            let resources = |runner: &GameRunner| {
+                let state = runner.state();
+                let payer = &state.players[1];
+                (
+                    state.waiting_for.clone(),
+                    state.pending_cast.clone(),
+                    state.stack.clone(),
+                    payer.mana_pool.clone(),
+                    payer.life,
+                    state.objects[&helper].tapped,
+                    state.objects[&katara].tapped,
+                )
+            };
+            let before = resources(&runner);
+            assert!(
+                !runner
+                    .act(GameAction::ChooseX { value: max + 1 })
+                    .is_ok_and(|result| result.disposition.is_applied()),
+                "X above the offered ceiling must be refused",
+            );
+            assert_eq!(resources(&runner), before);
+
+            let paid_x = if restricted { 1 } else { 2 };
+            runner.act(GameAction::ChooseX { value: paid_x }).unwrap();
+            let candidates = candidate_actions(runner.state());
+            let tap = GameAction::TapForConvoke {
+                object_id: helper,
+                mana_type: ManaType::Colorless,
+            };
+            assert_eq!(
+                candidates.iter().any(|candidate| candidate.action == tap),
+                !restricted,
+            );
+            if restricted {
+                let katara_tap = GameAction::TapForConvoke {
+                    object_id: katara,
+                    mana_type: ManaType::Colorless,
+                };
+                assert!(
+                    candidates
+                        .iter()
+                        .any(|candidate| candidate.action == katara_tap),
+                    "{payment_mode:?}: Katara's Waterbend tap must be offered at restricted X=1",
+                );
+                let before = resources(&runner);
+                assert!(
+                    !runner
+                        .act(tap)
+                        .is_ok_and(|result| result.disposition.is_applied()),
+                    "a prohibited tap must be refused",
+                );
+                assert_eq!(resources(&runner), before);
+            } else {
+                tap_for_waterbend(&mut runner, helper);
+            }
+            tap_for_waterbend(&mut runner, katara);
+            runner.act(GameAction::PassPriority).unwrap();
+            let state = runner.state();
+            assert_eq!(state.stack.len(), 1);
+            let entry = state.stack.back().unwrap();
+            assert_eq!(entry.source_id, katara);
+            assert_eq!(entry.controller, P1);
+            assert_eq!(entry.ability().unwrap().chosen_x, Some(paid_x));
+            assert!(state.objects[&katara].tapped);
+            assert_eq!(state.objects[&helper].tapped, !restricted);
+            assert_eq!(state.players[1].mana_pool.total(), 0);
+            assert!(state.pending_cast.is_none());
+            eprintln!("{payment_mode:?} restricted={restricted}: max={max}, committed X={paid_x}");
+        }
+    }
+    assert_eq!(
+        ceilings,
+        [[2, 1], [2, 1]],
+        "Auto and Manual ceiling must match live tap eligibility (untargeted, targeted)",
+    );
+}
