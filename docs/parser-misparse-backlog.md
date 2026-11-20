@@ -1280,8 +1280,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Spirit of Resistance
 - Spiritual Sanctuary
 - Splitting the Powerstone
-- Sprout watch Dryad
-- Sproutwatch Dryad
 - Stalwart Successor
 - Steel Exemplar
 - Stomping Slabs
