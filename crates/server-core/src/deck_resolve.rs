@@ -361,10 +361,7 @@ mod tests {
             section: DeckSection::MainDeck,
             name: "Forest".to_string(),
             count: 1,
-            printing: CardPrinting {
-                set_code: "lea".to_string(),
-                collector_number: "294".to_string(),
-            },
+            printing: CardPrinting::owner("lea", "294"),
         }
     }
 
@@ -407,10 +404,7 @@ mod tests {
     ]"#;
 
     fn mixed_printings_kept() -> Vec<DeckPrinting> {
-        let lea = || CardPrinting {
-            set_code: "lea".to_string(),
-            collector_number: "294".to_string(),
-        };
+        let lea = || CardPrinting::owner("lea", "294");
         vec![
             DeckPrinting {
                 section: DeckSection::MainDeck,
@@ -856,10 +850,7 @@ mod tests {
             section,
             name: name.into(),
             count,
-            printing: CardPrinting {
-                set_code: set.into(),
-                collector_number: "1".into(),
-            },
+            printing: CardPrinting::owner(set, "1"),
         }
     }
 
