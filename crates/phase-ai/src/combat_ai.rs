@@ -2183,7 +2183,7 @@ pub fn choose_blockers_with_profile(
     // The block-restriction statics are collected once here and threaded through
     // the precomputed variant: every pass below reads this per attacker, and the
     // non-precomputed entry point re-walks the battlefield on each call.
-    let block_restriction_statics = engine::game::combat::collect_block_restriction_statics(state);
+    let block_restriction_statics = BlockRestrictions::from_statics(state);
     let required_blockers = |attacker_id: &ObjectId| -> usize {
         engine::game::combat::min_blockers_required_from_precomputed(
             state,

@@ -2456,6 +2456,16 @@ pub struct BlockRestrictions<'a> {
     transients: Vec<&'a TransientContinuousEffect>,
 }
 
+impl BlockRestrictions<'static> {
+    /// Collect functioning statics for queries that only inspect those statics.
+    pub fn from_statics(state: &GameState) -> Self {
+        Self {
+            statics: collect_functioning_block_restriction_statics(state),
+            transients: Vec::new(),
+        }
+    }
+}
+
 /// CR 102.3 + CR 109.5: Evaluate the admitted tree against the live blocker,
 /// using the creator's team and controller at each leaf.
 fn matches_relative_blocker(
@@ -8529,14 +8539,14 @@ pub fn get_valid_block_targets_for_player(
 /// it and `block_requirements_for_player` surfaces it to the UI, so the count a
 /// player sees can never disagree with the count the engine enforces.
 pub fn min_blockers_required(state: &GameState, attacker_id: ObjectId) -> u32 {
-    let block_restriction = collect_block_restriction_statics(state);
+    let block_restriction = BlockRestrictions::from_statics(state);
     min_blockers_required_from_precomputed(state, attacker_id, &block_restriction)
 }
 
 /// CR 702.111b + CR 509.1b: Minimum blockers required (menace floor of 2 and any
 /// `MinBlockers` restriction floor).
 /// Precomputed-slice variant of [`min_blockers_required`]. Hoist
-/// [`collect_block_restriction_statics`] once before any attacker loop.
+/// [`BlockRestrictions::from_statics`] once before any attacker loop that only reads statics.
 pub fn min_blockers_required_from_precomputed(
     state: &GameState,
     attacker_id: ObjectId,
@@ -8612,13 +8622,13 @@ fn min_blockers_sources_from_precomputed(
 /// This is the inverse of [`min_blockers_required`]; an attacker carrying both a
 /// minimum and a maximum must satisfy both.
 pub fn max_blockers_allowed(state: &GameState, attacker_id: ObjectId) -> Option<u32> {
-    let block_restriction = collect_block_restriction_statics(state);
+    let block_restriction = BlockRestrictions::from_statics(state);
     max_blockers_allowed_from_precomputed(state, attacker_id, &block_restriction)
 }
 
 /// CR 509.1b: Maximum blockers allowed (`CantBeBlockedByMoreThan` restriction).
 /// Precomputed-slice variant of [`max_blockers_allowed`]. Hoist
-/// [`collect_block_restriction_statics`] once before any attacker loop.
+/// [`BlockRestrictions::from_statics`] once before any attacker loop that only reads statics.
 pub fn max_blockers_allowed_from_precomputed(
     state: &GameState,
     attacker_id: ObjectId,
@@ -8652,7 +8662,7 @@ pub fn block_requirements_for_player(
     };
     // Hoist the block-restriction slice once for the O(attackers × battlefield)
     // sweep — invoked from `engine_combat.rs` and `turns.rs` production paths.
-    let block_restriction = collect_block_restriction_statics(state);
+    let block_restriction = BlockRestrictions::from_statics(state);
     combat
         .attackers
         .iter()
