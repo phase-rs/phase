@@ -19933,8 +19933,9 @@ fn optional_conjunction_head(
                 })
             };
             match (payer, crate::game::casting_costs::cost_has_x(cost)) {
-                // CR 107.3a: an unannounced X is chosen at the payment (pay.rs
-                // PayAmountChoice), so the funding is undecided — offer.
+                // CR 107.3f: an undefined X in the effect text is chosen as it
+                // resolves (pay.rs PayAmountChoice), so the funding is
+                // undecided until that choice — offer.
                 (_, true)
                 // An unresolvable payer falls to the PayCost affordability arm
                 // of [`optional_effect_is_infeasible`].
