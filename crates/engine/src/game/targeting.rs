@@ -4239,7 +4239,9 @@ pub fn own_cant_be_targeted_prohibits(
 
 /// CR 608.2g: expose a parked resolving spell only while its object is still
 /// on the stack, without duplicating entries that are already live there.
-fn targetable_stack_spell_entries(state: &GameState) -> impl Iterator<Item = &StackEntry> {
+pub(crate) fn targetable_stack_spell_entries(
+    state: &GameState,
+) -> impl Iterator<Item = &StackEntry> {
     state
         .stack
         .iter()

@@ -12083,7 +12083,10 @@ pub(crate) fn stack_entry_targets_satisfy(
     filter: &TargetFilter,
     require_all: bool,
 ) -> bool {
-    let Some(entry) = state.stack.iter().find(|e| e.id == stack_obj_id) else {
+    // CR 608.2g: a spell parked mid-resolution is found as legal-target enumeration finds it.
+    let Some(entry) = crate::game::targeting::targetable_stack_spell_entries(state)
+        .find(|e| e.id == stack_obj_id)
+    else {
         return true; // Not a stack entry — permissive.
     };
     let ctx = match source_controller {

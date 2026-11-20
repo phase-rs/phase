@@ -21,6 +21,7 @@ const LAVA_SPIKE: &str = "Lava Spike deals 3 damage to target player or planeswa
 const TORCHLING: &str = "{R}: Untap this creature.\n{R}: Target creature blocks this creature this turn if able.\n{R}: Change the target of target spell that targets only this creature.\n{1}: This creature gets +1/-1 until end of turn.\n{1}: This creature gets -1/+1 until end of turn.";
 const SEEDS_OF_STRENGTH: &str = "Target creature gets +1/+1 until end of turn.\nTarget creature gets +1/+1 until end of turn.\nTarget creature gets +1/+1 until end of turn.";
 const MURDER: &str = "Destroy target creature.";
+const INVOKE_CALAMITY: &str = "You may cast up to two instant and/or sorcery spells with total mana value 6 or less from your graveyard and/or hand without paying their mana costs. If those spells would be put into your graveyard, exile them instead. Exile Invoke Calamity.";
 const ZADA: &str = "Whenever you cast an instant or sorcery spell that targets only Zada, copy that spell for each other creature you control that the spell could target. Each copy targets a different one of those creatures.";
 
 fn free_spell(s: &mut GameScenario, player: PlayerId, name: &str, text: &str) -> ObjectId {
@@ -157,6 +158,30 @@ fn rebound_counts_a_departed_second_target() {
 
     let legal = offered(&r);
     assert!(!legal.contains(&arc_departed));
+    assert_eq!(legal, set(&[spike_p0, spike_p1]));
+}
+
+/// CR 608.2g: the resolving Invoke Calamity is still a targetable spell, but it
+/// chose no targets, so it is not a spell that targets only a player.
+#[test]
+fn rebound_refuses_resolving_spell_with_no_targets() {
+    let (mut s, spike_a, spike_b, rebound) = rebound_scenario();
+    let invoke = free_spell(&mut s, P0, "Invoke Calamity", INVOKE_CALAMITY);
+    let mut r = s.build();
+    give_turn(&mut r, P1);
+    let spike_p0 = cast(&mut r, spike_a, &[TargetRef::Player(P0)]);
+    let spike_p1 = cast(&mut r, spike_b, &[TargetRef::Player(P1)]);
+    pass(&mut r);
+    cast(&mut r, invoke, &[]);
+    pass(&mut r);
+    pass(&mut r);
+    r.act(GameAction::FreeCastWindowChoice {
+        selection: Some(rebound),
+    })
+    .expect("free-cast Rebound");
+
+    let legal = offered(&r);
+    assert!(!legal.contains(&invoke));
     assert_eq!(legal, set(&[spike_p0, spike_p1]));
 }
 
