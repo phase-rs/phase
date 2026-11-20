@@ -264,6 +264,70 @@ fn destroy_follows_characteristic_change() {
 }
 
 // ---------------------------------------------------------------------------
+// Destroy the damage source: No Mercy ("Whenever a creature deals damage to
+// you, destroy it.").
+// ---------------------------------------------------------------------------
+
+/// Steps until a trigger asks for its target, then answers `target`.
+fn aim_trigger(r: &mut GameRunner, target: TargetRef) {
+    for _ in 0..50 {
+        if matches!(
+            r.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ) {
+            r.act(GameAction::ChooseTarget {
+                target: Some(target),
+            })
+            .expect("aim trigger");
+            return;
+        }
+        step(r);
+    }
+    panic!("no trigger target prompt");
+}
+
+/// P0 casts Sparkmage Apprentice ("When this creature enters, it deals 1 damage
+/// to any target"); its trigger T1 aims at P1, who controls No Mercy. With
+/// `blink`, P0 Ephemerates the Apprentice in response and aims the new trigger
+/// at itself, so only T1, dealt by the departed Apprentice, damages P1.
+/// Returns the Apprentice's zone once settled.
+fn sparkmage(blink: bool) -> Zone {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let apprentice = s.add_real_card(P0, "Sparkmage Apprentice", Zone::Hand, db());
+    let eph = s.add_real_card(P0, "Ephemerate", Zone::Hand, db());
+    let mercy = s.add_real_card(P1, "No Mercy", Zone::Battlefield, db());
+    let mut r = s.build();
+    pay(&mut r, P0, &[ManaType::Red, ManaType::Colorless]);
+    r.cast(apprentice).commit();
+    aim_trigger(&mut r, TargetRef::Player(P1));
+    assert_eq!(triggers_of(&r, apprentice).len(), 1, "reach: T1 aims at P1");
+    if blink {
+        let before = incarnation(&r, apprentice);
+        pay(&mut r, P0, &[ManaType::White]);
+        r.cast(eph).target_object(apprentice).commit();
+        aim_trigger(&mut r, TargetRef::Player(P0));
+        assert_ne!(incarnation(&r, apprentice), before, "reach: blinked");
+        assert_eq!(triggers_of(&r, apprentice).len(), 2, "reach: T1 and T2");
+    }
+    drive(&mut r, |r| triggers_of(r, mercy).len() == 1);
+    drive(&mut r, settled);
+    zone(&r, apprentice)
+}
+
+#[test]
+fn damage_source_control_is_destroyed() {
+    assert_eq!(sparkmage(false), Zone::Graveyard);
+}
+
+/// CR 400.7 + CR 113.7a: T1's damage was dealt by the departed Apprentice; No
+/// Mercy's "it" names that object, not the returned one.
+#[test]
+fn damage_source_spares_blinked_dealer() {
+    assert_eq!(sparkmage(true), Zone::Battlefield);
+}
+
+// ---------------------------------------------------------------------------
 // Return + continuous rider: Dread Slaver ("Whenever a creature dealt damage by
 // this creature this turn dies, return it to the battlefield under your
 // control. That creature is a black Zombie ..."), #11034.
@@ -548,8 +612,12 @@ fn mana_bloom_flicker_stays() {
 // Optional exile of a dead source: Academy Rector (#10708 section 1).
 // ---------------------------------------------------------------------------
 
-#[test]
-fn rector_round_trip_offers_no_exile() {
+/// Academy Rector dies to Shock. With `round_trip`, P1 exiles the dead Rector
+/// with Coffin Purge and returns it with Pull from Eternity before its trigger
+/// resolves. Drives to a settled game, declining any prompt, and returns
+/// whether the "you may exile it" prompt was offered, then the Rector's and the
+/// enchantment's zones.
+fn rector(round_trip: bool) -> (bool, Zone, Zone) {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
     let rector = s.add_real_card(P0, "Academy Rector", Zone::Battlefield, db());
@@ -563,17 +631,44 @@ fn rector_round_trip_offers_no_exile() {
     drive(&mut r, |r| {
         triggers_of(r, rector).len() == 1 && priority(r, P1)
     });
-    let before = incarnation(&r, rector);
-    cast_and_resolve(&mut r, P1, purge, &[ManaType::Black], &[rector]);
-    drive(&mut r, |r| priority(r, P1));
-    cast_and_resolve(&mut r, P1, pull, &[ManaType::White], &[rector]);
-    assert_eq!(zone(&r, rector), Zone::Graveyard, "reach: round trip");
-    assert_ne!(incarnation(&r, rector), before, "reach: a new object");
-    drive(&mut r, settled);
-    assert_eq!(
-        (zone(&r, rector), zone(&r, anthem)),
-        (Zone::Graveyard, Zone::Library)
-    );
+    if round_trip {
+        let before = incarnation(&r, rector);
+        cast_and_resolve(&mut r, P1, purge, &[ManaType::Black], &[rector]);
+        drive(&mut r, |r| priority(r, P1));
+        cast_and_resolve(&mut r, P1, pull, &[ManaType::White], &[rector]);
+        assert_eq!(zone(&r, rector), Zone::Graveyard, "reach: round trip");
+        assert_ne!(incarnation(&r, rector), before, "reach: a new object");
+    }
+    let mut offered = false;
+    for _ in 0..400 {
+        if settled(&r) {
+            break;
+        }
+        if matches!(
+            r.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ) {
+            offered = true;
+            r.act(GameAction::DecideOptionalEffect { accept: false })
+                .expect("decline optional");
+            continue;
+        }
+        step(&mut r);
+    }
+    assert!(settled(&r), "the game never settled");
+    (offered, zone(&r, rector), zone(&r, anthem))
+}
+
+/// CR 608.2d: an impossible option isn't offered. The round-tripped Rector is a
+/// new object, so "exile it" can't be done and the prompt never appears.
+#[test]
+fn rector_round_trip_offers_no_exile() {
+    assert_eq!(rector(true), (false, Zone::Graveyard, Zone::Library));
+}
+
+#[test]
+fn rector_control_offers_exile() {
+    assert_eq!(rector(false), (true, Zone::Graveyard, Zone::Library));
 }
 
 // ---------------------------------------------------------------------------

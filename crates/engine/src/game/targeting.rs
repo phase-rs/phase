@@ -1209,11 +1209,9 @@ pub(crate) enum ReferentRead {
 /// zone-change authority's arrival, a damage dealer's or tapped object's stamp.
 /// `None` when the event records nothing for `id`.
 pub(crate) fn event_recorded_pin(event: &GameEvent, id: ObjectId) -> Option<ObjectIncarnationRef> {
-    match event {
-        GameEvent::ZoneChanged { object_id, .. } if *object_id == id => {
-            super::triggers::zone_change_parent_target_pin(event)
-        }
-        _ => event_context_incarnation(&TargetFilter::TriggeringSource, event, id),
+    match super::triggers::zone_change_parent_target_pin(event) {
+        Some(arrival) if arrival.object_id == id => Some(arrival),
+        Some(_) | None => event_context_incarnation(&TargetFilter::TriggeringSource, event, id),
     }
 }
 
@@ -1262,15 +1260,14 @@ pub(crate) fn event_referent_is_findable(
             return pin.is_current(state);
         }
     }
-    match event {
-        GameEvent::DamageDealt {
-            target: TargetRef::Object(target),
-            ..
-        } if *target == id && !matches!(filter, TargetFilter::TriggeringSource) => {
-            event_recipient_is_live_incarnation(state, event, obj)
-        }
-        _ => event_recorded_pin(event, id).is_none_or(|pin| pin.is_current(state)),
+    // CR 120.1: a damage recipient's identity is in the damage ledger; every other
+    // event-named object is judged by the event's own record.
+    if !matches!(filter, TargetFilter::TriggeringSource)
+        && extract_target_object_from_event(event) == Some(id)
+    {
+        return event_recipient_is_live_incarnation(state, event, obj);
     }
+    event_recorded_pin(event, id).is_none_or(|pin| pin.is_current(state))
 }
 
 /// CR 400.7 + CR 608.2k: the single authority binding an event-context object
@@ -1303,7 +1300,7 @@ pub(crate) fn resolve_event_referent(
                 EventReferentBinding::Unfindable
             }
         }
-        _ => EventReferentBinding::NotNamed,
+        None | Some(TargetRef::Player(_)) => EventReferentBinding::NotNamed,
     }
 }
 

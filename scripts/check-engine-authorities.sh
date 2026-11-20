@@ -36,6 +36,8 @@
 #       An instruction that affects an event referent binds it through
 #       targeting::affected_event_context_target / resolve_event_referent (CR 400.7).
 #       A diff ratchet on these named APIs, not a proof of complete routing.
+#       Its view is SCOPE minus EVENT_REFERENT_EXCLUDES (only the authority
+#       itself), not the keyword exemptions.
 #
 # Allowed files (the authorities themselves and the layer/copy machinery that
 # must read raw keyword state): see SCOPE_EXCLUDES below.
@@ -73,6 +75,12 @@ SCOPE_EXCLUDES=(
     ':(exclude)crates/engine/src/game/game_object.rs'
     ':(exclude)crates/engine/src/game/effects/become_copy.rs'
     ':(exclude)crates/engine/src/game/effects/token_copy.rs'
+)
+# (E) has its own view: only the referent authority is outside it, so the
+# keyword exemptions above never hide a raw referent read.
+EVENT_REFERENT_EXCLUDES=(
+    ':(exclude)**/*.md'
+    ':(exclude)crates/engine/src/game/targeting.rs'
 )
 
 # Pre-commit hook mode: only check staged changes (mirrors
@@ -134,21 +142,33 @@ while IFS= read -r file; do
         done <<< "$keyword_clean"
         FAIL=1
     fi
-
-    if [ "$file" != crates/engine/src/game/targeting.rs ]; then
-        referent_hits=$(added_lines_grep "$kept" "$FORBIDDEN_EVENT_REFERENT") || exit 2
-        referent_clean=$(filter_allow_annotation "$file" "$referent_hits" allow-raw-event-referent)
-        if [ -n "$referent_clean" ]; then
-            report_event_referent="${report_event_referent}
-  ${file}:"
-            while IFS= read -r line; do
-                report_event_referent="${report_event_referent}
-    ${line}"
-            done <<< "$referent_clean"
-            FAIL=1
-        fi
-    fi
 done <<< "$files"
+
+referent_files=$(git diff $DIFF_MODE --name-only "$BASE" -- "${SCOPE[@]}" "${EVENT_REFERENT_EXCLUDES[@]}" 2>/dev/null || true)
+if [ -n "$referent_files" ]; then
+    added_lines_load $DIFF_MODE "$BASE" -- "${SCOPE[@]}" "${EVENT_REFERENT_EXCLUDES[@]}"
+fi
+
+while IFS= read -r file; do
+    [ -f "$file" ] || continue
+
+    kept=$(added_lines_for "$file" | grep -E $'^[0-9]+\t[^+]' || true)
+    if [ -z "$kept" ]; then
+        continue
+    fi
+
+    referent_hits=$(added_lines_grep "$kept" "$FORBIDDEN_EVENT_REFERENT") || exit 2
+    referent_clean=$(filter_allow_annotation "$file" "$referent_hits" allow-raw-event-referent)
+    if [ -n "$referent_clean" ]; then
+        report_event_referent="${report_event_referent}
+  ${file}:"
+        while IFS= read -r line; do
+            report_event_referent="${report_event_referent}
+    ${line}"
+        done <<< "$referent_clean"
+        FAIL=1
+    fi
+done <<< "$referent_files"
 
 if [ -n "$report_event_referent" ]; then
     cat >&2 <<EOF

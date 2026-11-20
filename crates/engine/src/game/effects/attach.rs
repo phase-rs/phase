@@ -1815,15 +1815,14 @@ fn resolve_parent_target_attachment_from_trigger(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> EventReferentBinding {
-    let Some(GameEvent::ZoneChanged {
-        object_id,
-        to: Zone::Battlefield,
-        ..
-    }) = state.current_trigger_event.as_ref()
+    let Some(object_id) = state
+        .current_trigger_event
+        .as_ref()
+        .and_then(entering_object)
     else {
         return EventReferentBinding::NotNamed;
     };
-    let is_attachment = state.objects.get(object_id).is_some_and(|obj| {
+    let is_attachment = state.objects.get(&object_id).is_some_and(|obj| {
         obj.card_types
             .subtypes
             .iter()
@@ -1837,10 +1836,41 @@ fn resolve_parent_target_attachment_from_trigger(
         ability,
         &TargetFilter::TriggeringSource,
     ) {
-        EventReferentBinding::Found(id) if id == *object_id => EventReferentBinding::Found(id),
+        EventReferentBinding::Found(id) if id == object_id => EventReferentBinding::Found(id),
         EventReferentBinding::Unfindable => EventReferentBinding::Unfindable,
-        _ => EventReferentBinding::NotNamed,
+        EventReferentBinding::Found(_) | EventReferentBinding::NotNamed => {
+            EventReferentBinding::NotNamed
+        }
     }
+}
+
+/// The object an enters trigger `event` put onto the battlefield.
+fn entering_object(event: &GameEvent) -> Option<ObjectId> {
+    let GameEvent::ZoneChanged {
+        object_id,
+        to: Zone::Battlefield,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    Some(*object_id)
+}
+
+/// CR 400.7 + CR 701.3a: the entering object an `Attach` effect's untargeted
+/// attachment operand (`slot`) reads from the trigger `event` (this module's
+/// role), for the trigger seeder to pin. `None` for any other effect or operand.
+pub(in crate::game) fn event_parent_attachment(
+    effect: &Effect,
+    slot: &TargetFilter,
+    event: &GameEvent,
+) -> Option<ObjectId> {
+    let Effect::Attach { attachment, .. } = effect else {
+        return None;
+    };
+    std::ptr::eq(attachment, slot)
+        .then(|| entering_object(event))
+        .flatten()
 }
 
 /// CR 400.7 + CR 608.2b: whether an attachment operand that resolved to nothing names a

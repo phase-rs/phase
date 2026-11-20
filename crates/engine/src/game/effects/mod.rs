@@ -32628,7 +32628,7 @@ pub(crate) fn evaluate_condition(
             .into_iter()
             .find_map(|target_ref| match target_ref {
                 TargetRef::Object(id) => Some(id),
-                _ => None,
+                TargetRef::Player(_) => None,
             })
             .is_some_and(|id| {
                 crate::game::exile_links::shares_name_with_other_exiled_by_source(

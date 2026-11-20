@@ -22,7 +22,7 @@ use crate::types::game_state::{GameState, StackEntryKind};
 
 /// CR 702.184a/702.122/702.171: object referent for Stationed/VehicleCrewed/Saddled
 /// trigger anaphora while a triggered ability is resolving.
-pub(in crate::game) fn parent_object_from_trigger_event(
+fn parent_object_from_trigger_event(
     event: Option<&GameEvent>,
 ) -> Option<crate::types::identifiers::ObjectId> {
     match event? {
@@ -45,6 +45,19 @@ fn named_parent_object(
     event: &GameEvent,
 ) -> Option<(&GameEvent, crate::types::identifiers::ObjectId)> {
     parent_object_from_trigger_event(Some(event)).map(|id| (event, id))
+}
+
+/// CR 400.7 + CR 608.2k: the object a perpetual effect's untargeted ParentTarget
+/// reads from the trigger `event` (this module's local role), for the trigger
+/// seeder to pin. `None` for every other effect: only this resolver reads it.
+pub(in crate::game) fn event_parent_object(
+    effect: &Effect,
+    event: &GameEvent,
+) -> Option<crate::types::identifiers::ObjectId> {
+    let Effect::ApplyPerpetual { .. } = effect else {
+        return None;
+    };
+    parent_object_from_trigger_event(Some(event))
 }
 
 fn parent_object_from_resolution_trigger_context(

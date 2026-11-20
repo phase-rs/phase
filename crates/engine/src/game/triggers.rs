@@ -13589,22 +13589,17 @@ pub(crate) fn seed_event_referent_pins(
             }
         }
         if *slot == TargetFilter::ParentTarget {
-            ids.extend(match &ability.effect {
-                Effect::ApplyPerpetual { .. } => {
-                    super::effects::perpetual::parent_object_from_trigger_event(Some(event))
-                }
-                Effect::Attach { attachment, .. } if std::ptr::eq(attachment, slot) => {
-                    match event {
-                        GameEvent::ZoneChanged {
-                            object_id,
-                            to: Zone::Battlefield,
-                            ..
-                        } => Some(*object_id),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            });
+            // The resolvers that read an untargeted ParentTarget from the trigger
+            // event own that role: a perpetual boon's subject, an entering attachment.
+            ids.extend(super::effects::perpetual::event_parent_object(
+                &ability.effect,
+                event,
+            ));
+            ids.extend(super::effects::attach::event_parent_attachment(
+                &ability.effect,
+                slot,
+                event,
+            ));
         }
     }
     for id in ids {
@@ -13617,14 +13612,15 @@ pub(crate) fn seed_event_referent_pins(
         let pin = if recipient {
             damage_event_recipient_pin(state, Some(event), later_equal_in_batch)
         } else {
-            zone_change_parent_target_pin(event)
-                .filter(|pin| pin.object_id == id)
-                .or_else(|| {
-                    state
-                        .objects
-                        .get(&id)
-                        .map(ObjectIncarnationRef::from_object)
-                })
+            // CR 400.7 + CR 113.7a: the incarnation the event itself recorded (a
+            // zone change's arrival, a damage dealer's, tapped or attacking
+            // object's stamp) decides; the live object only when it recorded none.
+            super::targeting::event_recorded_pin(event, id).or_else(|| {
+                state
+                    .objects
+                    .get(&id)
+                    .map(ObjectIncarnationRef::from_object)
+            })
         };
         ability.target_incarnations.extend(pin);
     }
@@ -14125,10 +14121,7 @@ fn carry_event_referent_pins(
     let named: Vec<ObjectId> = [TargetFilter::TriggeringSource, TargetFilter::EventTarget]
         .iter()
         .filter_map(|filter| event_object(state, filter, to.source_id, event))
-        .chain(match event {
-            GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
-            _ => None,
-        })
+        .chain(super::targeting::extract_source_from_event(event))
         .collect();
     for pin in &from.target_incarnations {
         if named.contains(&pin.object_id)
