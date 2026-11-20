@@ -86,9 +86,11 @@ function install(id: string, url: string) {
     locations.set(encodeCandidateKey("english_printing", [id, 0, "full_card", rung]), url);
   }
 }
+function requestsExact(keys: ResolutionKey[], id: string) {
+  return keys.some((key) => key.kind === "candidate" && decodeCandidateKey(key.key)[1][0] === id);
+}
 function exactRequested(id: string) {
-  return resolveAssets.mock.calls.some(([keys]) => keys.some((key) => key.kind === "candidate"
-    && decodeCandidateKey(key.key)[1][0] === id));
+  return resolveAssets.mock.calls.some(([keys]) => requestsExact(keys, id));
 }
 function response(input: string) {
   if (input.includes("scryfall-printings")) return Response.json({ [forestOracle]: entries });
@@ -269,7 +271,7 @@ it.each([true, false])("handles missing admitted offline art, automatic=%s", asy
   let release!: () => void;
   const pending = new Promise<void>((done) => { release = done; });
   beforeResolve = async (keys) => {
-    if (keys.some((key) => key.kind === "candidate" && decodeCandidateKey(key.key)[1][0] === slotZero)) await pending;
+    if (requestsExact(keys, slotZero)) await pending;
   };
   usePreferencesStore.setState({ showOwnerPrintings: false });
   const tile = renderCard(card);
@@ -280,7 +282,12 @@ it.each([true, false])("handles missing admitted offline art, automatic=%s", asy
     await waitFor(() => expect(exactRequested(slotZero)).toBe(true));
     if (automatic) expect(tile.img()?.getAttribute("src")).toBe("/viewer.jpg");
   } finally {
-    release();
+    await act(async () => {
+      release();
+      const exactLookups = resolveAssets.mock.calls.flatMap(([keys], index) =>
+        requestsExact(keys, slotZero) ? [resolveAssets.mock.results[index].value] : []);
+      await Promise.all(exactLookups);
+    });
   }
   await waitFor(() => {
     expect(hook.result.current).toMatchObject({ src: automatic ? "/viewer.jpg" : null, isLoading: false });

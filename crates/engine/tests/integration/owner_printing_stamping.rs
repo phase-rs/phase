@@ -3269,6 +3269,29 @@ fn basic_art_reserves_later_entries_and_aliases() {
     }
 }
 
+#[test]
+fn basic_art_fully_occupied_rotation_starts_in_catalog_order() {
+    let db = art_database();
+    let mut list = art_reference_list(
+        false,
+        vec![
+            art_row(DeckSection::MainDeck, "Forest", 1, "m21", "273"),
+            art_row(DeckSection::MainDeck, "Forest", 1, "m21", "272"),
+        ],
+    );
+    list.player.main_deck = names(&[("Forest", 4)]);
+    // The fixed placement reference maps retained copies to IDs 4, 3, 1, 2.
+    assert_art_reference(
+        &load_art_reference(&db, &list),
+        &[
+            (4, "Forest", Some(CardPrinting::owner("m21", "273"))),
+            (3, "Forest", Some(CardPrinting::owner("m21", "272"))),
+            (1, "Forest", Some(automatic("m21", "272"))),
+            (2, "Forest", Some(automatic("m21", "273"))),
+        ],
+    );
+}
+
 fn assert_deck_art(
     state: &GameState,
     owner: PlayerId,
