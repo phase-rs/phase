@@ -254,6 +254,11 @@ fn persisting_permanent_damage_is_never_offered_unbounded() {
         }
     }
 
+    assert_eq!(
+        runner.state().objects[&sponge].damage_marked,
+        0,
+        "the Turtle starts undamaged"
+    );
     let mut offered = false;
     'recasts: for &tap_id in &fodder[..3] {
         runner
@@ -299,9 +304,11 @@ fn persisting_permanent_damage_is_never_offered_unbounded() {
         runner.state().waiting_for
     );
 
-    // Reach guard: Terror's entry damage landed on a permanent that persists across every
-    // compared frame (the Turtle survives with damage marked), so the bounded reading below is
-    // about persisting damage, not a minted token's entry damage.
+    // Reach guard: the Turtle started undamaged (asserted before the drive) and the confirmed
+    // period aimed Terror's entry damage at it, so its marked damage grew between the compared
+    // frames on a permanent that persists across all of them (it survives with damage marked).
+    // The bounded reading below is therefore about persisting damage, not a minted token's
+    // entry damage.
     let sponge_obj = runner
         .state()
         .objects
@@ -317,6 +324,8 @@ fn persisting_permanent_damage_is_never_offered_unbounded() {
         "reach-guard: Terror's entry damage must be marked on the persisting Turtle, got {}",
         sponge_obj.damage_marked
     );
+    let sponge_remaining =
+        sponge_obj.toughness.expect("Turtle has toughness") - sponge_obj.damage_marked as i32;
 
     let WaitingFor::LoopShortcut {
         certificate,
@@ -337,6 +346,14 @@ fn persisting_permanent_damage_is_never_offered_unbounded() {
     assert!(
         certificate.per_cycle.is_some(),
         "counted Spend offer must carry a per-cycle signature: {certificate:?}"
+    );
+    // CR 704.5g: one point lands on the Turtle per repetition, so the measured bound is the
+    // repetitions left before its marked damage reaches its toughness. This pins the bound to
+    // the persisting Turtle rather than any other axis of the period.
+    assert_eq!(
+        i64::from(schema.deliverable_capacity),
+        i64::from(sponge_remaining),
+        "the offer's bound must be the Turtle's remaining toughness: {schema:?}"
     );
 }
 
