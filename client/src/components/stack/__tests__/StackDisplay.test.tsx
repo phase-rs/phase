@@ -408,6 +408,8 @@ describe("StackDisplay real grouped surfaces", () => {
       if (id === "11") return new DOMRect(400, 100, 80, 120);
       if (id === "20") return new DOMRect(800, 400, 80, 120);
       if (this.hasAttribute("data-player-hud")) return new DOMRect(1000, 500, 40, 40);
+      // The pile's visible band, which arcs cut their entries to, shows them all.
+      if (this.hasAttribute("data-stack-pile-scroller")) return new DOMRect(0, 0, 1200, 800);
       return originalRect.call(this);
     });
     const hud = document.createElement("div");

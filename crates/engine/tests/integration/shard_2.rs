@@ -7,6 +7,8 @@
 
 pub mod support;
 
+mod anzrag_must_be_blocked;
+
 mod a_killer_among_us;
 mod aang_compound_tail;
 mod aang_journey_partial_fail_to_find_2722;
@@ -183,6 +185,7 @@ mod call_damage_control_modal_return;
 mod call_forth_tempest_and_rootha;
 mod call_to_the_kindred;
 mod canker_abomination_enters_with_counters;
+mod cant_be_countered_this_turn;
 mod cant_draw_blocks_draw_replacement;
 mod captain_america_first_tap_msh_wave2;
 mod captain_america_throw;
@@ -358,6 +361,7 @@ mod crafty_cutpurse_independent_redirect;
 mod craterhoof_behemoth_dynamic_pump_2875;
 mod create_card_copy_with_chosen_name;
 mod created_token_counter_sequence;
+mod creature_type_choice_suggestions;
 mod crime_tracking;
 mod crippling_fear_chosen_type_exclusion;
 mod cross_line_instead_override_branch;
@@ -389,6 +393,7 @@ mod cut_a_deal_draw_this_way_count;
 mod damage_done_once_by_controller_player_recipients;
 mod damage_prevention_formula;
 mod damage_redirect_target_constraints;
+mod damaged_player_counter_branch;
 mod dandan_analysis_ai_support_reads;
 mod dandan_declare_round;
 mod dandan_free_reveal;

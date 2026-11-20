@@ -1593,7 +1593,6 @@
     },
     "search": {
       "title": "ライブラリーを検索",
-      "instructionWithTitle": "{{title}}：{{instruction}}",
       "subtitleExact_one": "{{count}}枚のカードを選択",
       "subtitleExact_other": "{{count}}枚のカードを選択",
       "subtitleUpTo_one": "最大{{count}}枚のカードを選択",
@@ -2064,7 +2063,8 @@
     "scrollLeft": "左へスクロール",
     "scrollRight": "右へスクロール",
     "confirm": "確認",
-    "cancel": "キャンセル"
+    "cancel": "キャンセル",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "アドベンチャー",
@@ -2636,6 +2636,9 @@
     "partitionSubtitle": "あなたのクリーチャーを2つの束に分ける。{{chooser}}が1つを選ぶ。",
     "partitionSubtitleRemaining_one": "あなたのクリーチャーを2つの束に分ける。{{chooser}}が1つを選ぶ。（あなたの後に残りプレイヤー{{count}}人）",
     "partitionSubtitleRemaining_other": "あなたのクリーチャーを2つの束に分ける。{{chooser}}が1つを選ぶ。（あなたの後に残りプレイヤー{{count}}人）",
+    "partitionInstruction": "{{chooser}}が1つを選ぶ",
+    "partitionInstructionRemaining_one": "{{chooser}}が1つを選ぶ（あなたの後に残りプレイヤー{{count}}人）",
+    "partitionInstructionRemaining_other": "{{chooser}}が1つを選ぶ（あなたの後に残りプレイヤー{{count}}人）",
     "pileALabel": "束A：",
     "pileBLabel": "束B：",
     "pileAria": "{{name}} — 束{{pile}}",

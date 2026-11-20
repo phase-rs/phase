@@ -183,7 +183,10 @@ fn parse_hyphenated_english_number(input: &str) -> OracleResult<'_, u32> {
 /// Prevents false matches where "a" greedily consumes the start of words like
 /// "another", "anyone", "among". The boundary check requires the next character
 /// to be non-alphanumeric (whitespace, punctuation) or end-of-input.
-fn parse_article_number(input: &str) -> OracleResult<'_, u32> {
+///
+/// Public so a caller that must exclude the article reading of [`parse_number`]
+/// (a number-list leg) rejects exactly what `parse_number` would read as 1.
+pub fn parse_article_number(input: &str) -> OracleResult<'_, u32> {
     // Try "an" before "a" (longest match first).
     let (rest, _) = alt((tag("an"), tag("a"))).parse(input)?;
     match rest.chars().next() {
