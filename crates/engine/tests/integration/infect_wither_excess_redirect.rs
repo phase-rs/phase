@@ -183,7 +183,7 @@ fn infect_redirect_accounts_for_marked_damage() {
 
 /// R3 — CR 702.80a: wither places the lethal 2 counters and the 2 excess
 /// is ordinary life loss. No printed creature has both wither and trample, so
-/// the harness grants trample.
+/// the harness grants trample, as Primal Frenzy does ("Enchanted creature has trample.").
 #[test]
 fn wither_redirect_places_only_lethal_counters() {
     let mut scenario = new_scenario();
@@ -308,7 +308,8 @@ fn deathtouch_infect_redirect_ignores_marked_damage() {
 
 /// R8 — CR 120.4a: 1 deathtouch damage is never excess, so an indestructible
 /// creature with damage marked takes it and nothing is redirected. No printed
-/// creature has both deathtouch and trample, so the harness grants trample.
+/// creature has both deathtouch and trample, so the harness grants trample, as
+/// Primal Frenzy does ("Enchanted creature has trample.").
 #[test]
 fn deathtouch_single_damage_is_never_excess() {
     let mut scenario = new_scenario();
