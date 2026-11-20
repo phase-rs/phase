@@ -5,6 +5,7 @@ use engine::ai_support::{adversarial_swarm_witness, SwarmWitnessResult};
 use engine::game::combat::{
     can_block_pair, can_block_pair_with_precomputed, collect_block_restriction_statics,
     collect_blocker_allowed_statics, collect_blocker_restriction_statics, AttackTarget,
+    BlockRestrictions,
 };
 use engine::game::commander::commander_lethal_headroom;
 use engine::game::players;
@@ -36,7 +37,7 @@ use crate::zone_eval::available_mana;
 /// functioning statics for every candidate pair.
 pub(crate) struct BlockLegalitySlices {
     blocker_restriction: Vec<(ObjectId, StaticDefinition)>,
-    block_restriction: Vec<(ObjectId, StaticDefinition)>,
+    block_restriction: BlockRestrictions,
     blocker_allowed: Vec<(ObjectId, StaticDefinition)>,
     // CR 604.1: shadow block-lift existence gate (CR 509.1b/609.4/702.28b),
     // hoisted once so per-pair legality skips the O(N) CanBlockShadow sweep.
