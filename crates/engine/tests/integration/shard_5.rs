@@ -90,6 +90,7 @@ mod sba_lethal_damage_redirect_single_application;
 mod scarab_god_regression;
 mod scarblade_malice_delayed_dies_762;
 mod scholarship_sponsor;
+mod scoped_unless_choose_all_then_act;
 mod scoped_unless_payer_per_iteration;
 mod scoped_unless_sacrifice_token;
 mod screaming_nemesis_life_lock;

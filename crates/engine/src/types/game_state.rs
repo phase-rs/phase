@@ -7086,6 +7086,11 @@ pub struct PendingPlayerScopeUnlessPayment {
     pub current_player: PlayerId,
     /// The typed sacrifice cost is retained to re-emit the next existing prompt.
     pub cost: AbilityCost,
+    /// CR 101.4: the sacrifices the paying seats chose, pinned to the
+    /// permanents they were (CR 400.7). Nothing is sacrificed until the last
+    /// seat has answered; then the batch and the tokens happen together.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub payments: Vec<PlayerScopeUnlessSelection>,
 }
 
 /// CR 101.4 + CR 118.12a: The action a seat chose to avert a scoped unless
@@ -7134,7 +7139,10 @@ pub struct PlayerScopeUnlessSettlement {
     pub controller: PlayerId,
     pub discards: Vec<(PlayerId, ObjectIncarnationRef)>,
     pub sacrifices: Vec<(PlayerId, Vec<ObjectIncarnationRef>)>,
-    pub punishment: Box<ResolvedAbility>,
+    /// What happens to the players who declined, after every payment. `None`
+    /// when nothing is owed (an aggregate token instruction nobody declined).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub punishment: Option<Box<ResolvedAbility>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_event: Option<GameEvent>,
 }
@@ -7143,7 +7151,19 @@ pub struct PlayerScopeUnlessSettlement {
 /// replacement passes already ran while all co-sacrificed permanents remained on
 /// the battlefield, queued for simultaneous delivery.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum PendingSacrificeDelivery {
+pub struct PendingSacrificeDelivery {
+    pub sacrifice: PendingSacrificeMove,
+    /// CR 614.6: the post-replacement work the consult installed for this move
+    /// (Kalitas, Traitor of Ghet's "create a 2/2 black Zombie"). Each queued
+    /// move keeps its own, so consulting the next move cannot displace it, and
+    /// it runs when this move is delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rider: Option<PostReplacementDrain>,
+}
+
+/// CR 701.21a: The approved shape of a consulted sacrifice move.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PendingSacrificeMove {
     Sacrifice {
         object_id: ObjectId,
         player_id: PlayerId,
@@ -31294,10 +31314,15 @@ fn visit_cost_move_resume_chains<'a>(
             &resume.pending_effect,
             SuspendedChainEvent::Bound(resume.trigger_event.as_ref()),
         ),
-        PendingCostMoveResume::PlayerScopeUnlessSettlement(settlement) => f(
-            &settlement.punishment,
-            SuspendedChainEvent::Bound(settlement.trigger_event.as_ref()),
-        ),
+        PendingCostMoveResume::PlayerScopeUnlessSettlement(settlement) => settlement
+            .punishment
+            .as_deref()
+            .map_or(Ok(()), |punishment| {
+                f(
+                    punishment,
+                    SuspendedChainEvent::Bound(settlement.trigger_event.as_ref()),
+                )
+            }),
         PendingCostMoveResume::CollectEvidencePayment { resume, .. } => {
             visit_collect_evidence_resume_chains(resume, f)
         }
@@ -70530,6 +70555,7 @@ mod restored_exact_attack_authority_tests {
                             declining_players: vec![],
                             current_player: P0,
                             cost: AbilityCost::Tap,
+                            payments: Vec::new(),
                         }));
                     state.waiting_for.clone()
                 }

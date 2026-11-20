@@ -1151,6 +1151,7 @@ pub(crate) fn begin_player_scope_token_unless_sacrifice(
         declining_players: Vec::new(),
         current_player: *current_player,
         cost: modifier.cost.clone(),
+        payments: Vec::new(),
     }));
     set_player_scope_unless_payment_waiting_for(state);
     true
@@ -1211,21 +1212,66 @@ fn settle_player_scope_token_unless_payment(
     pending: Box<PendingPlayerScopeUnlessPayment>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    // `UnlessPayment` belongs only to the per-payer question. Clear it before
-    // resolving the one aggregate result so a decline cannot leave its prior
-    // chooser serialized after token creation or a replacement resume.
-    set_active_priority(state);
-    if !pending.declining_players.is_empty() {
-        let mut effect = *pending.pending_effect;
+    let PendingPlayerScopeUnlessPayment {
+        pending_effect,
+        declining_players,
+        payments,
+        ..
+    } = *pending;
+    let (source_id, controller) = (pending_effect.source_id, pending_effect.controller);
+    let tokens = (!declining_players.is_empty()).then(|| {
+        let mut effect = pending_effect;
         if let Effect::Token { count, .. } = &mut effect.effect {
             *count = crate::types::ability::QuantityExpr::Fixed {
-                value: pending.declining_players.len() as i32,
+                value: declining_players.len() as i32,
             };
         }
-        effects::resolve_ability_chain(state, &effect, events, 0)
-            .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+        effect
+    });
+    let sacrifices = payments
+        .into_iter()
+        .map(|payment| (payment.player, payment.objects))
+        .collect();
+    // CR 101.4: once every seat has answered, the chosen creatures are
+    // sacrificed and the tokens created together (Acererak the Archlich's
+    // ruling), through the shared scoped-unless settlement. It clears the
+    // per-payer prompt first, so no prior chooser stays serialized after the
+    // tokens or a replacement resume.
+    crate::game::scoped_unless_poll::settle_token_unless_sacrifice(
+        state, source_id, controller, sacrifices, tokens, events,
+    )
+}
+
+/// Whether `player`'s live sacrifice selection about `source_id` is the
+/// aggregate token poll's payment.
+fn token_unless_poll_owns_prompt(state: &GameState, player: PlayerId, source_id: ObjectId) -> bool {
+    state
+        .pending_player_scope_unless_payment
+        .as_deref()
+        .is_some_and(|pending| {
+            pending.current_player == player && pending.pending_effect.source_id == source_id
+        })
+}
+
+/// CR 101.4 + CR 118.12a: the paying seat's chosen creature is recorded, not
+/// sacrificed; the next seat is asked, or the poll settles.
+fn record_token_unless_sacrifice(
+    state: &mut GameState,
+    player: PlayerId,
+    chosen: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let objects = crate::game::scoped_unless_poll::pin(state, chosen);
+    if let Some(pending) = state.pending_player_scope_unless_payment.as_deref_mut() {
+        pending
+            .payments
+            .push(crate::types::game_state::PlayerScopeUnlessSelection {
+                player,
+                action: crate::types::game_state::PlayerScopeUnlessAction::Sacrifice,
+                objects,
+            });
     }
-    Ok(state.waiting_for.clone())
+    advance_player_scope_token_unless_payment(state, player, true, events)
 }
 
 /// CR 800.4a + CR 101.4: After eliminating the current final payer, settle
@@ -3417,18 +3463,6 @@ fn finish_ward_sacrifice_payment(
     pending_effect: ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if state
-        .pending_player_scope_unless_payment
-        .as_ref()
-        .is_some_and(|pending| pending.pending_effect.source_id == pending_effect.source_id)
-    {
-        let player = state
-            .pending_player_scope_unless_payment
-            .as_ref()
-            .expect("aggregate payment checked above")
-            .current_player;
-        return advance_player_scope_token_unless_payment(state, player, true, events);
-    }
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&pending_effect.effect),
         source_id: pending_effect.source_id,
@@ -3841,6 +3875,10 @@ pub(super) fn handle_ward_sacrifice_choice(
                 pending_effect,
                 events,
             );
+        }
+        // The aggregate token poll admits exactly one sacrifice per seat.
+        if token_unless_poll_owns_prompt(state, player, pending_effect.source_id) {
+            return record_token_unless_sacrifice(state, player, chosen[0], events);
         }
 
         // CR 603.10a + CR 118.8: NOTE — sequential Ward multi-sacrifice is a separate

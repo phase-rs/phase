@@ -8830,9 +8830,18 @@ mod tests {
             .as_ref()
             .expect("the pause must retain the full sacrifice completion");
         assert!(pending.completion.spans_replacement_pause);
-        assert!(pending.completion.deferred_events.iter().any(
-            |event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == first)
-        ));
+        assert!(
+            pending.completion.pending_deliveries.iter().any(|delivery| {
+                matches!(
+                    &delivery.sacrifice,
+                    crate::types::game_state::PendingSacrificeMove::Sacrifice {
+                        object_id,
+                        ..
+                    } if *object_id == first
+                )
+            }),
+            "the first pre-consulted sacrifice must stay queued for simultaneous delivery across the pause"
+        );
 
         let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
             .expect("accepting the replacement must complete the whole sacrifice batch");

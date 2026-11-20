@@ -2,7 +2,8 @@
 //!
 //! The Oracle grammar is the reusable clause printed by Acererak the Archlich:
 //! each opponent decides in APNAP order, and only after every answer does the
-//! source's controller create one Zombie per decline.
+//! source's controller create one Zombie per decline, while the chosen
+//! creatures are sacrificed at the same time (CR 101.4).
 
 use engine::game::elimination::eliminate_player;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -19,6 +20,7 @@ const SCOPED_UNLESS_ZOMBIE: &str =
     "For each opponent, you create a 2/2 black Zombie creature token unless they sacrifice a creature.";
 const REST_IN_PEACE: &str =
     "When Rest in Peace enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.";
+const DAUTHI_VOIDWALKER: &str = "Shadow (This creature can block or be blocked by only creatures with shadow.)\nIf a card would be put into an opponent's graveyard from anywhere, instead exile it with a void counter on it.\n{T}, Sacrifice this creature: Choose an exiled card an opponent owns with a void counter on it. You may play it this turn without paying its mana cost.";
 const DARKSTEEL_COLOSSUS: &str = "Trample\nIndestructible\nIf Darksteel Colossus would be put into a graveyard from anywhere, reveal Darksteel Colossus and shuffle it into its owner's library instead.";
 
 fn zombie_count(runner: &GameRunner) -> usize {
@@ -280,23 +282,37 @@ fn scoped_unless_sacrifice_resumes_after_a_graveyard_replacement_choice() {
     expect_unless(&runner, P1);
     pay_sacrifice(&mut runner, colossus);
 
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice { .. }
-    ));
-    runner
-        .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("replacement choice resumes the aggregate payment");
+    // CR 101.4: P1's chosen Colossus is not sacrificed while P2 chooses.
     expect_unless(&runner, P2);
+    assert_eq!(runner.state().objects[&colossus].zone, Zone::Battlefield);
     runner
         .act(GameAction::PayUnlessCost { pay: false })
         .unwrap();
+
+    // CR 616.1: the settled sacrifice asks P1 to order the replacements, and
+    // the token for P2's decline waits for that answer.
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P1, .. }
+    ));
+    assert_eq!(zombie_count(&runner), 0);
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("replacement choice resumes the aggregate settlement");
+    assert_ne!(
+        runner.state().objects.get(&colossus).map(|o| o.zone),
+        Some(Zone::Battlefield)
+    );
     assert_eq!(zombie_count(&runner), 1);
     expect_aggregate_payment_finished(&runner);
 }
 
+/// CR 608.2m + CR 800.4a: the poll has settled and the announced sacrifice is
+/// paused on P1's CR 616.1 ordering when the source's controller leaves. The
+/// resolution continues fully: P1's question stands and their sacrifice
+/// completes, but no token is created for the departed controller.
 #[test]
-fn scoped_unless_sacrifice_abandons_a_payers_replacement_choice_when_controller_leaves() {
+fn scoped_unless_sacrifice_finishes_a_payers_replacement_choice_after_controller_leaves() {
     let mut scenario = GameScenario::new_n_player(3, 42);
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
@@ -312,6 +328,10 @@ fn scoped_unless_sacrifice_abandons_a_payers_replacement_choice_when_controller_
     runner.cast(spell).resolve();
     expect_unless(&runner, P1);
     pay_sacrifice(&mut runner, colossus);
+    expect_unless(&runner, P2);
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .unwrap();
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { player: P1, .. }
@@ -323,16 +343,118 @@ fn scoped_unless_sacrifice_abandons_a_payers_replacement_choice_when_controller_
         engine::types::events::LossReason::Conceded,
         &mut Vec::new(),
     );
-
     assert!(runner.state().pending_player_scope_unless_payment.is_none());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P1, .. }
+    ));
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P1 still orders the replacements for their sacrifice");
+
+    assert_ne!(
+        runner.state().objects.get(&colossus).map(|o| o.zone),
+        Some(Zone::Battlefield),
+        "the announced sacrifice still happens"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .battlefield
+            .iter()
+            .filter(|id| runner.state().objects[id].name == "Zombie")
+            .count(),
+        0,
+        "no token is created for the departed controller"
+    );
     assert!(runner.state().pending_replacement.is_none());
-    assert!(!runner.state().replacement_may_cost_paused);
+    assert!(runner
+        .state()
+        .pending_player_scope_sacrifice_choice
+        .is_none());
     assert!(
         !runner.state().has_active_post_replacement_drain(),
-        "the abandoned aggregate must not retain a replacement continuation"
+        "the settled batch must not retain a replacement continuation"
     );
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
+}
+
+/// CR 101.4 + Acererak the Archlich's ruling: "once all opponents have chosen,
+/// creatures are sacrificed and tokens are created simultaneously". P1's
+/// chosen creature stays on the battlefield while P2 decides.
+#[test]
+fn scoped_unless_sacrifice_waits_for_every_opponent_before_sacrificing() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let p1_creature = scenario.add_creature(P1, "P1 Sacrifice", 1, 1).id();
+    let p2_creature = scenario.add_creature(P2, "P2 Sacrifice", 1, 1).id();
+    let mut runner = scenario.build();
+    give_p0_sorcery_window(&mut runner);
+    runner.cast(spell).resolve();
+
+    expect_unless(&runner, P1);
+    pay_sacrifice(&mut runner, p1_creature);
+    expect_unless(&runner, P2);
+    assert_eq!(
+        runner.state().objects[&p1_creature].zone,
+        Zone::Battlefield,
+        "CR 101.4: nothing is sacrificed before the last opponent has chosen"
+    );
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("P2 declines");
+
+    assert_eq!(runner.state().objects[&p1_creature].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&p2_creature].zone, Zone::Battlefield);
+    assert_eq!(zombie_count(&runner), 1, "P2's decline owes one Zombie");
+    expect_aggregate_payment_finished(&runner);
+    assert!(runner.state().stack.is_empty());
+}
+
+/// CR 101.4 + CR 614.1: the paying opponents' creatures are sacrificed as one
+/// batch, so P1's Dauthi Voidwalker is still on the battlefield when P2's
+/// creature would go to P2's graveyard, and exiles it with a void counter.
+#[test]
+fn scoped_unless_sacrifice_settles_the_sacrifices_simultaneously() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let walker = scenario
+        .add_creature_from_oracle(P1, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER)
+        .id();
+    let p2_creature = scenario.add_creature(P2, "P2 Sacrifice", 1, 1).id();
+    let mut runner = scenario.build();
+    give_p0_sorcery_window(&mut runner);
+    runner.cast(spell).resolve();
+
+    expect_unless(&runner, P1);
+    pay_sacrifice(&mut runner, walker);
+    expect_unless(&runner, P2);
+    pay_sacrifice(&mut runner, p2_creature);
+
+    assert_eq!(runner.state().objects[&walker].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&p2_creature].zone,
+        Zone::Exile,
+        "Dauthi Voidwalker still applies to the co-sacrificed creature"
+    );
+    assert_eq!(
+        runner.state().objects[&p2_creature]
+            .counters
+            .get(&engine::types::counter::CounterType::Generic(
+                "void".to_string()
+            ))
+            .copied(),
+        Some(1)
+    );
+    assert_eq!(zombie_count(&runner), 0, "both opponents paid");
+    expect_aggregate_payment_finished(&runner);
 }

@@ -158,6 +158,7 @@ fn retained_by_cost_owners(state: &GameState) -> Vec<GameEvent> {
             | PendingCostMoveResume::LoyaltyActivation { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+            | PendingCostMoveResume::PlayerScopeUnlessSettlement(..)
             | PendingCostMoveResume::TurnFaceUpCostMove { .. },
         )
         | None => {}
@@ -586,6 +587,7 @@ fn take_completed_cast_prefix(state: &mut GameState, owner: PendingCastOwner) ->
             | PendingCostMoveResume::LoyaltyActivation { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             | PendingCostMoveResume::RandomDiscardUnlessPayment(_)
+            | PendingCostMoveResume::PlayerScopeUnlessSettlement(_)
             | PendingCostMoveResume::TurnFaceUpCostMove { .. },
         )
         | None => Vec::new(),

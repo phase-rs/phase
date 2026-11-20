@@ -1384,7 +1384,8 @@
       "title": "{{effect}} Unless You Pay",
       "titleChooseOne": "{{effect}} Unless You Pay One",
       "dontPay": "Don’t Pay",
-      "takeEffect": "Take the Effect"
+      "takeEffect": "Take the Effect",
+      "priorChoice": "Player {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "Splice onto Arcane?",
