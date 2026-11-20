@@ -38,7 +38,8 @@ const TYPHOID_RATS: &str =
 const DARKSTEEL_MYR: &str = "Indestructible (Damage and effects that say \"destroy\" don't \
 destroy this creature. If its toughness is 0 or less, it still dies.)";
 const DOUBLING_SEASON: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.";
-const WINDING_CONSTRICTOR: &str = "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.\nIf you would get one or more counters, you get that many plus one of each of those kinds of counters instead.";
+const VIZIER_OF_REMEDIES: &str =
+    "If one or more -1/-1 counters would be put on a creature you control, that many -1/-1 counters minus one are put on it instead.";
 
 fn add_blightsteel(scenario: &mut GameScenario, deathtouch: bool) -> ObjectId {
     let mut b = scenario.add_creature(P0, "Blightsteel Colossus", 11, 11);
@@ -202,19 +203,20 @@ fn wither_redirect_places_only_lethal_counters() {
 struct OrderingBoard {
     bears: ObjectId,
     doubling: ObjectId,
-    constrictor: ObjectId,
+    vizier: ObjectId,
 }
 
 /// Blightsteel Ram Throughs Grizzly Bears while P1 controls Doubling Season and
-/// Winding Constrictor, so the -1/-1 placement pauses on their ordering.
+/// Vizier of Remedies, so the -1/-1 placement pauses on their ordering.
+/// Neither modifies counters a player gets, so the excess is 9 poison.
 fn pause_on_counter_ordering() -> (GameRunner, CastOutcome, OrderingBoard) {
     let mut scenario = new_scenario();
     let source = add_blightsteel(&mut scenario, false);
     let doubling = scenario
         .add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON)
         .id();
-    let constrictor = scenario
-        .add_creature_from_oracle(P1, "Winding Constrictor", 2, 3, WINDING_CONSTRICTOR)
+    let vizier = scenario
+        .add_creature_from_oracle(P1, "Vizier of Remedies", 2, 1, VIZIER_OF_REMEDIES)
         .id();
     let bears = add_bears(&mut scenario, 0);
     let (runner, outcome) = cast_ram_through(scenario, source, bears);
@@ -224,13 +226,13 @@ fn pause_on_counter_ordering() -> (GameRunner, CastOutcome, OrderingBoard) {
         OrderingBoard {
             bears,
             doubling,
-            constrictor,
+            vizier,
         },
     )
 }
 
 /// R4 — CR 616.1: counter replacements modify only the lethal portion. With
-/// Doubling Season applied before Winding Constrictor, 2 counters become 5.
+/// Doubling Season applied before Vizier of Remedies, 2 counters become 3.
 #[test]
 fn infect_redirect_pause_resume_modifies_only_lethal_counters() {
     let (
@@ -239,7 +241,7 @@ fn infect_redirect_pause_resume_modifies_only_lethal_counters() {
         OrderingBoard {
             bears,
             doubling,
-            constrictor,
+            vizier,
         },
     ) = pause_on_counter_ordering();
 
@@ -258,7 +260,7 @@ fn infect_redirect_pause_resume_modifies_only_lethal_counters() {
     assert_eq!(player, P1);
     assert_eq!(kind, ReplacementChoiceKind::Order);
     assert_eq!(candidates.len(), 2, "{candidates:?}");
-    assert!(candidates.iter().any(|c| c.source_id == constrictor));
+    assert!(candidates.iter().any(|c| c.source_id == vizier));
     let index = candidates
         .iter()
         .position(|c| c.source_id == doubling)
@@ -272,8 +274,9 @@ fn infect_redirect_pause_resume_modifies_only_lethal_counters() {
     );
     runner.advance_until_stack_empty();
 
-    assert_eq!(minus_counter_adds(&events, bears), vec![5]);
+    assert_eq!(minus_counter_adds(&events, bears), vec![3]);
     assert_eq!(dealt_to(&events, TargetRef::Player(P1)), vec![(9, 0)]);
+    assert_eq!(poison(runner.state(), P1), 9);
     assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
     assert_settled(runner.state());
 }
@@ -440,7 +443,7 @@ fn paused_counter_stash_without_excess_is_refused_at_restore() {
         resumed.advance_until_stack_empty();
         assert_eq!(
             minus_counter_adds(&events, bears),
-            vec![5],
+            vec![3],
             "trusted {trusted}"
         );
         assert_eq!(poison(resumed.state(), P1), 9, "trusted {trusted}");
