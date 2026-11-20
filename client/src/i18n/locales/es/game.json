@@ -1555,7 +1555,6 @@
     },
     "search": {
       "title": "Buscar en la biblioteca",
-      "instructionWithTitle": "{{title}}: {{instruction}}",
       "subtitleExact_one": "Elige {{count}} carta",
       "subtitleExact_other": "Elige {{count}} cartas",
       "subtitleUpTo_one": "Elige hasta {{count}} carta",
@@ -2026,7 +2025,8 @@
     "scrollLeft": "Desplazar a la izquierda",
     "scrollRight": "Desplazar a la derecha",
     "confirm": "Confirmar",
-    "cancel": "Cancelar"
+    "cancel": "Cancelar",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Aventura",
@@ -2605,6 +2605,9 @@
     "partitionSubtitle": "Separa tus criaturas en dos montones. {{chooser}} elegirá uno.",
     "partitionSubtitleRemaining_one": "Separa tus criaturas en dos montones. {{chooser}} elegirá uno. ({{count}} jugador más después de ti)",
     "partitionSubtitleRemaining_other": "Separa tus criaturas en dos montones. {{chooser}} elegirá uno. ({{count}} jugadores más después de ti)",
+    "partitionInstruction": "{{chooser}} elige uno",
+    "partitionInstructionRemaining_one": "{{chooser}} elige uno ({{count}} jugador más después de ti)",
+    "partitionInstructionRemaining_other": "{{chooser}} elige uno ({{count}} jugadores más después de ti)",
     "pileALabel": "Montón A:",
     "pileBLabel": "Montón B:",
     "pileAria": "{{name}} — montón {{pile}}",

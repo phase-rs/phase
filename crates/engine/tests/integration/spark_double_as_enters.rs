@@ -2778,8 +2778,8 @@ mod feldon_tokens {
         // Reach guard: each copy stopped on its own Tribute, answered by the
         // chosen opponent; the first answer went on to the second copy's choice.
         if pay {
-            // CR 702.104a: each entering copy offers its own Tribute; each
-            // paid counter also stops on its replacement order.
+            // CR 702.104a + CR 616.1f: each entering copy independently
+            // offers Tribute, then orders its own paid counter's replacements.
             assert_eq!(
                 (tributes, counter_orders),
                 (2, 2),
@@ -2832,8 +2832,9 @@ mod feldon_tokens {
     /// The same event when the opponent pays the Tribute and its counter stops
     /// on its Hardened Scales / Doubling Season order: the order's answer puts
     /// the copy onto the battlefield and hands its entry to the event, so Soul
-    /// Warden sees both copies. CR 702.104a: each copy offers its own Tribute
-    /// before entering, even after the first copy's counter order suspends.
+    /// Warden sees both copies. Each copy offers its own Tribute before entering
+    /// and receives only its own counters, even after the first copy suspends.
+    /// CR 702.104a + CR 616.1f.
     #[test]
     fn a_paid_tribute_whose_counter_is_ordered_keeps_its_entrant_in_the_event() {
         let (copies, gained) = fanatic_copies_and_warden_life(2, P1, true);
@@ -2842,7 +2843,7 @@ mod feldon_tokens {
         assert_eq!(
             copies,
             vec![(Some(7), false); 2],
-            "each paid Tribute gets four counters and no tribute-unpaid bonus"
+            "each 3/3 gets four counters from Scales-before-Season and no unpaid Tribute bonus"
         );
     }
 

@@ -1555,7 +1555,6 @@
     },
     "search": {
       "title": "Chercher dans la bibliothèque",
-      "instructionWithTitle": "{{title}} : {{instruction}}",
       "subtitleExact_one": "Choisissez {{count}} carte",
       "subtitleExact_other": "Choisissez {{count}} cartes",
       "subtitleUpTo_one": "Choisissez jusqu'à {{count}} carte",
@@ -2026,7 +2025,8 @@
     "scrollLeft": "Défiler vers la gauche",
     "scrollRight": "Défiler vers la droite",
     "confirm": "Confirmer",
-    "cancel": "Annuler"
+    "cancel": "Annuler",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Aventure",
@@ -2605,6 +2605,9 @@
     "partitionSubtitle": "Séparez vos créatures en deux tas. {{chooser}} en choisira un.",
     "partitionSubtitleRemaining_one": "Séparez vos créatures en deux tas. {{chooser}} en choisira un. ({{count}} joueur de plus après vous)",
     "partitionSubtitleRemaining_other": "Séparez vos créatures en deux tas. {{chooser}} en choisira un. ({{count}} joueurs de plus après vous)",
+    "partitionInstruction": "{{chooser}} en choisit un",
+    "partitionInstructionRemaining_one": "{{chooser}} en choisit un ({{count}} joueur de plus après vous)",
+    "partitionInstructionRemaining_other": "{{chooser}} en choisit un ({{count}} joueurs de plus après vous)",
     "pileALabel": "Tas A :",
     "pileBLabel": "Tas B :",
     "pileAria": "{{name}} — tas {{pile}}",

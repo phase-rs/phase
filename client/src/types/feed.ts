@@ -32,6 +32,8 @@ export interface FeedSource {
   format?: string;
   type: "bundled" | "remote";
   url: string;
+  /** Data provider credited with a link wherever the feed is listed. */
+  attribution?: { name: string; url: string };
 }
 
 export interface FeedSubscription {

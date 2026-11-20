@@ -9139,6 +9139,7 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             crate::types::game_state::LiminalEntry {
+                copy_settlement: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(
                         crate::game::game_object::GameObject::new(
@@ -9172,6 +9173,7 @@ mod tests {
                 source_id: entry_ref,
                 player: PlayerId(0),
                 event: crate::types::proposed_event::ProposedEvent::TokenEntry {
+                    redirected_to: None,
                     entry_ref,
                     enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
                     enter_with_counters: Vec::new(),

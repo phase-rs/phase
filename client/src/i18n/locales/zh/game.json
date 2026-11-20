@@ -892,7 +892,6 @@
       "title": "占卜"
     },
     "search": {
-      "instructionWithTitle": "{{title}}：{{instruction}}",
       "subtitleDistinctExact_one": "选择{{count}}张特性各不相同的牌",
       "subtitleDistinctExact_other": "选择{{count}}张特性各不相同的牌",
       "subtitleDistinctUpTo_one": "至多选择{{count}}张特性各不相同的牌",
@@ -1099,7 +1098,8 @@
     "confirm": "确认",
     "eyebrow": "对局选择",
     "scrollLeft": "向左滚动",
-    "scrollRight": "向右滚动"
+    "scrollRight": "向右滚动",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "chooseOneOfBranch": {
     "eyebrow": "选择",
@@ -2596,6 +2596,9 @@
     "chooseTitle": "选择一个牌堆",
     "chooserName": "牌手 {{number}}",
     "empty": "（空）",
+    "partitionInstruction": "{{chooser}}选择其中一个",
+    "partitionInstructionRemaining_one": "{{chooser}}选择其中一个（你之后还有{{count}}名牌手）",
+    "partitionInstructionRemaining_other": "{{chooser}}选择其中一个（你之后还有{{count}}名牌手）",
     "partitionSubtitle": "将你的生物分成两个牌堆。{{chooser}}将选择其中一个。",
     "partitionSubtitleRemaining_one": "将你的生物分成两个牌堆。{{chooser}}将选择其中一个。（你之后还有{{count}}名牌手）",
     "partitionSubtitleRemaining_other": "将你的生物分成两个牌堆。{{chooser}}将选择其中一个。（你之后还有{{count}}名牌手）",

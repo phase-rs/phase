@@ -1958,6 +1958,7 @@ fn rewrite_keyword_anaphor_for_cost_paid_parent(
         filter,
         use_lki: false,
         subject_slot: None,
+        subject: ObjectScope::Target,
     }) = &condition
     else {
         return condition;
@@ -2024,6 +2025,7 @@ fn keyword_anaphor_referent_is_unpublished_resolution_pick(
         filter,
         use_lki: false,
         subject_slot: None,
+        subject: ObjectScope::Target,
     }) = condition
     else {
         return false;
@@ -13517,6 +13519,22 @@ fn parse_effect_clause_inner_with_damage_context(
         return parsed_clause(effect);
     }
 
+    // CR 611.2a + CR 614.1a + CR 514.2: floating turn-bound "if a [nontoken]
+    // creature would enter and it wasn't cast, exile it instead" (Mistcaller,
+    // Hallowed Moonlight). Dispatched after `strip_leading_duration` for the same
+    // reason as the Don't Blink lift above: the duration-stripped recursive call
+    // reaches it and the window is re-attached as `AbilityDefinition.duration`.
+    // This front door supports only clauses with a stated duration; durationless
+    // clauses remain unsupported here (CR 611.2a permits resolution-generated
+    // continuous effects without a stated duration) and keep their honest guard gap.
+    if let Some(effect) = super::oracle_replacement::parse_windowed_enter_wasnt_cast_exile_install(
+        &lower,
+        text,
+        ctx.stated_clause_duration.as_ref(),
+    ) {
+        return parsed_clause(effect);
+    }
+
     // CR 614.1a + CR 514.2: floating turn-bound life-floor replacement
     // ("Until end of turn, damage that would reduce your life total to less
     // than 1 reduces it to 1 instead." — Angel's Grace; Angel of Grace's ETB
@@ -21657,9 +21675,10 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
         return Some(parsed_clause(effect));
     }
 
-    // CR 111.11: "create [token description] for each X" → Token with dynamic count.
+    // CR 701.7a: "create [token description] for each X" → Token with dynamic count.
     // Delegates to try_parse_token, which handles token description parsing (name, P/T,
-    // types, colors, keywords). Replace the embedded count with the for-each quantity.
+    // types, colors, keywords). The embedded count multiplies the for-each quantity, as in the
+    // numeric and damage arms.
     //
     // The base may carry a subject ("You create a Treasure token …" — You've Been
     // Caught Stealing). Try the raw base first (preserves subject-bearing forms
@@ -21667,7 +21686,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
     // the correct owner), then fall back to the subject-stripped imperative so a
     // leading "you " no longer strands the for-each quantity.
     //
-    // CR 109.5 + CR 111.11: the stripped fallback is CONTROLLER-only. This arm
+    // CR 109.5 + CR 111.2: the stripped fallback is CONTROLLER-only. This arm
     // early-returns from `try_parse_for_each_effect` and so never runs the
     // subject→owner rebinding used by the numeric/targeted arms, and
     // `try_parse_token` defaults `Effect::Token.owner` to
@@ -21703,7 +21722,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 supertypes,
                 static_abilities,
                 enter_with_counters,
-                count: _,
+                count: base_count,
             } => {
                 // CR 109.4: a "their <zone>" possessive in the for-each clause
                 // binds to the player creating the token. Stamp ScopedPlayer
@@ -21715,8 +21734,8 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 // base (name/P/T/types) from `base_tp` — the text BEFORE "for
                 // each" — so `try_parse_token`'s own "this way" dispatch never
                 // sees the "for each" clause here; `scoped_count` above, from
-                // this function's OWN `quantity`, is the only count this path
-                // ever produces. A bare "card put into a graveyard this way"
+                // this function's OWN `quantity`, is the only for-each count this
+                // path ever produces. A bare "card put into a graveyard this way"
                 // counts only tracked cards delivered to Graveyard (CR 614.6);
                 // this is the normal path for Pinnacle Starcage's one-pile move.
                 // When a preceding Dig puts the rest into Graveyard, re-resolve
@@ -21755,7 +21774,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                     supertypes,
                     static_abilities,
                     enter_with_counters,
-                    count,
+                    count: replace_fixed_quantity(base_count, count),
                 }
             }
             other => other,
@@ -32265,9 +32284,10 @@ fn effect_reads_announced_root_slots(
         || matches!(
             condition,
             Some(AbilityCondition::TargetMatchesFilter {
+                filter: _,
                 use_lki: false,
                 subject_slot: None,
-                ..
+                subject: ObjectScope::Target,
             })
         )
     {
@@ -58759,6 +58779,7 @@ pub mod test_helpers {
             filter: TargetFilter::Typed(TypedFilter::creature()),
             use_lki: true,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }
     }
 
