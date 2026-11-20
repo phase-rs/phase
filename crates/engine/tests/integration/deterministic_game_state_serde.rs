@@ -994,6 +994,15 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             Classification::Canonical(HASH_SET),
         );
     }
+    add_spec(
+        &mut specs,
+        "src/types/proposed_event.rs",
+        "TokenBatch",
+        None,
+        "applied",
+        "HashSet",
+        Classification::Canonical(HASH_SET),
+    );
 
     for owner in NUMERIC_MAP_ROUND_TRIP_OWNERS {
         let spec = specs.get_mut(owner.id).unwrap_or_else(|| {

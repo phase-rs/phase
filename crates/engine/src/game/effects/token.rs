@@ -1583,7 +1583,7 @@ fn deliver_token_event_positions(
         } = cursor.remaining.remove(0);
         match batch.copy.take() {
             None => {
-                let event = batch.into_event(HashSet::new());
+                let event = batch.into_event();
                 let completed = apply_create_token_batch(
                     state,
                     event,
@@ -8845,6 +8845,7 @@ mod tests {
                         copy: Some(Box::new(copy)),
                         enter_tapped: EtbTapState::from_seeded_tapped(false),
                         count: 1,
+                        applied: HashSet::new(),
                     },
                 }],
                 delivered: Vec::new(),
@@ -8951,6 +8952,7 @@ mod tests {
                 copy: None,
                 enter_tapped: EtbTapState::Unspecified,
                 count: 1,
+                applied: HashSet::new(),
             }],
             applied: HashSet::new(),
         };

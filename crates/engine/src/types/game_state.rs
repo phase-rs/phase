@@ -43387,12 +43387,14 @@ pub(crate) fn same_position(a: &GameState, b: &GameState) -> bool {
 
 /// CR 615.3 + CR 614.3: the LIVE floating shields in `state`, in registry order — the
 /// sequence [`pending_shields_loop_eq`] compares. A used-up shield can no longer apply at a
-/// priority beat, so it is not part of the position; production agrees, with one bounded
-/// exception that cannot span a sample: `find_applicable_replacements` skips a spent floating
-/// entry unless the SAME simultaneous combat batch is still applying it
-/// (`if repl_def.is_consumed && !consumed_replacement_applies_in_combat_batch(state, event, rid) { continue; }`
-/// in `game::replacement`), and that re-admission ledger exists only inside
-/// `replace_combat_damage_batch` (`DamageBatchLedger::applications`), which grants no priority,
+/// priority beat, so it is not part of the position; production agrees, with two bounded
+/// exceptions that cannot span a sample: `find_applicable_replacements` skips a spent floating
+/// entry unless the SAME simultaneous event is still applying it
+/// (`if repl_def.is_consumed && !consumed_one_shot_still_applies(state, event, rid, spent_by_event) { continue; }`
+/// in `game::replacement`): a combat batch's re-admission ledger exists only inside
+/// `replace_combat_damage_batch` (`DamageBatchLedger::applications`), and a compound token
+/// event's spent set is read from its own batch views, which exist only while that event is in
+/// the pipeline or parked on a replacement prompt; neither grants priority,
 /// so no loop sample ever observes a spent shield able to apply again. This is the same
 /// live-only reading `analysis::resource::replacement_def_is_live` gives the loop firewall
 /// (`last_known_records_grow_unread`), applied to both comparators here because they now share
@@ -46338,6 +46340,7 @@ mod tests {
                         copy: None,
                         enter_tapped: EtbTapState::Unspecified,
                         count: 2,
+                        applied: HashSet::new(),
                     },
                 }],
                 delivered: vec![PositionedTokenIds {

@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "GameState gains the PendingSimultaneousTokenClause pause record for multi-seat simultaneous token clauses"
+  "reason": "GameState gains the PendingSimultaneousTokenClause pause record for multi-seat simultaneous token clauses; each appended TokenBatch of a parked CreateToken carries its own applied replacement set"
 }

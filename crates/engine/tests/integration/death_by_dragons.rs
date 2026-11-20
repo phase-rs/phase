@@ -14,7 +14,7 @@ use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::ManaColor;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
@@ -1215,17 +1215,19 @@ fn death_by_dragons_doubling_first_ordered_by_affected_owner() {
     halving_doubling_ordered_by_affected_owner(false);
 }
 
-/// CR 616.1 + CR 101.4: P0's Halving Season applies to both P1's and P2's
-/// tokens; P1 and P2 each control a Doubling Season. Each batch owner orders
-/// its own candidates in APNAP order, so P2's ordering is not taken by P1.
-///
-/// Halving-first documents E1 (deferred follow-up): a shared candidate gets
-/// one opportunity over the one compound event (CR 614.5) and applies to
-/// every batch it reaches, so P1's choice of Halving Season also halves P2's
-/// batch to zero before P2 is asked. A per-player reading of CR 616.1 would
-/// let P2 order its own event; the follow-up that implements it flips this
-/// branch's assertions deliberately.
-fn shared_halving_orders_each_owner(p1_halving_first: bool) {
+/// Which of Halving Season and the owner's Doubling Season an owner applies
+/// first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum First {
+    Halving,
+    Doubling,
+}
+
+/// CR 616.1 + CR 614.5 + CR 101.4: each batch owner orders the shared creation
+/// replacements for their own tokens, in APNAP order (Halving Season ruling:
+/// one at a time, rounding down). P0's Halving Season applies to both P1's and
+/// P2's tokens; P1 and P2 each control a Doubling Season.
+fn shared_halving_orders_each_owner(p1_first: First, p2_first: First) {
     let mut scenario = game();
     let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let halving = scenario
@@ -1247,67 +1249,415 @@ fn shared_halving_orders_each_owner(p1_halving_first: bool) {
     resolve_reflection(&mut runner, mystic, bears);
 
     let _ = runner.cast(dragons).target_player(P0).resolve();
-    if p1_halving_first {
-        answer_ordering_putting_first(&mut runner, P1, &[halving, doubling_p1], halving);
-        assert_clause_completed(&runner, dragons);
-        let state = runner.state();
-        for player in [P0, P1, P2] {
-            assert!(
-                controlled_tokens(state, player).is_empty(),
-                "E1: halving both batches to zero leaves {player:?} no tokens"
-            );
+    let source_of = |first: First, doubling: ObjectId| match first {
+        First::Halving => halving,
+        First::Doubling => doubling,
+    };
+    answer_ordering_putting_first(
+        &mut runner,
+        P1,
+        &[halving, doubling_p1],
+        source_of(p1_first, doubling_p1),
+    );
+    answer_ordering_putting_first(
+        &mut runner,
+        P2,
+        &[halving, doubling_p2],
+        source_of(p2_first, doubling_p2),
+    );
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    assert!(
+        controlled_tokens(state, P0).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_eq!(
+        state.objects[&bears].zone,
+        Zone::Battlefield,
+        "reach guard: the copy target is still on the battlefield"
+    );
+    // Halving first: 1 -> 0 (halved, rounded down) -> 0 (doubled).
+    // Doubling first: 1 -> 2 (doubled) -> 1 (halved).
+    let mut created = Vec::new();
+    for (player, first) in [(P1, p1_first), (P2, p2_first)] {
+        let tokens = controlled_tokens(state, player);
+        match first {
+            First::Halving => assert!(
+                tokens.is_empty(),
+                "{player:?} applied Halving Season first and must create no tokens"
+            ),
+            First::Doubling => {
+                assert_eq!(tokens.len(), 1, "{player:?} must create one token");
+                assert_bears(state, tokens[0], player);
+                created.extend(tokens);
+            }
         }
-        assert_eq!(
-            state.objects[&bears].zone,
-            Zone::Battlefield,
-            "reach guard: the copy target is still on the battlefield"
-        );
-        // CR 701.7a: nothing entered, so the one-shot waits for a real entry.
-        assert!(
-            !reflection_consumed(state),
-            "Reflection must not be used when no token enters"
-        );
-        assert!(
-            last_created_sorted(state).is_empty(),
-            "no token was created"
-        );
-    } else {
-        answer_ordering_putting_first(&mut runner, P1, &[halving, doubling_p1], doubling_p1);
-        answer_ordering_putting_first(&mut runner, P2, &[halving, doubling_p2], doubling_p2);
-        assert_clause_completed(&runner, dragons);
-        let state = runner.state();
-        assert!(
-            controlled_tokens(state, P0).is_empty(),
-            "the targeted player creates no tokens"
-        );
-        // Each batch: 1 -> 2 (doubled) -> 1 (halved).
-        let p1_tokens = controlled_tokens(state, P1);
-        assert_eq!(p1_tokens.len(), 1, "P1 must create one token");
-        assert_bears(state, p1_tokens[0], P1);
-        let p2_tokens = controlled_tokens(state, P2);
-        assert_eq!(p2_tokens.len(), 1, "P2 must create one token");
-        assert_bears(state, p2_tokens[0], P2);
-        assert_no_dragons(state);
-        assert!(
-            reflection_consumed(state),
-            "Reflection must be used by the shared entry"
-        );
-        assert_eq!(
-            last_created_sorted(state),
-            sorted(vec![p1_tokens[0], p2_tokens[0]]),
-            "the created referent must be both Bears"
-        );
     }
+    assert_no_dragons(state);
+    // CR 701.7a: Reflection is used only by a token that actually enters.
+    assert_eq!(
+        reflection_consumed(state),
+        !created.is_empty(),
+        "Reflection must be used exactly when a token enters"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(created),
+        "the created referent must be exactly the Bears created"
+    );
 }
 
 #[test]
-fn death_by_dragons_shared_halving_first_zeroes_every_batch() {
-    shared_halving_orders_each_owner(true);
+fn death_by_dragons_shared_halving_first_leaves_the_next_owner_its_order() {
+    shared_halving_orders_each_owner(First::Halving, First::Doubling);
+}
+
+#[test]
+fn death_by_dragons_both_owners_halving_first_create_nothing() {
+    shared_halving_orders_each_owner(First::Halving, First::Halving);
 }
 
 #[test]
 fn death_by_dragons_shared_halving_asks_each_owner_in_apnap_order() {
-    shared_halving_orders_each_owner(false);
+    shared_halving_orders_each_owner(First::Doubling, First::Doubling);
+}
+
+// Verbatim Oracle text (MTGJSON).
+const PRIMAL_VIGOR: &str = "If one or more tokens would be created, twice that many of those tokens are created instead.\nIf one or more +1/+1 counters would be put on a creature, twice that many +1/+1 counters are put on that creature instead.";
+
+// Verbatim Oracle text (MTGJSON).
+const CRAFTY_CUTPURSE: &str = "Flash\nWhen this creature enters, each token that would be created under an opponent's control this turn is created under your control instead.";
+
+/// The floating one-shots (`consume_on_apply`) on the board, as their
+/// `is_consumed` flags, for boards with more than one floating definition.
+fn one_shots_consumed(state: &GameState) -> Vec<bool> {
+    state
+        .pending_damage_replacements
+        .iter()
+        .filter(|def| def.consume_on_apply)
+        .map(|def| def.is_consumed)
+        .collect()
+}
+
+/// Assert the live prompt is a CR 616.1 ordering choice asked of `actor` over
+/// exactly the two floating Mystic Reflections (floating indices 0 and 1), and
+/// answer it so the one at floating index `first` applies first. Floating
+/// definitions all display the `ObjectId(0)` sentinel as their source, so the
+/// offered candidates are read from the parked replacement record.
+fn answer_floating_ordering_putting_first(runner: &mut GameRunner, actor: PlayerId, first: usize) {
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidates: summaries,
+        kind,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected a ReplacementChoice prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(kind, ReplacementChoiceKind::Order);
+    assert_eq!(
+        player, actor,
+        "the ordering choice belongs to {actor:?}, got {player:?}"
+    );
+    let candidates = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("an ordering prompt parks its replacement record")
+        .candidates
+        .clone();
+    assert_eq!(candidates.len(), summaries.len());
+    assert!(
+        candidates.iter().all(|rid| rid.source == ObjectId(0)),
+        "{actor:?} must be offered only floating candidates: {candidates:?}"
+    );
+    let mut indices: Vec<usize> = candidates.iter().map(|rid| rid.index).collect();
+    indices.sort_unstable();
+    assert_eq!(
+        indices,
+        vec![0, 1],
+        "{actor:?} must be offered exactly both Reflections"
+    );
+    let index = candidates
+        .iter()
+        .position(|rid| rid.index == first)
+        .expect("the chosen Reflection is offered");
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("answer the ordering choice");
+}
+
+fn assert_hill_giant(state: &GameState, id: ObjectId, controller: PlayerId) {
+    let token = &state.objects[&id];
+    assert_eq!(token.controller, controller);
+    assert_eq!(
+        token.name, "Hill Giant",
+        "{controller:?}'s token must be a Hill Giant"
+    );
+    assert_eq!((token.power, token.toughness), (Some(3), Some(3)));
+}
+
+/// CR 616.1 + CR 614.5 + CR 101.4: P0's Halving Season and Primal Vigor both
+/// reach P1's and P2's tokens (Halving Season ruling: "won't change the number
+/// of tokens you create"; Primal Vigor ruling: "It doesn't matter who controls
+/// the tokens"). Each owner orders the same pair for their own tokens: P1 puts
+/// Halving Season first (1 -> 0 -> 0), and P2 is still asked and puts Primal
+/// Vigor first (1 -> 2 -> 1).
+#[test]
+fn death_by_dragons_each_owner_orders_shared_replacements() {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let halving = scenario
+        .add_enchantment_from_oracle(P0, "Halving Season", HALVING_SEASON)
+        .id();
+    let vigor = scenario
+        .add_enchantment_from_oracle(P0, "Primal Vigor", PRIMAL_VIGOR)
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    resolve_reflection(&mut runner, mystic, bears);
+
+    let _ = runner.cast(dragons).target_player(P0).resolve();
+    answer_ordering_putting_first(&mut runner, P1, &[halving, vigor], halving);
+    answer_ordering_putting_first(&mut runner, P2, &[halving, vigor], vigor);
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    assert!(
+        controlled_tokens(state, P0).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert!(
+        controlled_tokens(state, P1).is_empty(),
+        "P1 put Halving Season first and must create no tokens"
+    );
+    let p2_tokens = controlled_tokens(state, P2);
+    assert_eq!(p2_tokens.len(), 1, "P2 must create one token");
+    assert_bears(state, p2_tokens[0], P2);
+    assert_no_dragons(state);
+    assert!(
+        reflection_consumed(state),
+        "Reflection must be used by P2's entering token"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        vec![p2_tokens[0]],
+        "the created referent must be exactly P2's Bear"
+    );
+}
+
+/// CR 616.1b + CR 111.2 + CR 614.5: P0 and P1 each resolved Crafty Cutpurse.
+/// Crafty Cutpurse ruling: the token's would-be controller chooses one of the
+/// applicable Crafty Cutpurse effects, then the new would-be controller
+/// repeats the process among the remaining ones; "Each effect can be applied
+/// to the token only once this way." So each Dragon goes to the other player
+/// and comes back: every batch keeps its own applied set through the owner
+/// change, and its current owner chooses. No prompt is raised (each owner has
+/// one applicable effect at a time).
+#[test]
+fn death_by_dragons_two_cutpurses_return_each_dragon_to_its_creator() {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let cutpurse_p0 = scenario
+        .add_creature_to_hand_from_oracle(P0, "Crafty Cutpurse", 2, 2, CRAFTY_CUTPURSE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let cutpurse_p1 = scenario
+        .add_creature_to_hand_from_oracle(P1, "Crafty Cutpurse", 2, 2, CRAFTY_CUTPURSE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(cutpurse_p0).resolve();
+    assert_quiet_completion(&runner, "P0's Crafty Cutpurse");
+    // P0 passes so P1 holds priority and flashes in its own Cutpurse.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority");
+    runner.cast(cutpurse_p1).resolve();
+    assert_quiet_completion(&runner, "P1's Crafty Cutpurse");
+    resolve_reflection(&mut runner, mystic, bears);
+
+    // Setup reach guard: one unconsumed redirect per controller.
+    for player in [P0, P1] {
+        let redirects: Vec<bool> = runner
+            .state()
+            .pending_damage_replacements
+            .iter()
+            .filter(|def| {
+                def.token_owner_redirect.is_some() && def.source_controller == Some(player)
+            })
+            .map(|def| def.is_consumed)
+            .collect();
+        assert_eq!(
+            redirects,
+            vec![false],
+            "reach guard: {player:?}'s Cutpurse redirect is installed and unused"
+        );
+    }
+    assert_eq!(
+        runner.state().waiting_for.acting_player(),
+        Some(P0),
+        "reach guard: P0 holds priority to cast Death by Dragons"
+    );
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    let p0_tokens = controlled_tokens(state, P0);
+    assert_eq!(p0_tokens.len(), 1, "P0's Dragon must come back to P0");
+    assert_bears(state, p0_tokens[0], P0);
+    let p1_tokens = controlled_tokens(state, P1);
+    assert_eq!(p1_tokens.len(), 1, "P1's Dragon must come back to P1");
+    assert_bears(state, p1_tokens[0], P1);
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_no_dragons(state);
+    assert_eq!(
+        one_shots_consumed(state),
+        vec![true],
+        "Reflection must be used by the shared entry"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(vec![p0_tokens[0], p1_tokens[0]]),
+        "the created referent must be both Bears"
+    );
+}
+
+/// Pass budget: with seven players, Primal Vigor and six Doubling Seasons (one
+/// per creating seat) and Mystic Reflection, each owner applies every
+/// replacement that reaches their own tokens. Each seat: 1 x 2 (Primal Vigor)
+/// x 2 (its Doubling Season) = 4 tokens, each entering as a copy of Grizzly
+/// Bears (CR 608.2f: "they enter as copies"). No prompt: Primal Vigor and
+/// Doubling Season commute, and one Reflection is a mandatory singleton.
+#[test]
+fn death_by_dragons_six_owners_each_get_every_replacement() {
+    let mut scenario = GameScenario::new_n_player(7, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    scenario.add_enchantment_from_oracle(P0, "Primal Vigor", PRIMAL_VIGOR);
+    let seats: Vec<PlayerId> = (1..=6).map(PlayerId).collect();
+    for seat in &seats {
+        scenario.add_enchantment_from_oracle(*seat, "Doubling Season", DOUBLING_SEASON);
+    }
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    resolve_reflection(&mut runner, mystic, bears);
+
+    let _ = runner.cast(dragons).target_player(P0).resolve();
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    assert!(
+        controlled_tokens(state, P0).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    let mut created = Vec::new();
+    for seat in &seats {
+        let tokens = controlled_tokens(state, *seat);
+        assert_eq!(tokens.len(), 4, "{seat:?} must create four tokens");
+        for id in &tokens {
+            assert_bears(state, *id, *seat);
+        }
+        created.extend(tokens);
+    }
+    assert_no_dragons(state);
+    assert!(
+        reflection_consumed(state),
+        "Reflection must be used by the shared entry"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(created),
+        "the created referent must be all 24 Bears"
+    );
+}
+
+/// CR 616.1c + CR 616.1f + CR 614.5: two Mystic Reflections (A on Grizzly
+/// Bears, B on Hill Giant). Mystic Reflection ruling: the controller of each
+/// entering permanent chooses the order of the copy effects, and "The copy
+/// effect they apply last will determine which creature the entering
+/// permanent copies." P0 puts A first, so P0's token copies Hill Giant; P1 is
+/// still asked and puts B first, so P1's token copies Grizzly Bears. Each
+/// one-shot is spent by the event (CR 608.2f), not by P0's application.
+#[test]
+fn death_by_dragons_each_owner_orders_two_reflections() {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let mystic_a = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let mystic_b = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    // Each Reflection installs one floating definition in cast order, so A is
+    // floating index 0 and B is floating index 1.
+    resolve_reflection(&mut runner, mystic_a, bears);
+    assert_eq!(runner.state().pending_damage_replacements.len(), 1);
+    resolve_reflection(&mut runner, mystic_b, giant);
+    assert_eq!(runner.state().pending_damage_replacements.len(), 2);
+    let (reflection_a, reflection_b) = (0, 1);
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    answer_floating_ordering_putting_first(&mut runner, P0, reflection_a);
+    answer_floating_ordering_putting_first(&mut runner, P1, reflection_b);
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    let p0_tokens = controlled_tokens(state, P0);
+    assert_eq!(p0_tokens.len(), 1, "P0 must create one token");
+    assert_hill_giant(state, p0_tokens[0], P0);
+    let p1_tokens = controlled_tokens(state, P1);
+    assert_eq!(p1_tokens.len(), 1, "P1 must create one token");
+    assert_bears(state, p1_tokens[0], P1);
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_no_dragons(state);
+    assert_eq!(
+        state.pending_damage_replacements.len(),
+        2,
+        "reach guard: exactly the two Reflections are floating"
+    );
+    assert_eq!(
+        one_shots_consumed(state),
+        vec![true, true],
+        "both Reflections must be used by the shared entry"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(vec![p0_tokens[0], p1_tokens[0]]),
+        "the created referent must be both copies"
+    );
 }
 
 /// CR 101.4 + CR 616.1: an earlier APNAP owner's lone optional is

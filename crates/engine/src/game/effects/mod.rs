@@ -25820,7 +25820,7 @@ fn simultaneous_token_fan_out_applies(
 /// CR 101.4), and otherwise keeps the legacy legs; at most one mandatory
 /// candidate auto-applies; several mandatory candidates ride the compound iff
 /// their order is immaterial or a whole-entry one-shot copy rides along
-/// (CR 614.5 converts every batch in one application).
+/// (CR 614.5 + CR 608.2f: spent by the event, it converts every batch it reaches, one owner's part at a time).
 fn try_resolve_simultaneous_token_fan_out(
     state: &mut GameState,
     scoped_template: &ResolvedAbility,
@@ -25876,17 +25876,20 @@ fn try_resolve_simultaneous_token_fan_out(
             spec,
             enter_tapped,
             count,
+            applied,
             ..
         } = single
         else {
             return SimultaneousTokenOutcome::NotApplicable;
         };
+        // CR 616.1 + CR 614.5: each seat's batch starts with its own proposal's applied set.
         appended.push(crate::types::proposed_event::TokenBatch {
             owner,
             spec,
             copy: None,
             enter_tapped,
             count,
+            applied,
         });
     }
     let compound = crate::types::proposed_event::ProposedEvent::CreateToken {
@@ -25907,7 +25910,8 @@ fn try_resolve_simultaneous_token_fan_out(
     // most one mandatory candidate auto-applies below. Several mandatory
     // candidates ride the compound iff their order is immaterial (the
     // pipeline auto-applies every order-free set) or a whole-entry one-shot
-    // copy rides along (CR 614.5 converts every batch in one application).
+    // copy rides along (CR 614.5 + CR 608.2f: spent by the event, it converts every
+    // batch it reaches, one owner's part at a time).
     let candidates = crate::game::replacement::find_applicable_replacements(
         state,
         &compound,

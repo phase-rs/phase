@@ -953,9 +953,9 @@ fn apply_granted_keyword_etb_replacement(
 /// stashes from `dredge_replacement_definition`'s `execute` — this applier
 /// only owns the count-zeroing half. On decline, the draw proceeds unmodified.
 ///
-/// The candidate id is already recorded in `applied` by the pipeline's
-/// `mark_applied(rid)` before this applier runs (the optional accept/decline
-/// path in `continue_replacement_impl`), so no manual re-insert is needed —
+/// The candidate id is already recorded in `applied` by
+/// `apply_chosen_replacement`, which marks before this applier runs (the
+/// optional accept/decline path delegates to it), so no manual re-insert is needed —
 /// mirrors the comment just above on `apply_granted_keyword_etb_replacement`.
 fn apply_granted_dredge_replacement(
     mut event: ProposedEvent,
@@ -1563,8 +1563,9 @@ pub(crate) fn pending_candidates_are_current(
 /// Read only for a prompt parked at the choice itself, where the stored
 /// candidates are what [`pipeline_loop`] discovered for the stored event. A
 /// prompt re-parked inside one candidate's application (an accepted MayCost,
-/// an entry-controller or as-enters answer, which mark their candidate applied
-/// first) is past that choice.
+/// which carries `may_cost_paid` / `may_cost_remaining`, or an entry-controller
+/// or as-enters answer, which marks its candidate applied first) is past that
+/// choice.
 fn leaves_out_an_applicable_replacement(state: &GameState, pending: &PendingReplacement) -> bool {
     if pending.may_cost_paid
         || pending.may_cost_remaining.is_some()
@@ -2269,14 +2270,14 @@ pub(crate) fn replacement_is_optional(state: &GameState, rid: ReplacementId) -> 
 
 /// CR 608.2f + CR 614.5 (F2): whether `rid` is a whole-entry one-shot copy
 /// replacement — a `consume_on_apply` entry replacement (Mystic Reflection)
-/// whose single application converts every batch of a compound `CreateToken`
-/// event at once. Consults both definition storages: object/liminal
+/// that converts every batch of a compound `CreateToken` event it reaches, one
+/// owner's part at a time, spent once by the event. Consults both definition storages: object/liminal
 /// definitions via `replacement_definition_for_id`, and floating spell shields
 /// under the `ObjectId(0)` sentinel in `pending_damage_replacements`.
 ///
 /// Never consults `is_consumed`: consumption is marked as the one-shot
 /// applies, and the gate asks about the definition's shape, not its live
-/// state. The pipeline's own candidate scan already skips consumed entries.
+/// state. The pipeline's own candidate scan skips consumed entries, except one this simultaneous event already used on another batch (`consumed_one_shot_still_applies`).
 pub(crate) fn replacement_is_whole_event_entry_copy(state: &GameState, rid: ReplacementId) -> bool {
     let definition = if rid.source == ObjectId(0) {
         state.pending_damage_replacements.get(rid.index)
@@ -6125,6 +6126,7 @@ fn create_token_applier(
                     copy: None,
                     enter_tapped: EtbTapState::Unspecified,
                     count: new_count,
+                    applied: HashSet::new(),
                 },
             );
         }
@@ -6166,6 +6168,7 @@ fn create_token_applier(
                         copy: None,
                         enter_tapped: EtbTapState::Unspecified,
                         count: new_count,
+                        applied: HashSet::new(),
                     },
                 );
             }
@@ -6191,9 +6194,13 @@ fn create_token_applier(
 fn push_appended_token_batch(
     appended: &mut Vec<TokenBatch>,
     applied: &HashSet<AppliedReplacementKey>,
-    batch: TokenBatch,
+    mut batch: TokenBatch,
 ) {
-    record_proposed_event(&batch.clone().into_event(applied.clone()));
+    // CR 614.5: the added batch is part of the creating batch's modified event,
+    // so it starts with that batch's applied set (which already holds this
+    // replacement).
+    batch.applied = applied.clone();
+    record_proposed_event(&batch.clone().into_event());
     appended.push(batch);
 }
 
@@ -8720,6 +8727,7 @@ fn object_replacement_candidate_applies_on_entry_board(
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     rid: ReplacementId,
     entry_board: Option<&GameState>,
+    spent_by_event: &[ReplacementId],
 ) -> bool {
     let liminal_obj = liminal_entry_ref(event)
         .filter(|entry_ref| *entry_ref == rid.source)
@@ -8845,9 +8853,11 @@ fn object_replacement_candidate_applies_on_entry_board(
         }
     }
 
-    // CR 614.5 + CR 615.8: Only the same source's current combat instance may
-    // reuse a consumed one-shot; all other consumed replacements stay spent.
-    if repl_def.is_consumed && !consumed_replacement_applies_in_combat_batch(state, event, rid) {
+    // CR 614.5 + CR 615.8 + CR 608.2f: Only the same simultaneous event (the
+    // same source's current combat instance, or another batch of the compound
+    // token event that used it) may reuse a consumed one-shot; all other
+    // consumed replacements stay spent.
+    if repl_def.is_consumed && !consumed_one_shot_still_applies(state, event, rid, spent_by_event) {
         return false;
     }
     // CR 708.3 + CR 708.2a: An object put onto the battlefield FACE DOWN is turned
@@ -9688,7 +9698,7 @@ fn legacy_object_replacement_candidates(
     event: &ProposedEvent,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
 ) -> Vec<ReplacementId> {
-    legacy_object_replacement_candidates_on_entry_board(state, event, registry, None)
+    legacy_object_replacement_candidates_on_entry_board(state, event, registry, None, &[])
 }
 
 fn legacy_object_replacement_candidates_on_entry_board(
@@ -9696,6 +9706,7 @@ fn legacy_object_replacement_candidates_on_entry_board(
     event: &ProposedEvent,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     entry_board: Option<&GameState>,
+    spent_by_event: &[ReplacementId],
 ) -> Vec<ReplacementId> {
     let mut candidates: Vec<_> = super::functioning_abilities::active_replacements(state)
         .filter_map(|(index, obj, _)| {
@@ -9715,6 +9726,7 @@ fn legacy_object_replacement_candidates_on_entry_board(
                 registry,
                 rid,
                 entry_board,
+                spent_by_event,
             )
             .then_some(rid)
         })
@@ -9739,6 +9751,7 @@ fn legacy_object_replacement_candidates_on_entry_board(
                             registry,
                             rid,
                             entry_board,
+                            spent_by_event,
                         )
                         .then_some(rid)
                     }),
@@ -9760,7 +9773,13 @@ fn indexed_object_replacement_candidates_from_index(
     event: &ProposedEvent,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
 ) -> Vec<ReplacementId> {
-    indexed_object_replacement_candidates_from_index_on_entry_board(state, event, registry, None)
+    indexed_object_replacement_candidates_from_index_on_entry_board(
+        state,
+        event,
+        registry,
+        None,
+        &[],
+    )
 }
 
 fn indexed_object_replacement_candidates_from_index_on_entry_board(
@@ -9768,6 +9787,7 @@ fn indexed_object_replacement_candidates_from_index_on_entry_board(
     event: &ProposedEvent,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     entry_board: Option<&GameState>,
+    spent_by_event: &[ReplacementId],
 ) -> Vec<ReplacementId> {
     let mut entries: Vec<ReplacementIndexEntry> = replacement_event_keys_for_event(event)
         .iter()
@@ -9792,6 +9812,7 @@ fn indexed_object_replacement_candidates_from_index_on_entry_board(
                 registry,
                 entry.id,
                 entry_board,
+                spent_by_event,
             )
             .then_some(entry.id)
         })
@@ -9817,6 +9838,7 @@ fn indexed_object_replacement_candidates_from_index_on_entry_board(
                             registry,
                             rid,
                             entry_board,
+                            spent_by_event,
                         )
                         .then_some(rid)
                     }),
@@ -9833,7 +9855,7 @@ fn indexed_object_replacement_candidates(
     event: &ProposedEvent,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
 ) -> Vec<ReplacementId> {
-    indexed_object_replacement_candidates_on_entry_board(state, event, registry, None)
+    indexed_object_replacement_candidates_on_entry_board(state, event, registry, None, &[])
 }
 
 fn indexed_object_replacement_candidates_on_entry_board(
@@ -9841,6 +9863,7 @@ fn indexed_object_replacement_candidates_on_entry_board(
     event: &ProposedEvent,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     entry_board: Option<&GameState>,
+    spent_by_event: &[ReplacementId],
 ) -> Vec<ReplacementId> {
     #[cfg(test)]
     INDEXED_OBJECT_REPLACEMENT_CANDIDATE_CONSULTS.with(|consults| {
@@ -9852,6 +9875,7 @@ fn indexed_object_replacement_candidates_on_entry_board(
         event,
         registry,
         entry_board,
+        spent_by_event,
     );
 
     #[cfg(all(debug_assertions, not(test)))]
@@ -9861,6 +9885,7 @@ fn indexed_object_replacement_candidates_on_entry_board(
             event,
             registry,
             entry_board,
+            spent_by_event,
         );
         debug_assert_eq!(
             candidates, legacy,
@@ -9873,6 +9898,7 @@ fn indexed_object_replacement_candidates_on_entry_board(
             event,
             registry,
             entry_board,
+            spent_by_event,
         );
         assert_eq!(
             candidates, legacy,
@@ -9888,14 +9914,27 @@ fn object_replacement_candidates_on_entry_board(
     event: &ProposedEvent,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     entry_board: Option<&GameState>,
+    spent_by_event: &[ReplacementId],
 ) -> Vec<ReplacementId> {
     if state.replacement_index.pipeline_active
         && state.replacement_index.initialized
         && !state.replacement_index.dirty
     {
-        indexed_object_replacement_candidates_on_entry_board(state, event, registry, entry_board)
+        indexed_object_replacement_candidates_on_entry_board(
+            state,
+            event,
+            registry,
+            entry_board,
+            spent_by_event,
+        )
     } else {
-        legacy_object_replacement_candidates_on_entry_board(state, event, registry, entry_board)
+        legacy_object_replacement_candidates_on_entry_board(
+            state,
+            event,
+            registry,
+            entry_board,
+            spent_by_event,
+        )
     }
 }
 
@@ -9959,10 +9998,14 @@ fn find_applicable_replacements_on_entry_board(
     // applicable … as the result of another replacement" (CR 616.2) and is
     // offered after the appender applies.
     if let Some(views) = event.token_batch_views() {
+        // CR 614.5 + CR 608.2f: a one-shot already used on one batch of this
+        // simultaneous event is spent by the event and still applies to the
+        // other batches it reaches.
+        let spent = one_shots_spent_by_compound(state, &views);
         let mut union = Vec::new();
         for view in &views {
             for rid in
-                find_applicable_replacements_on_entry_board(state, view, registry, entry_board)
+                find_applicable_replacements_for_batch(state, view, registry, entry_board, &spent)
             {
                 if !union.contains(&rid) {
                     union.push(rid);
@@ -9971,7 +10014,21 @@ fn find_applicable_replacements_on_entry_board(
         }
         return union;
     }
+    find_applicable_replacements_for_batch(state, event, registry, entry_board, &[])
+}
 
+/// The applicable replacements for one event that is not a compound token
+/// event (or one batch view of a compound one). `spent_by_event` names the
+/// consumed one-shots the enclosing simultaneous event already used on another
+/// of its batches (`consumed_one_shot_still_applies`); empty for any other
+/// event.
+fn find_applicable_replacements_for_batch(
+    state: &GameState,
+    event: &ProposedEvent,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    entry_board: Option<&GameState>,
+    spent_by_event: &[ReplacementId],
+) -> Vec<ReplacementId> {
     // CR 614.17c: "If an event can't happen, it can only be replaced by a
     // self-replacement effect (see rule 614.15). Other replacement and/or
     // prevention effects can't modify or replace it." Every pipeline draw
@@ -10357,6 +10414,7 @@ fn find_applicable_replacements_on_entry_board(
         event,
         registry,
         entry_board,
+        spent_by_event,
     ));
 
     // CR 614.1a + CR 615.3: Also scan game-state-level (floating) replacements
@@ -10384,7 +10442,7 @@ fn find_applicable_replacements_on_entry_board(
                 index,
             };
             if repl_def.is_consumed
-                && !consumed_replacement_applies_in_combat_batch(state, event, rid)
+                && !consumed_one_shot_still_applies(state, event, rid, spent_by_event)
             {
                 continue;
             }
@@ -10897,6 +10955,28 @@ pub(crate) fn begin_turn_would_be_prevented(
 }
 
 const MAX_REPLACEMENT_DEPTH: u16 = 16;
+
+/// The pipeline's pass budget for `proposed`. The bound is an engine guard
+/// against runaway pipelines, not a rule: each replacement may apply once per
+/// batch owner's part of a compound token event (one owner at a time), so a
+/// compound's budget scales with its distinct batch owners. Any other event,
+/// and a single-owner compound, keeps `MAX_REPLACEMENT_DEPTH`.
+fn replacement_depth_limit(proposed: &ProposedEvent) -> u16 {
+    let ProposedEvent::CreateToken {
+        owner, appended, ..
+    } = proposed
+    else {
+        return MAX_REPLACEMENT_DEPTH;
+    };
+    let mut owners = vec![*owner];
+    for batch in appended {
+        if !owners.contains(&batch.owner) {
+            owners.push(batch.owner);
+        }
+    }
+    let owner_count = u16::try_from(owners.len()).unwrap_or(u16::MAX);
+    MAX_REPLACEMENT_DEPTH.saturating_mul(owner_count)
+}
 
 /// Identifies which ability branch of a `ReplacementDefinition` is being applied.
 /// CR 614.1a + CR 614.1c: `ReplacementMode::Optional` carries both an `execute` ability
@@ -11823,8 +11903,8 @@ pub(crate) fn stored_candidate_executes(
 ///
 /// The event is judged as it stood when the candidate was offered: a resume
 /// that already marked this candidate applied before re-entering its handler
-/// (an entry-controller or as-enters answer, an accepted MayCost) has its own
-/// mark cleared first, as [`token_batch_admits`] does.
+/// (an entry-controller, as-enters or entry-payment answer on a ZoneChange) has
+/// its own mark cleared first.
 fn stored_candidate_applies(
     state: &GameState,
     proposed: &ProposedEvent,
@@ -12924,20 +13004,49 @@ fn apply_single_replacement(
 }
 
 /// CR 614.5 + CR 616.1f: whether replacement `rid` applies to this batch view of
-/// a compound token event. The pipeline marks `rid` applied on the whole event
-/// before applying it, so the check reads the view as it stood just before that
-/// mark.
+/// a compound token event. No caller marks a compound before this check, so the
+/// view's own `applied` set answers whether `rid` already affected this batch;
+/// `spent` names the one-shots this simultaneous event already used on another
+/// batch (`one_shots_spent_by_compound`).
 fn token_batch_admits(
     state: &GameState,
     view: &ProposedEvent,
     rid: ReplacementId,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    spent: &[ReplacementId],
 ) -> bool {
-    let mut unmarked = view.clone();
-    unmarked
-        .applied_set_mut()
-        .remove(&AppliedReplacementKey::for_event(view, rid));
-    find_applicable_replacements(state, &unmarked, registry).contains(&rid)
+    find_applicable_replacements_for_batch(state, view, registry, None, spent).contains(&rid)
+}
+
+/// CR 614.5 + CR 608.2f: the consume-on-apply replacements this compound token
+/// event has already applied to one of its batches (read from the views' own
+/// `applied` sets). Such a one-shot is spent by this simultaneous event, not by
+/// one owner's application, so it still applies to the other batches it
+/// reaches. Each view is computed afresh per event, so nothing outlives it.
+fn one_shots_spent_by_compound(state: &GameState, views: &[ProposedEvent]) -> Vec<ReplacementId> {
+    let mut spent = Vec::new();
+    for key in views.iter().flat_map(|view| view.applied_set().iter()) {
+        let rid = key.as_replacement_id();
+        if !spent.contains(&rid)
+            && stored_replacement_definition(state, rid).is_some_and(|def| def.consume_on_apply)
+        {
+            spent.push(rid);
+        }
+    }
+    spent
+}
+
+/// Whether a consumed one-shot `rid` may still apply to `event`: it was spent
+/// by the same simultaneous event (CR 614.5 + CR 608.2f: a compound token
+/// event's other batches), or it covers another portion of the same damage
+/// source's current combat instance (CR 510.2 + CR 700.1 + CR 615.8).
+fn consumed_one_shot_still_applies(
+    state: &GameState,
+    event: &ProposedEvent,
+    rid: ReplacementId,
+    spent_by_event: &[ReplacementId],
+) -> bool {
+    spent_by_event.contains(&rid) || consumed_replacement_applies_in_combat_batch(state, event, rid)
 }
 
 /// CR 111.2 + CR 101.4: the distinct owners of the batches of a compound token
@@ -12951,11 +13060,11 @@ fn token_batch_owners_admitting(
     rid: ReplacementId,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
 ) -> Vec<PlayerId> {
-    let admitting: Vec<PlayerId> = proposed
-        .clone()
-        .into_token_batch_views()
+    let views = proposed.clone().into_token_batch_views();
+    let spent = one_shots_spent_by_compound(state, &views);
+    let admitting: Vec<PlayerId> = views
         .iter()
-        .filter(|view| token_batch_admits(state, view, rid, registry))
+        .filter(|view| token_batch_admits(state, view, rid, registry, &spent))
         .filter_map(|view| match view {
             ProposedEvent::CreateToken { owner, .. } => Some(*owner),
             _ => None,
@@ -12992,7 +13101,7 @@ pub(crate) struct CompoundChoicePlan {
 /// order: the first owner whose own set demands a choice (a lone optional, or
 /// two or more whose order matters) acts first; with no demand anywhere every
 /// owner's set is mandatory and order-free, so the first owner with any
-/// candidate is offered its set. Recomputed every pass from the event's
+/// candidate is offered its set. Recomputed every pass from each batch's
 /// `applied` set (CR 616.1f), so no cursor is stored. Any other event yields
 /// the affected player and the whole choosable set.
 ///
@@ -13095,16 +13204,21 @@ pub(crate) fn compound_optional_decider(
     replacement_choice_player(state, proposed, rid)
 }
 
-/// CR 614.1a + CR 614.5 + CR 616.1f: apply one chosen replacement to a compound
-/// token event — to every batch it applies to, leaving the others unchanged.
-/// The batches are one modified event, so the replacement gets one opportunity
-/// over the whole event; it acts on each batch it matches (Parallel Lives
-/// doubles each batch, Ojer Taq triples only the creature batches).
+/// CR 614.1a + CR 616.1 + CR 101.4 + CR 614.5 + CR 616.1f: apply one chosen
+/// replacement to `owner`'s part of a compound token event — to every batch of
+/// `owner` it applies to, leaving every other batch unchanged. Each batch owner
+/// chooses for their own part of the simultaneous event (in APNAP order), so
+/// the replacement uses its one opportunity on `owner`'s part only and keeps
+/// its place in every other owner's ordering. On `owner`'s part it acts on
+/// each batch it matches (Parallel Lives doubles each batch, Ojer Taq triples
+/// only the creature batches).
 ///
 /// Applicability is settled for every batch before anything is applied, so an
-/// earlier batch's application cannot change which later batches it reaches. A
-/// `Prevented` batch is dropped on its own (CR 614.6); the event is `Prevented`
-/// only when no batch survives.
+/// earlier batch's application cannot change which later batches it reaches.
+/// `rid` is marked on every batch of `owner` (admitted or not) before it
+/// applies, so a batch the applier appends takes the creating batch's set
+/// already holding `rid`. A `Prevented` batch is dropped on its own
+/// (CR 614.6); the event is `Prevented` only when no batch survives.
 ///
 /// Applying per batch can run the replacement's applier more than once for the
 /// one event: a mandatory rider stash keeps the resident rider
@@ -13116,15 +13230,29 @@ fn apply_replacement_to_token_batches(
     state: &mut GameState,
     proposed: ProposedEvent,
     rid: ReplacementId,
+    owner: PlayerId,
     branch: ReplacementBranch,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ProposedEvent, ApplyResult> {
-    let views = proposed.into_token_batch_views();
+    let mut views = proposed.into_token_batch_views();
+    let spent = one_shots_spent_by_compound(state, &views);
+    let in_scope: Vec<bool> = views
+        .iter()
+        .map(|view| matches!(view, ProposedEvent::CreateToken { owner: batch_owner, .. } if *batch_owner == owner))
+        .collect();
     let admits: Vec<bool> = views
         .iter()
-        .map(|view| token_batch_admits(state, view, rid, registry))
+        .zip(&in_scope)
+        .map(|(view, in_scope)| *in_scope && token_batch_admits(state, view, rid, registry, &spent))
         .collect();
+    for (view, _) in views
+        .iter_mut()
+        .zip(&in_scope)
+        .filter(|(_, in_scope)| **in_scope)
+    {
+        view.mark_applied(rid);
+    }
     if !admits.contains(&true) {
         return Ok(ProposedEvent::from_token_batch_views(views)
             .expect("a compound token event's views reassemble"));
@@ -13155,38 +13283,115 @@ fn apply_replacement_to_token_batches(
 
 /// CR 614.1a: how many of this event's tokens replacement `rid` applies to —
 /// the summed `count` of the batches it matches. For a non-compound event this
-/// is the event's own `count`. The "that many" of a whole-event substitution
-/// (Moonlit Meditation's copies) is this number.
+/// is the event's own `count`. On a compound event only the batches `scope`
+/// covers count. The "that many" of a whole-event substitution (Moonlit
+/// Meditation's copies) is this number.
 fn token_count_affected_by(
     state: &GameState,
     proposed: &ProposedEvent,
     rid: ReplacementId,
+    scope: TokenBatchScope,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
 ) -> u32 {
     let Some(views) = proposed.token_batch_views() else {
         return proposed.create_token_count().unwrap_or(0);
     };
+    let spent = one_shots_spent_by_compound(state, &views);
     views
         .iter()
-        .filter(|view| token_batch_admits(state, view, rid, registry))
+        .filter(|view| match (scope, view) {
+            (TokenBatchScope::WholeEvent, _) => true,
+            (
+                TokenBatchScope::Owner(owner),
+                ProposedEvent::CreateToken {
+                    owner: batch_owner, ..
+                },
+            ) => *batch_owner == owner,
+            (TokenBatchScope::Owner(_), _) => false,
+        })
+        .filter(|view| token_batch_admits(state, view, rid, registry, &spent))
         .filter_map(ProposedEvent::create_token_count)
         .fold(0, u32::saturating_add)
 }
 
-#[allow(clippy::result_large_err)]
-fn apply_single_replacement_and_dirty(
-    state: &mut GameState,
-    proposed: ProposedEvent,
+/// Whose part of an event one chosen replacement covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenBatchScope {
+    /// The whole event (every event that is not a compound token event).
+    WholeEvent,
+    /// One batch owner's batches of a compound token event.
+    Owner(PlayerId),
+}
+
+/// CR 616.1 + CR 101.4 + CR 616.1g: the part of `proposed` a replacement chosen
+/// (or declined) by `actor` covers. On a compound token event each batch owner
+/// chooses for their own batches (in APNAP order), on the creation layer and on
+/// the entry layer that follows it, so the choice covers `actor`'s batches; any
+/// other event is covered whole. A single-owner compound's owner scope is every
+/// batch, which equals the whole event.
+fn token_batch_scope(proposed: &ProposedEvent, actor: PlayerId) -> TokenBatchScope {
+    if proposed.has_appended_token_batches() {
+        TokenBatchScope::Owner(actor)
+    } else {
+        TokenBatchScope::WholeEvent
+    }
+}
+
+/// CR 614.5 + CR 616.1: the applied set of the part of `proposed` that `actor`
+/// decides `rid` for, once `rid` has had its opportunity there: the event's set
+/// for a whole-event choice, the union of `actor`'s batch sets on a compound
+/// token event, plus `rid`'s own key.
+fn applied_after_choice(
+    proposed: &ProposedEvent,
     rid: ReplacementId,
+    actor: PlayerId,
+) -> HashSet<AppliedReplacementKey> {
+    let mut applied = match token_batch_scope(proposed, actor) {
+        TokenBatchScope::WholeEvent => proposed.applied_set().clone(),
+        TokenBatchScope::Owner(owner) => proposed.applied_of_owner(owner),
+    };
+    applied.insert(AppliedReplacementKey::for_event(proposed, rid));
+    applied
+}
+
+/// CR 614.5 + CR 616.1: record that `actor` declined replacement `rid` on their
+/// part of `proposed` without applying it — that part has had its opportunity.
+fn mark_chosen_declined(proposed: &mut ProposedEvent, rid: ReplacementId, actor: PlayerId) {
+    match token_batch_scope(proposed, actor) {
+        TokenBatchScope::WholeEvent => proposed.mark_applied(rid),
+        TokenBatchScope::Owner(owner) => proposed.mark_applied_for_owner(rid, owner),
+    }
+}
+
+/// The one authority that applies a replacement chosen by `actor`: marks `rid`
+/// applied on the part of `proposed` it covers (`token_batch_scope`) and
+/// applies it there, then runs the shared post-application tail.
+#[allow(clippy::result_large_err)]
+fn apply_chosen_replacement(
+    state: &mut GameState,
+    mut proposed: ProposedEvent,
+    rid: ReplacementId,
+    actor: PlayerId,
     branch: ReplacementBranch,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ProposedEvent, ApplyResult> {
+    let scope = token_batch_scope(&proposed, actor);
+    if scope == TokenBatchScope::WholeEvent {
+        proposed.mark_applied(rid);
+    }
+    // The comparison point for the CR 903.9b re-arm below is the event with
+    // `rid` already marked, so the mark alone never reads as a modification.
     let before = proposed.clone();
-    let mut result = if proposed.has_appended_token_batches() {
-        apply_replacement_to_token_batches(state, proposed, rid, branch, registry, events)
-    } else {
-        apply_single_replacement(state, proposed, rid, branch, registry, events)
+    let mut result = match scope {
+        TokenBatchScope::WholeEvent => {
+            apply_single_replacement(state, proposed, rid, branch, registry, events)
+        }
+        // `apply_replacement_to_token_batches` marks `owner`'s batches itself,
+        // before it applies.
+        TokenBatchScope::Owner(owner) => apply_replacement_to_token_batches(
+            state, proposed, rid, owner, branch, registry, events,
+        ),
     };
     // CR 614.5 normally records a replacement once per event. CR 903.9b is the
     // express exception: after ANOTHER replacement actually modifies the event
@@ -14029,6 +14234,7 @@ impl CounterPlacementProhibitions {
                         replacement_registry(),
                         *rid,
                         None,
+                        &[],
                     )
                 })
         };
@@ -15417,7 +15623,7 @@ fn pipeline_loop(
             break;
         }
 
-        if depth >= MAX_REPLACEMENT_DEPTH {
+        if depth >= replacement_depth_limit(&proposed) {
             break;
         }
 
@@ -15494,7 +15700,7 @@ fn pipeline_loop(
                 let Some(affected) = replacement_choice_player(state, &proposed, rid) else {
                     // An optional replacement with no authorized chooser is
                     // treated as declined; never default it to an unrelated player.
-                    proposed.mark_applied(rid);
+                    mark_chosen_declined(&mut proposed, rid, actor);
                     depth += 1;
                     continue;
                 };
@@ -15554,11 +15760,11 @@ fn pipeline_loop(
                 return park_as_enters_pay_choice(state, proposed, depth, rid, pay_choice, events);
             }
 
-            proposed.mark_applied(rid);
-            match apply_single_replacement_and_dirty(
+            match apply_chosen_replacement(
                 state,
                 proposed,
                 rid,
+                actor,
                 ReplacementBranch::Execute,
                 registry,
                 events,
@@ -15632,11 +15838,11 @@ fn pipeline_loop(
             ) {
                 return park_as_enters_pay_choice(state, proposed, depth, rid, pay_choice, events);
             }
-            proposed.mark_applied(rid);
-            match apply_single_replacement_and_dirty(
+            match apply_chosen_replacement(
                 state,
                 proposed,
                 rid,
+                actor,
                 ReplacementBranch::Execute,
                 registry,
                 events,
@@ -16585,8 +16791,9 @@ fn continue_replacement_impl(
         else {
             // No live or latched authority can make an optional choice. Mark it
             // applied as declined and continue the ordinary replacement loop.
+            let actor = pending.proposed.affected_player(state);
             let mut proposed = pending.proposed;
-            proposed.mark_applied(rid);
+            mark_chosen_declined(&mut proposed, rid, actor);
             return pipeline_loop(state, proposed, pending.depth + 1, registry, events, None);
         };
         // CR 614.12a: a `true` flag means this is the post-choice resume of an
@@ -16618,7 +16825,10 @@ fn continue_replacement_impl(
                 return ReplacementResult::NeedsChoice(player);
             }
         }
-        proposed.mark_applied(rid);
+        // CR 614.5 + CR 616.1: `rid` is marked where it is applied
+        // (`apply_chosen_replacement`), on the payer's part of the event; the
+        // reads below use the set that part carries once it is marked.
+        let applied_after = applied_after_choice(&proposed, rid, payer);
         // CR 614.1a: the "first time you would create … each turn" window is
         // per-player; it is consumed by `record_token_created` when the resulting
         // tokens (copies on accept, originals on decline) are created — no separate
@@ -16881,11 +17091,12 @@ fn continue_replacement_impl(
         // re-entry, but this gate is the sole stamp site for
         // `post_replacement_token_substitution_count` (B2's "that many" count) —
         // removing it as "redundant" would silently zero the copy count.
-        if let (ProposedEvent::CreateToken { applied, spec, .. }, Some(def)) =
+        if let (ProposedEvent::CreateToken { spec, .. }, Some(def)) =
             (&proposed, post_effect.as_deref_mut())
         {
+            let scope = token_batch_scope(&proposed, payer);
             if is_token_replacement_choice(def) {
-                state.post_replacement_token_choice_applied = Some(applied.clone());
+                state.post_replacement_token_choice_applied = Some(applied_after.clone());
                 // CR 614.6 + CR 608.2h + the Jinnie Fay ruling ("Anything else
                 // specified in the effect creating the tokens (such as tapped
                 // …) still applies"): the chosen branch creates "that many" —
@@ -16893,19 +17104,20 @@ fn continue_replacement_impl(
                 // instruction's tapped entry. Both are bound into this
                 // continuation's own template, so neither can reach any other
                 // "that many" of the resolution.
-                let that_many =
-                    u32_to_i32_saturating(token_count_affected_by(state, &proposed, rid, registry));
+                let that_many = u32_to_i32_saturating(token_count_affected_by(
+                    state, &proposed, rid, scope, registry,
+                ));
                 bind_substitute_token_entry(def, spec.tapped, that_many);
             } else if is_copy_token_substitution(def) {
                 // CR 614.1a + CR 616.1: Moonlit-class copy substitution. The
-                // continuation inherits this event's applied set (already carries
-                // Moonlit's rid — marked at accept above) so it self-suppresses;
+                // continuation inherits the payer's applied set (carrying
+                // Moonlit's rid, `applied_after`) so it self-suppresses;
                 // and the number of the event's tokens it replaces — every batch
                 // it matches, appended batches included (CR 614.1a: one modified
                 // event) — is latched as the "that many" copy count read by
                 // `QuantityRef::EventContextAmount`.
-                let replaced = token_count_affected_by(state, &proposed, rid, registry);
-                state.post_replacement_token_choice_applied = Some(applied.clone());
+                let replaced = token_count_affected_by(state, &proposed, rid, scope, registry);
+                state.post_replacement_token_choice_applied = Some(applied_after.clone());
                 state.post_replacement_token_substitution_count =
                     Some(u32_to_i32_saturating(replaced));
             }
@@ -16962,7 +17174,7 @@ fn continue_replacement_impl(
                 let drain = PostReplacementDrain {
                     status: DrainStatus::Ready(PostReplacementContinuation::Template(def)),
                     source: Some(rid.source),
-                    applied: proposed.applied_set().clone(),
+                    applied: applied_after,
                     event_source: replaced.source,
                     event_target: replaced.target,
                     event_amount: replaced.amount,
@@ -17016,7 +17228,7 @@ fn continue_replacement_impl(
             (ReplacementBranch::Execute, None) => state.abandon_active_post_replacement_drains(),
         }
 
-        match apply_single_replacement_and_dirty(state, proposed, rid, branch, registry, events) {
+        match apply_chosen_replacement(state, proposed, rid, payer, branch, registry, events) {
             Ok(new_event) => proposed = new_event,
             Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
             Err(ApplyResult::Modified(_)) => unreachable!(),
@@ -17089,8 +17301,11 @@ fn continue_replacement_impl(
     if replacement_is_optional(state, rid) {
         state.replacement_auto_choice_tail = None;
         let Some(affected) = replacement_choice_player(state, &pending.proposed, rid) else {
+            let actor = pending
+                .choice_player
+                .unwrap_or_else(|| pending.proposed.affected_player(state));
             let mut proposed = pending.proposed;
-            proposed.mark_applied(rid);
+            mark_chosen_declined(&mut proposed, rid, actor);
             return pipeline_loop(state, proposed, pending.depth + 1, registry, events, None);
         };
         // The candidates passed over still apply; the optional prompt keeps
@@ -17108,6 +17323,9 @@ fn continue_replacement_impl(
         return replay_pending_replacement(state, affected, events);
     }
 
+    let actor = pending
+        .choice_player
+        .unwrap_or_else(|| pending.proposed.affected_player(state));
     let mut proposed = pending.proposed.clone();
     if let Some((player, entry_candidates)) = entry_controller_choice(state, &proposed, rid) {
         pending.candidates = vec![rid];
@@ -17136,14 +17354,14 @@ fn continue_replacement_impl(
         state.pending_replacement = Some(pending);
         return raise_as_enters_pay_choice(state, rid.source, pay_choice, events);
     }
-    proposed.mark_applied(rid);
     // CR 614.1a: per-player "first time each turn" window is consumed by
     // `record_token_created` on the created tokens; no per-source bookkeeping here.
 
-    match apply_single_replacement_and_dirty(
+    match apply_chosen_replacement(
         state,
         proposed,
         rid,
+        actor,
         ReplacementBranch::Execute,
         registry,
         events,
@@ -17175,7 +17393,7 @@ pub fn continue_replacement(
     // terminal result below releases it instead of leaving it resident past
     // this event's delivery. The reused projection's controller already follows
     // the pending event: every applied replacement realigns it in
-    // `apply_single_replacement_and_dirty`, and an entry-controller answer
+    // `apply_chosen_replacement`, and an entry-controller answer
     // written onto the pending event is applied through that same seam before
     // anything reads the projection.
     let pending_event = state
@@ -28764,6 +28982,7 @@ mod tests {
                 copy: None,
                 enter_tapped: EtbTapState::Unspecified,
                 count: 1,
+                applied: HashSet::new(),
             }],
             applied: HashSet::new(),
         }
