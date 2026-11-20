@@ -1051,6 +1051,31 @@ describe("Scryfall generation scripts — face orientation (issue #9502)", () =>
   });
 });
 
+function basicLandPrintingFixtures() {
+  const catalog: {
+    lands: Record<string, {
+      choices: { scryfall_id: string; set: string; collector_number: string }[];
+    }>;
+  } = JSON.parse(readFileSync(
+    path.join(REPO_ROOT, "crates/engine/data/basic-land-art-v1.json"),
+    "utf8",
+  ));
+  return Object.entries(catalog.lands).flatMap(([oracle_id, { choices }]) =>
+    choices.map(({ scryfall_id, set, collector_number }) => ({
+      id: scryfall_id,
+      oracle_id,
+      set,
+      collector_number,
+      layout: "normal",
+      released_at: "2024-01-01",
+      image_uris: {
+        normal: `https://img.example/${scryfall_id}-normal.jpg`,
+        art_crop: `https://img.example/${scryfall_id}-art.jpg`,
+      },
+    })),
+  );
+}
+
 describe("Scryfall generation scripts — reversible cards (issue #2031)", () => {
   const oracleId = "ea9709b6-4c37-4d5a-b04d-cd4c42e4f9dd";
 
@@ -1120,6 +1145,7 @@ describe("Scryfall generation scripts — reversible cards (issue #2031)", () =>
       writeFileSync(
         input,
         JSON.stringify([
+          ...basicLandPrintingFixtures(),
           {
             id: "old-printing",
             layout: "reversible_card",
@@ -1234,6 +1260,7 @@ describe("Scryfall generation scripts — printings face images (#10899)", () =>
       writeFileSync(
         input,
         JSON.stringify([
+          ...basicLandPrintingFixtures(),
           harePrinting("hare-old", "2023-09-08"),
           harePrinting("hare-new", "2024-01-01"),
           delverPrinting("delver-old", "2011-09-30"),
