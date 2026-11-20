@@ -310,8 +310,8 @@ fn day_of_the_dragons_ltb_does_not_return_a_sacrificed_card_redirected_to_exile(
     assert_eq!(state.objects[&child].controller, P0);
 }
 
-/// DR1 — CR 607.2a + CR 607.3: Day's LTB returns the card its ETB exiled (Child of Night)
-/// under its controller's control, and the sacrificed nontoken Dragon (Dragon Hatchling)
+/// DR1 — CR 607.2a: Day's LTB returns the card its ETB exiled (Child of Night)
+/// under your control, and the sacrificed nontoken Dragon (Dragon Hatchling)
 /// stays in the graveyard.
 #[test]
 fn day_of_the_dragons_ltb_returns_the_card_its_etb_exiled() {
