@@ -21657,7 +21657,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
         return Some(parsed_clause(effect));
     }
 
-    // CR 111.11: "create [token description] for each X" → Token with dynamic count.
+    // CR 701.7a: "create [token description] for each X" → Token with dynamic count.
     // Delegates to try_parse_token, which handles token description parsing (name, P/T,
     // types, colors, keywords). The embedded count multiplies the for-each quantity, as in the
     // numeric and damage arms.
@@ -21668,7 +21668,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
     // the correct owner), then fall back to the subject-stripped imperative so a
     // leading "you " no longer strands the for-each quantity.
     //
-    // CR 109.5 + CR 111.11: the stripped fallback is CONTROLLER-only. This arm
+    // CR 109.5 + CR 111.2: the stripped fallback is CONTROLLER-only. This arm
     // early-returns from `try_parse_for_each_effect` and so never runs the
     // subject→owner rebinding used by the numeric/targeted arms, and
     // `try_parse_token` defaults `Effect::Token.owner` to

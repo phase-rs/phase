@@ -922,8 +922,8 @@ pub(crate) fn apply_damage_after_replacement(
                 if let Some(target_obj) = state.objects.get_mut(obj_id) {
                     // CR 120.3e: Damage to a creature marks damage.
                     target_obj.damage_marked += actual_amount;
-                    // CR 702.2b: Track deathtouch for SBA lethal-damage check.
-                    if ctx.has_deathtouch {
+                    // CR 702.2b + CR 120.8: only nonzero damage from a deathtouch source is recorded for CR 704.5h.
+                    if ctx.has_deathtouch && actual_amount > 0 {
                         target_obj.dealt_deathtouch_damage = true;
                     }
                 }
@@ -1198,19 +1198,20 @@ pub(crate) fn emit_damage_dealt_and_record(
     is_combat: bool,
     events: &mut Vec<GameEvent>,
 ) {
-    events.push(GameEvent::DamageDealt {
-        source_id,
-        target: target.clone(),
-        amount: record_amount,
-        is_combat,
-        excess: record_excess,
-        // CR 400.7: the incarnation captured with the damage context, as the
-        // damage record below uses.
-        source_incarnation,
-    });
-
-    // CR 120.1: Record damage for "was dealt damage by" condition queries.
+    // CR 120.8: damage reduced to 0 is not dealt, so it raises no event and leaves no record.
     if dealt_amount > 0 {
+        events.push(GameEvent::DamageDealt {
+            source_id,
+            target: target.clone(),
+            amount: record_amount,
+            is_combat,
+            excess: record_excess,
+            // CR 400.7: the incarnation captured with the damage context, as the
+            // damage record below uses.
+            source_incarnation,
+        });
+
+        // CR 120.1: Record damage for "was dealt damage by" condition queries.
         let target_controller = match target {
             TargetRef::Player(player_id) => *player_id,
             TargetRef::Object(object_id) => state
@@ -1441,8 +1442,8 @@ pub(crate) fn wither_infect_post_counter_core(
     if let TargetRef::Object(obj_id) = target {
         if is_creature {
             if let Some(target_obj) = state.objects.get_mut(obj_id) {
-                // CR 702.2b: Track deathtouch for SBA lethal-damage check.
-                if ctx.has_deathtouch {
+                // CR 702.2b + CR 120.8: only nonzero damage from a deathtouch source is recorded for CR 704.5h.
+                if ctx.has_deathtouch && actual_amount > 0 {
                     target_obj.dealt_deathtouch_damage = true;
                 }
             }

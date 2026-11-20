@@ -307,6 +307,7 @@ mod griffin_guide_ceased_token_co_departure;
 mod griffin_rider_conditional_self_buff;
 mod grimdancer_two_counter_entry_choice;
 mod grist_zone_functioning;
+mod gross_life_lost_this_turn;
 mod grubs_command_tracked_set_filter;
 mod guard_ownership;
 mod guardian_project_same_name_intervening_if;
