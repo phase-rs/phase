@@ -17030,10 +17030,10 @@ fn wheel_and_deal_implicit_draw_inherits_each_targeted_opponent() {
             &*per_opponent_draw.effect,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 7 },
-                target: TargetFilter::ParentTarget,
+                target: TargetFilter::ScopedPlayer,
             }
         ),
-        "expected the seven-card draw to inherit ParentTarget, got {:?}; full definition: {def:?}",
+        "expected the seven-card draw to bind the current target player, got {:?}; full definition: {def:?}",
         per_opponent_draw.effect
     );
     let controller_draw = per_opponent_draw
@@ -97254,6 +97254,7 @@ mod carried_player_reference_tests {
             inject_subject_target(&mut lib, &phrase, "that player searches their library");
             let expected = match carry {
                 CarriedPlayerSubject::Declared => TargetFilter::ParentTargetController,
+                CarriedPlayerSubject::TargetPopulation => TargetFilter::ScopedPlayer,
                 CarriedPlayerSubject::Reference { filter, .. } => filter.clone(),
             };
             assert!(matches!(
@@ -105857,4 +105858,179 @@ fn sproutwatch_dryad_preserves_per_keyword_conditions_and_duration() {
             .as_deref()
             .is_none_or(|description| !description.contains(" if ")));
     }
+}
+
+#[test]
+fn each_target_player_keeps_coordinated_predicate_recipients() {
+    for (head, expected_count) in [
+        ("Any number of", MultiTargetSpec::unlimited(0)),
+        ("Two", MultiTargetSpec::fixed(2, 2)),
+    ] {
+        let chain = parse_effect_chain(
+            &format!("{head} target players each draw a card and discard a card. You draw a card."),
+            AbilityKind::Spell,
+        );
+        assert_eq!(chain.multi_target, Some(expected_count), "{chain:#?}");
+        assert!(
+            matches!(
+                *chain.effect,
+                Effect::Draw {
+                    target: TargetFilter::Player,
+                    ..
+                }
+            ),
+            "{chain:#?}"
+        );
+        let discard = chain.sub_ability.as_deref().expect("discard action");
+        assert!(
+            matches!(
+                *discard.effect,
+                Effect::Discard {
+                    target: TargetFilter::ScopedPlayer,
+                    ..
+                }
+            ),
+            "{chain:#?}"
+        );
+        assert_eq!(discard.multi_target, None);
+        assert_eq!(discard.sub_link, SubAbilityLink::ContinuationStep);
+        let rider = discard.sub_ability.as_deref().expect("controller rider");
+        assert_eq!(rider.sub_link, SubAbilityLink::SequentialSibling);
+        assert!(matches!(
+            *rider.effect,
+            Effect::Draw {
+                target: TargetFilter::Controller,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn each_target_player_keeps_life_and_permanent_actions_under_one_announcement() {
+    for predicate in [
+        "lose 2 life and sacrifice a creature of their choice",
+        "sacrifice a creature of their choice and lose 2 life",
+        "mill a card and lose 2 life",
+    ] {
+        let chain = parse_effect_chain(
+            &format!("Any number of target players each {predicate}. You add {{B}}{{B}} and draw a card."),
+            AbilityKind::Activated,
+        );
+        assert_eq!(
+            chain.multi_target,
+            Some(MultiTargetSpec::unlimited(0)),
+            "{chain:#?}"
+        );
+        let first = if matches!(
+            *chain.effect,
+            Effect::TargetOnly {
+                target: TargetFilter::Player
+            }
+        ) {
+            chain.sub_ability.as_deref().expect("first action")
+        } else {
+            &chain
+        };
+        let second = first.sub_ability.as_deref().expect("second action");
+        assert_eq!(second.multi_target, None);
+        assert_eq!(second.sub_link, SubAbilityLink::ContinuationStep);
+        match &*first.effect {
+            Effect::LoseLife {
+                target: Some(TargetFilter::Player),
+                ..
+            } => {
+                let Effect::Sacrifice { target, .. } = &*second.effect else {
+                    panic!("expected scoped sacrifice, got {chain:#?}");
+                };
+                assert_eq!(
+                    target_filter_controller_ref(target),
+                    Some(ControllerRef::ScopedPlayer)
+                );
+            }
+            Effect::Sacrifice { target, .. } => {
+                assert_eq!(
+                    target_filter_controller_ref(target),
+                    Some(ControllerRef::ScopedPlayer)
+                );
+                assert!(
+                    matches!(
+                        *second.effect,
+                        Effect::LoseLife {
+                            target: Some(TargetFilter::ScopedPlayer),
+                            ..
+                        }
+                    ),
+                    "{chain:#?}"
+                );
+            }
+            Effect::Mill {
+                target: TargetFilter::Player,
+                ..
+            } => {
+                assert!(
+                    matches!(
+                        *second.effect,
+                        Effect::LoseLife {
+                            target: Some(TargetFilter::ScopedPlayer),
+                            ..
+                        }
+                    ),
+                    "{chain:#?}"
+                );
+            }
+            _ => panic!("unexpected action {chain:#?}"),
+        }
+        let mana = second
+            .sub_ability
+            .as_deref()
+            .expect("independent mana rider");
+        assert_eq!(mana.sub_link, SubAbilityLink::SequentialSibling);
+        assert!(matches!(*mana.effect, Effect::Mana { .. }), "{chain:#?}");
+        let draw = mana.sub_ability.as_deref().expect("independent draw rider");
+        assert!(
+            matches!(
+                *draw.effect,
+                Effect::Draw {
+                    target: TargetFilter::Controller,
+                    ..
+                }
+            ),
+            "{chain:#?}"
+        );
+    }
+}
+
+#[test]
+fn each_target_player_bounds_comparison_to_the_sacrificing_player() {
+    let chain = parse_effect_chain(
+        "Any number of target opponents each sacrifice a creature with the greatest power among creatures that player controls and lose 3 life.",
+        AbilityKind::Spell,
+    );
+    let sacrifice = chain.sub_ability.as_deref().expect("sacrifice action");
+    let Effect::Sacrifice {
+        target: TargetFilter::Typed(permanents),
+        ..
+    } = &*sacrifice.effect
+    else {
+        panic!("expected the sacrifice to retain its permanent filter");
+    };
+    assert_eq!(permanents.controller, Some(ControllerRef::ScopedPlayer));
+    let [FilterProp::PtComparison {
+        value:
+            QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(aggregate),
+            },
+        ..
+    }] = permanents.properties.as_slice()
+    else {
+        panic!("expected an aggregate power comparison");
+    };
+    let CardTypeSetSource::Objects { filter } = aggregate.source() else {
+        panic!("expected to compare battlefield objects");
+    };
+    assert_eq!(
+        target_filter_controller_ref(filter),
+        Some(ControllerRef::ScopedPlayer)
+    );
 }
