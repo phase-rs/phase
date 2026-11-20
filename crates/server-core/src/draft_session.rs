@@ -1762,15 +1762,7 @@ mod tests {
                     };
                     let expected: Vec<_> = sets
                         .iter()
-                        .map(|set| {
-                            (
-                                "Plains".to_string(),
-                                CardPrinting {
-                                    set_code: (*set).into(),
-                                    collector_number: "001".into(),
-                                },
-                            )
-                        })
+                        .map(|set| ("Plains".to_string(), CardPrinting::owner(*set, "001")))
                         .collect();
                     assert_eq!(actual, expected,
                         "pairing objects retain the authenticated owner's exact printing budget: pod seat {}",

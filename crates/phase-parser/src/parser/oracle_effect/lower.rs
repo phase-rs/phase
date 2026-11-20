@@ -8787,6 +8787,22 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                 },
                 tag("at the beginning of that turn's end step, "),
             ),
+            // CR 608.2c + CR 603.7a: "at the beginning of that player's next
+            // end step, " -- the player-anaphor prefix twin of the suffix arm in
+            // `strip_temporal_suffix` (Wanderer shape in trailing position).
+            // Table default is `ParentTargetOwner`; a Choose(Player|Opponent)
+            // antecedent rebinds to `ChosenPlayer` at the call site (Faramir).
+            // Textually distinct from the "that turn's end step" arm above
+            // ("player's" vs "turn's"), so neither shadows the other.
+            value(
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::End,
+                    player: crate::types::player::PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner,
+                },
+                tag("at the beginning of that player's next end step, "),
+            ),
             // CR 505.1 + CR 603.7a: "your next main phase" → PreCombatMain.
             // PlayerId(0) rewritten to ability.controller at resolve time
             // in effects::delayed_trigger::resolve.
@@ -13921,7 +13937,9 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::RemoveManaCost => {}
+        | ContinuousModification::RemoveManaCost
+        // No dynamic quantity to rebind: scalar designation payload only.
+        | ContinuousModification::ChangeControllerToDesignation { .. } => {}
     }
 }
 
@@ -14025,7 +14043,9 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::RemoveManaCost => {}
+        | ContinuousModification::RemoveManaCost
+        // No dynamic quantity to rebind: scalar designation payload only.
+        | ContinuousModification::ChangeControllerToDesignation { .. } => {}
     }
 }
 

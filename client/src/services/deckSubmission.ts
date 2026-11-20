@@ -6,7 +6,7 @@ import {
   type ArtChainEntry,
   type CardArtOverride,
 } from "../stores/preferencesStore";
-import { selectedPrinting } from "./artSelection";
+import { selectSubmissionPrinting } from "./artSelection";
 import { expandParsedDeck, type ExpandedDeck, type ParsedDeck } from "./deckParser";
 import { getCardPrintings, type PrintingEntry } from "./scryfall";
 
@@ -145,12 +145,12 @@ async function annotate<T extends SubmissionDeck>(
     const rows: DeckPrinting[] = [];
     for (const context of contexts) {
       const identity = await identities.get(context.name);
-      if (!identity) continue;
+      if (!identity || !(context.count > 0)) continue;
+      const match = selectSubmissionPrinting(
+        identity.oracleId, identity.printings, snapshot.artChain, snapshot.artOverrides, context.source,
+      );
+      if (!match) continue;
       for (let copy = 0; copy < context.count; copy++) {
-        const match = selectedPrinting(
-          identity.oracleId, identity.printings, snapshot.artChain, snapshot.artOverrides, context.source,
-        );
-        if (!match) continue;
         const last = rows[rows.length - 1];
         if (last && last.section === context.section && last.name === context.name
             && last.printing.set_code === match.set && last.printing.collector_number === match.collector_number) {
