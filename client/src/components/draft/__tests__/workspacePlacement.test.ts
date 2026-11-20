@@ -88,21 +88,24 @@ describe("workspace placement", () => {
       });
     });
 
-    it("sends_later_picks_to_the_merged_column_after_a_six_column_sort", () => {
-      const COLORS: Record<string, string[]> = {
-        white: ["W"], blue: ["U"], black: ["B"], red: ["R"], green: ["G"],
-        multicolor: ["W", "U"], colorless: [],
-      };
-      const pool = COLOR_KINDS.map((kind) => ({ ...card(kind, kind), colors: COLORS[kind] }));
-      const colorGroups: DraftPoolGroups["color_groups"] = pool.map((entry, index) => ({
-        kind: COLOR_KINDS[index],
+    // A later pick joins the column its group was sorted into, including a
+    // column the allocator shared between groups, for every sort and count.
+    function laterPicksJoinTheirGroupColumn(
+      sort: "color" | "type",
+      kinds: readonly DraftPoolGroupKind[],
+      columnCount: number,
+      traits: Record<string, Partial<DraftCardInstance>>,
+    ): Record<string, [number, number]> {
+      const pool = kinds.map((kind) => ({ ...card(kind, kind), ...traits[kind] }));
+      const axis = pool.map((entry, index) => ({
+        kind: kinds[index],
         total: 1,
         cards: [{ card: entry, count: 1, instance_ids: [entry.instance_id] }],
       }));
-      const poolGroups = { ...groups(), color_groups: colorGroups };
-      const preferences: DraftBoardPreferences = {
-        sort: "color", columnCount: 6, rows: "one", showHeaders: true,
-      };
+      const poolGroups = sort === "color"
+        ? { ...groups(), color_groups: axis }
+        : { ...groups(), type_groups: axis };
+      const preferences: DraftBoardPreferences = { sort, columnCount, rows: "one", showHeaders: true };
       const state: DraftWorkspaceState = {
         ...createDraftWorkspaceState(),
         placements: Object.fromEntries(
@@ -110,16 +113,48 @@ describe("workspace placement", () => {
         ),
       };
       const rebuilt = rebuildWorkspaceZone(state, "sideboard", pool, poolGroups, preferences);
-      const place = (instanceId: string) => resolveWorkspacePickPlacement(
-        pool.find((entry) => entry.instance_id === instanceId)!,
-        "sideboard", pool, poolGroups, rebuilt, preferences,
-      ).column;
+      return Object.fromEntries(pool.map((entry) => [
+        entry.name,
+        [
+          rebuilt.placements[entry.instance_id].column,
+          resolveWorkspacePickPlacement(
+            { ...entry, instance_id: `later-${entry.instance_id}` },
+            "sideboard", pool, poolGroups, rebuilt, preferences,
+          ).column,
+        ] as [number, number],
+      ]));
+    }
 
-      // Multicolor and colorless join their shared column; white and blue stay apart.
-      expect(place("multicolor")).toBe(5);
-      expect(place("colorless")).toBe(5);
-      expect(place("white")).toBe(0);
-      expect(place("blue")).toBe(1);
+    const COLOR_TRAITS: Record<string, Partial<DraftCardInstance>> = {
+      white: { colors: ["W"] }, blue: { colors: ["U"] }, black: { colors: ["B"] },
+      red: { colors: ["R"] }, green: { colors: ["G"] },
+      multicolor: { colors: ["W", "U"] }, colorless: { colors: [] },
+    };
+
+    it("sends_later_picks_to_the_merged_column_after_a_six_column_sort", () => {
+      const placed = laterPicksJoinTheirGroupColumn("color", COLOR_KINDS, 6, COLOR_TRAITS);
+      expect(placed.multicolor).toEqual([5, 5]);
+      expect(placed.colorless).toEqual([5, 5]);
+      expect(placed.white).toEqual([0, 0]);
+      expect(placed.blue).toEqual([1, 1]);
+    });
+
+    it("sends_later_picks_to_a_shared_column_when_the_pair_is_not_multicolor_and_colorless", () => {
+      const noMulticolor = COLOR_KINDS.filter((kind) => kind !== "multicolor");
+      const placed = laterPicksJoinTheirGroupColumn("color", noMulticolor, 5, COLOR_TRAITS);
+      for (const [column, later] of Object.values(placed)) expect(later).toBe(column);
+      // The tail pair really shares a column here, so this is the merged case.
+      expect(placed.green[0]).toBe(placed.colorless[0]);
+    });
+
+    it("sends_later_type_sorted_picks_to_a_shared_column_with_a_planeswalker", () => {
+      const kinds: DraftPoolGroupKind[] = [
+        "creature", "instant", "sorcery", "enchantment", "artifact", "planeswalker", "land",
+      ];
+      const traits = Object.fromEntries(kinds.map((kind) => [kind, { type_line: kind }]));
+      const placed = laterPicksJoinTheirGroupColumn("type", kinds, 6, traits);
+      for (const [column, later] of Object.values(placed)) expect(later).toBe(column);
+      expect(new Set(Object.values(placed).map(([column]) => column)).size).toBe(6);
     });
 
     it("folds_the_trailing_groups_first_as_columns_get_scarcer", () => {

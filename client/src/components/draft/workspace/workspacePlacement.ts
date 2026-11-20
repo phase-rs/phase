@@ -522,6 +522,31 @@ function allocateGroups(groups: AllocatableGroup[], columnCount: number): void {
   });
 }
 
+/**
+ * The columns `allocateGroups` gives each non-empty sort group over the cards
+ * in `activeIds`. Shared by the rebuild and by pick placement, so a column the
+ * allocator merged is recognised as a destination for every group it holds.
+ */
+function plannedSortColumns(
+  sort: Exclude<DraftBoardSort, "cmc">,
+  poolGroups: DraftPoolGroups,
+  poolIds: ReadonlySet<string>,
+  activeIds: ReadonlySet<string>,
+  columnCount: number,
+): Map<DraftPoolGroupKind, number[]> {
+  const boardGroups = axisGroups(sort, poolGroups).flatMap((group) => {
+    const bundles = group.cards.flatMap((entry) => {
+      const ids = entry.instance_ids.filter((instanceId) => (
+        poolIds.has(instanceId) && activeIds.has(instanceId)
+      ));
+      return ids.length === 0 ? [] : [ids];
+    });
+    return bundles.length === 0 ? [] : [{ group, bundles, columns: [] as number[] }];
+  });
+  allocateGroups(boardGroups, columnCount);
+  return new Map(boardGroups.map(({ group, columns }) => [group.kind, columns]));
+}
+
 export function rebuildWorkspaceZone(
   state: DraftWorkspaceState,
   zone: DraftZone,
@@ -543,20 +568,9 @@ export function rebuildWorkspaceZone(
   const rowFor = (instanceId: string) => rowCount === 1
     ? 0
     : Math.min(1, Math.max(0, state.placements[instanceId]?.row ?? 0));
-  const sortColumns = new Map<DraftPoolGroupKind, number[]>();
-  if (effective.sort !== "cmc") {
-    const boardGroups = axisGroups(effective.sort, poolGroups).flatMap((group) => {
-      const bundles = group.cards.flatMap((entry) => {
-        const ids = entry.instance_ids.filter((instanceId) => (
-          poolIds.has(instanceId) && affectedIds.has(instanceId)
-        ));
-        return ids.length === 0 ? [] : [ids];
-      });
-      return bundles.length === 0 ? [] : [{ group, bundles, columns: [] }];
-    });
-    allocateGroups(boardGroups, effective.columnCount);
-    boardGroups.forEach(({ group, columns }) => sortColumns.set(group.kind, columns));
-  }
+  const sortColumns = effective.sort === "cmc"
+    ? new Map<DraftPoolGroupKind, number[]>()
+    : plannedSortColumns(effective.sort, poolGroups, poolIds, affectedIds, effective.columnCount);
 
   for (let row = 0; row < rowCount; row += 1) {
     const rowIds = new Set([...affectedIds].filter((instanceId) => rowFor(instanceId) === row));
@@ -1079,6 +1093,19 @@ export function resolveWorkspaceSortColumn(
     return manaValueColumn(card.cmc, model.columnCount);
   }
   const groupKind = cardSortGroup(card, model.effectiveSort);
+  const zoneIds = new Set(
+    Object.entries(workspace.placements)
+      .filter(([, placement]) => placement.zone === zone)
+      .map(([instanceId]) => instanceId),
+  );
+  zoneIds.add(card.instance_id);
+  const planned = plannedSortColumns(
+    model.effectiveSort,
+    poolGroups,
+    new Set(pool.map((entry) => entry.instance_id)),
+    zoneIds,
+    model.columnCount,
+  );
   const matches = model.columns.filter((column) => {
     if (column.header.descriptors.some((descriptor) => descriptor.kind !== "engine-group")) {
       return false;
@@ -1089,13 +1116,13 @@ export function resolveWorkspaceSortColumn(
         ? [descriptor.groupKind]
         : []
     ));
-    // The allocator's catch-all column (multicolor and colorless sharing one
-    // column when groups outnumber columns) is a valid destination for each
-    // group it holds. Any other mixed column stays rejected so a pick is never
-    // folded into, say, a white-and-red header.
-    return sortGroupKinds.includes(groupKind)
-      && (sortGroupKinds.length === 1
-        || sortGroupKinds.every((kind) => kind === "multicolor" || kind === "colorless"));
+    // A column shared by several groups is a destination only when the
+    // allocator itself put them together (the folded tail of a sort with more
+    // groups than columns). A column that merely ended up holding mixed groups,
+    // like a white-and-red header from manual moves, stays rejected.
+    if (!sortGroupKinds.includes(groupKind)) return false;
+    return sortGroupKinds.length === 1
+      || sortGroupKinds.every((kind) => planned.get(kind)?.includes(column.column) === true);
   });
   // A column already holding the group wins over an empty one merely reserved for it.
   const matchingColumn = matches.find((column) => column.count > 0) ?? matches[0];
