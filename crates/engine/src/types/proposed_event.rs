@@ -511,7 +511,8 @@ pub struct TokenBatch {
     /// opportunity on this batch. Each batch owner chooses for their own part
     /// of a simultaneous event, so a multi-owner compound tracks every batch
     /// separately; a batch keeps its set if a redirect changes its owner
-    /// (CR 111.2).
+    /// (CR 614.5; Crafty Cutpurse ruling: "Each effect can be applied to the
+    /// token only once this way").
     #[serde(
         default,
         skip_serializing_if = "HashSet::is_empty",

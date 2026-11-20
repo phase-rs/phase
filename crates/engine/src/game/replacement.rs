@@ -13380,8 +13380,11 @@ fn apply_chosen_replacement(
     if scope == TokenBatchScope::WholeEvent {
         proposed.mark_applied(rid);
     }
-    // The comparison point for the CR 903.9b re-arm below is the event with
-    // `rid` already marked, so the mark alone never reads as a modification.
+    // On a whole event, the comparison point for the CR 903.9b re-arm below is
+    // the event with `rid` already marked, so the mark alone never reads as a
+    // modification; an owner-scoped compound is marked inside
+    // `apply_replacement_to_token_batches`, and the re-arm reads only
+    // ZoneChange events.
     let before = proposed.clone();
     let mut result = match scope {
         TokenBatchScope::WholeEvent => {
