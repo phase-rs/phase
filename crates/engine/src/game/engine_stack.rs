@@ -38,7 +38,7 @@ pub(super) fn finalize_trigger_target_selection(
 ) -> WaitingFor {
     let span_start = events.len();
     let placement = place_trigger_targets(state, trigger, ability, events);
-    // CR 603.2e + CR 603.3b: match the finisher's own span now and queue what it triggered before the drain. Those abilities triggered during the placement process under way, so the drain places that process first and then these together with the other abilities that triggered during it.
+    // CR 603.2e + CR 603.3b: match the finisher's own span now and queue what it triggered before the drain. Those abilities triggered during the placement process under way, so the drain places that process first and then these together with the other abilities that triggered during it. While an instant or sorcery is still resolving, the drain is refused (CR 608.2n) and these are placed later together with that resolution's other triggered abilities, not after them.
     triggers::queue_construction_span(state, events, span_start, span_owner);
     match placement {
         FinalizedPlacement::Returned(waiting_for) => *waiting_for,

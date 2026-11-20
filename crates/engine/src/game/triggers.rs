@@ -10277,7 +10277,7 @@ fn ability_resolution_is_placing_its_first_ability(state: &GameState) -> bool {
 }
 
 /// CR 603.3b + CR 603.12 + CR 309.4c: a triggered ability put on the stack
-/// while an ability's resolution is still under way is placed with every
+/// through a construction prompt (a target or mode choice) while an ability's resolution is still under way is placed with every
 /// ability that triggered earlier in that resolution, so the abilities queued
 /// by now join its placement process; what its own placement triggers waits for
 /// the next repetition. Only the finisher of the first ability the resolution
@@ -10295,7 +10295,7 @@ fn join_mid_resolution_triggers_to_process(state: &mut GameState) {
     }
 }
 
-/// CR 603.2 + CR 603.2c + CR 603.2e + CR 603.3b: match the span a finisher emitted against the game as it is now, claim it for the ordinary collectors, and queue what it triggered before the finisher's drain. Those abilities are not part of the placement process under way, so the drain places that process first. Inside an ability's resolution, the finisher of the first ability it put on the stack first marks what is already queued as members of the process under way.
+/// CR 603.2 + CR 603.2c + CR 603.2e + CR 603.3b: match the span a finisher emitted against the game as it is now, claim it for the ordinary collectors, and queue what it triggered before the finisher's drain. Those abilities are not part of the placement process under way, so the drain places that process first; while an instant or sorcery is still resolving the drain is refused (CR 608.2n), and they are placed together with that resolution's other triggered abilities. Inside an ability's resolution, the finisher of the first ability it put on the stack first marks what is already queued as members of the process under way.
 pub(crate) fn queue_construction_span(
     state: &mut GameState,
     events: &[GameEvent],
