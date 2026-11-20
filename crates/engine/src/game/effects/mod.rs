@@ -3954,11 +3954,11 @@ fn park_player_scope_queue_end(
     }
 }
 
-/// CR 118.12 + CR 608.2c: Complete the original rider of a paused
-/// `Effect::PayCost` only after its typed cost root has settled. The root owns
-/// the parent effect while a mana-source cost move is paused, so this replays
-/// the same child hand-off the ordinary chain walker would have performed.
-pub(crate) fn resolve_effect_pay_cost_rider(
+/// CR 608.2c + CR 603.12: Resolve `ability`'s rider the way the chain walker would after the
+/// parent effect completed — inheriting the parent's targets (the selected card a "when you do,
+/// exile that card" rider reads) and chain context. The single hand-off for a parent whose
+/// effect was completed outside the chain walker (a paused cost, a resumed copy settlement).
+pub(crate) fn resolve_rider_with_parent_context(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,

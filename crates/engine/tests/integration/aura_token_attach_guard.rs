@@ -401,6 +401,7 @@ fn a_replacement_that_leaves_a_non_aura_entrant_still_creates_the_token() {
     engine::game::effects::token::apply_create_token_after_replacement(
         board.runner.state_mut(),
         ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: P0,
             spec: Box::new(spec),
             copy: None,
