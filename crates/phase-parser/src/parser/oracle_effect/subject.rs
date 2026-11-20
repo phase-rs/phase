@@ -5349,9 +5349,21 @@ fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> Ta
         // "creatures target opponent controls"). `ParentTarget` cannot carry
         // this either: a triggerless grant declares no target, so it would
         // resolve to the controller and the grant would silently misfire.
-        _ if ctx.chain_prior_mass_population.is_some() => TargetFilter::TrackedSet {
-            id: crate::types::identifiers::TrackedSetId(0),
-        },
+        //
+        // When that population is itself a tracked-set read ("put a +1/+1
+        // counter on each of those creatures"), this chain did not establish
+        // it: the antecedent is an earlier printed paragraph, and the
+        // document relation pass (`CrossItemMassPopulationAnaphor`, Unbreakable
+        // Formation's addendum) binds the bare anaphor below to it.
+        _ if ctx
+            .chain_prior_mass_population
+            .as_ref()
+            .is_some_and(|population| !population.is_tracked_set_population()) =>
+        {
+            TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            }
+        }
         // No trigger context — anaphoric reference to previously mentioned objects
         _ => TargetFilter::ParentTarget,
     }
@@ -10269,6 +10281,19 @@ mod tests {
             they(None, None, false, None),
             TargetFilter::ParentTarget,
             "without a population the bare fallback stands"
+        );
+        assert_eq!(
+            they(
+                None,
+                None,
+                false,
+                Some(TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                })
+            ),
+            TargetFilter::ParentTarget,
+            "a population read from the tracked set was not established by this \
+             chain, so the bare anaphor stays for the cross-item relation pass"
         );
         assert_eq!(
             they(None, None, true, Some(population.clone())),
