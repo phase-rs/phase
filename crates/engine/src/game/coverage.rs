@@ -1630,7 +1630,18 @@ fn fmt_player_is_poisoned(player: &PlayerScope) -> String {
         PlayerScope::ScopedPlayer | PlayerScope::RecipientController => {
             "that player is poisoned".into()
         }
-        other => format!("{} is poisoned", fmt_player_scope(other)),
+        PlayerScope::Target
+        | PlayerScope::DefendingPlayer
+        | PlayerScope::SourceChosenPlayer
+        | PlayerScope::AnyTurn
+        | PlayerScope::SpecificPlayer { .. }
+        | PlayerScope::ParentObjectTarget { .. }
+        | PlayerScope::Opponent {
+            aggregate: AggregateFunction::Min | AggregateFunction::Sum,
+        }
+        | PlayerScope::AllPlayers { .. } => {
+            format!("{} is poisoned", fmt_player_scope(player))
+        }
     }
 }
 
