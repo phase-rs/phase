@@ -890,9 +890,9 @@ fn parse_token_description_with_context(
     bind_bare_token_x_pt_to_cost_x(&mut toughness);
 
     // CR 608.2c: a "for each … this way" / "for each opponent dealt damage"
-    // rider names the token count itself.
+    // rider multiplies the count position ("two … tokens for each …").
     if let Some(rider_count) = rider_count {
-        count = rider_count;
+        count = replace_fixed_quantity(count, rider_count);
     }
 
     if power.is_none() || toughness.is_none() {
@@ -975,10 +975,10 @@ pub(super) fn parse_token_attack_destination(
 
 /// CR 608.2c + CR 120.1 + CR 603.2c: split a trailing token-count rider off a
 /// create-token body — "for each opponent dealt damage" (Malcolm) or "for each
-/// <thing> … this way" (the preceding instruction's tracked set). The rider's
-/// quantity IS the token count, so it is read ahead of the count position and
-/// the body before "for each" is the token descriptor. Any other "for each"
-/// stays in the body for the count position's for-each binder.
+/// <thing> … this way" (the preceding instruction's tracked set). The rider is
+/// read ahead of the count position, which it multiplies; the body before "for
+/// each" is the token descriptor. Any other "for each" stays in the body for
+/// the count position's for-each binder.
 fn split_token_for_each_rider(text: &str) -> (&str, Option<QuantityExpr>) {
     let lower = text.to_lowercase();
     let Ok((clause, before)) = terminated(

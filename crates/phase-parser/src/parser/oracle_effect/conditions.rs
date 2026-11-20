@@ -7589,6 +7589,18 @@ pub fn ability_condition_to_static_condition(ac: &AbilityCondition) -> Option<St
         AbilityCondition::Not { condition } => Some(StaticCondition::Not {
             condition: Box::new(ability_condition_to_static_condition(condition)?),
         }),
+        AbilityCondition::And { conditions } => Some(StaticCondition::And {
+            conditions: conditions
+                .iter()
+                .map(ability_condition_to_static_condition)
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        AbilityCondition::Or { conditions } => Some(StaticCondition::Or {
+            conditions: conditions
+                .iter()
+                .map(ability_condition_to_static_condition)
+                .collect::<Option<Vec<_>>>()?,
+        }),
 
         // Casting-context conditions — read `SpellContext` / cast history at
         // resolution time; no continuous-evaluation (`StaticCondition`)
@@ -7661,9 +7673,7 @@ pub fn ability_condition_to_static_condition(ac: &AbilityCondition) -> Option<St
         | AbilityCondition::SourceMatchesFilter { .. }
         | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
         | AbilityCondition::DayNightIs { .. }
-        | AbilityCondition::ControllerControlsMatching { .. }
-        | AbilityCondition::And { .. }
-        | AbilityCondition::Or { .. } => None,
+        | AbilityCondition::ControllerControlsMatching { .. } => None,
     }
 }
 

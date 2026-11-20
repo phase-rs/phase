@@ -9441,7 +9441,9 @@ fn is_anaphoric_entry_counters_clause(sentence: &str) -> bool {
 /// with an optional source-keyword condition such as Ram Through's "If the
 /// creature you control has trample" prefix. The body remains the same
 /// CR 120.4a redirect; only the source-keyword gate is optional.
-fn parse_excess_damage_to_controller_rider(input: &str) -> OracleResult<'_, Option<KeywordKind>> {
+pub(crate) fn parse_excess_damage_to_controller_rider(
+    input: &str,
+) -> OracleResult<'_, Option<KeywordKind>> {
     /// CR 608.2c + CR 702: Parse the source-referential keyword gate.
     fn parse_source_keyword_condition(input: &str) -> OracleResult<'_, KeywordKind> {
         // This is not parse_inner_condition: Ram Through's definite phrase
