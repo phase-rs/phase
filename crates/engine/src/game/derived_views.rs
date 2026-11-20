@@ -1835,7 +1835,8 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // O(battlefield size); the BTreeMap stays empty (and `skip_serializing_if`
     // omits the field) when no Auras are enchanting any player, which is the
     // dominant case.
-    let block_restrictions = crate::game::combat::collect_block_restriction_statics(state);
+    let block_restrictions =
+        crate::game::combat::collect_functioning_block_restriction_statics(state);
     for &obj_id in &state.battlefield {
         let Some(obj) = state.objects.get(&obj_id) else {
             continue;
