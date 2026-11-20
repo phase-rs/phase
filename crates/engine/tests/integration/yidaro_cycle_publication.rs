@@ -241,9 +241,12 @@ fn v1_direct_ordinary_cycle() {
 }
 
 // CR 702.29e + CR 702.29f: The hand grant pays for a search and counts as cycling.
-// CR 603.3d: Tactician chooses its own legal target and resolves above that search.
+// CR 603.3d governs target selection for Snare Tactician's trigger. CR 603.3 and
+// CR 405.2 put it above the pending slivercycling ability.
 // CR 701.23b: The search can fail to find even with a Sliver in the library.
-// CR 733.1: Reversing the activation before payment leaves no completed cycle.
+// CancelCast abandons the pending activation before payment. CR 602.2b and
+// CR 601.2h-i govern completion, and CR 702.29f ties the cycle to discarding the
+// card to pay the typecycling cost.
 #[test]
 fn v2_granted_slivercycling_after_discard() {
     let mut control = main_phase();
