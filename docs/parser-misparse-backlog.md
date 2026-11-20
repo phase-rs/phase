@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4479
-- **Total card appearances across root causes:** 4512 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4476
+- **Total card appearances across root causes:** 4509 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > **Staleness warning.** This list is pruned one card at a time and has not been
 > regenerated from current parser state. A measurement at `bd1f78ed0` (#8907)
@@ -49,7 +49,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 |---|------------|--------:|----------------------------------|
 | 1 | Relative-clause / filter restriction on target dropped | 718 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
 | 2 | Dropped intervening-if / gating condition (condition: null) | 568 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
-| 3 | Anaphor bound to wrong referent | 399 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
+| 3 | Anaphor bound to wrong referent | 396 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 377 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 322 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 224 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
@@ -77,7 +77,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2384/4512 ≈ 52.8% of all misparse appearances; the top 10 cover 3360/4512 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
+> The top **5** root causes cover 2381/4509 ≈ 52.8% of all misparse appearances; the top 10 cover 3357/4509 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
 
 ## Full card lists per root cause
 
@@ -1389,7 +1389,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 3. Anaphor bound to wrong referent  (399 cards)
+### 3. Anaphor bound to wrong referent  (396 cards)
 
 **Signature.** A pronoun/demonstrative ('it', 'that creature/player', 'them', 'they') resolves to the wrong slot (Self/Source/Controller/Any/ParentTarget) instead of the bound parent target, forwarded result, or triggering player (CR 608.2k). Includes the runtime half of the same defect class, where the referent slot is bound correctly but resolves to a STALE prior answer.
 
@@ -1447,7 +1447,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Brudiclad, Telchor Engineer
 - Burn Away
 - Call of the Death-Dweller
-- Captain Ripley Vance
 - Celeborn the Wise
 - Cemetery Gatekeeper
 - Cemetery Protector
@@ -1617,7 +1616,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Mind Spiral
 - Mindshrieker
 - Minn, Wily Illusionist
-- Mogg Bombers
 - Mogis, God of Slaughter
 - Moku, Meandering Drummer
 - Monkey Cage
@@ -1634,7 +1632,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Nissa's Judgment
 - Niv-Mizzet, Supreme
 - No One Will Hear Your Cries
-- Norin the Wary
 - Numbing Dose
 - Ob Nixilis, Unshackled
 - Oblation

@@ -609,16 +609,7 @@ pub fn apply_resolved_stack_entry_finalize(
         );
     }
     if let Some(occurrence) = command.resulting_cast_occurrence {
-        let matching_record = usize::try_from(occurrence.turn_journal_index)
-            .ok()
-            .and_then(|index| {
-                state
-                    .spells_cast_this_turn_by_player
-                    .get(&occurrence.caster)
-                    .and_then(|records| records.get(index))
-            })
-            .is_some_and(|record| record.spell_object_id == Some(command.object));
-        if !matching_record {
+        if !crate::game::ledger::cast_occurrence_is_current(state, occurrence, command.object) {
             return Err(
                 ResolvedStackEntryFinalizeReplayInvariantError::CastOccurrenceMismatch(
                     command.object,
