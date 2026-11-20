@@ -9,19 +9,25 @@
 //! face-up conspiracy's command-zone continuous statics gather like an emblem's.
 
 use super::conspiracy::{
-    conspiracies_in_command_zone, functions_from_command_zone, is_conspiracy,
-    start_with_conspiracy, turn_hidden_agenda_face_up,
+    agenda_name_count, card_has_hidden_agenda, conspiracies_in_command_zone,
+    functions_from_command_zone, is_conspiracy, start_with_conspiracy, turn_hidden_agenda_face_up,
 };
+use super::filter::{matches_target_filter, matches_target_filter_for_zone, FilterContext};
 use super::functioning_abilities::{
     active_static_definitions, active_trigger_definitions, game_functioning_statics,
 };
+use super::morph::{turn_face_up_offer, turn_face_up_prepare, TurnFaceUpOffer};
 use crate::database::synthesis::synthesize_conspiracy;
-use crate::types::ability::{StaticDefinition, TriggerDefinition};
+use crate::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, StaticDefinition, TargetFilter,
+    TriggerDefinition,
+};
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{GameState, StaticSourceIndex};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::PlayerId;
+use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -235,15 +241,39 @@ fn turn_hidden_agenda_face_up_reveals_and_is_guarded() {
     start_with_conspiracy(&mut state, id, true);
 
     // An opponent cannot turn it face up.
-    assert!(!turn_hidden_agenda_face_up(&mut state, id, P1));
+    assert!(!turn_hidden_agenda_face_up(
+        &mut state,
+        id,
+        P1,
+        &mut Vec::new()
+    ));
     assert!(state.objects.get(&id).unwrap().face_down);
 
+    // CR 116.2j: the free action is offered outside the paid turn-face-up
+    // authority, which only ever reports paid-cost sources.
+    assert_eq!(turn_face_up_offer(&state, P1, id), None);
+    assert_eq!(
+        turn_face_up_offer(&state, P0, id),
+        Some(TurnFaceUpOffer::Ready)
+    );
+    assert!(turn_face_up_prepare(&state, id, P0).is_err());
+
     // The controller can.
-    assert!(turn_hidden_agenda_face_up(&mut state, id, P0));
+    assert!(turn_hidden_agenda_face_up(
+        &mut state,
+        id,
+        P0,
+        &mut Vec::new()
+    ));
     assert!(!state.objects.get(&id).unwrap().face_down);
 
     // Already face up → no-op.
-    assert!(!turn_hidden_agenda_face_up(&mut state, id, P0));
+    assert!(!turn_hidden_agenda_face_up(
+        &mut state,
+        id,
+        P0,
+        &mut Vec::new()
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -352,4 +382,205 @@ fn face_down_conspiracy_is_not_indexed_as_command_source() {
         !state.static_source_index.command_sources.contains(&id),
         "CR 905.4a: a face-down hidden-agenda conspiracy does not yet function"
     );
+}
+
+#[test]
+fn card_has_hidden_agenda_detects_agenda_text() {
+    let mut face = CardFace::default();
+    face.card_type.core_types.push(CoreType::Conspiracy);
+    face.oracle_text =
+        Some("Hidden agenda (Start the game with this conspiracy face down...)".to_string());
+    assert!(card_has_hidden_agenda(&face));
+
+    face.oracle_text =
+        Some("Double agenda (Start the game with this conspiracy face down...)".to_string());
+    assert!(card_has_hidden_agenda(&face));
+
+    assert_eq!(agenda_name_count(&face), 2);
+
+    face.oracle_text = Some("At the beginning of your upkeep, draw a card.".to_string());
+    assert!(!card_has_hidden_agenda(&face));
+    assert_eq!(agenda_name_count(&face), 0);
+
+    // An agenda is a keyword line, not any mention of the words.
+    face.oracle_text = Some("Reveal your hidden agenda.".to_string());
+    assert_eq!(agenda_name_count(&face), 0);
+
+    // Non-conspiracy with "hidden agenda" in text is not a hidden agenda conspiracy
+    let mut creature_face = CardFace::default();
+    creature_face.card_type.core_types.push(CoreType::Creature);
+    creature_face.oracle_text = Some("Hidden agenda".to_string());
+    assert!(!card_has_hidden_agenda(&creature_face));
+}
+
+/// CR 315.5b: a face-down conspiracy's printed name, type, and abilities are not
+/// available to anything until it is turned face up, while the internal identity
+/// that reveal and eligibility read survives.
+#[test]
+fn face_down_conspiracy_has_no_characteristics_until_turned_up() {
+    let mut state = GameState::new_two_player(7);
+    let cda = StaticDefinition::new(StaticMode::from_str("Continuous").unwrap());
+    let mut face = synthesized_conspiracy_face(vec![cda], vec![]);
+    face.name = "Brago's Favor".to_string();
+    face.mana_cost = crate::types::mana::ManaCost::generic(1);
+    let id = create_conspiracy_object(&mut state, "Brago's Favor", &face, P0);
+    // The production face application, which the reveal snapshot reads back.
+    crate::game::printed_cards::apply_card_face_to_object(
+        state.objects.get_mut(&id).unwrap(),
+        &face,
+    );
+    start_with_conspiracy(&mut state, id, true);
+
+    let named = TargetFilter::Named {
+        name: "Brago's Favor".to_string(),
+    };
+    let ctx = FilterContext::from_source(&state, id);
+    assert!(!matches_target_filter(&state, id, &named, &ctx));
+    assert!(
+        !matches_target_filter_for_zone(&state, id, Zone::Command, &named, &ctx),
+        "CR 315.5b: the command-zone filter path reads no printed name either"
+    );
+
+    let obj = state.objects.get(&id).unwrap();
+    assert!(is_conspiracy(obj), "internal identity survives");
+    assert!(obj.name.is_empty());
+    assert!(obj.card_types.core_types.is_empty());
+    assert!(obj.static_definitions.is_empty());
+    assert_eq!(obj.mana_cost, crate::types::mana::ManaCost::NoCost);
+    assert!(
+        active_static_definitions(&state, obj).next().is_none(),
+        "CR 315.5b: nothing to admit to the layer gather while face down"
+    );
+
+    assert!(turn_hidden_agenda_face_up(
+        &mut state,
+        id,
+        P0,
+        &mut Vec::new()
+    ));
+    let ctx = FilterContext::from_source(&state, id);
+    assert!(matches_target_filter(&state, id, &named, &ctx));
+    assert!(matches_target_filter_for_zone(
+        &state,
+        id,
+        Zone::Command,
+        &named,
+        &ctx
+    ));
+    let obj = state.objects.get(&id).unwrap();
+    assert_eq!(obj.name, "Brago's Favor");
+    assert!(obj.card_types.core_types.contains(&CoreType::Conspiracy));
+    assert_eq!(obj.static_definitions.len(), 1);
+}
+
+#[test]
+fn face_down_conspiracy_visibility_redacted_for_opponent_revealed_for_controller() {
+    // One marker per kind of rules payload a conspiracy's face can carry, so the
+    // serialized checks below cover every definition list and not just the name.
+    const RULES_PAYLOAD: [&str; 4] = [
+        "static-rules-payload",
+        "trigger-rules-payload",
+        "replacement-rules-payload",
+        "ability-rules-payload",
+    ];
+    let mut state = GameState::new_two_player(7);
+    let cda = StaticDefinition::new(StaticMode::from_str("Continuous").unwrap())
+        .description(RULES_PAYLOAD[0].to_string());
+    let trigger =
+        TriggerDefinition::new(TriggerMode::SpellCast).description(RULES_PAYLOAD[1].to_string());
+    let mut face = synthesized_conspiracy_face(vec![cda], vec![trigger]);
+    face.replacements = vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+        .description(RULES_PAYLOAD[2].to_string())];
+    face.abilities = vec![AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::unimplemented("Marker", "marker"),
+    )
+    .description(RULES_PAYLOAD[3].to_string())];
+    face.name = "Brago's Favor".to_string();
+    face.mana_cost = crate::types::mana::ManaCost::generic(1);
+    let id = create_conspiracy_object(&mut state, "Brago's Favor", &face, P0);
+    crate::game::printed_cards::apply_card_face_to_object(
+        state.objects.get_mut(&id).unwrap(),
+        &face,
+    );
+    start_with_conspiracy(&mut state, id, true);
+
+    // Controller projection sees the face-down conspiracy revealed
+    let p0_view = crate::game::visibility::filter_state_for_viewer(&state, P0);
+    let p0_card = p0_view.objects.get(&id).unwrap();
+    assert_eq!(p0_card.name, "Brago's Favor");
+    assert!(p0_card.is_conspiracy);
+    assert!(p0_card
+        .card_types
+        .core_types
+        .contains(&CoreType::Conspiracy));
+
+    // Opponent projection has identity and rules payload redacted
+    let p1_view = crate::game::visibility::filter_state_for_viewer(&state, P1);
+    let p1_card = p1_view.objects.get(&id).unwrap();
+    assert_eq!(p1_card.name, crate::game::visibility::HIDDEN_CARD_NAME);
+    assert!(
+        p1_card.is_conspiracy,
+        "preserves public display classification"
+    );
+    assert!(
+        p1_card.card_types.core_types.is_empty(),
+        "characteristics redacted"
+    );
+    assert!(p1_card.static_definitions.is_empty(), "statics redacted");
+    assert!(p1_card.trigger_definitions.is_empty(), "triggers redacted");
+    assert!(
+        p1_card.replacement_definitions.is_empty(),
+        "replacements redacted"
+    );
+    assert!(p1_card.abilities.is_empty(), "abilities redacted");
+    assert_eq!(p1_card.mana_cost, crate::types::mana::ManaCost::NoCost);
+
+    // Serialization for opponent and unseated observer does not leak name or statics
+    for viewer in [Some(P1), None] {
+        let wire = serde_json::to_string(&crate::game::derived_views::ClientGameStateRef::wrap(
+            &state, viewer,
+        ))
+        .expect("wire state serializes");
+        assert!(!wire.contains("Brago's Favor"), "viewer {viewer:?}");
+        assert!(!wire.contains("Continuous"), "viewer {viewer:?}");
+        // The engine-authored display classification is not a characteristic, so
+        // the client can still seat a face-down conspiracy in its dock without
+        // learning which card it is.
+        assert!(
+            wire.contains("\"is_conspiracy\":true"),
+            "display classification for viewer {viewer:?}"
+        );
+        for payload in RULES_PAYLOAD {
+            assert!(!wire.contains(payload), "{payload} for viewer {viewer:?}");
+        }
+    }
+
+    // Turn face up
+    assert!(turn_hidden_agenda_face_up(
+        &mut state,
+        id,
+        P0,
+        &mut Vec::new()
+    ));
+
+    // Now opponent also sees the card
+    let p1_view_after = crate::game::visibility::filter_state_for_viewer(&state, P1);
+    let p1_card_after = p1_view_after.objects.get(&id).unwrap();
+    assert_eq!(p1_card_after.name, "Brago's Favor");
+    assert_eq!(p1_card_after.static_definitions.len(), 1);
+    // Reach guard: the same markers do serialize once the card is public, so their
+    // absence above is the redaction and not a field the wire never carries.
+    let wire = serde_json::to_string(&crate::game::derived_views::ClientGameStateRef::wrap(
+        &state,
+        Some(P1),
+    ))
+    .expect("wire state serializes");
+    for payload in RULES_PAYLOAD {
+        assert!(wire.contains(payload), "{payload} after the turn-up");
+    }
+    assert!(p1_card_after
+        .card_types
+        .core_types
+        .contains(&CoreType::Conspiracy));
 }

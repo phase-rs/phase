@@ -27,11 +27,14 @@
 #                        unexpected wording changes.
 #
 # Usage:
-#   scripts/coverage-regression-check.sh <baseline> <current> [--fail-on-engine]
+#   scripts/coverage-regression-check.sh <baseline> <current> [options]
 #
 #   <baseline>  path OR https URL to main-branch coverage-data.json
 #   <current>   path to the newly produced coverage-data.json
 #   --fail-on-engine  exit 1 if REGRESSED (engine) bucket is non-empty
+#
+#   --self-test       run this script's own fixture suite
+#                     (scripts/lib/coverage_crlf_tests.sh) and exit with its status
 #
 # The coverage-data.json layout comes from `coverage-report` (see
 # crates/engine/src/bin/coverage_report.rs): .cards[] with .card_name,
@@ -39,17 +42,54 @@
 
 set -euo pipefail
 
+# Self-test entry, before the argument guard: the suite needs no arguments.
+if [[ "${1:-}" == "--self-test" ]]; then
+    exec /bin/bash "$(dirname "$0")/lib/coverage_crlf_tests.sh"
+fi
+
 if [[ $# -lt 2 ]]; then
     sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//' >&2
     exit 2
 fi
 
+# Native Windows jq terminates every line it prints with CRLF, so a value read from it carries a
+# CR into arithmetic: `net=$((cur_supported - base_supported))` then reports "invalid arithmetic
+# operator" and the comparison does not decide at all (#10549). Normalize at the boundary, and
+# fail with a named message when the value is still not a number — a threshold that silently does
+# not evaluate is the defect, so this must never fall through to a false "clean" verdict.
+jq_num() {
+    local value
+    value="$(jq "$@")"
+    value="${value%$'\r'}"
+    # A sign is allowed; anything else that is not a digit is refused. Testing the whole value
+    # against `[!0-9-]` let `-`, `--` and `1-2` through, and those fail inside `[[ ]]`'s CONDITION
+    # context silently — no verdict, exit 0 — which is the false clean this boundary exists to stop.
+    case "${value#-}" in
+        '' | *[!0-9]*)
+            echo "ERROR: jq produced a non-numeric value where a count was required: jq $*" >&2
+            echo "       got '$value' — refusing to compare against a value that is not a number" >&2
+            return 2
+            ;;
+    esac
+    printf '%s\n' "$value"
+}
+
 BASELINE="$1"
 CURRENT="$2"
 FAIL_ON_ENGINE=0
-if [[ "${3:-}" == "--fail-on-engine" ]]; then
-    FAIL_ON_ENGINE=1
-fi
+shift 2
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --fail-on-engine)
+            FAIL_ON_ENGINE=1
+            shift
+            ;;
+        *)
+            echo "unknown option: $1" >&2
+            exit 2
+            ;;
+    esac
+done
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
@@ -71,6 +111,75 @@ fi
 if [[ ! -s "$CURRENT" ]]; then
     echo "Current file missing or empty: $CURRENT" >&2
     exit 2
+fi
+
+# A support/diagnostic comparison is only meaningful when both files were
+# generated from the same raw card-data corpus. `coverage-report` emits this
+# identity from the exact MTGJSON bytes it consumes, keeping every caller on
+# one authority. Never compare mixed epochs (Oracle churn would read as parser
+# regressions), and never skip silently: a corpus mismatch warns and skips, an
+# unstamped legacy baseline warns and compares, and a missing or malformed
+# identity fails closed.
+#
+# `source_corpus_hash` is read as: absent/null -> "" (no identity recorded);
+# a lowercase SHA-256 string -> itself; anything else (including "") -> a
+# `malformed:` marker, which the SHA-256 shape check below rejects. The shape
+# is decided inside jq, on the decoded string, so the only raw CR left in the
+# output is native Windows jq's line ending, dropped as in `jq_num` (#10549).
+# `\A`/`\z` anchor the whole string: jq's `$` also matches before a final
+# newline.
+read_source_corpus_hash() {
+    local value
+    value="$(jq -r '.source_corpus_hash
+        | if . == null then ""
+          elif type == "string" and test("\\A[0-9a-f]{64}\\z") then .
+          else "malformed:" + tojson
+          end' "$1")" || return
+    printf '%s\n' "${value%$'\r'}"
+}
+is_sha256_hex() {
+    [[ "$1" =~ ^[0-9a-f]{64}$ ]]
+}
+BASELINE_SOURCE_CORPUS_HASH="$(read_source_corpus_hash "$BASELINE")"
+CURRENT_SOURCE_CORPUS_HASH="$(read_source_corpus_hash "$CURRENT")"
+# The current artifact always comes from this checkout's `coverage-report`,
+# which refuses to run without verified provenance, so a missing or malformed
+# current identity is a pipeline defect and never a bootstrap state.
+if [[ -z "$CURRENT_SOURCE_CORPUS_HASH" ]]; then
+    echo "CORPUS_IDENTITY_MISSING: current has no source_corpus_hash; refusing cross-corpus comparison." >&2
+    echo "CARD DATA DRIFT: refusing comparison without a current corpus identity." >&2
+    exit 2
+fi
+if ! is_sha256_hex "$CURRENT_SOURCE_CORPUS_HASH"; then
+    echo "CORPUS_IDENTITY_MALFORMED: current source_corpus_hash is not a lowercase SHA-256: $CURRENT_SOURCE_CORPUS_HASH" >&2
+    exit 2
+fi
+if [[ -z "$BASELINE_SOURCE_CORPUS_HASH" ]]; then
+    # Legacy-baseline bootstrap. Baselines published before corpus stamping
+    # carry no identity, and stamping one after the fact would be a guess.
+    # Compare exactly as the gate did before corpus identity existed, and say
+    # so loudly. The trusted main publisher uploads the coverage-report output,
+    # which carries the provenance-verified identity of the raw AtomicCards
+    # bytes it consumed, so the fence below engages on its own with the first
+    # stamped baseline. A baseline that records a malformed identity is not
+    # legacy and still fails closed.
+    echo "::warning title=Coverage corpus identity unverified::CORPUS_IDENTITY_UNVERIFIED: baseline has no source_corpus_hash (published before corpus stamping); comparing without corpus identity against current corpus $CURRENT_SOURCE_CORPUS_HASH. The corpus fence engages once main publishes a stamped baseline."
+    echo "CORPUS_IDENTITY_UNVERIFIED: legacy baseline without source_corpus_hash; corpus identity could not be compared." >&2
+elif ! is_sha256_hex "$BASELINE_SOURCE_CORPUS_HASH"; then
+    echo "CORPUS_IDENTITY_MALFORMED: baseline source_corpus_hash is not a lowercase SHA-256: $BASELINE_SOURCE_CORPUS_HASH" >&2
+    echo "CARD DATA DRIFT: refusing comparison against a malformed baseline corpus identity." >&2
+    exit 2
+elif [[ "$BASELINE_SOURCE_CORPUS_HASH" != "$CURRENT_SOURCE_CORPUS_HASH" ]]; then
+    # Different corpora: a support/diagnostic delta would mix Oracle churn
+    # with parser changes, so the comparison is not meaningful and is skipped.
+    # This is deliberately non-blocking. Corpus drift is routine (weekly
+    # MTGJSON rollover, per-branch caches, local inputs), and failing here
+    # would wedge the merge queue: nothing merges, so main never republishes
+    # a baseline for the new corpus. Only producer/publisher defects
+    # (missing or malformed identities above) fail closed.
+    echo "::warning title=Coverage corpus mismatch::CORPUS_MISMATCH: baseline corpus $BASELINE_SOURCE_CORPUS_HASH != current corpus $CURRENT_SOURCE_CORPUS_HASH; coverage comparison skipped (not meaningful across corpora). It resumes once main publishes a baseline for this corpus."
+    echo "CARD DATA DRIFT: baseline and current were generated from different corpora; skipping coverage comparison." >&2
+    exit 0
 fi
 
 # Emit one JSON object per card that flipped, with categorized new gaps.
@@ -140,14 +249,14 @@ jq -n --slurpfile base "$BASELINE" --slurpfile curr "$CURRENT" '
     )
 ' > "$tmpdir/flips.json"
 
-engine_count=$(jq '[.[] | select(.bucket=="engine_regress")] | length' "$tmpdir/flips.json")
-parser_count=$(jq '[.[] | select(.bucket=="parser_regress")] | length' "$tmpdir/flips.json")
-oracle_count=$(jq '[.[] | select(.bucket=="oracle_changed")] | length' "$tmpdir/flips.json")
-gained_count=$(jq '[.[] | select(.bucket=="gained")] | length' "$tmpdir/flips.json")
+engine_count=$(jq_num '[.[] | select(.bucket=="engine_regress")] | length' "$tmpdir/flips.json")
+parser_count=$(jq_num '[.[] | select(.bucket=="parser_regress")] | length' "$tmpdir/flips.json")
+oracle_count=$(jq_num '[.[] | select(.bucket=="oracle_changed")] | length' "$tmpdir/flips.json")
+gained_count=$(jq_num '[.[] | select(.bucket=="gained")] | length' "$tmpdir/flips.json")
 
-cur_total=$(jq '.total_cards' "$CURRENT")
-cur_supported=$(jq '.supported_cards' "$CURRENT")
-base_supported=$(jq '.supported_cards' "$BASELINE")
+cur_total=$(jq_num '.total_cards' "$CURRENT")
+cur_supported=$(jq_num '.supported_cards' "$CURRENT")
+base_supported=$(jq_num '.supported_cards' "$BASELINE")
 net=$((cur_supported - base_supported))
 
 echo "== Card support delta vs baseline =="
@@ -208,8 +317,8 @@ fi
 
 diag_fail=0
 if [[ "$baseline_has_diag" -eq 1 ]]; then
-    base_total=$(jq -r '.total_cards // 0' "$BASELINE" 2>/dev/null)
-    curr_total=$(jq -r '.total_cards // 0' "$CURRENT" 2>/dev/null)
+    base_total=$(jq_num -r '.total_cards // 0' "$BASELINE")
+    curr_total=$(jq_num -r '.total_cards // 0' "$CURRENT")
     new_cards=$((curr_total - base_total))
     if [[ "$new_cards" -lt 0 ]]; then
         new_cards=0
@@ -265,16 +374,24 @@ if [[ "$baseline_has_diag" -eq 1 ]]; then
     ' > "$tmpdir/honesty.json" 2>/dev/null
 
     while IFS='=' read -r cat count; do
-        base_count=$(jq -r ".diagnostics[\"$cat\"] // 0" "$BASELINE" 2>/dev/null)
+        count="${count%$'\r'}"
+        case "${count#-}" in
+            '' | *[!0-9]*)
+                echo "ERROR: non-numeric diagnostic count for '$cat': '$count'" >&2
+                echo "       refusing to compare against a value that is not a number" >&2
+                exit 2
+                ;;
+        esac
+        base_count=$(jq_num -r ".diagnostics[\"$cat\"] // 0" "$BASELINE")
         if [[ "$count" -gt "$base_count" ]]; then
             increase=$((count - base_count))
-            honesty_only=$(jq -r --arg cat "$cat" '
+            honesty_only=$(jq_num -r --arg cat "$cat" '
               [.[] | select(.category == $cat) | .honesty_only | length] | add // 0
             ' "$tmpdir/honesty.json")
             honesty_names=$(jq -r --arg cat "$cat" '
               [.[] | select(.category == $cat) | .honesty_only[]] | join(", ")
             ' "$tmpdir/honesty.json")
-            real_count=$(jq -r --arg cat "$cat" '
+            real_count=$(jq_num -r --arg cat "$cat" '
               [.[] | select(.category == $cat) | .real_regress | length] | add // 0
             ' "$tmpdir/honesty.json")
             if [[ "$honesty_only" -gt 0 ]]; then
@@ -299,6 +416,14 @@ if [[ "$baseline_has_diag" -eq 1 ]]; then
 
     # Also check for new categories not in baseline
     while IFS='=' read -r cat count; do
+        count="${count%$'\r'}"
+        case "${count#-}" in
+            '' | *[!0-9]*)
+                echo "ERROR: non-numeric diagnostic count for '$cat': '$count'" >&2
+                echo "       refusing to compare against a value that is not a number" >&2
+                exit 2
+                ;;
+        esac
         if ! jq -e ".diagnostics[\"$cat\"]" "$BASELINE" > /dev/null 2>&1; then
             echo "DIAGNOSTIC REGRESSION: new category $cat with count $count (not in baseline)" >&2
             diag_fail=1

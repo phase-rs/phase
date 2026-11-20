@@ -346,6 +346,7 @@ fn redundancy_delta(
             /* delta= */ -3.0,
         ),
         Effect::ApplyPostReplacementDamage { .. } => None,
+        Effect::ResumeDamageBatch { .. } => None,
         Effect::CombineHost { .. } | Effect::ChooseAugmentAndCombineWithHost { .. } => None,
         Effect::Draw { count, .. } => zero_quantity_redundancy(
             state,
@@ -628,6 +629,7 @@ fn redundancy_delta(
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::Intensify { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -739,7 +741,10 @@ fn redundancy_delta(
         // static redundancy signal (the value depends on the runtime choice).
         | Effect::ChooseCounterKind { .. }
         | Effect::PutChosenCounter { .. }
-        | Effect::HeistExile => None,
+        | Effect::HeistExile
+        // Turtle Team-Up (no CR section — casual product): "the bosses play
+        // a card" — value depends on the revealed card; no static signal.
+        | Effect::HordePlayCard { .. } => None,
     }
 }
 

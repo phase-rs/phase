@@ -375,7 +375,7 @@ fn scoped_advokist_planeswalker_only_restriction_snapshots_controller_provenance
             affected_players: RestrictionPlayerScope::SpecificPlayer(P1),
             expiry: RestrictionExpiry::UntilPlayerNextTurn { player: P0 },
             activity: ProhibitedActivity::Attack {
-                defended: AttackTargetFilter::Planeswalker,
+                defended: AttackTargetFilter::Planeswalker { subtype: None },
                 protected_player: Some(P0),
             },
         }] if *stored_source == source

@@ -2,11 +2,15 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::types::ability_visit::{
+    granter_symbols, granter_symbols_mut, DefinitionNode, DefinitionNodeMut,
+};
 use crate::types::action_rejection::ActionRejection;
+use crate::types::display_only::DisplayOnly;
 use crate::types::events::{GameEvent, LibrarySearchCardFaceView, LibrarySearchCardView};
 use crate::types::game_state::{
-    CastOfferKind, GameState, LibraryKnowledgeStamp, PayCostKind, StackEntryKind, WaitingFor,
-    ZoneChangeRecord,
+    CastOfferKind, DistributionScope, GameState, LibraryKnowledgeStamp, PayCostKind,
+    StackEntryKind, WaitingFor, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -15,25 +19,36 @@ use crate::types::zones::{ExileCostSourceZone, Zone};
 use super::players;
 use super::turn_control;
 
-const HIDDEN_CARD_NAME: &str = "Hidden Card";
+pub const HIDDEN_CARD_NAME: &str = "Hidden Card";
 
 /// Resolution-only look-result provenance is never part of a viewer snapshot.
 /// The engine retains it for the active loop, while clients need only the
 /// public prompt and the card identities they are otherwise allowed to see.
 fn redact_parent_target_iteration_members(ability: &mut crate::types::ability::ResolvedAbility) {
     ability.context.parent_target_iteration_members = None;
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        redact_parent_target_iteration_members(sub_ability);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        redact_parent_target_iteration_members(else_ability);
+    for (_, child) in ability.child_links_mut() {
+        redact_parent_target_iteration_members(child);
     }
 }
 
-fn redact_waiting_for_iteration_members(waiting_for: &mut WaitingFor) {
+///
+/// Shared by both viewer boundaries: `filter_state_for_viewer` and the direct
+/// client serializer (`derived_views::client_state_wire_value`), so a caller
+/// that skips the viewer filter still cannot ship the provenance.
+pub(crate) fn redact_waiting_for_iteration_members(waiting_for: &mut WaitingFor) {
     match waiting_for {
         WaitingFor::UnlessPayment { pending_effect, .. }
         | WaitingFor::UnlessPaymentChooseCost { pending_effect, .. } => {
+            redact_parent_target_iteration_members(pending_effect);
+        }
+        // CR 608.2d: the paused resolution-time division effect is retained in
+        // authoritative state to resume from; the prompt (`targets`, `total`,
+        // `unit`) is the whole public surface, so its private look-result
+        // provenance never reaches a viewer.
+        WaitingFor::DistributeAmong {
+            scope: DistributionScope::ResolutionCandidates { pending_effect },
+            ..
+        } => {
             redact_parent_target_iteration_members(pending_effect);
         }
         _ => {}
@@ -143,6 +158,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::RevealUntilBottomOrder { .. }
+        | WaitingFor::DigBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::CoinFlipKeepChoice { .. }
@@ -157,10 +173,11 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::ChooseFromZoneChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
-        | WaitingFor::SpellCopyOrderChoice { .. }
+        | WaitingFor::MemberOrderChoice { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardChoice { .. }
+        | WaitingFor::HeroEventChoice { .. }
         | WaitingFor::EffectZoneChoice { .. }
         | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
         | WaitingFor::LearnChoice { .. }
@@ -168,6 +185,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::TriggerTargetSelection { .. }
         | WaitingFor::BetweenGamesSideboard { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::NamedChoice { .. }
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }
@@ -232,6 +250,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesPartition { .. }
         | WaitingFor::SeparatePilesChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
         | WaitingFor::CommanderZoneChoice { .. }
@@ -382,6 +401,7 @@ pub(crate) fn capture_library_search_card_view(
         zone: object.zone,
         identity: ObjectIncarnationRef::from_object(object),
         card_id: object.card_id,
+        printing: object.printing.clone(),
         current_face,
         front_face,
         back_face,
@@ -633,9 +653,11 @@ pub(crate) enum IdentityProjection {
     /// [`redact_face_down_identity_from_observer`]: a face-down permanent or spell the
     /// viewer neither controls nor may look under (CR 708.5).
     FaceDownRedacted,
-    /// [`reveal_face_down_identity_to_controller`]: the other side of the same
-    /// two-sided pair — a face-down permanent or spell the viewer may look under, whose
-    /// back face's name is written onto the projected object.
+    /// [`reveal_face_down_printed_identity`]: the other side of the same two-sided
+    /// pair — a face-down permanent or spell the viewer may look under, whose back
+    /// face's printed card is written onto the projected object. A conspiracy's
+    /// private agenda choices are a SEPARATE disclosure and stay redacted unless the
+    /// view is the controller's own.
     FaceDownRevealed,
 }
 
@@ -982,6 +1004,7 @@ pub(crate) fn identity_projection_for_viewer(
         .planar_deck
         .iter()
         .chain(state.scheme_deck.iter())
+        .chain(state.boss_deck.iter())
         .copied()
         .collect();
     for obj_id in supplementary_deck_ids {
@@ -1059,6 +1082,7 @@ pub(crate) fn identity_projection_for_viewer(
         .battlefield
         .iter()
         .copied()
+        .chain(state.command_zone.iter().copied())
         .chain(
             state
                 .battlefield
@@ -1143,6 +1167,7 @@ pub(crate) fn identity_projection_for_unseated_viewer(
         .planar_deck
         .iter()
         .chain(state.scheme_deck.iter())
+        .chain(state.boss_deck.iter())
         .chain(state.exile.iter())
     {
         if state
@@ -1156,6 +1181,7 @@ pub(crate) fn identity_projection_for_unseated_viewer(
     for object_id in state
         .battlefield
         .iter()
+        .chain(state.command_zone.iter())
         .chain(state.stack.iter().map(|entry| &entry.id))
     {
         if state
@@ -1250,9 +1276,23 @@ fn redact_activation_records(filtered: &mut GameState) {
         CollectEvidenceResume, DeferredLifeCostResume, PendingCast, PendingCostMoveResume,
     };
     fn clear(pending: &mut PendingCast) {
+        // CR 602.2a + CR 602.5c: engine authority — never shown to a viewer.
         pending.ability.activation_record = None;
+        pending.ability.announced_usage_key = None;
     }
     filtered.abilities_activated_this_turn_by_player.clear();
+    // CR 602.2a + CR 602.5c: the announcement-bound journals and the
+    // per-priority AI guard are engine authority — a viewer sees neither
+    // tallies nor which acquisitions were announced. (Trusted save/restore
+    // retains them; only the projection clears them.)
+    filtered.pending_activations.clear();
+    filtered.activated_abilities_this_turn.clear();
+    filtered.activated_abilities_this_game.clear();
+    // CR 400.2: the departed-incarnation tallies are the same engine-authority
+    // journal class as the live journals (trusted save/restore retains them;
+    // only the projection clears them).
+    filtered.departed_activated_abilities_this_turn.clear();
+    filtered.departed_activated_abilities_this_game.clear();
     if let Some(pending) = filtered.pending_cast.as_deref_mut() {
         clear(pending);
     }
@@ -1272,15 +1312,18 @@ fn redact_activation_records(filtered: &mut GameState) {
             PendingCostMoveResume::CollectEvidencePayment { resume, .. } => match resume.as_mut() {
                 CollectEvidenceResume::Casting { pending_cast, .. } => clear(pending_cast),
                 CollectEvidenceResume::Effect { .. }
+                | CollectEvidenceResume::Resolution { .. }
                 | CollectEvidenceResume::ManaAbility { .. } => {}
             },
             PendingCostMoveResume::LoyaltyActivation { resolved, .. } => {
                 resolved.activation_record = None;
+                resolved.announced_usage_key = None;
             }
             // Resolution-time payments and non-activation roots: no activation
             // is in flight in any of these.
             PendingCostMoveResume::WardSacrificePayment { .. }
             | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
             | PendingCostMoveResume::Foretell { .. }
             | PendingCostMoveResume::UnlessBouncePayment { .. }
             | PendingCostMoveResume::ManaAbilityPayment { .. }
@@ -1309,6 +1352,7 @@ fn redact_activation_records(filtered: &mut GameState) {
     ) {
         if let StackEntryKind::ActivatedAbility { ability, .. } = &mut entry.kind {
             ability.activation_record = None;
+            ability.announced_usage_key = None;
         }
     }
 }
@@ -1412,6 +1456,17 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     };
     filtered.play_trace = None;
     filtered.spell_cast_reversal = None;
+    // CR 707.13 + CR 400.11: an object created outside the game (Garth One-Eye's copy)
+    // is staged in exile for the casting pipeline while its "you may cast" prompt is
+    // pending, but outside the game is not a zone — no viewer's exile list shows it.
+    // The object itself stays in `objects`, so the prompt can still cast it.
+    // allow-raw-zone: viewer projection of a filtered copy; authoritative zone membership is unchanged (CR 400.11).
+    filtered.exile.retain(|object_id| {
+        !filtered
+            .objects
+            .get(object_id)
+            .is_some_and(|object| object.is_outside_game())
+    });
     let viewer_knows = |object_id: ObjectId| {
         viewer.is_some_and(|viewer| state.viewer_knows_card_identity(viewer, object_id))
     };
@@ -1533,6 +1588,17 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // itself. Viewer projections are display-only clones; the authoritative
     // state the drain resumes from is never filtered.
     filtered.pending_discard_batch = None;
+    // CR 400.2: the single-card sibling of the batch above retains the object
+    // ID of a card still in a hand (a hidden zone), and Library of Leng can
+    // send it to another hidden zone. Server-only for every viewer.
+    filtered.pending_single_discard = None;
+    // CR 101.4 + CR 101.4a: the picks earlier players have already made for a
+    // simultaneous instruction stay unrevealed until it is delivered, so no
+    // viewer — a later chooser above all — receives them. The projected
+    // prompt is the complete viewer-facing surface.
+    if let Some(choice) = filtered.pending_player_scope_choice.as_mut() {
+        choice.selections.clear();
+    }
     // CR 401.4 + CR 608.2c: Queued owner batches retain exact hidden-card
     // identities and origins for later private choices, and the orders owners
     // have already chosen (CR 401.4: the order isn't revealed). The public
@@ -1566,6 +1632,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // stack entry, continuation) holds a key.
     filtered.control_change_observations.clear();
     filtered.control_change_captures.clear();
+    // Engine working memory, empty at every action-return boundary.
+    filtered.layer_control_changes.clear();
+    filtered.announced_control_changes.clear();
     // Deferred life-cost owners can embed a complete PendingCast, including
     // hidden card and target context. The projected WaitingFor is the only
     // viewer-facing interaction surface.
@@ -1653,7 +1722,11 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     filtered.resolving_begin_game_abilities = false;
 
     // Un-card actions: enabled status and Gotcha offers are private to the entitled player.
-    // The gesture menu is derived from all active abilities in the game and is shared.
+    // The gesture menu and the touchable objects are derived only while some
+    // player is opted in, so they are as private as the opt-in itself: only an
+    // opted-in viewer receives them. An opted-out viewer or a spectator sees the
+    // same projection whatever the other seats chose.
+    let viewer_opted_in = viewer.is_some_and(|viewer_id| filtered.un_actions.is_enabled(viewer_id));
     if let Some(viewer_id) = viewer {
         filtered
             .un_actions
@@ -1666,6 +1739,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     } else {
         filtered.un_actions.enabled_players.clear();
         filtered.un_actions.gotcha_offers.clear();
+    }
+    if !viewer_opted_in {
+        filtered.un_actions.menu.clear();
+        filtered.un_actions.touchable.clear();
     }
     filtered.un_actions.pending_offers.clear();
 
@@ -1744,6 +1821,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         None => identity_projection_for_unseated_viewer(state),
     };
     let mut hidden_zone_change_ids = HashSet::new();
+    let mut face_down_observed_ids = HashSet::new();
     let mut hidden_library_ids = HashSet::new();
     for (obj_id, projection) in identity_projection {
         match projection {
@@ -1761,6 +1839,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             }
             IdentityProjection::FaceDownRedacted => {
                 if let Some(obj) = filtered.objects.get_mut(&obj_id) {
+                    face_down_observed_ids.insert(obj_id);
                     redact_face_down_identity_from_observer(obj);
                     record_hidden_replacement_candidate_source(
                         replacement_candidate_source_ids.as_ref(),
@@ -1771,9 +1850,23 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             }
             IdentityProjection::FaceDownRevealed => {
                 if let Some(obj) = filtered.objects.get_mut(&obj_id) {
-                    reveal_face_down_identity_to_controller(obj);
+                    reveal_face_down_printed_identity(obj);
                 }
             }
+        }
+    }
+
+    // CR 702.106c + CR 702.106f: an agenda's secretly chosen names — and how
+    // many names it takes — belong to its controller until the turn-face-up
+    // special action publishes them (CR 702.106c). That secrecy is a property of
+    // the face-down status, not of any one zone or projection leaf: this loop is
+    // also the only authority for a face-down conspiracy that left the game
+    // with its owner (CR 800.4a) but remains stored in exile, outside the
+    // command-zone leaf above. Enforcing it once over the final object set keeps
+    // every projection path — in-game, game-end, seated and unseated — on one answer.
+    for (_, obj) in filtered.objects.iter_mut() {
+        if obj.face_down && !can_view_private_for_player(obj.controller) {
+            redact_secret_agenda_choices(obj);
         }
     }
 
@@ -1839,7 +1932,13 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         .pending_trigger_event_batch
         .iter_mut()
         .chain(filtered.pending_attack_trigger_events.iter_mut())
-        .chain(filtered.deferred_entry_events.iter_mut())
+        .chain(
+            filtered
+                .deferred_entry_events
+                .iter_mut()
+                .map(|parked| &mut parked.event),
+        )
+        .chain(filtered.unsettled_entry_batch_events.iter_mut())
         .chain(
             filtered
                 .consumed_before_priority_trigger_events
@@ -1861,6 +1960,20 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     {
         redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
     }
+    // CR 708.5: an entry held across answers records the card under a face-down entrant, which
+    // no player but its controller may look at, so it is hidden from this viewer as the object is.
+    let held_entry_hidden_ids: HashSet<ObjectId> = hidden_zone_change_ids
+        .union(&face_down_observed_ids)
+        .copied()
+        .collect();
+    for event in filtered
+        .deferred_entry_events
+        .iter_mut()
+        .map(|parked| &mut parked.event)
+        .chain(filtered.unsettled_entry_batch_events.iter_mut())
+    {
+        redact_hidden_zone_change_event(event, &held_entry_hidden_ids);
+    }
     for context in filtered.deferred_triggers.iter_mut().chain(
         filtered
             .pending_trigger_order
@@ -1876,7 +1989,18 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         {
             redact_hidden_zone_change_event(event, &hidden_zone_change_ids);
         }
+        // CR 400.2 + CR 708.5: a context's cause record names each causing entrant; a
+        // face-down entrant is hidden from this viewer as the object is.
+        for cause in context.causes.iter_mut() {
+            redact_hidden_zone_change_event(cause, &held_entry_hidden_ids);
+        }
     }
+    // CR 400.2 + CR 708.5: an observer's `AbilityTriggered` event nests the observed
+    // firing's cause records, wherever that event is carried. A face-down entrant among
+    // them (a manifested card) is hidden from this viewer as the object is.
+    filtered.for_each_trigger_event_carrier_mut(&mut |event| {
+        redact_ability_triggered_causes(event, &held_entry_hidden_ids)
+    });
     match &mut filtered.waiting_for {
         WaitingFor::TriggerTargetSelection {
             trigger_event,
@@ -2024,12 +2148,22 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // entrant's projection carries its card_id/printed_ref, which other players may not see
     // (CR 708.5).
     filtered.battlefield_entry_observations.clear();
+    // CR 400.2 + CR 401.2 + CR 603.3: a held as-enters roll's trigger contexts are
+    // engine continuations that the settled release puts on the stack. They latch
+    // their sources' full contexts (cast payments, LKI names), so a card now hidden
+    // in a library or hand would be named through them. No client consumes them, so
+    // every audience's copy drops them. The parked entry stays, its event redacted
+    // above.
+    for parked in filtered.deferred_entry_events.iter_mut() {
+        parked.held_triggers.clear();
+    }
     redact_hidden_identity_side_tables(&mut filtered, &hidden_zone_change_ids);
 
     // Source-bound named choices carry complete source contexts in authoritative
     // state. The client needs only the exact public prompt projection, never its
     // LKI/links/cost facts, so strip the private context before serialization.
     if let WaitingFor::NamedChoice {
+        decision_subject_id,
         player,
         choice_type,
         options,
@@ -2043,6 +2177,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             source.context = None;
         }
         filtered.waiting_for = WaitingFor::NamedChoice {
+            // CR 608.2c + CR 608.2d: the object a per-object choice is for is public
+            // (display-only); every viewer sees which permanent the prompt assigns.
+            decision_subject_id: *decision_subject_id,
             player: *player,
             choice_type: choice_type.clone(),
             options: options.clone(),
@@ -2230,7 +2367,6 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         ref certificate,
         ref schema,
         ref declaration,
-        road,
         counted_take,
         period: _,
     } = state.waiting_for
@@ -2287,6 +2423,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                         DecisionPointKind::ManaColor { color } => {
                             DecisionPointKind::ManaColor { color: *color }
                         }
+                        DecisionPointKind::Order { pos, positions } => DecisionPointKind::Order {
+                            pos: *pos,
+                            positions: *positions,
+                        },
                     };
                     DecisionPoint {
                         slot: point.slot.clone(),
@@ -2331,7 +2471,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                     // (life, poison, library sizes over the living players) and the engine's own
                     // budget, so the pair carries through the per-viewer projection unredacted —
                     // only hidden-info legal targets are rewritten above.
-                    measured_repetition_bound: schema.measured_repetition_bound,
+                    repetition_bound: schema.repetition_bound,
                     deliverable_capacity: schema.deliverable_capacity,
                     points,
                     convoke_tappable_count,
@@ -2345,7 +2485,6 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             predicted_winner,
             certificate: certificate.clone(),
             declaration,
-            road,
             counted_take,
             period: Default::default(),
             schema,
@@ -2397,6 +2536,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         ref selectable_cards,
         kept_destination,
         rest_destination,
+        rest_remainder,
         rest_split_top_count,
         rest_order,
         source_id,
@@ -2414,6 +2554,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 selectable_cards: selectable_cards.iter().map(|_| ObjectId(0)).collect(),
                 kept_destination,
                 rest_destination,
+                rest_remainder,
                 // The split SIZE is public (it is printed on the card); only
                 // the identities of the cards are private, and those are
                 // blanked above.
@@ -2474,6 +2615,34 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         );
     }
 
+    // CR 701.20e: the private-look ledger names exactly which library cards the
+    // looker saw; a viewer without the looker's private access must not learn
+    // those ids (the `DigSource::PriorLook` window stays open across the
+    // `OptionalEffectChoice` and `DigBottomOrder` prompts).
+    if !state
+        .private_look_player
+        .is_some_and(&can_view_private_for_player)
+    {
+        filtered.private_look_ids.clear();
+    }
+
+    // CR 701.20e: the looked-at cards are known only to the looking player, so
+    // every other viewer gets placeholder ids (same shape as `ScryChoice`).
+    if let WaitingFor::DigBottomOrder {
+        player,
+        source_id,
+        ref cards,
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::DigBottomOrder {
+                player,
+                source_id,
+                cards: cards.iter().map(|_| ObjectId(0)).collect(),
+            };
+        }
+    }
+
     if let WaitingFor::ScryChoice {
         player, ref cards, ..
     } = state.waiting_for
@@ -2512,6 +2681,50 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 player,
                 hand_cards: hand_cards.iter().map(|_| ObjectId(0)).collect(),
             };
+        }
+    }
+
+    // CR 701.20a + CR 400.2: a `RevealChoice` lists the matching cards of the
+    // chooser's HIDDEN hand, so its membership and count are private to the
+    // chooser. For any viewer without private access to that hand the payload
+    // (candidate list and the pending mana-ability carrier) is cleared
+    // unconditionally — never conditioned on which eligible cards happen to be
+    // visible — so the projection's shape cannot encode private eligibility.
+    if let WaitingFor::RevealChoice {
+        player,
+        cards,
+        pending_mana_ability,
+        ..
+    } = &mut filtered.waiting_for
+    {
+        let candidates_hidden =
+            viewer.is_none_or(|v| !viewer_has_private_access_to_player(state, v, *player));
+        if candidates_hidden {
+            cards.clear();
+            *pending_mana_ability = None;
+        }
+    }
+
+    // CR 402.3 + CR 400.2: other players may count the cards in a hand but not look
+    // at them. The unchosen X bound of a cast in progress is computed from the
+    // payer's PRIVATE hand (a reveal-for-mana source such as Metalworker contributes
+    // capacity per revealable card), and the per-X payment previews are derived from
+    // the same planner, so both are private to the payer. Any other viewer receives
+    // the redacted form — the bound collapses to the floor and no previews — never
+    // conditioned on what the hand holds, so the projection cannot encode it.
+    if let WaitingFor::ChooseXValue {
+        player,
+        min,
+        max,
+        x_cost_previews,
+        ..
+    } = &mut filtered.waiting_for
+    {
+        let bound_hidden =
+            viewer.is_none_or(|v| !viewer_has_private_access_to_player(state, v, *player));
+        if bound_hidden {
+            *max = *min;
+            x_cost_previews.clear();
         }
     }
 
@@ -2593,6 +2806,28 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 constraint: constraint.clone(),
                 ordering_hint,
                 split: split.clone(),
+            };
+        }
+    }
+
+    // Digital-only Alchemy spellbook draft (no CR entry): a draft's offer is a
+    // private random sample shown only to the drafting player, so other viewers
+    // see the prompt without its options.
+    if let WaitingFor::SpellbookDraft {
+        player,
+        source_id,
+        destination,
+        tapped,
+        ..
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::SpellbookDraft {
+                player,
+                source_id,
+                options: Vec::new(),
+                destination,
+                tapped,
             };
         }
     }
@@ -3021,27 +3256,100 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         track_exiled_by_source,
         face_down_in_exile,
         ref face_down_profile,
+        ref with_entry_effect,
         ref enter_with_counters,
         ref conditional_enter_with_counters,
         count_param,
         ref library_position,
-        mass_library_order: _,
+        library_shuffle,
+        ref mass_library_order,
         is_cost_payment: _,
         enters_modified_if: _,
         ref duration,
+        performed_by,
+        ref privacy_zones,
     } = state.waiting_for
     {
         // A private-zone choice reveals exactly which cards can be selected,
         // including a mass library-order prompt whose members still occupy the
         // battlefield. The placement parameters are public, but the offered
         // ids and their identity/origin provenance are not.
-        if !can_view_private_for_player(player) && matches!(zone, Zone::Hand | Zone::Library) {
+        //
+        // CR 402.3: an opponent may count the cards in a hand but may not learn
+        // which of them are eligible. A mixed hand/command choice (Next of Kin)
+        // would leak that subset through the placeholder count: the opponent can
+        // subtract the public command-zone candidates from the number of
+        // offered placeholders. For a mixed private/public set, clear the list
+        // entirely for non-choosers. A pure Library set keeps one placeholder per
+        // eligible card (the existing count-only disclosure); a Hand-scoped set
+        // is cleared even when unmixed because the eligible subset's size is
+        // hand information CR 402.3 withholds; a pure public set is not
+        // redacted at all.
+        // CR 402.3: the prompt owns its producer-captured scope; archived
+        // prompts that predate the field fall back to the exact paused
+        // producer.
+        let privacy_scope = privacy_zones
+            .clone()
+            .or_else(|| state.effect_zone_choice_privacy_scope());
+        let scope_private = privacy_scope
+            .as_ref()
+            .is_some_and(|zones| zones.iter().any(|zone| !zone.is_public()));
+        let scope_public = privacy_scope
+            .as_ref()
+            .is_some_and(|zones| zones.iter().any(|zone| zone.is_public()));
+        let has_private_card = cards.iter().any(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|object| !object.zone.is_public())
+        });
+        let has_public_card = cards.iter().any(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|object| object.zone.is_public())
+        });
+        // The producer's exact scan scope is authoritative. Candidate-zone
+        // inspection remains only as a fallback for prompts restored from
+        // saves that predate the scope-carrying producer.
+        // Legacy saves carry no producer-captured scope; fall back to the
+        // prompt's stored zone plus candidate zones.
+        let fallback_private = privacy_scope.is_none() && (!zone.is_public() || has_private_card);
+        // CR 401.4: a Library arrangement prompt hides its member ids even when
+        // every candidate is currently public; its bounds are public (the
+        // batch size), so only the cards are redacted. Keep the base projection
+        // for BOTH typed and archived forms; the archived Terminus prompt
+        // carries no typed batch but must still hide the ordering ids.
+        let library_arrangement = matches!(zone, Zone::Library);
+        let _ = mass_library_order;
+        let private_scope = scope_private || (fallback_private && !library_arrangement);
+        let mixed_private_public = (scope_private && scope_public)
+            || (privacy_scope.is_none()
+                && fallback_private
+                && (has_public_card || zone.is_public()));
+        let redact_cards = private_scope || library_arrangement;
+        // CR 401.4: an ordering prompt's bounds are the public batch size, so
+        // they stay visible even when the producer carried a Library scope
+        // (Library is a hidden zone, but the number of cards being ordered is
+        // not). Hidden *eligibility* bounds for non-library prompts stay
+        // redacted.
+        let redact_bounds = private_scope && !library_arrangement;
+        if !can_view_private_for_player(player) && redact_cards {
             filtered.waiting_for = WaitingFor::EffectZoneChoice {
                 player,
-                cards: cards.iter().map(|_| ObjectId(0)).collect(),
-                count,
-                min_count,
-                up_to,
+                cards: if library_arrangement {
+                    cards.iter().map(|_| ObjectId(0)).collect()
+                } else if mixed_private_public || zone == Zone::Hand {
+                    Vec::new()
+                } else {
+                    cards.iter().map(|_| ObjectId(0)).collect()
+                },
+                count: if redact_bounds { 0 } else { count },
+                min_count: if redact_bounds { 0 } else { min_count },
+                // Normalize the selection mode too: an empty mixed prompt and
+                // a singleton/ordinary private prompt must not differ through
+                // `up_to` in the observer envelope.
+                up_to: if redact_bounds { true } else { up_to },
                 source_id,
                 effect_kind,
                 zone,
@@ -3056,16 +3364,25 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 // Face-down entry characteristics are public effect parameters,
                 // not private hand info — pass them through the redaction.
                 face_down_profile: face_down_profile.clone(),
+                // The with-entry effect is the rider's public text, not private
+                // hand info — pass it through.
+                with_entry_effect: with_entry_effect.clone(),
                 enter_with_counters: enter_with_counters.clone(),
                 conditional_enter_with_counters: conditional_enter_with_counters.clone(),
                 count_param,
                 library_position: library_position.clone(),
+                library_shuffle,
                 mass_library_order: None,
                 is_cost_payment: false,
                 enters_modified_if: None,
                 // The bounded-move duration is a public effect parameter, not
                 // private hand info — pass it through the redaction.
                 duration: duration.clone(),
+                // Who performs the move is public, like the duration.
+                performed_by,
+                // The prompt keeps its own classification after projection;
+                // only the viewer-visible members are replaced.
+                privacy_zones: privacy_zones.clone(),
             };
         }
     }
@@ -3172,6 +3489,52 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             pool.registered_planar_deck = Arc::new(Vec::new());
             pool.registered_scheme_deck = Arc::new(Vec::new());
             pool.current_scheme_deck = Arc::new(Vec::new());
+            // CR 400.2 + CR 100.4: the record names this seat's library and sideboard
+            // cards, so it leaves with the lists it annotates.
+            pool.printings = DisplayOnly::new(None);
+            // CR 905.4a + CR 702.106a: Non-commander formats (such as Limited with
+            // command zone for conspiracies) must not leak commander-slot entries
+            // to opponents or observers. Any hidden-agenda conspiracies in the
+            // commander slot must likewise be redacted.
+            if !state.format_config.uses_commander {
+                pool.registered_commander = Arc::new(Vec::new());
+                pool.current_commander = Arc::new(Vec::new());
+            } else {
+                if pool
+                    .registered_commander
+                    .iter()
+                    .any(|e| crate::game::conspiracy::card_has_hidden_agenda(&e.card))
+                {
+                    pool.registered_commander = Arc::new(
+                        pool.registered_commander
+                            .iter()
+                            .filter(|e| !crate::game::conspiracy::card_has_hidden_agenda(&e.card))
+                            .cloned()
+                            .collect(),
+                    );
+                }
+                if pool
+                    .current_commander
+                    .iter()
+                    .any(|e| crate::game::conspiracy::card_has_hidden_agenda(&e.card))
+                {
+                    pool.current_commander = Arc::new(
+                        pool.current_commander
+                            .iter()
+                            .filter(|e| !crate::game::conspiracy::card_has_hidden_agenda(&e.card))
+                            .cloned()
+                            .collect(),
+                    );
+                }
+            }
+        }
+        // CR 400.2: library and hand are hidden zones. The estimate is computed from the
+        // seat's complete submitted deck, so it reveals that deck's strength to anyone but
+        // its owner. Only the owner's projection keeps it; the declared `bracket_tier` is
+        // the owner's own public statement and stays for every viewer. AI sessions and
+        // saved games read the unfiltered state, so they keep the estimate.
+        if Some(pool.player) != viewer {
+            pool.estimated_bracket_tier = None;
         }
     }
 
@@ -3187,6 +3550,16 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             } = &mut filtered.waiting_for
             {
                 eligible_companions.clear();
+            }
+        }
+    }
+
+    // CR 702.106f: You don't reveal that more than one name was secretly chosen,
+    // so every other viewer sees the same one-name prompt for either agenda.
+    if let WaitingFor::SecretAgendaChoice { player, .. } = &state.waiting_for {
+        if !can_view_private_for_player(*player) {
+            if let WaitingFor::SecretAgendaChoice { name_count, .. } = &mut filtered.waiting_for {
+                *name_count = 1;
             }
         }
     }
@@ -3239,6 +3612,18 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         }
     }
 
+    // CR 400.2 + CR 708.5: the prompts that copy the resolving trigger's event, and the paused
+    // mana abilities a payment prompt carries, hold an observer's `AbilityTriggered` event too:
+    // one traversal redacts every nested cause record against the face-down-aware set. It runs
+    // after every `waiting_for` rebuild above (`PayCost` re-clones the authoritative resume,
+    // restoring unredacted causes) and before the hidden-identity pass, whose set omits
+    // face-down battlefield entrants.
+    filtered
+        .waiting_for
+        .for_each_prompt_trigger_event_mut(&mut |event| {
+            redact_ability_triggered_causes(event, &held_entry_hidden_ids)
+        });
+
     redact_hidden_library_identity_carriers(&mut filtered, &hidden_library_ids);
 
     // CR 601.2h + CR 113.7a + CR 400.2: prompt-held and root-held paused abilities latch
@@ -3249,6 +3634,36 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     redact_waiting_for_payment(&mut filtered.waiting_for, &hidden_zone_change_ids);
     redact_paused_ability_payment(&mut filtered, &hidden_zone_change_ids);
 
+    // CR 401.2 + CR 401.4: a hidden ordered zone publishes no position. Masking
+    // a hidden card's printed identity is not enough by itself: viewers keep
+    // learning object identities while the card is revealed, and the ordered
+    // `Player::library` still pairs each of those stable ids with a slot, so a
+    // settled order could be recovered by joining earlier knowledge to the
+    // projected order. Every zone member this audience may not identify is
+    // therefore placed in a canonical (id-ascending) slot among the hidden
+    // slots; a member shown at its real position (a revealed card, a look
+    // permission, a reveal that is still necessary) keeps that position, so
+    // the projection still tells the truth about everything it discloses.
+    let hidden_ordered_ids: HashSet<ObjectId> = filtered
+        .objects
+        .iter()
+        .filter(|(_, object)| object.name == HIDDEN_CARD_NAME)
+        .map(|(object_id, _)| *object_id)
+        .collect();
+    let is_hidden_ordered = |object_id: ObjectId| hidden_ordered_ids.contains(&object_id);
+    for player in filtered.players.iter_mut() {
+        // allow-raw-zone: a viewer-projection clone reorders its own hidden-zone display slots; no gameplay zone change occurs (CR 401.2 + CR 401.4).
+        canonicalize_hidden_ordered_zone(&mut player.library, is_hidden_ordered);
+        // CR 103.3a + CR 701.24a: supplementary decks are shuffled into
+        // unknown order. Keep their unrevealed identities separate from the
+        // authoritative slot order in this viewer projection.
+        canonicalize_hidden_ordered_zone(&mut player.attraction_deck, is_hidden_ordered);
+        canonicalize_hidden_ordered_zone(&mut player.contraption_deck, is_hidden_ordered);
+    }
+    canonicalize_hidden_ordered_zone(&mut filtered.planar_deck, is_hidden_ordered);
+    canonicalize_hidden_ordered_zone(&mut filtered.scheme_deck, is_hidden_ordered);
+    canonicalize_hidden_ordered_zone(&mut filtered.boss_deck, is_hidden_ordered);
+
     // This is the single display-identity authority sent to every client. The
     // preceding projection/redaction passes decide whether an object's identity
     // remains available; UI code consumes this result rather than recreating
@@ -3258,6 +3673,42 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     }
 
     filtered
+}
+
+/// CR 401.2 + CR 401.4: Break the identity-to-position link in a hidden ordered
+/// zone. Members the audience cannot identify are redistributed across the
+/// hidden slots in a canonical id order, so no object identity keeps the slot
+/// it actually occupies; members the audience may see stay in their true slots,
+/// because a revealed card is legitimately shown at its position (CR 701.20a).
+///
+/// The canonical order is a deterministic function of the hidden id set, so the
+/// projection stays stable across equal states and across viewers; what it can
+/// never express is which hidden card sits at which library position.
+fn canonicalize_hidden_ordered_zone(
+    zone: &mut im::Vector<ObjectId>,
+    is_hidden: impl Fn(ObjectId) -> bool,
+) {
+    let mut hidden: Vec<ObjectId> = zone.iter().copied().filter(|id| is_hidden(*id)).collect();
+    if hidden.len() < 2 {
+        // A lone hidden member has exactly one possible slot, so there is no
+        // link left to break.
+        return;
+    }
+    hidden.sort_unstable();
+    let mut next_hidden = hidden.into_iter();
+    *zone = zone
+        .iter()
+        .copied()
+        .map(|object_id| {
+            if is_hidden(object_id) {
+                next_hidden
+                    .next()
+                    .expect("the hidden slot count equals the hidden member count")
+            } else {
+                object_id
+            }
+        })
+        .collect();
 }
 
 /// CR 723.4 + CR 805.8: a player controlling another player sees the
@@ -3451,10 +3902,13 @@ pub fn filter_events_for_viewer(
             // CR 401.2: a revealed card that now sits in a library at a hidden
             // position keeps its name (reveal order, no position) but loses the
             // object id that would locate it in the projected library order.
+            // The disclosed occurrences are engine bookkeeping for the
+            // knowledge finalizer; no viewer receives them.
             GameEvent::CardsRevealed {
                 player,
                 card_ids,
                 card_names,
+                occurrences: _,
             } => GameEvent::CardsRevealed {
                 player: *player,
                 card_ids: card_ids
@@ -3463,12 +3917,28 @@ pub fn filter_events_for_viewer(
                     .filter(|id| !hidden_library.contains(id))
                     .collect(),
                 card_names: card_names.clone(),
+                occurrences: Vec::new(),
             },
             GameEvent::EffectResolved { .. } => {
                 let mut event = event.clone();
                 redact_hidden_library_event(&mut event, &hidden_library);
                 event
             }
+            // `causes` are engine bookkeeping for the observer matcher; no viewer
+            // receives them (same treatment as `CardsRevealed.occurrences`).
+            GameEvent::AbilityTriggered {
+                stack_entry,
+                source_id,
+                controller,
+                origin,
+                ..
+            } => GameEvent::AbilityTriggered {
+                stack_entry: *stack_entry,
+                source_id: *source_id,
+                controller: *controller,
+                origin: *origin,
+                causes: Vec::new(),
+            },
             other => other.clone(),
         })
         .collect()
@@ -3893,6 +4363,22 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     obj.spellbook.clear();
     obj.parse_warnings.clear();
     obj.back_face = None;
+    // Redacted with `back_face`. Only a double-faced copy token carries it. Such a token can be in a
+    // hidden zone only between a zone change and the state-based action that removes it (CR 111.7),
+    // and it can't be turned face down (CR 712.16); the redaction covers that window.
+    obj.double_faced_token_alternative = None;
+    // CR 400.2: a hidden card's token-ness identifies its pile position
+    // (Horde libraries mix tokens and cards), so it redacts like every other
+    // printed characteristic — mirroring `redact_zone_change_record`'s
+    // `record.is_token = false`. The Horde-deck flag and the pinned library
+    // rarity go with it: both are loader-seeded per-card metadata with no
+    // public face while hidden.
+    obj.is_token = false;
+    obj.is_horde_deck_token = false;
+    // `display_source = Token` is token-ness by another name — reset it with
+    // the flags above so a hidden card's art routing leaks nothing either.
+    obj.display_source = crate::game::game_object::DisplaySource::Card;
+    obj.horde_library_rarity = None;
     obj.specialize_faces = None;
     obj.cleave_variant = None;
     obj.modal = None;
@@ -3903,20 +4389,11 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     obj.casting_permissions.clear();
     obj.unimplemented_mechanics.clear();
 
-    obj.base_power = None;
-    obj.base_toughness = None;
-    obj.base_loyalty = None;
-    obj.base_printed_loyalty = None;
-    obj.base_defense = None;
-    obj.base_card_types = Default::default();
-    obj.base_mana_cost = Default::default();
-    obj.base_keywords.clear();
-    Arc::make_mut(&mut obj.base_abilities).clear();
-    Arc::make_mut(&mut obj.base_trigger_definitions).clear();
-    Arc::make_mut(&mut obj.base_replacement_definitions).clear();
-    Arc::make_mut(&mut obj.base_static_definitions).clear();
-    obj.base_color.clear();
     obj.base_printed_ref = None;
+    // CR 400.2 + CR 708.5: the printing identifies the physical card exactly as its name does,
+    // so it leaves with the name, live and base value alike.
+    obj.printing = DisplayOnly::default();
+    obj.base_printing = DisplayOnly::default();
 }
 
 /// The retained event shapes that carry a `ZoneChangeRecord` or a `TriggerSourceContext`:
@@ -3959,7 +4436,26 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
         } => {
             redact_source_context_hidden_members(saga, hidden_ids);
         }
+        // CR 400.2 + CR 708.5: an observer's `AbilityTriggered` event nests the
+        // observed firing's cause events; each is hidden exactly as the same
+        // event is at top level.
+        GameEvent::AbilityTriggered { causes, .. } => {
+            for cause in causes {
+                redact_hidden_zone_change_event(cause, hidden_ids);
+            }
+        }
         _ => {}
+    }
+}
+
+/// CR 400.2 + CR 708.5: redacts the cause records an `AbilityTriggered` event nests,
+/// against `hidden_ids` (the viewer's hidden and face-down ids). No-op for every other
+/// event.
+fn redact_ability_triggered_causes(event: &mut GameEvent, hidden_ids: &HashSet<ObjectId>) {
+    if let GameEvent::AbilityTriggered { causes, .. } = event {
+        for cause in causes {
+            redact_hidden_zone_change_event(cause, hidden_ids);
+        }
     }
 }
 
@@ -3990,9 +4486,11 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `SagaChapterAbilityResolved` events held as a stack or resolving entry's
 /// `trigger_event`, in `stack_trigger_event_batches`, `current_trigger_event(s)`,
 /// `pending_trigger_event_batch`, `pending_attack_trigger_events`,
-/// `consumed_before_priority_trigger_events`, `deferred_entry_events`, a paused
+/// `consumed_before_priority_trigger_events`, `deferred_entry_events` (event; its
+/// `held_triggers` are cleared for every audience), `unsettled_entry_batch_events`, a paused
 /// player-scope sacrifice's `deferred_events`, the pending trigger's `trigger_event`, a
-/// deferred or ordering trigger context's `trigger_event` and `trigger_events`, the
+/// deferred or ordering trigger context's `trigger_event` and `trigger_events` and a
+/// context's `causes`, the
 /// `trigger_event` of the `TriggerTargetSelection` (with its `trigger_events`),
 /// `UnlessPayment`, `UnlessPaymentChooseCost`, `ChooseObjectsSelection` and
 /// `EachPlayerCopyChosenSelection` prompts, and as a creation look-back event; and
@@ -4010,7 +4508,7 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `CollectEvidenceChoice` and `ChooseManaColor`, `ManaChoiceContext::ResolvingEffect`,
 /// `CollectEvidenceResume::Effect`,
 /// and the roots `pending_player_scope_sacrifice_choice`,
-/// `pending_player_scope_unless_payment`, `pending_scoped_library_search`,
+/// `pending_player_scope_choice`, `pending_player_scope_unless_payment`, `pending_scoped_library_search`,
 /// `pending_library_search_delivery`, `epic_effects` and the prevention riders of
 /// `replacement_continuations`, which every shield's `runtime_execute` names
 /// (`redact_waiting_for_payment`, `redact_paused_ability_payment`). Applied
@@ -4018,7 +4516,7 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 ///
 /// Not carriers because no viewer receives them: `pending_cost_move_resume`,
 /// `pending_deferred_life_cost_resume`, `pending_triggered_mana_resume`,
-/// `pending_discard_batch`, `resolution_stack` and the other private resume cursors
+/// `pending_discard_batch`, `pending_single_discard`, `resolution_stack` and the other private resume cursors
 /// cleared above, `payment_transaction` (`None` in every projection); not serialized:
 /// `pending_discard_for_cost`, `resolving_player_scope_tail`,
 /// `resolving_created_token_seats`;
@@ -4111,14 +4609,17 @@ fn redact_ability_payment(
     ability: &mut crate::types::ability::ResolvedAbility,
     hidden_ids: &HashSet<ObjectId>,
 ) {
+    // CR 602.2a + CR 602.5c: the announcement-bound usage key and the
+    // activation record are engine authority — never shown to a viewer.
+    // Cleared on every prompt-held carrier, including resolving abilities,
+    // before the trigger-source payment entries below.
+    ability.announced_usage_key = None;
+    ability.activation_record = None;
     if let Some(context) = ability.trigger_source.as_mut() {
         redact_source_context_hidden_members(context, hidden_ids);
     }
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        redact_ability_payment(sub_ability, hidden_ids);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        redact_ability_payment(else_ability, hidden_ids);
+    for (_, child) in ability.child_links_mut() {
+        redact_ability_payment(child, hidden_ids);
     }
 }
 
@@ -4145,12 +4646,8 @@ fn ability_payment_names_hidden_source(
         .as_ref()
         .is_some_and(|context| source_context_names_hidden_member(context, hidden_ids))
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(|sub_ability| ability_payment_names_hidden_source(sub_ability, hidden_ids))
-        || ability.else_ability.as_deref().is_some_and(|else_ability| {
-            ability_payment_names_hidden_source(else_ability, hidden_ids)
-        })
+            .child_links()
+            .any(|(_, child)| ability_payment_names_hidden_source(child, hidden_ids))
 }
 
 /// A paused cast keeps its spell ability; blank only its hidden-source payment entries and
@@ -4170,6 +4667,22 @@ fn redact_pending_mana_ability_payment(
     pending: &mut crate::types::game_state::PendingManaAbility,
     hidden_ids: &HashSet<ObjectId>,
 ) {
+    // CR 602.2a + CR 602.5c: the paused mana ability's own announced usage
+    // key is engine authority — never shown to a viewer. The single
+    // choke point: every owner call site routes through here.
+    pending.announced_usage_key = None;
+    pending.selected_taps_for_mana.clear();
+    // CR 400.2 + CR 613.1f: the activation-time definition snapshot is a
+    // stamped clone like the TCE grant payloads — a mana ability a hidden-zone
+    // provider donated (Thranduil holding a graveyard Elf's ability) names the
+    // provider once the activation pauses at a prompt. Walk the same node axis
+    // as the object/TCE walks; nested pendings recurse through this choke
+    // point via `ManaAbilityManaPayment`. Projection only.
+    if let Some(snapshot) = pending.ability_snapshot.as_mut() {
+        granter_symbols_mut::each_node(DefinitionNodeMut::Ability(snapshot), &mut |node| {
+            redact_granter_lineage_node(node, hidden_ids);
+        });
+    }
     redact_mana_ability_resume_payment(&mut pending.resume, hidden_ids);
     if let Some(resume) = pending.cost_move_resume.as_mut() {
         redact_mana_ability_resume_payment(resume, hidden_ids);
@@ -4307,7 +4820,13 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
             pending_mana_ability,
             ..
         } => redact_pending_mana_ability_payment(pending_mana_ability, hidden_ids),
+        // CR 605.3b: a reveal selection inside a mana ability's immediate
+        // resolution (Metalworker) carries the paused activation.
         WaitingFor::PayAmountChoice {
+            pending_mana_ability,
+            ..
+        }
+        | WaitingFor::RevealChoice {
             pending_mana_ability,
             ..
         } => {
@@ -4340,6 +4859,8 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
             CollectEvidenceResume::Effect { pending_ability } => {
                 redact_ability_payment(pending_ability, hidden_ids);
             }
+            // Carries only the source id: no ability payment to redact.
+            CollectEvidenceResume::Resolution { .. } => {}
             CollectEvidenceResume::ManaAbility {
                 pending_mana_ability,
             } => redact_pending_mana_ability_payment(pending_mana_ability, hidden_ids),
@@ -4357,7 +4878,7 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
 }
 
 /// CR 601.2h + CR 113.7a + CR 400.2: the root-held paused abilities every viewer receives
-/// (a paused cast, a player-scope sacrifice or unless-payment, a scoped library search and
+/// (a paused cast, a player-scope sacrifice, return or unless-payment, a scoped library search and
 /// its delivery, an Epic spell copy, and a resolution-installed prevention rider,
 /// CR 615.5). Only hidden-source payment entries are blanked and hidden linked-exile
 /// members' mana values zeroed, except that a `replacement_continuations` entry no shield
@@ -4367,6 +4888,9 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
         redact_pending_cast_payment(pending, hidden_ids);
     }
     if let Some(choice) = state.pending_player_scope_sacrifice_choice.as_mut() {
+        redact_ability_payment(&mut choice.ability, hidden_ids);
+    }
+    if let Some(choice) = state.pending_player_scope_choice.as_mut() {
         redact_ability_payment(&mut choice.ability, hidden_ids);
     }
     if let Some(pending) = state.pending_player_scope_unless_payment.as_deref_mut() {
@@ -4471,6 +4995,64 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
 /// views over a hidden-id record; rules decisions read authoritative state. This follows
 /// the accepted `zone_changes_this_turn` / `redact_zone_change_record` precedent.
 ///
+/// CR 400.2 + CR 613.1f: blank the hidden lineage stamps on one definition
+/// node. Ability nodes carry the head stamp plus the re-donation chain;
+/// trigger, static, and replacement nodes carry a head stamp only. Shared by
+/// the object-ability walk and the transient-effect walk below.
+fn redact_granter_lineage_node(node: DefinitionNodeMut<'_>, hidden_ids: &HashSet<ObjectId>) {
+    let stamp_names_hidden = |stamp: Option<ObjectIncarnationRef>| {
+        stamp.is_some_and(|s| hidden_ids.contains(&s.object_id))
+    };
+    match node {
+        DefinitionNodeMut::Ability(def) => {
+            if stamp_names_hidden(def.granting_object) {
+                def.granting_object = None;
+            }
+            def.grant_chain
+                .retain(|stamp| !hidden_ids.contains(&stamp.object_id));
+        }
+        DefinitionNodeMut::Trigger(def) => {
+            if stamp_names_hidden(def.granting_object) {
+                def.granting_object = None;
+            }
+        }
+        DefinitionNodeMut::Static(def) => {
+            if stamp_names_hidden(def.granting_object) {
+                def.granting_object = None;
+            }
+        }
+        DefinitionNodeMut::Replacement(def) => {
+            if stamp_names_hidden(def.granting_object) {
+                def.granting_object = None;
+            }
+        }
+    }
+}
+
+/// CR 400.2 + CR 613.1f: whether one definition node names a hidden id in its
+/// lineage stamps. The pre-pass twin of [`redact_granter_lineage_node`].
+fn lineage_node_names_hidden(node: DefinitionNode<'_>, hidden_ids: &HashSet<ObjectId>) -> bool {
+    match node {
+        DefinitionNode::Ability(def) => {
+            def.granting_object
+                .is_some_and(|stamp| hidden_ids.contains(&stamp.object_id))
+                || def
+                    .grant_chain
+                    .iter()
+                    .any(|stamp| hidden_ids.contains(&stamp.object_id))
+        }
+        DefinitionNode::Trigger(def) => def
+            .granting_object
+            .is_some_and(|stamp| hidden_ids.contains(&stamp.object_id)),
+        DefinitionNode::Static(def) => def
+            .granting_object
+            .is_some_and(|stamp| hidden_ids.contains(&stamp.object_id)),
+        DefinitionNode::Replacement(def) => def
+            .granting_object
+            .is_some_and(|stamp| hidden_ids.contains(&stamp.object_id)),
+    }
+}
+
 /// Projection only: authoritative state keeps the full records the engine reads for
 /// look-back (CR 608.2h, CR 603.10a).
 fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSet<ObjectId>) {
@@ -4482,6 +5064,89 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
         state.lki_copiable_values_by_incarnation.remove(id);
         state.departed_stack_spells.remove(id);
         state.linked_exile_lki.remove(id);
+    }
+    // CR 400.2 + CR 613.1f: a layer-6 grant stamps the provider's incarnation
+    // onto the recipient's live definition (`granting_object`, pushed into
+    // `grant_chain` on re-donation). A face-down battlefield provider matches
+    // the grant filter's InZone pin, so its stamp survives the layer pass even
+    // though its identity is hidden from this viewer. Blank those entries in
+    // the projection so no lineage names a hidden id, while authoritative
+    // state keeps the full chain (legitimate transitive budgets survive).
+    // Projection only: projection never feeds legality.
+    //
+    // The walk is the writer's own node axis (`each_node`, the same walker
+    // `stamp_granter` uses): the head stamp is the layer-6 write site, and
+    // nested ability nodes carry stamps on a granted whole-body re-donation.
+    // `base_abilities` is walked too — printed defs carry no stamps, so the
+    // pre-pass short-circuits without cloning.
+    for (_, object) in state.objects.iter_mut() {
+        for abilities in [&mut object.abilities, &mut object.base_abilities] {
+            if abilities.iter().any(|def| {
+                let mut names_hidden = false;
+                granter_symbols::each_node(DefinitionNode::Ability(def), &mut |node| {
+                    names_hidden |= lineage_node_names_hidden(node, hidden_ids);
+                });
+                names_hidden
+            }) {
+                for def in Arc::make_mut(abilities) {
+                    granter_symbols_mut::each_node(DefinitionNodeMut::Ability(def), &mut |node| {
+                        redact_granter_lineage_node(node, hidden_ids);
+                    });
+                }
+            }
+        }
+    }
+    // CR 400.2 + CR 613.1f: transient continuous effects snapshot donor
+    // abilities verbatim (`snapshot_granted_modifications`), so a TCE holds a
+    // stamped clone after the object walk blanked the live donor. Walk the
+    // same node axis over every grant payload, and blank the effect's own
+    // `granting_object` when it names a hidden id. Projection only.
+    for effect in state.transient_continuous_effects.iter_mut() {
+        if effect
+            .granting_object
+            .is_some_and(|stamp| hidden_ids.contains(&stamp.object_id))
+        {
+            effect.granting_object = None;
+        }
+        for modification in effect.modifications.iter_mut() {
+            match modification {
+                crate::types::ability::ContinuousModification::GrantAbility { definition } => {
+                    granter_symbols_mut::each_node(
+                        DefinitionNodeMut::Ability(definition),
+                        &mut |node| {
+                            redact_granter_lineage_node(node, hidden_ids);
+                        },
+                    );
+                }
+                crate::types::ability::ContinuousModification::GrantTrigger { trigger } => {
+                    granter_symbols_mut::each_node(
+                        DefinitionNodeMut::Trigger(trigger),
+                        &mut |node| {
+                            redact_granter_lineage_node(node, hidden_ids);
+                        },
+                    );
+                }
+                crate::types::ability::ContinuousModification::GrantStaticAbility {
+                    definition,
+                } => {
+                    granter_symbols_mut::each_node(
+                        DefinitionNodeMut::Static(definition),
+                        &mut |node| {
+                            redact_granter_lineage_node(node, hidden_ids);
+                        },
+                    );
+                }
+                crate::types::ability::ContinuousModification::GrantReplacement { replacement } => {
+                    granter_symbols_mut::each_node(
+                        DefinitionNodeMut::Replacement(replacement),
+                        &mut |node| {
+                            redact_granter_lineage_node(node, hidden_ids);
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
     }
     // CR 400.2: a departed activated ability names its source and carries that source's
     // ability. Once the source is hidden from this viewer the record is dropped, as a
@@ -4591,6 +5256,7 @@ fn redact_counter_added_record(record: &mut crate::types::game_state::CounterAdd
     let crate::types::game_state::CounterAddedRecord {
         actor: _,
         object_id: _,
+        incarnation: _,
         counter_type: _,
         count: _,
         name,
@@ -4649,6 +5315,7 @@ fn redact_spell_cast_record(record: &mut crate::types::game_state::SpellCastReco
         has_x_in_cost: _,
         has_adventure: _,
         from_zone: _,
+        from_outside_game: _,
         cast_variant: _,
         was_kicked: _,
         spell_object_id,
@@ -4661,6 +5328,8 @@ fn redact_spell_cast_record(record: &mut crate::types::game_state::SpellCastReco
 
 /// The entry ledger's id is a non-optional key, so the record keeps its id and controller
 /// (the count is preserved) and loses every characteristic that identifies the card.
+/// Status is not a characteristic (CR 110.5a), and a permanent's face-up/face-down
+/// status is public (CR 110.5), so the redacted record keeps its face state.
 fn redact_battlefield_entry_record(record: &mut crate::types::game_state::BattlefieldEntryRecord) {
     let crate::types::game_state::BattlefieldEntryRecord {
         object_id: _,
@@ -4671,6 +5340,9 @@ fn redact_battlefield_entry_record(record: &mut crate::types::game_state::Battle
         colors,
         keywords,
         controller: _,
+        // CR 110.5: status is public and is not a characteristic, so redaction
+        // preserves it.
+        face_state: _,
     } = record;
     *name = HIDDEN_CARD_NAME.to_string();
     core_types.clear();
@@ -4783,6 +5455,7 @@ fn redact_zone_change_record(record: &mut crate::types::game_state::ZoneChangeRe
     record.combat_status = Default::default();
     record.block_pairs.clear();
     record.co_departed.clear();
+    record.co_entered.clear();
 }
 
 fn hide_card(state: &mut GameState, obj_id: ObjectId) {
@@ -4793,8 +5466,23 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.face_down = true;
         obj.name = HIDDEN_CARD_NAME.to_string();
         redact_printed_identity(obj);
+        // CR 708.2a + CR 708.4: base characteristics clear here, not in `redact_printed_identity`,
+        // because a face-down permanent's or spell's base values are its public characteristics.
+        obj.base_power = None;
+        obj.base_toughness = None;
+        obj.base_loyalty = None;
+        obj.base_printed_loyalty = None;
+        obj.base_defense = None;
+        obj.base_card_types = Default::default();
+        obj.base_mana_cost = Default::default();
+        obj.base_keywords.clear();
+        Arc::make_mut(&mut obj.base_abilities).clear();
+        Arc::make_mut(&mut obj.base_trigger_definitions).clear();
+        Arc::make_mut(&mut obj.base_replacement_definitions).clear();
+        Arc::make_mut(&mut obj.base_static_definitions).clear();
+        obj.base_color.clear();
         Arc::make_mut(&mut obj.abilities).clear();
-        obj.keywords.clear();
+        obj.clear_keywords();
         obj.power = None;
         obj.toughness = None;
         obj.loyalty = None;
@@ -4808,7 +5496,17 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.static_definitions.clear();
         obj.printed_ref = None;
         obj.foretold = false;
+        redact_secret_agenda_choices(obj);
     }
+}
+
+/// CR 702.106c + CR 702.106f: a face-down agenda's secretly chosen names — and how
+/// many names the agenda takes — belong to the controller who chose them. Only the
+/// turn-face-up special action publishes them (`conspiracy::turn_hidden_agenda_face_up`);
+/// every projection that discloses less than that keeps these fields off the wire.
+fn redact_secret_agenda_choices(obj: &mut crate::game::game_object::GameObject) {
+    obj.secret_chosen_names.clear();
+    obj.agenda_name_count = 0;
 }
 
 fn record_hidden_replacement_candidate_source(
@@ -4821,12 +5519,24 @@ fn record_hidden_replacement_candidate_source(
     }
 }
 
-fn reveal_face_down_identity_to_controller(obj: &mut crate::game::game_object::GameObject) {
+/// CR 708.5 + CR 702.106e: Write the hidden card's printed face onto a projection
+/// for a viewer entitled to look under it — the controller, a look-permission
+/// static's beneficiary, or every player at the CR 708.9 game-end reveal. This is
+/// an identity disclosure only: it never publishes a face-down conspiracy's secret
+/// agenda choices, which [`redact_secret_agenda_choices`] keeps off every other
+/// viewer's wire.
+fn reveal_face_down_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     if let Some(back_face) = &obj.back_face {
         obj.name = back_face.name.clone();
         obj.base_name = back_face.name.clone();
         obj.printed_ref = back_face.printed_ref.clone();
         obj.base_printed_ref = back_face.printed_ref.clone();
+        if obj.zone == Zone::Command && obj.is_conspiracy {
+            obj.card_types = back_face.card_types.clone();
+            obj.base_card_types = back_face.card_types.clone();
+            obj.mana_cost = back_face.mana_cost.clone();
+            obj.keywords = back_face.keywords.clone();
+        }
     }
 }
 
@@ -4836,11 +5546,30 @@ fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::G
     obj.printed_ref = None;
     // CR 708.5 + CR 708.2: a face-down permanent has no name and no abilities,
     // and no player but its controller may look at the card underneath.
+    // This applies equally to face-down conspiracies in the command zone (CR 905.4a / CR 702.106a).
     // `parse_warnings` survives the face-down transformation on the
     // authoritative object (measured: a manifested card keeps the printed
     // face's warnings), so it must be redacted here for the same reason
     // `back_face` is — it is evidence about the hidden printed text.
     obj.parse_warnings.clear();
+    // CR 315.5b + CR 702.106f: clear runtime ability definitions, chosen attributes,
+    // secret names, and the agenda's name count for face-down command-zone
+    // conspiracies so they don't leak their abilities or secret choices to observers.
+    // `is_conspiracy` stays: it is the public display classification, not a
+    // characteristic. Battlefield face-down permanents must keep their granted
+    // runtime abilities/replacements.
+    if obj.zone == Zone::Command {
+        Arc::make_mut(&mut obj.abilities).clear();
+        obj.trigger_definitions = Default::default();
+        obj.static_definitions = Default::default();
+        obj.replacement_definitions = Default::default();
+        obj.chosen_attributes.clear();
+        redact_secret_agenda_choices(obj);
+        obj.card_types = Default::default();
+        obj.mana_cost = crate::types::mana::ManaCost::NoCost;
+        obj.clear_keywords();
+        obj.color.clear();
+    }
 }
 
 /// CR 603.3b + CR 400.2: A pending trigger awaiting its
@@ -4867,13 +5596,15 @@ fn redact_pending_trigger_for_observer(pending: &mut crate::game::triggers::Pend
 /// CR 603.3b + CR 400.2: Wrapping-context variant of
 /// [`redact_pending_trigger_for_observer`] that also clears the
 /// `trigger_events` sidecar (the full simultaneous-event set for
-/// batched triggers, which can reference hidden-zone objects). Scheduling
+/// batched triggers, which can reference hidden-zone objects) and the
+/// `causes` record, a second copy of those events. Scheduling
 /// provenance is public metadata and is intentionally preserved.
 fn redact_pending_trigger_context_for_observer(
     ctx: &mut crate::game::triggers::PendingTriggerContext,
 ) {
     redact_pending_trigger_for_observer(&mut ctx.pending);
     ctx.trigger_events.clear();
+    ctx.causes.clear();
 }
 
 /// CR 400.2 + CR 401.2: an `EffectResolved` subject snapshot pairs a hidden
@@ -4905,11 +5636,8 @@ fn redact_hidden_library_ability(
     {
         ability.effect_context_object = None;
     }
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        redact_hidden_library_ability(sub_ability, hidden_library);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        redact_hidden_library_ability(else_ability, hidden_library);
+    for (_, child) in ability.child_links_mut() {
+        redact_hidden_library_ability(child, hidden_library);
     }
 }
 
@@ -5082,13 +5810,13 @@ mod tests {
         continue_replacement, replace_event, replacement_choice_waiting_for, ReplacementResult,
     };
     use crate::game::scenario::{GameScenario, P0, P1};
-    use crate::game::zones::create_object;
-    use crate::types::ability::EffectKind;
+    use crate::game::zones::{create_object, move_to_zone};
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, BeholdCostAction, CostPaidObjectSnapshot,
         Effect, FaceDownProfile, QuantityExpr, ReplacementDefinition, ResolvedAbility,
         TargetFilter,
     };
+    use crate::types::ability::{EffectKind, TargetRef};
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::counter::CounterType;
@@ -5097,22 +5825,68 @@ mod tests {
     use crate::types::game_state::{
         ActiveLibrarySearch, AutoMayChoice, BattlefieldEntryRecord, CastPaymentMode,
         CastingVariant, CostResume, CounterAddedRecord, DamageRecord, DelayedTrigger,
-        DepartedStackSpell, FrozenScopedSearchFoundDisposition, LinkedExileLki,
+        DepartedStackSpell, DistributionUnit, FrozenScopedSearchFoundDisposition, LinkedExileLki,
         LinkedExileSnapshot, ManaAbilityCostCursor, ManaAbilityCostResolutionMode,
         ManaAbilityResume, ManaSpentSourceSnapshot, MayTriggerAutoChoiceKey, MayTriggerOrigin,
         PendingBeginGameAbility, PendingCast, PendingCostMoveCompletion, PendingCostMoveResume,
-        PendingManaAbility, PendingSacrificeCostCompletion, PendingScopedLibrarySearch,
-        PendingSearchFoundBatch, PendingTriggerOrder, PreparedScopedLibrarySearchChoice,
-        SpellCastRecord, StackEntry, TargetEffectDetail, TriggerOrderGroup,
+        PendingManaAbility, PendingPlayerScopeChoice, PendingSacrificeCostCompletion,
+        PendingScopedLibrarySearch, PendingSearchFoundBatch, PendingTriggerOrder,
+        PreparedScopedLibrarySearchChoice, SpellCastRecord, StackEntry, TargetEffectDetail,
+        TriggerOrderGroup,
     };
     use crate::types::identifiers::{CardId, ObjectIncarnationRef, ReplacementContinuationId};
+    use crate::types::keywords::{Keyword, WardCost};
     use crate::types::mana::ManaCost;
     use crate::types::proposed_event::{ProposedEvent, SearchFoundDisposition};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::resolution::OptionalEffectFrame;
+    use crate::types::resolved_commands::{
+        ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
+    };
     use crate::types::zones::{ExileCostSourceZone, Zone};
     use rand::RngCore;
     use std::collections::BTreeSet;
+
+    /// Row V21c, building block (CR 400.2 + CR 708.5): a cause nested in an
+    /// observer's `AbilityTriggered` event is hidden exactly as the same
+    /// `ZoneChanged` is at top level.
+    #[test]
+    fn redact_hidden_zone_change_event_redacts_each_nested_cause() {
+        use crate::types::events::TriggeredAbilityOrigin;
+        let hidden = ObjectId(7);
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            hidden,
+            Some(crate::types::zones::Zone::Library),
+            crate::types::zones::Zone::Battlefield,
+        );
+        record.name = "Secret Card".to_string();
+        record.core_types.push(CoreType::Creature);
+        let entry = GameEvent::ZoneChanged {
+            object_id: hidden,
+            from: Some(crate::types::zones::Zone::Library),
+            to: crate::types::zones::Zone::Battlefield,
+            record: Box::new(record),
+        };
+        let hidden_ids: HashSet<ObjectId> = [hidden].into_iter().collect();
+
+        let mut top_level = entry.clone();
+        redact_hidden_zone_change_event(&mut top_level, &hidden_ids);
+        // Reach guard: the redaction acts on the top-level copy.
+        assert_ne!(top_level, entry);
+
+        let mut observed = GameEvent::AbilityTriggered {
+            stack_entry: Some(ObjectId(50)),
+            source_id: ObjectId(8),
+            controller: PlayerId(1),
+            origin: TriggeredAbilityOrigin::SourceAbility,
+            causes: vec![entry],
+        };
+        redact_hidden_zone_change_event(&mut observed, &hidden_ids);
+        let GameEvent::AbilityTriggered { causes, .. } = observed else {
+            panic!("the event keeps its variant");
+        };
+        assert_eq!(causes, vec![top_level]);
+    }
 
     /// U4 — CR 708.5: the battlefield-entry observation table is engine-internal (a face-down
     /// entrant's projection carries its card identity), so every viewer projection strips it.
@@ -5316,6 +6090,7 @@ mod tests {
                 colors: Vec::new(),
                 keywords: Vec::new(),
                 controller: owner,
+                face_state: crate::types::game_state::FaceState::FaceDown,
             });
         state
             .sacrificed_permanents_this_turn
@@ -5360,6 +6135,7 @@ mod tests {
         let counter_record = |object_id: ObjectId, name: &str| CounterAddedRecord {
             actor: owner,
             object_id,
+            incarnation: Some(0),
             counter_type: CounterType::Plus1Plus1,
             count: 1,
             name: name.to_string(),
@@ -5436,6 +6212,11 @@ mod tests {
         assert!(opponent.battlefield_entries_this_turn[0]
             .core_types
             .is_empty());
+        assert_eq!(
+            opponent.battlefield_entries_this_turn[0].face_state,
+            crate::types::game_state::FaceState::FaceDown,
+            "CR 110.5: face-up/face-down status is public and survives redaction"
+        );
         assert_eq!(opponent.sacrificed_permanents_this_turn.len(), 1);
         assert_eq!(
             opponent.sacrificed_permanents_this_turn[0].name,
@@ -5724,7 +6505,12 @@ mod tests {
         });
         state.pending_trigger_event_batch = all_events.clone();
         state.pending_attack_trigger_events = all_events.clone();
-        state.deferred_entry_events = vec![event.clone()];
+        state.deferred_entry_events = vec![crate::types::game_state::ParkedEntry::pending(
+            event.clone(),
+            None,
+        )];
+        state.unsettled_entry_batch_events = vec![event.clone()];
+
         state.consumed_before_priority_trigger_events =
             vec![crate::game::triggers::ConsumedTriggerEventOccurrence {
                 event: event.clone(),
@@ -5988,11 +6774,17 @@ mod tests {
                     "pending_attack_trigger_events",
                     &state.pending_attack_trigger_events,
                 ),
-                ("deferred_entry_events", &state.deferred_entry_events),
+                (
+                    "unsettled_entry_batch_events",
+                    &state.unsettled_entry_batch_events,
+                ),
             ] {
                 for event in events {
                     push(label, &from_event(event));
                 }
+            }
+            for event in state.parked_entry_events() {
+                push("deferred_entry_events", &from_event(event));
             }
             for occurrence in &state.consumed_before_priority_trigger_events {
                 push(
@@ -6128,6 +6920,7 @@ mod tests {
             "pending_attack_trigger_events",
             "consumed_before_priority_trigger_events",
             "deferred_entry_events",
+            "unsettled_entry_batch_events",
             "pending_player_scope_sacrifice_choice",
             "transient_continuous_effects duration_event_source",
             "departed 1 object",
@@ -6231,6 +7024,7 @@ mod tests {
             "/pending_trigger_event_batch/",
             "/pending_attack_trigger_events/",
             "/deferred_entry_events/",
+            "/unsettled_entry_batch_events/",
             "/consumed_before_priority_trigger_events/",
             "/pending_player_scope_sacrifice_choice/",
             "/waiting_for/",
@@ -6322,6 +7116,8 @@ mod tests {
                     trigger_event: Some(event.clone()),
                     effect_description: None,
                     remaining: Vec::new(),
+                    affected_object: None,
+                    repeat: None,
                 },
             ),
             (
@@ -6334,6 +7130,7 @@ mod tests {
                     effect_description: None,
                     remaining_choices: Vec::new(),
                     chosen: Vec::new(),
+                    affected_object: None,
                 },
             ),
             (
@@ -6431,6 +7228,53 @@ mod tests {
                 assert_eq!(carried[1], payment[1], "{label}: pending_effect visible");
             }
         }
+
+        // U-H2. CR 400.2 + CR 401.2 + CR 603.3: a parked as-enters roll's held trigger
+        // contexts are engine continuations; every audience's projection drops them, the
+        // owner's included, and the parked entry stays. Seeded on a separate state so
+        // the assertions above are untouched.
+        let mut held_state = state.clone();
+        held_state.deferred_entry_events[0].held_triggers = vec![context()];
+        assert_eq!(
+            held_state.deferred_entry_events[0].held_triggers[0]
+                .pending
+                .ability
+                .trigger_source
+                .as_ref()
+                .map(|source| source.mana_spent_source_snapshots.clone()),
+            Some(payment.clone()),
+            "reach-guard: the held context names the hidden mana source"
+        );
+        for (audience, view) in [
+            (
+                "opponent",
+                filter_state_for_viewer(&held_state, opponent_id),
+            ),
+            ("spectator", filter_state_for_unseated_viewer(&held_state)),
+            ("owner", filter_state_for_viewer(&held_state, owner)),
+        ] {
+            assert_eq!(
+                view.deferred_entry_events.len(),
+                1,
+                "{audience}: the parked entry stays"
+            );
+            assert!(
+                view.deferred_entry_events[0].held_triggers.is_empty(),
+                "{audience}: the held contexts are dropped"
+            );
+            let wire = serde_json::to_value(&view).expect("the projection serializes");
+            assert!(
+                wire["deferred_entry_events"][0]
+                    .get("held_triggers")
+                    .is_none(),
+                "{audience}: no held_triggers key on the wire"
+            );
+        }
+        assert_eq!(
+            held_state.deferred_entry_events[0].held_triggers,
+            vec![context()],
+            "the authoritative state keeps its held contexts"
+        );
     }
 
     /// CR 406.3 + CR 406.3a: the three carriers whose copy-on-write pass first SELECTS what
@@ -6843,6 +7687,8 @@ mod tests {
             trigger_event: Some(fixture.event.clone()),
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
+            repeat: None,
         };
         pending.cost_move_resume = Some(ManaAbilityResume::EffectPayCost {
             payer: fixture.owner,
@@ -6908,6 +7754,8 @@ mod tests {
                     trigger_event: None,
                     effect_description: None,
                     remaining: Vec::new(),
+                    affected_object: None,
+                    repeat: None,
                 }),
             ),
             (
@@ -6922,6 +7770,7 @@ mod tests {
                     effect_description: None,
                     remaining_choices: Vec::new(),
                     chosen: Vec::new(),
+                    affected_object: None,
                 }),
             ),
             (
@@ -7280,6 +8129,18 @@ mod tests {
                 }),
             ),
             (
+                "pending_player_scope_choice",
+                "/pending_player_scope_choice/".to_string(),
+                2,
+                Box::new(|state: &mut GameState| {
+                    state.pending_player_scope_choice = Some(PendingPlayerScopeChoice {
+                        ability: effect(),
+                        remaining_players: Vec::new(),
+                        selections: Vec::new(),
+                    });
+                }),
+            ),
+            (
                 "pending_player_scope_unless_payment",
                 "/pending_player_scope_unless_payment/".to_string(),
                 2,
@@ -7497,6 +8358,7 @@ mod tests {
             pending: mana_ability(),
             cursor: ManaAbilityCostCursor {
                 remaining: Vec::new(),
+                activation: Default::default(),
                 remaining_life_payments: Vec::new(),
                 resolution_mode: ManaAbilityCostResolutionMode::Interactive,
                 excluded_sources: Vec::new(),
@@ -7818,6 +8680,7 @@ mod tests {
         caster: PlayerId,
     ) -> Box<PendingCast> {
         Box::new(PendingCast {
+            alternative_cost_keyword: None,
             object_id,
             card_id,
             ability: Box::new(ResolvedAbility::new(
@@ -7837,8 +8700,10 @@ mod tests {
             cost_reduction_election: None,
             activation_cost_snapshot: None,
             activation_cost: None,
+            activation_cost_paused_on_draw: false,
             deferred_hand_discard_cost: None,
             prepaid_finalization: None,
+            deferred_life_gain_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
@@ -7865,6 +8730,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            deferred_tapped_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -7901,6 +8767,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
+            repeat: None,
         };
 
         let filtered = filter_state_for_viewer(&state, PlayerId(1));
@@ -7911,6 +8779,52 @@ mod tests {
             pending_effect.context.parent_target_iteration_members, None,
             "a viewer snapshot must not expose the private look-result object ids"
         );
+    }
+
+    /// CR 608.2d: the paused resolution-time division effect is retained in
+    /// authoritative state, but its resolution-only look-result provenance never
+    /// reaches a viewer through the typed filter. The direct client serializer's
+    /// own redaction is pinned in `derived_views` on an unfiltered state.
+    #[test]
+    fn resolution_division_projection_redacts_private_iteration_members() {
+        let mut state = GameState::new_two_player(42);
+        let mut pending = ResolvedAbility::new(
+            Effect::unimplemented("private loop probe", "private loop probe"),
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        pending.context.parent_target_iteration_members = Some(vec![ObjectId(1), ObjectId(2)]);
+        state.waiting_for = WaitingFor::DistributeAmong {
+            player: PlayerId(0),
+            total: 3,
+            targets: vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Object(ObjectId(2)),
+            ],
+            unit: DistributionUnit::Damage,
+            scope: DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            },
+        };
+
+        let members = |waiting_for: &WaitingFor| match waiting_for {
+            WaitingFor::DistributeAmong {
+                scope: DistributionScope::ResolutionCandidates { pending_effect },
+                ..
+            } => pending_effect
+                .context
+                .parent_target_iteration_members
+                .clone(),
+            other => panic!("the prompt must survive projection, got {other:?}"),
+        };
+
+        // Typed viewer filter.
+        let filtered = filter_state_for_viewer(&state, PlayerId(1));
+        assert_eq!(members(&filtered.waiting_for), None);
+
+        // Authoritative state still carries the provenance for the resume.
+        assert!(members(&state.waiting_for).is_some());
     }
 
     fn dummy_pending_mana_ability(
@@ -7924,12 +8838,16 @@ mod tests {
             rules_execution_node: None,
             ability_snapshot: None,
             announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
@@ -7939,6 +8857,75 @@ mod tests {
             cost_removed_counters: None,
             batch_siblings: Vec::new(),
         })
+    }
+
+    #[test]
+    fn viewer_projection_omits_selected_mana_producers_in_nested_pending_activations() {
+        use crate::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
+        let selected = crate::types::mana::TapsForManaSelection {
+            source: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(910), 4),
+            occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                base_set: TriggerBaseSetInstanceRef::INITIAL,
+                printed_index: 1,
+            },
+            production_override: crate::types::game_state::ProductionOverride::SingleColor(
+                crate::types::mana::ManaType::Green,
+            ),
+        };
+        let mut parent = dummy_pending_mana_ability(PlayerId(0), ObjectId(911));
+        parent.selected_taps_for_mana.push(selected.clone());
+        let mut child = dummy_pending_mana_ability(PlayerId(0), ObjectId(912));
+        child
+            .selected_taps_for_mana
+            .push(crate::types::mana::TapsForManaSelection {
+                source: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(913), 7),
+                production_override: crate::types::game_state::ProductionOverride::SingleColor(
+                    crate::types::mana::ManaType::Blue,
+                ),
+                ..selected
+            });
+        assert_ne!(parent.selected_taps_for_mana, child.selected_taps_for_mana);
+        child.resume = ManaAbilityResume::ManaAbilityManaPayment {
+            pending_mana_ability: parent,
+        };
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::ManaAbilityManaPayment {
+            player: PlayerId(0),
+            pending_mana_ability: child,
+        };
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let projected = filter_state_for_viewer(&state, viewer);
+            let WaitingFor::ManaAbilityManaPayment {
+                pending_mana_ability,
+                ..
+            } = &projected.waiting_for
+            else {
+                panic!("projection retains the existing public prompt");
+            };
+            assert!(pending_mana_ability.selected_taps_for_mana.is_empty());
+            let ManaAbilityResume::ManaAbilityManaPayment {
+                pending_mana_ability,
+            } = &pending_mana_ability.resume
+            else {
+                panic!("projection retains the parent shape");
+            };
+            assert!(pending_mana_ability.selected_taps_for_mana.is_empty());
+        }
+        let WaitingFor::ManaAbilityManaPayment {
+            pending_mana_ability,
+            ..
+        } = &state.waiting_for
+        else {
+            unreachable!()
+        };
+        assert_eq!(pending_mana_ability.selected_taps_for_mana.len(), 1);
+        let ManaAbilityResume::ManaAbilityManaPayment {
+            pending_mana_ability,
+        } = &pending_mana_ability.resume
+        else {
+            unreachable!()
+        };
+        assert_eq!(pending_mana_ability.selected_taps_for_mana.len(), 1);
     }
 
     #[test]
@@ -7957,6 +8944,7 @@ mod tests {
             options: vec!["Anchor".to_string()],
         };
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type: choice_type.clone(),
@@ -7970,6 +8958,7 @@ mod tests {
         assert!(matches!(
             source_less_view.waiting_for,
             WaitingFor::NamedChoice {
+                decision_subject_id: _,
                 free_entry: _,
                 player: PlayerId(0),
                 ref choice_type,
@@ -7998,6 +8987,7 @@ mod tests {
         );
         let expected_prompt = source.prompt.clone();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type,
@@ -9779,6 +10769,38 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn dig_bottom_order_ids_are_redacted_for_an_opponent() {
+        let mut state = GameState::new_two_player(42);
+        let cards: Vec<ObjectId> = (1..=2)
+            .map(|i| {
+                create_object(
+                    &mut state,
+                    CardId(i),
+                    PlayerId(0),
+                    format!("Looked {i}"),
+                    Zone::Library,
+                )
+            })
+            .collect();
+        state.waiting_for = WaitingFor::DigBottomOrder {
+            player: PlayerId(0),
+            source_id: ObjectId(99),
+            cards: cards.clone(),
+        };
+
+        let own_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert!(matches!(
+            own_view.waiting_for,
+            WaitingFor::DigBottomOrder { cards: ref c, .. } if *c == cards
+        ));
+        let opponent_view = filter_state_for_viewer(&state, PlayerId(1));
+        assert!(matches!(
+            opponent_view.waiting_for,
+            WaitingFor::DigBottomOrder { cards: ref c, .. } if *c == vec![ObjectId(0); 2]
+        ));
+    }
+
     /// CR 701.25a: surveil is "look at the top N cards of your library" — the
     /// surveilling player must see those identities while the prompt is open,
     /// and no one else may. Regression guard for the surveil prompt rendering
@@ -9978,6 +11000,72 @@ mod tests {
             filtered.objects.get(&card_id).map(|obj| obj.name.as_str()),
             Some("Hidden Card"),
             "re-drawn card must not inherit prior reveal state — it is a new object per CR 400.7"
+        );
+    }
+
+    /// CR 701.20a: a PUBLIC reveal survives a move into a hand. "To reveal a
+    /// card, show that card to all players" — once they have been shown it,
+    /// putting it into a hand does not unshow it, so the opponent must still
+    /// identify the card (Malevolent Rumble, Narset, Parter of Veils: "reveal …
+    /// and put it into your hand"). CR 401.2: the same card moving into a
+    /// LIBRARY retires the reveal, because library order is not public — the
+    /// neighbouring `public_reveal_memory_clears_when_card_changes_zones` test
+    /// owns that half.
+    ///
+    /// Revert probe: retire the public reveal on every destination (the pre-fix
+    /// behavior) ⇒ the hand assertion below FAILS.
+    #[test]
+    fn public_reveal_memory_survives_a_move_into_a_hand() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Rumbled Card".to_string(),
+            Zone::Library,
+        );
+        // The momentary reveal window a reveal-dig opens (CR 701.20a), plus the
+        // durable publication the `CardsRevealed` event boundary records — the
+        // same pair a `Dig { reveal: true }` produces.
+        state.revealed_cards.insert(card_id);
+        state
+            .resolve_and_apply_information(
+                &[card_id],
+                ResolvedInformationAudience::Public,
+                ResolvedInformationLifetime::UntilZoneChange,
+                ResolvedInformationEdit::Reveal,
+            )
+            .expect("a live library occurrence is published")
+            .expect("the reveal is journaled");
+        assert_eq!(
+            filter_state_for_viewer(&state, PlayerId(1)).objects[&card_id].name,
+            "Rumbled Card",
+            "the reveal is public while the card sits in the library"
+        );
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, card_id, Zone::Hand, &mut events);
+        assert!(
+            state.public_revealed_cards.contains(&card_id),
+            "CR 701.20a: a public reveal must survive a move into a hand"
+        );
+        assert_eq!(
+            filter_state_for_viewer(&state, PlayerId(1)).objects[&card_id].name,
+            "Rumbled Card",
+            "the opponent must still identify the revealed card now that it is a hand card"
+        );
+
+        // CR 401.2: a library destination is the one hidden zone that retires
+        // the publication, so the identity never resurfaces later.
+        move_to_zone(&mut state, card_id, Zone::Library, &mut events);
+        assert!(
+            !state.public_revealed_cards.contains(&card_id),
+            "a move into a library must retire the public reveal"
+        );
+        assert_eq!(
+            filter_state_for_viewer(&state, PlayerId(1)).objects[&card_id].name,
+            "Hidden Card",
+            "a card put back into a library is hidden again"
         );
     }
 
@@ -10226,6 +11314,30 @@ mod tests {
         );
         assert_eq!(filtered.planar_deck, im::vector![plane_id]);
         assert_eq!(filtered.scheme_deck, im::vector![scheme_id]);
+    }
+
+    #[test]
+    fn boss_pile_cards_are_hidden_from_all_viewers() {
+        let mut state = GameState::new_two_player(42);
+        let boss_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Secret Boss".to_string(),
+            Zone::Command,
+        );
+        state.objects.get_mut(&boss_id).unwrap().face_down = true;
+        state.boss_deck.push_back(boss_id);
+
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let filtered = filter_state_for_viewer(&state, viewer);
+            assert_eq!(
+                filtered.objects.get(&boss_id).map(|obj| obj.name.as_str()),
+                Some("Hidden Card"),
+                "boss pile identity hidden from {viewer:?}"
+            );
+            assert_eq!(filtered.boss_deck, im::vector![boss_id]);
+        }
     }
 
     /// CR 400.2 makes the command zone public "except for those cards that some rule or
@@ -11148,6 +12260,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::SelfRef,
@@ -11335,6 +12449,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::SelfRef,
@@ -11985,6 +13101,7 @@ mod tests {
         // P0 has already answered; P1 is the pending chooser.
         state.players[0].chosen_attributes = vec![ChosenAttribute::Number(4)];
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::NumberRange {
@@ -12184,6 +13301,7 @@ mod tests {
             pending: Box::new(pending),
             cursor: ManaAbilityCostCursor {
                 remaining: Vec::new(),
+                activation: Default::default(),
                 remaining_life_payments: Vec::new(),
                 resolution_mode: ManaAbilityCostResolutionMode::Interactive,
                 excluded_sources: Vec::new(),
@@ -12210,6 +13328,7 @@ mod tests {
                 paused_at_index: 0,
                 destination: Zone::Exile,
                 completion: PendingCostMoveCompletion::FinishPending,
+                requested_cost_count: None,
                 deferred_cost_events: Vec::new(),
                 departure_record_indices: Vec::new(),
             },
@@ -12229,6 +13348,7 @@ mod tests {
                     phyrexian_choices: None,
                     pre_payment_checks: None,
                 },
+                requested_cost_count: None,
                 deferred_cost_events: Vec::new(),
                 departure_record_indices: Vec::new(),
             },
@@ -12239,6 +13359,7 @@ mod tests {
                 paused_at_index: 0,
                 completion: PendingSacrificeCostCompletion::ResolutionOptionalPayment {
                     frame: Box::new(OptionalEffectFrame {
+                        parked_poll: None,
                         ability: Box::new(ResolvedAbility::new(
                             Effect::NoOp,
                             vec![],
@@ -12249,6 +13370,7 @@ mod tests {
                         trigger_events: Vec::new(),
                         trigger_match_count: None,
                         return_result_occurrence: None,
+                        replacement_action: None,
                     }),
                     selected: vec![ObjectIncarnationRef::from_object(&state.objects[&hidden])],
                 },
@@ -12384,6 +13506,54 @@ mod tests {
         );
     }
 
+    /// CR 400.2: `pending_single_discard` names a card still in a HAND (a hidden
+    /// zone) and must be absent from every viewer projection, mirroring
+    /// `pending_discard_batch`. REVERT PROBE: delete
+    /// `filtered.pending_single_discard = None;` from `filter_state_for_scope`.
+    #[test]
+    fn parked_single_discard_is_absent_from_every_viewer_projection() {
+        let mut state = GameState::new_two_player(42);
+        let hidden = create_object(
+            &mut state,
+            CardId(70_008),
+            PlayerId(0),
+            "Hand Secret".to_string(),
+            Zone::Hand,
+        );
+        state.pending_single_discard =
+            Some(Box::new(crate::types::game_state::PendingSingleDiscard {
+                paused_card: crate::types::identifiers::ObjectIncarnationRef::of(hidden, 0),
+                player: PlayerId(0),
+                source_id: None,
+            }));
+
+        let authoritative = serde_json::to_string(&state.pending_single_discard)
+            .expect("the authoritative carrier serializes");
+        assert!(
+            authoritative.contains(&hidden.0.to_string()),
+            "reach guard: the authoritative carrier really does hold the hand card's ID"
+        );
+
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let view = filter_state_for_viewer(&state, viewer);
+            assert!(
+                view.pending_single_discard.is_none(),
+                "viewer {viewer:?} must not receive the parked single discard"
+            );
+            let wire = serde_json::to_string(&view).expect("the filtered snapshot serializes");
+            assert!(
+                !wire.contains("\"pendingSingleDiscard\":{")
+                    && !wire.contains("\"pending_single_discard\":{"),
+                "viewer {viewer:?}'s snapshot must not serialize the carrier at all"
+            );
+        }
+
+        assert!(
+            state.pending_single_discard.is_some(),
+            "filtering must not alter the authoritative server carrier"
+        );
+    }
+
     /// CR 400.2 + CR 616.1: an exile-until replacement continuation carries
     /// hidden library order and is server-only for every viewer.
     #[test]
@@ -12468,8 +13638,9 @@ mod tests {
                 }],
                 damage_to_players: Vec::new(),
                 prevention_tally: Vec::new(),
-                lives_before: vec![20, 20],
                 sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+                replacement: None,
+                phase_c_remnant: None,
             }));
 
         let authoritative = serde_json::to_string(&state.pending_combat_lifelink)
@@ -13520,7 +14691,7 @@ mod tests {
                 suggested_declaration: None,
                 leading_aims: Vec::new(),
                 iteration_count: IterationCount::Fixed(3),
-                measured_repetition_bound: Some(3),
+                repetition_bound: crate::analysis::decision_template::RepetitionBound::Measured,
                 deliverable_capacity: 3,
                 points: vec![DecisionPoint {
                     slot: slot.clone(),
@@ -13541,7 +14712,6 @@ mod tests {
                 },
                 key: DecisionGroupKey::from_sources(&[slot.source], DecisionKind::LoopChoice),
             }),
-            road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -13600,7 +14770,7 @@ mod tests {
     ///
     /// # This path is UNREACHABLE through today's publisher, and the row says so
     ///
-    /// `record_trigger_target_answer` mints `ByIdentity` only for `TargetRef::Object`, and the
+    /// `announced_target_pins` mints `ByIdentity` only for `TargetRef::Object`, and the
     /// bounded publisher's own conjuncts (`TargetAnnouncement::Chosen`, and player-valued legal
     /// sets on every tracked board — measured `any ByIdentity pin? false` on all five drives)
     /// keep object pins out of a published slot today. The row exists so a publisher relaxation
@@ -13950,7 +15120,6 @@ mod tests {
                 shortened_by: None,
                 published_declaration: Some(declaration),
                 leading_aims: Vec::new(),
-                road: crate::analysis::loop_check::OfferRoad::Ring,
                 counted_take: Default::default(),
                 period: Default::default(),
             },
@@ -14699,6 +15868,68 @@ mod tests {
         assert_eq!(wire.objects[&fd].name, "Grizzly Bears");
     }
 
+    /// CR 401.2 + CR 401.4: the shared viewer projection breaks the
+    /// identity-to-position link in a hidden ordered zone. A card a viewer
+    /// learned while it was revealed keeps its stable object id, so the
+    /// projected library must not place that id at the position it truly
+    /// occupies; a card still legitimately shown keeps its true slot.
+    #[test]
+    fn hidden_library_order_breaks_the_identity_to_position_link() {
+        let mut state = GameState::new_two_player(7);
+        let revealed_top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Revealed Top".into(),
+            Zone::Library,
+        );
+        // Created before `hidden_higher_id`, so its object id is lower while it
+        // truly sits BELOW that card: the canonical id order cannot coincide
+        // with this library's real order.
+        let hidden_lower_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Hidden Lower Id".into(),
+            Zone::Library,
+        );
+        let hidden_higher_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Hidden Higher Id".into(),
+            Zone::Library,
+        );
+        assert!(hidden_lower_id < hidden_higher_id);
+        state.players[0].library.clear();
+        state.players[0].library.push_back(revealed_top);
+        state.players[0].library.push_back(hidden_higher_id);
+        state.players[0].library.push_back(hidden_lower_id);
+        state.revealed_cards.insert(revealed_top);
+
+        for (label, projected) in [
+            ("P0", filter_state_for_viewer(&state, PlayerId(0))),
+            ("P1", filter_state_for_viewer(&state, PlayerId(1))),
+            ("unseated", filter_state_for_unseated_viewer(&state)),
+        ] {
+            let order: Vec<ObjectId> = projected.players[0].library.iter().copied().collect();
+            assert_eq!(order.len(), 3, "{label}: the zone keeps every member");
+            assert_eq!(
+                order[0], revealed_top,
+                "{label}: CR 701.20a — a card still revealed keeps its true slot"
+            );
+            assert_eq!(
+                &order[1..],
+                &[hidden_lower_id, hidden_higher_id],
+                "{label}: hidden members take canonical id-order slots"
+            );
+            assert_eq!(
+                projected.objects[&hidden_higher_id].name, HIDDEN_CARD_NAME,
+                "{label}: and carry no printed identity"
+            );
+        }
+    }
+
     /// CR 401.2: a revealed card that now sits in a library at a hidden
     /// position loses its id from the viewer copy of `CardsRevealed` (every
     /// seat, the owner included, and a spectator); a revealed library card
@@ -14738,6 +15969,7 @@ mod tests {
             player: PlayerId(0),
             card_ids: vec![bottomed, still_revealed, in_hand],
             card_names: names.clone(),
+            occurrences: state.disclosed_occurrences(&[bottomed, still_revealed, in_hand]),
         };
         for viewer in [PlayerId(0), PlayerId(1), PlayerId(99)] {
             assert_eq!(
@@ -14746,6 +15978,8 @@ mod tests {
                     player: PlayerId(0),
                     card_ids: vec![still_revealed, in_hand],
                     card_names: names.clone(),
+                    // The disclosed occurrences are never sent to a viewer.
+                    occurrences: Vec::new(),
                 }],
                 "viewer {viewer:?}"
             );
@@ -14985,6 +16219,52 @@ mod tests {
                 ..
             }
         ));
+
+        // U-H3. CR 400.2 + CR 401.2 + CR 603.3: a held as-enters roll context whose
+        // ability names the library card is dropped from every viewer's parked entry.
+        let roll = GameEvent::DieRolled {
+            player_id: PlayerId(0),
+            sides: 6,
+            result: Some(4),
+            pre_entry_source: Some(permanent),
+        };
+        let mut parked = crate::types::game_state::ParkedEntry::occurred(roll);
+        parked.held_triggers = vec![crate::game::triggers::PendingTriggerContext::single(
+            crate::game::triggers::PendingTrigger::ordinary(
+                ObjectId(900),
+                PlayerId(0),
+                None,
+                Box::new(with_context(library_card, &state)),
+                0,
+            ),
+        )];
+        state.deferred_entry_events.push(parked);
+        let authoritative = state.deferred_entry_events.clone();
+        assert_eq!(
+            authoritative[0].held_triggers[0]
+                .pending
+                .ability
+                .effect_context_object
+                .as_ref()
+                .map(|snapshot| snapshot.object_id),
+            Some(library_card),
+            "reach guard: the held context names the library card"
+        );
+        for (viewer, projected) in [
+            ("P0", filter_state_for_viewer(&state, PlayerId(0))),
+            ("P1", filter_state_for_viewer(&state, PlayerId(1))),
+            ("unseated", filter_state_for_unseated_viewer(&state)),
+        ] {
+            assert_eq!(projected.deferred_entry_events.len(), 1, "{viewer}");
+            assert!(
+                projected.deferred_entry_events[0].held_triggers.is_empty(),
+                "{viewer}: the held context is dropped"
+            );
+        }
+        assert_eq!(
+            state.deferred_entry_events, authoritative,
+            "the rules state keeps the held context"
+        );
     }
 
     fn exile_with_alt_cost_permission(
@@ -15652,6 +16932,324 @@ mod tests {
         assert_eq!(
             opponent.replacement_continuations, state.replacement_continuations,
             "an unreferenced rider naming only public objects is projected unchanged"
+        );
+    }
+
+    const SOUL_SUMMONS: &str = "Manifest the top card of your library. (Put it onto the battlefield face down as a 2/2 creature. Turn it face up any time for its mana cost if it's a creature card.)";
+    const CRYPTIC_COAT: &str = "When this Equipment enters, cloak the top card of your library, then attach this Equipment to it. (To cloak a card, put it onto the battlefield face down as a 2/2 creature with ward {2}. Turn it face up any time for its mana cost if it's a creature card.)\nEquipped creature gets +1/+0 and can't be blocked.\n{1}{U}: Return this Equipment to its owner's hand.";
+    const HIDDEN_DRAGONSLAYER: &str = "Lifelink\nMegamorph {2}{W} (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any time for its megamorph cost and put a +1/+1 counter on it.)\nWhen this creature is turned face up, destroy target creature with power 4 or greater an opponent controls.";
+
+    fn after_layer_pass(mut view: GameState) -> GameState {
+        crate::game::layers::mark_layers_full(&mut view);
+        crate::game::layers::flush_layers(&mut view);
+        view
+    }
+
+    /// Serra Angel ({3}{W}{W} Creature — Angel 4/4, Flying, Vigilance) on top of P0's library.
+    fn serra_angel_on_library_top(scenario: &mut GameScenario) -> ObjectId {
+        let angel = scenario.add_card_to_library_top(P0, "Serra Angel");
+        let obj = scenario.state.objects.get_mut(&angel).unwrap();
+        obj.card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Angel".to_string()],
+        };
+        obj.base_card_types = obj.card_types.clone();
+        (obj.power, obj.toughness) = (Some(4), Some(4));
+        (obj.base_power, obj.base_toughness) = (Some(4), Some(4));
+        obj.keywords = vec![Keyword::Flying, Keyword::Vigilance];
+        obj.base_keywords = obj.keywords.clone();
+        angel
+    }
+
+    fn soul_summons_manifests_serra_angel() -> (GameState, ObjectId) {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let angel = serra_angel_on_library_top(&mut scenario);
+        let summons = scenario
+            .add_spell_to_hand_from_oracle(P0, "Soul Summons", false, SOUL_SUMMONS)
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(summons).resolve();
+        let state = runner.state().clone();
+        assert!(
+            state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "reach guard: Soul Summons resolved completely"
+        );
+        let obj = &state.objects[&angel];
+        assert!(
+            obj.zone == Zone::Battlefield && obj.face_down && obj.back_face.is_some(),
+            "reach guard: Serra Angel was manifested face down"
+        );
+        (state, angel)
+    }
+
+    fn assert_redacted_for_p1(state: &GameState, id: ObjectId) {
+        assert_eq!(
+            identity_projection_for_viewer(state, P1).get(&id).copied(),
+            Some(IdentityProjection::FaceDownRedacted),
+            "reach guard: the opponent may not look under the face-down object"
+        );
+    }
+
+    fn object_json(state: &GameState, id: ObjectId) -> String {
+        serde_json::to_string(&state.objects[&id]).expect("object serializes")
+    }
+
+    /// CR 708.2a + CR 701.40a: an observer's view of a manifested card keeps its public 2/2
+    /// Creature values, live and base, through a layer pass.
+    #[test]
+    fn manifest_observer_view_keeps_face_down_base_characteristics_through_layer_pass() {
+        let (state, angel) = soul_summons_manifests_serra_angel();
+        assert_redacted_for_p1(&state, angel);
+
+        let view = after_layer_pass(proposer_hidden_view(&state, P1));
+        let obj = &view.objects[&angel];
+        assert_eq!((obj.power, obj.toughness), (Some(2), Some(2)));
+        assert_eq!((obj.base_power, obj.base_toughness), (Some(2), Some(2)));
+        assert_eq!(obj.card_types.core_types, vec![CoreType::Creature]);
+        assert_eq!(obj.base_card_types.core_types, vec![CoreType::Creature]);
+    }
+
+    /// CR 708.5: the card under a manifest stays hidden from an observer in both consumers;
+    /// its base values are the face-down 2/2, never the hidden card's 4/4.
+    #[test]
+    fn manifest_observer_views_never_carry_the_hidden_card() {
+        let (state, angel) = soul_summons_manifests_serra_angel();
+        assert_redacted_for_p1(&state, angel);
+        let needles = ["Serra Angel", "Angel", "Vigilance", "Flying"];
+
+        let controller = object_json(&filter_state_for_viewer(&state, P0), angel);
+        for needle in ["Serra Angel", "Vigilance", "Flying"] {
+            assert!(
+                controller.contains(needle),
+                "control: the controller's view names {needle}"
+            );
+        }
+
+        let hidden = proposer_hidden_view(&state, P1);
+        let views = [
+            ("hidden view", hidden.clone()),
+            ("hidden view after a layer pass", after_layer_pass(hidden)),
+            ("wire snapshot", filter_state_for_viewer(&state, P1)),
+        ];
+        for (label, view) in &views {
+            let obj = &view.objects[&angel];
+            assert_eq!(obj.name, HIDDEN_CARD_NAME, "{label}");
+            assert!(obj.back_face.is_none(), "{label}");
+            let json = object_json(view, angel);
+            for needle in needles {
+                assert!(!json.contains(needle), "{label} leaks {needle}");
+            }
+        }
+        for (label, view) in &views {
+            let obj = &view.objects[&angel];
+            assert_eq!(
+                (obj.base_power, obj.base_toughness),
+                (Some(2), Some(2)),
+                "{label}"
+            );
+        }
+    }
+
+    /// CR 701.58a: an observer's view of a cloaked card keeps its public 2/2 Creature base
+    /// values and its ward {2}.
+    #[test]
+    fn cloak_observer_view_keeps_face_down_base_characteristics_and_ward() {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let angel = serra_angel_on_library_top(&mut scenario);
+        let coat = scenario
+            .add_artifact_to_hand_from_oracle(P0, "Cryptic Coat", CRYPTIC_COAT)
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(coat).resolve();
+        runner.resolve_top();
+        let state = runner.state().clone();
+        let ward = vec![Keyword::Ward(WardCost::Mana(ManaCost::generic(2)))];
+        let cloaked = &state.objects[&angel];
+        assert!(
+            cloaked.zone == Zone::Battlefield
+                && cloaked.face_down
+                && cloaked.back_face.is_some()
+                && cloaked.keywords == ward
+                && cloaked.base_keywords == ward,
+            "reach guard: the ETB trigger cloaked Serra Angel with ward {{2}}"
+        );
+        assert_redacted_for_p1(&state, angel);
+        assert_eq!(
+            state.objects[&coat]
+                .attached_to
+                .as_ref()
+                .and_then(|attached| attached.as_object()),
+            Some(angel),
+            "reach guard: the Coat equips the cloaked card"
+        );
+
+        let view = after_layer_pass(proposer_hidden_view(&state, P1));
+        let obj = &view.objects[&angel];
+        assert_eq!((obj.base_power, obj.base_toughness), (Some(2), Some(2)));
+        assert_eq!((obj.power, obj.toughness), (Some(3), Some(2)));
+        assert_eq!(obj.base_card_types.core_types, vec![CoreType::Creature]);
+        assert_eq!(obj.keywords, ward);
+        assert_eq!(obj.base_keywords, ward);
+    }
+
+    /// CR 708.4 + CR 708.2a: a spell cast face down keeps its public 2/2 Creature base values
+    /// in an observer's view while on the stack, and its card stays hidden.
+    #[test]
+    fn face_down_stack_spell_observer_view_keeps_face_down_base_characteristics() {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let slayer = scenario
+            .add_creature_to_hand(P0, "Hidden Dragonslayer", 2, 1)
+            .with_subtypes(vec!["Human", "Warrior"])
+            .from_oracle_text_with_keywords(&["Lifelink", "Megamorph"], HIDDEN_DRAGONSLAYER)
+            .id();
+        let colorless = || {
+            crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )
+        };
+        scenario.with_mana_pool(P0, vec![colorless(), colorless(), colorless()]);
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&slayer].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: slayer,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::AlternativeCastChoice {
+                    keyword: crate::types::game_state::AlternativeCastKeyword::FaceDown,
+                    ..
+                }
+            ),
+            "reach guard: megamorph offers the face-down cast"
+        );
+        runner
+            .act(GameAction::ChooseAlternativeCast {
+                choice: crate::types::actions::AlternativeCastDecision::Alternative,
+            })
+            .unwrap();
+        let state = runner.state().clone();
+        assert!(
+            state.stack.iter().any(|entry| entry.id == slayer)
+                && state.objects[&slayer].face_down
+                && state.objects[&slayer].back_face.is_some(),
+            "reach guard: Hidden Dragonslayer is a face-down spell on the stack"
+        );
+        assert_redacted_for_p1(&state, slayer);
+        let needles = ["Dragonslayer", "Human", "Warrior", "Lifelink", "Megamorph"];
+        let controller = object_json(&filter_state_for_viewer(&state, P0), slayer);
+        for needle in needles {
+            assert!(
+                controller.contains(needle),
+                "control: the controller's view names {needle}"
+            );
+        }
+
+        let views = [
+            (
+                "hidden view after a layer pass",
+                after_layer_pass(proposer_hidden_view(&state, P1)),
+            ),
+            ("wire snapshot", filter_state_for_viewer(&state, P1)),
+        ];
+        for (label, view) in &views {
+            let json = object_json(view, slayer);
+            for needle in needles {
+                assert!(!json.contains(needle), "{label} leaks {needle}");
+            }
+        }
+        for (label, view) in &views {
+            let obj = &view.objects[&slayer];
+            assert_eq!(
+                (obj.base_power, obj.base_toughness),
+                (Some(2), Some(2)),
+                "{label}"
+            );
+            assert_eq!(
+                obj.base_card_types.core_types,
+                vec![CoreType::Creature],
+                "{label}"
+            );
+        }
+    }
+
+    /// CR 701.20a + CR 400.2: a reveal selection offered before anything is revealed
+    /// ("reveal any number of artifact cards in your hand") lists the matching cards of the
+    /// chooser's HIDDEN hand. The chooser keeps every candidate; an opponent or an unseated
+    /// spectator learns neither which cards match nor how many.
+    #[test]
+    fn reveal_choice_candidates_are_private_to_the_chooser() {
+        use crate::types::ability::{ObjectSelectionCardinality, TargetFilter};
+        let reveal_candidates = |waiting_for: &WaitingFor| match waiting_for {
+            WaitingFor::RevealChoice { cards, .. } => cards.clone(),
+            other => panic!("expected a RevealChoice, got {other:?}"),
+        };
+        let mut state = GameState::new_two_player(42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Artifact A".to_string(),
+            Zone::Hand,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Artifact B".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::RevealChoice {
+            player: PlayerId(0),
+            cards: vec![a, b],
+            filter: TargetFilter::Any,
+            optional: false,
+            decline_runs_continuation: false,
+            cardinality: ObjectSelectionCardinality::AnyNumber,
+            pending_mana_ability: None,
+        };
+
+        // Zero revealed so far: the chooser sees every option, nobody else sees any.
+        assert_eq!(
+            reveal_candidates(&filter_state_for_viewer(&state, PlayerId(0)).waiting_for),
+            vec![a, b]
+        );
+        assert!(
+            reveal_candidates(&filter_state_for_viewer(&state, PlayerId(1)).waiting_for).is_empty()
+        );
+        assert!(
+            reveal_candidates(&filter_state_for_unseated_viewer(&state).waiting_for).is_empty()
+        );
+
+        // CR 400.2: the projection never conditions on which candidates are
+        // already public — partially or fully revealed, a viewer without access
+        // to the chooser's hand still receives no candidate list.
+        for revealed in [a, b] {
+            state.revealed_cards.insert(revealed);
+            assert!(
+                reveal_candidates(&filter_state_for_viewer(&state, PlayerId(1)).waiting_for)
+                    .is_empty()
+            );
+            assert!(
+                reveal_candidates(&filter_state_for_unseated_viewer(&state).waiting_for).is_empty()
+            );
+        }
+        assert_eq!(
+            reveal_candidates(&filter_state_for_viewer(&state, PlayerId(0)).waiting_for),
+            vec![a, b]
         );
     }
 }

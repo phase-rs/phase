@@ -9,13 +9,16 @@
 //! way Destroy and Prepare already do.
 
 use super::rules::{GameScenario, Phase, P0, P1};
+use engine::analysis::resource::loop_states_equal_modulo_resources;
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::GameRunner;
 use engine::game::zones::move_to_zone;
 use engine::types::ability::{ContinuousModification, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
+use engine::types::game_state::{CastPaymentMode, GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
@@ -343,5 +346,397 @@ fn blinked_recipient_is_neither_tapped_nor_frozen() {
     assert!(
         !is_tapped(&runner, wall),
         "the returned permanent untaps during its controller's next untap step"
+    );
+}
+
+const MATSU_TRIBE_SNIPER: &str = "{T}: This creature deals 1 damage to target creature with flying.\nWhenever this creature deals damage to a creature, tap that creature and it doesn't untap during its controller's next untap step.";
+const FLICKER_OF_FATE: &str =
+    "Exile target creature or enchantment, then return it to the battlefield under its owner's control.";
+
+/// Produce the damage and pending untargeted trigger through the activation
+/// pipeline, not an injected event or a hand-built stack entry.
+fn matsu_pending_damage() -> (GameRunner, ObjectId, ObjectId, [ObjectId; 2], usize) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest", "Forest", "Forest", "Forest"]);
+    scenario.with_library_top(P1, &["Island", "Island", "Island", "Island"]);
+    let sniper = scenario
+        .add_creature_from_oracle(P0, "Matsu-Tribe Sniper", 1, 1, MATSU_TRIBE_SNIPER)
+        .id();
+    let crow = scenario
+        .add_creature(P1, "Storm Crow", 1, 2)
+        .from_oracle_text_with_keywords(
+            &["Flying"],
+            "Flying (This creature can't be blocked except by creatures with flying or reach.)",
+        )
+        .id();
+    // Two legal flyers require an actual target choice, not an optional prompt
+    // silently ignored because the only legal object was auto-selected.
+    let other_crow = scenario
+        .add_creature(P1, "Storm Crow", 1, 2)
+        .from_oracle_text_with_keywords(
+            &["Flying"],
+            "Flying (This creature can't be blocked except by creatures with flying or reach.)",
+        )
+        .id();
+    let responses = std::array::from_fn(|_| {
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Flicker of Fate", true, FLICKER_OF_FATE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 1,
+            })
+            .id()
+    });
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let mut runner = scenario.build();
+    let recipient_epoch = runner.state().objects[&crow].incarnation;
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: sniper,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("announce Matsu's printed tap activation");
+    let WaitingFor::TargetSelection {
+        player,
+        target_slots,
+        selection,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("Matsu must ask which of the two legal flyers to damage");
+    };
+    assert_eq!(*player, P0);
+    let legal = &target_slots[selection.current_slot].legal_targets;
+    assert!(legal.contains(&TargetRef::Object(crow)));
+    assert!(legal.contains(&TargetRef::Object(other_crow)));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(crow)),
+        })
+        .expect("choose the surviving Storm Crow");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(is_tapped(&runner, sniper), "the printed tap cost was paid");
+    assert_eq!(runner.state().stack.len(), 1);
+    let activation = &runner.state().stack[0];
+    assert!(matches!(
+        activation.kind,
+        StackEntryKind::ActivatedAbility { .. }
+    ));
+    assert_eq!(
+        activation.ability().unwrap().targets,
+        vec![TargetRef::Object(crow)]
+    );
+
+    let mut emitted = Vec::new();
+    for _ in 0..8 {
+        if matches!(
+            runner.state().stack.back().map(|entry| &entry.kind),
+            Some(StackEntryKind::TriggeredAbility { .. })
+        ) {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        emitted.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("resolve only the damage activation")
+                .events,
+        );
+    }
+    assert_eq!(runner.state().stack.len(), 1);
+    let entry = &runner.state().stack[0];
+    assert_eq!(entry.source_id, sniper);
+    assert_eq!(entry.controller, P0);
+    assert!(
+        entry.ability().unwrap().targets.is_empty(),
+        "the trigger is untargeted"
+    );
+    let StackEntryKind::TriggeredAbility {
+        trigger_event:
+            Some(
+                event @ GameEvent::DamageDealt {
+                    source_id,
+                    source_incarnation,
+                    target,
+                    amount,
+                    is_combat,
+                    ..
+                },
+            ),
+        ..
+    } = &entry.kind
+    else {
+        panic!("the real Matsu trigger must retain its damage event");
+    };
+    assert_eq!(*source_id, sniper);
+    assert_eq!(
+        *source_incarnation,
+        Some(runner.state().objects[&sniper].incarnation)
+    );
+    assert_eq!(*target, TargetRef::Object(crow));
+    assert_eq!(*amount, 1);
+    assert!(!is_combat);
+    assert!(
+        emitted.contains(event),
+        "the activation actually emitted this event"
+    );
+    let matching: Vec<_> = runner
+        .state()
+        .damage_dealt_this_turn
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| {
+            record.source_id == *source_id
+                && record.source_incarnation == *source_incarnation
+                && record.target == *target
+                && record.amount == *amount
+                && record.is_combat == *is_combat
+        })
+        .collect();
+    assert_eq!(matching.len(), 1, "capture the exact event/journal join");
+    let record_index = matching[0].0;
+    assert_eq!(matching[0].1.target_incarnation, Some(recipient_epoch));
+    assert_eq!(runner.state().objects[&crow].zone, Zone::Battlefield);
+    assert!(
+        !is_tapped(&runner, crow),
+        "damage has not resolved the freeze trigger"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    (runner, sniper, crow, responses, record_index)
+}
+
+/// Cast and pay for a real response, stopping before the underlying trigger.
+fn flicker_while_matsu_pending(runner: &mut GameRunner, response: ObjectId, blinked: ObjectId) {
+    for _ in 0..2 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("give P0 response priority");
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(runner.state().stack.len(), 1);
+    let pending = runner.state().stack[0].clone();
+    let old_epoch = runner.state().objects[&blinked].incarnation;
+    let card_id = runner.state().objects[&response].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: response,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast funded Flicker of Fate in response");
+    let WaitingFor::TargetSelection {
+        player,
+        target_slots,
+        selection,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("Flicker must ask which of the several creatures to blink");
+    };
+    assert_eq!(*player, P0);
+    assert!(target_slots[selection.current_slot]
+        .legal_targets
+        .contains(&TargetRef::Object(blinked)));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(blinked)),
+        })
+        .expect("choose the creature to blink while Matsu's trigger is pending");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().stack.len(), 2);
+    let spell = runner.state().stack.back().unwrap();
+    assert_eq!(spell.source_id, response);
+    assert_eq!(
+        spell.ability().unwrap().targets,
+        vec![TargetRef::Object(blinked)]
+    );
+    assert!(matches!(
+        spell.kind,
+        StackEntryKind::Spell {
+            actual_mana_spent: 2,
+            ..
+        }
+    ));
+    for _ in 0..8 {
+        if runner.state().objects[&response].zone == Zone::Graveyard {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("resolve the paid Flicker only");
+    }
+    assert_eq!(runner.state().objects[&response].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&blinked].zone, Zone::Battlefield);
+    // CR 400.7: the paid blink produced a different object.
+    assert_ne!(runner.state().objects[&blinked].incarnation, old_epoch);
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(
+        runner.state().stack[0],
+        pending,
+        "Matsu's original event is still pending"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+fn resolve_matsu_future(state: GameState, crow: ObjectId, freezes: bool) {
+    // Only raw captured gameplay states are resumed, never normalized comparands.
+    let mut future = GameRunner::from_state(state);
+    future.advance_until_stack_empty();
+    assert!(future.state().stack.is_empty());
+    assert!(matches!(
+        future.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    // CR 608.2k + CR 400.7: the selected recipient relation determines whether
+    // the object currently at this storage id is still affected.
+    assert_eq!(is_tapped(&future, crow), freezes);
+    // Controlled tap setup distinguishes the freeze from the immediate tap.
+    future.state_mut().objects.get_mut(&crow).unwrap().tapped = true;
+    advance_to_upkeep_of(&mut future, P1);
+    // CR 502.3: only the bound recipient skips this untap.
+    assert_eq!(is_tapped(&future, crow), freezes);
+    assert!(future.state().stack.is_empty());
+    assert!(matches!(
+        future.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn loop_relational_matsu_dealer_only_blink_preserves_recipient_tap_and_freeze() {
+    let (mut runner, sniper, crow, responses, record_index) = matsu_pending_damage();
+    let dealer_epoch = runner.state().objects[&sniper].incarnation;
+    let recipient_epoch = runner.state().objects[&crow].incarnation;
+    let selected_record = runner.state().damage_dealt_this_turn[record_index].clone();
+
+    // Flicker can target the tapped dealer: its Oracle imposes no untapped restriction.
+    assert!(is_tapped(&runner, sniper));
+    flicker_while_matsu_pending(&mut runner, responses[0], sniper);
+    assert_ne!(runner.state().objects[&sniper].incarnation, dealer_epoch);
+    assert_eq!(runner.state().objects[&crow].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&crow].incarnation, recipient_epoch);
+    assert!(
+        !is_tapped(&runner, crow),
+        "the original trigger is still pending"
+    );
+
+    // The real event and journal still select the departed dealer, not its return.
+    assert!(matches!(
+        &runner.state().stack[0].kind,
+        StackEntryKind::TriggeredAbility {
+            trigger_event: Some(GameEvent::DamageDealt {
+                source_id,
+                source_incarnation,
+                target,
+                ..
+            }),
+            ..
+        } if *source_id == sniper
+            && *source_incarnation == Some(dealer_epoch)
+            && *target == TargetRef::Object(crow)
+    ));
+    let record = &runner.state().damage_dealt_this_turn[record_index];
+    assert_eq!(record, &selected_record);
+    assert_eq!(record.source_id, sniper);
+    assert_eq!(record.source_incarnation, Some(dealer_epoch));
+    assert_eq!(record.target, TargetRef::Object(crow));
+    assert_eq!(record.target_incarnation, Some(recipient_epoch));
+
+    // CR 113.7a + CR 608.2k: source departure does not stop the independent
+    // trigger from tapping and freezing its unchanged, previously identified recipient.
+    resolve_matsu_future(runner.state().clone(), crow, true);
+}
+
+#[test]
+fn loop_relational_matsu_pending_recipient_relation_survives_resource_projection() {
+    let (mut runner, _, crow, responses, record_index) = matsu_pending_damage();
+    flicker_while_matsu_pending(&mut runner, responses[0], crow);
+    let stale = runner.state().clone();
+    assert_ne!(
+        stale.damage_dealt_this_turn[record_index].target_incarnation,
+        Some(stale.objects[&crow].incarnation)
+    );
+
+    // Controlled raw comparison mutation, NOT an independently played history:
+    // change ONLY the selected journal recipient relation; dealer, carried event,
+    // current board, damage payload and latest snapshots remain identical.
+    let mut live = stale.clone();
+    live.damage_dealt_this_turn[record_index].target_incarnation =
+        Some(live.objects[&crow].incarnation);
+
+    // Positive future first, before the refusal: a lost/unsupported trigger
+    // cannot make the subsequent negative or comparator assertion vacuous.
+    resolve_matsu_future(live.clone(), crow, true);
+    resolve_matsu_future(stale.clone(), crow, false);
+    assert!(loop_states_equal_modulo_resources(&stale, &stale.clone()));
+    assert!(loop_states_equal_modulo_resources(&live, &live.clone()));
+    assert!(
+        !loop_states_equal_modulo_resources(&stale, &live),
+        "pending Matsu triggers with stale versus live recipients have different futures"
+    );
+}
+
+#[test]
+fn loop_relational_matsu_legacy_unknown_and_live_pin_diverge_after_another_paid_blink() {
+    let (mut runner, _, crow, responses, record_index) = matsu_pending_damage();
+    flicker_while_matsu_pending(&mut runner, responses[0], crow);
+    let mut pinned = runner.state().clone();
+    pinned.damage_dealt_this_turn[record_index].target_incarnation =
+        Some(pinned.objects[&crow].incarnation);
+    // Labelled compatibility control: None is genuinely unknown legacy history,
+    // not another spelling of a pin on today's live recipient.
+    let mut unknown = pinned.clone();
+    unknown.damage_dealt_this_turn[record_index].target_incarnation = None;
+    resolve_matsu_future(pinned.clone(), crow, true);
+    resolve_matsu_future(unknown.clone(), crow, true);
+
+    let mut unknown_future = GameRunner::from_state(unknown.clone());
+    let mut pinned_future = GameRunner::from_state(pinned.clone());
+    flicker_while_matsu_pending(&mut unknown_future, responses[1], crow);
+    flicker_while_matsu_pending(&mut pinned_future, responses[1], crow);
+    assert_eq!(
+        unknown_future.state().objects[&crow].incarnation,
+        pinned_future.state().objects[&crow].incarnation
+    );
+    // The unchanged runtime's legacy fallback accepts the returned object;
+    // the formerly live exact pin is now stale and must reject it.
+    resolve_matsu_future(unknown_future.state().clone(), crow, true);
+    resolve_matsu_future(pinned_future.state().clone(), crow, false);
+    assert!(loop_states_equal_modulo_resources(
+        &unknown,
+        &unknown.clone()
+    ));
+    assert!(
+        !loop_states_equal_modulo_resources(&unknown, &pinned),
+        "same immediate acceptance does not imply the same future after a response"
     );
 }

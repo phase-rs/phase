@@ -161,6 +161,8 @@ impl From<&ResourceAxis> for AxisKey {
             ResourceAxis::SacTriggers => AxisKey::Sac,
             // CR 704.5c: the per-victim poison axis has one aggregate key.
             ResourceAxis::Poison(_) => AxisKey::Counter(CounterClass::Poison, ObjectClass::Player),
+            // CR 107.14: likewise the per-seat energy axis.
+            ResourceAxis::Energy(_) => AxisKey::Counter(CounterClass::Energy, ObjectClass::Player),
         }
     }
 }
@@ -751,7 +753,28 @@ fn effect_projection(effect: &Effect) -> Projection {
             // CR 122.1: removing counters consumes the counter resource (negative).
             Some(ct) => {
                 let class = CounterClass::from_counter_type(ct);
-                let (a, _) = count_seed(count);
+                let a = match count {
+                    // "Remove all [kind] counters" carries the `Fixed{-1}` sentinel,
+                    // not an amount: it removes however many are there, so it is
+                    // recorded as one unit of consumption. Negating the sentinel
+                    // would record it as production.
+                    QuantityExpr::Fixed { value: -1 } => 1,
+                    // A printed amount removes that many.
+                    QuantityExpr::Fixed { value } => i64::from(*value),
+                    // A dynamic amount is unknown statically: it is recorded as
+                    // one unit of consumption (a consumption marks no axis
+                    // magnitude).
+                    QuantityExpr::Ref { .. }
+                    | QuantityExpr::DivideRounded { .. }
+                    | QuantityExpr::Offset { .. }
+                    | QuantityExpr::ClampMin { .. }
+                    | QuantityExpr::Multiply { .. }
+                    | QuantityExpr::Sum { .. }
+                    | QuantityExpr::UpTo { .. }
+                    | QuantityExpr::Power { .. }
+                    | QuantityExpr::Difference { .. }
+                    | QuantityExpr::Max { .. } => 1,
+                };
                 b.add_counter(
                     class,
                     default_object_class(class),
@@ -954,6 +977,10 @@ fn effect_projection(effect: &Effect) -> Projection {
         // — a multi-card or counted conjure produces that many ETBs, and a
         // variable/X count is marked Unbounded. Any other destination has no
         // repeatable axis ⇒ Unmodeled.
+        // CR 707.13: a card copy created from a name never enters the
+        // battlefield directly (it is created to be cast), so it has no modeled
+        // axis here.
+        Effect::CreateCardCopyByName { .. } => return Projection::Unmodeled,
         Effect::Conjure {
             cards, destination, ..
         } => {
@@ -970,6 +997,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
         | Effect::Regenerate { .. }
@@ -1175,6 +1203,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::CopyTokenOf { .. }
         | Effect::CreateTokenCopyFromPool { .. }
         | Effect::Investigate
+        | Effect::HordePlayCard { .. } => return Projection::Unmodeled,
         | Effect::Unimplemented { .. } => return Projection::Unmodeled,
     }
     b.finish()
@@ -1271,7 +1300,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::ExcessDamageAll
         | TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
-        | TriggerMode::AbilityTriggered
+        | TriggerMode::AbilityTriggered { .. }
         | TriggerMode::Countered
         | TriggerMode::YouAttackUnblocked
         | TriggerMode::AttackerBlocked
@@ -1318,6 +1347,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::Evolve
         | TriggerMode::Evolved
         | TriggerMode::GotchaSaid
+        | TriggerMode::Touched
         | TriggerMode::Explored
         | TriggerMode::Exploited
         | TriggerMode::Enlisted
@@ -1435,6 +1465,12 @@ pub(crate) type ScopedEffect<'a> = (&'a Effect, Option<&'a PlayerFilter>);
 /// [`collect_effects_in_effect`] — the nested-effect payloads that the display
 /// walkers (`build_ability_item`) do *not* descend. Borrows the faces, so the
 /// returned references live as long as the input.
+///
+/// This is deliberately distinct from
+/// [`crate::analysis::deck_signals::ability_chain::collect_scoped_effects`]:
+/// that walker can exclude `else_ability` and `mode_abilities` and never
+/// descends nested effect payloads, while this walker always descends all
+/// three.
 pub(crate) fn collect_effects<'a>(def: &'a AbilityDefinition, out: &mut Vec<ScopedEffect<'a>>) {
     collect_effects_in_effect(&def.effect, def.player_scope.as_ref(), out);
     if let Some(sub) = &def.sub_ability {
@@ -1492,6 +1528,10 @@ fn collect_effects_in_effect<'a>(
             ..
         } => collect_effects(d, out),
         Effect::CreateDelayedTrigger { effect, .. } => collect_effects(effect, out),
+        // CR 614.6: a draw replacement's substitute is a nested definition.
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            collect_effects(replacement_effect, out)
+        }
         Effect::CreateBoon { trigger, .. } => {
             if let Some(execute) = trigger.execute.as_deref() {
                 collect_effects(execute, out)
@@ -1519,13 +1559,12 @@ fn collect_effects_in_effect<'a>(
                 collect_effects(d, out);
             }
         }
-        // CR 614.1a: the heterogeneous substitute Effect installed by a draw /
+        // CR 614.1a: the heterogeneous substitute Effect installed by a
         // planeswalk replacement rides in `replacement_effect: Box<Effect>` (not an
         // `AbilityDefinition` payload), so it is invisible to the sibling recursions
         // above. Descend it too — otherwise a randomness effect nested inside a
         // replacement install escapes every `collect_effects` consumer.
-        Effect::CreateDrawReplacement { replacement_effect }
-        | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             collect_effects_in_effect(replacement_effect, None, out);
         }
         _ => {}
@@ -1983,8 +2022,7 @@ fn fold_one_of(acc: &mut NodeAcc, costs: &[AbilityCost]) {
 
 /// CR 106.1+: enumerate every nonzero [`ResourceVector`] component of `net` as a
 /// signed `(ResourceAxis, amount)` pair — the input to the produces/requires
-/// derivation. Adding a `ResourceVector` field without extending this walk is a
-/// compile error via [`AxisKey::from`]'s exhaustiveness.
+/// derivation.
 fn net_axis_components(net: &ResourceVector) -> Vec<(ResourceAxis, i64)> {
     let mut out = Vec::new();
     for (i, &n) in net.mana.iter().enumerate() {
@@ -2269,6 +2307,18 @@ pub struct CandidateCycle {
     pub unbounded: Vec<ResourceAxis>,
 }
 
+/// One candidate cycle found while examining exactly two input faces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairCandidate {
+    /// Indices into the input slice — the caller owns the names.
+    pub left: usize,
+    pub right: usize,
+    /// The cycle; every member's `origin.source` is `left` or `right`.
+    pub cycle: CandidateCycle,
+    /// Whether every member node projected to a modeled vector.
+    pub completeness: ModelCompleteness,
+}
+
 /// Map an [`AxisKey`] back to a named [`ResourceAxis`] at the candidate's
 /// sentinel players (§3.7 step 5). For mana, recover the seeded color from the
 /// first strictly-positive net slot (color survives the edge-key collapse), else
@@ -2334,6 +2384,168 @@ pub fn candidate_cycles(faces: &[&CardFace]) -> Vec<CandidateCycle> {
         .map(|face| AbilitySource::from(*face))
         .collect();
     candidate_cycles_from_sources(&sources)
+}
+
+/// Engine B restricted to the input regime it was actually built and tested for.
+/// Every existing test drives `candidate_cycles_from_nodes` with exactly two
+/// faces' worth of nodes, so a pair-restricted entry point inherits that
+/// validation instead of extrapolating past it.
+///
+/// EVIDENCE ONLY. A [`CandidateCycle`] is unconfirmed by construction — this
+/// module's own header states it ignores targeting legality, timing windows,
+/// "may" choices, and replacement interactions — so a result here MUST NOT floor
+/// a tier, contribute to a `BracketAxis`, or change a `BracketEstimate.tier`. It
+/// is rendered beside a table match, or alone, as "these two cards may combo".
+pub fn candidate_pairs(faces: &[&CardFace]) -> Vec<PairCandidate> {
+    // Each face's nodes are built once, attributed to the face's index in `faces`, so
+    // a pair's cycle members name the same sources a two-face `candidate_cycles` would.
+    let nodes_by_face: Vec<Vec<AbilityNode>> = faces
+        .iter()
+        .enumerate()
+        .map(|(index, face)| {
+            let mut nodes = build_nodes(&[AbilitySource::from(*face)]);
+            for node in &mut nodes {
+                node.origin.source = index;
+            }
+            nodes
+        })
+        .collect();
+    let mut out = Vec::new();
+
+    for left in 0..nodes_by_face.len() {
+        for right in (left + 1)..nodes_by_face.len() {
+            let pair_nodes = || nodes_by_face[left].iter().chain(&nodes_by_face[right]);
+            out.extend(
+                candidate_cycles_from_nodes(pair_nodes().cloned().collect())
+                    .into_iter()
+                    .map(|cycle| {
+                        let completeness = pair_nodes()
+                            .filter(|node| cycle.members.contains(&node.origin))
+                            .fold(ModelCompleteness::FullyModeled, |acc, node| {
+                                acc.merge(node.completeness)
+                            });
+                        PairCandidate {
+                            left,
+                            right,
+                            cycle,
+                            completeness,
+                        }
+                    }),
+            );
+        }
+    }
+
+    out
+}
+
+#[cfg(feature = "combo-verify")]
+pub const COMBO_AUDIT_BLIND_SPOT: &str = "Blind spot: Thassa's Oracle + Demonic Consultation is a one-shot win, produces no SCC, and cannot be found by this detector; Effect::WinTheGame projects to Unmodeled, so a cycle that ends in an outright win is invisible too — a missing candidate never means \"no combo\".";
+
+/// Evidence-only measurements over the two-card corpus rows and optional decks.
+#[cfg(feature = "combo-verify")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct PairAuditReport {
+    /// Pair candidates proposed over two-card corpus rows and input decks.
+    pub proposed: u32,
+    /// Proposed candidates whose unordered name pair appears in the WU-2 table.
+    pub table_agree: Option<u32>,
+    /// Two-card corpus rows that emitted at least one candidate.
+    pub corpus_agree: u32,
+    /// All rows in the current corpus, including rows not eligible for pair analysis.
+    pub corpus_total: u32,
+    /// Proposed pair candidates whose cycle contains no unmodeled projection.
+    pub fully_modeled: u32,
+    /// Largest number of distinct faces in any proposed cycle.
+    pub max_scc_faces: u32,
+}
+
+/// Assemble the pair detector's measured corpus/deck profile without changing
+/// game state or feeding any bracket-tier input.
+#[cfg(feature = "combo-verify")]
+pub fn pair_audit_report(
+    db: &crate::database::CardDatabase,
+    table: Option<&crate::database::combo_table::ComboTable>,
+    decks: &[Vec<&CardFace>],
+) -> PairAuditReport {
+    fn table_contains_pair(
+        table: &crate::database::combo_table::ComboTable,
+        left: &str,
+        right: &str,
+    ) -> bool {
+        let left = left.to_lowercase();
+        let right = right.to_lowercase();
+        table.entries_for(&left).iter().any(|&index| {
+            table.entry(index).is_some_and(|entry| {
+                let [first, second] = &entry.pieces;
+                (first.key == left && second.key == right)
+                    || (first.key == right && second.key == left)
+            })
+        })
+    }
+
+    fn record_candidates(
+        faces: &[&CardFace],
+        table: Option<&crate::database::combo_table::ComboTable>,
+        report: &mut PairAuditReport,
+    ) -> bool {
+        let candidates = candidate_pairs(faces);
+        for candidate in &candidates {
+            report.proposed = report.proposed.saturating_add(1);
+            if candidate.completeness == ModelCompleteness::FullyModeled {
+                report.fully_modeled = report.fully_modeled.saturating_add(1);
+            }
+            let faces_in_cycle = candidate
+                .cycle
+                .members
+                .iter()
+                .map(|member| member.source)
+                .collect::<BTreeSet<_>>()
+                .len();
+            report.max_scc_faces = report
+                .max_scc_faces
+                .max(u32::try_from(faces_in_cycle).unwrap_or(u32::MAX));
+            if let (Some(table), Some(agreed)) = (table, report.table_agree.as_mut()) {
+                let left = &faces[candidate.left].name;
+                let right = &faces[candidate.right].name;
+                if table_contains_pair(table, left, right) {
+                    *agreed = agreed.saturating_add(1);
+                }
+            }
+        }
+        !candidates.is_empty()
+    }
+
+    let mut report = PairAuditReport {
+        proposed: 0,
+        table_agree: table.map(|_| 0),
+        corpus_agree: 0,
+        corpus_total: u32::try_from(crate::analysis::corpus::corpus_len()).unwrap_or(u32::MAX),
+        fully_modeled: 0,
+        max_scc_faces: 0,
+    };
+
+    for index in 0..crate::analysis::corpus::corpus_len() {
+        let row = crate::analysis::corpus::row(index);
+        if row.cards.len() != 2 {
+            continue;
+        }
+        let Some(faces) = row
+            .cards
+            .iter()
+            .map(|name| db.get_face_by_name(name))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        if record_candidates(&faces, table, &mut report) {
+            report.corpus_agree = report.corpus_agree.saturating_add(1);
+        }
+    }
+    for faces in decks {
+        record_candidates(faces, table, &mut report);
+    }
+
+    report
 }
 
 /// [`candidate_cycles`] over borrowed definition views, each member naming its source's index.
@@ -2522,11 +2734,80 @@ mod tests {
             counter_type: Some(CounterType::Plus1Plus1),
             count: fixed(3),
             target: default_target_filter_any(),
+            scope: crate::types::ability::EffectScope::Single,
         };
         let Projection::Modeled { vector, .. } = effect_projection(&remove) else {
             panic!("modeled")
         };
         assert_eq!(vector.counters.get(&P1P1), Some(&-3));
+    }
+
+    /// CR 122.1: "remove all fate counters from all permanents" (Oblivion Stone)
+    /// consumes fate counters. The `Fixed{-1}` "remove all" sentinel is one unit
+    /// of consumption, never production; a finite mass removal keeps its own
+    /// negative amount, and a dynamic count stays one unit of consumption.
+    #[test]
+    fn remove_all_counters_sentinel_is_consumption() {
+        use crate::types::ability::EffectScope;
+        let fate = CounterType::Generic("fate".to_string());
+        let removal = |counter_type: CounterType, count: QuantityExpr, scope: EffectScope| {
+            Effect::RemoveCounter {
+                counter_type: Some(counter_type),
+                count,
+                target: default_target_filter_any(),
+                scope,
+            }
+        };
+        let fate_key = (
+            CounterClass::from_counter_type(&fate),
+            default_object_class(CounterClass::from_counter_type(&fate)),
+        );
+        for scope in [EffectScope::All, EffectScope::Single] {
+            let Projection::Modeled {
+                vector, produces, ..
+            } = effect_projection(&removal(fate.clone(), fixed(-1), scope))
+            else {
+                panic!("modeled")
+            };
+            assert_eq!(vector.counters.get(&fate_key), Some(&-1), "{scope:?}");
+            assert!(
+                !produces.contains(&AxisKey::Counter(fate_key.0, fate_key.1)),
+                "{scope:?}: removing every fate counter produces none: {produces:?}"
+            );
+        }
+
+        // "Remove two loyalty counters from each planeswalker" (Pestilent Haze).
+        let Projection::Modeled { vector, .. } =
+            effect_projection(&removal(CounterType::Loyalty, fixed(2), EffectScope::All))
+        else {
+            panic!("modeled")
+        };
+        let loyalty_key = (CounterClass::Loyalty, ObjectClass::Planeswalker);
+        assert_eq!(vector.counters.get(&loyalty_key), Some(&-2));
+
+        // A dynamic count stays one unit of consumption.
+        let dynamic = || QuantityExpr::Ref {
+            qty: crate::types::ability::QuantityRef::EventContextAmount,
+        };
+        for count in [
+            dynamic(),
+            QuantityExpr::UpTo {
+                max: Box::new(dynamic()),
+            },
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(dynamic()),
+            },
+        ] {
+            let Projection::Modeled { vector, .. } = effect_projection(&removal(
+                CounterType::Plus1Plus1,
+                count.clone(),
+                EffectScope::Single,
+            )) else {
+                panic!("modeled")
+            };
+            assert_eq!(vector.counters.get(&P1P1), Some(&-1), "{count:?}");
+        }
     }
 
     #[test]
@@ -2932,6 +3213,7 @@ mod tests {
             count,
             target: TargetFilter::Player, // not Controller/SelfRef ⇒ OPPONENT
             destination: Zone::Graveyard,
+            position: crate::types::ability::LibraryPosition::Top,
         }
     }
     fn gain_life(amount: QuantityExpr) -> Effect {
@@ -2974,6 +3256,8 @@ mod tests {
     }
     fn change_zone(origin: Option<Zone>, destination: Zone) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin,
             destination,
             target: default_target_filter_any(),
@@ -4151,6 +4435,19 @@ mod tests {
         assert_eq!(
             trigger_axis(&TriggerDefinition::new(TriggerMode::LifeLost)),
             Some(AxisKey::Life)
+        );
+    }
+
+    /// CR 107.14: Engine B's seat-free graph key reads every seat's energy axis as the one
+    /// player-energy counter key its own nets accumulate.
+    #[test]
+    fn a_seats_energy_axis_keys_as_the_player_energy_counter() {
+        assert_eq!(
+            AxisKey::from(&ResourceAxis::Energy(PlayerId(3))),
+            AxisKey::from(&ResourceAxis::Counter(
+                CounterClass::Energy,
+                ObjectClass::Player
+            ))
         );
     }
 }

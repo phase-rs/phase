@@ -1247,7 +1247,7 @@ fn epic_group_of_distinct_prototypes_with_equal_snapshots_prompts() {
 
 /// V27 (CR 104.4b): loop normalization gives in-flight `EpicCopy` triggers the
 /// relation each carrier compared their payloads by, including on a
-/// twice-normalized ring prior.
+/// twice-normalized state.
 #[test]
 fn loop_comparison_of_in_flight_epic_copies_matches_base() {
     let m = |a: &GameState, b: &GameState| loop_states_equal_modulo_resources(a, b);

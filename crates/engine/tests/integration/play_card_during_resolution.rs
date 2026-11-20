@@ -20,16 +20,22 @@
 //!   `PlayLand` opens the land-face choice (its resolution-owned election is
 //!   a follow-up).
 
+use std::collections::BTreeSet;
+
+use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    CastingPermission, ControllerRef, StaticDefinition, TargetFilter, TargetRef, TypedFilter,
+    AbilityCondition, AbilityDefinition, CardPlayMode, CastFromZoneDriver, CastingPermission,
+    ControllerRef, Effect, EffectOutcomeSignal, StaticDefinition, TargetFilter, TargetRef,
+    TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::LayoutKind;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{ExileLinkKind, WaitingFor};
+use engine::types::game_state::{ExileLink, ExileLinkKind, LookGrant, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -51,6 +57,7 @@ const PAY_LIFE_LAND: &str =
 const COLOR_CHOICE_LAND: &str = "As this land enters, choose a color.\n{T}: Add {U}.";
 const STEAL_PERMANENT: &str = "Gain control of target permanent.";
 const GAIN_THREE: &str = "You gain 3 life.";
+const SMUGGLERS_BUGGY: &str = "Hideaway 4 (When this artifact enters, look at the top four cards of your library, exile one face down, then put the rest on the bottom in a random order.)\nWhenever this Vehicle deals combat damage to a player, you may cast the exiled card without paying its mana cost. If you do, return this Vehicle to its owner's hand.\nCrew 2";
 
 fn fund(runner: &mut GameRunner, player: PlayerId, mana: ManaType, count: usize) {
     let pool = &mut runner
@@ -1613,4 +1620,284 @@ fn minds_desire_keeps_its_until_end_of_turn_play_permission() {
         .expect("playing the exiled land later");
     assert_eq!(runner.state().objects[&land].zone, Zone::Battlefield);
     assert_eq!(lands_played(&runner, P0), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Empty Hideaway links (issue #10325)
+// ---------------------------------------------------------------------------
+
+/// R20 — CR 400.7 + CR 607.2a + CR 608.2d: once Shelldock Isle's hidden card
+/// was played and left exile, "the exiled card" names no card, so a later
+/// activation makes no "you may play" offer and resolves as a no-op.
+#[test]
+fn shelldock_offers_nothing_once_its_hidden_card_was_played() {
+    let mut board = shelldock_board(stage_instant, |_| {}, false).unwrap();
+    let first = activate_shelldock(&mut board, true, None);
+    assert!(first.offered, "reach-guard: the linked card is offered");
+    assert_eq!(
+        board.runner.state().objects[&board.hidden].zone,
+        Zone::Graveyard,
+        "reach-guard: the hidden instant was cast and resolved"
+    );
+    assert_eq!(board.runner.state().players[0].life, 23);
+
+    board
+        .runner
+        .state_mut()
+        .objects
+        .get_mut(&board.land)
+        .unwrap()
+        .tapped = false;
+    let second = activate_shelldock(&mut board, true, None);
+    assert!(
+        !second.offered,
+        "CR 607.2a + CR 608.2d: no linked exiled card, no offer"
+    );
+    let state = board.runner.state();
+    assert!(
+        state.objects[&board.land].tapped,
+        "reach-guard: the second activation resolved"
+    );
+    assert_eq!(
+        state.players[0].mana_pool.total(),
+        0,
+        "reach-guard: {{U}} was spent"
+    );
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(state.players[0].life, 23, "nothing else was cast");
+}
+
+/// R21 — CR 702.75a + CR 607.2a + CR 608.2d: a Mosswort Bridge whose Hideaway
+/// exiled nothing (it was put onto the battlefield, not played) has no linked
+/// card, so its play ability makes no offer even with its condition met. Paired
+/// with R5, where the same ability over a hidden card is offered.
+#[test]
+fn mosswort_bridge_that_hid_nothing_offers_no_play() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bridge = scenario
+        .add_land_from_oracle(P0, "Mosswort Bridge", MOSSWORT_BRIDGE)
+        .id();
+    scenario.add_creature(P0, "Power Ten", 10, 1);
+    for i in 0..3 {
+        scenario.add_card_to_library_top(P0, &format!("Library Card {i}"));
+        scenario.add_card_to_library_top(P1, &format!("Opponent Card {i}"));
+    }
+    let mut runner = scenario.build();
+    assert!(
+        !runner
+            .state()
+            .exile_links
+            .iter()
+            .any(|link| link.source_id == bridge),
+        "reach-guard: the Bridge hid nothing"
+    );
+
+    fund(&mut runner, P0, ManaType::Green, 1);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: bridge,
+            ability_index: 1,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("activating Mosswort Bridge's play ability");
+    let drive = settle(&mut runner, bridge, true, None);
+    assert!(
+        !drive.offered,
+        "CR 607.2a + CR 608.2d: the Bridge hid nothing, so no offer"
+    );
+    let state = runner.state();
+    assert!(
+        state.objects[&bridge].tapped,
+        "reach-guard: the ability resolved"
+    );
+    assert_eq!(
+        state.players[0].mana_pool.total(),
+        0,
+        "reach-guard: {{G}} was spent"
+    );
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(
+        permissions_from(&runner, bridge).is_empty(),
+        "no permission is granted"
+    );
+}
+
+/// The `sub_ability` chain starting at `def`, in order.
+fn ability_chain(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    std::iter::successors(Some(def), |link| link.sub_ability.as_deref()).collect()
+}
+
+/// P0's Smuggler's Buggy (verbatim Oracle) as a 5/5 Vehicle artifact creature
+/// (the Cybership precedent: an attacking Vehicle modelled as a creature). With
+/// `hide`, a generic(3) "You gain 3 life." instant sits face down in exile under
+/// the Buggy's Hideaway look link.
+fn buggy_board(hide: bool) -> (GameRunner, ObjectId, Option<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let buggy = scenario
+        .add_creature(P0, "Smuggler's Buggy", 5, 5)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Vehicle"])
+        .from_oracle_text(SMUGGLERS_BUGGY)
+        .id();
+    let hidden = hide.then(|| {
+        scenario
+            .add_spell_to_exile(P0, "Hidden Insight", true)
+            .from_oracle_text(GAIN_THREE)
+            .with_mana_cost(ManaCost::generic(3))
+            .id()
+    });
+    for i in 0..3 {
+        scenario.add_card_to_library_top(P0, &format!("Library Card {i}"));
+        scenario.add_card_to_library_top(P1, &format!("Opponent Card {i}"));
+    }
+    let mut runner = scenario.build();
+    if let Some(hidden) = hidden {
+        let incarnation = runner.state().objects[&buggy].incarnation;
+        let state = runner.state_mut();
+        state.objects.get_mut(&hidden).unwrap().face_down = true;
+        state.exile_links.push(ExileLink {
+            exiled_id: hidden,
+            source_id: buggy,
+            kind: ExileLinkKind::HideawayLookable {
+                grant: LookGrant::SourceController,
+                lookers: BTreeSet::from([P0]),
+                source_incarnation: incarnation,
+            },
+        });
+    }
+    (runner, buggy, hidden)
+}
+
+/// From P0's precombat main, attack P1 with `attacker` and pass priority until
+/// combat damage has been dealt, leaving the damage trigger for [`settle`].
+fn attack_until_combat_damage(runner: &mut GameRunner, attacker: ObjectId) {
+    let life_before = runner.life(P1);
+    for _ in 0..40 {
+        if runner.life(P1) < life_before {
+            return;
+        }
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![(attacker, AttackTarget::Player(P1))],
+                bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            other => panic!("unexpected prompt before combat damage: {other:?}"),
+        };
+        runner.act(action).expect("advancing to combat damage");
+    }
+    panic!("combat damage was never dealt");
+}
+
+/// R22 — CR 607.2a + CR 608.2d + CR 608.2c: Smuggler's Buggy with nothing
+/// hidden deals combat damage; its "you may cast the exiled card" names no
+/// card, so no offer is made, the optional is declined, and the "If you do,
+/// return this Vehicle to its owner's hand" rider does not run.
+#[test]
+fn smugglers_buggy_with_nothing_hidden_offers_no_cast_and_stays() {
+    let parsed = parse_oracle_text(
+        SMUGGLERS_BUGGY,
+        "Smuggler's Buggy",
+        &[],
+        &["Artifact".to_owned()],
+        &["Vehicle".to_owned()],
+    );
+    let chain = parsed
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .map(ability_chain)
+        .find(|chain| {
+            chain
+                .iter()
+                .any(|def| matches!(*def.effect, Effect::CastFromZone { .. }))
+        })
+        .expect("reach-guard: the combat-damage trigger casts the exiled card");
+    assert!(
+        chain
+            .iter()
+            .all(|def| !matches!(*def.effect, Effect::Unimplemented { .. })),
+        "reach-guard: the trigger chain has no parse gap"
+    );
+    assert!(
+        matches!(
+            *chain[0].effect,
+            Effect::CastFromZone {
+                target: TargetFilter::ExiledBySource,
+                mode: CardPlayMode::Cast,
+                driver: CastFromZoneDriver::DuringResolution,
+                ..
+            }
+        ),
+        "reach-guard: an unbound resolve-now cast of the exiled card"
+    );
+    let performed_gate = Some(AbilityCondition::EffectOutcome {
+        signal: EffectOutcomeSignal::OptionalEffectPerformed,
+    });
+    assert!(
+        chain[1..].iter().any(|def| def.condition == performed_gate),
+        "reach-guard: the return rider is gated on the cast"
+    );
+
+    let (mut runner, buggy, _) = buggy_board(false);
+    attack_until_combat_damage(&mut runner, buggy);
+    assert_eq!(
+        runner.life(P1),
+        15,
+        "reach-guard: the Buggy dealt combat damage"
+    );
+    assert!(
+        !runner.state().stack.is_empty(),
+        "reach-guard: the combat-damage trigger fired"
+    );
+    let drive = settle(&mut runner, buggy, true, None);
+    assert!(
+        !drive.offered,
+        "CR 607.2a + CR 608.2d: nothing hidden, so no offer"
+    );
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&buggy].zone,
+        Zone::Battlefield,
+        "CR 608.2c: the \"If you do\" rider did not run"
+    );
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
+/// R23 — CR 607.2a + CR 608.2g + CR 608.2c: with a card hidden under its
+/// Hideaway link, Smuggler's Buggy's combat-damage trigger offers the cast;
+/// accepting casts the hidden spell during the resolution and the "If you do"
+/// rider returns the Buggy to its owner's hand.
+#[test]
+fn smugglers_buggy_casts_its_hidden_card_and_returns() {
+    let (mut runner, buggy, hidden) = buggy_board(true);
+    let hidden = hidden.expect("a hidden card was staged");
+    attack_until_combat_damage(&mut runner, buggy);
+    assert_eq!(
+        runner.life(P1),
+        15,
+        "reach-guard: the Buggy dealt combat damage"
+    );
+    let drive = settle(&mut runner, hidden, true, None);
+    assert!(drive.offered, "the live linked card is offered");
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&hidden].zone,
+        Zone::Graveyard,
+        "the hidden instant was cast and resolved"
+    );
+    assert_eq!(state.players[0].life, 23);
+    assert_eq!(
+        state.objects[&buggy].zone,
+        Zone::Hand,
+        "CR 608.2c: the \"If you do\" rider returned the Buggy"
+    );
 }

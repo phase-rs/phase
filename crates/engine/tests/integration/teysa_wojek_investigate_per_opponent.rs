@@ -389,8 +389,8 @@ fn teysa_runtime_no_clue_when_no_opponent_lost_life() {
 // std corpus whose for-each ranges over OBJECTS (not a player set): Serene Sleuth
 // ("for each goaded creature you control") and Sophina ("for each nontoken attacking
 // creature"). The parameterized gate-widen + Gap A (`FilterProp::Goaded`) now lift
-// Serene Sleuth to an `ObjectCount` repeat_for; Sophina stays a bare Investigate
-// (Gap B deferred — parse_type_phrase_folding leading-adjective order-dependence). Both
+// Serene Sleuth to an `ObjectCount` repeat_for; Sophina lifts the same way once its
+// post-negation "attacking" is consumed. Both
 // branches drive the real seam and pair their `repeat_for` assertion with a positive
 // `Effect::Investigate` reach-guard so neither is vacuous.
 const SERENE_SLEUTH: &str = "When this creature enters, investigate. (Create a Clue token. It's \
@@ -557,12 +557,9 @@ fn object_for_each_investigate_is_lifted() {
         typed.controller
     );
 
-    // Sophina's attack trigger: object for-each ("nontoken attacking creature") —
-    // Gap B (DEFERRED). parse_type_phrase_folding's leading-adjective order-dependence means
-    // this for-each does NOT yet parse to a member-count, so the seam leaves it a bare
-    // Investigate. Deferred-gap tripwire: paired with a positive `Effect::Investigate`
-    // reach-guard (non-vacuous), it asserts the CURRENT bare-Investigate state and
-    // FLIPS to fail when Gap B lands — the signal to update this expectation.
+    // Sophina's attack trigger: object for-each ("nontoken attacking creature") — the
+    // combat-status word after the `non-` prefix lifts to an `ObjectCount` repeat_for
+    // carrying both the nontoken and attacking restrictions.
     let sophina = parse_oracle_text(SOPHINA, "Sophina, Spearsage Deserter", &[], &[], &[]);
     let attack = sophina
         .triggers
@@ -574,10 +571,20 @@ fn object_for_each_investigate_is_lifted() {
         matches!(attack.effect.as_ref(), Effect::Investigate),
         "reach-guard: Sophina's clause must parse to Investigate"
     );
-    assert!(
-        attack.repeat_for.is_none(),
-        "Gap B deferred (parse_type_phrase_folding leading-adjective order-dependence): \
-         'nontoken attacking creature' does not yet lift — flip this guard when Gap B lands: {:?}",
-        attack.repeat_for
-    );
+    let Some(QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(typed),
+        },
+    }) = &attack.repeat_for
+    else {
+        panic!(
+            "Sophina must lift to a typed ObjectCount repeat_for, got {:?}",
+            attack.repeat_for
+        );
+    };
+    assert!(typed.type_filters.contains(&TypeFilter::Creature));
+    assert!(typed.properties.contains(&FilterProp::NonToken));
+    assert!(typed
+        .properties
+        .contains(&FilterProp::Attacking { defender: None }));
 }

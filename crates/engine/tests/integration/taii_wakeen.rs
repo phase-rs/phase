@@ -23,11 +23,17 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::TargetRef;
 use engine::types::ability::{Effect, QuantityExpr, TargetFilter, TypeFilter, TypedFilter};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
+
+use super::support::{
+    advance_until_stack_empty_and_collect_events, assert_damage_dealt, assert_no_damage_to,
+};
 use engine::types::player::PlayerId;
 
 const TAII: &str = "Whenever a source you control deals noncombat damage to a creature \
@@ -165,47 +171,73 @@ fn a1_no_fire_on_combat_damage() {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Lib A", "Lib B"]);
-    scenario.add_creature_from_oracle(P0, "Taii Wakeen, Perfect Shot", 2, 3, TAII);
+    let taii = scenario
+        .add_creature_from_oracle(P0, "Taii Wakeen, Perfect Shot", 2, 3, TAII)
+        .id();
     // P0's 3/3 attacker; P1's 0/3 blocker. Combat damage 3 == blocker toughness.
     let attacker = scenario.add_creature(P0, "Striker", 3, 3).id();
     let blocker = scenario.add_creature(P1, "Wall", 0, 3).id();
 
     let mut runner = scenario.build();
     let p0_hand_before = runner.state().players[P0.0 as usize].hand.len();
+    let mut events = Vec::new();
 
     // Advance to P0's declare-attackers, attack, block, and let combat damage
     // resolve.
     for _ in 0..200 {
         match &runner.state().waiting_for {
             WaitingFor::DeclareAttackers { .. } => {
-                let _ = runner.act(GameAction::DeclareAttackers {
-                    attacks: vec![(attacker, AttackTarget::Player(P1))],
-                    bands: vec![],
-                });
+                events.extend(
+                    runner
+                        .act(GameAction::DeclareAttackers {
+                            attacks: vec![(attacker, AttackTarget::Player(P1))],
+                            bands: vec![],
+                        })
+                        .expect("declare attacker")
+                        .events,
+                );
             }
             WaitingFor::DeclareBlockers { .. } => {
-                let _ = runner.act(GameAction::DeclareBlockers {
-                    assignments: vec![(blocker, attacker)],
-                });
+                events.extend(
+                    runner
+                        .act(GameAction::DeclareBlockers {
+                            assignments: vec![(blocker, attacker)],
+                        })
+                        .expect("declare blocker")
+                        .events,
+                );
             }
             WaitingFor::Priority { .. } => {
-                // Stop once combat damage has been dealt (blocker marked).
-                if runner.state().objects[&blocker].damage_marked >= 3 {
+                // Stop once combat damage has moved the lethal recipient out
+                // of the battlefield.
+                if runner.state().objects[&blocker].zone != Zone::Battlefield {
                     break;
                 }
-                if runner.act(GameAction::PassPriority).is_err() {
-                    break;
-                }
+                events.extend(
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("pass priority")
+                        .events,
+                );
             }
             _ => break,
         }
     }
 
-    assert_eq!(
-        runner.state().objects[&blocker].damage_marked,
-        3,
-        "test precondition: 3 combat damage was dealt to the 3-toughness blocker"
-    );
+    // A matching but incorrectly triggered Taii ability would still be on the
+    // stack after combat damage. Resolve it before the hand-count assertion so
+    // that the negative checks the finished production path.
+    events.extend(advance_until_stack_empty_and_collect_events(&mut runner));
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+
+    assert_damage_dealt(&events, attacker, TargetRef::Object(blocker), 3, true);
+    assert_eq!(runner.state().objects[&blocker].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&taii].zone, Zone::Battlefield);
+    assert_no_damage_to(&events, TargetRef::Object(taii));
     assert_eq!(
         runner.state().players[P0.0 as usize].hand.len(),
         p0_hand_before,

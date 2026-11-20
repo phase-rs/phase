@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "WaitingFor::RevealChoice gains a typed selection cardinality (ObjectSelectionCardinality, default exactly one; AnyNumber for 'reveal any number of' hand reveals) and pending_mana_ability for mana-ability resumption (Metalworker); Effect::RevealHand gains the same cardinality. Old peers would drop the field and treat an any-number prompt as a single pick."
+}

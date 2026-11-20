@@ -33,6 +33,58 @@ pub enum LlmError {
     /// The decision the request was built for is no longer the decision the
     /// engine is waiting on. An ordinary race, not a failure of the model.
     StaleDecision,
+    /// The provider refused a message-thread request: it would not continue
+    /// the seat's thread, or cannot use threads at all. Threads are best effort
+    /// (one expires after five idle minutes), so this is not the model failing:
+    /// the seat's thread has been dropped, and a game decision is asked once
+    /// more as a fresh request.
+    ThreadUnavailable { code: ThreadErrorCode },
+}
+
+/// Why the Anthropic Messages API refused a message-thread request.
+///
+/// Read from the error body's `error.details.error_code`, never from the HTTP
+/// status alone: a 404 also answers an unknown model, which is not a thread
+/// error and must not be retried as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ThreadErrorCode {
+    /// The thread expired, was never stored, or belongs to another account.
+    NotFound,
+    /// The previous reply's id has already been continued once.
+    AlreadyContinued,
+    /// Another continue from the same id is still running.
+    ContinueInFlight,
+    /// A field that must stay fixed for the whole thread changed.
+    FingerprintMismatch,
+    /// The request, or the organization, cannot use threads at all.
+    UnsupportedRequest,
+}
+
+impl ThreadErrorCode {
+    /// The code for an `error.details.error_code` value, or `None` for any
+    /// value that is not a thread error.
+    pub fn from_api_code(code: &str) -> Option<ThreadErrorCode> {
+        match code {
+            "thread_not_found" => Some(ThreadErrorCode::NotFound),
+            "thread_already_continued" => Some(ThreadErrorCode::AlreadyContinued),
+            "thread_continue_in_flight" => Some(ThreadErrorCode::ContinueInFlight),
+            "thread_fingerprint_mismatch" => Some(ThreadErrorCode::FingerprintMismatch),
+            "thread_unsupported_request" => Some(ThreadErrorCode::UnsupportedRequest),
+            _ => None,
+        }
+    }
+
+    /// The API's own spelling of this code.
+    pub const fn api_code(self) -> &'static str {
+        match self {
+            ThreadErrorCode::NotFound => "thread_not_found",
+            ThreadErrorCode::AlreadyContinued => "thread_already_continued",
+            ThreadErrorCode::ContinueInFlight => "thread_continue_in_flight",
+            ThreadErrorCode::FingerprintMismatch => "thread_fingerprint_mismatch",
+            ThreadErrorCode::UnsupportedRequest => "thread_unsupported_request",
+        }
+    }
 }
 
 impl fmt::Display for LlmError {
@@ -60,6 +112,11 @@ impl fmt::Display for LlmError {
             LlmError::StaleDecision => {
                 write!(f, "the decision this LLM request was built for has changed")
             }
+            LlmError::ThreadUnavailable { code } => write!(
+                f,
+                "the provider refused the message thread ({})",
+                code.api_code()
+            ),
         }
     }
 }

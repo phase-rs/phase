@@ -18,7 +18,9 @@ pub struct LlmPrompt {
     /// The same decision in structured form, for providers that answer typed
     /// questions rather than chat (Jev). Built from the very strings `system`
     /// and `user` are, so every provider is shown the same position and the same
-    /// option domain.
+    /// option domain, with one exception: a typed Choice names one criterion,
+    /// so for a combat declaration, which a chat model composes from pairs, the
+    /// frame offers the engine's candidates instead.
     pub frame: DecisionFrame,
 }
 
@@ -53,13 +55,14 @@ pub struct DecisionFrame {
     /// Engine-authored standing brief: the seat's role, difficulty, and format
     /// guidance. Instructions, never data.
     pub brief: String,
-    /// The rendered position. DATA: card names, Oracle text, log lines and
-    /// player names all reach it, so it is only ever placed in the question's
-    /// `state`, never in its instructions.
+    /// The rendered position. DATA: card names, Oracle text and log lines all
+    /// reach it, so it is only ever placed in the question's `state`, never in
+    /// its instructions.
     pub position: String,
     /// The engine-authored question put about the position.
     pub instruction: String,
     /// Sanitized option lines ([`option_value`]); the index is the option number.
+    /// For a game decision these are always the engine's candidates.
     pub options: Vec<String>,
 }
 
@@ -130,10 +133,15 @@ pub fn difficulty_brief(difficulty: AiDifficulty) -> &'static str {
 /// How much game history this difficulty is shown.
 ///
 /// History is summarized per turn cycle ([`crate::render::history`]): the cycle
-/// in progress verbatim, earlier cycles as one line per turn. The two lowest
+/// in progress entry by entry, earlier cycles as one line per turn. The two lowest
 /// difficulties deliberately reason from a near-term window, which is a large
 /// part of what makes them beatable; every budget is bounded, so no difficulty's
-/// prompt grows with the length of the game.
+/// prompt grows with the length of the game. For the same reason a message
+/// thread ([`crate::game_thread`]), which holds every earlier turn, is used
+/// only by a difficulty that keeps summarized cycles, and it is bounded by its
+/// own token budget. A thread's continue shows the same window of what was
+/// logged since the seat's last decision entry by entry, and folds anything
+/// older into one line per turn, as summarized cycles are.
 pub fn history_budget(difficulty: AiDifficulty) -> HistoryBudget {
     let (summarized_cycles, current_cycle_entries) = match difficulty {
         AiDifficulty::VeryEasy => (0, 0),
@@ -156,6 +164,22 @@ pub const RESPONSE_CONTRACT: &str =
      Do not wrap it in markdown. Do not explain outside the JSON. The \"choice\" \
      value must be one of the valid option numbers stated outside the data block.";
 
+/// The reply contract of every game decision. Most game decisions take one
+/// number; a combat declaration takes each attack or block the seat declares,
+/// as a list (`combat_declaration`). The decision message says which, outside
+/// the data block. One contract covers both, so a seat's system prompt stays
+/// the same from one decision to the next, and with it the seat's message
+/// thread ([`crate::game_thread`]), which is kept only under the system prompt
+/// it was opened with.
+pub const GAME_RESPONSE_CONTRACT: &str =
+    "Reply with ONLY a JSON object and nothing else, in this form:\n\
+     {\"choice\": <the number of the option you pick>, \"reason\": \"<one short sentence>\"}\n\
+     When the message outside the data block tells you to choose a list of options, \
+     \"choice\" is a JSON array of every number you choose instead:\n\
+     {\"choice\": [<the numbers of the options you pick>], \"reason\": \"<one short sentence>\"}\n\
+     Do not wrap it in markdown. Do not explain outside the JSON. Every number in \"choice\" \
+     must be one of the valid option numbers stated outside the data block.";
+
 /// Opening marker of the untrusted-data block. Paired with
 /// [`UNTRUSTED_DATA_END`] and explained to the model by
 /// [`UNTRUSTED_DATA_DECLARATION`].
@@ -173,7 +197,7 @@ const FORGED_MARKER_REPLACEMENT: &str = "[redacted delimiter]";
 ///
 /// Rendered game and draft data is not neutral prose. Oracle text is written in
 /// the imperative ("Sacrifice a creature", "You may search your library"), log
-/// lines carry player names, action labels carry card names and payload
+/// lines carry card names, action labels carry card names and payload
 /// strings, and a pack can carry any card text the format contains. A model
 /// reading that in the same undifferentiated stream as its own instructions has
 /// no structural reason to treat one as description and the other as directive.

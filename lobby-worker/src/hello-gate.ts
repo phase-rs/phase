@@ -8,7 +8,7 @@ export type HelloGateOutcome =
   | { kind: "pass" };
 
 export interface ConnAttachment {
-  client_hello: { client_version: string; build_commit: string } | null;
+  client_hello: { client_version: string; build_commit: string; lobby_protocol_version?: number | null } | null;
   subscribed: boolean;
   /**
    * The lobby registration this connection hosts. Mirrors

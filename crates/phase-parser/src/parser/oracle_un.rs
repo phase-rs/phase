@@ -7,11 +7,15 @@
 //! `<behavior>` is a typed [`GotchaCondition`]; the "When you do" clause is the
 //! reflexive trigger's effect chain (CR 603.12), parsed by the ordinary
 //! effect-chain parser and handed back to the caller.
+//!
+//! `Whenever a player's skin or fingernail touches this creature, <effect>.`
+//! (Vile Bile) parses to a [`TriggerMode::Touched`] trigger on the touched
+//! object; "that player" in the effect is the touching player.
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{char, space0};
-use nom::combinator::{opt, value};
+use nom::combinator::{all_consuming, opt, value};
 use nom::multi::separated_list1;
 use nom::sequence::{delimited, preceded};
 use nom::Parser;
@@ -148,4 +152,63 @@ pub(crate) fn gotcha_trigger(
         .description(description.to_string());
     trigger.gotcha_condition = Some(condition);
     trigger
+}
+
+/// `whenever a player's skin or fingernail touches ~` — the trigger condition of
+/// a touch ability, on already-lowercased, `~`-normalized text.
+fn parse_touch_condition(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        all_consuming((
+            alt((tag("whenever "), tag("when "))),
+            tag("a player"),
+            alt((tag("'s"), tag("\u{2019}s"))),
+            tag(" skin or fingernail touches ~"),
+        )),
+    )
+    .parse(input)
+}
+
+/// The trigger for a touch ability: fires when any player touches this object.
+/// `None` when `lower` is not a touch trigger condition.
+pub(crate) fn try_parse_touch_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    parse_touch_condition(lower).ok()?;
+    // CR 113.6: a permanent's triggered ability functions on the battlefield.
+    let mut def =
+        TriggerDefinition::new(TriggerMode::Touched).trigger_zones(vec![Zone::Battlefield]);
+    def.valid_card = Some(TargetFilter::SelfRef);
+    def.valid_target = Some(TargetFilter::Player);
+    Some((TriggerMode::Touched, def))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn touch_condition_reads_the_printed_skin_or_fingernail_clause() {
+        for text in [
+            "whenever a player's skin or fingernail touches ~",
+            "whenever a player\u{2019}s skin or fingernail touches ~",
+        ] {
+            let (mode, def) = try_parse_touch_trigger(text).expect(text);
+            assert_eq!(mode, TriggerMode::Touched);
+            assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+            assert_eq!(def.valid_target, Some(TargetFilter::Player));
+            assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
+        }
+    }
+
+    #[test]
+    fn touch_condition_rejects_unprinted_or_unconsumed_shapes() {
+        for text in [
+            "whenever a player touches ~",
+            "whenever a player's skin touches ~",
+            "whenever a player's skin or fingernail touches ~ during your turn",
+            "whenever an opponent's skin or fingernail touches ~",
+            "whenever a player's skin or fingernail touches target creature",
+        ] {
+            assert!(try_parse_touch_trigger(text).is_none(), "{text}");
+        }
+    }
 }

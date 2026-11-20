@@ -124,4 +124,49 @@ describe("OutsideGameModal", () => {
       },
     });
   });
+
+  it("offers the revealed companion as a card outside the game and dispatches Companion on confirm", () => {
+    // CR 702.139a + CR 400.11: a revealed, not-yet-used companion is still outside
+    // the game, so a Living Wish-class search offers it beside the sideboard.
+    const waitingFor: WaitingFor = {
+      type: "OutsideGameChoice",
+      data: {
+        player: 0,
+        source_id: 1,
+        choices: [
+          {
+            source: {
+              type: "Sideboard",
+              data: { sideboard_index: 0, card: { name: "Pyroclasm" } },
+            },
+            count: 1,
+            name: "Pyroclasm",
+          },
+          {
+            source: { type: "Companion", data: { card: { name: "Lurrus of the Dream-Den" } } },
+            count: 1,
+            name: "Lurrus of the Dream-Den",
+          },
+        ],
+        count: 1,
+        reveal: true,
+        up_to: false,
+        destination: "Hand",
+      },
+    };
+    setWaitingFor(waitingFor);
+    render(<CardChoiceModal />);
+
+    expect(screen.getByText("From companion")).toBeInTheDocument();
+    expect(screen.getByText("From sideboard")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Lurrus of the Dream-Den/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "ChooseOutsideGameCards",
+      data: { selections: [{ type: "Companion" }] },
+    });
+  });
 });

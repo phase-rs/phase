@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{opt, peek, value, verify};
+use nom::combinator::{opt, peek, recognize, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -273,6 +273,38 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
         return false;
     }
 
+    // CR 608.2c: "If <condition>, <imperative instruction>. [Otherwise, …]" on an
+    // instant or sorcery is a conditional instruction of the spell's effect, even
+    // when a later sentence carries a static marker ("They have \"…\"", Brood
+    // Birthing). Only an imperative body defers; a self-static body ("If X is 5 or
+    // more, this spell can't be countered", Banefire) keeps its routing.
+    if split_leading_conditional(lower).is_some_and(|(_, body)| {
+        EFFECT_IMPERATIVE_PREFIXES.iter().any(|prefix| {
+            tag::<_, _, OracleError<'_>>(*prefix)
+                .parse(body.as_str())
+                .is_ok()
+        })
+    }) {
+        return true;
+    }
+
+    // CR 111.3 + CR 604.3a: "Create a … token. Its power is equal to … and its
+    // toughness is equal to …" defines the created token's power and toughness.
+    // A spell's characteristic-defining ability can't define another object's
+    // characteristics, so the sentence belongs to the creation instruction and
+    // the whole line is the spell's effect chain (Broken Visage).
+    if has_token_pt_followup_sentence(lower) {
+        return true;
+    }
+
+    // Digital-only Alchemy: a quoted ability that cards "perpetually gain" is the
+    // grant's payload, not a static ability of the spell itself, so the line is
+    // the spell's effect chain (Circadian Struggle: "… those cards perpetually
+    // gain \"This spell costs {1} less to cast.\"").
+    if scan_contains(lower, "perpetually gain \"") || scan_contains(lower, "perpetually gains \"") {
+        return true;
+    }
+
     if is_spell_resolution_cast_from_hand_free(lower) {
         return true;
     }
@@ -322,6 +354,30 @@ fn is_spell_resolution_cast_from_hand_free(lower: &str) -> bool {
         && (scan_contains(lower, "without paying its mana cost")
             || scan_contains(lower, "without paying their mana cost")
             || scan_contains(lower, "without paying their mana costs"))
+}
+
+/// CR 111.3: a sentence after a token-creation sentence that the effect
+/// parser's token P/T follow-up grammar reads in full.
+fn has_token_pt_followup_sentence(lower: &str) -> bool {
+    let Ok((_, sentences)) = nom::multi::separated_list1(
+        tag::<_, _, OracleError<'_>>(". "),
+        alt((take_until(". "), nom::combinator::rest)),
+    )
+    .parse(lower) else {
+        return false;
+    };
+    let mut after_creation = false;
+    sentences.into_iter().any(|sentence| {
+        let followup = after_creation
+            && super::oracle_effect::sequence::parse_token_source_power_toughness_followup(
+                sentence,
+            )
+            .is_some();
+        after_creation |= tag::<_, _, OracleError<'_>>("create ")
+            .parse(sentence)
+            .is_ok();
+        followup
+    })
 }
 
 fn is_self_spell_cost_modification(lower: &str) -> bool {
@@ -682,6 +738,10 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
 
 fn is_static_compound_pattern(lower: &str) -> bool {
     if scan_contains(lower, "as though it had flash") && !lower_starts_with(lower, "you may cast") {
+        return true;
+    }
+    // CR 601.3b: "you may cast the first <qualifier> spell … as though it had flash".
+    if super::oracle_static::is_nth_qualified_spell_flash_permission(lower) {
         return true;
     }
     if scan_contains(lower, "enters with ") && !scan_contains(lower, "counter") {
@@ -1209,6 +1269,16 @@ fn is_counter_prohibition_replacement_pattern(lower: &str) -> bool {
     // "instead" but still route through the replacement pipeline.
     nom_primitives::scan_at_word_boundaries(lower, |input| {
         alt((
+            // Typed middle ("can't have -1/-1 counters put on" — Darksteel
+            // Angel): `recognize` keeps the arm's `&str` output so it
+            // unifies with the `tag` arms. Either order is correct (the
+            // arms are disjoint); typed first by the specific-first
+            // convention.
+            recognize((
+                tag::<_, _, OracleError>("can't have "),
+                nom_primitives::parse_counter_type_typed,
+                tag(" counters put on"),
+            )),
             tag::<_, _, OracleError>("can't have counters put on"),
             tag("players can't get counters"),
             tag("counters can't be put on"),
@@ -1404,10 +1474,33 @@ mod tests {
 
     #[test]
     fn masked_brood_birthing_stays_static() {
-        // Brood Birthing invariant: the "have " grant marker is OUTSIDE the quote,
-        // so masking the quoted span must NOT flip the line off static.
+        // Fragment shape only: the bare "they have" grant marker is OUTSIDE the
+        // quote, so masking the quoted span must NOT flip this fragment off
+        // static. Routing of Brood Birthing's whole spell line is decided by
+        // `should_defer_spell_to_effect` (see
+        // `spell_if_imperative_line_defers_to_effect`).
         let line = "they have \"sacrifice this token: add {c}.\"";
         assert!(is_static_pattern(&strip_double_quoted_spans(line)));
+    }
+
+    /// CR 608.2c: an "If <condition>, <imperative>" spell line is a conditional
+    /// instruction of the spell; a self-static If-line keeps its routing.
+    #[test]
+    fn spell_if_imperative_line_defers_to_effect() {
+        assert!(should_defer_spell_to_effect(
+            "if you control an eldrazi spawn, create three 0/1 colorless eldrazi spawn \
+             creature tokens. they have \"sacrifice this token: add {c}.\" otherwise, \
+             create one of those tokens."
+        ));
+        for self_static in [
+            "if x is 5 or more, this spell can't be countered and the damage can't be prevented.",
+            "if this spell was kicked, it has split second.",
+            "if you revealed a dragon card or controlled a dragon as you cast this spell, \
+             this spell can't be countered.",
+            "if you weren't the starting player, this spell costs {1} less to cast.",
+        ] {
+            assert!(!should_defer_spell_to_effect(self_static), "{self_static}");
+        }
     }
 
     #[test]
@@ -1568,6 +1661,20 @@ mod tests {
         let lower = "each other vehicle and creature you control enters with an additional +1/+1 counter on it if its mana value is 4 or less. otherwise, it enters with three additional +1/+1 counters on it.";
         assert!(is_static_pattern(lower));
         assert!(is_replacement_pattern(lower));
+    }
+
+    /// The Blue Spirit routes to statics; the self-flash permission does not.
+    #[test]
+    fn classifies_first_qualified_spell_flash_permission_as_static() {
+        let lower =
+            "you may cast the first creature spell you cast each turn as though it had flash.";
+        assert!(super::super::oracle_static::is_nth_qualified_spell_flash_permission(lower));
+        assert!(is_static_pattern(lower));
+        assert!(
+            !super::super::oracle_static::is_nth_qualified_spell_flash_permission(
+                "you may cast this spell as though it had flash."
+            )
+        );
     }
 
     // -------------------------------------------------------------------

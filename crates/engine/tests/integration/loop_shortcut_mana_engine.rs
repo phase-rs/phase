@@ -164,7 +164,7 @@ pub(crate) fn drive_one_period(rig: &mut Rig, mana_idx: usize, untap_idx: usize)
 /// T1 ⭐ — real Basalt + Power OFFERS a MULTI-ACTION shortcut `[Mana(Colorless)]` / `Advantage` /
 /// (Fixed count picker). The whole STEP B/C/D pipeline end-to-end through `apply_action`.
 /// Revert-failing: dropping STEP C's sequence drive (driving only `seq[0]`) re-taps the tapped
-/// Basalt on the 2nd iteration ⇒ `RecastAbort` ⇒ no offer (the `activation_loop_without_untapper`
+/// Basalt on the 2nd iteration ⇒ no offer (the `activation_loop_without_untapper`
 /// twin shows the same abort mechanism). The paired negative is T6 (no Power ⇒ net-0 ⇒ no offer).
 #[test]
 fn mana_engine_basalt_power_offers_mana_advantage_shortcut() {
@@ -231,7 +231,7 @@ fn mana_engine_accumulates_both_beats() {
 
 /// T3 — a PARTIAL period (only the mana beat) does NOT offer. The trace holds `[mana]`
 /// (non-vacuity), but driving `[mana]` twice re-taps the already-tapped Basalt on the 2nd
-/// iteration ⇒ `RecastAbort` ⇒ no offer. The drive+cover IS the period-boundary check. Paired
+/// iteration ⇒ no offer. The drive+cover IS the period-boundary check. Paired
 /// positive = T1 (the full 2-beat period offers).
 #[test]
 fn mana_engine_partial_period_does_not_offer() {
@@ -666,9 +666,8 @@ fn loop_action_sequence_conditional_load_migration() {
 /// break-on-err flip demonstrable, PATH-1), or does it NO-OP (which makes the loop genuinely
 /// infinite-advantage, not finite-fuel, ⇒ PATH-2)?
 ///
-/// The ONLY opponent-resource-depleting action that can be DRIVEN (offered) is a NON-targeted one
-/// (a targeted one raises a `TargetSelection` the drive answers with `RecastAbort` — it is never
-/// offered, so it can't reach materialize). Pyrohemia's `{R}: deals 1 damage to each creature and
+/// The ONLY opponent-resource-depleting action that can be DRIVEN (offered) is a NON-targeted one.
+/// Pyrohemia's `{R}: deals 1 damage to each creature and
 /// each player` is exactly that: a repeatable, non-targeted activated ability that depletes a
 /// finite opponent resource (the 2/2's toughness/existence). We drive it PAST exhaustion and
 /// MEASURE the reducer result.

@@ -70,6 +70,7 @@ pub fn resolve(
         state.last_revealed_ids.clear();
         events.push(GameEvent::CardsRevealed {
             player,
+            occurrences: Vec::new(),
             card_ids: Vec::new(),
             card_names: cards.iter().map(|card| card.name.clone()).collect(),
         });

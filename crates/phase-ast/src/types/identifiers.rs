@@ -33,6 +33,17 @@ pub const TRIGGERING_SPELL_PLACEHOLDER: ObjectId = ObjectId(u64::MAX);
 #[serde(transparent)]
 pub struct ExtraPhaseId(pub u64);
 
+/// CR 500.7 + CR 603.7a: monotonic identity of one granted extra turn, minted
+/// when an effect enqueues it. Two queued extra turns can share a player and an
+/// anchor; this is what tells them apart. `0` is never minted: an entry written
+/// without an id (saved before ids existed) reads the default and names no
+/// minted turn.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct ExtraTurnId(pub u64);
+
 /// Unique identifier for a set of objects tracked across delayed trigger boundaries.
 /// CR 603.7: Delayed triggers reference the specific objects from the originating effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

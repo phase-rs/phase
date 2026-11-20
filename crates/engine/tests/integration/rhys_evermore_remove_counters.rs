@@ -89,6 +89,7 @@ fn rhys_parses_remove_any_number_as_up_to_sentinel_not_unimplemented() {
             counter_type,
             count,
             target,
+            scope: engine::types::ability::EffectScope::Single,
         } => {
             assert_eq!(*counter_type, None, "untyped: any number of *counters*");
             // Positive reach guard: the "any number of" arm encodes UpTo over the
@@ -466,6 +467,7 @@ fn ai_enumerates_counter_removal_candidates_including_decline() {
             counter_type: None,
             count: QuantityExpr::up_to(QuantityExpr::Fixed { value: -1 }),
             target: engine::types::ability::TargetFilter::SelfRef,
+            scope: engine::types::ability::EffectScope::Single,
         },
         vec![TargetRef::Object(bearer)],
         bearer,

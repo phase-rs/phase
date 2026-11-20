@@ -93,6 +93,8 @@ export function IncomingAttackersPopover({
               >
                 <CardImage
                   cardName={obj.name}
+                  ownerPrinting={obj.printing}
+                  ownerPrintedRef={obj.printed_ref}
                   size="small"
                   isToken={obj.display_source === "Token"}
                   tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined}

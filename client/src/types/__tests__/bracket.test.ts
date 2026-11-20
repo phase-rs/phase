@@ -6,7 +6,6 @@ import {
   BRACKET_TIER_NUMERIC,
   COMMANDER_BRACKETS,
   effectiveBracket,
-  isBracketMismatch,
   type CommanderBracket,
 } from "../bracket";
 
@@ -50,7 +49,7 @@ describe("effectiveBracket", () => {
   });
 
   it("returns the manual tag as-is even below the estimate", () => {
-    // Under-reporting is flagged by isBracketMismatch, but the declared tag
+    // Under-reporting is flagged by the engine's DeclarationVerdict, but the declared tag
     // remains the effective value.
     expect(effectiveBracket(2, "optimized")).toBe(2);
   });
@@ -62,29 +61,5 @@ describe("effectiveBracket", () => {
 
   it("returns null when there is neither a tag nor an estimate", () => {
     expect(effectiveBracket(null, null)).toBeNull();
-  });
-});
-
-describe("isBracketMismatch", () => {
-  it("flags a manual tag below the estimate (under-reporting)", () => {
-    expect(isBracketMismatch(2, "upgraded")).toBe(true);
-    expect(isBracketMismatch(3, "optimized")).toBe(true);
-    expect(isBracketMismatch(1, "upgraded")).toBe(true);
-  });
-
-  it("allows declaring at or above the estimate", () => {
-    expect(isBracketMismatch(3, "upgraded")).toBe(false);
-    expect(isBracketMismatch(4, "upgraded")).toBe(false);
-    expect(isBracketMismatch(5, "optimized")).toBe(false);
-  });
-
-  it("allows B1 Exhibition on a B2-floor estimate", () => {
-    // The estimator never returns B1, so a B1 tag on a Core estimate is a
-    // valid self-declaration, not a mismatch.
-    expect(isBracketMismatch(1, "core")).toBe(false);
-  });
-
-  it("never mismatches an untagged deck", () => {
-    expect(isBracketMismatch(null, "optimized")).toBe(false);
   });
 });

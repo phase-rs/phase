@@ -9,7 +9,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::{Player, PlayerCounterKind, PlayerId};
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{CounterCause, ProposedEvent};
 use crate::types::resolution::PendingProliferateActions;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -375,6 +375,9 @@ fn proliferate_addition_plan(
                         object_id: *obj_id,
                         counter_type: ct,
                         count: 1,
+                        // CR 614.16: proliferate (CR 701.34a) is a resolving
+                        // effect instruction.
+                        cause: CounterCause::ResolvingEffect,
                     });
                 }
             }
@@ -394,6 +397,9 @@ fn proliferate_addition_plan(
                                 player_id: *pid,
                                 counter_kind: kind,
                                 count: 1,
+                                // CR 614.16: proliferate (CR 701.34a) is a
+                                // resolving effect instruction.
+                                cause: CounterCause::ResolvingEffect,
                             });
                         }
                         PlayerCounterSource::Energy => {
@@ -401,6 +407,9 @@ fn proliferate_addition_plan(
                                 actor,
                                 player_id: *pid,
                                 count: 1,
+                                // CR 614.16: proliferate (CR 701.34a) is a
+                                // resolving effect instruction.
+                                cause: CounterCause::ResolvingEffect,
                             });
                         }
                     }
@@ -422,12 +431,14 @@ fn apply_counter_addition_plan_item(
             object_id,
             counter_type,
             count,
+            cause,
         } => super::counters::add_counter_with_replacement(
             state,
             actor,
             object_id,
             counter_type,
             count,
+            cause,
             events,
         ),
         PendingCounterAddition::Player {
@@ -435,6 +446,7 @@ fn apply_counter_addition_plan_item(
             player_id,
             counter_kind,
             count,
+            cause,
         } => {
             super::player_counter::add_player_counter_with_replacement(
                 state,
@@ -442,6 +454,7 @@ fn apply_counter_addition_plan_item(
                 player_id,
                 counter_kind,
                 count,
+                cause,
                 events,
             ) != super::player_counter::PlayerCounterAdditionOutcome::NeedsChoice
         }
@@ -449,7 +462,10 @@ fn apply_counter_addition_plan_item(
             actor,
             player_id,
             count,
-        } => super::energy::add_energy_with_replacement(state, actor, player_id, count, events),
+            cause,
+        } => super::energy::add_energy_with_replacement(
+            state, actor, player_id, count, cause, events,
+        ),
     }
 }
 
@@ -749,7 +765,12 @@ mod tests {
             state.players[1].is_phased_out(),
             "P1 must read as phased out"
         );
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert!(state.players[2].is_eliminated, "P2 must read as eliminated");
         assert!(
             state.players[1].poison_counters > 0 && state.players[2].poison_counters > 0,

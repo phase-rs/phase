@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "PendingCounterPostAction::ContinueLiminalCopyTokenBatch drops enter_with_counters: a liminal copy batch resumed after a counter pause creates its next token with no creation counters, instead of the committed token's own scheduled ones; an old peer refuses a payload without the key."
+}

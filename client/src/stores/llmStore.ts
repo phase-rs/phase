@@ -3,20 +3,28 @@ import { persist } from "zustand/middleware";
 
 import { LLM_ENDPOINTS_KEY } from "../constants/storage";
 import { defaultJevRelayOrigin } from "../services/llm/relayOrigin";
-import type { LlmProfile, LlmProviderCatalogEntry, LlmProviderId } from "../services/llm/types";
+import type {
+  LlmDecisionContext,
+  LlmProfile,
+  LlmProviderCatalogEntry,
+  LlmProviderId,
+} from "../services/llm/types";
 import { useMultiplayerStore } from "./multiplayerStore";
 
 /**
- * How a profile is persisted: everything except the credential.
+ * How a profile is persisted to `localStorage`: everything except the
+ * credential and the tab-local opt-in flag.
  *
- * `apiKey` is deliberately absent. A key written to `localStorage` is readable
- * by anything with script access to the origin and outlives the session that
- * needed it, so keys live in memory for the lifetime of the tab and are
- * re-entered afterwards. {@link STORED_PROFILE_KEYS} is the allowlist the
- * persister projects through, so a field added to `LlmProfile` is NOT persisted
- * until it is named here.
+ * Both `apiKey` and `rememberApiKey` are deliberately absent. A key written to
+ * `localStorage` is readable by anything with script access to the origin and
+ * outlives the session that needed it, so keys live in memory (or, when the
+ * player opts in for the current tab, in `sessionStorage` alongside the
+ * destination they were entered for). Keeping `rememberApiKey` out of
+ * `localStorage` ensures a fresh tab always starts with the option off.
+ * {@link STORED_PROFILE_KEYS} is the allowlist the persister projects through,
+ * so a field added to `LlmProfile` is NOT persisted until it is named here.
  */
-type StoredProfile = Omit<LlmProfile, "apiKey">;
+type StoredProfile = Omit<LlmProfile, "apiKey" | "rememberApiKey">;
 
 const STORED_PROFILE_KEYS = [
   "id",
@@ -26,6 +34,7 @@ const STORED_PROFILE_KEYS = [
   "model",
   "maxOutputTokens",
   "temperature",
+  "decisionContext",
   "enabled",
 ] as const satisfies readonly (keyof StoredProfile)[];
 
@@ -133,6 +142,15 @@ function normalizeFiniteNumber(value: unknown): number | null {
 }
 
 /**
+ * Only an explicit `"messageThread"` opts a profile into message threads.
+ * Anything else, including the absent field of a profile saved before the
+ * setting existed, keeps the self-contained requests it always sent.
+ */
+function normalizeDecisionContext(value: unknown): LlmDecisionContext {
+  return value === "messageThread" ? "messageThread" : "selfContained";
+}
+
+/**
  * Profiles recovered from a persisted payload, NORMALIZED to complete records.
  *
  * Storage is not a trusted input: the record can be hand-edited, truncated by a
@@ -171,9 +189,11 @@ function readPersistedProfiles(value: unknown): LlmProfile[] {
         model: normalizeString(record.model),
         maxOutputTokens: normalizePositiveNumber(record.maxOutputTokens),
         temperature: normalizeFiniteNumber(record.temperature),
-        // A profile whose model did not survive cannot be usable, so it must
-        // not present itself as enabled.
+        decisionContext: normalizeDecisionContext(record.decisionContext),
+        // Never restored from localStorage: credentials and tab-scoped opt-in
+        // flags are not persisted across tabs or sessions.
         enabled: record.enabled === true && normalizeString(record.model).trim() !== "",
+        rememberApiKey: false,
       },
     ];
   });
@@ -305,12 +325,16 @@ export const useLlmStore = create<LlmState>()(
           model: "",
           maxOutputTokens: null,
           temperature: null,
+          // Message threads are opt-in, per profile.
+          decisionContext: "selfContained",
           // New profiles start ENABLED: the player has just asked for a provider,
           // so making them find the switch afterwards is a step that only
           // produces a configured-but-inert profile. A half-filled one is still
           // never reachable -- `isProfileUsable` also requires a model and, for
           // a provider that needs one, a key.
           enabled: true,
+          // Opt-in only: off by default.
+          rememberApiKey: false,
           ...partial,
         };
         set((state) => ({ profiles: [...state.profiles, profile] }));
@@ -419,9 +443,9 @@ export const useLlmStore = create<LlmState>()(
         // blanked the credential in memory, so this write only rewrites the
         // stored record through `partialize` to remove it from disk.
         queueMicrotask(() => {
-          useLlmStore.setState({
-            profiles: readPersistedProfiles(state.profiles).map((profile) => ({ ...profile })),
-          });
+          useLlmStore.setState((current) => ({
+            profiles: current.profiles.map((profile) => ({ ...profile })),
+          }));
         });
       },
       merge: (persisted, current) => ({
@@ -437,22 +461,32 @@ export const useLlmStore = create<LlmState>()(
 );
 
 /**
- * The profile driving an AI seat, or `undefined` when the seat is heuristic.
+ * The profile bound to an AI seat, usable or not, or `undefined` when none is.
  *
  * The seat's own choice wins, including an explicit choice of the built-in
  * engine; only a seat the player never chose falls through to the default
- * opponent. This is the single authority the setup picker and the game loop
- * both read, so what the picker shows is what the game will do.
+ * opponent. It needs no provider catalog, so a store listener can resolve a
+ * seat the same way {@link profileForSeat} does.
+ */
+export function boundProfileForSeat(state: LlmState, seatIndex: number): LlmProfile | undefined {
+  const choice = state.seatBindings[seatIndex];
+  const id = choice === undefined ? state.defaultOpponentProfileId : choice;
+  if (!id) return undefined;
+  return state.profiles.find((candidate) => candidate.id === id);
+}
+
+/**
+ * The profile driving an AI seat, or `undefined` when the seat is heuristic:
+ * the seat's bound profile ({@link boundProfileForSeat}), if it is usable.
+ * This is the single authority the setup picker and the game loop both read,
+ * so what the picker shows is what the game will do.
  */
 export function profileForSeat(
   state: LlmState,
   seatIndex: number,
   catalog: readonly LlmProviderCatalogEntry[],
 ): LlmProfile | undefined {
-  const choice = state.seatBindings[seatIndex];
-  const id = choice === undefined ? state.defaultOpponentProfileId : choice;
-  if (!id) return undefined;
-  const profile = state.profiles.find((candidate) => candidate.id === id);
+  const profile = boundProfileForSeat(state, seatIndex);
   return isProfileUsable(profile, catalog) ? profile : undefined;
 }
 
@@ -502,3 +536,256 @@ function dropRelayKeysOnOriginChange(): void {
 }
 
 dropRelayKeysOnOriginChange();
+
+// ── Session-persisted API keys: sessionStorage, not localStorage ───────────────
+//
+// When a player opts in via `rememberApiKey`, both that tab-local preference
+// and the API key (bound to its provider and effective endpoint) are copied to
+// `sessionStorage`. This survives a tab reload while the destination matches,
+// and clears when the tab closes. Neither field is written to `localStorage` or
+// included in backup export or cloud sync.
+//
+// Residual risk: while the tab is open, any script executing on the origin can
+// read `sessionStorage`, and browsers may persist `sessionStorage` to disk for
+// session restore. Keeping this strictly opt-in (off by default, per tab)
+// limits that exposure to players who explicitly choose it.
+//
+// Every existing clear rule applies to the stored copy too:
+// - Changing provider or endpoint clears it (handled in `updateProfile`)
+// - Changing the Jev relay origin clears it (handled in `dropRelayKeysOnOriginChange`)
+// - Destination mismatch on reload (e.g. relay or endpoint edited in another
+//   tab) refuses restoration and prunes the stale entry (handled in
+//   `hydrateSessionApiKeys`)
+// - Turning the option off or removing the profile deletes it
+
+const LLM_API_KEYS_SESSION_KEY = "phase-llm-api-keys";
+const LLM_REMEMBER_API_KEYS_SESSION_KEY = "phase-llm-remember-api-keys";
+
+interface SessionApiKeyEntry {
+  apiKey: string;
+  provider: LlmProviderId;
+  endpoint: string;
+}
+
+/** Map of profile id -> destination-bound API key entry, stored in sessionStorage. */
+type SessionApiKeyMap = Record<string, SessionApiKeyEntry>;
+
+/**
+ * The destination a profile's key is bound to: its explicit `baseUrl` when set,
+ * the resolved Jev relay origin when `provider === "Jev"` without an explicit
+ * `baseUrl`, or `""` for a provider's default endpoint. Returns `null` when a
+ * Jev relay origin cannot be derived.
+ */
+function effectiveEndpointOf(profile: LlmProfile): string | null {
+  const explicit = normalizedBaseUrl(profile.baseUrl);
+  if (explicit) return explicit;
+  if (profile.provider === "Jev") {
+    return defaultJevRelayOrigin(useMultiplayerStore.getState().hostingServer) ?? null;
+  }
+  return "";
+}
+
+/** Reads and validates the destination-bound API key map from sessionStorage.
+ *  Any failure (absent, quota, disabled, malformed) yields an empty map — keys
+ *  then simply do not survive, exactly as a fresh tab. */
+function readSessionApiKeys(): SessionApiKeyMap {
+  try {
+    const raw = sessionStorage.getItem(LLM_API_KEYS_SESSION_KEY);
+    if (raw === null) return {};
+    const parsed = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const result: SessionApiKeyMap = {};
+    for (const [id, value] of Object.entries(parsed)) {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
+      const entry = value as Record<string, unknown>;
+      if (
+        typeof entry.apiKey === "string"
+        && entry.apiKey !== ""
+        && typeof entry.provider === "string"
+        && KNOWN_PROVIDERS.includes(entry.provider as LlmProviderId)
+        && typeof entry.endpoint === "string"
+      ) {
+        result[id] = {
+          apiKey: entry.apiKey,
+          provider: entry.provider as LlmProviderId,
+          endpoint: entry.endpoint,
+        };
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+/** Writes the API key map to sessionStorage, removing the key entirely when
+ *  the map is empty so a cleared session leaves nothing behind. On write
+ *  failure, removes any previous stored map so reload cannot restore a
+ *  superseded key. */
+function writeSessionApiKeys(keys: SessionApiKeyMap): void {
+  try {
+    if (Object.keys(keys).length === 0) {
+      sessionStorage.removeItem(LLM_API_KEYS_SESSION_KEY);
+      return;
+    }
+    sessionStorage.setItem(LLM_API_KEYS_SESSION_KEY, JSON.stringify(keys));
+  } catch {
+    // A failed write leaves the previous map in storage. Remove it so a
+    // reload does not restore a superseded key. Keys then do not survive a
+    // refresh, the same as a fresh tab.
+    try {
+      sessionStorage.removeItem(LLM_API_KEYS_SESSION_KEY);
+    } catch {
+      // Storage is unavailable, so no stale entry can persist.
+    }
+  }
+}
+
+function readSessionRememberedIds(): Set<string> {
+  try {
+    const raw = sessionStorage.getItem(LLM_REMEMBER_API_KEYS_SESSION_KEY);
+    if (raw === null) return new Set();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((id): id is string => typeof id === "string" && id !== ""));
+  } catch {
+    return new Set();
+  }
+}
+
+function writeSessionRememberedIds(ids: readonly string[]): void {
+  try {
+    if (ids.length === 0) {
+      sessionStorage.removeItem(LLM_REMEMBER_API_KEYS_SESSION_KEY);
+      return;
+    }
+    sessionStorage.setItem(LLM_REMEMBER_API_KEYS_SESSION_KEY, JSON.stringify(ids));
+  } catch {
+    try {
+      sessionStorage.removeItem(LLM_REMEMBER_API_KEYS_SESSION_KEY);
+    } catch {
+      // Storage is unavailable.
+    }
+  }
+}
+
+function buildSessionApiKeyMap(profiles: readonly LlmProfile[]): SessionApiKeyMap {
+  const keys: SessionApiKeyMap = {};
+  for (const profile of profiles) {
+    if (!profile.rememberApiKey || !profile.apiKey) continue;
+    const endpoint = effectiveEndpointOf(profile);
+    if (endpoint === null) continue;
+    keys[profile.id] = {
+      apiKey: profile.apiKey,
+      provider: profile.provider,
+      endpoint,
+    };
+  }
+  return keys;
+}
+
+function sessionApiKeyMapsEqual(a: SessionApiKeyMap, b: SessionApiKeyMap): boolean {
+  const aIds = Object.keys(a);
+  if (aIds.length !== Object.keys(b).length) return false;
+  return aIds.every((id) => {
+    const lhs = a[id];
+    const rhs = b[id];
+    return (
+      rhs !== undefined
+      && lhs.apiKey === rhs.apiKey
+      && lhs.provider === rhs.provider
+      && lhs.endpoint === rhs.endpoint
+    );
+  });
+}
+
+function buildRememberedIds(profiles: readonly LlmProfile[]): string[] {
+  return profiles.filter((profile) => profile.rememberApiKey).map((profile) => profile.id);
+}
+
+function stringArraysEqual(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+/**
+ * Loads tab-scoped `rememberApiKey` preferences and destination-matched API
+ * keys from `sessionStorage` into the store. Runs once at module load, after
+ * `create` has finished `localStorage` hydration, and is exported so tests can
+ * drive it against seeded storage.
+ */
+export function hydrateSessionApiKeys(): void {
+  const rememberedIds = readSessionRememberedIds();
+  const hydrated = readSessionApiKeys();
+  if (rememberedIds.size === 0 && Object.keys(hydrated).length === 0) return;
+
+  let pruned = false;
+  useLlmStore.setState((current) => {
+    const profileIds = new Set(current.profiles.map((p) => p.id));
+    const nextProfiles = current.profiles.map((profile) => {
+      const remembered = rememberedIds.has(profile.id);
+      const entry = hydrated[profile.id];
+      if (!remembered) {
+        if (entry !== undefined) {
+          delete hydrated[profile.id];
+          pruned = true;
+        }
+        return profile;
+      }
+      const currentEndpoint = effectiveEndpointOf(profile);
+      const matchesDestination =
+        entry !== undefined
+        && currentEndpoint !== null
+        && entry.provider === profile.provider
+        && entry.endpoint === currentEndpoint;
+      if (matchesDestination) {
+        return { ...profile, rememberApiKey: true, apiKey: entry.apiKey };
+      }
+      if (entry !== undefined) {
+        delete hydrated[profile.id];
+        pruned = true;
+      }
+      return { ...profile, rememberApiKey: true, apiKey: "" };
+    });
+
+    // Prune orphaned sessionStorage entries for profiles that no longer exist
+    // (e.g., deleted in another tab). This covers both the API key map and
+    // the remembered-ids set.
+    for (const id of Object.keys(hydrated)) {
+      if (!profileIds.has(id)) {
+        delete hydrated[id];
+        pruned = true;
+      }
+    }
+    for (const id of rememberedIds) {
+      if (!profileIds.has(id)) {
+        rememberedIds.delete(id);
+        pruned = true;
+      }
+    }
+
+    return { profiles: nextProfiles };
+  });
+
+  if (pruned) {
+    writeSessionApiKeys(hydrated);
+    writeSessionRememberedIds(Array.from(rememberedIds));
+  }
+}
+
+hydrateSessionApiKeys();
+
+// Mirror every later change to `rememberApiKey` or remembered API keys back to
+// sessionStorage, skipping writes when neither projection changed.
+useLlmStore.subscribe((state, prev) => {
+  const nextRemembered = buildRememberedIds(state.profiles);
+  const prevRemembered = buildRememberedIds(prev.profiles);
+  if (!stringArraysEqual(nextRemembered, prevRemembered)) {
+    writeSessionRememberedIds(nextRemembered);
+  }
+
+  const nextKeys = buildSessionApiKeyMap(state.profiles);
+  const prevKeys = buildSessionApiKeyMap(prev.profiles);
+  if (!sessionApiKeyMapsEqual(nextKeys, prevKeys)) {
+    writeSessionApiKeys(nextKeys);
+  }
+});

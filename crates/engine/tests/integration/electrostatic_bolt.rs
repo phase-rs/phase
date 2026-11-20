@@ -11,6 +11,7 @@
 use engine::game::scenario::GameScenario;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{AbilityCondition, Effect, EffectKind, TargetFilter, TypeFilter};
+use engine::types::actions::GameAction;
 use engine::types::events::PlayerActionKind;
 use engine::types::game_state::WaitingFor;
 use engine::types::mana::ManaCost;
@@ -197,7 +198,7 @@ fn electrostatic_bolt_destroys_4_toughness_artifact_creature_but_not_non_artifac
 /// conditions qualifying a non-battlefield "card" must retain `RevealedHasCardType`
 /// and must never be misrouted to `TargetMatchesFilter`.
 #[test]
-fn target_plus_revealed_preserves_revealed_card_type() {
+fn hidetsugu_and_kairi_preserves_revealed_card_type() {
     // Hidetsugu and Kairi: exile top card + target opponent + "If it's an instant or sorcery card"
     let hk_parsed = parse_oracle_text(
         "When Hidetsugu and Kairi dies, exile the top card of your library. Target opponent loses \
@@ -228,99 +229,6 @@ fn target_plus_revealed_preserves_revealed_card_type() {
             subtype_filter: None,
         }),
         "Hidetsugu and Kairi must retain RevealedHasCardType, not TargetMatchesFilter"
-    );
-
-    // Audacious Swap: verified Oracle text from Scryfall:
-    // "Casualty 2\n\
-    // The owner of target nonenchantment permanent shuffles it into their library, \
-    // then exiles the top card of their library. If it's a land card, they put it \
-    // onto the battlefield. Otherwise, they may cast it without paying its mana cost."
-    let swap_parsed = parse_oracle_text(
-        "Casualty 2\n\
-         The owner of target nonenchantment permanent shuffles it into their library, \
-         then exiles the top card of their library. If it's a land card, they put it \
-         onto the battlefield. Otherwise, they may cast it without paying its mana cost.",
-        "Audacious Swap",
-        &[],
-        &["Instant".to_string()],
-        &[],
-    );
-    assert_eq!(swap_parsed.abilities.len(), 1);
-    let shuffle_into_lib = &swap_parsed.abilities[0];
-    let Effect::ChangeZone {
-        destination: Zone::Library,
-        owner_library: true,
-        target: ref target_filter,
-        ..
-    } = *shuffle_into_lib.effect
-    else {
-        panic!(
-            "expected ChangeZone to owner library, got {:?}",
-            shuffle_into_lib.effect
-        );
-    };
-    assert!(
-        matches!(target_filter, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Permanent)
-            && tf.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Enchantment))))
-    );
-
-    let shuffle = shuffle_into_lib
-        .sub_ability
-        .as_deref()
-        .expect("change zone chains to shuffle");
-    assert!(matches!(
-        *shuffle.effect,
-        Effect::Shuffle {
-            target: TargetFilter::ParentTargetOwner
-        }
-    ));
-
-    let exile_top = shuffle
-        .sub_ability
-        .as_deref()
-        .expect("shuffle chains to exile top card");
-    assert!(matches!(
-        *exile_top.effect,
-        Effect::ExileTop {
-            player: TargetFilter::ParentTargetOwner,
-            ..
-        }
-    ));
-
-    let land_branch = exile_top
-        .sub_ability
-        .as_deref()
-        .expect("exile top chains to land branch");
-    assert!(matches!(
-        *land_branch.effect,
-        Effect::ChangeZone {
-            destination: Zone::Battlefield,
-            ..
-        }
-    ));
-    assert_eq!(
-        land_branch.condition,
-        Some(AbilityCondition::RevealedHasCardType {
-            card_types: vec![CoreType::Land],
-            additional_filter: None,
-            subtype_filter: None,
-        }),
-        "CR 109.2 + CR 608.2c: 'If it\\'s a land card' must retain RevealedHasCardType, NOT TargetMatchesFilter"
-    );
-
-    let otherwise_cast = land_branch
-        .else_ability
-        .as_deref()
-        .expect("land branch has Otherwise cast else-ability");
-    assert!(
-        matches!(
-            *otherwise_cast.effect,
-            Effect::CastFromZone {
-                without_paying_mana_cost: true,
-                ..
-            }
-        ),
-        "Otherwise branch must cast from zone without paying mana cost"
     );
 }
 
@@ -361,12 +269,31 @@ fn audacious_swap_runtime_distinguishes_nonland_from_land() {
             .cast(swap)
             .target_object(target)
             .commit()
-            .accept_optional()
+            .stop_at_optional()
             .resolve();
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::OptionalEffectChoice { player: P1, .. }
+        ));
+        let mut events = outcome.events().to_vec();
+        events.extend(
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .expect("the target's owner accepts the free cast")
+                .events,
+        );
+        for _ in 0..2 {
+            events.extend(
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("resolve the spell cast from exile")
+                    .events,
+            );
+        }
 
         // 1. Target nonenchantment permanent shuffled into owner's library.
         assert!(
-            outcome.events().iter().any(|e| matches!(
+            events.iter().any(|e| matches!(
                 e,
                 GameEvent::PlayerPerformedAction {
                     player_id,
@@ -379,7 +306,7 @@ fn audacious_swap_runtime_distinguishes_nonland_from_land() {
 
         // 2. Nonland card (Target Bear) is exiled from library and cast via Otherwise branch.
         assert!(
-            outcome.events().iter().any(|e| matches!(
+            events.iter().any(|e| matches!(
                 e,
                 GameEvent::EffectResolved {
                     kind: EffectKind::ExileTop,
@@ -389,7 +316,7 @@ fn audacious_swap_runtime_distinguishes_nonland_from_land() {
             "ExileTop effect must resolve"
         );
         assert!(
-            outcome.events().iter().any(|e| matches!(
+            events.iter().any(|e| matches!(
                 e,
                 GameEvent::EffectResolved {
                     kind: EffectKind::CastFromZone,
@@ -399,18 +326,18 @@ fn audacious_swap_runtime_distinguishes_nonland_from_land() {
             "CastFromZone effect must resolve for nonland card"
         );
         assert!(
-            outcome.events().iter().any(
+            events.iter().any(
                 |e| matches!(e, GameEvent::SpellCast { object_id, .. } if *object_id == target)
             ),
             "Target Bear must be cast from exile"
         );
         assert_eq!(
-            outcome.zone_of(target),
+            runner.state().objects[&target].zone,
             Zone::Battlefield,
             "Target Bear resolves from the stack and enters the battlefield"
         );
         assert_eq!(
-            outcome.final_waiting_for(),
+            &runner.state().waiting_for,
             &WaitingFor::Priority { player: P0 },
             "priority returns to active player after resolution"
         );

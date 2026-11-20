@@ -54,6 +54,10 @@ export const ENGINE_QUERIES = {
     needsCardDb: true,
     run: (engine: EngineModule, request: unknown) => engine.companionCandidates(request),
   },
+  isCardCompanion: {
+    needsCardDb: true,
+    run: (engine: EngineModule, name: string) => engine.isCardCompanion(name),
+  },
   maxDeckCopies: {
     needsCardDb: true,
     run: (engine: EngineModule, name: string, formatConfig: FormatConfig) =>
