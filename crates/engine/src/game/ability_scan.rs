@@ -5561,8 +5561,9 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
         },
         TriggerCondition::SourceAttackedThisCombat
         | TriggerCondition::AttackersDeclaredCount {
-            subject: AttackersDeclaredCountSubject::CurrentCombat { .. },
-            ..
+            subject: AttackersDeclaredCountSubject::CurrentCombat { exclude_source: _ },
+            comparator: _,
+            count: _,
         } => Axes {
             event: false,
             sibling: SiblingReads::None,
