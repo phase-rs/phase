@@ -63958,8 +63958,9 @@ fn instead_child_projects_the_parent_pin_with_independent_clause_state() {
         spell_anaphor_binding: SpellAnaphorBinding::EventSource,
         ..ParseContext::default()
     };
+    // Yidaro, Wandering Monster's instead body.
     let child = parse_child_ability_with_parent_target(
-        "Put it onto the battlefield from your graveyard.",
+        "put it onto the battlefield from your graveyard",
         AbilityKind::Spell,
         false,
         &parent,
@@ -63976,19 +63977,24 @@ fn instead_child_projects_the_parent_pin_with_independent_clause_state() {
         ),
         "{child:#?}"
     );
+    // The instead body of Tear Asunder.
     let separate_child = parse_child_ability_with_parent_target(
-        "Destroy target artifact.",
+        "exile target nonland permanent",
         AbilityKind::Spell,
         false,
         &parent,
     );
-    assert!(matches!(
-        separate_child.effect.as_ref(),
-        Effect::Destroy {
-            target: TargetFilter::Typed(_),
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            separate_child.effect.as_ref(),
+            Effect::ChangeZone {
+                target: TargetFilter::Typed(_),
+                destination: Zone::Exile,
+                ..
+            }
+        ),
+        "{separate_child:#?}"
+    );
     assert_eq!(
         parent.chain_declared_slots,
         DeclaredSlotRegistry::Indeterminate

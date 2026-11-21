@@ -18734,6 +18734,8 @@ mod referent_owner_tests {
 fn named_cycling_split_commits_at_the_first_structural_suffix() {
     use crate::types::ability::{CyclingHistoryWindow, TypedFilter};
 
+    // No printed card has these adversarial shapes. Yidaro, Wandering Monster
+    // is the nearest printed case.
     let body = "counter nine or more times this game, then draw a card.";
     for name in ["Yidaro, Wandering Monster", "Yidaro,   Wandering Monster"] {
         let guard = format!("If you've cycled a card named {name} four or more times this game");

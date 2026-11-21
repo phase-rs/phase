@@ -28941,8 +28941,9 @@ mod intervening_if_state_condition_tests {
 fn named_cycling_guard_requires_a_complete_whole_game_minimum() {
     use crate::types::ability::{CyclingHistoryWindow, TypedFilter};
 
-    let guard = "you have cycled a card named Street Wraith seven or more times this game";
-    let (rest, parsed) = parse_inner_condition(guard).expect("complete game-history guard");
+    let guard = "you've cycled a card named Yidaro, Wandering Monster four or more times this game";
+    let lower = guard.to_lowercase();
+    let (rest, parsed) = parse_inner_condition(&lower).expect("complete game-history guard");
     assert!(rest.is_empty());
     assert_eq!(
         parsed,
@@ -28955,15 +28956,17 @@ fn named_cycling_guard_requires_a_complete_whole_game_minimum() {
                         type_filters: vec![],
                         controller: None,
                         properties: vec![FilterProp::Named {
-                            name: "street wraith".into()
+                            name: "yidaro, wandering monster".into()
                         }],
                     })),
                 },
             },
             comparator: Comparator::GE,
-            rhs: QuantityExpr::Fixed { value: 7 },
+            rhs: QuantityExpr::Fixed { value: 4 },
         }
     );
+    // No printed card has these adversarial shapes. Yidaro, Wandering Monster
+    // is the nearest printed case.
     for malformed in [
         "you cycled a card named four or more times this game",
         "you cycled a card named ~ four or more times this game",
