@@ -1351,7 +1351,8 @@
       "title": "{{effect}} à moins que vous ne payiez",
       "titleChooseOne": "{{effect}} à moins que vous ne payiez l'un",
       "dontPay": "Ne pas payer",
-      "takeEffect": "Subir l'effet"
+      "takeEffect": "Subir l'effet",
+      "priorChoice": "Joueur {{id}} : {{choice}}"
     },
     "spliceOffer": {
       "title": "Imprégner d’arcane ?",
