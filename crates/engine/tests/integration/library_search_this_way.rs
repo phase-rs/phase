@@ -1028,9 +1028,11 @@ fn run_case_deciding(spec: &Spec, variant: &str, accept: bool) -> Obs {
             let Kind::Planeswalker(l) = spec.kind else {
                 unreachable!()
             };
-            let id = scn
-                .add_planeswalker_from_oracle(P0, spec.name, sub, l, spec.oracle)
-                .id();
+            let mut pw = scn.add_planeswalker_from_oracle(P0, spec.name, sub, l, spec.oracle);
+            if spec.legendary {
+                pw.as_legendary();
+            }
+            let id = pw.id();
             let t = opp(&mut scn, "Opp Bear");
             (
                 id,
