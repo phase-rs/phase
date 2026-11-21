@@ -5,9 +5,10 @@ use std::io::Read;
 use std::sync::LazyLock;
 
 use engine::database::CardDatabase;
-use engine::game::coverage::{analyze_coverage, card_face_gaps, CardCoverageResult};
+use engine::game::coverage::{analyze_coverage, card_face_gaps, CardCoverageResult, GapDiagnosis};
 use engine::game::deck_loading::default_scheme_deck_entries;
 use engine::game::deck_validation::{evaluate_deck_compatibility, DeckCompatibilityRequest};
+use engine::game::gap_analysis::{analyze_gaps, GapClass};
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
 use engine::types::confirmed_misparse::{ConfirmedMisparses, MisparseClass};
@@ -611,4 +612,136 @@ fn confirmed_misparse_default_schemes_full_export() {
     }
     assert_default_schemes(&marked);
     eprintln!("confirmed_misparse_default_schemes_full_export executed full export: committed_rows={} present_markers={present} listed_real_schemes={listed_schemes} excluded_eligible_schemes={} supported_before={supported_before} supported_after={supported_after} selected=20", committed.len(), excluded_schemes.len());
+}
+
+/// Production hookup: `analyze_coverage` itself attaches the census clauses and one
+/// typed `Misparse` diagnosis per clause to a confirmed-misparse face, and the gap
+/// analysis groups that row under the `misparse:<class>` category. Removing the
+/// `explain_blank_gaps` call from `analyze_coverage` fails this test.
+#[test]
+fn analyze_coverage_names_the_census_clauses_and_gap_analysis_groups_them() {
+    let key = "a good day to die";
+    let entry = ConfirmedMisparses::committed()
+        .get(key)
+        .expect("the committed list carries this face");
+    let raw: Map<String, Value> = [key]
+        .into_iter()
+        .map(|key| (key.to_string(), fixture()[key].clone()))
+        .collect();
+    let db = database(&stamped_export(&raw, ConfirmedMisparses::committed()));
+    let cards = analyze_coverage(&db).cards;
+    let card = cards
+        .iter()
+        .find(|card| card.card_face_key.as_deref() == Some(key))
+        .expect("exact export key");
+    let gap = card
+        .gap_details
+        .iter()
+        .find(|gap| gap.handler == entry.class.handler())
+        .expect("the marked face reports its misparse gap");
+    assert_eq!(
+        gap.source_text.as_deref(),
+        Some(entry.clauses.join(" / ").as_str())
+    );
+    let expected: Vec<GapDiagnosis> = entry
+        .clauses
+        .iter()
+        .map(|clause| GapDiagnosis::Misparse {
+            class: entry.class,
+            clause: clause.clone(),
+        })
+        .collect();
+    assert_eq!(gap.diagnoses, expected);
+
+    let analysis = analyze_gaps(&cards);
+    let category = analysis
+        .categories
+        .get(&GapClass::Misparse(entry.class).label())
+        .expect("the misparse category is reported");
+    assert_eq!(category.tally.cards_affected, 1);
+    assert!(!category.families.is_empty());
+    assert!(category
+        .families
+        .iter()
+        .all(|family| family.tally.cards_affected == 1));
+    assert!(
+        !analysis.categories.contains_key("undiagnosed"),
+        "the misparse row is diagnosed, not undiagnosed"
+    );
+}
+
+/// Production hookup for swallow text: Isildur's Fateful Strike opens with a
+/// reminder line (line 0) that the audit unit absorbs; its swallow warnings flag
+/// the printed clause on line 1. The exported text is that clause, never the
+/// reminder.
+#[test]
+fn analyze_coverage_swallow_text_is_the_flagged_clause_not_the_absorbed_reminder() {
+    let key = "isildur's fateful strike";
+    let oracle = fixture()[key]["oracle_text"].as_str().unwrap();
+    let clause = oracle.lines().nth(1).unwrap().trim();
+    assert!(oracle.lines().next().unwrap().starts_with('('));
+    let raw: Map<String, Value> = [key]
+        .into_iter()
+        .map(|key| (key.to_string(), fixture()[key].clone()))
+        .collect();
+    let cards = analyze_coverage(&database(&raw)).cards;
+    let card = cards
+        .iter()
+        .find(|card| card.card_face_key.as_deref() == Some(key))
+        .expect("exact export key");
+    let swallows: Vec<_> = card
+        .gap_details
+        .iter()
+        .filter(|gap| gap.handler.starts_with("Swallow:"))
+        .collect();
+    assert!(!swallows.is_empty(), "the card carries swallow gaps");
+    for gap in swallows {
+        assert_eq!(gap.source_text.as_deref(), Some(clause), "{}", gap.handler);
+    }
+}
+
+/// Cut Short's real export shape, through `analyze_coverage`: its `Duration_ThisTurn`
+/// warning flags the destroy clause on line 1, but the warning's display text holds
+/// only line 0 (the Convoke reminder), cut at 140 bytes. Rebuilding the clause from
+/// that text names the supported Convoke keyword; the exported text must be the
+/// destroy clause. The face is a SYNTHETIC carrier: the Lightning Bolt export entry
+/// with Cut Short's name, its Oracle text and its warning, all verbatim from the card
+/// database export (Cut Short is not in the committed fixture).
+#[test]
+fn analyze_coverage_swallow_text_for_cut_short_is_the_destroy_clause_not_convoke() {
+    const ORACLE: &str = "Convoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's color.)
+Destroy target planeswalker that was activated this turn or tapped creature.";
+    let mut face = fixture()["lightning bolt"].clone();
+    let entry = face.as_object_mut().unwrap();
+    entry.insert("name".into(), Value::String("Cut Short".into()));
+    entry.insert("oracle_text".into(), Value::String(ORACLE.into()));
+    entry.insert(
+        "parse_warnings".into(),
+        serde_json::json!([{
+            "type": "SwallowedClause",
+            "detector": "Duration_ThisTurn",
+            "description": "Convoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's",
+            "line_index": 1,
+            "unit_span": {
+                "first_line": 0, "last_line": 1, "start_byte": 0, "end_byte": 225,
+                "precision": "Exact", "ordinal_within_span": 0
+            },
+            "items": [0]
+        }]),
+    );
+    let raw: Map<String, Value> = [("cut short".to_string(), face)].into_iter().collect();
+    let cards = analyze_coverage(&database(&raw)).cards;
+    let card = cards
+        .iter()
+        .find(|card| card.card_face_key.as_deref() == Some("cut short"))
+        .expect("exact export key");
+    let gap = card
+        .gap_details
+        .iter()
+        .find(|gap| gap.handler == "Swallow:Duration_ThisTurn")
+        .expect("the warning is reported as a swallow gap");
+    assert_eq!(
+        gap.source_text.as_deref(),
+        Some("Destroy target planeswalker that was activated this turn or tapped creature.")
+    );
 }

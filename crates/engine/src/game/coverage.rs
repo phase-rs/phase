@@ -18,7 +18,7 @@ use crate::parser::oracle_casting::parse_casting_restriction_line;
 use crate::parser::oracle_effect::gap_diagnosis::diagnose_clause_gap;
 use crate::parser::oracle_effect::imperative::try_parse_em_dash_die_result_line;
 use crate::parser::oracle_ir::diagnostic::{
-    ClauseGap, ClauseGapKind, OracleDiagnostic, OracleItemId, OracleSourceSpan,
+    ClauseGap, ClauseGapKind, OracleDiagnostic, OracleItemId, OracleSourceSpan, SpanPrecision,
 };
 use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::TurnWindow;
@@ -43,6 +43,7 @@ use crate::types::ability::{
 use crate::types::ability_visit::{ability_tree_any, visit_direct_effect_ability_payloads};
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, SubtypeSet};
+use crate::types::confirmed_misparse::{ConfirmedMisparses, MisparseClass};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::ActivatedAbilityKind;
 use crate::types::keywords::{Keyword, ProtectionTarget};
@@ -368,7 +369,8 @@ pub struct GapDetail {
     pub diagnoses: Vec<GapDiagnosis>,
 }
 
-/// Why a coverage gap exists, typed by layer: a parser verdict or an unhandled resolver feature.
+/// Why a coverage gap exists, typed by layer: a parser verdict, an unhandled resolver
+/// feature, or a census-confirmed misparse.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "layer", rename_all = "snake_case")]
 pub enum GapDiagnosis {
@@ -377,15 +379,24 @@ pub enum GapDiagnosis {
         family: ResolverFeatureFamily,
         feature: String,
     },
+    /// The parser accepted this clause, so it holds no rejection verdict; the census
+    /// found the parse wrong. `class` is the kind of defect, `clause` the census-cited
+    /// text.
+    Misparse {
+        class: MisparseClass,
+        clause: String,
+    },
 }
 
 impl GapDiagnosis {
-    /// The Oracle phrase a parser verdict rejected. A resolver gap has no rejected phrase:
-    /// its feature is already in its handler.
+    /// The Oracle phrase this diagnosis names: the phrase a parser verdict rejected, or
+    /// the clause a census verdict found misparsed. A resolver gap has no phrase: its
+    /// feature is already in its handler.
     pub fn phrase(&self) -> Option<&str> {
         match self {
             Self::Parser(gap) => Some(gap.phrase()),
             Self::Resolver { .. } => None,
+            Self::Misparse { clause, .. } => Some(clause),
         }
     }
 }
@@ -2726,6 +2737,9 @@ fn fmt_delayed_condition(cond: &DelayedTriggerCondition) -> String {
                 format!("at your next {}", fmt_phase(phase))
             }
             crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner => {
+                format!("at that player's next {}", fmt_phase(phase))
+            }
+            crate::types::ability::DelayedTriggerPlayerBinding::ChosenPlayer { .. } => {
                 format!("at that player's next {}", fmt_phase(phase))
             }
         },
@@ -5193,6 +5207,11 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         AbilityCondition::ScopedPlayerMatches { filter } => {
             format!("scoped player is {}", fmt_player_filter(filter))
         }
+        AbilityCondition::PlayerAttackedPlayer { attacker, defender } => format!(
+            "{} attacked {} this turn",
+            fmt_player_scope(attacker),
+            fmt_player_scope(defender)
+        ),
     }
 }
 
@@ -5566,6 +5585,34 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
         SC::AnyPlayerAttackedYouLastTurn {
             scope: AttackedYouScope::AttackedPlayer,
         } => "the attacked player attacked you during their last turn".into(),
+        StaticCondition::PlayerAttackedPlayer { attacker, defender } => {
+            // Exhaustive on purpose: every endpoint renders distinctly so the
+            // coverage diff shows a change between any two of them. A new
+            // `ControllerRef` breaks the build here instead of collapsing
+            // into a shared fallback label.
+            let endpoint = |scope: &ControllerRef| match scope {
+                ControllerRef::You => "you",
+                ControllerRef::Opponent => "an opponent",
+                ControllerRef::ScopedPlayer => "the scoped player",
+                ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => "target player",
+                ControllerRef::ParentTargetController => "the parent target's controller",
+                ControllerRef::EventTargetController => "the event target's controller",
+                ControllerRef::ParentTargetOwner => "the parent target's owner",
+                ControllerRef::DefendingPlayer => "the defending player",
+                ControllerRef::ChosenPlayer { .. } => "the chosen player",
+                ControllerRef::DeclaredPlayer { .. } => "the declared player",
+                ControllerRef::SourceChosenPlayer => "the source-chosen player",
+                ControllerRef::TriggeringPlayer => "the triggering player",
+                ControllerRef::EnchantedPlayer => "the enchanted player",
+                ControllerRef::ActivePlayer => "the active player",
+                ControllerRef::SpecificPlayer { .. } => "a specific player",
+            };
+            format!(
+                "{} attacked {} this turn",
+                endpoint(attacker),
+                endpoint(defender)
+            )
+        }
         SC::OpponentPoisonAtLeast { count } => format!("an opponent has {count}+ poison"),
         SC::UnlessPay { .. } => "unless a cost is paid".into(),
         SC::Unrecognized { .. } => "unrecognized".into(),
@@ -5725,6 +5772,16 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             "damage as though unblocked".into()
         }
         ContinuousModification::ChangeController => "change controller".into(),
+        // CR 725.5: designation-anchored control — label names the holder so
+        // coverage distinguishes it from source-controller changes. Exhaustive
+        // over `Designation`: a future leaf breaks the build here by design.
+        ContinuousModification::ChangeControllerToDesignation { designation } => {
+            match designation {
+                crate::types::ability::Designation::Monarch => {
+                    "change controller to monarch".into()
+                }
+            }
+        }
         ContinuousModification::SetBasicLandType { land_type } => {
             format!("set land type {}", land_type.as_subtype_str())
         }
@@ -6142,7 +6199,11 @@ fn build_trigger_item(
 ) -> ParsedItem {
     // CR 603.8: StateCondition triggers use the priority pipeline, not the
     // event-based trigger registry — they are supported.
-    let mode_supported = trigger_mode_is_supported(&trig.mode, trigger_registry);
+    // CR 615.13 (Matt M5): qualifier-bearing prevention defs are refused —
+    // the runtime matcher cannot honor the qualifiers (shared authority on
+    // `TriggerDefinition`).
+    let mode_supported = trigger_mode_is_supported(&trig.mode, trigger_registry)
+        && !trig.unsupported_damage_prevention_qualifiers();
     let mut children = Vec::new();
     if let Some(execute) = &trig.execute {
         children.push(build_ability_item(
@@ -7650,7 +7711,8 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             &valid_subtypes,
         );
         let supported = coverage.is_supported();
-        let gap_details = public_gap_details(&coverage.gaps);
+        let mut gap_details = public_gap_details(&coverage.gaps);
+        explain_blank_gaps(key, face, &coverage.parse_details, &mut gap_details);
         let gap_count = gap_details.len();
 
         for gap in &coverage.gaps {
@@ -8271,6 +8333,205 @@ fn check_confirmed_misparse(face: &CardFace, missing: &mut Vec<String>) {
     }
 }
 
+/// No published gap leaves `source_text` blank: the report always says WHAT is
+/// unsupported. Confirmed misparses carry their census clauses; every other gap
+/// without text is explained from the most specific source it has
+/// ([`blank_gap_text`]).
+fn explain_blank_gaps(
+    key: &str,
+    face: &CardFace,
+    parse_details: &[ParsedItem],
+    gap_details: &mut [GapDetail],
+) {
+    attach_misparse_clauses(key, face, gap_details);
+    refine_swallow_text(face, gap_details);
+    if !gap_details.iter().any(gap_text_is_blank) {
+        return;
+    }
+    let lines = face
+        .oracle_text
+        .as_deref()
+        .filter(|text| !text.is_empty())
+        .map(|text| effective_oracle_lines_for_card(text, &face.name))
+        .unwrap_or_default();
+    let dropped = if gap_details
+        .iter()
+        .any(|gap| gap_text_is_blank(gap) && gap.handler.starts_with("SilentDrop:"))
+    {
+        dropped_oracle_lines(&lines, &face.name, parse_details).1
+    } else {
+        Vec::new()
+    };
+    for gap in gap_details.iter_mut().filter(|gap| gap_text_is_blank(gap)) {
+        gap.source_text = Some(blank_gap_text(gap, &lines, &dropped));
+    }
+}
+
+/// A gap whose text is absent or empty: some producers record `Some("")` for an
+/// item with no fragment, which reads as blank in the report.
+fn gap_text_is_blank(gap: &GapDetail) -> bool {
+    gap.source_text
+        .as_deref()
+        .is_none_or(|text| text.trim().is_empty())
+}
+
+/// A swallow gap's recorded text is the warning's display form
+/// (`[warning:swallowed-clause] Detector — <unit text cut at 140 bytes>`): the
+/// unit often opens with a reminder-text line and ends mid-sentence, so the
+/// clause the detector flagged is hidden or cut off. Replace it with the full
+/// printed clause ([`swallow_clause_text`]). The detector stays named by the
+/// gap's handler.
+fn refine_swallow_text(face: &CardFace, gap_details: &mut [GapDetail]) {
+    let Some(oracle) = face.oracle_text.as_deref() else {
+        return;
+    };
+    for gap in gap_details.iter_mut() {
+        let Some(detector) = gap.handler.strip_prefix("Swallow:") else {
+            continue;
+        };
+        let warning = face.parse_warnings.iter().find(|warning| {
+            matches!(
+                warning,
+                OracleDiagnostic::SwallowedClause { detector: warned, .. } if warned == detector
+            )
+        });
+        if let Some(clause) = warning.and_then(|warning| swallow_clause_text(warning, oracle)) {
+            gap.source_text = Some(clause);
+        }
+    }
+}
+
+/// The printed clause a swallow warning flagged. A stamped warning carries its
+/// audit unit's provenance, so the clause is read from the Oracle lines the unit
+/// covers, from `line_index` (the unit's first ITEM line) to the span's last line:
+/// a unit can open with lines no item claimed (a keyword or reminder line, as on
+/// Cut Short's Convoke line), and those are not what the detector flagged. A
+/// warning without provenance (a pre-provenance payload, or a chain-relative span
+/// whose lines are not card-absolute) can only be completed from its truncated
+/// display text ([`swallow_clause_from_description`]).
+fn swallow_clause_text(warning: &OracleDiagnostic, oracle: &str) -> Option<String> {
+    let OracleDiagnostic::SwallowedClause {
+        description,
+        line_index,
+        unit_span,
+        ..
+    } = warning
+    else {
+        return None;
+    };
+    unit_span
+        .as_ref()
+        .filter(|span| span.precision == SpanPrecision::Exact)
+        .and_then(|span| {
+            let count = span.last_line.saturating_sub(*line_index) + 1;
+            clause_from_lines(oracle.lines().skip(*line_index).take(count))
+        })
+        .or_else(|| swallow_clause_from_description(description, oracle))
+}
+
+/// The printed clause behind a swallow detector's unit text. Each line of the
+/// unit is completed to the full Oracle line it begins (only the last can be cut
+/// short), reminder text is dropped, and a line that was only reminder text
+/// disappears. `None` when nothing but reminder text is left.
+fn swallow_clause_from_description(description: &str, oracle: &str) -> Option<String> {
+    clause_from_lines(
+        description
+            .lines()
+            .map(str::trim)
+            .filter(|fragment| !fragment.is_empty())
+            .map(|fragment| {
+                oracle
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| line.starts_with(fragment))
+                    .unwrap_or(fragment)
+            }),
+    )
+}
+
+/// `lines` joined with reminder text stripped; `None` when only reminder text is left.
+fn clause_from_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<String> {
+    let clause: Vec<String> = lines
+        .map(str::trim)
+        .map(crate::parser::oracle_util::strip_reminder_text)
+        .filter(|line| !line.is_empty())
+        .collect();
+    (!clause.is_empty()).then(|| clause.join(" "))
+}
+
+/// The text that says what a gap with no recorded source fragment concerns, most
+/// specific first: the printed lines a silent drop left uncovered; the phrase or
+/// feature its own diagnosis names; the printed line holding the text in its
+/// handler's argument (`Static:Unrecognized(...)`) or its label (`Keyword:X`);
+/// and last the handler itself, so the text is never empty.
+fn blank_gap_text(gap: &GapDetail, lines: &[String], dropped: &[&str]) -> String {
+    if gap.handler.starts_with("SilentDrop:") && !dropped.is_empty() {
+        return dropped.join(" / ");
+    }
+    if let Some(phrase) = gap.diagnoses.iter().find_map(GapDiagnosis::phrase) {
+        return phrase.to_string();
+    }
+    if let Some((family, feature)) = gap.diagnoses.iter().find_map(|diagnosis| match diagnosis {
+        GapDiagnosis::Resolver { family, feature } => Some((family, feature)),
+        GapDiagnosis::Parser(_) | GapDiagnosis::Misparse { .. } => None,
+    }) {
+        return format!("Not handled by the engine ({}): {feature}", family.tag());
+    }
+    let label = gap
+        .handler
+        .split_once(':')
+        .map_or(gap.handler.as_str(), |(_, label)| label);
+    let argument = label
+        .split_once('(')
+        .map(|(_, rest)| rest.strip_suffix(')').unwrap_or(rest));
+    for needle in argument.into_iter().chain(std::iter::once(label)) {
+        let needle = needle.to_lowercase();
+        if needle.is_empty() {
+            continue;
+        }
+        if let Some(line) = lines
+            .iter()
+            .find(|line| line.to_lowercase().contains(&needle))
+        {
+            return line.clone();
+        }
+    }
+    match argument {
+        Some(argument) => format!("{argument} (no engine handler)"),
+        None => format!("No engine handler for {}", gap.handler),
+    }
+}
+
+/// Show WHAT a confirmed misparse got wrong, in the standard gap shape: the
+/// census-cited clauses become the gap's `source_text` and one typed
+/// `GapDiagnosis::Misparse` each. The runtime gap label stays prose-free
+/// (`MisparseClass::handler`); only the published report carries the clauses,
+/// looked up by the exact export key.
+fn attach_misparse_clauses(key: &str, face: &CardFace, gap_details: &mut [GapDetail]) {
+    let Some(class) = face.metadata.confirmed_misparse else {
+        return;
+    };
+    let Some(entry) = ConfirmedMisparses::committed().get(key) else {
+        return;
+    };
+    if entry.clauses.is_empty() {
+        return;
+    }
+    let handler = class.handler();
+    if let Some(detail) = gap_details
+        .iter_mut()
+        .find(|detail| detail.handler == handler && detail.source_text.is_none())
+    {
+        detail.source_text = Some(entry.clauses.join(" / "));
+        detail
+            .diagnoses
+            .extend(entry.clauses.iter().map(|clause| GapDiagnosis::Misparse {
+                class,
+                clause: clause.clone(),
+            }));
+    }
+}
+
 /// The coverage label for an ability whose per-player fan-out ("each player
 /// …", "each target player …") performs a control-change action whose seat
 /// template isn't one of the allowlisted printed shapes
@@ -8735,7 +8996,12 @@ fn check_trigger(
     }
     // CR 603.8: StateCondition triggers are handled by the priority pipeline
     // (collect_state_triggers), not the event-based trigger registry. They are supported.
-    if !trigger_mode_is_supported(&trigger.mode, trigger_registry) {
+    // CR 615.13 (Matt M5): qualifier-bearing prevention defs surface the same
+    // gap — the def AS SPECIFIED cannot fire (shared refusal authority on
+    // `TriggerDefinition`).
+    if !trigger_mode_is_supported(&trigger.mode, trigger_registry)
+        || trigger.unsupported_damage_prevention_qualifiers()
+    {
         let label = format!("Trigger:{}", trigger.mode);
         if !missing.contains(&label) {
             missing.push(label);
@@ -10196,6 +10462,14 @@ fn is_static_definition_supported(
             .condition
             .as_ref()
             .is_some_and(StaticCondition::contains_unrecognized)
+        // CR 109.4 (Matt R2-F4, widened by R7-F2): a resolution-scoped
+        // `ChosenPlayer` or target-relative endpoint has no answer inside the
+        // layer pipeline, so the runtime entry gate refuses the whole tree —
+        // coverage must refuse it too (shared authority on `StaticCondition`).
+        && !stat
+            .condition
+            .as_ref()
+            .is_some_and(StaticCondition::has_unanswerable_attack_endpoint)
         && stat.modifications.iter().all(|modification| {
             modification_is_supported(
                 modification,
@@ -10254,6 +10528,12 @@ fn is_trigger_supported(
     token_static_traversal: TokenStaticTraversal,
 ) -> bool {
     if !trigger_mode_is_supported(&trigger.mode, trigger_registry) {
+        return false;
+    }
+    // CR 615.13 (Matt M5): qualifier-bearing prevention defs are refused —
+    // the runtime matcher cannot honor the qualifiers (shared authority on
+    // `TriggerDefinition`).
+    if trigger.unsupported_damage_prevention_qualifiers() {
         return false;
     }
     trigger.execute.as_deref().is_none_or(|execute| {
@@ -10464,25 +10744,6 @@ enum StructuralFeature {
     /// carry it. Narrowing it to the two in-batch drains is Command Zone #267. The card parses,
     /// and outside combat the choice is asked, so nothing else in coverage can see it.
     DamageReplacementChoiceUnaskedInCombat,
-    /// CR 614.1a + CR 616.1 + CR 702.16e: a damage substitution (every replacement
-    /// `replacement::is_damage_substitution` selects: Phytohydra, Force Bubble, Nefarious Lich,
-    /// Soul-Scar Mage, Szadek, Lord of Secrets, Undead Alchemist) whose CR 616.1 choice is not
-    /// offered against protection. Protection prevents the damage at the pre-replacement gate,
-    /// before the substitution is offered ("Any damage that would be dealt by sources that have the
-    /// stated quality to a permanent or player with protection is prevented."), so the affected
-    /// player never chooses between them (CR 616.1e): Pyroclasm at a Silver Knight under an
-    /// opposing Soul-Scar Mage, or Szadek's combat damage to a player under Teferi's Protection.
-    /// The card parses. This fence records the missing order choice against protection, so nothing
-    /// else in coverage can see it.
-    DamageSubstitutionChoiceIncomplete,
-    /// CR 614.9 + CR 616.1 + CR 702.16e: a capped redirect ("The next 1 damage that would be
-    /// dealt to this creature this turn is dealt to target creature you control instead." —
-    /// Nomads en-Kor) sends its part to a recipient where protection from the source prevents it
-    /// at the pre-replacement gate, ahead of any other prevention shield there (Test of Faith),
-    /// so the recipient's controller is not offered the order CR 616.1 gives them. The card
-    /// parses, and with no competing shield on the recipient it works, so nothing else in
-    /// coverage can see it.
-    CappedRedirectRecipientChoiceIncomplete,
     /// CR 615.7: several sources of one simultaneous damage instruction can deal damage to one
     /// recipient (Allies at Last: "each deal damage equal to their power to target creature";
     /// Rakdos Charm: "Each creature deals 1 damage to its controller"). A limited shield there
@@ -10517,12 +10778,6 @@ impl StructuralFeature {
             CounterExileRiderTailDropped => "structural:counter_exile_rider_tail_dropped",
             DamageReplacementChoiceUnaskedInCombat => {
                 "structural:damage_replacement_choice_unasked_in_combat"
-            }
-            DamageSubstitutionChoiceIncomplete => {
-                "structural:damage_substitution_choice_incomplete"
-            }
-            CappedRedirectRecipientChoiceIncomplete => {
-                "structural:capped_redirect_recipient_choice_incomplete"
             }
             SharedShieldSplitUnoffered => "structural:shared_shield_split_unoffered",
         }
@@ -10560,17 +10815,6 @@ impl StructuralFeature {
             // `damage_substitution_replacements::a_parked_may_gets_no_automatic_yes_in_combat`
             // (Battletide Alchemist: the Ogre's 3 combat damage is neither dealt nor prevented).
             DamageReplacementChoiceUnaskedInCombat => FeatureSupport::Unhandled,
-            // MEASURED UNHANDLED: `damage_substitution_replacements`
-            // (`protection_prevents_ahead_of_a_substitutions_choice`,
-            // `protection_prevents_ahead_of_soul_scar_mages_choice`,
-            // `protection_prevents_ahead_of_szadeks_choice`: the protected recipient's player is
-            // never asked, and no counters are put).
-            DamageSubstitutionChoiceIncomplete => FeatureSupport::Unhandled,
-            // MEASURED UNHANDLED: `unpreventable_damage_prevention_effects`
-            // (`a_capped_redirects_part_meets_protection_before_a_competing_shield`: the pro-red
-            // Silver Knight's protection prevents the redirected point and Test of Faith is never
-            // offered, so no counter is placed).
-            CappedRedirectRecipientChoiceIncomplete => FeatureSupport::Unhandled,
             // MEASURED UNHANDLED: `damage_substitution_replacements`
             // (`a_batch_keeps_a_shared_shield_for_the_players_choice`: Mending Hands meets the
             // Hill Giant's or the Rumbling Baloth's damage in full, giving 3/20 or 0/23; the
@@ -11358,20 +11602,6 @@ fn extract_ability_features_with_token_statics(
     ) {
         emit_structural(features, StructuralFeature::SharedShieldSplitUnoffered);
     }
-    // CR 614.9: a shield that redirects only the next N damage.
-    if matches!(
-        &*def.effect,
-        Effect::CreateDamageReplacement {
-            redirect_to: Some(_),
-            redirect_amount: Some(crate::types::ability::PreventionAmount::Next(_)),
-            ..
-        }
-    ) {
-        emit_structural(
-            features,
-            StructuralFeature::CappedRedirectRecipientChoiceIncomplete,
-        );
-    }
     if prevention_rider_asks_a_choice_in_combat(def) {
         emit_structural(
             features,
@@ -11535,14 +11765,6 @@ fn extract_damage_replacement_choice_feature(
             StructuralFeature::DamageReplacementChoiceUnaskedInCombat,
         );
     }
-    // CR 614.1a: the runtime's own substitution predicate, so the fence and the engine select
-    // the same class.
-    if crate::game::replacement::is_damage_substitution(repl) {
-        emit_structural(
-            features,
-            StructuralFeature::DamageSubstitutionChoiceIncomplete,
-        );
-    }
 }
 
 fn extract_trigger_features(
@@ -11691,6 +11913,7 @@ fn extract_ability_condition_features(
         | AbilityCondition::ControllerControlledMatchingAsCast { .. }
         | AbilityCondition::IsYourTurn
         | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::FirstCombatPhaseOfTurn
         | AbilityCondition::FirstEndStepOfTurn
@@ -12188,6 +12411,8 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // `evaluate_condition` (effects/mod.rs). Used by cross-scope decline-tail
         // gates (Liliana, Waker of the Dead — parent `All`, decline `Opponent`).
         AbilityCondition::ScopedPlayerMatches { .. } => ("ScopedPlayerMatches", Handled),
+        // CR 508.6: handled by `evaluate_condition` (effects/mod.rs).
+        AbilityCondition::PlayerAttackedPlayer { .. } => ("PlayerAttackedPlayer", Handled),
     }
 }
 
@@ -12786,6 +13011,9 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::CompletedADungeon => ("CompletedADungeon", Unhandled),
         // CR 103.1: bridges to Ability/Trigger `WasStartingPlayer`, both runtime-handled.
         StaticCondition::WasStartingPlayer { .. } => ("WasStartingPlayer", Handled),
+        // CR 508.6: bridges to `AbilityCondition::PlayerAttackedPlayer`,
+        // runtime-handled (same shape as `WasStartingPlayer` below).
+        StaticCondition::PlayerAttackedPlayer { .. } => ("PlayerAttackedPlayer", Handled),
         // CR 702.185c: "a spell was warped this turn"; bridges to Ability/Trigger
         // `SpellCastWithVariantThisTurn`, both runtime-handled.
         StaticCondition::SpellCastWithVariantThisTurn { .. } => {
@@ -17007,24 +17235,22 @@ mod tests {
     }
 
     /// (name, verbatim Oracle text, MTGJSON keywords, MTGJSON types)
-    type DamageSubstitutionCase = (
+    type DamageShieldCase = (
         &'static str,
         &'static str,
         &'static [&'static str],
         &'static [&'static str],
     );
 
-    const DAMAGE_SUBSTITUTION_TAG: &str = "structural:damage_substitution_choice_incomplete";
-
-    /// CR 614.1a + CR 616.1 + CR 702.16e: the protection fence keys on the runtime's substitution
-    /// predicate (`replacement::is_damage_substitution`), so it covers the class uniformly:
-    /// Soul-Scar Mage, Szadek and Undead Alchemist, whose substitution the fence is the only gap
-    /// of, and the "If damage would be dealt to …, … instead" lines (Phytohydra, Force Bubble,
-    /// Nefarious Lich). A prevention shield (Test of Faith, Phantom Centaur) and an amount
-    /// modification (Furnace of Rath) are not substitutions and are not fenced.
+    /// CR 614.1a + CR 616.1 + CR 702.16e: a damage substitution (every replacement the runtime's
+    /// `replacement::is_damage_substitution` selects) is offered beside protection's prevention,
+    /// so its affected player orders them, and it carries no coverage gap: Soul-Scar Mage, Szadek,
+    /// Undead Alchemist, and the "If damage would be dealt to …, … instead" lines (Phytohydra,
+    /// Force Bubble). Nefarious Lich's exile choice keeps its own
+    /// `damage_replacement_choice_unasked_in_combat` gap.
     #[test]
-    fn a_damage_substitution_is_a_coverage_gap() {
-        let fenced_alone: [DamageSubstitutionCase; 3] = [
+    fn a_damage_substitution_has_no_coverage_gap() {
+        let cases: [DamageShieldCase; 5] = [
             (
                 "Soul-Scar Mage",
                 "Prowess\nIf a source you control would deal noncombat damage to a creature an opponent controls, put that many -1/-1 counters on that creature instead.",
@@ -17043,24 +17269,6 @@ mod tests {
                 &[],
                 &["Creature"],
             ),
-        ];
-        for (name, oracle, keywords, types) in fenced_alone {
-            let face = counter_rider_face(name, oracle, keywords, types);
-            let mut features = HashMap::new();
-            extract_card_features(&face, &mut features);
-            assert_eq!(
-                features.get(DAMAGE_SUBSTITUTION_TAG),
-                Some(&FeatureSupport::Unhandled),
-                "{name}"
-            );
-            assert_eq!(
-                card_face_gaps(&face),
-                vec![format!("ResolverFeature:{DAMAGE_SUBSTITUTION_TAG}")],
-                "{name}: the fence is the face's only gap"
-            );
-        }
-
-        let fenced: [DamageSubstitutionCase; 3] = [
             (
                 "Phytohydra",
                 "If damage would be dealt to this creature, put that many +1/+1 counters on it instead.",
@@ -17073,57 +17281,16 @@ mod tests {
                 &[],
                 &["Enchantment"],
             ),
-            (
-                "Nefarious Lich",
-                "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game.",
-                &[],
-                &["Enchantment"],
-            ),
         ];
-        for (name, oracle, keywords, types) in fenced {
-            let face = counter_rider_face(name, oracle, keywords, types);
-            let mut features = HashMap::new();
-            extract_card_features(&face, &mut features);
-            assert_eq!(
-                features.get(DAMAGE_SUBSTITUTION_TAG),
-                Some(&FeatureSupport::Unhandled),
-                "{name}"
-            );
-        }
-
-        let unfenced: [DamageSubstitutionCase; 3] = [
-            (
-                "Test of Faith",
-                "Prevent the next 3 damage that would be dealt to target creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.",
-                &[],
-                &["Instant"],
-            ),
-            (
-                "Furnace of Rath",
-                "If a source would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.",
-                &[],
-                &["Enchantment"],
-            ),
-            (
-                "Phantom Centaur",
-                "Protection from black\nThis creature enters with three +1/+1 counters on it.\nIf damage would be dealt to this creature, prevent that damage. Remove a +1/+1 counter from this creature.",
-                &["Protection"],
-                &["Creature"],
-            ),
-        ];
-        for (name, oracle, keywords, types) in unfenced {
+        for (name, oracle, keywords, types) in cases {
             let face = counter_rider_face(name, oracle, keywords, types);
             assert!(
-                !face.abilities.is_empty()
-                    || face
-                        .replacements
-                        .iter()
-                        .any(|repl| repl.event == ReplacementEvent::DamageDone),
-                "{name}: reach guard — the damage line parses"
+                face.replacements
+                    .iter()
+                    .any(crate::game::replacement::is_damage_substitution),
+                "{name}: reach guard — the substitution parses"
             );
-            let mut features = HashMap::new();
-            extract_card_features(&face, &mut features);
-            assert_eq!(features.get(DAMAGE_SUBSTITUTION_TAG), None, "{name}");
+            assert_eq!(card_face_gaps(&face), Vec::<String>::new(), "{name}");
         }
     }
 
@@ -17166,9 +17333,6 @@ mod tests {
                     .any(crate::game::replacement::is_damage_substitution),
                 "{name}: no replacement is a damage substitution"
             );
-            let mut features = HashMap::new();
-            extract_card_features(&face, &mut features);
-            assert_eq!(features.get(DAMAGE_SUBSTITUTION_TAG), None, "{name}");
             assert!(!coverage.is_supported(), "{name}");
         }
     }
@@ -17365,60 +17529,40 @@ mod tests {
         }
     }
 
-    /// CR 614.9 + CR 616.1: a capped redirect ("The next N damage ... is dealt to ... instead")
-    /// is fenced as `capped_redirect_recipient_choice_incomplete`, as an activated ability
-    /// (Nomads en-Kor), a spell (Harm's Way) and a granted ability (Martyrdom). An uncapped
-    /// redirect (Pariah: "All damage that would be dealt to you is dealt to enchanted creature
-    /// instead.") is not.
+    /// CR 614.9 + CR 616.1 + CR 702.16e: a capped redirect ("The next N damage ... is dealt to ...
+    /// instead") offers its part's recipient protection beside any other prevention shield there,
+    /// so it carries no coverage gap, as an activated ability (Nomads en-Kor) or a spell (Harm's
+    /// Way).
     #[test]
-    fn a_capped_redirect_is_a_coverage_gap() {
-        const TAG: &str = "structural:capped_redirect_recipient_choice_incomplete";
-        type Case = (
-            &'static str,
-            &'static str,
-            &'static [&'static str],
-            &'static [&'static str],
-            bool,
-        );
-        let cards: [Case; 4] = [
+    fn a_capped_redirect_has_no_coverage_gap() {
+        let cards: [DamageShieldCase; 2] = [
             (
                 "Nomads en-Kor",
                 "{0}: The next 1 damage that would be dealt to this creature this turn is dealt to target creature you control instead.",
                 &[],
                 &["Creature"],
-                true,
             ),
             (
                 "Harm's Way",
                 "The next 2 damage that a source of your choice would deal to you and/or permanents you control this turn is dealt to any target instead.",
                 &[],
                 &["Instant"],
-                true,
-            ),
-            (
-                "Martyrdom",
-                "Until end of turn, target creature you control gains \"{0}: The next 1 damage that would be dealt to target creature, planeswalker, or player this turn is dealt to this creature instead.\" Only you may activate this ability.",
-                &[],
-                &["Instant"],
-                true,
-            ),
-            (
-                "Pariah",
-                "Enchant creature\nAll damage that would be dealt to you is dealt to enchanted creature instead.",
-                &["Enchant"],
-                &["Enchantment"],
-                false,
             ),
         ];
-        for (name, oracle, keywords, types, fenced) in cards {
+        for (name, oracle, keywords, types) in cards {
             let face = counter_rider_face(name, oracle, keywords, types);
-            let mut features = HashMap::new();
-            extract_card_features(&face, &mut features);
-            assert_eq!(
-                features.get(TAG),
-                fenced.then_some(&FeatureSupport::Unhandled),
-                "{name}"
+            assert!(
+                face.abilities.iter().any(|def| matches!(
+                    &*def.effect,
+                    Effect::CreateDamageReplacement {
+                        redirect_to: Some(_),
+                        redirect_amount: Some(crate::types::ability::PreventionAmount::Next(_)),
+                        ..
+                    }
+                )),
+                "{name}: reach guard — the capped redirect parses"
             );
+            assert_eq!(card_face_gaps(&face), Vec::<String>::new(), "{name}");
         }
     }
 
@@ -17777,6 +17921,84 @@ mod tests {
         );
     }
 
+    /// CR 615.13 (Matt M5): qualifier-bearing `DamagePreventedOnce` defs are
+    /// refused at ALL THREE coverage authorities — parse-details items,
+    /// missing parts, and carrier support — because the runtime matcher
+    /// cannot honor the qualifiers. The unqualified Squire shape stays
+    /// supported everywhere. Pre-fix the qualified forms are admitted.
+    #[test]
+    fn qualified_damage_prevention_trigger_is_unsupported() {
+        use crate::types::ability::DamageKindFilter;
+
+        let trigger_registry = super::build_trigger_registry();
+        let static_registry = super::build_static_registry();
+        let traversal = super::TokenStaticTraversal::Include;
+        let plain = TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+            .valid_target(TargetFilter::Controller);
+        assert!(
+            super::is_trigger_supported(&plain, &trigger_registry, &static_registry, traversal),
+            "unqualified prevention trigger stays supported"
+        );
+        assert!(
+            super::build_trigger_item(&plain, &trigger_registry, &static_registry, traversal)
+                .supported,
+            "unqualified prevention trigger item stays supported"
+        );
+        let mut missing = Vec::new();
+        super::check_trigger(
+            &plain,
+            &trigger_registry,
+            &static_registry,
+            traversal,
+            &mut missing,
+        );
+        assert!(
+            missing.is_empty(),
+            "unqualified prevention trigger surfaces no gap: {missing:?}"
+        );
+
+        let source = crate::types::identifiers::ObjectId(7);
+        let qualified = [
+            TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+                .valid_target(TargetFilter::Controller)
+                .damage_kind(DamageKindFilter::CombatOnly),
+            TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+                .valid_target(TargetFilter::Controller)
+                .damage_kind(DamageKindFilter::NoncombatOnly),
+            TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+                .valid_target(TargetFilter::Controller)
+                .valid_source(TargetFilter::SpecificObject { id: source }),
+        ];
+        for trigger in &qualified {
+            assert!(
+                !super::is_trigger_supported(
+                    trigger,
+                    &trigger_registry,
+                    &static_registry,
+                    traversal
+                ),
+                "qualified prevention trigger must be unsupported: {trigger:?}"
+            );
+            assert!(
+                !super::build_trigger_item(trigger, &trigger_registry, &static_registry, traversal)
+                    .supported,
+                "qualified prevention trigger item must be unsupported: {trigger:?}"
+            );
+            let mut missing = Vec::new();
+            super::check_trigger(
+                trigger,
+                &trigger_registry,
+                &static_registry,
+                traversal,
+                &mut missing,
+            );
+            assert!(
+                missing.iter().any(|gap| gap.starts_with("Trigger:")),
+                "qualified prevention trigger must surface a gap: {missing:?}"
+            );
+        }
+    }
+
     /// An explicit Exile origin can retrieve the intended set when it is still
     /// the latest, but does not preserve that identity across a later publisher.
     #[test]
@@ -17834,6 +18056,7 @@ mod tests {
                     protection_does_not_remove: None,
                     room_door: None,
                     granting_object: None,
+                    bound_actor: None,
                 }],
                 ..Default::default()
             }
@@ -18603,6 +18826,7 @@ mod tests {
             prohibit(ProhibitedActivity::Attack {
                 defended,
                 protected_player: None,
+                protected_scope: None,
             })
         };
 
@@ -24263,6 +24487,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     protection_does_not_remove: None,
                     room_door: None,
                     granting_object: None,
+                    bound_actor: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -24314,6 +24539,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     protection_does_not_remove: None,
                     room_door: None,
                     granting_object: None,
+                    bound_actor: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -27213,6 +27439,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -27258,6 +27485,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(
@@ -27300,6 +27528,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -27336,6 +27565,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         let findings = audit_card_lines(oracle, &face);
@@ -28060,6 +28290,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(
@@ -28095,6 +28326,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(
@@ -28140,6 +28372,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -28176,6 +28409,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -28214,6 +28448,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -28258,6 +28493,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             });
         }
 
@@ -28458,6 +28694,66 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
     }
 
+    /// CR 109.4 (Matt R2-F4): a typed Continuous static gated on a
+    /// `PlayerAttackedPlayer` with a resolution-scoped `ChosenPlayer`
+    /// endpoint is UNSUPPORTED — the layer pipeline has no resolving
+    /// ability to answer it, so the runtime entry gate refuses the whole
+    /// tree. CR 109.4 + CR 115.1 (Matt R7-F2): the same refusal covers the
+    /// target-relative endpoints (`TargetPlayer`/`TargetOpponent`), which
+    /// read no declared target without a resolving ability. The `Not`
+    /// wrapper must not bypass the refusal (the leaf view recurses), while
+    /// the same gate with bindable endpoints stays supported. Pre-fix the
+    /// target-relative shapes are admitted.
+    #[test]
+    fn unanswerable_attack_endpoint_nested_not_gate_is_unsupported_static() {
+        let trigger_registry = build_trigger_registry();
+        let static_registry = build_static_registry();
+
+        for attacker in [
+            ControllerRef::ChosenPlayer { index: 0 },
+            ControllerRef::TargetPlayer,
+            ControllerRef::TargetOpponent,
+        ] {
+            let refused = StaticDefinition::continuous().condition(StaticCondition::Not {
+                condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                    attacker: attacker.clone(),
+                    defender: ControllerRef::You,
+                }),
+            });
+            assert!(
+                !is_static_supported(
+                    &refused,
+                    &trigger_registry,
+                    &static_registry,
+                    TokenStaticTraversal::Include,
+                ),
+                "a Continuous static gated on an unanswerable Not(attacked you) \
+                 endpoint must be reported unsupported, not silently accepted \
+                 as fully parsed: {refused:?}"
+            );
+        }
+
+        // Sanity: the same gate with bindable endpoints stays supported —
+        // proving the gap signal comes from the unanswerable leaf, not from
+        // the attack gate or the Not wrapper themselves. `ActivePlayer`
+        // reads live game state with no ability context.
+        let supported = StaticDefinition::continuous().condition(StaticCondition::Not {
+            condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::ActivePlayer,
+                defender: ControllerRef::You,
+            }),
+        });
+        assert!(
+            is_static_supported(
+                &supported,
+                &trigger_registry,
+                &static_registry,
+                TokenStaticTraversal::Include,
+            ),
+            "Not(ActivePlayer attacked you) must remain supported"
+        );
+    }
+
     /// CR 113.11: CantHaveKeyword is a data-carrying static (parameterized by
     /// keyword). Archetype of Imagination et al. must be covered once this arm
     /// is present in `is_data_carrying_static()`.
@@ -28488,6 +28784,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         });
 
         assert!(
@@ -29039,7 +29336,12 @@ mod unpublished_event_source_tests {
 
     /// Parse a card through the production MTGJSON-to-face path
     /// (`build_oracle_face`), the same construction the parser tests use.
-    fn parsed_face(name: &str, type_line: &str, types: &[&str], oracle: &str) -> CardFace {
+    pub(super) fn parsed_face(
+        name: &str,
+        type_line: &str,
+        types: &[&str],
+        oracle: &str,
+    ) -> CardFace {
         use crate::database::mtgjson::{AtomicCard, AtomicIdentifiers};
         let card = AtomicCard {
             name: name.to_string(),
@@ -29201,6 +29503,346 @@ mod unpublished_event_source_tests {
                 .any(|gap| gap == GIVE_CONTROL_UNBOUND_RECIPIENT_GAP),
             "{:?}",
             card_face_gaps(&kain)
+        );
+    }
+}
+
+#[cfg(test)]
+mod misparse_gap_diagnosis_tests {
+    use super::*;
+
+    /// A confirmed misparse reports its census clauses in the standard gap shape:
+    /// `source_text` plus one typed diagnosis per clause, keyed by the exact export key.
+    #[test]
+    fn marked_face_gap_names_its_clauses() {
+        let key = "a girl and her dogs";
+        let entry = ConfirmedMisparses::committed()
+            .get(key)
+            .expect("the committed list carries this face");
+        let mut face = CardFace::default();
+        face.metadata.confirmed_misparse = Some(entry.class);
+        let mut details = public_gap_details(&card_face_coverage(&face).gaps);
+        attach_misparse_clauses(key, &face, &mut details);
+        let gap = details
+            .iter()
+            .find(|gap| gap.handler == entry.class.handler())
+            .expect("the marked face reports its misparse gap");
+        assert_eq!(
+            gap.source_text.as_deref(),
+            Some(entry.clauses.join(" / ").as_str())
+        );
+        let expected: Vec<GapDiagnosis> = entry
+            .clauses
+            .iter()
+            .map(|clause| GapDiagnosis::Misparse {
+                class: entry.class,
+                clause: clause.clone(),
+            })
+            .collect();
+        assert_eq!(gap.diagnoses, expected);
+    }
+
+    /// A face without the census marker gets no clause text, even when a gap of
+    /// the same shape is present and the export key is on the committed list.
+    #[test]
+    fn unmarked_face_gets_no_misparse_text() {
+        let key = "a girl and her dogs";
+        let class = ConfirmedMisparses::committed()
+            .get(key)
+            .expect("the committed list carries this face")
+            .class;
+        let face = CardFace::default();
+        let mut details = vec![GapDetail {
+            handler: class.handler().to_string(),
+            source_text: None,
+            diagnoses: vec![],
+        }];
+        attach_misparse_clauses(key, &face, &mut details);
+        assert_eq!(details[0].source_text, None);
+        assert!(details[0].diagnoses.is_empty());
+    }
+
+    /// Several census clauses join into one `source_text` and keep one typed
+    /// diagnosis each, in list order.
+    #[test]
+    fn multi_clause_misparse_keeps_every_clause() {
+        let key = "agent of acquisitions";
+        let entry = ConfirmedMisparses::committed()
+            .get(key)
+            .expect("the committed list carries this face");
+        assert!(
+            entry.clauses.len() >= 2,
+            "the face must carry several clauses"
+        );
+        let mut face = CardFace::default();
+        face.metadata.confirmed_misparse = Some(entry.class);
+        let mut details = vec![GapDetail {
+            handler: entry.class.handler().to_string(),
+            source_text: None,
+            diagnoses: vec![],
+        }];
+        attach_misparse_clauses(key, &face, &mut details);
+        assert_eq!(
+            details[0].source_text.as_deref(),
+            Some(entry.clauses.join(" / ").as_str())
+        );
+        let clauses: Vec<&str> = details[0]
+            .diagnoses
+            .iter()
+            .filter_map(GapDiagnosis::phrase)
+            .collect();
+        assert_eq!(
+            clauses,
+            entry.clauses.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+    }
+
+    /// The new variant's wire shape: `layer` tag, snake_case class, clause text.
+    #[test]
+    fn misparse_diagnosis_wire_shape_round_trips() {
+        let diagnosis = GapDiagnosis::Misparse {
+            class: MisparseClass::DroppedQualifier,
+            clause: "choose a land card name".to_string(),
+        };
+        let json = serde_json::to_value(&diagnosis).expect("serializes");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "layer": "misparse",
+                "class": "dropped_qualifier",
+                "clause": "choose a land card name",
+            })
+        );
+        let back: GapDiagnosis = serde_json::from_value(json).expect("deserializes");
+        assert_eq!(back, diagnosis);
+    }
+}
+
+#[cfg(test)]
+mod blank_gap_text_tests {
+    use super::*;
+
+    fn gap(handler: &str, diagnoses: Vec<GapDiagnosis>) -> GapDetail {
+        GapDetail {
+            handler: handler.to_string(),
+            source_text: None,
+            diagnoses,
+        }
+    }
+
+    fn lines() -> Vec<String> {
+        vec![
+            "Flying".to_string(),
+            "Cumulative upkeep {1}".to_string(),
+            "As long as defending player controls two or more nonland permanents, draw a card."
+                .to_string(),
+        ]
+    }
+
+    #[test]
+    fn silent_drop_names_the_uncovered_lines() {
+        let text = blank_gap_text(&gap("SilentDrop:1_of_2", vec![]), &lines(), &["Flying"]);
+        assert_eq!(text, "Flying");
+    }
+
+    #[test]
+    fn resolver_gap_names_its_family_and_feature() {
+        let diagnosis = GapDiagnosis::Resolver {
+            family: ResolverFeatureFamily::StaticCondition,
+            feature: "OpponentPoisonAtLeast".to_string(),
+        };
+        let text = blank_gap_text(&gap("ResolverFeature:x", vec![diagnosis]), &lines(), &[]);
+        assert!(text.contains("static_condition") && text.contains("OpponentPoisonAtLeast"));
+    }
+
+    #[test]
+    fn handler_argument_finds_its_printed_line() {
+        let text = blank_gap_text(
+            &gap(
+                "Static:Unrecognized(as long as defending player controls two or more nonland)",
+                vec![],
+            ),
+            &lines(),
+            &[],
+        );
+        assert!(text.starts_with("As long as defending player"));
+    }
+
+    #[test]
+    fn handler_label_is_matched_case_insensitively_against_lines() {
+        let text = blank_gap_text(&gap("Keyword:flying", vec![]), &lines(), &[]);
+        assert_eq!(text, "Flying");
+    }
+
+    #[test]
+    fn a_gap_with_nothing_to_match_still_reads_non_empty() {
+        let text = blank_gap_text(&gap("Effect:empty", vec![]), &[], &[]);
+        assert_eq!(text, "No engine handler for Effect:empty");
+        let text = blank_gap_text(
+            &gap("ParserMisfire:InvalidSubtype(Blood)", vec![]),
+            &[],
+            &[],
+        );
+        assert_eq!(text, "Blood (no engine handler)");
+    }
+
+    #[test]
+    fn an_empty_recorded_text_counts_as_blank() {
+        let face = CardFace::default();
+        let mut details = vec![GapDetail {
+            handler: "Effect:departure_attachment_relation".to_string(),
+            source_text: Some(String::new()),
+            diagnoses: vec![],
+        }];
+        explain_blank_gaps("k", &face, &[], &mut details);
+        assert_eq!(
+            details[0].source_text.as_deref(),
+            Some("No engine handler for Effect:departure_attachment_relation")
+        );
+    }
+
+    #[test]
+    fn explain_blank_gaps_leaves_recorded_text_alone() {
+        let face = CardFace::default();
+        let mut details = vec![GapDetail {
+            handler: "Effect:Foo".to_string(),
+            source_text: Some("recorded".to_string()),
+            diagnoses: vec![],
+        }];
+        explain_blank_gaps("k", &face, &[], &mut details);
+        assert_eq!(details[0].source_text.as_deref(), Some("recorded"));
+    }
+}
+
+#[cfg(test)]
+mod swallow_clause_text_tests {
+    use super::*;
+
+    const SANCTUM: &str = "({T}: Add {U}.)
+As this land enters, you may behold a Jace. If you don't, this land enters tapped. (To behold a Jace, choose a Jace you control or reveal a Jace card from your hand.)
+{2}{U}, {T}: Empower Jace 2.";
+
+    /// The unit text the detector records opens with a reminder line and is cut at 140
+    /// bytes, so it ends mid-reminder.
+    #[test]
+    fn reminder_lines_drop_and_cut_lines_complete() {
+        let description = "({T}: Add {U}.)
+As this land enters, you may behold a Jace. If you don't, this land enters tapped. (To behold a Jace, choose a Jace you cont";
+        assert_eq!(
+            swallow_clause_from_description(description, SANCTUM).as_deref(),
+            Some("As this land enters, you may behold a Jace. If you don't, this land enters tapped.")
+        );
+    }
+
+    #[test]
+    fn a_unit_of_only_reminder_text_yields_nothing() {
+        assert_eq!(
+            swallow_clause_from_description("({T}: Add {U}.)", SANCTUM),
+            None
+        );
+    }
+
+    #[test]
+    fn swallow_gap_text_replaces_the_warning_display_form() {
+        let face = CardFace {
+            oracle_text: Some(SANCTUM.to_string()),
+            parse_warnings: vec![OracleDiagnostic::swallowed_clause(
+                "Condition_If",
+                "({T}: Add {U}.)
+As this land enters, you may behold a Jace. If you don't, this land enters tapped. (To behold a Jace, choose a Jace you cont",
+                None,
+            )],
+            ..CardFace::default()
+        };
+        let mut details = vec![GapDetail {
+            handler: "Swallow:Condition_If".to_string(),
+            source_text: Some("[warning:swallowed-clause] Condition_If".to_string()),
+            diagnoses: vec![],
+        }];
+        refine_swallow_text(&face, &mut details);
+        assert_eq!(
+            details[0].source_text.as_deref(),
+            Some("As this land enters, you may behold a Jace. If you don't, this land enters tapped.")
+        );
+    }
+}
+
+#[cfg(test)]
+mod swallow_provenance_tests {
+    use super::unpublished_event_source_tests::parsed_face;
+    use super::*;
+
+    /// Cut Short's printed text, verbatim from the card database export.
+    const CUT_SHORT: &str = "Convoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's color.)\nDestroy target planeswalker that was activated this turn or tapped creature.";
+    const DESTROY: &str =
+        "Destroy target planeswalker that was activated this turn or tapped creature.";
+
+    fn swallow_gap(detector: &str) -> GapDetail {
+        GapDetail {
+            handler: format!("Swallow:{detector}"),
+            source_text: Some(format!("[warning:swallowed-clause] {detector}")),
+            diagnoses: vec![],
+        }
+    }
+
+    /// The production parser flags Cut Short's destroy line (line 1) under
+    /// `Duration_ThisTurn`, in a unit that also absorbs the Convoke line (line 0)
+    /// and whose display text is cut inside the Convoke reminder. The report must
+    /// name the destroy clause, not the supported Convoke keyword.
+    #[test]
+    fn cut_short_reports_the_destroy_clause_not_convoke() {
+        let face = parsed_face("Cut Short", "Instant", &["Instant"], CUT_SHORT);
+        let warning = face
+            .parse_warnings
+            .iter()
+            .find(|warning| {
+                matches!(
+                    warning,
+                    OracleDiagnostic::SwallowedClause { detector, .. }
+                        if detector == "Duration_ThisTurn"
+                )
+            })
+            .expect("the production parser flags Cut Short's destroy clause");
+        assert_eq!(warning.line_index(), 1, "the flagged item is on line 1");
+        let mut details = vec![swallow_gap("Duration_ThisTurn")];
+        refine_swallow_text(&face, &mut details);
+        assert_eq!(details[0].source_text.as_deref(), Some(DESTROY));
+    }
+
+    /// A stamped warning is read from its provenance, never from the display text:
+    /// the description here names only the reminder line, yet the clause is the
+    /// destroy line the unit's `line_index` points at.
+    #[test]
+    fn stamped_warning_uses_its_line_index_not_its_description() {
+        let warning = OracleDiagnostic::SwallowedClause {
+            detector: "Duration_ThisTurn".to_string(),
+            description: "Convoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's".to_string(),
+            line_index: 1,
+            unit_span: Some(OracleSourceSpan::exact(0, 1, 0, 225, 0)),
+            items: Vec::new(),
+            gap: None,
+        };
+        assert_eq!(
+            swallow_clause_text(&warning, CUT_SHORT).as_deref(),
+            Some(DESTROY)
+        );
+    }
+
+    /// A span that is not card-absolute carries no usable line coordinates, so the
+    /// clause falls back to the display text.
+    #[test]
+    fn chain_relative_span_falls_back_to_the_display_text() {
+        let warning = OracleDiagnostic::SwallowedClause {
+            detector: "Duration_ThisTurn".to_string(),
+            description: DESTROY.to_string(),
+            line_index: 0,
+            unit_span: Some(OracleSourceSpan::chain_relative(0, 0, 0, 10, 0)),
+            items: Vec::new(),
+            gap: None,
+        };
+        assert_eq!(
+            swallow_clause_text(&warning, CUT_SHORT).as_deref(),
+            Some(DESTROY)
         );
     }
 }

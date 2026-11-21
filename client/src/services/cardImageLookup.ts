@@ -29,6 +29,22 @@ export interface CardImageLookup {
   ownerPrinting?: CardPrinting | null;
 }
 
+export function automaticArtCatalogVersion(printing: CardPrinting | null | undefined): number | null {
+  const version = printing?.automatic_art_catalog_version;
+  return typeof version === "number" && Number.isInteger(version) && version >= 1 && version <= 255
+    ? version
+    : null;
+}
+
+export function printingComparison(
+  printing: CardPrinting | null | undefined,
+  ref: PrintedRef | null | undefined,
+) {
+  return printing && ref
+    ? [printing.set_code, printing.collector_number, ref.oracle_id, ref.face_name, automaticArtCatalogVersion(printing)] as const
+    : null;
+}
+
 /** Owner admission uses the same identity as the selected object or emblem source. */
 export function ownerPrintedRefOf(lookup: CardImageLookup): PrintedRef | undefined {
   return lookup.oracleId && lookup.faceName

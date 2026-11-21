@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Automatic basic-land printings carry display provenance for image fallback"
+}
