@@ -1055,8 +1055,14 @@ fn lethal_damage_candidates(state: &GameState, battlefield_snapshot: &[ObjectId]
                     && obj.toughness.is_some_and(|t| {
                         t > 0
                             && (
-                                // CR 704.5g: Normal lethal damage requires positive toughness and damage >= toughness.
-                                obj.damage_marked >= t as u32
+                                // CR 704.5g + CR 120.6: positive toughness and lethal damage marked,
+                                // checked by the lethal-damage authority (its basis may be power,
+                                // CR 613.11). The toughness > 0 precondition stays toughness-based.
+                                crate::game::lethal_damage::is_lethal_damage(
+                                    state,
+                                    obj,
+                                    obj.damage_marked,
+                                )
                                 // CR 704.5h + CR 702.2b: any damage dealt by a deathtouch source, marked
                                 // (CR 120.3e) or as -1/-1 counters (CR 120.3d).
                                 || obj.dealt_deathtouch_damage

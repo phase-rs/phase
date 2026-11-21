@@ -684,9 +684,23 @@ fn lethal_destruction_is_not_fixed(state: &GameState, object_id: ObjectId) -> bo
 }
 
 #[allow(dead_code)] // Reachable only through the deferred crate-visible assessment API.
-fn survives_marked_damage(object: &GameObject, incoming_damage: u32) -> Option<bool> {
-    let toughness = object.toughness?.max(0) as u32;
-    Some(object.damage_marked.saturating_add(incoming_damage) < toughness)
+fn survives_marked_damage(
+    state: &GameState,
+    object: &GameObject,
+    incoming_damage: u32,
+) -> Option<bool> {
+    // CR 704.5f + CR 704.5g: a creature with toughness 0 or less dies regardless of damage;
+    // otherwise it survives unless its marked plus incoming damage is lethal (CR 120.6, whose
+    // basis may be power under CR 613.11).
+    let toughness = object.toughness?;
+    Some(
+        toughness > 0
+            && !lethal_damage::is_lethal_damage(
+                state,
+                object,
+                object.damage_marked.saturating_add(incoming_damage),
+            ),
+    )
 }
 
 /// Assess the next combat-damage exchange for a currently bound attacker/blocker pair.
@@ -817,8 +831,8 @@ pub(crate) fn assess_combat_impact(
     }
 
     let (Some(attacker_survives), Some(blocker_survives)) = (
-        survives_marked_damage(attacker_object, damage.blocker_to_attacker),
-        survives_marked_damage(blocker_object, damage.attacker_to_blocker),
+        survives_marked_damage(state, attacker_object, damage.blocker_to_attacker),
+        survives_marked_damage(state, blocker_object, damage.attacker_to_blocker),
     ) else {
         return CombatImpact::Indeterminate;
     };
@@ -2955,6 +2969,52 @@ mod tests {
             index_before,
             "assessment must not prepare or rebuild the replacement index"
         );
+    }
+
+    /// CR 120.6 + CR 613.11: the survival estimate reads the lethal-damage basis. With a
+    /// "lethal damage dealt to creatures you control is determined by their power" static on
+    /// P1's side, P1's 3/1 blocker survives the 1/1's 1 damage (power 3); without it, it dies.
+    #[test]
+    fn assess_combat_impact_reads_the_lethal_damage_basis() {
+        for (with_static, blocker_survives) in [(true, true), (false, false)] {
+            let mut state = setup();
+            let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 1, 1);
+            let blocker = create_creature(&mut state, PlayerId(1), "Blocker", 3, 1);
+            if with_static {
+                let carrier = create_creature(
+                    &mut state,
+                    PlayerId(1),
+                    "Zilortha, Strength Incarnate",
+                    7,
+                    3,
+                );
+                let def = StaticDefinition::new(
+                    crate::types::statics::StaticMode::LethalDamageDeterminedByPower,
+                )
+                .affected(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .into(),
+                );
+                let obj = state.objects.get_mut(&carrier).unwrap();
+                obj.static_definitions.push(def.clone());
+                Arc::make_mut(&mut obj.base_static_definitions).push(def);
+            }
+            setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+            let attacker_ref = current_incarnation(&state, attacker);
+            let blocker_ref = current_incarnation(&state, blocker);
+
+            let CombatImpact::Fixed { survival, .. } =
+                assess_combat_impact(&state, attacker_ref, blocker_ref)
+            else {
+                panic!("a plain one-on-one exchange is fixed (with_static: {with_static})");
+            };
+            assert_eq!(
+                survival.blocker_survives, blocker_survives,
+                "with_static: {with_static}"
+            );
+            assert!(!survival.attacker_survives, "3 damage kills the 1/1");
+        }
     }
 
     #[test]

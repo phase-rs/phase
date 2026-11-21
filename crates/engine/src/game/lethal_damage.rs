@@ -3,22 +3,60 @@
 //!
 //! Readers that ask "is this much damage lethal for this creature?" or "how much more must an
 //! attacker assign before it may trample over?" read this module, so their answers cannot drift
-//! apart. Today those are the combat assignment minimum, the excess-damage reading
-//! (`combat_damage::lethal_damage_needed`) and the combat predictor
-//! (`combat_damage::combat_damage_to_defender`). The lethal-damage state-based action
-//! (`sba::lethal_damage_candidates`) still compares marked damage with toughness directly.
+//! apart: the lethal-damage state-based action (`sba::lethal_damage_candidates`), the combat
+//! assignment minimum, the excess-damage reading (`combat_damage::lethal_damage_needed`), the
+//! combat predictor (`combat_damage::combat_damage_to_defender`) and the AI's survival estimate
+//! (`combat_damage::assess_combat_impact`).
 
 use crate::game::game_object::GameObject;
+use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
+use crate::types::statics::StaticMode;
+
+/// CR 120.6: the characteristic a creature's marked damage is checked against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LethalDamageBasis {
+    /// CR 120.6 + CR 704.5g: the default — toughness.
+    Toughness,
+    /// CR 613.11: a rule-modifying static substitutes power ("Lethal damage dealt to creatures
+    /// you control is determined by their power rather than their toughness" — Zilortha,
+    /// Strength Incarnate).
+    Power,
+}
+
+/// CR 604.1 + CR 613.11 + CR 109.5: the lethal-damage basis for `object_id`, read live from the
+/// functioning `LethalDamageDeterminedByPower` statics whose `affected` filter matches it. "You"
+/// in that filter is the static's current controller, so a control change moves the effect, and
+/// it ends as soon as its source stops functioning.
+pub fn lethal_damage_basis(state: &GameState, object_id: ObjectId) -> LethalDamageBasis {
+    let power_basis = check_static_ability(
+        state,
+        StaticMode::LethalDamageDeterminedByPower,
+        &StaticCheckContext {
+            target_id: Some(object_id),
+            ..Default::default()
+        },
+    );
+    if power_basis {
+        LethalDamageBasis::Power
+    } else {
+        LethalDamageBasis::Toughness
+    }
+}
 
 /// CR 120.6 + CR 704.5g: total marked damage at or above which `obj` has been dealt lethal
 /// damage.
 ///
-/// Toughness at or below 0 yields 0; a creature in that state is put into its owner's graveyard
-/// by CR 704.5f, which is not a consequence of damage.
-pub fn lethal_damage_threshold(_state: &GameState, obj: &GameObject) -> u32 {
-    obj.toughness.unwrap_or(0).max(0) as u32
+/// Toughness basis: toughness at or below 0 yields 0; a creature in that state is put into its
+/// owner's graveyard by CR 704.5f, which is not a consequence of damage. Power basis: at least 1,
+/// because CR 704.5g also requires that the creature "has damage marked on it" (a creature with
+/// 0 power isn't destroyed unless it has at least 1 damage marked on it).
+pub fn lethal_damage_threshold(state: &GameState, obj: &GameObject) -> u32 {
+    match lethal_damage_basis(state, obj.id) {
+        LethalDamageBasis::Toughness => obj.toughness.unwrap_or(0).max(0) as u32,
+        LethalDamageBasis::Power => obj.power.unwrap_or(0).max(1) as u32,
+    }
 }
 
 /// CR 120.6 + CR 704.5g: `total` damage is lethal for `obj`: it is nonzero ("it has damage marked
@@ -82,7 +120,36 @@ pub fn combat_lethal_damage_remaining(
 mod tests {
     use super::*;
     use crate::game::combat_damage::lethal_damage_needed;
-    use crate::game::scenario::{GameScenario, P1};
+    use crate::game::scenario::{GameScenario, P0, P1};
+
+    /// Verbatim Oracle text (MTGJSON): Zilortha, Strength Incarnate.
+    const ZILORTHA: &str = "Trample\nLethal damage dealt to creatures you control is determined \
+         by their power rather than their toughness.";
+
+    /// A board where P0 controls Zilortha (when `with_zilortha`), one P0 creature `mine` and one
+    /// P1 creature `theirs`, both `power`/`toughness` with `marked` damage.
+    fn zilortha_board(
+        with_zilortha: bool,
+        power: i32,
+        toughness: i32,
+        marked: u32,
+    ) -> (GameState, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        if with_zilortha {
+            scenario
+                .add_creature(P0, "Zilortha, Strength Incarnate", 7, 3)
+                .from_oracle_text_with_keywords(&["Trample"], ZILORTHA);
+        }
+        let mine = scenario
+            .add_creature(P0, "Mine", power, toughness)
+            .with_damage_marked(marked)
+            .id();
+        let theirs = scenario
+            .add_creature(P1, "Theirs", power, toughness)
+            .with_damage_marked(marked)
+            .id();
+        (scenario.build().state().clone(), mine, theirs)
+    }
 
     /// A board with one P1 creature of the given toughness and marked damage.
     fn board(toughness: i32, marked: u32) -> (GameState, ObjectId) {
@@ -183,5 +250,55 @@ mod tests {
             1,
             "3 of 4 is not yet lethal: the deathtouch source still owes 1"
         );
+    }
+
+    /// CR 613.11 + CR 109.5: the basis is power only for creatures the static's controller
+    /// controls, and toughness without the static.
+    #[test]
+    fn lethal_damage_basis_reads_the_functioning_static() {
+        let (state, mine, theirs) = zilortha_board(false, 1, 5, 0);
+        assert_eq!(
+            lethal_damage_basis(&state, mine),
+            LethalDamageBasis::Toughness
+        );
+        assert_eq!(
+            lethal_damage_basis(&state, theirs),
+            LethalDamageBasis::Toughness
+        );
+
+        let (state, mine, theirs) = zilortha_board(true, 1, 5, 0);
+        assert_eq!(lethal_damage_basis(&state, mine), LethalDamageBasis::Power);
+        assert_eq!(
+            lethal_damage_basis(&state, theirs),
+            LethalDamageBasis::Toughness
+        );
+    }
+
+    /// CR 704.5g + ruling 1: the power threshold is at least 1; the toughness arm is unchanged,
+    /// including 0 for toughness 0 (CR 704.5f's territory).
+    #[test]
+    fn lethal_damage_threshold_floors_power_at_one() {
+        let (mut state, mine, theirs) = zilortha_board(true, 0, 4, 0);
+        assert_eq!(lethal_damage_threshold(&state, &state.objects[&mine]), 1);
+        state.objects.get_mut(&mine).unwrap().power = Some(-1);
+        assert_eq!(lethal_damage_threshold(&state, &state.objects[&mine]), 1);
+        state.objects.get_mut(&mine).unwrap().power = Some(5);
+        assert_eq!(lethal_damage_threshold(&state, &state.objects[&mine]), 5);
+        assert_eq!(lethal_damage_threshold(&state, &state.objects[&theirs]), 4);
+        state.objects.get_mut(&theirs).unwrap().toughness = Some(0);
+        assert_eq!(lethal_damage_threshold(&state, &state.objects[&theirs]), 0);
+    }
+
+    /// CR 120.4a + CR 702.19b under the power basis: the excess reading and the combat remainder
+    /// both measure against power.
+    #[test]
+    fn excess_and_combat_remainder_read_the_power_basis() {
+        let (state, mine, theirs) = zilortha_board(true, 5, 9, 2);
+        assert_eq!(lethal_damage_needed(&state, mine, false), 3);
+        assert_eq!(lethal_damage_needed(&state, theirs, false), 7);
+
+        let (state, mine, theirs) = zilortha_board(true, 1, 5, 0);
+        assert_eq!(remaining(&state, mine, false, 0, 1), 0);
+        assert_eq!(remaining(&state, theirs, false, 0, 1), 4);
     }
 }

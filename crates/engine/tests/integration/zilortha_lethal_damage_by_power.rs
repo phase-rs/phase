@@ -1,0 +1,570 @@
+//! Zilortha, Strength Incarnate: "Lethal damage dealt to creatures you control is determined by
+//! their power rather than their toughness." (CR 120.6 + CR 704.5g + CR 613.11).
+//!
+//! Rulings (2020-04-17) pinned here:
+//! 1. A creature with 0 power isn't destroyed unless it has at least 1 damage marked on it.
+//! 2. A creature with 0 toughness is put into its owner's graveyard (CR 704.5f); Zilortha
+//!    doesn't affect that.
+//! 3. Wherever the game checks for lethal damage — the state-based action, assigning trample
+//!    damage, excess damage (Flame Spill) — power replaces toughness.
+//! 4. Nonlethal damage can become lethal when Zilortha enters or leaves.
+//!
+//! Oracle text verified verbatim against `data/mtgjson/AtomicCards.json`: Zilortha, Strength
+//! Incarnate, Lava Dart, Flame Slash, Flame Spill, Lightning Bolt, Unsummon, Disfigure, Giant
+//! Growth, Act of Treason, Darksteel Myr, Rith, Liberated Primeval. Other bodies are textless
+//! vanilla creatures.
+
+use engine::game::combat::AttackTarget;
+use engine::game::coverage::unimplemented_mechanics;
+use engine::game::engine::EngineError;
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::parser::oracle::parse_oracle_text;
+use engine::types::ability::{ControllerRef, TargetFilter, TargetRef, TypedFilter};
+use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
+use engine::types::game_state::{CombatDamageAssignmentMode, WaitingFor};
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::ManaCost;
+use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
+use engine::types::zones::Zone;
+
+const ZILORTHA_NAME: &str = "Zilortha, Strength Incarnate";
+const ZILORTHA: &str = "Trample\nLethal damage dealt to creatures you control is determined by \
+     their power rather than their toughness.";
+const LAVA_DART: &str = "Lava Dart deals 1 damage to any target.\n\
+     Flashback\u{2014}Sacrifice a Mountain. (You may cast this card from your graveyard for its \
+     flashback cost. Then exile it.)";
+const FLAME_SLASH: &str = "Flame Slash deals 4 damage to target creature.";
+const FLAME_SPILL: &str = "Flame Spill deals 4 damage to target creature. Excess damage is dealt \
+     to that creature's controller instead.";
+const LIGHTNING_BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
+const UNSUMMON: &str = "Return target creature to its owner's hand.";
+const DISFIGURE: &str = "Target creature gets -2/-2 until end of turn.";
+const GIANT_GROWTH: &str = "Target creature gets +3/+3 until end of turn.";
+const ACT_OF_TREASON: &str = "Gain control of target creature until end of turn. Untap that \
+     creature. It gains haste until end of turn. (It can attack and {T} this turn.)";
+const DARKSTEEL_MYR: &str = "Indestructible (Damage and effects that say \"destroy\" don't \
+     destroy this creature. If its toughness is 0 or less, it still dies.)";
+const RITH: &str = "Flying, ward {2}\nOther Dragons you control have ward {2}.\nAt the beginning \
+     of your end step, if a creature or planeswalker an opponent controlled was dealt excess \
+     damage this turn, create a 4/4 red Dragon creature token with flying.";
+
+fn board() -> GameScenario {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+}
+
+fn zilortha(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    scenario
+        .add_creature(player, ZILORTHA_NAME, 7, 3)
+        .as_legendary()
+        .from_oracle_text_with_keywords(&["Trample"], ZILORTHA)
+        .id()
+}
+
+/// A free copy of a spell in P0's hand.
+fn spell(scenario: &mut GameScenario, name: &str, instant: bool, text: &str) -> ObjectId {
+    scenario
+        .add_spell_to_hand_from_oracle(P0, name, instant, text)
+        .with_mana_cost(ManaCost::zero())
+        .id()
+}
+
+/// Cast `spell` at `target` and resolve it to an empty stack and a priority window. Returns the
+/// resolution's events.
+fn cast_at(runner: &mut GameRunner, spell: ObjectId, target: ObjectId) -> Vec<GameEvent> {
+    let outcome = runner.cast(spell).target_object(target).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the spell resolves to a priority window, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert!(outcome.state().stack.is_empty(), "the stack is empty");
+    outcome.events().to_vec()
+}
+
+fn damage_to(events: &[GameEvent], target: ObjectId) -> Vec<(u32, u32)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamageDealt {
+                target: TargetRef::Object(id),
+                amount,
+                excess,
+                ..
+            } if *id == target => Some((*amount, *excess)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn zone(runner: &GameRunner, id: ObjectId) -> Zone {
+    runner.state().objects[&id].zone
+}
+
+fn marked(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id].damage_marked
+}
+
+/// Attack P1 with `attackers`, declare `blocks` (`(blocker, attacker)`), then pass priority until
+/// combat damage is being assigned (a prompt is up) or has been dealt.
+fn attack_and_block(
+    runner: &mut GameRunner,
+    attackers: &[ObjectId],
+    blocks: &[(ObjectId, ObjectId)],
+) {
+    let mut declared_attackers = false;
+    let mut declared_blockers = false;
+    for _ in 0..64 {
+        match &runner.state().waiting_for {
+            WaitingFor::AssignCombatDamage { .. } => break,
+            WaitingFor::Priority { .. } if runner.state().phase == Phase::CombatDamage => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::DeclareAttackers { player, .. } => {
+                assert_eq!(*player, P0);
+                assert!(!declared_attackers, "attackers are declared once");
+                declared_attackers = true;
+                let attacks: Vec<_> = attackers
+                    .iter()
+                    .map(|&id| (id, AttackTarget::Player(P1)))
+                    .collect();
+                runner
+                    .declare_attackers(&attacks)
+                    .expect("declare attackers");
+            }
+            WaitingFor::DeclareBlockers { player, .. } => {
+                assert_eq!(*player, P1);
+                assert!(!declared_blockers, "blockers are declared once");
+                declared_blockers = true;
+                runner.declare_blockers(blocks).expect("declare blockers");
+            }
+            other => panic!("unexpected prompt before combat damage: {other:?}"),
+        }
+    }
+    assert!(
+        declared_attackers && declared_blockers,
+        "combat must reach the declared block"
+    );
+}
+
+/// The lethal minimum the open trample prompt publishes for `blocker`.
+fn prompt_minimum(runner: &GameRunner, blocker: ObjectId) -> u32 {
+    let WaitingFor::AssignCombatDamage {
+        player,
+        blockers,
+        trample,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected a combat damage assignment prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert!(trample.is_some(), "the prompted attacker tramples");
+    blockers
+        .iter()
+        .find(|slot| slot.blocker_id == blocker)
+        .expect("the blocker is a slot of the prompt")
+        .lethal_minimum
+}
+
+fn assign(
+    runner: &mut GameRunner,
+    blocker: ObjectId,
+    to_blocker: u32,
+    trample_damage: u32,
+) -> Result<(), EngineError> {
+    runner
+        .act(GameAction::AssignCombatDamage {
+            mode: CombatDamageAssignmentMode::Normal,
+            assignments: vec![(blocker, to_blocker)],
+            trample_damage,
+            controller_damage: 0,
+        })
+        .map(|_| ())
+}
+
+fn finish_combat(runner: &mut GameRunner) {
+    runner.combat_damage();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "combat finishes at a priority window, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty());
+}
+
+/// Z0 (SHAPE + coverage): the static line parses to the mode with the "creatures you control"
+/// filter, and a scenario-built Zilortha reports no unimplemented mechanic.
+#[test]
+fn zilortha_static_parses_and_is_supported() {
+    let parsed = parse_oracle_text(
+        ZILORTHA,
+        ZILORTHA_NAME,
+        &["Trample".to_owned()],
+        &["Creature".to_owned()],
+        &["Dinosaur".to_owned()],
+    );
+    assert!(parsed.abilities.is_empty(), "{:?}", parsed.abilities);
+    assert!(parsed.triggers.is_empty());
+    assert_eq!(parsed.statics.len(), 1, "{:?}", parsed.statics);
+    let def = &parsed.statics[0];
+    assert_eq!(def.mode, StaticMode::LethalDamageDeterminedByPower);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::from(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+    );
+
+    let mut scenario = board();
+    let z = zilortha(&mut scenario, P0);
+    let runner = scenario.build();
+    let obj = &runner.state().objects[&z];
+    assert!(
+        obj.static_definitions
+            .iter_all()
+            .any(|d| d.mode == StaticMode::LethalDamageDeterminedByPower),
+        "reach guard: the scenario-built Zilortha carries the static"
+    );
+    assert!(
+        unimplemented_mechanics(obj).is_empty(),
+        "{:?}",
+        unimplemented_mechanics(obj)
+    );
+}
+
+/// Z1: a 1/5 I control dies to 1 damage (power 1).
+#[test]
+fn my_one_five_dies_to_one_damage() {
+    let mut scenario = board();
+    zilortha(&mut scenario, P0);
+    let mine = scenario.add_creature(P0, "One Five", 1, 5).id();
+    let dart = spell(&mut scenario, "Lava Dart", true, LAVA_DART);
+    let mut runner = scenario.build();
+
+    let events = cast_at(&mut runner, dart, mine);
+    assert_eq!(damage_to(&events, mine), vec![(1, 0)]);
+    assert_eq!(zone(&runner, mine), Zone::Graveyard);
+}
+
+/// Z2: a 5/1 I control survives 4 damage, and dies once Zilortha leaves (ruling 4).
+#[test]
+fn my_five_one_survives_four_until_zilortha_leaves() {
+    let mut scenario = board();
+    let z = zilortha(&mut scenario, P0);
+    let mine = scenario.add_creature(P0, "Five One", 5, 1).id();
+    let slash = spell(&mut scenario, "Flame Slash", false, FLAME_SLASH);
+    let unsummon = spell(&mut scenario, "Unsummon", true, UNSUMMON);
+    let mut runner = scenario.build();
+
+    cast_at(&mut runner, slash, mine);
+    assert_eq!(zone(&runner, mine), Zone::Battlefield);
+    assert_eq!(marked(&runner, mine), 4);
+
+    cast_at(&mut runner, unsummon, z);
+    assert_eq!(zone(&runner, z), Zone::Hand);
+    assert_eq!(
+        zone(&runner, mine),
+        Zone::Graveyard,
+        "CR 704.5g: 4 damage on toughness 1 is lethal again"
+    );
+}
+
+/// Z3: opponents' creatures are unaffected.
+#[test]
+fn opponents_creatures_keep_toughness() {
+    let mut scenario = board();
+    zilortha(&mut scenario, P0);
+    let mine = scenario.add_creature(P0, "Mine", 1, 5).id();
+    let theirs = scenario.add_creature(P1, "Theirs", 1, 5).id();
+    let dart_a = spell(&mut scenario, "Lava Dart", true, LAVA_DART);
+    let dart_b = spell(&mut scenario, "Lava Dart", true, LAVA_DART);
+    let mut runner = scenario.build();
+
+    cast_at(&mut runner, dart_a, theirs);
+    assert_eq!(zone(&runner, theirs), Zone::Battlefield);
+    assert_eq!(marked(&runner, theirs), 1);
+    cast_at(&mut runner, dart_b, mine);
+    assert_eq!(zone(&runner, mine), Zone::Graveyard);
+}
+
+/// Z4: an opponent's trampler must assign lethal damage to my blocker by its power (ruling 3).
+#[test]
+fn opponents_trampler_assigns_lethal_by_my_blockers_power() {
+    let mut scenario = board();
+    zilortha(&mut scenario, P1);
+    let blocker = scenario.add_creature(P1, "One Five", 1, 5).id();
+    let attacker = scenario.add_creature(P0, "Six Six", 6, 6).trample().id();
+    let mut runner = scenario.build();
+    let p1_life = runner.life(P1);
+
+    attack_and_block(&mut runner, &[attacker], &[(blocker, attacker)]);
+    assert_eq!(prompt_minimum(&runner, blocker), 1);
+    assert!(
+        assign(&mut runner, blocker, 0, 6).is_err(),
+        "CR 702.19b: excess before lethal is rejected"
+    );
+    assign(&mut runner, blocker, 1, 5).expect("1 is lethal for a 1-power creature");
+    finish_combat(&mut runner);
+    assert_eq!(runner.life(P1), p1_life - 5);
+    assert_eq!(zone(&runner, blocker), Zone::Graveyard);
+}
+
+/// Z4b: Zilortha on the attacking side does not change the opponent's blocker.
+#[test]
+fn attacker_side_zilortha_leaves_the_blocker_on_toughness() {
+    let mut scenario = board();
+    zilortha(&mut scenario, P0);
+    let attacker = scenario.add_creature(P0, "Six Six", 6, 6).trample().id();
+    let blocker = scenario.add_creature(P1, "One Five", 1, 5).id();
+    let mut runner = scenario.build();
+
+    attack_and_block(&mut runner, &[attacker], &[(blocker, attacker)]);
+    assert_eq!(prompt_minimum(&runner, blocker), 5);
+}
+
+/// Z5: ruling 1 — a 0-power creature I control survives with no damage marked, then dies to 1.
+#[test]
+fn zero_power_creature_needs_one_damage() {
+    let mut scenario = board();
+    zilortha(&mut scenario, P0);
+    let wall = scenario.add_creature(P0, "Zero Four", 0, 4).id();
+    let mine = scenario.add_creature(P0, "One Five", 1, 5).id();
+    let dart_a = spell(&mut scenario, "Lava Dart", true, LAVA_DART);
+    let dart_b = spell(&mut scenario, "Lava Dart", true, LAVA_DART);
+    let mut runner = scenario.build();
+
+    cast_at(&mut runner, dart_a, mine);
+    assert_eq!(zone(&runner, mine), Zone::Graveyard);
+    // Reach guard: SBAs ran after the first Dart, and the undamaged 0-power creature survived.
+    assert_eq!(zone(&runner, wall), Zone::Battlefield);
+    assert_eq!(marked(&runner, wall), 0);
+    cast_at(&mut runner, dart_b, wall);
+    assert_eq!(zone(&runner, wall), Zone::Graveyard);
+}
+
+/// Z6: deathtouch is unchanged (CR 704.5h).
+#[test]
+fn deathtouch_still_destroys_my_creature() {
+    let mut scenario = board();
+    zilortha(&mut scenario, P0);
+    let attacker = scenario.add_creature(P0, "Five Five", 5, 5).id();
+    let blocker = scenario
+        .add_creature(P1, "Deathtouch", 1, 1)
+        .deathtouch()
+        .id();
+    let mut runner = scenario.build();
+
+    attack_and_block(&mut runner, &[attacker], &[(blocker, attacker)]);
+    finish_combat(&mut runner);
+    assert_eq!(zone(&runner, attacker), Zone::Graveyard);
+    assert_eq!(zone(&runner, blocker), Zone::Graveyard);
+}
+
+/// Z7: ruling 3 — Flame Spill's excess is measured against my creature's power.
+#[test]
+fn flame_spill_excess_reads_power() {
+    let mut scenario = board();
+    zilortha(&mut scenario, P0);
+    let mine = scenario.add_creature(P0, "Mine", 1, 5).id();
+    let theirs = scenario.add_creature(P1, "Theirs", 1, 5).id();
+    let spill_a = spell(&mut scenario, "Flame Spill", true, FLAME_SPILL);
+    let spill_b = spell(&mut scenario, "Flame Spill", true, FLAME_SPILL);
+    let mut runner = scenario.build();
+    let p0_life = runner.life(P0);
+    let p1_life = runner.life(P1);
+
+    let events = cast_at(&mut runner, spill_a, mine);
+    assert_eq!(runner.life(P0), p0_life - 3, "CR 120.4a: 3 excess to me");
+    assert_eq!(damage_to(&events, mine), vec![(1, 0)]);
+    assert_eq!(zone(&runner, mine), Zone::Graveyard);
+
+    cast_at(&mut runner, spill_b, theirs);
+    assert_eq!(runner.life(P1), p1_life, "4 is not lethal for toughness 5");
+    assert_eq!(zone(&runner, theirs), Zone::Battlefield);
+    assert_eq!(marked(&runner, theirs), 4);
+}
+
+/// Z8: "you" is Zilortha's current controller (CR 109.5). After P0 takes Zilortha, P1's
+/// creatures read toughness and P0's read power.
+#[test]
+fn control_change_moves_the_effect() {
+    let mut scenario = board();
+    let z = zilortha(&mut scenario, P1);
+    let theirs = scenario.add_creature(P1, "Theirs", 1, 5).id();
+    let mine = scenario.add_creature(P0, "Mine", 1, 5).id();
+    let treason = spell(&mut scenario, "Act of Treason", false, ACT_OF_TREASON);
+    let dart_a = spell(&mut scenario, "Lava Dart", true, LAVA_DART);
+    let dart_b = spell(&mut scenario, "Lava Dart", true, LAVA_DART);
+    let mut runner = scenario.build();
+
+    cast_at(&mut runner, treason, z);
+    assert_eq!(runner.state().objects[&z].controller, P0);
+    cast_at(&mut runner, dart_a, theirs);
+    assert_eq!(zone(&runner, theirs), Zone::Battlefield);
+    cast_at(&mut runner, dart_b, mine);
+    assert_eq!(zone(&runner, mine), Zone::Graveyard);
+}
+
+/// Z9: Zilortha applies to itself (7 power).
+#[test]
+fn zilortha_survives_four_damage() {
+    let mut scenario = board();
+    let z = zilortha(&mut scenario, P0);
+    let slash = spell(&mut scenario, "Flame Slash", false, FLAME_SLASH);
+    let mut runner = scenario.build();
+
+    cast_at(&mut runner, slash, z);
+    assert_eq!(zone(&runner, z), Zone::Battlefield);
+    assert_eq!(marked(&runner, z), 4);
+}
+
+/// Z10: ruling 2 — 0 toughness still kills (CR 704.5f), with no damage involved.
+#[test]
+fn zero_toughness_still_dies() {
+    let mut scenario = board();
+    zilortha(&mut scenario, P0);
+    let mine = scenario.add_creature(P0, "Five Two", 5, 2).id();
+    let disfigure = spell(&mut scenario, "Disfigure", true, DISFIGURE);
+    let mut runner = scenario.build();
+
+    cast_at(&mut runner, disfigure, mine);
+    assert_eq!(zone(&runner, mine), Zone::Graveyard);
+    assert_eq!(marked(&runner, mine), 0);
+}
+
+/// Z11: ruling 4 — damage already marked becomes lethal when Zilortha enters.
+#[test]
+fn marked_damage_becomes_lethal_when_zilortha_enters() {
+    let mut scenario = board();
+    let mine = scenario
+        .add_creature(P0, "One Five", 1, 5)
+        .with_damage_marked(2)
+        .id();
+    let z = scenario
+        .add_creature_to_hand(P0, ZILORTHA_NAME, 7, 3)
+        .as_legendary()
+        .with_mana_cost(ManaCost::zero())
+        .from_oracle_text_with_keywords(&["Trample"], ZILORTHA)
+        .id();
+    let mut runner = scenario.build();
+    assert_eq!(
+        zone(&runner, mine),
+        Zone::Battlefield,
+        "reach guard: alive before Zilortha"
+    );
+
+    let outcome = runner.cast(z).resolve();
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(zone(&runner, z), Zone::Battlefield);
+    assert_eq!(zone(&runner, mine), Zone::Graveyard);
+}
+
+/// Z12: CR 120.10 — the excess-damage record reads power, and a trigger that reads it fires.
+/// Aegar, the Freezing Flame's trigger does not parse yet (its intervening-if is unrecognized),
+/// so the reader is Rith, Liberated Primeval's end-step check.
+#[test]
+fn excess_damage_by_power_is_recorded_for_excess_readers() {
+    let mut scenario = board();
+    let rith = scenario
+        .add_creature(P0, "Rith, Liberated Primeval", 5, 5)
+        .as_legendary()
+        .with_subtypes(vec!["Dragon"])
+        .from_oracle_text_with_keywords(&["Flying", "Ward"], RITH)
+        .id();
+    zilortha(&mut scenario, P1);
+    let theirs = scenario.add_creature(P1, "Two Four", 2, 4).id();
+    let bolt = spell(&mut scenario, "Lightning Bolt", true, LIGHTNING_BOLT);
+    let mut runner = scenario.build();
+
+    let events = cast_at(&mut runner, bolt, theirs);
+    assert_eq!(
+        damage_to(&events, theirs),
+        vec![(3, 1)],
+        "CR 120.4a: 1 of 3 is excess"
+    );
+    assert_eq!(zone(&runner, theirs), Zone::Graveyard);
+
+    // Skip combat, then let Rith's end-step trigger resolve.
+    runner.advance_to_combat();
+    runner.declare_attackers(&[]).expect("declare no attackers");
+    runner.advance_to_end_step();
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().phase, Phase::End);
+    let dragons: Vec<_> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter_map(|id| runner.state().objects.get(id))
+        .filter(|obj| obj.id != rith && obj.name == "Dragon" && obj.controller == P0)
+        .map(|obj| (obj.power, obj.toughness))
+        .collect();
+    assert_eq!(
+        dragons,
+        vec![(Some(4), Some(4))],
+        "Rith makes one 4/4 Dragon"
+    );
+}
+
+/// Z13: ruling 1 in production — a 0/4 I control takes 1 from Flame Spill and the other 3 are
+/// excess to me.
+#[test]
+fn flame_spill_on_zero_power_creature_deals_one() {
+    let mut scenario = board();
+    zilortha(&mut scenario, P0);
+    let wall = scenario.add_creature(P0, "Zero Four", 0, 4).id();
+    let spill = spell(&mut scenario, "Flame Spill", true, FLAME_SPILL);
+    let mut runner = scenario.build();
+    let p0_life = runner.life(P0);
+
+    let events = cast_at(&mut runner, spill, wall);
+    assert_eq!(runner.life(P0), p0_life - 3);
+    assert_eq!(damage_to(&events, wall), vec![(1, 0)]);
+    assert_eq!(zone(&runner, wall), Zone::Graveyard);
+}
+
+/// Z14: already lethal under power before deathtouch (CR 702.19b). Giant Growth makes the Myr
+/// 3/4; Lightning Bolt marks 3, lethal by power 3 but not by toughness 4, and indestructible
+/// keeps it alive. A deathtouch trampler then owes it nothing.
+#[test]
+fn already_lethal_by_power_owes_deathtouch_nothing() {
+    let mut scenario = board();
+    zilortha(&mut scenario, P1);
+    let myr = scenario
+        .add_creature(P1, "Darksteel Myr", 0, 1)
+        .as_artifact_creature()
+        .from_oracle_text_with_keywords(&["Indestructible"], DARKSTEEL_MYR)
+        .id();
+    let attacker = scenario
+        .add_creature(P0, "Deathtouch Trampler", 3, 3)
+        .deathtouch()
+        .trample()
+        .id();
+    let growth = spell(&mut scenario, "Giant Growth", true, GIANT_GROWTH);
+    let bolt = spell(&mut scenario, "Lightning Bolt", true, LIGHTNING_BOLT);
+    let mut runner = scenario.build();
+
+    cast_at(&mut runner, growth, myr);
+    cast_at(&mut runner, bolt, myr);
+    assert_eq!(zone(&runner, myr), Zone::Battlefield, "CR 702.12b");
+    assert_eq!(marked(&runner, myr), 3);
+    let p1_life = runner.life(P1);
+
+    attack_and_block(&mut runner, &[attacker], &[(myr, attacker)]);
+    assert_eq!(prompt_minimum(&runner, myr), 0);
+    assign(&mut runner, myr, 0, 3).expect("the already-lethal Myr is owed nothing");
+    finish_combat(&mut runner);
+    assert_eq!(runner.life(P1), p1_life - 3);
+    assert_eq!(zone(&runner, myr), Zone::Battlefield);
+}

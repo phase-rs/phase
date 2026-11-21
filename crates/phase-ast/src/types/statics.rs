@@ -1085,6 +1085,12 @@ pub enum StaticMode {
     /// Adamantoise, Patient Zero, Uthgardt Fury, …), so their marked damage
     /// persists across turns.
     DamageNotRemovedDuringCleanup,
+    /// CR 120.6 + CR 704.5g + CR 613.11: "Lethal damage dealt to [filter] is determined by
+    /// their power rather than their toughness" (Zilortha, Strength Incarnate). A rule
+    /// modification read at query time: for creatures matched by the definition's `affected`
+    /// filter, marked damage is checked against power instead of toughness wherever the game
+    /// checks for lethal damage. Reader: `game::lethal_damage::lethal_damage_basis`.
+    LethalDamageDeterminedByPower,
     CantAttack,
     CantBlock,
     CantAttackOrBlock,
@@ -2524,6 +2530,7 @@ pub enum StaticMode {
 pub enum StaticModeKind {
     Continuous,
     DamageNotRemovedDuringCleanup,
+    LethalDamageDeterminedByPower,
     CantAttack,
     CantBlock,
     CantAttackOrBlock,
@@ -2680,6 +2687,9 @@ impl StaticMode {
             StaticMode::Continuous => StaticModeKind::Continuous,
             StaticMode::DamageNotRemovedDuringCleanup => {
                 StaticModeKind::DamageNotRemovedDuringCleanup
+            }
+            StaticMode::LethalDamageDeterminedByPower => {
+                StaticModeKind::LethalDamageDeterminedByPower
             }
             StaticMode::CantAttack => StaticModeKind::CantAttack,
             StaticMode::CantBlock => StaticModeKind::CantBlock,
@@ -2969,6 +2979,7 @@ impl StaticMode {
             | StaticMode::CountsAsNamed { .. }
             | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::DamageNotRemovedDuringCleanup
+            | StaticMode::LethalDamageDeterminedByPower
             | StaticMode::Other(_) => None,
         }
     }
@@ -3354,6 +3365,7 @@ impl StaticMode {
             | StaticMode::CountsAsNamed { .. }
             | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::DamageNotRemovedDuringCleanup
+            | StaticMode::LethalDamageDeterminedByPower
             | StaticMode::Other(_) => None,
         }
     }
@@ -3365,6 +3377,9 @@ impl fmt::Display for StaticMode {
             StaticMode::Continuous => write!(f, "Continuous"),
             StaticMode::DamageNotRemovedDuringCleanup => {
                 write!(f, "DamageNotRemovedDuringCleanup")
+            }
+            StaticMode::LethalDamageDeterminedByPower => {
+                write!(f, "LethalDamageDeterminedByPower")
             }
             StaticMode::CantAttack => write!(f, "CantAttack"),
             StaticMode::CantBlock => write!(f, "CantBlock"),
@@ -3841,6 +3856,7 @@ impl FromStr for StaticMode {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mode = match s {
             "Continuous" => StaticMode::Continuous,
+            "LethalDamageDeterminedByPower" => StaticMode::LethalDamageDeterminedByPower,
             "CantAttack" => StaticMode::CantAttack,
             "CantBlock" => StaticMode::CantBlock,
             "CantAttackOrBlock" => StaticMode::CantAttackOrBlock,

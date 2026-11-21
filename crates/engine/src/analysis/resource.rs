@@ -3806,6 +3806,7 @@ fn static_mode_projected_count(mode: &crate::types::statics::StaticMode) -> Opti
         | StaticMode::MustAttackDefender { .. }
         | StaticMode::Continuous
         | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::LethalDamageDeterminedByPower
         | StaticMode::CantAttack
         | StaticMode::CantBlock
         | StaticMode::CantAttackOrBlock
@@ -7907,6 +7908,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         // board reads.
         StaticMode::Continuous
         | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::LethalDamageDeterminedByPower
         | StaticMode::CantAttack
         | StaticMode::CantBlock
         | StaticMode::CantAttackOrBlock

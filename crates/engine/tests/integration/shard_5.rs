@@ -478,5 +478,6 @@ mod yunas_whistle;
 mod zero_life_mid_cast_payment;
 mod zero_moved_this_way_count;
 mod zhulodok_double_cascade;
+mod zilortha_lethal_damage_by_power;
 mod zimone_all_questioning;
 mod zone_change_reflexive_this_way;

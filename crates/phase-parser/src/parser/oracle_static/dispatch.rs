@@ -689,6 +689,38 @@ pub(crate) fn parse_damage_not_removed_during_cleanup(
     )
 }
 
+/// CR 120.6 + CR 704.5g: "Lethal damage dealt to <subject> is determined by their power rather
+/// than their toughness." (Zilortha, Strength Incarnate). Exact grammar on purpose: only the
+/// power-for-toughness substitution is modelled, so any other shape keeps its honest
+/// `Unimplemented`.
+fn parse_lethal_damage_determined_by_power(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (input, _) = tag("lethal damage dealt to ").parse(input)?;
+    let (input, affected) = nom_target::parse_type_phrase(input)?;
+    let (input, _) = tag(" is determined by ").parse(input)?;
+    let (input, _) = nom_filter::parse_pt_possessive(input)?;
+    let (input, _) = tag("power rather than ").parse(input)?;
+    let (input, _) = nom_filter::parse_pt_possessive(input)?;
+    let (input, _) = tag("toughness").parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    eof(input)?;
+    Ok((input, affected))
+}
+
+pub(crate) fn is_lethal_damage_determined_by_power_static(lower: &str) -> bool {
+    parse_lethal_damage_determined_by_power(lower).is_ok()
+}
+
+pub(crate) fn try_parse_lethal_damage_determined_by_power_static(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    nom_on_lower(text, lower, parse_lethal_damage_determined_by_power).map(|(affected, _)| {
+        StaticDefinition::new(StaticMode::LethalDamageDeterminedByPower)
+            .affected(affected)
+            .description(text.to_string())
+    })
+}
+
 /// CR 509.1b: "Creatures with power <comparison> <quantity> can't
 /// block this creature." — a can't-be-blocked-by restriction whose blocker
 /// filter gates on a power threshold that may be DYNAMIC (Kraken of the Straits:
@@ -936,6 +968,11 @@ pub(crate) fn parse_static_line_inner(
     }
     // CR 514.2: "Damage isn't removed from [subject] during cleanup steps."
     if let Some(def) = parse_damage_not_removed_during_cleanup(&tp, &text) {
+        return Some(def);
+    }
+    // CR 120.6 + CR 704.5g: "Lethal damage dealt to [subject] is determined by their power
+    // rather than their toughness." (Zilortha, Strength Incarnate).
+    if let Some(def) = try_parse_lethal_damage_determined_by_power_static(&text, &lower) {
         return Some(def);
     }
     // CR 101.2 + CR 109.5: "Each opponent who [did X] this turn can't [Y]" —
