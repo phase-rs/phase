@@ -9599,22 +9599,22 @@ fn parse_you_drew_prefix(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-/// "<threshold> card(s) <window>" for controller draws: the plural
-/// `parse_ge_threshold` form ("two or more cards") plus the singular GE-1
-/// article idiom ("a card"; drawing is the unit event), each over the shared
-/// history window. Covers "you drew a card this turn" and "you drew two or
-/// more cards last turn" with no new tags; "since your last turn ended" has
-/// no draw counter and is declined.
+/// "<threshold> card(s) <window>" for controller draws. Strict comparisons,
+/// plural GE thresholds, and the singular article share the history window.
 fn parse_drawn_cards_in_window(input: &str) -> OracleResult<'_, StaticCondition> {
-    if let Ok((rest, n)) = parse_ge_threshold(input) {
-        let (rest, _) = tag("cards ").parse(rest)?;
-        let (rest, window) = parse_history_window(rest)?;
-        return draw_window_condition(input, rest, window, n);
-    }
-    let (rest, _) = parse_article(input)?;
-    let (rest, _) = tag("card ").parse(rest)?;
+    let (rest, (comparator, n)) = alt((
+        terminated(
+            (parse_strict_comparator_prefix, parse_number),
+            alt((tag(" cards "), tag(" card "))),
+        ),
+        map(terminated(parse_ge_threshold, tag("cards ")), |n| {
+            (Comparator::GE, n)
+        }),
+        value((Comparator::GE, 1), (parse_article, tag("card "))),
+    ))
+    .parse(input)?;
     let (rest, window) = parse_history_window(rest)?;
-    draw_window_condition(input, rest, window, 1)
+    draw_window_condition(input, rest, window, comparator, n)
 }
 
 /// CR 121.1 + CR 603.4: map a controller-draw threshold onto its window
@@ -9624,6 +9624,7 @@ fn draw_window_condition<'a>(
     input: &'a str,
     rest: &'a str,
     window: HistoryWindow,
+    comparator: Comparator,
     n: u32,
 ) -> OracleResult<'a, StaticCondition> {
     let qty = match window {
@@ -9640,7 +9641,7 @@ fn draw_window_condition<'a>(
             )))
         }
     };
-    Ok((rest, make_quantity_ge(qty, n)))
+    Ok((rest, make_quantity_comparison(qty, comparator, n)))
 }
 
 fn parse_you_drew_cards_in_window(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -22309,21 +22310,41 @@ mod tests {
     }
 
     #[test]
-    fn youve_drawn_two_or_more_cards_this_turn_counts_controller_draws() {
-        let (rest, c) = parse_inner_condition("you've drawn two or more cards this turn").unwrap();
-        assert_eq!(rest, "");
-        assert_eq!(
-            c,
-            StaticCondition::QuantityComparison {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::CardsDrawnThisTurn {
-                        player: PlayerScope::Controller,
+    fn youve_drawn_card_threshold_counts_controller_draws() {
+        // Proft's Eidetic Memory, Lake-town Toymaker, and Lyra, Tolarian Archangel.
+        for (text, comparator, value) in [
+            (
+                "you've drawn more than one card this turn",
+                Comparator::GT,
+                1,
+            ),
+            (
+                "you've drawn two or more cards this turn",
+                Comparator::GE,
+                2,
+            ),
+            (
+                "you've drawn three or more cards this turn",
+                Comparator::GE,
+                3,
+            ),
+        ] {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(
+                condition,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::CardsDrawnThisTurn {
+                            player: PlayerScope::Controller,
+                        },
                     },
+                    comparator,
+                    rhs: QuantityExpr::Fixed { value },
                 },
-                comparator: Comparator::GE,
-                rhs: QuantityExpr::Fixed { value: 2 },
-            }
-        );
+                "{text}"
+            );
+        }
     }
 
     #[test]
