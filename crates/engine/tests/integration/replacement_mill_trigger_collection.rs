@@ -456,7 +456,7 @@ fn noncombat_zombie_damage_is_not_a_mill() {
     assert_eq!(r.state().objects[&fodder].zone, Zone::Graveyard);
     assert_eq!(r.state().stack.last().unwrap().source_id, tymaret);
     trace.settle(&mut r);
-    assert!(trace.events.iter().any(|event| matches!(event, GameEvent::DamageDealt { source_id, target: TargetRef::Player(P1), amount: 2, is_combat: false, excess: _, source_incarnation: _ } if *source_id == tymaret)));
+    assert!(trace.events.iter().any(|event| matches!(event, GameEvent::DamageDealt { source_id, target: TargetRef::Player(P1), amount: 2, is_combat: false, excess: _, source_incarnation: _, .. } if *source_id == tymaret)));
     assert_eq!(r.life(P1), 18);
     assert_library(&r, P1, &ids);
     trace.assert_milled(P1, &[]);
@@ -730,6 +730,7 @@ fn combat_mill_preserves_repeat_hits_draw_triggers_and_lifelink() {
                 is_combat: true,
                 excess: _,
                 source_incarnation: _,
+                ..
             } = event
             {
                 Some((*source_id, *amount))

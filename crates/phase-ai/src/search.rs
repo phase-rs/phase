@@ -18896,6 +18896,7 @@ mod tests {
                 pending_effect: stub_pending_effect(source, PlayerId(1)),
                 remaining: 1,
                 min_total_power: None,
+                trigger_event: None,
             }
         });
         push("UnlessBounceChoice", &|state| {

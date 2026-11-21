@@ -24593,8 +24593,9 @@ mod kilo_interruptibility_tests {
 /// Census rows for the CR 603.5 conjunct set.
 #[cfg(test)]
 mod bounded_offer_conjunct_tests {
-    /// F2c — **NO FOURTH COPY OF THE CR 603.5 CONJUNCT SET IS BUILT OUT OF THESE FIVE
-    /// PREDICATES, AND EVERY SURVIVING PRODUCTION CALLER IS INSIDE `game/effects/`.**
+    /// F2c — **NO FOURTH COPY OF THE CR 603.5 CONJUNCT SET IS BUILT OUT OF THESE
+    /// PREDICATES (the gate family's two spellings counted as one row pair), AND EVERY
+    /// SURVIVING PRODUCTION CALLER IS INSIDE `game/effects/`.**
     ///
     /// CR 603.5 + CR 608.2c + CR 608.2d + CR 603.12a. Three places used to answer *"does this
     /// ability open ONE up-front optional gate?"* — production's own branch, the mint's guard
@@ -24603,8 +24604,10 @@ mod bounded_offer_conjunct_tests {
     /// place the set is assembled, and the census is what keeps it that way.
     ///
     /// MEASURED counts, not derived ones. The plan's derivation predicted `2 / 2 / 2 / 1 / 2`
-    /// and the tree measures `2 / 2 / 2 / 1 / 2`; if these ever disagree the MEASURED value is
-    /// what belongs here.
+    /// and the tree measured `2 / 2 / 2 / 1 / 2`; the gate family's decline route then moved
+    /// from the wrapper spelling to the reason spelling, and the tree measures
+    /// `2 / 2 / 2 / 1 / 1 / 2`. If these ever disagree the MEASURED value is what belongs
+    /// here.
     ///
     /// | predicate | production sites | where |
     /// |---|---|---|
@@ -24612,7 +24615,8 @@ mod bounded_offer_conjunct_tests {
     /// | `has_member_driven_repeat_after_hydration` | 2 | `upfront_optional_gate` + `resolve_chain_body`'s driver guard |
     /// | `is_repeated_optional_payment` | 2 | `upfront_optional_gate` + `resolve_chain_body`'s driver dispatch |
     /// | `optional_prompt_player` | 2 | `upfront_optional_gate` + `offer_repeated_payment` (names who is asked each CR 603.12a payment offer; opens no up-front window) |
-    /// | `optional_effect_is_infeasible` | 2 | `upfront_optional_gate` + `resolve_chain_body`'s `CastFromZone` decline |
+    /// | `optional_effect_is_infeasible` | 1 | `upfront_optional_gate`'s probe arm (the decline route moved to the reason authority below) |
+    /// | `optional_effect_infeasibility` | 2 | the boolean wrapper's own body (`.is_some()`) + `resolve_chain_body`'s decline route, which needs the `Conjunction`/`Instruction` reason |
     ///
     /// **THE NON-AUTHORITY SITES ARE NOT COPIES, AND FOLDING THEM IN WOULD BE WRONG.**
     /// They consume these predicates to decide WHICH DRIVER RUNS — whether a counted repeat
@@ -24621,10 +24625,10 @@ mod bounded_offer_conjunct_tests {
     /// gate suppressed itself. That is a different question from "does one up-front window
     /// open", and it is asked after the gate has already declined.
     ///
-    /// **HONEST GUARANTEE.** This enforces that no fourth copy is built OUT OF THESE FIVE
+    /// **HONEST GUARANTEE.** This enforces that no fourth copy is built OUT OF THESE
     /// PREDICATES. A copy that re-derives the same conjunct from `ability.repeat_for` (or from
     /// `optional_for`, or from the effect discriminant) inline is NOT caught, and no census
-    /// over these five tokens can catch it — `has_kind_driven_repeat` is itself exactly such a
+    /// over these tokens can catch it — `has_kind_driven_repeat` is itself exactly such a
     /// re-derivation.
     ///
     /// The zero-outside-`game/effects/` assertion carries its own POSITIVE CONTROL, because a
@@ -24679,7 +24683,7 @@ mod bounded_offer_conjunct_tests {
         }
 
         // ASSEMBLED needles, so this row's own source cannot be counted by its own instrument.
-        let predicates: [(String, usize); 5] = [
+        let predicates: [(String, usize); 6] = [
             (format!("has_kind_driven{}repeat(", '_'), 2),
             (
                 format!("has_member_driven_repeat_after{}hydration(", '_'),
@@ -24687,7 +24691,14 @@ mod bounded_offer_conjunct_tests {
             ),
             (format!("is_repeated_optional{}payment(", '_'), 2),
             (format!("optional_prompt{}player(", '_'), 2),
-            (format!("optional_effect_is{}infeasible(", '_'), 2),
+            // The boolean wrapper and the reason-returning authority are ONE gate
+            // family, counted in the same census: the wrapper is the authority's
+            // `.is_some()`, and the decline route in `resolve_chain_body` reads the
+            // reason so an impossible CONJUNCTION declines like an impossible
+            // instruction without re-probing.
+            (format!("optional_effect_is{}infeasible(", '_'), 1),
+            // ASSEMBLED from two literals, so this row's line cannot contain it.
+            (format!("{}_infeasibility(", "optional_effect"), 2),
         ];
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -24764,7 +24775,10 @@ mod bounded_offer_conjunct_tests {
              `resolve_chain_body`'s `CastFromZone` decline probe — every one of them selects a \
              DRIVER rather than opening an up-front window — plus `offer_repeated_payment`, \
              which only names who is asked a driver's per-iteration offer, so a NEW site is a \
-             decision to adjudicate here and not a number to move.\nsites={sites:#?}"
+             decision to adjudicate here and not a number to move. Within the gate family \
+             itself, moving a site between the wrapper spelling (`optional_effect_is_infeasible`) \
+             and the reason spelling (`optional_effect_infeasibility`) is not a count change.\
+             \nsites={sites:#?}"
         );
 
         let outside: Vec<&String> = sites
@@ -24774,7 +24788,7 @@ mod bounded_offer_conjunct_tests {
             .collect();
         assert!(
             outside.is_empty(),
-            "SINGLE ASSEMBLER: every production consumer of these five predicates lives in \
+            "SINGLE ASSEMBLER: every production consumer of these predicates lives in \
              `game/effects/`, next to the authority that assembles them. A caller in another \
              module is by construction re-deriving the gate's conjunct set from outside it — \
              which is exactly what `analysis::resource::auto_may_answer_for` and \

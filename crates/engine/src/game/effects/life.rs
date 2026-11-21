@@ -764,7 +764,11 @@ fn settle_life_gain_exact(
                 .map_err(ExactLifeChangeError::Unrepresentable);
         }
     }
-    crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
+    // CR 611.3a + CR 119: gate escalation on a live life-reading static.
+    crate::game::layers::mark_layers_full_if_dimension_read_live(
+        state,
+        crate::game::layers::LayerInvalidationDimension::LifeTotal,
+    );
     let (emit_amount, emit_fraction) = signed_delta.unwrap_or((gain_amount as i32, gain_fraction));
     let after_player = state.players.iter().find(|player| player.id == pid);
     events.push(GameEvent::LifeChanged {
@@ -1123,7 +1127,12 @@ fn settle_life_loss_exact(
             exact_loss.whole_floor(),
         );
     }
-    crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
+    // CR 611.3a + CR 119 + CR 120.3a: gate escalation on a live life-reading
+    // static. Also the sink for non-infect player damage (deal_damage.rs).
+    crate::game::layers::mark_layers_full_if_dimension_read_live(
+        state,
+        crate::game::layers::LayerInvalidationDimension::LifeTotal,
+    );
     let (loss_whole, loss_fraction) = exact_loss.into_whole_and_fraction();
     let (emit_amount, emit_fraction) = signed_delta
         .map(|d| d.into_whole_and_fraction())

@@ -901,6 +901,8 @@ fn proposed_events(
         amount: 1,
         amount_fraction: Default::default(),
         is_combat: false,
+        source_name: None,
+        source_incarnation: None,
         applied: Default::default(),
     };
     let moves = |destinations: &[Zone]| -> Vec<ProposedEvent> {

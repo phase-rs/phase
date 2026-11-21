@@ -229,6 +229,7 @@ fn create_army_token(
     };
 
     let proposed = ProposedEvent::CreateToken {
+        redirected_to: None,
         owner: controller,
         spec: Box::new(spec),
         copy: None,

@@ -12,7 +12,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, DebugCardEntrySource, GameState, LiminalEntry, PendingDebugCardEntries,
-    PendingLiminalEntryResume, WaitingFor,
+    WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::{PlayerCounterKind, PlayerId};
@@ -154,6 +154,13 @@ pub fn apply_debug_action(
                     let delayed = super::triggers::check_delayed_triggers(state, events);
                     events.extend(delayed);
                     super::sba::check_state_based_actions(state, events); // CR 704
+                }
+                // CR 101.2 + CR 701.21a: a bar on the victim refuses the debug
+                // action rather than reporting a sacrifice that never moved.
+                super::sacrifice::SacrificeOutcome::Prohibited => {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot sacrifice this permanent".to_string(),
+                    ));
                 }
                 super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(player) => {
                     state.waiting_for =
@@ -713,6 +720,7 @@ pub fn apply_debug_action(
                 attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
             };
             let proposed = ProposedEvent::CreateToken {
+                redirected_to: None,
                 owner,
                 spec: Box::new(spec),
                 copy: None,
@@ -1296,6 +1304,7 @@ fn route_debug_token_to_battlefield(
     state.liminal_entries.insert(
         object_id,
         LiminalEntry {
+            copy_settlement: None,
             object: crate::types::game_state::LiminalEntrant::Token(
                 crate::types::game_state::TokenProjection::materialize(token),
             ),
@@ -1318,6 +1327,7 @@ fn route_debug_token_to_battlefield(
     );
 
     let proposed = ProposedEvent::TokenEntry {
+        redirected_to: None,
         entry_ref: object_id,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enter_with_counters: intrinsic_counters,
@@ -1328,28 +1338,6 @@ fn route_debug_token_to_battlefield(
         TokenEntryMode::Standard => {
             match replacement::replace_event(state, proposed, &mut events) {
                 ReplacementResult::Execute(event) => {
-                    if state.has_post_replacement_drain() {
-                        if let Some(waiting_for) =
-                            super::engine_replacement::apply_pending_post_replacement_effect(
-                                state,
-                                Some(object_id),
-                                None,
-                                Some(crate::types::replacements::ReplacementEvent::Moved),
-                                &mut events,
-                            )
-                        {
-                            state.pending_liminal_entry_resume =
-                                Some(PendingLiminalEntryResume::Token {
-                                    source_id: object_id,
-                                    player: waiting_for
-                                        .acting_player()
-                                        .unwrap_or(staged.controller),
-                                    event,
-                                });
-                            state.waiting_for = waiting_for;
-                            return ActionResult::applied(events, state.waiting_for.clone());
-                        }
-                    }
                     if super::effects::token::commit_liminal_token_entry_and_continue_copy_batch(
                         state,
                         event,

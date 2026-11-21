@@ -4995,6 +4995,18 @@ fn filter_is_unionable(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 608.2c: The distributive adverb closes the subject of a coordinated
+/// player predicate. The subject application supplies the announced count.
+pub(super) fn has_distributive_player_subject(text: &str) -> bool {
+    extract_subject_text(text).is_some_and(|subject| {
+        let subject = subject.to_ascii_lowercase();
+        nom_primitives::scan_at_word_boundaries(&subject, |input| {
+            all_consuming(tag::<_, _, OracleError<'_>>("each")).parse(input)
+        })
+        .is_some()
+    })
+}
+
 pub(super) fn parse_leading_subject_application(
     text: &str,
     ctx: &mut ParseContext,
@@ -5337,6 +5349,33 @@ fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> Ta
         // CR 608.2c: the nearest earlier clause announced a player; "they" is that
         // player, spelled as "that player" is.
         _ if ctx.prior_player_declaration => TargetFilter::ParentTargetController,
+        // CR 608.2c: no trigger context, but an earlier same-chain mass
+        // ("each …") clause established an object population (Call for Aid's
+        // "Gain control of all creatures … . … . They gain haste"). "They"
+        // names that frozen population — the same `TrackedSet{0}` sentinel
+        // the object-position grammar emits for "those creatures"
+        // (`parse_target`'s tracked-set dispatch), resolved at runtime
+        // against the chain's published set (`resolve_tracked_set_sentinel`).
+        // A live filter is wrong here: the population may have crossed the
+        // filter boundary at resolution (stolen creatures are no longer
+        // "creatures target opponent controls"). `ParentTarget` cannot carry
+        // this either: a triggerless grant declares no target, so it would
+        // resolve to the controller and the grant would silently misfire.
+        //
+        // When that population is itself a tracked-set read ("put a +1/+1
+        // counter on each of those creatures"), this chain did not establish
+        // it, so the bare anaphor below stays for whatever binds that set; for
+        // a cross-paragraph rider that is the document relation pass
+        // (`CrossItemMassPopulationAnaphor`, Unbreakable Formation's addendum).
+        _ if ctx
+            .chain_prior_mass_population
+            .as_ref()
+            .is_some_and(|population| !population.is_tracked_set_population()) =>
+        {
+            TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            }
+        }
         // No trigger context — anaphoric reference to previously mentioned objects
         _ => TargetFilter::ParentTarget,
     }
@@ -10230,6 +10269,84 @@ mod tests {
         assert_eq!(
             they(None, Some(TargetFilter::Player), true),
             TargetFilter::TriggeringPlayer
+        );
+    }
+
+    /// CR 608.2c: triggerless "they" after a same-chain mass ("each …")
+    /// clause names the frozen published set — the `TrackedSet{0}` sentinel
+    /// the object-position grammar emits for "those creatures" — never the
+    /// controller a bare `ParentTarget` would resolve to. Every earlier
+    /// reading keeps precedence: trigger subject, player declaration, and
+    /// combat/event scopes all win over the population. `AffectedObject` is
+    /// the faithful consumer for the grant witness ("They gain haste");
+    /// frameless, the consumer is unobservable.
+    #[test]
+    fn they_after_mass_population_binds_frozen_set_last() {
+        let population = TargetFilter::Typed(TypedFilter::creature());
+        let they = |scope: Option<ControllerRef>,
+                    subject: Option<TargetFilter>,
+                    declared: bool,
+                    mass: Option<TargetFilter>| {
+            resolve_they_pronoun(
+                &mut ParseContext {
+                    prior_player_declaration: declared,
+                    relative_player_scope: scope,
+                    subject,
+                    chain_prior_mass_population: mass,
+                    ..Default::default()
+                },
+                AnaphorConsumer::AffectedObject,
+            )
+        };
+        assert_eq!(
+            they(None, None, false, Some(population.clone())),
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            },
+            "triggerless 'they' with a prior mass population binds the frozen set"
+        );
+        assert_eq!(
+            they(None, None, false, None),
+            TargetFilter::ParentTarget,
+            "without a population the bare fallback stands"
+        );
+        assert_eq!(
+            they(
+                None,
+                None,
+                false,
+                Some(TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                })
+            ),
+            TargetFilter::ParentTarget,
+            "a population read from the tracked set was not established by this \
+             chain, so the bare anaphor stays for the cross-item relation pass"
+        );
+        assert_eq!(
+            they(None, None, true, Some(population.clone())),
+            TargetFilter::ParentTargetController,
+            "a player declaration still wins over the population"
+        );
+        assert_eq!(
+            they(
+                Some(ControllerRef::DefendingPlayer),
+                None,
+                false,
+                Some(population.clone())
+            ),
+            TargetFilter::DefendingPlayer,
+            "combat scope still wins over the population"
+        );
+        assert_eq!(
+            they(
+                None,
+                Some(TargetFilter::TriggeringSource),
+                false,
+                Some(population.clone())
+            ),
+            population,
+            "an object trigger subject reads the live population filter (Ardbert), not the sentinel"
         );
     }
 

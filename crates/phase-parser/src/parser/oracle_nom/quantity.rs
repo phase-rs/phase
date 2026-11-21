@@ -4827,23 +4827,33 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             },
             tag("total amount of life your opponents have lost this turn"),
         ),
-        value(
-            QuantityRef::LifeLost {
-                player: PlayerScope::Opponent {
-                    aggregate: AggregateFunction::Sum,
-                },
+        // CR 119.3 + CR 608.2h: total the selected players' losses at resolution.
+        map(
+            preceded(
+                (opt(tag("the ")), tag("total life lost by ")),
+                terminated(
+                    alt((
+                        value(
+                            PlayerScope::Opponent {
+                                aggregate: AggregateFunction::Sum,
+                            },
+                            tag("your opponents"),
+                        ),
+                        value(
+                            PlayerScope::AllPlayers {
+                                aggregate: AggregateFunction::Sum,
+                                exclude: None,
+                            },
+                            tag("all players"),
+                        ),
+                    )),
+                    tag(" this turn"),
+                ),
+            ),
+            |player| QuantityRef::LifeLost {
+                player,
                 window: TurnWindow::ThisTurn,
             },
-            tag("the total life lost by your opponents this turn"),
-        ),
-        value(
-            QuantityRef::LifeLost {
-                player: PlayerScope::Opponent {
-                    aggregate: AggregateFunction::Sum,
-                },
-                window: TurnWindow::ThisTurn,
-            },
-            tag("total life lost by your opponents this turn"),
         ),
         value(
             QuantityRef::LifeLost {
@@ -5897,6 +5907,16 @@ pub fn parse_kicker_count_where_x_expression(input: &str) -> OracleResult<'_, Qu
     let (rest, _) = tag("the number of times ").parse(input)?;
     let (_, quantity) = parse_kicker_count_subject_was_kicked(rest)?;
     Ok(("", quantity))
+}
+
+/// Shared lowercased Oracle marker for "for each" and "for every" count clauses.
+/// Consumes the trailing space so the grouped quantity starts at the next word.
+pub(crate) fn parse_for_each_marker(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        preceded(tag("for "), alt((tag("each "), tag("every ")))),
+    )
+    .parse(input)
 }
 
 /// CR 107.1 + CR 608.2c: the group size N of "for each N <counted clause>"
@@ -12314,17 +12334,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_quantity_ref_total_life_lost_by_opponents() {
-        let (rest, q) =
-            parse_quantity_ref("the total life lost by your opponents this turn").unwrap();
-        assert!(matches!(
-            q,
-            QuantityRef::LifeLost {
-                player: PlayerScope::Opponent { .. },
-                ..
+    fn parse_quantity_ref_total_life_lost_by_players() {
+        for (players, player) in [
+            (
+                "your opponents",
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            ),
+            (
+                "all players",
+                PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Sum,
+                    exclude: None,
+                },
+            ),
+        ] {
+            let expected = QuantityRef::LifeLost {
+                player,
+                window: TurnWindow::ThisTurn,
+            };
+            for article in ["", "the "] {
+                let text = format!("{article}total life lost by {players} this turn");
+                assert_eq!(parse_quantity_ref(&text).unwrap(), ("", expected.clone()));
             }
-        ));
-        assert_eq!(rest, "");
+        }
     }
 
     #[test]

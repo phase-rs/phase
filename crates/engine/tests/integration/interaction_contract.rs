@@ -886,6 +886,7 @@ fn aggregate_and_multi_target_decisions_publish_no_attachment_fan_pick() {
             crew_power: 2,
             eligible_creatures: vec![attached, other],
             contributions: vec![1, 1],
+            contribution_fractions: Vec::new(),
         };
         bind(state, "gate-crew");
     }
@@ -2744,6 +2745,7 @@ fn sequential_ward_projection_submits_one_object_and_rotates_before_reprompt() {
         pending_effect: gain_life_effect(source),
         remaining: 2,
         min_total_power: None,
+        trigger_event: None,
     };
     bind(runner.state_mut(), "ward-sequential");
 
@@ -2814,6 +2816,7 @@ fn aggregate_ward_projects_and_submits_a_multi_object_power_witness() {
         pending_effect: gain_life_effect(source),
         remaining: 1,
         min_total_power: Some(2),
+        trigger_event: None,
     };
     bind(runner.state_mut(), "ward-aggregate");
 
@@ -2857,6 +2860,7 @@ fn aggregate_ward_threshold_zero_still_rejects_an_empty_selection() {
         pending_effect: gain_life_effect(source),
         remaining: 1,
         min_total_power: Some(0),
+        trigger_event: None,
     };
     bind(runner.state_mut(), "ward-zero");
 
@@ -2898,6 +2902,7 @@ fn aggregate_ward_counts_negative_power_and_keeps_a_valid_positive_sibling() {
         pending_effect: gain_life_effect(source),
         remaining: 1,
         min_total_power: Some(2),
+        trigger_event: None,
     };
     bind(runner.state_mut(), "ward-signed-power");
 
@@ -2962,6 +2967,7 @@ fn aggregate_ward_does_not_publish_a_witness_larger_than_the_contract_cap() {
         pending_effect: gain_life_effect(source),
         remaining: 1,
         min_total_power: Some(threshold),
+        trigger_event: None,
     };
     bind(runner.state_mut(), "ward-aggregate-cap");
 

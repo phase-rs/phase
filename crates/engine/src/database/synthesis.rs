@@ -5466,13 +5466,17 @@ fn build_enlist_trigger() -> TriggerDefinition {
     // CR 702.154a: "this creature gets +X/+0 until end of turn, where X is the
     // tapped creature's power." `Power { scope: Anaphoric }` reads the
     // enlisted creature from the linked trigger's `effect_context_object`.
+    // CR 107.1b: a negative tapped-creature power gives X = 0.
     let pump = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Pump {
-            power: PtValue::Quantity(QuantityExpr::Ref {
-                qty: QuantityRef::Power {
-                    scope: ObjectScope::Anaphoric,
-                },
+            power: PtValue::Quantity(QuantityExpr::ClampMin {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Anaphoric,
+                    },
+                }),
+                minimum: 0,
             }),
             toughness: PtValue::Fixed(0),
             target: TargetFilter::SelfRef,
@@ -8067,6 +8071,7 @@ pub fn synthesize_backup(face: &mut CardFace) {
                         filter: TargetFilter::SelfRef,
                         use_lki: false,
                         subject_slot: None,
+                        subject: ObjectScope::Target,
                     }),
                 })
                 .description(
@@ -14629,16 +14634,17 @@ mod provoke_synthesis_tests {
             matches!(target, TargetFilter::SelfRef),
             "pump must affect the attacker"
         );
-        assert!(
-            matches!(
-                power,
-                PtValue::Quantity(QuantityExpr::Ref {
+        assert_eq!(
+            *power,
+            PtValue::Quantity(QuantityExpr::ClampMin {
+                inner: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::Power {
                         scope: ObjectScope::Anaphoric
                     }
-                })
-            ),
-            "X must be the tapped creature's power via Power{{Anaphoric}}, got {power:?}"
+                }),
+                minimum: 0,
+            }),
+            "X must be the tapped creature's power, floored at 0 (CR 107.1b)"
         );
         assert!(
             matches!(toughness, PtValue::Fixed(0)),

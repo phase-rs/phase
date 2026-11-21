@@ -160,15 +160,19 @@ fn deathtouch_marked_damage_kills_any_size_body() {
 }
 
 #[test]
-fn deathtouch_without_marked_damage_is_not_lethal() {
-    // CR 704.5h keys on damage having been MARKED; a wither/infect deathtouch
-    // source marks none (CR 120.3d), so only the counters can kill.
-    let outcome = DamageOutcome {
+fn deathtouch_counter_form_damage_is_lethal() {
+    // CR 704.5h + CR 120.3d: wither/infect deathtouch damage is dealt as -1/-1 counters and still destroys.
+    let deathtouch = DamageOutcome {
         marked: 0,
         minus_counters: 1,
         deathtouch: true,
     };
-    assert!(!outcome_is_lethal(&creature(Body::new(7)), &outcome));
+    assert!(outcome_is_lethal(&creature(Body::new(7)), &deathtouch));
+    let plain = DamageOutcome {
+        deathtouch: false,
+        ..deathtouch
+    };
+    assert!(!outcome_is_lethal(&creature(Body::new(7)), &plain));
 }
 
 #[test]

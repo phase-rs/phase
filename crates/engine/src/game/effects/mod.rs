@@ -3954,11 +3954,11 @@ fn park_player_scope_queue_end(
     }
 }
 
-/// CR 118.12 + CR 608.2c: Complete the original rider of a paused
-/// `Effect::PayCost` only after its typed cost root has settled. The root owns
-/// the parent effect while a mana-source cost move is paused, so this replays
-/// the same child hand-off the ordinary chain walker would have performed.
-pub(crate) fn resolve_effect_pay_cost_rider(
+/// CR 608.2c + CR 603.12: Resolve `ability`'s rider the way the chain walker would after the
+/// parent effect completed — inheriting the parent's targets (the selected card a "when you do,
+/// exile that card" rider reads) and chain context. The single hand-off for a parent whose
+/// effect was completed outside the chain walker (a paused cost, a resumed copy settlement).
+pub(crate) fn resolve_rider_with_parent_context(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
@@ -8060,6 +8060,23 @@ fn resolve_optional_effect_decision_step(
 ) -> Result<ResolutionProgress, EffectError> {
     // CR 608.2c: qualification is read from the state the prompt parked, before
     // the answer lowers optionality and strips the enclosing repeat driver.
+    // CR 118.3 + CR 608.2d: an accepted "you may <A> and <B>" option still
+    // needs the resources to pay it in full. Every acceptance — the prompt's
+    // answer, a remembered answer, a payment-branch choice — lands here before
+    // optionality lowers and any head component is spent, so an option no
+    // probed funding confirms resolves declined, never partially paid.
+    if choice == AutoMayChoice::Accept
+        && ability.optional
+        && !accepted_conjunction_commits(state, &ability)
+    {
+        return resolve_optional_effect_decision_step(
+            state,
+            ability,
+            AutoMayChoice::Decline,
+            events,
+            depth,
+        );
+    }
     let accepted_move = AcceptedOptionalMove::qualify(state, &ability);
     ability.optional = false;
     // CR 608.2c: the enclosing repeat driver owns progression. This answer
@@ -10524,6 +10541,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition, host_zones: &[Zone]) 
         protection_does_not_remove,
         room_door,
         granting_object,
+        bound_actor,
     } = static_ability;
     condition.is_none()
         && per_player_condition.is_none()
@@ -10538,6 +10556,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition, host_zones: &[Zone]) 
         && protection_does_not_remove.is_none()
         && room_door.is_none()
         && granting_object.is_none()
+        && bound_actor.is_none()
 }
 
 /// CR 608.2c: the one object class a static ability granted by a
@@ -10894,6 +10913,7 @@ fn condition_reads_filter_population(
         | AbilityCondition::HasObjectTarget
         | AbilityCondition::IsYourTurn
         | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::FirstCombatPhaseOfTurn
         | AbilityCondition::FirstEndStepOfTurn
@@ -11969,6 +11989,7 @@ fn static_condition_reads_filter_population(
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
@@ -12291,6 +12312,7 @@ fn static_definition_reads_filter_population(
         protection_does_not_remove: _,
         room_door: _,
         granting_object: _,
+        bound_actor: _,
     } = static_def;
     affected
         .as_ref()
@@ -12825,6 +12847,7 @@ fn continuous_modification_reads_filter_population(
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -13774,6 +13797,10 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
             | AbilityCondition::ScopedPlayerMatches { .. }
+            // CR 508.6: a live game-state gate, not a decline-alternative
+            // selector — declining the optional effect does not pick an
+            // "attacked you" branch.
+            | AbilityCondition::PlayerAttackedPlayer { .. }
             | AbilityCondition::EffectOutcome {
                 signal:
                     EffectOutcomeSignal::CurrentScopeSucceeded
@@ -14756,6 +14783,125 @@ fn split_multi_target_player_chain(
     // producer left in the detached remainder.
     per_target.detached_remainder = detached_remainder_verdict(tail.as_deref());
     (per_target, tail)
+}
+
+/// CR 608.2e: Resolve each coordinated action for the announced population
+/// before advancing to the next action. Park that next action with its intact
+/// population whenever a choice or replacement suspends the current action.
+#[inline(never)]
+fn resolve_coordinated_target_player_action(
+    state: &mut GameState,
+    announcement: &ResolvedAbility,
+    chosen_players: &[PlayerId],
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    child_stack_start: ChildStackDepth,
+) -> Result<ResolutionProgress, EffectError> {
+    let mut action = Box::new(announcement.clone());
+    let mut tail = action.sub_ability.take();
+    let target = effect_target_filter(&announcement.effect)
+        .expect("coordinated action has a player announcement");
+    if matches!(action.effect, Effect::TargetOnly { .. }) {
+        action = tail.take().expect("announcement has a coordinated action");
+        tail = action.sub_ability.take();
+    }
+    if let Some(next) = tail.as_mut().filter(|next| {
+        next.sub_link == SubAbilityLink::ContinuationStep && node_references_scoped_player(next)
+    }) {
+        let mut resume = Box::new(announcement.clone());
+        resume.effect = Effect::TargetOnly {
+            target: target.clone(),
+        };
+        resume.sub_ability = Some(next.clone());
+        tail = Some(resume);
+    }
+    action.multi_target = None;
+    action.set_unpinned_targets(Vec::new());
+
+    let players: Vec<_> = crate::game::players::apnap_order(state)
+        .into_iter()
+        .filter(|player| chosen_players.contains(player))
+        .collect();
+    if should_collect_player_scope_sacrifice_choices(&action) {
+        return start_player_scope_sacrifice_choices(
+            state,
+            &action,
+            announcement.controller,
+            &players,
+            tail,
+            events,
+            depth,
+        );
+    }
+
+    action.multi_target.clone_from(&announcement.multi_target);
+    let progress = if scoped_discard::should_collect_player_scope_choices(&action) {
+        scoped_discard::start_player_scope_choices(
+            state,
+            &action,
+            announcement.controller,
+            &players,
+            events,
+            depth,
+        )?
+    } else {
+        action.multi_target = None;
+        let seats: Vec<_> = players
+            .iter()
+            .map(|&player| {
+                let mut bound = action.clone();
+                bound.set_scoped_player_recursive(player);
+                bound.set_unpinned_targets(vec![TargetRef::Player(player)]);
+                (player, *bound)
+            })
+            .collect();
+        if let Some(dealer) = draw::plan_coordinated_draw(state, &seats) {
+            let before = events.len();
+            match draw::start_simultaneous_draw(state, dealer, events) {
+                draw::SimultaneousDraw::Parked => {
+                    if let Some(tail) = tail {
+                        state
+                            .insert_ability_continuation_parent_at_child_boundary(
+                                PendingContinuation::new(tail, state),
+                                child_stack_start,
+                            )
+                            .expect("dealer's frames sit above the tail's boundary");
+                    }
+                    return Ok(ResolutionProgress::Waiting);
+                }
+                draw::SimultaneousDraw::Completed => {
+                    for _ in &players {
+                        events.push(GameEvent::EffectResolved {
+                            kind: EffectKind::from(&action.effect),
+                            source_id: action.source_id,
+                            subject: None,
+                        });
+                    }
+                    record_player_actions_performed(state, &events[before..]);
+                }
+            }
+        } else {
+            let mut seats = seats.into_iter();
+            while let Some((_, seat)) = seats.next() {
+                let progress = resolve_ability_chain_step(state, &seat, events, depth + 1)?;
+                if progress.is_pending() {
+                    for (_, mut remaining) in seats.rev() {
+                        remaining.sub_ability = tail;
+                        tail = Some(Box::new(remaining));
+                    }
+                    append_to_pending_continuation(state, tail);
+                    return Ok(progress);
+                }
+            }
+        }
+        ResolutionProgress::Complete
+    };
+    if progress.is_pending() {
+        append_to_pending_continuation(state, tail);
+    } else if let Some(tail) = tail {
+        return resolve_ability_chain_step(state, &tail, events, depth + 1);
+    }
+    Ok(progress)
 }
 
 /// CR 608.2c: Retain `ContinuationStep` clauses under the current "each target
@@ -17454,6 +17600,14 @@ fn affected_objects_from_events(
         Effect::PumpAll { target, .. } if is_sole_chain_producer(state, ability) => {
             pump::pump_all_affected_objects(state, ability, target)
         }
+        // CR 701.10a + CR 611.2c (Matt R7-F4): doubling establishes the same
+        // mass population a pump does — the resolver selects through the
+        // shared authority, so publish that same population for a following
+        // "They"/"those creatures" consumer. Without this arm the fallback
+        // below harvests only zone changes and the grant binds nothing.
+        Effect::DoublePTAll { target, .. } if is_sole_chain_producer(state, ability) => {
+            pump::pump_all_affected_objects(state, ability, target)
+        }
         // CR 701.15a: the creatures actually goaded.
         Effect::GoadAll { .. } if is_sole_chain_producer(state, ability) => {
             goad::goad_targets(state, ability)
@@ -19851,50 +20005,287 @@ fn optional_pay_cost_affordability_is_decidable(cost: &AbilityCost) -> bool {
             if !crate::game::casting_costs::cost_has_x(cost))
 }
 
+/// What the steps of "you may <A> and <B>" before a conjunct have done to the
+/// pools a later conjunct draws from: the objects they move away, and the
+/// zones they may add objects to.
+#[derive(Clone)]
+struct ConjunctionPrefix {
+    departed: Vec<ObjectId>,
+    graveyard_may_grow: bool,
+    hand_may_grow: bool,
+}
+
+impl ConjunctionPrefix {
+    /// CR 400.7: an object an earlier step moves leaves the pool it came from
+    /// and may join the pool of the zone it moves to.
+    fn record_move(&mut self, departed: Vec<ObjectId>, destination: Zone) {
+        self.departed.extend(departed);
+        match destination {
+            Zone::Graveyard => self.graveyard_may_grow = true,
+            Zone::Hand => self.hand_may_grow = true,
+            Zone::Library | Zone::Battlefield | Zone::Stack | Zone::Exile | Zone::Command => {}
+        }
+    }
+}
+
+/// How the head of "you may <A> and <B>" changes the state its conjuncts are
+/// performed in before they are.
+enum ConjunctionHeadFunding {
+    /// The head spends no mana; its conjuncts are judged in the state as it is.
+    Unfunded,
+    /// CR 608.2g + CR 605.3a: a fixed mana payment by `payer`. The mana
+    /// abilities activated to fund it resolve inline (CR 605.3b), so the
+    /// conjuncts are judged in the state each legal funding leaves
+    /// ([`crate::game::casting::effect_mana_funding_candidates`]).
+    Mana {
+        payer: PlayerId,
+        cost: crate::types::mana::ManaCost,
+    },
+}
+
+/// The modeled head of "you may <A> and <B>", what it does to later pools and
+/// how it is funded, or `None` for a head whose effect on later pools the walk
+/// does not know.
+fn optional_conjunction_head(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<(ConjunctionPrefix, ConjunctionHeadFunding)> {
+    let mut prefix = ConjunctionPrefix {
+        departed: Vec::new(),
+        graveyard_may_grow: false,
+        hand_may_grow: false,
+    };
+    match &ability.effect {
+        Effect::ChangeZone {
+            target: TargetFilter::SelfRef | TargetFilter::TriggeringSource,
+            ..
+        } => {
+            let effective = hydrate_event_context_targets(state, ability);
+            let (departed, destination) =
+                change_zone::referent_move_departures(state, effective.as_ref())?;
+            prefix.record_move(departed, destination);
+            Some((prefix, ConjunctionHeadFunding::Unfunded))
+        }
+        // CR 118.12 + CR 119.4: "you may pay N life and <B>" — paying life
+        // moves no object.
+        Effect::PayCost {
+            cost: AbilityCost::PayLife { .. },
+            scale: None,
+            ..
+        } => Some((prefix, ConjunctionHeadFunding::Unfunded)),
+        // CR 118.12 + CR 605.3a: "you may pay {N} and <B>" moves no object
+        // itself, but CR 608.2g lets the payer activate mana abilities before
+        // paying — whether or not the pool already covers the cost — and each
+        // resolves immediately (CR 605.3b), so its resolution events meet the
+        // replacement pipeline and its costs may sacrifice permanents into the
+        // graveyard: funding can change what later conjuncts read (Nefarious
+        // Lich replaces Pristine Talisman's "You gain 1 life" with a draw). A
+        // later evidence pool is therefore never decided here, and every other
+        // conjunct is judged under each legal funding.
+        Effect::PayCost {
+            cost: AbilityCost::Mana { cost },
+            scale: None,
+            payer,
+            ..
+        } => {
+            prefix.graveyard_may_grow = true;
+            let payer = crate::game::targeting::resolve_effect_player_ref(state, ability, payer);
+            match (payer, crate::game::casting_costs::cost_has_x(cost)) {
+                (Some(payer), false) => Some((
+                    prefix,
+                    ConjunctionHeadFunding::Mana {
+                        payer,
+                        cost: cost.clone(),
+                    },
+                )),
+                // CR 107.3f: an undefined X in the effect text is chosen as it
+                // resolves (pay.rs PayAmountChoice), so the funding is
+                // undecided until that choice and the hand is not decided.
+                (_, true)
+                // An unresolvable payer falls to the PayCost affordability arm
+                // of [`optional_effect_is_infeasible`].
+                | (None, _) => {
+                    prefix.hand_may_grow = true;
+                    Some((prefix, ConjunctionHeadFunding::Unfunded))
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The verdict on a "you may <A> and <B>" option.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConjunctionVerdict {
+    /// The option may be chosen, and its mana head is funded this way: the
+    /// first legal funding that leaves every modeled conjunct performable, or
+    /// the planner's own when the walk decides none (an unmodeled chain or
+    /// step).
+    Offered(crate::game::casting::EffectManaFunding),
+    /// CR 118.3 + CR 608.2d: no legal funding leaves every conjunct
+    /// performable in full.
+    Impossible,
+    /// The funding search was cut short by its budget
+    /// (`EffectManaFundingCandidates::exhausted`) or a probed funding paused
+    /// for a choice, so no funding has been shown to leave every conjunct
+    /// performable AND none has been shown impossible. The option is offered,
+    /// but no funding is confirmed to pay it in full, so accepting it resolves
+    /// declined ([`accepted_conjunction_commits`], CR 118.3).
+    Undecided,
+}
+
 /// CR 118.12 + CR 118.3 + CR 608.2d: "you may <A> and <B>" is one option, a
 /// cost paid on resolution, so it can be chosen only if every conjoined step
 /// ([`is_step_of_optional_instruction`]) can be performed in full from what
 /// the earlier steps leave. A step's resources are judged after the earlier
 /// steps' departures (Lamplight Phoenix ruling: it can't be exiled as
-/// evidence for its own trigger; CR 701.59b). The walk models only earlier
-/// steps whose effect on later pools it knows — today a referent move, whose
-/// movers depart; any other step, or a move INTO the graveyard, may add to a
-/// later pool, so it answers `false` and the option is offered.
+/// evidence for its own trigger; CR 701.59b). The walk models only heads and
+/// steps whose effect on later pools it knows ([`optional_conjunction_head`],
+/// [`ConjunctionPrefix`]): a referent move, whose movers depart, and a mana
+/// or life payment. A mana head's conjuncts are judged under every legal
+/// funding (CR 608.2g: the payer may activate any mana ability before paying,
+/// so the automatic planner's choice of sources is not the only payment);
+/// the option is impossible only when none of them leaves the conjuncts
+/// performable. The fundings probed are bounded
+/// ([`crate::game::casting::effect_mana_funding_candidates`]): a search the
+/// budget cuts short is not decided ([`ConjunctionVerdict::Undecided`]): the
+/// option is offered, but only a confirmed funding commits an acceptance
+/// ([`accepted_conjunction_commits`], CR 118.3). A conjunct whose pool an
+/// earlier step may have added to, or any other unmodeled step, is not judged
+/// and the option is offered under the planner's funding.
 ///
-/// COUPLING: a head kind this walk admits must be in `resolve_chain_body`'s
-/// `auto_decline_infeasible_optional` set (`ChangeZone` is), so an
-/// infeasible conjunction is declined rather than resolved.
-fn optional_conjunction_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
-    // Only a referent-move head is modeled; every other head skips the
-    // hydration clone below.
-    if !matches!(
-        &ability.effect,
-        Effect::ChangeZone {
-            target: TargetFilter::SelfRef | TargetFilter::TriggeringSource,
-            ..
-        }
-    ) {
-        return false;
-    }
-    let effective = hydrate_event_context_targets(state, ability);
-    let Some((departed, destination)) =
-        change_zone::referent_move_departures(state, effective.as_ref())
-    else {
-        return false;
+/// Covered heads: "you may exile it and collect evidence N" (Lamplight
+/// Phoenix), "you may pay {1} and discard a card" (Banon, the Returners'
+/// Leader; Conspiracy Theorist; Wolf of Devil's Breach — ruling: "You can't
+/// choose to discard a card without also paying {1}{R}") and "you may pay
+/// {1} / 2 life and exile it" (Timothar, Baron of Bats; Kinzu of the Bleak
+/// Coven — ruling: "If you can't exile the card, … you can't pay {1}").
+///
+/// COUPLING: `resolve_chain_body` routes an impossible conjunction
+/// ([`OptionalInfeasibility::Conjunction`]) to the optional-decline authority
+/// for every head, so an impossible conjunct is declined rather than its head
+/// being performed alone; the accepted head's
+/// payment (`pay.rs`) funds itself through [`conjunction_head_funding`], so it
+/// funds the way this verdict found performable.
+fn optional_conjunction_verdict(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> ConjunctionVerdict {
+    use crate::game::casting::{EffectManaFunding, EffectManaFundingProbe};
+    let unjudged = ConjunctionVerdict::Offered(EffectManaFunding::Planned);
+    let Some((prefix, funding)) = optional_conjunction_head(state, ability) else {
+        return unjudged;
     };
-    // CR 400.7 + CR 701.59a: a move into the graveyard adds to the evidence
-    // pool, which this walk does not model.
-    if destination == Zone::Graveyard {
-        return false;
-    }
     let Some(first) = ability
         .sub_ability
         .as_ref()
         .and_then(|first| cast_from_zone::cast_metadata_continuation(ability, first))
     else {
-        return false;
+        return unjudged;
     };
-    for step in std::iter::successors(Some(first.as_ref()), |s| s.sub_ability.as_deref())
+    // No conjoined step ("you may pay {1}. If you do, …"): nothing to judge,
+    // so no funding is simulated.
+    if !is_step_of_optional_instruction(first) {
+        return unjudged;
+    }
+    match funding {
+        ConjunctionHeadFunding::Unfunded => {
+            if conjunct_steps_are_infeasible(state, first, prefix) {
+                ConjunctionVerdict::Impossible
+            } else {
+                unjudged
+            }
+        }
+        ConjunctionHeadFunding::Mana { payer, cost } => {
+            let candidates = crate::game::casting::effect_mana_funding_candidates(state, payer);
+            // A search cut short by the probe budget has not shown that no
+            // funding is performable, so it decides nothing: the option is
+            // offered, but only a confirmed funding commits it
+            // ([`accepted_conjunction_commits`]).
+            let mut any_undecided = candidates.exhausted;
+            for candidate in candidates.fundings {
+                match crate::game::casting::effect_mana_funding_probe(
+                    state,
+                    payer,
+                    ability.source_id,
+                    &cost,
+                    candidate,
+                ) {
+                    EffectManaFundingProbe::Funded(funded) => {
+                        if !conjunct_steps_are_infeasible(&funded, first, prefix.clone()) {
+                            return ConjunctionVerdict::Offered(candidate);
+                        }
+                    }
+                    EffectManaFundingProbe::Unpayable => {}
+                    EffectManaFundingProbe::Undecided => any_undecided = true,
+                }
+            }
+            if any_undecided {
+                ConjunctionVerdict::Undecided
+            } else {
+                ConjunctionVerdict::Impossible
+            }
+        }
+    }
+}
+
+/// See [`optional_conjunction_verdict`].
+fn optional_conjunction_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
+    optional_conjunction_verdict(state, ability) == ConjunctionVerdict::Impossible
+}
+
+/// CR 608.2g: How the accepted head of "you may pay {N} and <B>" is funded —
+/// the funding [`optional_conjunction_verdict`] found leaves its conjuncts
+/// performable, so the automated payment activates the mana ability the
+/// conjuncts need (Pristine Talisman under Nefarious Lich, ahead of floating
+/// mana or a land the planner prefers) rather than only the planner's choice.
+/// An undecided or impossible search names the planner's own funding: an
+/// optional head reaches this payment only when the verdict confirmed a
+/// funding ([`accepted_conjunction_commits`]), so that answer serves only a
+/// mandatory head, which is not an option to decline.
+pub(crate) fn conjunction_head_funding(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> crate::game::casting::EffectManaFunding {
+    match optional_conjunction_verdict(state, ability) {
+        ConjunctionVerdict::Offered(funding) => funding,
+        ConjunctionVerdict::Impossible | ConjunctionVerdict::Undecided => {
+            crate::game::casting::EffectManaFunding::Planned
+        }
+    }
+}
+
+/// CR 118.3 + CR 608.2d: whether an accepted "you may <A> and <B>" option
+/// commits as a whole. The head is spent only under a funding whose probe left
+/// every modeled conjunct performable ([`ConjunctionVerdict::Offered`]); the
+/// payment (`pay.rs`) then funds itself exactly that way
+/// ([`conjunction_head_funding`]). An [`ConjunctionVerdict::Undecided`] search
+/// was offered because it has not shown the option impossible, but it has not
+/// shown any funding that pays it in full either, and the same bounded search
+/// run again at acceptance cannot show more. Paying the head on it would risk
+/// the partial payment CR 118.3 forbids (a `{1}` spent, then a conjoined
+/// `discard` with no card), so such an acceptance resolves declined: nothing
+/// of the option is performed and its "If you do" rider does not happen.
+///
+/// Known limit of the bound: a board whose only performable funding lies past
+/// [`crate::game::casting::EFFECT_MANA_FUNDING_PROBE_BUDGET`] candidates, or
+/// behind a probe paused for a replacement choice, loses the option.
+fn accepted_conjunction_commits(state: &GameState, ability: &ResolvedAbility) -> bool {
+    match optional_conjunction_verdict(state, ability) {
+        ConjunctionVerdict::Offered(_) => true,
+        ConjunctionVerdict::Impossible | ConjunctionVerdict::Undecided => false,
+    }
+}
+
+/// Whether a conjunct after the head of "you may <A> and <B>" can't be
+/// performed in full in `judged` — the state the head leaves — from what the
+/// earlier steps (`prefix`) leave. Every pool is read from `judged`.
+fn conjunct_steps_are_infeasible(
+    judged: &GameState,
+    first: &ResolvedAbility,
+    mut prefix: ConjunctionPrefix,
+) -> bool {
+    for step in std::iter::successors(Some(first), |s| s.sub_ability.as_deref())
         .take_while(|s| is_step_of_optional_instruction(s))
     {
         match &step.effect {
@@ -19904,16 +20295,66 @@ fn optional_conjunction_is_infeasible(state: &GameState, ability: &ResolvedAbili
             // impossible. An optional, scoped or repeated evidence step is not
             // a single committed payment and falls to the stop arm.
             Effect::CollectEvidence { amount }
-                if !step.optional && step.player_scope.is_none() && step.repeat_for.is_none() =>
+                if !prefix.graveyard_may_grow
+                    && !step.optional
+                    && step.player_scope.is_none()
+                    && step.repeat_for.is_none() =>
             {
                 if !collect_evidence::can_collect_evidence_without(
-                    state,
+                    judged,
                     step.controller,
-                    &departed,
+                    &prefix.departed,
                     *amount,
                 ) {
                     return true;
                 }
+            }
+            // CR 118.3 + CR 701.9a: a discard the player can't pay in full
+            // from the hand the earlier steps leave makes the whole option
+            // impossible. Earlier departures only shrink that hand, so a
+            // shortfall now is a shortfall then. The discarded cards then join
+            // the graveyard. CR 608.2g: the hand is read as the head's funding
+            // leaves it — a draw the funding's own resolution met through a
+            // replacement (Nefarious Lich) counts, a card the funding spent
+            // does not.
+            Effect::Discard { .. } if !prefix.hand_may_grow => {
+                let effective = hydrate_event_context_targets(judged, step);
+                if discard::optional_discard_is_infeasible(judged, effective.as_ref()) {
+                    return true;
+                }
+                prefix.graveyard_may_grow = true;
+            }
+            // CR 400.7 + CR 608.2d: "and exile it" can't be performed once its
+            // referent left the zone it is expected in; no earlier step can
+            // bring that object back (a returned card is a new object).
+            Effect::ChangeZone {
+                origin,
+                target: target @ (TargetFilter::SelfRef | TargetFilter::TriggeringSource),
+                ..
+            } => {
+                let effective = hydrate_event_context_targets(judged, step);
+                let infeasible = if matches!(target, TargetFilter::SelfRef) {
+                    change_zone::optional_self_move_is_infeasible(
+                        judged,
+                        effective.as_ref(),
+                        *origin,
+                    )
+                } else {
+                    change_zone::optional_triggering_source_move_is_infeasible(
+                        judged,
+                        effective.as_ref(),
+                        *origin,
+                    )
+                };
+                if infeasible {
+                    return true;
+                }
+                let Some((departed, destination)) =
+                    change_zone::referent_move_departures(judged, effective.as_ref())
+                else {
+                    return false;
+                };
+                prefix.record_move(departed, destination);
             }
             // A step this walk does not model may change what later steps can
             // use, so the option is offered.
@@ -19938,6 +20379,26 @@ fn optional_conjunction_is_infeasible(state: &GameState, ability: &ResolvedAbili
 /// ([`optional_conjunction_is_infeasible`]). Suppressing the prompt lets the
 /// effect resolve as its defined no-op instead.
 fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
+    optional_effect_infeasibility(state, ability).is_some()
+}
+
+/// Why an optional instruction can't be chosen
+/// ([`optional_effect_infeasibility`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OptionalInfeasibility {
+    /// CR 118.12 + CR 118.3: a conjoined step of "you may <A> and <B>" can't
+    /// be performed in full ([`optional_conjunction_verdict`]).
+    Conjunction,
+    /// The instruction itself can't be performed.
+    Instruction,
+}
+
+/// [`optional_effect_is_infeasible`] with the reason, so a caller that routes
+/// on it judges the conjunction once.
+fn optional_effect_infeasibility(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<OptionalInfeasibility> {
     // CR 603.5 + CR 608.2d: an optional instruction on the source's
     // "enchanted/equipped X" is decided as it resolves; with no live host to
     // act on ("you may have that player gain control of equipped creature" on
@@ -19946,12 +20407,19 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         crate::game::targeting::ResolutionHostBinding::NotApplicable
         | crate::game::targeting::ResolutionHostBinding::Bound(_) => {}
         crate::game::targeting::ResolutionHostBinding::Absent
-        | crate::game::targeting::ResolutionHostBinding::Unaffectable(_) => return true,
+        | crate::game::targeting::ResolutionHostBinding::Unaffectable(_) => {
+            return Some(OptionalInfeasibility::Instruction)
+        }
     }
     // CR 608.2d + CR 118.3: every conjoined step of the option must be performable.
     if optional_conjunction_is_infeasible(state, ability) {
-        return true;
+        return Some(OptionalInfeasibility::Conjunction);
     }
+    optional_instruction_is_infeasible(state, ability).then_some(OptionalInfeasibility::Instruction)
+}
+
+/// The instruction-level arms of [`optional_effect_is_infeasible`].
+fn optional_instruction_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
     match &ability.effect {
         Effect::PutSticker { .. } => stickers::optional_is_infeasible(state, ability),
         Effect::PutChosenCounter {
@@ -23393,9 +23861,13 @@ fn player_scope_sacrifice_step(
                 obj.controller == player
                     && !obj.is_emblem
                     && crate::game::filter::matches_target_filter(state, *id, target, &ctx)
-                    && !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
-                        state, &scoped, *id, player,
-                    )
+                    // CR 608.2d: same candidate legality as the ordinary
+                    // sacrifice-effect pool — a permanent its chooser is
+                    // barred from sacrificing is not offered. CR 109.5: the
+                    // template keeps the ability's real controller, so the
+                    // forced-action and triggered-cause bars read who is
+                    // forcing the sacrifice.
+                    && sacrifice::can_sacrifice_for_ability(state, template, *id, player)
             })
         })
         .collect();
@@ -23503,6 +23975,12 @@ fn perform_player_scope_sacrifices(
                         &events[events_before_card..],
                     );
                     emit_sacrifice_batch_follow_ups(&mut completion, completed, events);
+                }
+                // CR 609.3: a mid-resolution bar means the instruction can't
+                // move this object — skip it so terminal bookkeeping derives
+                // from actual departures, not attempts.
+                crate::game::sacrifice::SacrificeOutcome::Prohibited => {
+                    completion.announced.retain(|&id| id != card);
                 }
                 crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                     let completed = record_sacrifice_batch_events(
@@ -26153,6 +26631,21 @@ fn resolve_chain_body(
                 TargetRef::Object(_) => None,
             })
             .collect();
+        if !chosen_players.is_empty()
+            && ability.sub_ability.as_ref().is_some_and(|next| {
+                next.sub_link == SubAbilityLink::ContinuationStep
+                    && node_references_scoped_player(next)
+            })
+        {
+            return resolve_coordinated_target_player_action(
+                state,
+                ability,
+                &chosen_players,
+                events,
+                depth,
+                child_stack_start,
+            );
+        }
         if chosen_players.len() != 1 {
             // A sentence boundary begins an instruction that is not qualified
             // by the preceding "each target player" subject. Keep that tail
@@ -27198,9 +27691,11 @@ fn resolve_chain_body(
     // Per-iteration optionality must reach the rebound singleton ability before
     // feasibility is decided. In particular, the root's first member can have
     // no committable counter move while a later member remains offerable.
-    let optional_is_infeasible = ability.optional
-        && !optionality_is_per_iteration(state, ability)
-        && optional_effect_is_infeasible(state, ability);
+    let optional_infeasibility = (ability.optional
+        && !optionality_is_per_iteration(state, ability))
+    .then(|| optional_effect_infeasibility(state, ability))
+    .flatten();
+    let optional_is_infeasible = optional_infeasibility.is_some();
 
     // CR 608.2c + CR 608.2d: An infeasible optional instruction in this
     // dispatch does not happen. Route each outcome through the existing
@@ -27254,7 +27749,15 @@ fn resolve_chain_body(
     // CR 608.2d + CR 603.5: an optional instruction on a source's host with no
     // live host is likewise a declined option ("you may have that player gain
     // control of equipped creature. If you do, untap it." — no rider runs).
-    if optional_is_infeasible && (auto_decline_infeasible_optional || host_effect_impossible) {
+    // CR 118.12 + CR 118.3: an impossible conjunct makes the whole "you may
+    // <A> and <B>" a declined option whatever its head, so a payable head
+    // ("pay {1}" before an impossible "discard a card") is not paid alone and
+    // its "If you do" rider stays gated.
+    if optional_is_infeasible
+        && (auto_decline_infeasible_optional
+            || host_effect_impossible
+            || optional_infeasibility == Some(OptionalInfeasibility::Conjunction))
+    {
         return resolve_optional_effect_decision_step(
             state,
             ability.clone(),
@@ -32107,6 +32610,251 @@ fn shared_quality_operand_values(
     }
 }
 
+/// CR 608.2c + CR 608.2h + CR 400.7: the object an `AbilityCondition::TargetMatchesFilter`
+/// reads, with the incarnation that proves WHICH object it is.
+struct ConditionReferent {
+    id: ObjectId,
+    /// The announced (declared target) or event-recorded incarnation. `None` when
+    /// nothing proves the incarnation (a referent resolved from the live board, a
+    /// legacy save): the read then keeps the id-keyed chain it always had.
+    pin: Option<ObjectIncarnationRef>,
+    /// The scope the referent was resolved under. An `ObjectScope::EventSource` referent whose
+    /// incarnation has no surviving last-known-information record answers false (the engine
+    /// limit) instead of reading whatever object now holds the storage id.
+    scope: ObjectScope,
+}
+
+/// CR 603.2 + CR 608.2h: the incarnation of the spell a `SpellCopied` event (or a `SpellCast`
+/// whose trigger carries no pin) names. The event carries none, so it is read from the object: still on the stack, the
+/// live incarnation; otherwise the incarnation of its latest recorded exit, which for a
+/// spell countered or otherwise moved off the stack before its trigger resolves is the stack
+/// exit that `exit_lki_for_incarnation` answers from (limit: a spell that went on to leave
+/// exile or the battlefield before the trigger resolved has a later record, which answers
+/// instead). `None` when no record survives.
+fn spell_event_incarnation(state: &GameState, id: ObjectId) -> Option<ObjectIncarnationRef> {
+    if let Some(object) = state.objects.get(&id).filter(|o| o.zone == Zone::Stack) {
+        return Some(ObjectIncarnationRef::from_object(object));
+    }
+    state
+        .lki_by_incarnation
+        .get(&id)
+        .and_then(|history| history.keys().max().copied())
+        .map(|incarnation| ObjectIncarnationRef::of(id, incarnation))
+}
+
+/// CR 608.2c + CR 603.2: resolve the referent of a `TargetMatchesFilter` condition.
+///
+/// `ObjectScope::Target` (the default) is, in order: an explicit declared `subject_slot`;
+/// the node's own resolution-bound attachment-host recipient; the ability's first object
+/// target (with its announced pin); else, for subject-based triggers that carry no chosen
+/// target, the triggering event's subject. `ObjectScope::EventSource` is the object the
+/// current trigger event names even when the node also declares a target. Every other
+/// scope has no referent here (the parser never writes one): the condition is false.
+fn resolve_condition_referent(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    subject_slot: Option<usize>,
+    subject: &ObjectScope,
+) -> Option<ConditionReferent> {
+    use crate::game::targeting;
+    let unpinned = |id| ConditionReferent {
+        id,
+        pin: None,
+        scope: ObjectScope::Target,
+    };
+    match subject {
+        ObjectScope::EventSource => {
+            let event = state.current_trigger_event.as_ref()?;
+            let id = targeting::extract_source_from_event(event)?;
+            // Only the two spell events need a spell-specific pin; every other event names its own
+            // object's incarnation through the one shared authority, `event_context_incarnation`.
+            let pin = if let GameEvent::SpellCast {
+                card_id: _,
+                controller: _,
+                object_id: _,
+                cast_mana_value: _,
+            } = event
+            {
+                // CR 601.2i + CR 400.7: a cast trigger names the occurrence it was put on the
+                // stack for (`triggering_spell_identity`), so a same-id recast cannot answer for it.
+                Some(
+                    targeting::triggering_spell_identity(state)
+                        .or_else(|| spell_event_incarnation(state, id))?,
+                )
+            } else if let GameEvent::SpellCopied {
+                card_id: _,
+                controller: _,
+                object_id: _,
+                original_id: _,
+            } = event
+            {
+                Some(spell_event_incarnation(state, id)?)
+            } else {
+                targeting::event_context_incarnation(&TargetFilter::TriggeringSource, event, id)
+            };
+            Some(ConditionReferent {
+                id,
+                pin,
+                scope: ObjectScope::EventSource,
+            })
+        }
+        ObjectScope::Target => {
+            // CR 608.2c: An explicit `subject_slot` tests a specific declared
+            // chain slot (Malamet's condition reads slot 0, the you-control
+            // fighter) — the current node's local `targets` were overwritten by
+            // most-recent-only chain propagation, so resolve against the
+            // flattened root chain instead of `targets.first()`. CR 608.2b: "If
+            // part of the effect requires information about an illegal target,
+            // it fails to determine any such information", so a slot that was
+            // an illegal target at resolution tests as unmatched.
+            if let Some(index) = subject_slot {
+                return match targeting::resolve_live_parent_slot_from_root(state, ability, index) {
+                    Some(TargetRef::Object(id)) => Some(unpinned(id)),
+                    Some(TargetRef::Player(_)) | None => None,
+                };
+            }
+            // CR 608.2c + CR 301.5a + CR 301.5f: "put a +1/+1 counter on
+            // equipped creature if it's red" — the anaphor names this
+            // instruction's own recipient, the source's attachment host bound
+            // as the instruction resolves (CR 115.10a: not a target, so no
+            // slot carries it). A singular anaphor needs a unique referent: no
+            // host (unattached Equipment) leaves "it" without one, so the
+            // condition is false rather than falling through to an unrelated
+            // trigger-event subject. An Equipment or Aura has at most one host
+            // (CR 301.5c, CR 303.4d); two or more can only come from a
+            // non-attachment source's filter fallback, which no card in this
+            // class reaches, and likewise has no unique referent. CR 603.4
+            // does not apply — the "if" does not follow the trigger
+            // condition, so it is checked only here, on resolution.
+            if let Some(hosts) = ability.effect.target_filter().and_then(|recipient| {
+                targeting::resolution_bound_attachment_hosts(state, ability, recipient)
+            }) {
+                return match hosts.as_slice() {
+                    [host] => Some(unpinned(*host)),
+                    [] | [_, _, ..] => None,
+                };
+            }
+            // CR 400.7 + CR 608.2b: the first object target keeps its announced
+            // incarnation, so a target that has since changed zones is recognised as
+            // departed rather than read as the new object at the same storage id.
+            if let Some((index, id)) = ability.targets.iter().enumerate().find_map(|(i, t)| match t
+            {
+                TargetRef::Object(id) => Some((i, *id)),
+                TargetRef::Player(_) => None,
+            }) {
+                return Some(ConditionReferent {
+                    id,
+                    pin: ability.target_pin_at(index),
+                    scope: ObjectScope::Target,
+                });
+            }
+            // CR 603.2 + CR 400.7: no chosen target — the triggering event's subject object,
+            // with the incarnation the event itself proves (Tribute to the World Tree: the
+            // entrant may be gone before the trigger resolves, and its last known power is
+            // read from the snapshot of THAT incarnation's exit).
+            targeting::resolve_event_context_target(
+                state,
+                &TargetFilter::TriggeringSource,
+                ability.source_id,
+            )
+            .and_then(|t| match t {
+                TargetRef::Object(id) => Some(ConditionReferent {
+                    id,
+                    pin: state.current_trigger_event.as_ref().and_then(|event| {
+                        targeting::event_context_incarnation(
+                            &TargetFilter::TriggeringSource,
+                            event,
+                            id,
+                        )
+                    }),
+                    scope: ObjectScope::Target,
+                }),
+                TargetRef::Player(_) => None,
+            })
+        }
+        ObjectScope::Source
+        | ObjectScope::Recipient
+        | ObjectScope::CostPaidObject
+        | ObjectScope::Anaphoric
+        | ObjectScope::Demonstrative
+        | ObjectScope::AmassedArmy
+        | ObjectScope::EventTarget
+        | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard
+        | ObjectScope::BatchSource
+        | ObjectScope::ChainRootTarget
+        | ObjectScope::GrantingObject
+        | ObjectScope::SpecificObject { .. } => None,
+    }
+}
+
+/// CR 608.2c + CR 608.2h + CR 400.7: evaluate `filter` against the condition's referent.
+///
+/// The basis is chosen by WHERE the referent is, not by the clause's tense. A referent
+/// whose proven incarnation is still the live object in its expected zone is read live
+/// (CR 608.2h: "the current information of that object"). A referent that has moved reads
+/// the last known information recorded for THAT incarnation at its exit
+/// (`exit_lki_for_incarnation`), so a later object at the same storage id, or a stale
+/// id-keyed cache entry, can never answer in its place. With no incarnation proof, or no
+/// surviving record for an announced target, the id-keyed chain applies unchanged:
+/// past tense (`use_lki`) reads the id-keyed LKI cache, else the live object.
+fn evaluate_target_matches_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+    use_lki: bool,
+    subject_slot: Option<usize>,
+    subject: &ObjectScope,
+) -> bool {
+    let Some(referent) = resolve_condition_referent(state, ability, subject_slot, subject) else {
+        return false;
+    };
+    let id = referent.id;
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    if use_lki {
+        if let Some(GameEvent::ZoneChanged {
+            object_id: _,
+            from: _,
+            to: _,
+            record,
+        }) = state.current_trigger_event.as_ref()
+        {
+            if record.object_id == id {
+                return crate::game::filter::matches_target_filter_on_zone_change_record(
+                    state, record, filter, &ctx,
+                );
+            }
+        }
+    }
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation on the live object.
+    let live = || crate::game::filter::matches_target_filter(state, id, filter, &ctx);
+    let id_keyed_chain = || {
+        if use_lki {
+            // CR 400.7: Check last-known information for past-tense conditions.
+            // Try LKI cache first, fall back to current state if object still exists.
+            if let Some(lki) = state.lki_cache.get(&id) {
+                return crate::game::filter::matches_target_filter_on_lki_snapshot(
+                    state, id, lki, filter, &ctx,
+                );
+            }
+        }
+        live()
+    };
+    match referent.pin {
+        Some(pin) if pin.is_current(state) => live(),
+        Some(pin) => {
+            match crate::game::filter::exit_lki_for_incarnation(state, id, pin.incarnation) {
+                Some(lki) => crate::game::filter::matches_target_filter_on_lki_snapshot(
+                    state, id, lki, filter, &ctx,
+                ),
+                None if matches!(referent.scope, ObjectScope::EventSource) => false,
+                None => id_keyed_chain(),
+            }
+        }
+        None => id_keyed_chain(),
+    }
+}
+
 /// CR 608.2c: Evaluate a condition against the current game state and ability context.
 /// Returns whether the condition is met. Handles all `AbilityCondition` variants as
 /// pure boolean evaluators — callers are responsible for any terminal control flow
@@ -32783,118 +33531,9 @@ pub(crate) fn evaluate_condition(
             filter,
             use_lki,
             subject_slot,
+            subject,
         } => {
-            // CR 608.2c: An explicit `subject_slot` tests a specific declared
-            // chain slot (Malamet's condition reads slot 0, the you-control
-            // fighter) — the current node's local `targets` were overwritten by
-            // most-recent-only chain propagation, so resolve against the
-            // flattened root chain instead of `targets.first()`. CR 608.2b: "If
-            // part of the effect requires information about an illegal target,
-            // it fails to determine any such information", so a slot that was
-            // an illegal target at resolution tests as unmatched.
-            // CR 608.2c + CR 603.2: without a slot, "that creature" / "it" is, in
-            // order: the node's own resolution-bound attachment-host recipient;
-            // else the ability's first object target; else — for subject-based
-            // triggers that carry no chosen target — the triggering event's
-            // subject object. The last tier mirrors the `ParentTargetController`
-            // fallback (targeting.rs): when `targets` has no object, resolve the
-            // anaphor against `TriggeringSource` from the current trigger event.
-            let target_id = if let Some(index) = subject_slot {
-                match crate::game::targeting::resolve_live_parent_slot_from_root(
-                    state, ability, *index,
-                ) {
-                    Some(TargetRef::Object(id)) => Some(id),
-                    _ => None,
-                }
-            } else if let Some(hosts) = ability.effect.target_filter().and_then(|recipient| {
-                crate::game::targeting::resolution_bound_attachment_hosts(state, ability, recipient)
-            }) {
-                // CR 608.2c + CR 301.5a + CR 301.5f: "put a +1/+1 counter on
-                // equipped creature if it's red" — the anaphor names this
-                // instruction's own recipient, the source's attachment host bound
-                // as the instruction resolves (CR 115.10a: not a target, so no
-                // slot carries it). Read it from the same authority the effect
-                // uses. A singular anaphor needs a unique referent: no host
-                // (unattached Equipment) leaves "it" without one, so the
-                // condition is false rather than falling through to an unrelated
-                // trigger-event subject. An Equipment or Aura has at most one host
-                // (CR 301.5c, CR 303.4d); two or more can only come from a
-                // non-attachment source's filter fallback, which no card in this
-                // class reaches, and likewise has no unique referent. CR 603.4
-                // does not apply — the "if" does not follow the trigger
-                // condition, so it is checked only here, on resolution.
-                match hosts.as_slice() {
-                    [host] => Some(*host),
-                    _ => None,
-                }
-            } else {
-                ability
-                    .targets
-                    .iter()
-                    .find_map(|t| match t {
-                        TargetRef::Object(id) => Some(*id),
-                        _ => None,
-                    })
-                    .or_else(|| {
-                        crate::game::targeting::resolve_event_context_target(
-                            state,
-                            &TargetFilter::TriggeringSource,
-                            ability.source_id,
-                        )
-                        .and_then(|t| match t {
-                            TargetRef::Object(id) => Some(id),
-                            TargetRef::Player(_) => None,
-                        })
-                    })
-            };
-            let matched = if let Some(id) = target_id {
-                if *use_lki {
-                    if let Some(GameEvent::ZoneChanged { record, .. }) =
-                        state.current_trigger_event.as_ref()
-                    {
-                        if record.object_id == id {
-                            return crate::game::filter::matches_target_filter_on_zone_change_record(
-                                state,
-                                record,
-                                filter,
-                                &crate::game::filter::FilterContext::from_ability(ability),
-                            );
-                        }
-                    }
-                    // CR 400.7: Check last-known information for past-tense conditions.
-                    // Try LKI cache first, fall back to current state if object still exists.
-                    if let Some(lki) = state.lki_cache.get(&id) {
-                        crate::game::filter::matches_target_filter_on_lki_snapshot(
-                            state,
-                            id,
-                            lki,
-                            filter,
-                            &crate::game::filter::FilterContext::from_ability(ability),
-                        )
-                    } else {
-                        // Object still exists — check current state.
-                        // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-                        crate::game::filter::matches_target_filter(
-                            state,
-                            id,
-                            filter,
-                            &crate::game::filter::FilterContext::from_ability(ability),
-                        )
-                    }
-                } else {
-                    // Check current state for present-tense conditions.
-                    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-                    crate::game::filter::matches_target_filter(
-                        state,
-                        id,
-                        filter,
-                        &crate::game::filter::FilterContext::from_ability(ability),
-                    )
-                }
-            } else {
-                false
-            };
-            matched
+            evaluate_target_matches_filter(state, ability, filter, *use_lki, *subject_slot, subject)
         }
         // CR 608.2c + CR 603.2: "if it targets a [filter]" — check the triggering
         // spell's committed targets (Flurry on Shiko and Narset, Unified).
@@ -33257,6 +33896,57 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::ScopedPlayerMatches { filter } => {
             let candidate = ability.scoped_player.unwrap_or(ability.controller);
             scoped_player_matches_filter(state, ability, candidate, filter)
+        }
+        // CR 508.6 + CR 608.2c: retrospective this-turn player-pair attack
+        // test ("if they didn't attack you that turn" — Faramir, Prince of
+        // Ithilien, wrapped in `Not`). Both endpoints resolve via the widened
+        // `resolve_single_player_scope` (`Target` = first `TargetRef::Player`
+        // in `ability.targets` — the stamped chosen player); the printed
+        // controller anchors `original_controller` fallback exactly like the
+        // quantity path. An unresolvable scope fails closed to `false`
+        // (duration-timing-only `AnyTurn`/`SpecificPlayer` are rejected
+        // before the scope resolver's `unreachable!()`); card-level `Not`
+        // composes above it. Reads the UNCOLLAPSED direct-attack ledger
+        // (Faramir ruling 2023-06-16), never the collapsed `has_attacked`.
+        AbilityCondition::PlayerAttackedPlayer { attacker, defender } => {
+            if attacker.duration_timing_only() || defender.duration_timing_only() {
+                return false;
+            }
+            let controller = ability.original_controller.unwrap_or(ability.controller);
+            let ctx = crate::game::quantity::QuantityContext {
+                entering: None,
+                source: ability.source_id,
+                trigger_source: ability.trigger_source.clone(),
+                recipient: None,
+                scoped_player: ability.scoped_player,
+                damage_source: None,
+                // No spell scope at a condition gate; a resolving ability is
+                // in scope, so no stamped granter is carried either.
+                spell: None,
+                event_amount: None,
+                granting_object: None,
+            };
+            let (Some(attacker_id), Some(defender_id)) = (
+                crate::game::quantity::resolve_single_player_scope(
+                    state,
+                    attacker,
+                    controller,
+                    ctx.clone(),
+                    &ability.targets,
+                    Some(ability),
+                ),
+                crate::game::quantity::resolve_single_player_scope(
+                    state,
+                    defender,
+                    controller,
+                    ctx,
+                    &ability.targets,
+                    Some(ability),
+                ),
+            ) else {
+                return false;
+            };
+            state.has_attacked_player_directly_this_turn(attacker_id, defender_id)
         }
     }
 }
@@ -44032,6 +44722,7 @@ mod tests {
             filter,
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         };
         for (label, condition, consumes) in [
             ("direct tracked-set filter", gate(tracked.clone()), true),
@@ -49455,6 +50146,7 @@ mod tests {
             filter: TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
             use_lki: true,
             subject_slot: None,
+            subject: ObjectScope::Target,
         });
         let ability = ResolvedAbility::new(
             Effect::Bounce {
@@ -65747,6 +66439,104 @@ mod tests {
         assert!(!optional_effect_is_infeasible(&state, &bury_and_collect));
     }
 
+    /// CR 118.12 + CR 118.3 + CR 608.2d: a payment head ("you may pay 2 life /
+    /// {1} and discard a card") is one option with its conjunct: an empty hand
+    /// makes it impossible even though the payment alone is affordable, and a
+    /// card in hand makes it offerable. A conjunct whose pool an earlier step
+    /// may add to is not decided: a mana payment may sacrifice a permanent into
+    /// the graveyard, and a move into the hand adds to the discard pool.
+    #[test]
+    fn optional_payment_conjunction_judges_its_conjunct() {
+        let pay = |cost: AbilityCost| {
+            let mut head = ResolvedAbility::new(
+                Effect::PayCost {
+                    cost,
+                    scale: None,
+                    payer: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            head.optional = true;
+            head
+        };
+        let discard_step = || {
+            let mut step =
+                optional_discard(QuantityExpr::Fixed { value: 1 }, TargetFilter::Controller);
+            step.optional = false;
+            step.sub_link = SubAbilityLink::ContinuationStep;
+            step
+        };
+        let life = AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let mut pay_and_discard = pay(life.clone());
+        pay_and_discard.sub_ability = Some(Box::new(discard_step()));
+        assert!(
+            !optional_effect_is_infeasible(&state, &pay(life.clone())),
+            "reach: 2 life alone is payable at 20 life"
+        );
+        assert!(
+            optional_effect_is_infeasible(&state, &pay_and_discard),
+            "no card can be discarded, so the conjoined payment is impossible"
+        );
+        add_hand_card(&mut state, PlayerId(0), 10);
+        assert!(!optional_effect_is_infeasible(&state, &pay_and_discard));
+
+        // Gated: "you may pay 2 life. If you do, discard a card" — the discard is
+        // a later instruction, not part of the option.
+        let state = GameState::new_two_player(42);
+        let mut gated = pay_and_discard.clone();
+        gated.sub_ability.as_mut().expect("sub").condition =
+            Some(AbilityCondition::effect_performed());
+        assert!(!optional_effect_is_infeasible(&state, &gated));
+
+        // A mana payment may sacrifice a permanent into the graveyard, so a
+        // later evidence pool is not decided from the graveyard as it is now.
+        let mut pay_and_collect = pay(AbilityCost::Mana {
+            cost: crate::types::mana::ManaCost::zero(),
+        });
+        let mut evidence = ResolvedAbility::new(
+            Effect::CollectEvidence { amount: 4 },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        evidence.sub_link = SubAbilityLink::ContinuationStep;
+        pay_and_collect.sub_ability = Some(Box::new(evidence));
+        assert!(!optional_effect_is_infeasible(&state, &pay_and_collect));
+
+        // A move into the hand adds to the discard pool.
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Graveyard,
+        );
+        let mut return_and_discard = optional_referent_move(TargetFilter::SelfRef, None, source);
+        return_and_discard.source_incarnation = Some(state.objects[&source].incarnation);
+        if let Effect::ChangeZone {
+            destination,
+            enters_under,
+            ..
+        } = &mut return_and_discard.effect
+        {
+            *destination = Zone::Hand;
+            *enters_under = None;
+        }
+        return_and_discard.sub_ability = Some(Box::new(discard_step()));
+        assert!(
+            !change_zone::optional_self_move_is_infeasible(&state, &return_and_discard, None),
+            "reach: the source in the graveyard can return to the hand"
+        );
+        assert!(!optional_effect_is_infeasible(&state, &return_and_discard));
+    }
+
     /// CR 118.3: "you may discard two cards. If you do, draw three cards." with one
     /// card in hand can't be paid in full, so it is not offered: the card stays in
     /// hand and the "If you do" draw does not happen. Two cards make it offerable.
@@ -71496,6 +72286,105 @@ mod tests {
             "CR 122.1: only 2 counters existed, so the re-anchoring consumer must \
              read the 2 actually removed — not the 7 the relay asked for"
         );
+    }
+    /// CR 508.6 + CR 608.2c: unit matrix for the retrospective this-turn
+    /// player-pair attack predicate (phase 5a, Verification Matrix row 5).
+    /// Endpoints resolve via `resolve_single_player_scope` (`Target` = first
+    /// `TargetRef::Player` — the stamped chosen player); every negative below
+    /// is paired with a positive cell proving the path resolves. Revert-
+    /// discriminating: dropping the ledger read (e.g. collapsing to the
+    /// collapsed `has_attacked` gate) flips cell 1; dropping the fail-closed
+    /// arms flips cells 5-7.
+    #[test]
+    fn player_attacked_player_predicate_matrix() {
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        fn ability_with_targets(targets: Vec<TargetRef>) -> ResolvedAbility {
+            let effect: Effect = serde_json::from_str(
+                r#"{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"Controller"}}"#,
+            )
+            .expect("draw effect must parse");
+            ResolvedAbility::new(effect, targets, ObjectId(1), PlayerId(0))
+        }
+        fn seeded(attacker: PlayerId, defender: PlayerId) -> GameState {
+            let mut state = GameState::new_two_player(42);
+            state
+                .attacked_players_directly_this_turn
+                .entry(attacker)
+                .or_default()
+                .insert(defender);
+            state
+        }
+        let cond = |attacker: PlayerScope, defender: PlayerScope| {
+            AbilityCondition::PlayerAttackedPlayer { attacker, defender }
+        };
+        let empty = GameState::new_two_player(42);
+        // 1. Chosen (Target=P1) attacked you (Controller=P0): ledger P1->P0.
+        assert!(evaluate_condition(
+            &cond(PlayerScope::Target, PlayerScope::Controller),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 2. Same scopes, empty ledger: no attack recorded.
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::Target, PlayerScope::Controller),
+            &empty,
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 3. Controller attacked chosen: ledger P0->P1.
+        assert!(evaluate_condition(
+            &cond(PlayerScope::Controller, PlayerScope::Target),
+            &seeded(p0, p1),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 4. Controller vs controller, empty ledger: nobody attacked themselves.
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::Controller, PlayerScope::Controller),
+            &empty,
+            &ability_with_targets(vec![]),
+        ));
+        // 5. Target with no stamped player target: unresolvable fails closed.
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::Target, PlayerScope::Controller),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![]),
+        ));
+        // 6-7. Duration-timing-only scopes never reach the resolver: false
+        // even with a matching ledger entry.
+        assert!(!evaluate_condition(
+            &cond(
+                PlayerScope::SpecificPlayer { id: p1 },
+                PlayerScope::Controller,
+            ),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::AnyTurn, PlayerScope::Controller),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 8. Ordered pairs: only P0->P1 seeded, query P1->P0 is false.
+        assert!(!evaluate_condition(
+            &cond(PlayerScope::Target, PlayerScope::Controller),
+            &seeded(p0, p1),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        // 9. Card-level Not composes above the leaf in both polarities.
+        let leaf = cond(PlayerScope::Target, PlayerScope::Controller);
+        let not = |inner: AbilityCondition| AbilityCondition::Not {
+            condition: Box::new(inner),
+        };
+        assert!(!evaluate_condition(
+            &not(leaf.clone()),
+            &seeded(p1, p0),
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
+        assert!(evaluate_condition(
+            &not(leaf),
+            &empty,
+            &ability_with_targets(vec![TargetRef::Player(p1)]),
+        ));
     }
 
     /// CR 701.26a + CR 608.2c: a tap instruction stamps `Tapped`; untap stays unstamped.

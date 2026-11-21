@@ -851,6 +851,8 @@ mod tests {
             target,
             amount,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: Default::default(),
             amount_fraction: Default::default(),
         }
@@ -1889,6 +1891,8 @@ mod tests {
             target: TargetRef::Object(victim),
             amount: 2,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: Default::default(),
             amount_fraction: Default::default(),
         };
@@ -1907,6 +1911,8 @@ mod tests {
             target: TargetRef::Object(victim),
             amount: 2,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: Default::default(),
             amount_fraction: Default::default(),
         };
@@ -2003,6 +2009,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             spec: Box::new(token_spec),
             copy: None,
@@ -2102,6 +2109,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             spec: Box::new(token_spec),
             copy: None,
@@ -2196,6 +2204,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(token_spec),
             copy: None,

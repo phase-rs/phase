@@ -158,6 +158,7 @@
     "subscribe": "订阅",
     "unsubscribe": "取消订阅",
     "lastRefreshed": "上次刷新：{{date}}",
+    "dataProvidedBy": "数据提供：",
     "addCustomFeed": "添加自定义订阅源",
     "add": "添加",
     "offlineUnavailable": "离线时无法更新订阅源。",

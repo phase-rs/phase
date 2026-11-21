@@ -11244,6 +11244,7 @@ mod simultaneous_entry_tests {
             state.liminal_entries.insert(
                 b,
                 LiminalEntry {
+                    copy_settlement: None,
                     object,
                     name: "Card 2".to_string(),
                     source_id: b,

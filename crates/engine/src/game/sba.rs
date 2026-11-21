@@ -1039,11 +1039,19 @@ fn check_creature_deaths(
         })
         .map(CreatureDeathSba::ZeroToughness)
         .collect();
-    to_die.extend(
-        lethal_damage_candidates(state, battlefield_snapshot)
-            .into_iter()
-            .map(CreatureDeathSba::Destroy),
-    );
+    let lethal = lethal_damage_candidates(state, battlefield_snapshot);
+    // CR 704.5h: this check consumes every deathtouch record but a lethal candidate's, which its
+    // destruction ends, so a check paused on a replacement choice resumes with the candidates it
+    // had not reached.
+    for id in battlefield_snapshot
+        .iter()
+        .filter(|id| !lethal.contains(id))
+    {
+        if let Some(obj) = state.objects.get_mut(id) {
+            obj.dealt_deathtouch_damage = false;
+        }
+    }
+    to_die.extend(lethal.into_iter().map(CreatureDeathSba::Destroy));
 
     perform_creature_deaths(state, events, any_performed, &to_die);
 }
@@ -1063,8 +1071,9 @@ fn lethal_damage_candidates(state: &GameState, battlefield_snapshot: &[ObjectId]
                             && (
                                 // CR 704.5g: Normal lethal damage requires positive toughness and damage >= toughness.
                                 dmg.0 >= t.0 as u64
-                                // CR 704.5h + CR 702.2b: Deathtouch lethal also requires positive toughness.
-                                || (obj.dealt_deathtouch_damage && !dmg.is_zero())
+                                // CR 704.5h + CR 702.2b: any damage dealt by a deathtouch source, marked
+                                // (CR 120.3e) or as -1/-1 counters (CR 120.3d).
+                                || obj.dealt_deathtouch_damage
                             )
                     })
                     // CR 702.12b: Indestructible creatures are not destroyed by lethal damage.

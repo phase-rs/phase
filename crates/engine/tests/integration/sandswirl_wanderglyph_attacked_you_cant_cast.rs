@@ -187,6 +187,7 @@ fn full_card_parses_both_clauses_no_unimplemented() {
                     activity: ProhibitedActivity::Attack {
                         defended: AttackTargetFilter::PlayerOrPlaneswalker,
                         protected_player: None,
+                        protected_scope: None,
                     },
                     // CR 514.2: "… this turn" expires at the CURRENT turn's cleanup
                     // (`RestrictionExpiry::EndOfTurn`), NOT a permanent restriction and

@@ -4,7 +4,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
 use nom::combinator::{
-    all_consuming, eof, map, map_opt, map_parser, not, opt, peek, rest, value, verify,
+    all_consuming, eof, map, map_opt, map_parser, not, opt, peek, recognize, rest, value, verify,
 };
 use nom::multi::many0;
 use nom::sequence::{delimited, preceded, terminated};
@@ -15,7 +15,7 @@ use super::super::oracle_nom::duration::{
     parse_duration, parse_for_as_long_as_condition, parse_until_source_exiles_another_card_body,
 };
 use super::super::oracle_nom::enters_under::{
-    parse_leading_control_clause, ControlClausePossessor,
+    parse_control_clause, parse_leading_control_clause, ControlClausePossessor,
 };
 use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
@@ -497,6 +497,7 @@ mod gate_reflexive_rider_tests {
                 ),
                 use_lki: true,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             }),
         }
     }
@@ -8476,7 +8477,14 @@ fn bare_dealt_damage_relative_clause_owns_suffix(input: &str) -> bool {
 /// The player is a placeholder rewritten from `binding` at delayed-trigger
 /// creation; "on your next turn" skips the creation turn's step, and
 /// CR 608.2c: "that player" is the owner of the object the parent moved.
-fn parse_player_next_step_suffix(input: &str) -> OracleResult<'_, DelayedTriggerCondition> {
+///
+/// CR 608.2c + CR 108.3: "their" after an owner control clause names that owner
+/// (Phytotitan). The control clause is the pronoun's antecedent and stays part
+/// of the instruction, so the returned `usize` is the length of the retained
+/// antecedent prefix (`0` for every other form).
+fn parse_player_next_step_suffix(
+    input: &str,
+) -> OracleResult<'_, (usize, DelayedTriggerCondition)> {
     use crate::types::ability::{DelayedTriggerPlayerBinding, TurnGate};
     // A grouped name ("main phase") is two steps, so it is left to the table.
     let step = || {
@@ -8488,47 +8496,76 @@ fn parse_player_next_step_suffix(input: &str) -> OracleResult<'_, DelayedTrigger
             },
         )
     };
-    let (rest, (binding, gate, phase)) = terminated(
-        preceded(
-            tag("at the beginning of "),
-            alt((
-                map(preceded(tag("your next "), step()), |phase| {
+    let player_next_step = preceded(
+        tag("at the beginning of "),
+        alt((
+            map(preceded(tag("your next "), step()), |phase| {
+                (
+                    DelayedTriggerPlayerBinding::Controller,
+                    TurnGate::None,
+                    phase,
+                )
+            }),
+            map(preceded(tag("that player's next "), step()), |phase| {
+                (
+                    DelayedTriggerPlayerBinding::ParentTargetOwner,
+                    TurnGate::None,
+                    phase,
+                )
+            }),
+            map(
+                delimited(tag("the "), step(), tag(" on your next turn")),
+                |phase| {
                     (
                         DelayedTriggerPlayerBinding::Controller,
-                        TurnGate::None,
+                        TurnGate::AfterCreationTurn,
                         phase,
                     )
-                }),
-                map(preceded(tag("that player's next "), step()), |phase| {
-                    (
-                        DelayedTriggerPlayerBinding::ParentTargetOwner,
-                        TurnGate::None,
-                        phase,
-                    )
-                }),
-                map(
-                    delimited(tag("the "), step(), tag(" on your next turn")),
-                    |phase| {
-                        (
-                            DelayedTriggerPlayerBinding::Controller,
-                            TurnGate::AfterCreationTurn,
-                            phase,
-                        )
+                },
+            ),
+        )),
+    );
+    // CR 608.2c + CR 108.3: "their" after an owner control clause names that owner (Phytotitan).
+    let owner_their = map(
+        (
+            recognize(terminated(
+                verify(
+                    parse_control_clause,
+                    |possessor: &ControlClausePossessor| {
+                        *possessor == ControlClausePossessor::Owner
                     },
                 ),
+                tag(" "),
             )),
+            preceded(tag("at the beginning of their next "), step()),
         ),
+        |(antecedent, phase): (&str, Phase)| {
+            (
+                antecedent.len(),
+                (
+                    DelayedTriggerPlayerBinding::ParentTargetOwner,
+                    TurnGate::None,
+                    phase,
+                ),
+            )
+        },
+    );
+    let (rest, (kept, (binding, gate, phase))) = terminated(
+        alt((map(player_next_step, |shape| (0, shape)), owner_their)),
         eof,
     )
     .parse(input)?;
     Ok((
         rest,
-        DelayedTriggerCondition::AtNextPhaseForPlayer {
-            phase,
-            player: crate::types::player::PlayerId(0),
-            gate,
-            binding,
-        },
+        (
+            kept,
+            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase,
+                player: crate::types::player::PlayerId(0),
+                gate,
+                binding,
+            },
+        ),
     ))
 }
 
@@ -8544,13 +8581,15 @@ fn parse_player_next_step_suffix(input: &str) -> OracleResult<'_, DelayedTrigger
 /// `RestrictionScope::SourcesControlledBy` placeholder pattern.
 pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerCondition>) {
     let lower = text.to_lowercase();
-    if let Some((offset, condition, _)) = nom_primitives::scan_last_at_word_boundaries_with_offset(
-        &lower,
-        parse_player_next_step_suffix,
-    )
-    .filter(|(offset, ..)| *offset > 0)
+    if let Some((offset, (kept, condition), _)) =
+        nom_primitives::scan_last_at_word_boundaries_with_offset(
+            &lower,
+            parse_player_next_step_suffix,
+        )
+        .filter(|(offset, ..)| *offset > 0)
     {
-        let end = text.len() - (lower.len() - offset);
+        // The retained antecedent (`kept`) stays in the instruction text.
+        let end = text.len() - (lower.len() - (offset + kept));
         return (text[..end].trim_end_matches(',').trim(), Some(condition));
     }
     for (suffix, condition) in [
@@ -8785,6 +8824,22 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                     turn: None,
                 },
                 tag("at the beginning of that turn's end step, "),
+            ),
+            // CR 608.2c + CR 603.7a: "at the beginning of that player's next
+            // end step, " -- the player-anaphor prefix twin of the suffix arm in
+            // `strip_temporal_suffix` (Wanderer shape in trailing position).
+            // Table default is `ParentTargetOwner`; a Choose(Player|Opponent)
+            // antecedent rebinds to `ChosenPlayer` at the call site (Faramir).
+            // Textually distinct from the "that turn's end step" arm above
+            // ("player's" vs "turn's"), so neither shadows the other.
+            value(
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::End,
+                    player: crate::types::player::PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner,
+                },
+                tag("at the beginning of that player's next end step, "),
             ),
             // CR 505.1 + CR 603.7a: "your next main phase" → PreCombatMain.
             // PlayerId(0) rewritten to ability.controller at resolve time
@@ -12532,8 +12587,8 @@ pub(crate) enum WhereXSlot {
     /// result themselves (CR 107.1b); CR 107.1b exempts effects that set P/T.
     #[default]
     Amount,
-    /// The signed amount a "gets ±X/±X" modification adds (CR 613.4c), where a
-    /// negative X would reach the game unclamped.
+    /// The signed amount a "gets ±X/±X" modification adds (CR 613.4c); a
+    /// negative X is clamped to 0 here (CR 107.1b).
     PtAdjustment,
 }
 
@@ -12585,46 +12640,38 @@ impl<'a> WhereXBinding<'a> {
     /// site goes through here so the expression and the antecedents it is read
     /// under cannot drift apart at a call site. `expression` is passed rather
     /// than read from `self` because some seams rewrite the tail (licensing,
-    /// nested owners) before the count is resolved. A `PtAdjustment` slot gets the
-    /// CR 107.1b clamp when the characteristic rung bound X
-    /// (`clamp_rung_bound_pt_adjustment`).
+    /// nested owners) before the count is resolved. The slot then binds X
+    /// ([`WhereXSlot::bind`]).
     pub(crate) fn resolve_quantity(&self, expression: &str) -> Option<QuantityExpr> {
         let antecedents = self.antecedents_or_empty();
         let x = parse_where_x_quantity_expression_with_antecedents(expression, &antecedents)?;
-        Some(match self.slot {
-            WhereXSlot::Amount => x,
-            WhereXSlot::PtAdjustment => clamp_rung_bound_pt_adjustment(x, expression, &antecedents),
-        })
+        Some(self.slot.bind(x))
     }
 }
 
-/// CR 107.1b + CR 608.2k: when the antecedent rung bound X to the trigger event
-/// object's characteristic, a negative characteristic gives X = 0 (Arahbo, Roar
-/// of the World ruling: "If the attacking Cat's power is negative at that time,
-/// X is 0."). Scoped to the rung binding: X is rung-bound when the same
-/// expression read without the rung differs.
-fn clamp_rung_bound_pt_adjustment(
-    x: QuantityExpr,
-    expression: &str,
-    antecedents: &PlayerAntecedents,
-) -> QuantityExpr {
-    let rung_bound = antecedents.characteristic_pronoun_owner.is_some()
-        && parse_where_x_quantity_expression_with_antecedents(
-            expression,
-            &PlayerAntecedents {
-                characteristic_pronoun_owner: None,
-                ..antecedents.clone()
+impl WhereXSlot {
+    /// CR 107.1b: a negative X feeding a signed P/T adjustment is 0.
+    pub(crate) fn bind(self, x: QuantityExpr) -> QuantityExpr {
+        match self {
+            WhereXSlot::Amount => x,
+            WhereXSlot::PtAdjustment => match x {
+                QuantityExpr::ClampMin { minimum, .. } if minimum >= 0 => x,
+                QuantityExpr::ClampMin { .. }
+                | QuantityExpr::Ref { .. }
+                | QuantityExpr::Fixed { .. }
+                | QuantityExpr::DivideRounded { .. }
+                | QuantityExpr::Offset { .. }
+                | QuantityExpr::Multiply { .. }
+                | QuantityExpr::Sum { .. }
+                | QuantityExpr::UpTo { .. }
+                | QuantityExpr::Power { .. }
+                | QuantityExpr::Difference { .. }
+                | QuantityExpr::Max { .. } => QuantityExpr::ClampMin {
+                    inner: Box::new(x),
+                    minimum: 0,
+                },
             },
-        )
-        .as_ref()
-            != Some(&x);
-    if rung_bound {
-        QuantityExpr::ClampMin {
-            inner: Box::new(x),
-            minimum: 0,
         }
-    } else {
-        x
     }
 }
 
@@ -13928,7 +13975,9 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::RemoveManaCost => {}
+        | ContinuousModification::RemoveManaCost
+        // No dynamic quantity to rebind: scalar designation payload only.
+        | ContinuousModification::ChangeControllerToDesignation { .. } => {}
     }
 }
 
@@ -14032,7 +14081,9 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::RemoveManaCost => {}
+        | ContinuousModification::RemoveManaCost
+        // No dynamic quantity to rebind: scalar designation payload only.
+        | ContinuousModification::ChangeControllerToDesignation { .. } => {}
     }
 }
 
@@ -17452,7 +17503,9 @@ mod tests {
 }
 #[cfg(test)]
 mod where_x_tests {
-    use super::{parse_where_x_quantity_expression, strip_trailing_duration, WhereXBinding};
+    use super::{
+        parse_where_x_quantity_expression, strip_trailing_duration, WhereXBinding, WhereXSlot,
+    };
     use crate::types::ability::TurnWindow;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
@@ -18423,10 +18476,13 @@ mod where_x_tests {
             WhereXBinding::bare(Some("that creature's power")),
         );
 
-        let expected = PtValue::Quantity(QuantityExpr::Ref {
-            qty: QuantityRef::Power {
-                scope: ObjectScope::Target,
-            },
+        let expected = PtValue::Quantity(QuantityExpr::ClampMin {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Target,
+                },
+            }),
+            minimum: 0,
         });
         let Effect::Pump {
             power, toughness, ..
@@ -18809,18 +18865,17 @@ mod where_x_tests {
         );
     }
 
-    /// CR 107.1b + CR 613.4c: a signed P/T adjustment whose X the characteristic
-    /// rung bound is clamped at zero (Arahbo, Roar of the World ruling: a
-    /// negative attacking Cat gives X = 0); a count slot, an unbound rung, a
-    /// non-pronoun count and an explicit self-reference are not.
+    /// CR 107.1b + CR 613.4c: every X feeding a signed P/T adjustment is clamped
+    /// at zero, whatever bound it; a count slot keeps the bare reading.
     #[test]
-    fn where_x_pt_adjustment_clamps_only_rung_bound_x() {
+    fn where_x_pt_adjustment_clamps_every_x() {
         use crate::types::ability::PtValue;
-        let rung = event_object_rung();
-        let clamped = QuantityExpr::ClampMin {
-            inner: Box::new(power(ObjectScope::EventSource)),
+        let clamp = |inner: QuantityExpr| QuantityExpr::ClampMin {
+            inner: Box::new(inner),
             minimum: 0,
         };
+        let rung = event_object_rung();
+        let clamped = clamp(power(ObjectScope::EventSource));
         let adjustment = WhereXBinding::new(Some("its power"), &rung).as_pt_adjustment();
         assert_eq!(
             adjustment.resolve_quantity("its power"),
@@ -18830,7 +18885,7 @@ mod where_x_tests {
             super::apply_where_x_expression(PtValue::Variable("-X".to_string()), adjustment),
             Some(PtValue::Quantity(QuantityExpr::Multiply {
                 factor: -1,
-                inner: Box::new(clamped),
+                inner: Box::new(clamped.clone()),
             }))
         );
 
@@ -18839,24 +18894,21 @@ mod where_x_tests {
             WhereXBinding::new(Some("its power"), &rung).resolve_quantity("its power"),
             Some(power(ObjectScope::EventSource))
         );
-        // No rung in scope: nothing to clamp.
         let empty = Default::default();
         assert_eq!(
             WhereXBinding::new(Some("its power"), &empty)
                 .as_pt_adjustment()
                 .resolve_quantity("its power"),
-            Some(power(ObjectScope::Source))
+            Some(clamp(power(ObjectScope::Source)))
         );
-        // The rung did not bind a non-pronoun count or an explicit self-reference.
         let creatures = WhereXBinding::new(Some("the number of creatures you control"), &rung)
             .as_pt_adjustment()
             .resolve_quantity("the number of creatures you control");
         assert!(
             matches!(
-                creatures,
-                Some(QuantityExpr::Ref {
-                    qty: QuantityRef::ObjectCount { .. }
-                })
+                &creatures,
+                Some(QuantityExpr::ClampMin { inner, minimum: 0 })
+                    if matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ObjectCount { .. } })
             ),
             "{creatures:?}"
         );
@@ -18864,15 +18916,16 @@ mod where_x_tests {
             WhereXBinding::new(Some("~'s power"), &rung)
                 .as_pt_adjustment()
                 .resolve_quantity("~'s power"),
-            Some(power(ObjectScope::Source))
+            Some(clamp(power(ObjectScope::Source)))
         );
+        // An already-floored X is not wrapped twice.
+        assert_eq!(WhereXSlot::PtAdjustment.bind(clamped.clone()), clamped);
     }
 
     /// CR 613.4c + CR 107.1b + CR 608.2k: the pump-clause consumer marks its X
-    /// as a signed adjustment, so under a trigger subject whose "it" is the
-    /// event object, "its power" is clamped at zero, while an explicit
-    /// self-reference ("~'s power") and a context-free clause keep the bare
-    /// `Source` reading.
+    /// as a signed adjustment, so every reading is clamped at zero; under a
+    /// trigger subject "its power" reads the event object, while an explicit
+    /// self-reference ("~'s power") and a context-free clause read `Source`.
     #[test]
     fn where_x_pump_clause_marks_signed_adjustment_under_event_subject() {
         use crate::parser::oracle_ir::context::ParseContext;
@@ -18902,14 +18955,20 @@ mod where_x_tests {
                 "gets +X/+X until end of turn, where X is ~'s power",
                 &event_subject
             ),
-            PtValue::Quantity(power(ObjectScope::Source))
+            PtValue::Quantity(QuantityExpr::ClampMin {
+                inner: Box::new(power(ObjectScope::Source)),
+                minimum: 0,
+            })
         );
         assert_eq!(
             pump(
                 "gets +X/+X until end of turn, where X is its power",
                 &ParseContext::default()
             ),
-            PtValue::Quantity(power(ObjectScope::Source))
+            PtValue::Quantity(QuantityExpr::ClampMin {
+                inner: Box::new(power(ObjectScope::Source)),
+                minimum: 0,
+            })
         );
     }
 }
