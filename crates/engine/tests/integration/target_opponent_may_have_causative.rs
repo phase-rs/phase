@@ -631,7 +631,7 @@ fn terrapact_no_legal_target_removes_the_trigger() {
     assert_eq!(plus_counters(&runner, terrapact), 0);
     assert!(landers(&runner).is_empty());
 
-    let (mut runner, terrapact) = terrapact_board(&[P1]);
+    let (mut runner, terrapact) = terrapact_board(db, &[P1]);
     runner.cast(terrapact).commit();
     let record = drive(&mut runner, Answers::new(&[], &[false]));
     assert!(record.target_prompts.is_empty(), "{record:?}");
@@ -717,7 +717,7 @@ fn risk_factor_without_legal_target_cannot_be_cast() {
     assert_eq!(lives(&runner), before);
 
     // Paired positive: only P1 hexproof, so the cast succeeds on P2.
-    let (mut runner, risk) = risk_factor_board(&[P1]);
+    let (mut runner, risk) = risk_factor_board(db, &[P1]);
     let before = lives(&runner);
     announce_cast(&mut runner, risk);
     let record = drive(&mut runner, Answers::new(&[TargetRef::Player(P2)], &[true]));

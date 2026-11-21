@@ -696,13 +696,13 @@ fn a_free_cast_during_resolution_records_one_dilemma() {
     for _ in 0..4 {
         scenario.add_basic_land(P0, ManaColor::Green);
     }
+    let charm = scenario.add_real_card(P1, "Abzan Charm", Zone::Library, db);
+    let mut runner = scenario.build();
     // `add_real_card` appends to the library (the bottom); Chaos Wand exiles
     // from the top, so re-seat the charm at index 0.
-    let charm = scenario.add_real_card(P1, "Abzan Charm", Zone::Library, db);
-    let library = scenario.state_mut().library_of_mut(P1);
+    let library = runner.state_mut().library_of_mut(P1);
     library.retain(|&object| object != charm);
     library.push_front(charm);
-    let mut runner = scenario.build();
     let hand = hand_len(&runner, P0);
     let life = runner.life(P0);
     runner
