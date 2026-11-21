@@ -1351,7 +1351,8 @@
       "title": "{{effect}} a Menos Que Você Pague",
       "titleChooseOne": "{{effect}} a Menos Que Você Pague Um",
       "dontPay": "Não Pagar",
-      "takeEffect": "Aceitar o Efeito"
+      "takeEffect": "Aceitar o Efeito",
+      "priorChoice": "Jogador {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "Unir com Arcano?",

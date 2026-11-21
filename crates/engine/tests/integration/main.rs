@@ -238,6 +238,7 @@ mod ogre_battlecaster_8775;
 mod ogre_marauder_defending_player_unless_sacrifice;
 mod one_shot_ledger_combat_pause_save_load;
 mod one_time_boon;
+mod optional_conjoined_payment_feasibility;
 mod oracle_parser;
 mod ozolith_leaves_battlefield_counters;
 mod pain_magnification_single_source_damage;

@@ -423,6 +423,18 @@ pub(super) fn handle_replacement_choice(
         state.waiting_for = waiting_for.clone();
         return Ok(waiting_for);
     }
+    // CR 101.4 + CR 616.1: the choice decides one sacrifice of a simultaneous
+    // batch that is still being consulted. Its move waits with the batch instead
+    // of happening now; the generic dispatcher below would deliver it at once.
+    if effects::player_scope_sacrifice_consult_awaits_replacement_choice(state) {
+        let waiting_for = answer_player_scope_sacrifice_consult(state, index, events)?;
+        return Ok(settle_replacement_choice_wait(
+            state,
+            events,
+            action_event_start,
+            waiting_for,
+        ));
+    }
     resolve_pending_replacement(state, events, |state, events| {
         super::replacement::continue_replacement(state, index, events)
     })
@@ -812,6 +824,22 @@ fn handle_replacement_choice_body(
     } else {
         handle_replacement_choice_inner(state, events, operation)?
     };
+    Ok(settle_replacement_choice_wait(
+        state,
+        events,
+        action_event_start,
+        waiting_for,
+    ))
+}
+
+/// The common epilogue of an answered replacement choice: adopt a nested prompt,
+/// or hand a settled round trip back to priority and the parked combat batch.
+fn settle_replacement_choice_wait(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    action_event_start: usize,
+    waiting_for: WaitingFor,
+) -> WaitingFor {
     // CR 616.1f: a second ordering choice, or any nested prompt, leaves the record
     // parked for the next answer; only a settled round trip may close the batch.
     // Nothing is left behind on this path — the anchor is a local that dies here.
@@ -823,7 +851,7 @@ fn handle_replacement_choice_body(
         // buffer. Hand them to the entry gate: an entrant whose instruction is
         // still suspended is held for the scan that follows its last co-entrant.
         super::triggers::park_entry_observer_triggers_if_paused(state, events, action_event_start);
-        return Ok(waiting_for);
+        return waiting_for;
     };
     // CR 800.4j: the handler hands a settled choice back to the active player's
     // priority. A choice answered after that player left the game (another
@@ -837,13 +865,33 @@ fn handle_replacement_choice_body(
         },
     };
     state.waiting_for = waiting_for.clone();
-    Ok(super::combat_damage::resume_pending_combat_lifelink(
-        state,
-        action_event_start,
-        None,
-        events,
-    )
-    .unwrap_or(waiting_for))
+    super::combat_damage::resume_pending_combat_lifelink(state, action_event_start, None, events)
+        .unwrap_or(waiting_for)
+}
+
+/// CR 101.4 + CR 616.1: answer the replacement choice that interrupted a
+/// simultaneous sacrifice batch's consult, then continue the batch: consult the
+/// remaining selections, deliver every approved move together, and resume the
+/// instruction's later work through the common priority boundary (CR 608.2c).
+/// The batch's events stay in this action's buffer for the post-action
+/// pipeline's trigger scan (CR 603.2).
+fn answer_player_scope_sacrifice_consult(
+    state: &mut GameState,
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match effects::answer_player_scope_sacrifice_consult(state, index, events) {
+        effects::PlayerScopeSacrificeConsultAnswer::NeedsChoice => {
+            return Ok(state.waiting_for.clone());
+        }
+        effects::PlayerScopeSacrificeConsultAnswer::Consulted => {}
+    }
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    resume_paused_player_scope_sacrifice(state, events)?;
+    super::engine::resume_pending_continuation_if_priority(state, events)?;
+    Ok(state.waiting_for.clone())
 }
 
 /// What resuming a parked player-scope sacrifice batch produced.
@@ -9916,9 +9964,18 @@ mod tests {
             .as_ref()
             .expect("the pause must retain the full sacrifice completion");
         assert!(pending.completion.spans_replacement_pause);
-        assert!(pending.completion.deferred_events.iter().any(
-            |event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == first)
-        ));
+        assert!(
+            pending.completion.pending_deliveries.iter().any(|delivery| {
+                matches!(
+                    &delivery.sacrifice,
+                    crate::types::game_state::PendingSacrificeMove::Sacrifice {
+                        object_id,
+                        ..
+                    } if *object_id == first
+                )
+            }),
+            "the first pre-consulted sacrifice must stay queued for simultaneous delivery across the pause"
+        );
 
         let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
             .expect("accepting the replacement must complete the whole sacrifice batch");

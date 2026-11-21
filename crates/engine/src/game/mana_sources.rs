@@ -1975,6 +1975,28 @@ pub(crate) fn mana_source_option_has_drawback(
         })
 }
 
+/// CR 605.1b + CR 605.3b: True when some `TapsForMana` triggered mana ability on
+/// the battlefield does more on resolution than add mana. Such an ability
+/// resolves inline whenever a permanent it matches is tapped for mana, so then
+/// even a source without a [`mana_source_option_has_drawback`] drawback can
+/// change more than the mana pool when tapped.
+pub(crate) fn taps_for_mana_trigger_has_non_mana_effect(state: &GameState) -> bool {
+    taps_for_mana_trigger_sources(state).iter().any(|id| {
+        state.objects.get(id).is_some_and(|obj| {
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition())
+                .filter(|trigger| trigger.mode == TriggerMode::TapsForMana)
+                .any(|trigger| {
+                    trigger.execute.as_deref().is_some_and(|execute| {
+                        !matches!(*execute.effect, Effect::Mana { .. })
+                            || mana_ability_penalty(execute) != ManaSourcePenalty::None
+                    })
+                })
+        })
+    })
+}
+
 /// CR 119.3 (life) / CR 120.3 (damage → life loss): The benefit twin of
 /// [`effect_controller_harm_amount`]. Returns `true` iff a single `Effect`
 /// favors the player who caused the trigger (the tapper): opponent-scoped
