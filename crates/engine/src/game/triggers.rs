@@ -24,9 +24,9 @@ use crate::types::game_state::{
     DepartingOwnerAfterAuthority, DistributionUnit, GameState, LatchedBatchedTrigger,
     LatchedSuppressTrigger, LogicalZoneChangeGroup, LogicalZoneChangeTerminalOutcome,
     MayTriggerAutoChoiceKey, MayTriggerOrigin, ProductionOverride, StackEntry, StackEntryKind,
-    SubjectIncarnationScope, SyntheticTriggerProvenance, TargetSelectionConstraint,
-    TargetSelectionSlot, TriggerObservationTime, TriggerSourceContext, TriggerSourceRead,
-    WaitingFor, ZoneChangeAnnouncement,
+    StackObjectClass, SubjectIncarnationScope, SyntheticTriggerProvenance,
+    TargetSelectionConstraint, TargetSelectionSlot, TriggerObservationTime, TriggerSourceContext,
+    TriggerSourceRead, WaitingFor, ZoneChangeAnnouncement,
 };
 use crate::types::identifiers::{
     DelayedInstallIdentity, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
@@ -45,7 +45,9 @@ use crate::types::resolved_commands::{
 use crate::types::statics::{
     StaticMode, SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
 };
-use crate::types::triggers::{AttackTargetFilter, TriggerEventKey, TriggerMode};
+use crate::types::triggers::{
+    AttackTargetFilter, TriggerEventKey, TriggerMode, TriggerPlacementPart,
+};
 use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def;
@@ -215,6 +217,25 @@ pub(crate) enum DeferredTriggerBatchOrigin {
 
 fn deferred_trigger_batch_origin_is_ordinary(origin: &DeferredTriggerBatchOrigin) -> bool {
     matches!(origin, DeferredTriggerBatchOrigin::Ordinary)
+}
+
+/// CR 603.3b: whether a queued triggered ability belongs to the placement
+/// process under way. Abilities that triggered during that process go on the
+/// stack only after every ability of the process, both parts, is on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) enum TriggerPlacementProcess {
+    /// Not yet part of a placement process: a fresh collection, or an ability
+    /// that triggered while another process was being placed.
+    #[default]
+    Fresh,
+    /// Part of the process being placed: selected into its stage, parked as its
+    /// later part, a paused remainder of it, or an observer of one of its
+    /// abilities (CR 603.2: it triggered when that ability triggered).
+    UnderWay,
+}
+
+fn trigger_placement_process_is_fresh(process: &TriggerPlacementProcess) -> bool {
+    matches!(process, TriggerPlacementProcess::Fresh)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -465,6 +486,10 @@ pub struct PendingTriggerContext {
     /// closed).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) causes: Vec<GameEvent>,
+    /// CR 603.3b: whether this ability belongs to the placement process under
+    /// way (see [`TriggerPlacementProcess`]).
+    #[serde(default, skip_serializing_if = "trigger_placement_process_is_fresh")]
+    pub(crate) placement_process: TriggerPlacementProcess,
 }
 
 fn trigger_firing_is_unknown(firing: &TriggerFiring) -> bool {
@@ -492,6 +517,7 @@ impl PendingTriggerContext {
             batch_origin: DeferredTriggerBatchOrigin::Ordinary,
             firing,
             causes: Vec::new(),
+            placement_process: TriggerPlacementProcess::Fresh,
         }
     }
 
@@ -525,6 +551,7 @@ impl PendingTriggerContext {
             batch_origin: DeferredTriggerBatchOrigin::Ordinary,
             firing,
             causes,
+            placement_process: TriggerPlacementProcess::Fresh,
         }
     }
 
@@ -542,11 +569,24 @@ impl PendingTriggerContext {
             batch_origin: DeferredTriggerBatchOrigin::Ordinary,
             firing: identity.firing(),
             causes,
+            placement_process: TriggerPlacementProcess::Fresh,
         }
     }
 
     pub(crate) fn firing(&self) -> TriggerFiring {
         self.firing
+    }
+
+    /// CR 603.3b + CR 113.7a: the part this ability is placed in, read from its
+    /// trigger-time definition; an ability with no definition is placed in the
+    /// first part.
+    pub(crate) fn placement_part(&self) -> TriggerPlacementPart {
+        self.pending
+            .ability
+            .triggered_definition()
+            .map_or(TriggerPlacementPart::Ordinary, |def| {
+                def.mode.placement_part()
+            })
     }
 
     pub(crate) fn record_duration_event(&mut self, event: DurationEvent) {
@@ -6296,6 +6336,37 @@ pub(crate) fn trigger_apnap_rank(state: &GameState, controller: PlayerId) -> usi
     }
 }
 
+/// CR 603.3b + CR 101.4: stack-placement order of a collected trigger. Compared
+/// field by field in declaration order: the placement part (every first-part
+/// trigger of every player before any second-part trigger), then APNAP rank
+/// (CR 805.6/805.7: the team rank in shared-team-turn formats), then
+/// collection order. `collection_order: None` marks a chosen remainder, which
+/// keeps its queued order (stable sort).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct TriggerPlacementKey {
+    part: TriggerPlacementPart,
+    apnap_rank: usize,
+    collection_order: Option<u32>,
+}
+
+impl TriggerPlacementKey {
+    /// CR 603.3b: a chosen remainder keeps its queued (chosen) order.
+    fn keeping_chosen_order(self) -> Self {
+        Self {
+            collection_order: None,
+            ..self
+        }
+    }
+}
+
+fn trigger_placement_key(state: &GameState, ctx: &PendingTriggerContext) -> TriggerPlacementKey {
+    TriggerPlacementKey {
+        part: ctx.placement_part(),
+        apnap_rank: trigger_apnap_rank(state, ctx.pending.controller),
+        collection_order: Some(ctx.pending.timestamp),
+    }
+}
+
 fn trigger_order_controller(state: &GameState, controller: PlayerId) -> PlayerId {
     if state.format_config.topology().has_shared_team_turns() {
         // CR 805.6 / CR 805.7 + CR 603.3b: APNAP choices are made by teams in
@@ -9748,15 +9819,11 @@ fn collect_pending_triggers_with_collection(
     // look back to a controller who may have left with it (CR 603.10a).
     let mut pending = retire_departed_controller_contexts(state, pending);
 
-    // CR 603.3b + CR 101.4 + CR 805.6/805.7: Stack-placement order is full
-    // APNAP turn order. Shared-team-turn formats rank/order by team while
-    // preserving the real trigger controller on each pending trigger.
-    pending.sort_by_key(|t| {
-        (
-            trigger_apnap_rank(state, t.pending.controller),
-            t.pending.timestamp,
-        )
-    });
+    // CR 603.3b + CR 101.4 + CR 805.6/805.7: Stack-placement order is the
+    // placement part, then full APNAP turn order. Shared-team-turn formats
+    // rank/order by team while preserving the real trigger controller on each
+    // pending trigger.
+    pending.sort_by_key(|t| trigger_placement_key(state, t));
     pending
 }
 
@@ -10154,11 +10221,12 @@ pub(crate) fn process_triggers_observing(
 /// CR 603.2c: each target-lock span has exactly one owner. This window owns
 /// the span its dispatched context emits, including an in-window construction
 /// finisher's (`ConstructionSpanOwner::EnclosingWindow`). An action-seam
-/// finisher owns its own span through [`hold_construction_span`]; a synthetic
+/// finisher owns its own span through [`queue_construction_span`]; a synthetic
 /// dispatch's span (a dungeon room) is owned by the `ChooseDungeonRoom` arm's
 /// range collection. When this window runs on the reducer action's own buffer,
 /// the drain that ran it claims the range through [`drain_on_action_buffer`],
-/// so the post-action pipeline does not collect it again.
+/// so the post-action pipeline does not collect it again. Observers it collects
+/// are marked as members of the placement process under way (CR 603.3b).
 fn collect_target_lock_side_effects(state: &mut GameState, events_out: &[GameEvent], from: usize) {
     if from >= events_out.len() {
         return;
@@ -10181,56 +10249,95 @@ pub(crate) enum ConstructionSpanOwner {
     EnclosingWindow,
 }
 
-/// The abilities a finisher's own span triggered, matched at emission and not
-/// yet queued (CR 603.2e: a "becomes" trigger is decided when the event happens).
-#[must_use]
-pub(crate) struct HeldConstructionSpan {
-    contexts: Vec<PendingTriggerContext>,
+/// CR 603.3b + CR 603.12 + CR 309.4c: whether the finisher now running is
+/// the finisher of the first ability that the ability resolution under way
+/// put on the stack. The carrier must be an ability (`StackEntryKind::class`) (a spell carrier's id is
+/// its card's old object id, and an instant or sorcery's final part, CR 608.2n,
+/// can still trigger a later sibling), and the finalizing entry must be the
+/// only ability-class stack entry newer than it: an ability's entry id is
+/// allocated from `next_object_id` when it is pushed, so a newer ability-class
+/// entry was put on the stack after the carrier began resolving, and an
+/// earlier finisher's entry stays on the stack until a player receives priority.
+fn ability_resolution_is_placing_its_first_ability(state: &GameState) -> bool {
+    let Some(carrier) = state
+        .resolving_stack_entry
+        .as_ref()
+        .filter(|entry| matches!(entry.kind.class(), StackObjectClass::Ability(_)))
+    else {
+        return false;
+    };
+    state
+        .stack
+        .iter()
+        .filter(|entry| {
+            matches!(entry.kind.class(), StackObjectClass::Ability(_)) && entry.id > carrier.id
+        })
+        .count()
+        == 1
 }
 
-/// CR 603.2 + CR 603.2c + CR 603.2e: match `events[start..]` against the game
-/// as it is now and claim the span for ordinary collectors, so the post-action
-/// pipeline (or a live announcement's staging) does not collect it again.
-/// `None` when the enclosing window owns the span.
-#[must_use = "release the held span after the finisher's drain"]
-pub(crate) fn hold_construction_span(
-    state: &mut GameState,
-    events: &[GameEvent],
-    start: usize,
-    owner: ConstructionSpanOwner,
-) -> Option<HeldConstructionSpan> {
-    match owner {
-        ConstructionSpanOwner::EnclosingWindow => None,
-        ConstructionSpanOwner::Finisher => {
-            let contexts = collect_pending_triggers(state, &events[start.min(events.len())..]);
-            claim_events_for_ordinary_collection(state, events, start);
-            Some(HeldConstructionSpan { contexts })
+/// CR 603.3b + CR 603.12 + CR 309.4c: a triggered ability put on the stack
+/// through a construction prompt (a target or mode choice) while an ability's resolution is still under way is placed with every
+/// ability that triggered earlier in that resolution, so the abilities queued
+/// by now join its placement process; what its own placement triggers waits for
+/// the next repetition. Only the finisher of the first ability the resolution
+/// put on the stack joins: at a later finisher of the same resolution the
+/// `Fresh` contexts are what an earlier finisher's placement triggered, which
+/// go on together with what this one triggers, in the next repetition.
+fn join_mid_resolution_triggers_to_process(state: &mut GameState) {
+    if !ability_resolution_is_placing_its_first_ability(state) {
+        return;
+    }
+    for context in &mut state.deferred_triggers {
+        if context.placement_process == TriggerPlacementProcess::Fresh {
+            context.placement_process = TriggerPlacementProcess::UnderWay;
         }
     }
 }
 
-/// CR 603.3 + CR 603.3b: queue the held abilities after the finisher's own
-/// drain, so none joins the process it triggered during; they wait with that
-/// process's remaining queued siblings.
-pub(crate) fn release_construction_span(state: &mut GameState, held: Option<HeldConstructionSpan>) {
-    if let Some(HeldConstructionSpan { contexts }) = held {
-        queue_parked_trigger_contexts(state, contexts, DeferredTriggerBatchOrigin::Ordinary);
+/// CR 603.2 + CR 603.2c + CR 603.2e + CR 603.3b: match the span a finisher emitted against the game as it is now, claim it for the ordinary collectors, and queue what it triggered before the finisher's drain. Those abilities are not part of the placement process under way, so the drain places that process first; while an instant or sorcery is still resolving the drain is refused (CR 608.2n), and they are placed together with that resolution's other triggered abilities. Inside an ability's resolution, the finisher of the first ability it put on the stack first marks what is already queued as members of the process under way.
+pub(crate) fn queue_construction_span(
+    state: &mut GameState,
+    events: &[GameEvent],
+    start: usize,
+    owner: ConstructionSpanOwner,
+) {
+    match owner {
+        ConstructionSpanOwner::EnclosingWindow => {}
+        ConstructionSpanOwner::Finisher => {
+            // CR 603.3b + CR 603.12: the abilities that triggered earlier in the resolution this finisher's ability was put on the stack in are queued by now; they belong to its process, not to what its own targeting triggers. Only the first ability a resolution puts on the stack does this.
+            join_mid_resolution_triggers_to_process(state);
+            let contexts = collect_pending_triggers(state, &events[start.min(events.len())..]);
+            claim_events_for_ordinary_collection(state, events, start);
+            queue_parked_trigger_contexts(state, contexts, DeferredTriggerBatchOrigin::Ordinary);
+        }
     }
 }
 
 /// CR 603.2 + CR 603.2c: the one collection that admits
 /// `GameEvent::AbilityTriggered`: the dispatch window that produced it. Every
 /// other collection refuses the event, so each occurrence is collected
-/// exactly once.
+/// exactly once. An observer it collects joins the placement process of the
+/// ability it observes (CR 603.3b).
 fn collect_dispatch_side_effects_into_deferred(state: &mut GameState, events: &[GameEvent]) {
     let mut session = TriggerCollectionSession::new(TriggerCollectionOverlay::default());
     session.ability_triggered = AbilityTriggeredCollection::Admitted;
-    let pending = collect_pending_triggers_with_collection(
+    let mut pending = collect_pending_triggers_with_collection(
         state,
         events,
         LogicalZoneTriggerCollection::Ordinary,
         &mut session,
     );
+    // CR 603.2 + CR 603.3b: an observer triggered when the ability being put on the stack triggered, so it belongs to that ability's placement process. Every other ability collected here (a becomes-target, ward or crime trigger, CR 700.13) triggered during placement and waits for the next repetition.
+    for ctx in &mut pending {
+        if ctx
+            .trigger_events
+            .iter()
+            .any(|event| matches!(event, GameEvent::AbilityTriggered { .. }))
+        {
+            ctx.placement_process = TriggerPlacementProcess::UnderWay;
+        }
+    }
     state.deferred_triggers.extend(pending);
 }
 
@@ -11012,8 +11119,8 @@ fn build_ephemeral_order_template(
     }
 }
 
-/// CR 603.3b: whether `queued` — one ordering controller's queued trigger
-/// identities, in queue order — is exactly the not-yet-announced end of an order
+/// CR 603.3b: whether `queued` — one ordering controller's queued first-part
+/// trigger identities of one placement process, in queue order — is exactly the not-yet-announced end of an order
 /// that controller already chose. `build_ephemeral_order_template` pins a chosen
 /// order's triggers in that order, and a construction pause parks the rest of it
 /// contiguously and in order, so a chosen remainder is the tail of those pins.
@@ -11053,45 +11160,50 @@ fn queued_triggers_continue_chosen_order(
 
 /// CR 603.3b: put a drained deferred queue into placement order before grouping.
 /// Segment and settlement collectors append their contexts as each delivery
-/// completes, so a fresh collection is normalized back to APNAP order
-/// (timestamp within a controller) and every controller orders its complete
-/// batch once before the next player receives priority. The not-yet-announced
-/// remainder of an order a controller already chose keeps that chosen order:
-/// re-sorting it would move triggers the player has already placed.
+/// completes, so a fresh collection is normalized back to placement order
+/// (part, then APNAP, then timestamp within a controller) and every controller
+/// orders its complete batch once before the next player receives priority. The
+/// not-yet-announced first-part remainder of an order a controller already
+/// chose keeps that chosen order: re-sorting it would move triggers the player
+/// has already placed. A chosen remainder belongs to one placement process, so
+/// the remainder is judged per (process, ordering controller).
 fn normalize_deferred_trigger_order(state: &GameState, pending: &mut [PendingTriggerContext]) {
-    let mut controllers: Vec<PlayerId> = Vec::new();
-    for ctx in pending.iter() {
-        let controller = trigger_order_controller(state, ctx.pending.controller);
-        if !controllers.contains(&controller) {
-            controllers.push(controller);
+    type RemainderKey = (TriggerPlacementProcess, PlayerId);
+    let remainder_key = |ctx: &PendingTriggerContext| -> Option<RemainderKey> {
+        match ctx.placement_part() {
+            TriggerPlacementPart::Ordinary => Some((
+                ctx.placement_process,
+                trigger_order_controller(state, ctx.pending.controller),
+            )),
+            TriggerPlacementPart::ObservesAbilityTriggering => None,
+        }
+    };
+    let mut keys: Vec<RemainderKey> = Vec::new();
+    for key in pending.iter().filter_map(remainder_key) {
+        if !keys.contains(&key) {
+            keys.push(key);
         }
     }
-    let chosen_remainders: Vec<PlayerId> = controllers
+    let chosen_remainders: Vec<RemainderKey> = keys
         .into_iter()
-        .filter(|controller| {
+        .filter(|key| {
             let queued: Vec<_> = pending
                 .iter()
-                .filter(|ctx| {
-                    trigger_order_controller(state, ctx.pending.controller) == *controller
-                })
+                .filter(|ctx| remainder_key(ctx) == Some(*key))
                 .map(thisobject_order_source)
                 .collect();
-            queued_triggers_continue_chosen_order(state, *controller, &queued)
+            queued_triggers_continue_chosen_order(state, key.1, &queued)
         })
         .collect();
     // The sort is stable: a chosen remainder carries no timestamp key, so it keeps
-    // its queued order within its controller's APNAP slot.
+    // its queued order within its part and controller's APNAP slot.
     pending.sort_by_key(|ctx| {
-        let controller = trigger_order_controller(state, ctx.pending.controller);
-        let collection_order = if chosen_remainders.contains(&controller) {
-            None
+        let key = trigger_placement_key(state, ctx);
+        if remainder_key(ctx).is_some_and(|k| chosen_remainders.contains(&k)) {
+            key.keeping_chosen_order()
         } else {
-            Some(ctx.pending.timestamp)
-        };
-        (
-            trigger_apnap_rank(state, ctx.pending.controller),
-            collection_order,
-        )
+            key
+        }
     });
 }
 
@@ -11215,8 +11327,8 @@ fn apply_trigger_order_template(
 
 /// CR 603.3b: Partition `pending` by ordering controller (preserving the APNAP
 /// placement order produced by `collect_pending_triggers`), populate
-/// `state.pending_trigger_order` with one `TriggerOrderGroup` per controller/team,
-/// and return either the first ordering prompt (earliest APNAP unordered group) or
+/// `state.pending_trigger_order` with one `TriggerOrderGroup` per ordering
+/// controller within one placement stage (process, part), and return either the first ordering prompt (earliest APNAP unordered group) or
 /// `NoChoiceNeeded` when no group requires a choice.
 ///
 /// Choice order vs placement order — the two are intentionally distinct:
@@ -11231,6 +11343,9 @@ fn begin_trigger_ordering(
     pending: Vec<PendingTriggerContext>,
 ) -> TriggerOrderingDisposition {
     use crate::types::game_state::{PendingTriggerOrder, TriggerOrderGroup};
+
+    // CR 603.3b: one pass places one part of one placement process. First-part abilities of every player go before any second-part ability, the second part starts once the first is placed, and abilities that triggered during the process wait until it is placed. This process repeats.
+    let pending = take_placement_stage(state, pending);
 
     // Partition by ordering controller while preserving the input (placement) order.
     //
@@ -11308,6 +11423,52 @@ fn begin_trigger_ordering(
     let wf = build_next_order_triggers_prompt(state)
         .expect("just-populated pending_trigger_order must yield a prompt");
     TriggerOrderingDisposition::PromptForChoice(Box::new(wf))
+}
+
+/// CR 603.3b: select the one (process, part) stage of `pending` this pass
+/// places, and park every other context back in `deferred_triggers`, in order.
+///
+/// The process is the one under way when any context of `pending` belongs to
+/// it, otherwise a fresh one; the part is the lowest part among that process's
+/// contexts. A fresh stage starts a new process, so its members are marked as
+/// belonging to it, and so is the parked later part of that process. Contexts
+/// of the other process keep their mark (they triggered during the process
+/// being placed, or are the process an open prompt is placing). Reads `pending`
+/// only, never the queue.
+fn take_placement_stage(
+    state: &mut GameState,
+    pending: Vec<PendingTriggerContext>,
+) -> Vec<PendingTriggerContext> {
+    let process = if pending
+        .iter()
+        .any(|ctx| ctx.placement_process == TriggerPlacementProcess::UnderWay)
+    {
+        TriggerPlacementProcess::UnderWay
+    } else {
+        TriggerPlacementProcess::Fresh
+    };
+    let Some(part) = pending
+        .iter()
+        .filter(|ctx| ctx.placement_process == process)
+        .map(PendingTriggerContext::placement_part)
+        .min()
+    else {
+        return pending;
+    };
+    let (mut stage, parked): (Vec<_>, Vec<_>) = pending
+        .into_iter()
+        .partition(|ctx| ctx.placement_process == process && ctx.placement_part() == part);
+    for ctx in &mut stage {
+        ctx.placement_process = TriggerPlacementProcess::UnderWay;
+    }
+    let parked = parked.into_iter().map(|mut ctx| {
+        if ctx.placement_process == process {
+            ctx.placement_process = TriggerPlacementProcess::UnderWay;
+        }
+        ctx
+    });
+    state.deferred_triggers.extend(parked);
+    stage
 }
 
 /// CR 603.3b + CR 605.4a: If a trigger-ordering choice interrupted a
@@ -15608,9 +15769,11 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
     // `elimination::drain_or_clear_deferred_triggers_after_elimination`'s
     // `pending_trigger_order.is_some()` guard, and the reducer dispatching on
     // the `(waiting_for, action)` pair. The deferred queue is not always empty while
-    // `OrderTriggers` is open: an action-seam construction finisher
-    // queues the abilities its own target choice triggered after its drain
-    // returned on that prompt (CR 603.3b). The only waiting-state-agnostic entries are
+    // `OrderTriggers` is open: an action-seam construction finisher queues the
+    // abilities its own target choice triggered before its drain, which can return
+    // on that prompt, and the stage selector parks a later part, or abilities that
+    // triggered during the process, behind an open order prompt (CR 603.3b). The
+    // only waiting-state-agnostic entries are
     // concession/elimination and debug actions, which is why `elimination.rs`
     // clears that recipient alongside the construction cursors it already
     // clears.
@@ -19746,15 +19909,11 @@ fn collect_matching_delayed_triggers_with(
     // nothing; its one-shot record is already gone.
     let mut pending = retire_departed_controller_contexts(state, pending);
 
-    // CR 603.3b + CR 101.4: APNAP stack-placement order for the firing batch.
-    // Stable sort; the per-batch timestamp (state.turn_number) is constant, so it
-    // preserves the prior same-controller order the ordering pass then consumes.
-    pending.sort_by_key(|ctx| {
-        (
-            trigger_apnap_rank(state, ctx.pending.controller),
-            ctx.pending.timestamp,
-        )
-    });
+    // CR 603.3b + CR 101.4: placement-part then APNAP stack-placement order for
+    // the firing batch. Stable sort; the per-batch timestamp (state.turn_number)
+    // is constant, so it preserves the prior same-controller order the ordering
+    // pass then consumes.
+    pending.sort_by_key(|ctx| trigger_placement_key(state, ctx));
     DelayedTriggerMatch {
         contexts: pending,
         consumed: consumed_events,
@@ -19934,12 +20093,8 @@ fn collect_pending_and_delayed_triggers_reporting_terminalized(
     } = collect_matching_delayed_triggers(state, delayed_events, delayed_scope);
     let mut contexts = normal_pending;
     contexts.extend(delayed_pending);
-    contexts.sort_by_key(|ctx| {
-        (
-            trigger_apnap_rank(state, ctx.pending.controller),
-            ctx.pending.timestamp,
-        )
-    });
+    // CR 603.3b + CR 101.4: placement part, then APNAP order.
+    contexts.sort_by_key(|ctx| trigger_placement_key(state, ctx));
     (
         CollectedTriggerContextBatch {
             contexts,
@@ -62716,6 +62871,40 @@ pub mod tests {
         let mut fresh = vec![chosen[1].clone(), chosen[2].clone()];
         normalize_deferred_trigger_order(&unmarked, &mut fresh);
         assert_eq!(sources(&fresh), vec![3, 2]);
+    }
+
+    /// CR 603.3b: the placement-process mark survives a serialized pause and is
+    /// skipped while it holds its default; a saved context without it loads as
+    /// a fresh one.
+    #[test]
+    fn placement_process_mark_round_trips_and_defaults_to_fresh() {
+        let state = setup();
+        let fresh = auto_inert_gate_context(&state, false);
+        assert_eq!(fresh.placement_process, TriggerPlacementProcess::Fresh);
+        let fresh_json = serde_json::to_value(&fresh).expect("serializes");
+        assert!(fresh_json.get("placement_process").is_none());
+        let restored: PendingTriggerContext =
+            serde_json::from_value(fresh_json).expect("deserializes");
+        assert_eq!(restored, fresh);
+
+        let mut under_way = fresh.clone();
+        under_way.placement_process = TriggerPlacementProcess::UnderWay;
+        let under_way_json = serde_json::to_value(&under_way).expect("serializes");
+        assert_eq!(
+            under_way_json.get("placement_process"),
+            Some(&serde_json::json!("UnderWay"))
+        );
+        let restored: PendingTriggerContext =
+            serde_json::from_value(under_way_json.clone()).expect("deserializes");
+        assert_eq!(restored, under_way);
+
+        let mut saved = under_way_json;
+        saved
+            .as_object_mut()
+            .expect("a context is a JSON object")
+            .remove("placement_process");
+        let loaded: PendingTriggerContext = serde_json::from_value(saved).expect("deserializes");
+        assert_eq!(loaded.placement_process, TriggerPlacementProcess::Fresh);
     }
 
     /// Row 10b — the subtype-defended restriction scope never matches a
