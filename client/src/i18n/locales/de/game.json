@@ -1351,7 +1351,8 @@
       "title": "{{effect}}, sofern du nicht bezahlst",
       "titleChooseOne": "{{effect}}, sofern du nicht eines bezahlst",
       "dontPay": "Nicht bezahlen",
-      "takeEffect": "Den Effekt hinnehmen"
+      "takeEffect": "Den Effekt hinnehmen",
+      "priorChoice": "Spieler {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "An Arkan koppeln?",
