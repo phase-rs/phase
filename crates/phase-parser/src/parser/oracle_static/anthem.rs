@@ -1201,10 +1201,13 @@ fn parse_dynamic_for_each_pt_term(
         .parse(for_each_with_marker)
         .ok()?;
     let pt_text = pt_text.trim();
-    let (pt_source, subject_number) = match (parse_pump_verb(pt_text), verb) {
-        (Ok((rest, number)), _) => (rest, Some(number)),
-        (Err(_), PumpTermVerb::SharedWithLead(lead_number)) => (pt_text, lead_number),
-        (Err(_), PumpTermVerb::Own) => return None,
+    let (pt_source, subject_number) = match (
+        nom_primitives::scan_at_word_boundaries(pt_text, parse_pump_verb),
+        verb,
+    ) {
+        (Some((rest, number)), _) => (rest, Some(number)),
+        (None, PumpTermVerb::SharedWithLead(lead_number)) => (pt_text, lead_number),
+        (None, PumpTermVerb::Own) => return None,
     };
     let (power, toughness) = parse_pt_mod(pt_source)?;
     let quantity = super::oracle_quantity::parse_for_each_clause_expr_deferred(
@@ -1248,7 +1251,8 @@ fn parse_repeated_for_each_pt_modifications(text: &str) -> Option<Vec<Continuous
 
     // Only the first term carries the verb once the predicate is split; every
     // term shares it, and with it the subject's number.
-    let lead_number = parse_pump_verb(&terms[0]).ok().map(|(_, number)| number);
+    let lead_number = nom_primitives::scan_at_word_boundaries(&terms[0], parse_pump_verb)
+        .map(|(_, number)| number);
     let mut modifications = Vec::new();
     for term in &terms {
         modifications.extend(parse_dynamic_for_each_pt_term(

@@ -3388,24 +3388,116 @@ fn type_filters_are_juxtaposed_subtype_and_core(type_filters: &[TypeFilter]) -> 
 /// named card zone. The default is intentionally reject-by-default so a future
 /// property cannot widen this parser without an explicit admissibility decision.
 fn is_admissible_zone_card_count_property(property: &FilterProp) -> bool {
-    if matches!(
-        property,
-        FilterProp::Historic
-            | FilterProp::NotHistoric
-            | FilterProp::HasSupertype { .. }
-            | FilterProp::NotSupertype { .. }
-            | FilterProp::Cmc {
-                value: QuantityExpr::Fixed { .. },
-                ..
-            }
-    ) {
-        return true;
-    }
     match property {
+        FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Cmc {
+            value: QuantityExpr::Fixed { .. },
+            ..
+        } => true,
         FilterProp::AnyOf { props } => {
             !props.is_empty() && props.iter().all(is_admissible_zone_card_count_property)
         }
-        _ => false,
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::ControllerMatches { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::CanEnchant { .. }
+        | FilterProp::Counters { .. }
+        | FilterProp::Cmc { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedTo { .. }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::NotColor { .. }
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::Prepared
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::PtComparison { .. }
+        | FilterProp::Not { .. }
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::SharesQuality { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => false,
     }
 }
 
@@ -3445,7 +3537,68 @@ fn add_zone_card_count_property(
                 .map(|filter| add_zone_card_count_property(Some(filter), property.clone()))
                 .collect(),
         },
-        Some(filter) => TargetFilter::And {
+        Some(
+            filter @ (TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Opponent
+            | TargetFilter::SelfRef
+            | TargetFilter::GrantingObject { .. }
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::Not { .. }
+            | TargetFilter::And { .. }
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastCreated
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
+            | TargetFilter::ChosenCard
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ChoiceAssignment { .. }
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::AttackedPlayerOrPlaneswalker
+            | TargetFilter::EventTarget
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::AffectedObjectOwner
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::OriginalSource
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::HasChosenName
+            | TargetFilter::ChosenDamageSource { .. }
+            | TargetFilter::Named { .. }
+            | TargetFilter::Owner
+            | TargetFilter::AllPlayers),
+        ) => TargetFilter::And {
             filters: vec![
                 filter,
                 TargetFilter::Typed(TypedFilter::default().properties(vec![property])),

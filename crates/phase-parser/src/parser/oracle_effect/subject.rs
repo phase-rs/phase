@@ -16,7 +16,6 @@ use super::imperative;
 use super::lower::BOUNDED_TARGET_CARDINALITIES;
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
-use crate::types::ability::filter_contains_filter_prop;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChooseOneOfKind, ChosenSubtypeKind, ColorChangeMode,
     ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRecipient, Duration,
@@ -6173,44 +6172,6 @@ fn build_pt_choice_clause(
     })
 }
 
-/// CR 202.3: Identify the filtered zone-card quantities that need the
-/// postnominal mana-value grammar. This keeps the compound fallback narrow:
-/// other dynamic quantities (for example, cards drawn this turn) remain owned
-/// by their existing lowering path instead of being reinterpreted here.
-fn quantity_expr_contains_cmc_zone_count(quantity: &QuantityExpr) -> bool {
-    match quantity {
-        QuantityExpr::Ref {
-            qty:
-                QuantityRef::ZoneCardCount {
-                    filter: Some(filter),
-                    ..
-                },
-        } => filter_contains_filter_prop(filter, &|property| {
-            matches!(property, FilterProp::Cmc { .. })
-        }),
-        _ => quantity.any_ref(&mut |quantity_ref| match quantity_ref {
-            QuantityRef::ZoneCardCount {
-                filter: Some(filter),
-                ..
-            } => filter_contains_filter_prop(filter, &|property| {
-                matches!(property, FilterProp::Cmc { .. })
-            }),
-            _ => false,
-        }),
-    }
-}
-
-fn dynamic_modifications_include_cmc_zone_count(modifications: &[ContinuousModification]) -> bool {
-    modifications.iter().any(|modification| {
-        let value = match modification {
-            ContinuousModification::AddDynamicPower { value }
-            | ContinuousModification::AddDynamicToughness { value } => value,
-            _ => return false,
-        };
-        quantity_expr_contains_cmc_zone_count(value)
-    })
-}
-
 /// Continuous-clause builder. Unstated durations default to Permanent at four
 /// keyword-driven arms: Suspend, in-addition-to-types, Licid attachable
 /// subtypes, and pure `GrantTrigger` grants (CR 611.2a).
@@ -6329,78 +6290,7 @@ fn build_continuous_clause(
         return None;
     }
 
-    // CR 613.4c: a targeted continuous grant may combine a leading keyword
-    // clause with a dynamic P/T clause ("gains indestructible and gets +1/+0
-    // for each ..."). The generic modification extractor intentionally keeps
-    // the fixed P/T shape, so let the static parser's shared dynamic-pump
-    // authority replace only those fixed axes while preserving the keyword
-    // modifications and the existing GenericEffect runtime path.
     let affected = static_affected_for_application(&application);
-    let already_dynamic = modifications.iter().any(|modification| {
-        matches!(
-            modification,
-            ContinuousModification::AddDynamicPower { .. }
-                | ContinuousModification::AddDynamicToughness { .. }
-        )
-    });
-    if !already_dynamic {
-        if let Some(mut dynamic_def) =
-            parse_continuous_gets_has(predicate_text, affected.clone(), predicate_text)
-        {
-            let dynamic_modifications: Vec<_> = dynamic_def
-                .modifications
-                .iter()
-                .filter(|modification| {
-                    matches!(
-                        modification,
-                        ContinuousModification::AddDynamicPower { .. }
-                            | ContinuousModification::AddDynamicToughness { .. }
-                    )
-                })
-                .cloned()
-                .collect();
-            // CR 611.2b: a stated continuous condition must be rechecked while
-            // the effect exists. GenericEffect evaluates `StaticDefinition::condition`
-            // once at resolution and then clears it, so this fallback must decline
-            // conditional definitions rather than silently changing that duration
-            // semantics. The existing conditional lowering paths remain authoritative.
-            if dynamic_def.condition.is_none()
-                && dynamic_def.per_player_condition.is_none()
-                && dynamic_modifications_include_cmc_zone_count(&dynamic_modifications)
-            {
-                let mut combined = modifications;
-                combined.retain(|modification| {
-                    !matches!(
-                        modification,
-                        ContinuousModification::AddPower { .. }
-                            | ContinuousModification::AddToughness { .. }
-                    )
-                });
-                combined.extend(dynamic_modifications);
-                dynamic_def.modifications = combined;
-                return Some(ParsedEffectClause {
-                    history: Vec::new(),
-                    head_text: None,
-                    optional_targeting: false,
-                    unlowered_guard: None,
-                    effect: Effect::GenericEffect {
-                        static_abilities: vec![dynamic_def],
-                        duration: duration.clone(),
-                        target: application.target,
-                        end_cost: None,
-                    },
-                    duration,
-                    sub_ability: None,
-                    distribute: None,
-                    multi_target: None,
-                    condition: None,
-                    optional: false,
-                    unless_pay: None,
-                    entry_onset: ContinuousEffectOnset::WhenFollowed,
-                });
-            }
-        }
-    }
 
     // CR 702.62b + CR 611.2a + CR 611.2c: A "gains suspend" grant onto an exiled
     // card has no turn-scoped expiry — a card stays suspended (exiled, has suspend,
@@ -9875,33 +9765,6 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cmc_zone_count_detection_walks_nested_filter_grammar() {
-        use crate::types::ability::{Comparator, CountScope, PlayerRelation, ZoneRef};
-
-        let quantity = QuantityExpr::Ref {
-            qty: QuantityRef::ZoneCardCount {
-                zone: ZoneRef::Hand,
-                card_types: Vec::new(),
-                scope: CountScope::Controller,
-                filter: Some(TargetFilter::PlayerMatching {
-                    player: Box::new(PlayerFilter::ControlsCount {
-                        relation: PlayerRelation::All,
-                        filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
-                            FilterProp::Cmc {
-                                comparator: Comparator::GE,
-                                value: QuantityExpr::Fixed { value: 4 },
-                            },
-                        ])),
-                        comparator: Comparator::GE,
-                        count: Box::new(QuantityExpr::Fixed { value: 1 }),
-                    }),
-                }),
-            },
-        };
-        assert!(quantity_expr_contains_cmc_zone_count(&quantity));
-    }
 
     #[test]
     fn r2_owner_anaphor_requires_prior_object_declaration() {

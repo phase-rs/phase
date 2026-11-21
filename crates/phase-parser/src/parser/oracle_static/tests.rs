@@ -24,6 +24,69 @@ use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 use crate::types::zones::Zone;
 
+fn dynamic_power_value(modification: &ContinuousModification) -> Option<&QuantityExpr> {
+    match modification {
+        ContinuousModification::AddDynamicPower { value } => Some(value),
+        ContinuousModification::CopyValues { .. }
+        | ContinuousModification::CopyChosen
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
+        | ContinuousModification::SubstituteTextWord { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::GrantTrigger { .. }
+        | ContinuousModification::GrantReplacement { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::SetDynamicPower { .. }
+        | ContinuousModification::SetDynamicToughness { .. }
+        | ContinuousModification::SetPowerDynamic { .. }
+        | ContinuousModification::SetToughnessDynamic { .. }
+        | ContinuousModification::AddDynamicToughness { .. }
+        | ContinuousModification::AddDynamicKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor { .. }
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddChosenKeyword
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::GrantStaticAbility { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::SetChosenName
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. }
+        | ContinuousModification::RemoveManaCost => None,
+    }
+}
+
 /// CR 202.3 + CR 608.2h + CR 701.14: Algorithmic Ferocity's static pump must
 /// retain the hand-card mana-value predicate while the same resolved effect
 /// keeps its indestructible grant and Fight clause.
@@ -75,10 +138,7 @@ fn algorithmic_ferocity_static_parse_keeps_dynamic_cmc_pump_and_fight() {
     let dynamic_power = static_ability
         .modifications
         .iter()
-        .find_map(|modification| match modification {
-            ContinuousModification::AddDynamicPower { value } => Some(value),
-            _ => None,
-        })
+        .find_map(dynamic_power_value)
         .expect("expected dynamic power");
     assert_eq!(
         dynamic_power,
@@ -141,10 +201,7 @@ fn filtered_cmc_compound_pump_preserves_non_unit_multiplier() {
     let dynamic_power = static_ability
         .modifications
         .iter()
-        .find_map(|modification| match modification {
-            ContinuousModification::AddDynamicPower { value } => Some(value),
-            _ => None,
-        })
+        .find_map(dynamic_power_value)
         .expect("expected dynamic power");
     assert!(matches!(
         dynamic_power,
@@ -6354,7 +6411,7 @@ fn static_hearth_elemental_cost_reduction_includes_adventures() {
     );
 }
 
-/// CR 601.2f + CR 301.5 + CR 611.3a: Glamdring, Foe-hammer — "Instant and
+/// CR 601.2f + CR 301.5 + CR 611.3a: Glamdring — "Instant and
 /// sorcery spells you cast cost {X} less to cast, where X is equipped
 /// creature's power." Unlike the self-spell "This spell costs {X} less ..."
 /// family above, this is a BOARD-WIDE reduction the Equipment grants to OTHER
@@ -6368,7 +6425,7 @@ fn static_glamdring_foe_hammer_cost_reduction_is_live_equipped_power() {
     let def = parse_static_line(
         "Instant and sorcery spells you cast cost {X} less to cast, where X is equipped creature's power.",
     )
-    .expect("Glamdring, Foe-hammer's cost reduction should parse");
+    .expect("Glamdring's cost reduction should parse");
     let StaticMode::ModifyCost {
         mode: CostModifyMode::Reduce,
         amount: ManaCost::Cost { generic: 1, .. },
@@ -20069,6 +20126,35 @@ fn static_gets_for_each_leading_keyword_class_generic() {
                 }
         ),
         "expected a per-Mountain dynamic boost, got {power:?}"
+    );
+}
+
+#[test]
+fn static_gets_for_each_fists_of_flame_preserves_drawn_count_and_trample() {
+    let modifications = parse_continuous_modifications(
+        "Target creature gains trample and gets +1/+0 for each card you've drawn this turn.",
+    );
+    assert!(modifications.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddKeyword { keyword } if *keyword == Keyword::Trample
+    )));
+    let power = modifications
+        .iter()
+        .find_map(|modification| {
+            if let ContinuousModification::AddDynamicPower { value } = modification {
+                Some(value)
+            } else {
+                None
+            }
+        })
+        .expect("the shared extractor must emit dynamic power");
+    assert_eq!(
+        *power,
+        QuantityExpr::Ref {
+            qty: QuantityRef::CardsDrawnThisTurn {
+                player: PlayerScope::Controller,
+            },
+        }
     );
 }
 
