@@ -2098,6 +2098,7 @@ face = [
   { key = "shadow of the grave", class = "dropped_qualifier", clauses = ["Return to your hand all cards in your graveyard that you cycled or discarded this turn."] },
   { key = "shadow the hedgehog", class = "dropped_qualifier", clauses = ["Chaos Control — Each spell you cast has split second if mana from an artifact was spent to cast it."] },
   { key = "shadowfax, lord of horses", class = "dropped_qualifier", clauses = ["Whenever Shadowfax attacks, you may put a creature card with lesser power from your hand onto the battlefield tapped and attacking."] },
+  { key = "shakedown heavy", class = "wrong_object", clauses = ["If they do, untap this creature and remove it from combat."] },
   { key = "shallow grave", class = "dropped_qualifier", clauses = ["Return the top creature card of your graveyard to the battlefield."] },
   { key = "shaman en-kor", class = "wrong_duration", clauses = ["{0}: The next 1 damage that would be dealt to this creature this turn is dealt to target creature you control instead.", "{1}{W}: The next time a source of your choice would deal damage to target creature this turn, that damage is dealt to this creature instead."] },
   { key = "shang-chi, master of kung fu", class = "dropped_qualifier", clauses = ["Spend this mana only to activate abilities of creature sources."] },

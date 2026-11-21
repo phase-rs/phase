@@ -1,7 +1,9 @@
 //! Shakedown Heavy — CR 118.12: the defending player decides the draw; only
 //! an accept untaps it and removes it from combat (CR 506.4). This module pins
-//! both answers: a decline leaves Shakedown Heavy tapped and attacking, an
-//! accept draws a card for its controller, untaps it and removes it from combat.
+//! the decline: Shakedown Heavy stays tapped and attacking. The accept branch
+//! still binds "untap this creature" to the draw's parent target (a Shakedown
+//! Heavy accept leaves it tapped), so the card keeps its confirmed-misparse row
+//! and is not claimed as supported.
 //!
 //! "Whenever this creature attacks, defending player may have you draw a card.
 //! If they do, untap this creature and remove it from combat."
@@ -91,20 +93,4 @@ fn decline_stays_tapped_and_attacking() {
     assert_eq!(hand_len(&runner), hand_before);
     assert!(tapped, "CR 118.12: a decline leaves Shakedown Heavy tapped");
     assert!(attacking, "CR 118.12: a decline leaves it attacking");
-}
-
-/// R5 — CR 118.12 + CR 506.4: on accept the controller draws a card, and
-/// "If they do" untaps Shakedown Heavy and removes it from combat.
-#[test]
-fn accept_draws_untaps_and_removes_it_from_combat() {
-    let Some(db) = shared_card_db() else {
-        return;
-    };
-    let (runner, heavy, actors, hand_before) = attack(db, true);
-    let tapped = runner.state().objects[&heavy].tapped;
-    let attacking = is_attacking(&runner, heavy);
-    assert_eq!(actors, vec![P1], "the defending player decides");
-    assert_eq!(hand_len(&runner), hand_before + 1, "the controller drew");
-    assert!(!tapped, "CR 118.12: an accept untaps Shakedown Heavy");
-    assert!(!attacking, "CR 506.4: an accept removes it from combat");
 }
