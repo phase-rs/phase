@@ -27830,7 +27830,10 @@ mod tests {
             panic!("Flavor Judge's exact target clause must lower to TargetOnly");
         };
 
-        assert!(matches!(target, TargetFilter::Or { filters } if filters.len() == 2));
+        assert!(matches!(
+            target,
+            TargetFilter::Or { ref filters } if filters.len() == 2
+        ));
         assert!(
             has_stack_leg(&target, false),
             "the spell leg must survive the target qualifier: {target:?}"
@@ -27860,7 +27863,10 @@ mod tests {
             panic!("Radiant Performer's exact target clause must lower to TargetOnly");
         };
 
-        assert!(matches!(target, TargetFilter::Or { filters } if filters.len() == 2));
+        assert!(matches!(
+            target,
+            TargetFilter::Or { ref filters } if filters.len() == 2
+        ));
         assert!(
             has_stack_leg(&target, false),
             "the spell leg must survive the target qualifier: {target:?}"
@@ -27912,7 +27918,7 @@ mod tests {
             panic!("ordinary choose-target text must still reach TargetOnly");
         };
         assert!(
-            matches!(target, TargetFilter::Typed(TypedFilter { type_filters, .. })
+            matches!(target, TargetFilter::Typed(TypedFilter { ref type_filters, .. })
                 if type_filters.contains(&TypeFilter::Creature)),
             "ordinary choose target creature must retain its creature filter: {target:?}"
         );
