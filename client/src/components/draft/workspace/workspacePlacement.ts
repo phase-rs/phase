@@ -1167,26 +1167,6 @@ export function resolveWorkspaceSortColumn(
   if (shared !== undefined) return shared.column.column;
   if (pure[0] !== undefined) return pure[0].column.column;
 
-  const hasEmptyColumn = model.columns.some((column) => column.count === 0);
-  if (!hasEmptyColumn && !groupColumns.has(groupKind)) {
-    // Every column is occupied and none holds this group: its own column of a
-    // shared pair emptied out. Read its home from the assignment the sort
-    // itself makes over the pool's groups (the same `allocateColumnIndexes`
-    // the rebuild uses), never from any hypothetical plan, and rejoin it only
-    // while the column there still holds just the groups planned for it.
-    const planned = allocateColumnIndexes(axisKinds.length, model.columnCount);
-    const home = planned[axisKinds.indexOf(groupKind)];
-    const homeColumn = holding.find(({ column }) => column.column === home);
-    if (
-      home !== undefined
-      && homeColumn !== undefined
-      && homeColumn.column.count > 0
-      && unsplit(homeColumn.kinds)
-      && homeColumn.kinds.every((kind) => planned[axisKinds.indexOf(kind)] === home)
-    ) {
-      return home;
-    }
-  }
   if (model.effectiveSort === "color") {
     return model.columns.find((column) => column.count === 0)?.column ?? 0;
   }

@@ -325,10 +325,6 @@ describe("workspace placement", () => {
       ...state,
       placements: { ...state.placements, [id]: { ...state.placements[id], column: destination } },
     });
-    const sendTo = (state: DraftWorkspaceState, id: string, zone: "deck" | "sideboard"): DraftWorkspaceState => ({
-      ...state,
-      placements: { ...state.placements, [id]: { ...state.placements[id], zone } },
-    });
 
     it("prefers_the_column_holding_only_the_group_over_a_column_the_player_mixed", () => {
       const board = colorBoard([
@@ -350,33 +346,6 @@ describe("workspace placement", () => {
       // Grizzly Bears is dragged into the red column.
       const mixed = dragTo(board.state, "bears", 3);
       expect(pickFor(board, mixed, "elves", "deck")).toBe(4);
-    });
-
-    it("keeps_the_other_group_a_destination_after_one_of_a_merged_pair_leaves", () => {
-      const specs: readonly Spec[] = [
-        ["pacifism", "white", "deck"], ["opt", "blue", "deck"], ["night", "black", "deck"],
-        ["shock", "red", "deck"], ["elves", "green", "deck"],
-        ["satyr", "multicolor", "deck"], ["manalith", "colorless", "deck"],
-      ];
-      const board = colorBoard(specs, 6);
-      expect(column(board.state, "satyr")).toBe(5);
-      expect(column(board.state, "manalith")).toBe(5);
-      // Manalith leaves: a later colorless card rejoins Satyr's column, and back.
-      expect(pickFor(board, sendTo(board.state, "manalith", "sideboard"), "manalith", "deck")).toBe(5);
-      expect(pickFor(board, sendTo(board.state, "satyr", "sideboard"), "satyr", "deck")).toBe(5);
-    });
-
-    it("rejoins_the_column_the_sort_gave_the_group_not_another_that_could_share", () => {
-      const board = colorBoard([
-        ["pacifism", "white", "deck"], ["opt", "blue", "deck"],
-        ["night", "black", "deck"], ["plains", "colorless", "deck"],
-      ], 2);
-      expect([column(board.state, "pacifism"), column(board.state, "opt")]).toEqual([0, 0]);
-      expect([column(board.state, "night"), column(board.state, "plains")]).toEqual([1, 1]);
-      // Opt and Plains go to the sideboard, then Opt comes back: it was sorted
-      // beside Pacifism, not beside Child of Night.
-      const away = sendTo(sendTo(board.state, "opt", "sideboard"), "plains", "sideboard");
-      expect(pickFor(board, away, "opt", "deck")).toBe(0);
     });
 
     it("folds_the_trailing_groups_first_as_columns_get_scarcer", () => {
