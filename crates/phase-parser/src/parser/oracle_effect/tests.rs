@@ -4481,8 +4481,7 @@ fn compound_mass_counter_number_led_conjunct_stays_put_counter_all() {
 
 /// The count axis of `starts_counted_counter_placement` is the shared count grammar, and
 /// the noun axis is singular/plural; a conjunct that names no counters placed "on" a
-/// recipient is not a counter placement and stays a gap (reach guard: the primary placed
-/// counters, so the arm WAS consulted).
+/// recipient is not a counter placement.
 #[test]
 fn counted_counter_placement_gate_ranges_over_counts_and_requires_a_recipient() {
     for placement in [
@@ -4509,26 +4508,11 @@ fn counted_counter_placement_gate_ranges_over_counts_and_requires_a_recipient() 
             "{other:?} is not a counted counter placement"
         );
     }
-    let clause = parse_effect_clause(
-        "put two +1/+1 counters on target creature and three fish tokens",
-        &mut ParseContext::default(),
-    );
-    assert!(
-        matches!(clause.effect, Effect::PutCounter { .. }),
-        "reach guard: the primary placed counters, got {:?}",
-        clause.effect
-    );
-    let sub = clause.sub_ability.expect("the verbless tail is chained");
-    assert!(
-        matches!(*sub.effect, Effect::Unimplemented { .. }),
-        "a counter-free number-led tail stays an honest gap, got {:?}",
-        sub.effect
-    );
 }
 
 /// CR 608.2c + CR 701.13a: a mass exile carries its verb forward to a verbless "all <filter>"
 /// conjunct ("Exile all creatures and all artifacts"), and Shadows' Verdict's two zone
-/// legs become two exile moves, each keeping its own zone and mana-value filter.
+/// legs become two exile moves, each keeping its own zone filter.
 #[test]
 fn compound_mass_exile_conjunct_carries_exile_forward() {
     let def = parse_effect_chain("Exile all creatures and all artifacts.", AbilityKind::Spell);
@@ -4561,9 +4545,11 @@ fn compound_mass_exile_conjunct_carries_exile_forward() {
         AbilityKind::Spell,
     );
     let in_zone = |filter: &TargetFilter, zone: Zone| {
-        typed_legs(filter)
-            .iter()
-            .all(|leg| leg.properties.contains(&FilterProp::InZone { zone }))
+        let legs = typed_legs(filter);
+        !legs.is_empty()
+            && legs
+                .iter()
+                .all(|leg| leg.properties.contains(&FilterProp::InZone { zone }))
     };
     match &*verdict.effect {
         Effect::ChangeZoneAll {

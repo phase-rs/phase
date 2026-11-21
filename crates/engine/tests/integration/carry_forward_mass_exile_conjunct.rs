@@ -1,7 +1,7 @@
 //! Runtime witnesses for the verbless mass-exile conjunct released by the
 //! `ChangeZoneAll`-carries-"exile"-forward change in
 //! `parser/oracle_effect/mod.rs` (`extract_effect_verb`'s `ChangeZoneAll`
-//! arm + `starts_counted_counter_placement` gate).
+//! arm).
 //!
 //! Shadows' Verdict — Sorcery, {3}{B}{B} — Oracle text:
 //! "Exile all creatures and planeswalkers with mana value 3 or less from the
