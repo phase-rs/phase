@@ -175,10 +175,13 @@ pub fn resolve_combat_damage(
         }
         // Settled to priority with a batch still parked. An answer that settles to
         // priority finishes the batch in its own action
-        // (`engine::resume_parked_combat_damage_at_action_boundary`), so this is
-        // reached only when the active player left the game with the batch parked
-        // (CR 800.4j: the turn continues, `turns::auto_advance_once`), or from a
-        // save written before that convergence existed. No further answer will
+        // (`engine::resume_parked_combat_damage_at_action_boundary`), also after the
+        // active player left the game (CR 800.4j: the completed batch's window goes
+        // to `engine::living_priority_seat`). So this is reached, from priority.rs's
+        // completeness gate, only when that convergence held back the batch's next
+        // prompt because it names a seat that left the game (CR 800.4a, the same
+        // aliveness test `turns::auto_advance_once` applies), or from a save written
+        // before that convergence existed. No further answer will
         // arrive, so finish the batch here — otherwise the owed gains die with
         // combat AND the `!regular_damage_done` completeness gate (priority.rs)
         // re-enters this function forever.
@@ -469,9 +472,17 @@ pub(crate) fn resume_pending_combat_lifelink(
             // entered through it by the all-pass gate in priority.rs, the one path
             // the inline first-strike step takes too; a regular batch is the last
             // step and ends with this window.
-            waiting_for.or(Some(WaitingFor::Priority {
-                player: state.active_player,
-            }))
+            //
+            // CR 800.4j: a batch answered after the active player left the game
+            // (a surviving chooser's answer to its parked choice) gives that window
+            // to the next player in turn order still in the game, never to the seat
+            // that left.
+            match waiting_for {
+                None | Some(WaitingFor::Priority { .. }) => Some(WaitingFor::Priority {
+                    player: super::engine::living_priority_seat(state),
+                }),
+                prompt => prompt,
+            }
         }
     }
 }
@@ -8920,6 +8931,106 @@ mod tests {
                     if *target == TargetRef::Object(blocker))
             ),
             "the overlap's prevention still publishes, got {events:?}"
+        );
+    }
+
+    const SWANS_OF_BRYN_ARGOLL: &str = "Flying\nIf a source would deal damage to this creature, prevent that damage. The source's controller draws cards equal to the damage prevented this way.";
+    const SUNTAIL_HAWK: &str = "Flying";
+    const ABUNDANCE: &str = "If you would draw a card, you may instead choose land or nonland and reveal cards from the top of your library until you reveal a card of the chosen kind. Put that card into your hand and put all other cards revealed this way on the bottom of your library in any order.";
+
+    /// CR 800.4j: the priority window a completed batch ends with goes to the next
+    /// player in turn order still in the game. Three players: P0's Swans of Bryn
+    /// Argoll attacks P1 and is blocked by P1's Suntail Hawk; the Hawk's 1 is
+    /// prevented, and its controller P1 draws, a draw P1's Abundance offers to
+    /// replace (CR 616.1), asked inside the batch. P0, the active player, concedes
+    /// at that prompt; P1 declines. The answer's handler
+    /// (`engine_replacement::handle_replacement_choice`) returns the completed
+    /// batch's own wait, which names P1, not the departed P0.
+    #[test]
+    fn a_completed_batch_hands_priority_to_the_next_living_seat() {
+        let mut scenario = GameScenario::new_n_player(3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        for player in [P0, P1, PlayerId(2)] {
+            for index in 0..8 {
+                scenario.add_spell_to_library_top(player, &format!("Library Filler {index}"), true);
+            }
+        }
+        let swans = scenario
+            .add_creature_from_oracle(P0, "Swans of Bryn Argoll", 4, 3, SWANS_OF_BRYN_ARGOLL)
+            .from_oracle_text_with_keywords(&["Flying"], SWANS_OF_BRYN_ARGOLL)
+            .id();
+        let hawk = scenario
+            .add_creature_from_oracle(P1, "Suntail Hawk", 1, 1, SUNTAIL_HAWK)
+            .from_oracle_text_with_keywords(&["Flying"], SUNTAIL_HAWK)
+            .id();
+        scenario.add_enchantment_from_oracle(P1, "Abundance", ABUNDANCE);
+        let mut runner = scenario.build();
+
+        let mut attacked = false;
+        for _ in 0..40 {
+            let action = match &runner.state().waiting_for {
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                WaitingFor::DeclareAttackers { .. } => {
+                    let attacks = if attacked {
+                        Vec::new()
+                    } else {
+                        vec![(swans, AttackTarget::Player(P1))]
+                    };
+                    attacked = true;
+                    GameAction::DeclareAttackers {
+                        attacks,
+                        bands: vec![],
+                    }
+                }
+                WaitingFor::DeclareBlockers { player, .. } => GameAction::DeclareBlockers {
+                    assignments: if *player == P1 {
+                        vec![(hawk, swans)]
+                    } else {
+                        Vec::new()
+                    },
+                },
+                _ => break,
+            };
+            runner.act(action).expect("combat action");
+        }
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!("got {:?}", runner.state().waiting_for);
+        };
+        assert_eq!(player, P1);
+        assert!(runner.state().combat_damage_batch_parked());
+        runner
+            .act(GameAction::Concede { player_id: P0 })
+            .expect("P0 concedes");
+        assert!(runner.state().players[0].is_eliminated);
+        assert!(runner.state().combat_damage_batch_parked());
+        let decline = candidates
+            .iter()
+            .position(|candidate| candidate.description == "Decline")
+            .expect("Abundance's Decline is offered");
+
+        let mut events = Vec::new();
+        let waiting_for = crate::game::engine_replacement::handle_replacement_choice(
+            runner.state_mut(),
+            decline,
+            &mut events,
+        )
+        .expect("P1 declines Abundance");
+
+        let state = runner.state();
+        assert!(!state.combat_damage_batch_parked());
+        assert!(state.combat.as_ref().unwrap().regular_damage_done);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::CardDrawn { player_id, .. } if *player_id == P1)),
+            "P1 drew, got {events:?}"
+        );
+        assert!(
+            matches!(waiting_for, WaitingFor::Priority { player } if player == P1),
+            "got {waiting_for:?}"
         );
     }
 }

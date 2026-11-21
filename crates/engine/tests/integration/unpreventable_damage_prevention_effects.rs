@@ -6468,6 +6468,163 @@ fn a_concession_at_the_batchs_prompt_finishes_the_batch() {
     assert_eq!(state.game_end, None);
 }
 
+/// A three-player game in the precombat main phase, with eight library cards for each player.
+fn three_player_rider_board() -> GameScenario {
+    let mut scenario = GameScenario::new_n_player(3, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1, PlayerId(2)] {
+        for index in 0..8 {
+            scenario.add_spell_to_library_top(player, &format!("Library Filler {index}"), true);
+        }
+    }
+    scenario
+}
+
+/// P0, the active player, concedes at P1's prompt inside the batch (CR 800.4a). P1 is still in the
+/// game and still owes its answer; the batch stays parked, and no player receives priority
+/// (CR 510.2).
+fn active_player_concedes_at_p1s_prompt(runner: &mut GameRunner) {
+    runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("P0 concedes");
+    let state = runner.state();
+    assert!(state.players[0].is_eliminated);
+    assert!(state.pending_combat_lifelink.is_some());
+    assert_no_priority_inside_the_batch(state);
+    assert!(
+        state.waiting_for.acting_player() == Some(P1),
+        "got {:?}",
+        state.waiting_for
+    );
+}
+
+/// What P1's answer after P0's concession left: the batch completed in that answer's own action
+/// (CR 510.2), and the priority window it ends with goes to P1, the next player in turn order
+/// still in the game, not to P0 (CR 800.4j).
+fn assert_the_answer_finished_the_batch_for_the_next_seat(
+    runner: &GameRunner,
+    result: &ActionResult,
+) {
+    let state = runner.state();
+    assert_no_priority_inside_the_batch(state);
+    assert!(state.pending_combat_lifelink.is_none());
+    assert!(state
+        .combat
+        .as_ref()
+        .is_some_and(|combat| combat.regular_damage_done));
+    assert!(
+        matches!(result.waiting_for, WaitingFor::Priority { player } if player == P1),
+        "got {:?}",
+        result.waiting_for
+    );
+    assert_eq!(state.game_end, None);
+}
+
+/// The active player leaves at the batch's prompt, and the surviving chooser's answer finishes
+/// the batch (CR 510.2, CR 800.4j). With three players, P0's Hill Giant attacks P1, whose
+/// Nefarious Lich ("If damage would be dealt to you, exile that many cards from your graveyard
+/// instead. If you can't, you lose the game.") asks P1 to exile 3 of its 4 graveyard cards, and
+/// P0's Grizzly Bears attacks P2. P0 concedes at the prompt, then P1 exiles 3 cards: the batch
+/// completes in P1's action, and P1 gets the priority window.
+#[test]
+fn an_answer_after_the_active_players_concession_finishes_the_batch() {
+    let mut scenario = three_player_rider_board();
+    let graveyard = nefarious_lich_with_graveyard(&mut scenario, 4);
+    let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mut runner = scenario.build();
+
+    to_the_first_combat_prompt(
+        &mut runner,
+        &[
+            (giant, AttackTarget::Player(P1)),
+            (bears, AttackTarget::Player(PlayerId(2))),
+        ],
+        P1,
+        &[],
+    );
+    let WaitingFor::EffectZoneChoice {
+        player,
+        cards,
+        count,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!("got {:?}", runner.state().waiting_for);
+    };
+    assert_eq!((player, count), (P1, 3));
+    active_player_concedes_at_p1s_prompt(&mut runner);
+
+    let result = runner
+        .act(GameAction::SelectCards {
+            cards: cards.into_iter().take(count).collect(),
+        })
+        .expect("P1 exiles 3 cards");
+
+    assert_the_answer_finished_the_batch_for_the_next_seat(&runner, &result);
+    let state = runner.state();
+    assert_eq!(
+        graveyard
+            .iter()
+            .filter(|id| state.objects[id].zone == Zone::Exile)
+            .count(),
+        3
+    );
+    assert_eq!(state.players[1].life, 20);
+}
+
+/// The same departure at a replacement choice the batch's substitute asks, answered through
+/// `GameAction::ChooseReplacement`. P1's Vampire of the Dire Moon (deathtouch, lifelink) blocks
+/// P0's Grizzly Bears, and P1's Nefarious Lich turns its gain of 1 into a draw ("If you would
+/// gain life, draw that many cards instead.", CR 614.6), which meets P1's Abundance's "may"
+/// (CR 616.1). P0's Hill Giant attacks P2. P0 concedes at Abundance's prompt; P1 declines it and
+/// draws: the batch completes in P1's action, and P1 gets the priority window, not P0.
+#[test]
+fn a_replacement_answer_after_the_active_players_concession_hands_priority_to_the_next_seat() {
+    let mut scenario = three_player_rider_board();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let vampire = creature_with_keywords(
+        &mut scenario,
+        P1,
+        "Vampire of the Dire Moon",
+        (1, 1),
+        &["Deathtouch", "Lifelink"],
+        VAMPIRE_OF_THE_DIRE_MOON,
+    );
+    scenario.add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH);
+    scenario.add_enchantment_from_oracle(P1, "Abundance", ABUNDANCE);
+    let mut runner = scenario.build();
+    let hand_before = hand_size(&runner, P1);
+
+    to_the_first_combat_prompt(
+        &mut runner,
+        &[
+            (bears, AttackTarget::Player(P1)),
+            (giant, AttackTarget::Player(PlayerId(2))),
+        ],
+        P1,
+        &[(vampire, bears)],
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player, .. } if player == P1
+        ),
+        "got {:?}",
+        runner.state().waiting_for
+    );
+    active_player_concedes_at_p1s_prompt(&mut runner);
+
+    let action = answering_abundance(false)(runner.state());
+    let result = runner.act(action).expect("P1 declines Abundance");
+
+    assert_the_answer_finished_the_batch_for_the_next_seat(&runner, &result);
+    assert_eq!(cards_drawn(&result.events, P1), 1);
+    assert_eq!(hand_size(&runner, P1) - hand_before, 1);
+    assert_eq!(life(&runner, P1), 20);
+}
+
 /// P4 and P5: a second Phase D rider waits behind a paused one, and no state-based action is
 /// checked inside the batch (CR 704.3: they are checked whenever a player would receive priority;
 /// CR 510.2: none does inside the batch; Vengeful Archon's and Refraction Trap's rulings: a
@@ -6681,4 +6838,47 @@ fn a_lifelink_substitutes_draws_ask_abundance() {
             "{label}"
         );
     }
+}
+
+/// The active player leaves at its own prompt inside the batch (CR 800.4a), and the batch finishes
+/// in the concession's own action (CR 510.2; CR 800.4j: the turn goes on without an active
+/// player). With three players, P0's Grizzly Bears attacks P1 and is blocked by P1's Swans of Bryn
+/// Argoll ("If a source would deal damage to this creature, prevent that damage. The source's
+/// controller draws cards equal to the damage prevented this way."), so P0 draws, a draw P0's
+/// Abundance offers to replace (CR 616.1); P0's Hill Giant attacks P2. P0 concedes at that prompt:
+/// the concession's result has the batch completed and gives priority to P1, the next player in
+/// turn order still in the game.
+#[test]
+fn the_active_players_concession_at_its_own_prompt_finishes_the_batch() {
+    let mut scenario = three_player_rider_board();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let swans = swans_of_bryn_argoll(&mut scenario);
+    scenario.add_enchantment_from_oracle(P0, "Abundance", ABUNDANCE);
+    let mut runner = scenario.build();
+
+    to_the_first_combat_prompt(
+        &mut runner,
+        &[
+            (bears, AttackTarget::Player(P1)),
+            (giant, AttackTarget::Player(PlayerId(2))),
+        ],
+        P1,
+        &[(swans, bears)],
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player, .. } if player == P0
+        ),
+        "got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().pending_combat_lifelink.is_some());
+    let result = runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("P0 concedes");
+
+    assert!(runner.state().players[0].is_eliminated);
+    assert_the_answer_finished_the_batch_for_the_next_seat(&runner, &result);
 }

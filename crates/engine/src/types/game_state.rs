@@ -34386,8 +34386,9 @@ impl GameState {
     }
 
     /// CR 510.2: a combat damage batch is parked on a choice; until it completes, no player has
-    /// priority, the deferred queue is not placed, and the batch owns every event its answers
-    /// produce (CR 510.3a + CR 603.3b).
+    /// priority, the deferred queue is not placed, and the batch takes custody of its answers'
+    /// events that no other owner collects (`combat_damage::take_answer_events_into_batch`)
+    /// (CR 510.3a + CR 603.3b).
     ///
     /// Deliberately not part of [`Self::withholds_priority`]: that predicate also reads "a play
     /// is in progress" (`play_trace::play_in_progress`), and a combat damage batch is a

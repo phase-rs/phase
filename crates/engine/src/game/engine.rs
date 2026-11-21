@@ -2019,9 +2019,13 @@ fn resume_parked_counter_cost_root_at_action_boundary(
 /// `handle_replacement_choice`'s own resume, or a second boundary over the same
 /// action, changes nothing (the fold-only claims what it folds).
 ///
-/// CR 800.4j: with the active player gone the turn continues to its completion,
-/// and the batch is finished by `turns::auto_advance_once`, which keeps a wait
-/// from naming a seat that left; this boundary leaves it to that authority.
+/// CR 800.4j: the same holds after the active player left the game (a surviving
+/// chooser answers after that player's concession): the batch finishes in the
+/// answering action, and its completed batch's priority window goes to the next
+/// player in turn order still in the game (`living_priority_seat`, from
+/// `combat_damage::resume_pending_combat_lifelink`). CR 800.4a: a next prompt the
+/// batch's resume raises is surfaced only when its acting player is still in the
+/// game, the test `turns::auto_advance_once` applies to the same resume.
 fn resume_parked_combat_damage_at_action_boundary(
     state: &mut GameState,
     answer: Option<super::combat_damage::ParkedCombatDamageAnswer>,
@@ -2031,8 +2035,7 @@ fn resume_parked_combat_damage_at_action_boundary(
     let Some(answer) = answer else {
         return Ok(None);
     };
-    if !state.combat_damage_batch_parked() || !super::players::is_alive(state, state.active_player)
-    {
+    if !state.combat_damage_batch_parked() {
         return Ok(None);
     }
     if !matches!(waiting_for, WaitingFor::Priority { .. }) {
@@ -2057,6 +2060,21 @@ fn resume_parked_combat_damage_at_action_boundary(
         events,
     )
     .unwrap_or_else(|| state.waiting_for.clone());
+    // CR 800.4a: a prompt naming a seat that left the game cannot be answered, so
+    // it is not surfaced; the priority window goes to the next player in turn
+    // order still in the game (CR 800.4j), and `resolve_combat_damage`'s re-entry
+    // guard finishes the batch from priority.rs's completeness gate.
+    // `acting_player()` is `None` for `GameOver`, which is terminal and surfaced.
+    let resumed = if resumed
+        .acting_player()
+        .is_some_and(|player| !super::players::is_alive(state, player))
+    {
+        WaitingFor::Priority {
+            player: living_priority_seat(state),
+        }
+    } else {
+        resumed
+    };
     state.waiting_for = resumed.clone();
     Ok(Some(resumed))
 }
