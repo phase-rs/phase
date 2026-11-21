@@ -706,7 +706,7 @@ fn bind_transient_effect(
         // CR 400.7 + CR 608.2k: a grant mutates its referent, so it binds only
         // the incarnation the trigger event recorded (the shared authority).
         if let Some(obj_id) =
-            crate::game::targeting::triggering_source_mutation_referent(state, ability.source_id)
+            crate::game::targeting::triggering_source_mutation_referent(state, ability)
         {
             install_transient(
                 state,
@@ -1048,10 +1048,10 @@ fn bind_transient_effect(
         // trigger that pinned its referent into `targets` (CR 603.7c) keeps the
         // existing path.
         Some(TargetFilter::EventTarget) if ability.targets.is_empty() => {
-            for obj_id in crate::game::targeting::resolve_event_referent_permanents(
+            for obj_id in crate::game::targeting::resolve_event_referent_permanents_for(
                 state,
+                ability,
                 &TargetFilter::EventTarget,
-                ability.source_id,
             ) {
                 install_transient(
                     state,
