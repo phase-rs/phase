@@ -1619,6 +1619,11 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // surface, so no viewer — including the choosing player — needs the carrier
     // itself.
     filtered.pending_combat_lifelink = None;
+    // CR 510.2 + CR 616.1: the parked pre-application batch is server
+    // authority for the same reason as its lifelink sibling above — its
+    // `batch_events` can carry redacted effect events and its tallies name
+    // replacement sources. The projected `WaitingFor::ReplacementChoice` is
+    // the complete viewer-facing interaction surface.
     // CR 608.2h: a paused player-scope clause retains its frozen aggregate in
     // authoritative state so save/restore resumes the same application. The
     // value can encode hidden-zone information (for example, hand sizes), so it
@@ -2055,6 +2060,10 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 // An id-only incarnation reference, not a payment carrier.
                 granting_object: _,
                 source_name: _,
+                // Merge seam (upstream/main): the actor binding is irrelevant
+                // to hidden-member redaction — only `duration_event_source`
+                // is read below.
+                bound_actor: _,
             } = effect;
             duration_event_source.as_deref().is_some_and(|context| {
                 source_context_names_hidden_member(context, &hidden_zone_change_ids)
@@ -6587,6 +6596,9 @@ mod tests {
                 end_permission: None,
                 granting_object: None,
                 source_name: "Paid Permanent".to_string(),
+                // Merge seam (upstream/main): object-anchored test effect,
+                // never an installer-bound bar.
+                bound_actor: None,
             },
         );
         let departed_object = state.objects[&departed].clone();
@@ -7405,6 +7417,9 @@ mod tests {
                 end_permission: None,
                 granting_object: None,
                 source_name: "Paid Permanent".to_string(),
+                // Merge seam (upstream/main): object-anchored test effect,
+                // never an installer-bound bar.
+                bound_actor: None,
             },
         );
 
@@ -7820,6 +7835,7 @@ mod tests {
                     pending_effect: effect(),
                     remaining: 1,
                     min_total_power: None,
+                    trigger_event: None,
                 }),
             ),
             (

@@ -605,11 +605,24 @@ pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
     discard_scheduled_units(state);
     // CR 724.1d + CR 511.3: if the turn ends during combat, all creatures are
     // removed from combat and the combat phase is over. Clear any active
-    // additional-combat attacker restriction (Last Night Together / Bumi) — the
-    // normal cleanup path via Phase::EndCombat or end_combat_phase_to_postcombat
-    // is skipped, so we must expire the restriction here.
+    // additional-combat attacker restriction (Last Night Together / Bumi) --
+    // the normal cleanup path via Phase::EndCombat or
+    // end_combat_phase_to_postcombat is skipped, so we must expire the
+    // restriction here even when the turn ends outside combat.
     state.current_combat_attacker_restriction = None;
     state.current_combat_attacker_restriction_source = None;
+    // CR 724.1d + CR 511.2/511.3: if the turn ends during a combat phase, the
+    // combat phase is over even though it is skipped, not completed -- run the
+    // same end-of-combat teardown the normal EndCombat transition uses, so
+    // "until end of combat" effects, replacements, and game restrictions
+    // (Champions of Minas Tirith's decline ban) expire instead of leaking
+    // into a later combat. Guard on the PHASE, not on combat presence:
+    // EndTheTurn already cleared `state.combat` before calling here. The
+    // teardown re-clears the attacker restriction and marks layers dirty
+    // (CR 611.3a: live static conditions observe the removal).
+    if state.phase.is_combat() {
+        complete_end_combat_teardown(state);
+    }
     enter_phase(state, Phase::Cleanup, events, None);
 }
 
@@ -641,6 +654,21 @@ fn complete_end_combat_teardown(state: &mut GameState) {
     state
         .pending_damage_replacements
         .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+    // CR 511.2: "this combat" game restrictions expire with every other
+    // combat-scoped effect (unit 3b: Champions of Minas Tirith's decline
+    // restriction is the first producer). One line covers both end-of-combat
+    // callers (the EndCombat step arm and `end_combat_phase_to_postcombat`)
+    // through this single teardown authority.
+    state.restrictions.retain(|r| {
+        use crate::types::ability::{GameRestriction, RestrictionExpiry};
+        match r {
+            GameRestriction::DamagePreventionDisabled { expiry, .. }
+            | GameRestriction::ProhibitActivity { expiry, .. }
+            | GameRestriction::CantEnterBattlefieldFrom { expiry, .. } => {
+                !matches!(expiry, RestrictionExpiry::EndOfCombat)
+            }
+        }
+    });
 }
 
 /// Removes, from every object's live `replacement_definitions`, each definition
@@ -2138,6 +2166,7 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.players_attacked_this_turn.clear();
     state.attacking_creatures_this_turn.clear();
     state.attacked_defenders_this_turn.clear();
+    state.attacked_players_directly_this_turn.clear();
     state.creature_attacked_defenders_this_turn.clear();
     state.steps_started_this_turn.clear();
     // CR 614.10 + CR 614.10a + CR 500.11: A turn-scoped combat skip that was
@@ -4722,7 +4751,8 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // resolve_combat_damage returns — too late without this pre-flush.
             super::layers::flush_layers(state);
             // CR 510.1 / CR 510.2: Combat damage assigned and dealt as a turn-based action.
-            // resolve_combat_damage may pause for interactive assignment (2+ blockers).
+            // resolve_combat_damage may pause for interactive assignment (2+ blockers)
+            // or for a CR 616.1 replacement-ordering choice (parked batch).
             if let Some(waiting) = combat_damage::resolve_combat_damage(state, events) {
                 state.waiting_for = waiting.clone();
                 return AutoAdvanceStep::waiting(waiting);

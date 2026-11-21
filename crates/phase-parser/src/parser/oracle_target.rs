@@ -47,7 +47,7 @@ use super::oracle_util::{
 use crate::types::text_grammar::{
     parse_color_prefix, parse_color_quality_prefix, parse_core_type, parse_exile_visibility_prefix,
     parse_leading_keyword_match, parse_leading_pt_designation, parse_token_suffix,
-    separator_continues_enclosing_list, starts_with_type_phrase_lead, KeywordMatch,
+    separator_stops_keyword_list, starts_with_type_phrase_lead, KeywordMatch,
 };
 pub(crate) use crate::types::text_grammar::{
     parse_combat_status_prefix, parse_without_keyword_suffix, starts_with_type_word,
@@ -5545,7 +5545,7 @@ fn starts_with_article_core_type_segment(text: &str) -> bool {
     false
 }
 
-fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
+pub(crate) fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(tf) => !tf.type_filters.is_empty() || !tf.properties.is_empty(),
         TargetFilter::StackSpell
@@ -9349,10 +9349,11 @@ fn parse_keyword_suffix(text: &str) -> Option<(KeywordSuffix, usize)> {
         let mut found_sep = false;
         for sep in &[", and ", ", or ", " and ", " or ", ", "] {
             if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*sep).parse(remaining) {
-                // A separator followed by a type word rather than a keyword
-                // belongs to the enclosing type list ("creature with disturb,
-                // or enchantment") and stays unconsumed for the caller.
-                if separator_continues_enclosing_list(rest) {
+                // A separator followed by anything other than another keyword
+                // stays unconsumed: it either belongs to the enclosing type
+                // list ("creature with disturb, or enchantment") or opens the
+                // following clause (Jadar, Ghoulcaller of Nephalia).
+                if separator_stops_keyword_list(rest) {
                     break;
                 }
                 if matches!(*sep, ", or " | " or ") {
@@ -16699,7 +16700,9 @@ mod tests {
     fn card_with_flashback_or_disturb_uses_keyword_kind_filters() {
         let (f, rest) =
             parse_type_phrase_folding("card with flashback or disturb, put it into your graveyard");
-        assert_eq!(rest, "put it into your graveyard");
+        // Preserve the comma that terminates the keyword qualifier so callers
+        // that parse a following clause can validate its boundary.
+        assert_eq!(rest, ", put it into your graveyard");
         let TargetFilter::Or { filters } = f else {
             panic!("expected Or filter, got {f:?}");
         };
@@ -16787,7 +16790,9 @@ mod tests {
         let (f, rest) = parse_type_phrase_folding(
             "creature with deathtouch, hexproof, reach, or trample and reveal it",
         );
-        assert_eq!(rest, "reveal it");
+        // The final "and" is a clause delimiter, not a fifth keyword-list
+        // separator; preserve it for the caller that owns the next clause.
+        assert_eq!(rest, " and reveal it");
         let TargetFilter::Or { filters } = f else {
             panic!("expected Or filter, got {f:?}");
         };
@@ -26249,6 +26254,19 @@ mod tests {
                 if t.properties.iter().filter(|p| matches!(p, FilterProp::WithKeyword { .. })).count() == 2),
             "{filter:?}"
         );
+    }
+
+    #[test]
+    fn keyword_suffix_preserves_following_clause_delimiter() {
+        let text = "with decayed, create a token";
+        let (suffix, consumed) = parse_keyword_suffix(text).expect("keyword suffix");
+        assert!(matches!(
+            suffix.properties.as_slice(),
+            [FilterProp::WithKeyword {
+                value: Keyword::Decayed
+            }]
+        ));
+        assert_eq!(&text[consumed..], ", create a token");
     }
 
     /// A non-list target followed by an unrelated ", or" clause stays untouched.
