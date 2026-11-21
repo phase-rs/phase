@@ -53,6 +53,43 @@ use crate::types::player::PlayerCounterKind;
 use crate::types::text_grammar::parse_article_number;
 use crate::types::zones::Zone;
 
+/// CR 201.2 + CR 201.2a: use a single literal name to filter recorded cycles.
+pub(super) fn named_game_cycling_quantity(name: &str) -> Option<QuantityExpr> {
+    let name = name
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    if name.is_empty()
+        || all_consuming(tag::<_, _, OracleError<'_>>("~"))
+            .parse(name.as_str())
+            .is_ok()
+    {
+        return None;
+    }
+    let operand = format!("card named {name}");
+    let (filter, rest) = parse_type_phrase_folding(&operand);
+    let TargetFilter::Typed(mut typed) = filter else {
+        return None;
+    };
+    if !rest.trim().is_empty()
+        || !matches!(typed.type_filters.as_slice(), [] | [TypeFilter::Card])
+        || typed.controller.is_some()
+        || !matches!(typed.properties.as_slice(), [FilterProp::Named { name: parsed }] if parsed == &name)
+    {
+        return None;
+    }
+    // Every recorded cycle already has a card as its subject.
+    typed.type_filters.clear();
+    Some(QuantityExpr::Ref {
+        qty: QuantityRef::CardsCycled {
+            scope: CountScope::Controller,
+            window: crate::types::ability::CyclingHistoryWindow::ThisGame,
+            filter: Some(TargetFilter::Typed(typed)),
+        },
+    })
+}
+
 /// Parse a quantity expression: either a fractional expression, a dynamic reference,
 /// or a fixed number. Fractional forms ("half X, rounded up/down") compose over the
 /// same `parse_quantity_ref` / `parse_number` primitives used for plain quantities.

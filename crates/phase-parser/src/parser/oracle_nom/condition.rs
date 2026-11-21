@@ -5,9 +5,11 @@
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::bytes::complete::take_until;
+use nom::bytes::complete::{take_until, take_while1};
 use nom::character::complete::{multispace1, satisfy};
-use nom::combinator::{cut, eof, map, map_opt, not, opt, peek, recognize, value, verify};
+use nom::combinator::{
+    all_consuming, cut, eof, map, map_opt, not, opt, peek, recognize, value, verify,
+};
 use nom::multi::many0;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
@@ -195,7 +197,55 @@ pub fn parse_condition(input: &str) -> OracleResult<'_, StaticCondition> {
 ///
 /// Useful when the prefix has already been consumed by the caller.
 pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
-    alt((parse_condition_connective, parse_single_inner_condition)).parse(input)
+    alt((
+        parse_named_game_cycling_condition,
+        parse_condition_connective,
+        parse_single_inner_condition,
+    ))
+    .parse(input)
+}
+
+pub(crate) fn parse_named_cycling_head(input: &str) -> OracleResult<'_, &str> {
+    preceded(
+        (parse_controller_action_history_subject, tag("cycled ")),
+        tag("a card named "),
+    )
+    .parse(input)
+}
+
+/// CR 109.5 + CR 608.2h: the trigger controller's history is read at resolution.
+pub(crate) fn parse_named_game_cycling_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (name_input, _) = parse_named_cycling_head(input)?;
+    let Some((candidate, rest, threshold, comparator, window)) =
+        scan_at_word_boundaries(name_input, |candidate| {
+            let (rest, (threshold, comparator)) = parse_numeric_threshold_suffix(candidate)?;
+            let (rest, window) =
+                preceded(tag(" times this "), take_while1(char::is_alphabetic)).parse(rest)?;
+            Ok((rest, (candidate, rest, threshold, comparator, window)))
+        })
+    else {
+        return Err(oracle_err(name_input));
+    };
+    if comparator != Comparator::GE
+        || all_consuming(tag::<_, _, OracleError<'_>>("game"))
+            .parse(window)
+            .is_err()
+    {
+        return Err(oracle_err(candidate));
+    }
+    peek(alt((tag(","), eof))).parse(rest)?;
+    let name_end = name_input.len() - candidate.len();
+    let lhs = nom_quantity::named_game_cycling_quantity(&name_input[..name_end])
+        .ok_or_else(|| oracle_err(name_input))?;
+    let value = i32::try_from(threshold).map_err(|_| oracle_err(candidate))?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs: QuantityExpr::Fixed { value },
+        },
+    ))
 }
 
 /// CR 608.2c: the logical connective axis of a game-state condition —
@@ -8792,14 +8842,18 @@ fn parse_player_action_this_turn_body(
 fn parse_player_action_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         parse_opponent_action_this_turn,
-        preceded(
-            alt((
-                value((), (parse_youve, tag(" "))),
-                value((), tag("you have ")),
-                value((), tag("you ")),
-            )),
-            |i| parse_player_action_this_turn_body(i, PlayerScope::Controller),
-        ),
+        preceded(parse_controller_action_history_subject, |i| {
+            parse_player_action_this_turn_body(i, PlayerScope::Controller)
+        }),
+    ))
+    .parse(input)
+}
+
+fn parse_controller_action_history_subject(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), (parse_youve, tag(" "))),
+        value((), tag("you have ")),
+        value((), tag("you ")),
     ))
     .parse(input)
 }
@@ -8982,19 +9036,20 @@ fn parse_amount_threshold(input: &str) -> OracleResult<'_, (u32, Comparator)> {
             let (rest, n) = parse_number(rest)?;
             Ok((rest, (n, Comparator::GE)))
         },
-        // "N or more/less/fewer"
-        |i| {
-            let (rest, n) = parse_number(i)?;
-            let (rest, cmp) = alt((
-                value(Comparator::GE, tag(" or more")),
-                value(Comparator::LE, tag(" or fewer")),
-                value(Comparator::LE, tag(" or less")),
-            ))
-            .parse(rest)?;
-            Ok((rest, (n, cmp)))
-        },
+        parse_numeric_threshold_suffix,
     ))
     .parse(input)
+}
+
+fn parse_numeric_threshold_suffix(input: &str) -> OracleResult<'_, (u32, Comparator)> {
+    let (rest, n) = parse_number(input)?;
+    let (rest, cmp) = alt((
+        value(Comparator::GE, tag(" or more")),
+        value(Comparator::LE, tag(" or fewer")),
+        value(Comparator::LE, tag(" or less")),
+    ))
+    .parse(rest)?;
+    Ok((rest, (n, cmp)))
 }
 
 /// CR 106.3 + CR 601.2h + CR 603.4: Parse
@@ -28878,5 +28933,45 @@ mod intervening_if_state_condition_tests {
             ObjectReferentNoun::Creature,
             &TargetFilter::Typed(TypedFilter::creature())
         ));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn named_cycling_guard_requires_a_complete_whole_game_minimum() {
+    use crate::types::ability::{CyclingHistoryWindow, TypedFilter};
+
+    let guard = "you have cycled a card named Street Wraith seven or more times this game";
+    let (rest, parsed) = parse_inner_condition(guard).expect("complete game-history guard");
+    assert!(rest.is_empty());
+    assert_eq!(
+        parsed,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CardsCycled {
+                    scope: CountScope::Controller,
+                    window: CyclingHistoryWindow::ThisGame,
+                    filter: Some(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![],
+                        controller: None,
+                        properties: vec![FilterProp::Named {
+                            name: "street wraith".into()
+                        }],
+                    })),
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 7 },
+        }
+    );
+    for malformed in [
+        "you cycled a card named four or more times this game",
+        "you cycled a card named ~ four or more times this game",
+        "you cycled a card named Street Wraith in your graveyard four or more times this game",
+        "you cycled a card named Street Wraith many or more times this game",
+        "you cycled a card named Street Wraith four or more times this gameplay",
+        "you cycled a card named Street Wraith four or more times this game during your turn",
+    ] {
+        assert!(parse_inner_condition(malformed).is_err(), "{malformed}");
     }
 }

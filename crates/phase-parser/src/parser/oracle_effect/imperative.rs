@@ -11652,6 +11652,15 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
             library_shuffle,
             ..
         } => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
+        // CR 701.24a + CR 701.24c: the separate controller shuffle also
+        // applies when this specific source cannot be moved.
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            library_shuffle,
+            ..
+        } => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
         Effect::ChangeZone {
             library_shuffle, ..
         } if single_library_population => *library_shuffle = LibraryShuffleMode::TerminalShuffle,

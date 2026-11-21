@@ -11,7 +11,7 @@ use engine::types::ability::{
     QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
     CastPaymentMode, CyclingOccurrence, CyclingRecord, GameState, ManaChoice, ManaChoicePrompt,
     NamedChoiceSourceBinding, StackEntryKind, WaitingFor, ZoneDeparture,
@@ -840,7 +840,7 @@ fn contains_strict_failure(value: &serde_json::Value, name: &str) -> bool {
 }
 
 #[test]
-fn v6_history_clauses_remain_strict_failures() {
+fn phase5_printed_yidaro_branches_and_phoenix_stays_strict() {
     let parse = |text, name, keywords: &[&str], subtypes: &[&str]| {
         parse_oracle_text(
             text,
@@ -871,10 +871,7 @@ fn v6_history_clauses_remain_strict_failures() {
             trigger.mode == TriggerMode::Cycled && trigger.valid_card == Some(TargetFilter::SelfRef)
         })
         .expect("Yidaro self-cycle trigger");
-    assert!(contains_strict_failure(
-        &serde_json::to_value(cycle).unwrap(),
-        "instead_condition"
-    ));
+    assert_yidaro_branch(cycle);
 
     let phoenix = parse(
         "Flying\nWhen this creature enters, you may return target instant or sorcery card with a cycling ability from your graveyard to your hand.\nAt the beginning of each end step, if you cycled two or more cards this turn, return this card from your graveyard to your hand.",
@@ -2386,5 +2383,465 @@ fn phase3_v3_counts_recorded_names_and_excludes_ordinary_discard() {
         },
     ] {
         assert_eq!(count(&runner, Some(unsupported)), 0);
+    }
+}
+
+const YIDARO: &str = "Yidaro, Wandering Monster";
+
+fn assert_yidaro_branch(trigger: &engine::types::ability::TriggerDefinition) {
+    use engine::types::ability::{AbilityCondition, Comparator, LibraryShuffleMode};
+
+    assert_eq!(trigger.mode, TriggerMode::Cycled);
+    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    let movement = trigger.execute.as_deref().expect("Yidaro's movement");
+    assert!(
+        matches!(
+            movement.effect.as_ref(),
+            Effect::ChangeZone {
+                target: TargetFilter::SelfRef,
+                origin: None,
+                destination: Zone::Library,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
+                ..
+            }
+        ),
+        "regenerate Yidaro's card export and integration fixture: {movement:#?}"
+    );
+    let branch = movement
+        .sub_ability
+        .as_deref()
+        .expect("Yidaro's instead branch");
+    assert!(
+        matches!(&branch.condition, Some(AbilityCondition::ConditionInstead { inner })
+        if matches!(inner.as_ref(), AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref { qty: QuantityRef::CardsCycled {
+                scope: CountScope::Controller, window: CyclingHistoryWindow::ThisGame, ..
+            }},
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 4 },
+        }))
+    );
+    assert!(matches!(
+        branch.effect.as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::SelfRef,
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Battlefield,
+            ..
+        }
+    ));
+    assert!(matches!(
+        branch
+            .else_ability
+            .as_deref()
+            .map(|def| def.effect.as_ref()),
+        Some(Effect::Shuffle {
+            target: TargetFilter::Controller
+        })
+    ));
+}
+
+fn yidaro_scenario() -> GameScenario {
+    let mut scenario = main_phase();
+    for seat in [P0, P1] {
+        scenario.with_library_top(
+            seat,
+            &[
+                "Island", "Mountain", "Forest", "Plains", "Swamp", "Island", "Forest",
+            ],
+        );
+        for _ in 0..8 {
+            scenario.add_basic_land(seat, ManaColor::Red);
+        }
+    }
+    scenario
+}
+
+#[derive(Clone, Copy)]
+struct PendingYidaroCycle {
+    source: ObjectId,
+    controller: PlayerId,
+    draw: ObjectId,
+    trigger: ObjectId,
+}
+
+fn cycle_yidaro(runner: &mut GameRunner, seat: PlayerId, source: ObjectId) -> PendingYidaroCycle {
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == seat)
+    );
+    let [definition] = runner.state().objects[&source]
+        .base_trigger_definitions
+        .as_slice()
+    else {
+        panic!("expected one printed Yidaro trigger");
+    };
+    assert_yidaro_branch(definition);
+    let lands: Vec<_> = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            let object = &runner.state().objects[id];
+            object.controller == seat && object.name == "Mountain" && !object.tapped
+        })
+        .take(2)
+        .collect();
+    assert_eq!(lands.len(), 2);
+    for land in lands {
+        tap_land(runner, land);
+    }
+
+    let index = wraith_index(runner, source);
+    assert!(offered(runner, source).contains(&index));
+    let turn = runner.state().turn_number;
+    let journal_index = runner
+        .state()
+        .cycles_completed_this_game_by_player
+        .get(&seat)
+        .map_or(0, |rows| rows.len());
+    let events = act(runner, activation(source, index, CastPaymentMode::Auto));
+    assert_eq!(cycle_events(&events), [(seat, source)]);
+    assert_cycle_draw_count(&events, seat, 0);
+    assert_eq!(zone(runner, source), Zone::Graveyard);
+    assert_eq!(
+        runner.state().cycles_completed_this_game_by_player[&seat][journal_index],
+        cycle_record(YIDARO, turn)
+    );
+
+    let mut stack = runner.state().stack.iter().rev();
+    let trigger = stack.next().expect("Yidaro trigger above draw");
+    let draw = stack.next().expect("Yidaro cycling draw");
+    assert_eq!(trigger.controller, seat);
+    let ability = trigger.ability().expect("stacked self-cycle trigger");
+    assert!(ability.targets.is_empty() && ability.chosen_target_slots.slots().is_empty());
+    assert!(
+        engine::game::ability_utils::build_target_slots(runner.state(), ability)
+            .expect("self-trigger target slots")
+            .is_empty()
+    );
+    let discarded = runner.state().objects[&source].snapshot_for_zone_change(
+        source,
+        Some(Zone::Graveyard),
+        Zone::Library,
+    );
+    assert_eq!(
+        ability
+            .trigger_source
+            .as_ref()
+            .expect("bound discard")
+            .identity,
+        discarded.trigger_source_context().unwrap().identity,
+    );
+    assert_eq!(draw.controller, seat);
+    let StackEntryKind::TriggeredAbility { source_id, .. } = trigger.kind else {
+        panic!("expected self-cycle trigger on top");
+    };
+    assert_eq!(source_id, source);
+    let StackEntryKind::ActivatedAbility { source_id, .. } = draw.kind else {
+        panic!("expected paid cycling beneath the trigger");
+    };
+    assert_eq!(source_id, source);
+    assert_eq!(
+        draw.ability().unwrap().cycling_occurrence,
+        Some(CyclingOccurrence {
+            activator: seat,
+            journal_index,
+        })
+    );
+    PendingYidaroCycle {
+        source,
+        controller: seat,
+        draw: draw.id,
+        trigger: trigger.id,
+    }
+}
+
+fn assert_cycle_draw_count(events: &[GameEvent], seat: PlayerId, count: usize) {
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event,
+        GameEvent::CardDrawn { player_id, .. } if *player_id == seat))
+            .count(),
+        count
+    );
+}
+
+// CR 117.3b + CR 117.3c + CR 117.4: begin with the seat holding
+// priority and resolve only the current top entry.
+fn pass_top_entry(runner: &mut GameRunner, entry: ObjectId) -> Vec<GameEvent> {
+    assert_eq!(
+        runner.state().stack.back().map(|entry| entry.id),
+        Some(entry)
+    );
+    let WaitingFor::Priority { player } = runner.state().waiting_for else {
+        panic!("expected priority before first pass");
+    };
+    assert!([P0, P1].contains(&player));
+    let mut events = act(runner, GameAction::PassPriority);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player: next } if next != player)
+    );
+    assert_eq!(
+        runner.state().stack.back().map(|entry| entry.id),
+        Some(entry)
+    );
+    events.extend(act(runner, GameAction::PassPriority));
+    assert!(runner
+        .state()
+        .stack
+        .iter()
+        .all(|pending| pending.id != entry));
+    events
+}
+
+fn resolve_yidaro_trigger(
+    runner: &mut GameRunner,
+    cycle: PendingYidaroCycle,
+    destination: Option<Zone>,
+    shuffles: usize,
+) -> Vec<GameEvent> {
+    let start = runner.state().resolved_rules_journal.entries().len();
+    let events = pass_top_entry(runner, cycle.trigger);
+    assert_eq!(
+        runner.state().stack.back().map(|entry| entry.id),
+        Some(cycle.draw)
+    );
+    assert_cycle_draw_count(&events, cycle.controller, 0);
+    let moves = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Graveyard),
+                to,
+                ..
+            } if *object_id == cycle.source => Some(*to),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(moves, destination.into_iter().collect::<Vec<_>>());
+    let journal_players: Vec<_> = runner
+        .state()
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(start)
+        .filter_map(|entry| match &entry.command {
+            Some(ResolvedRulesCommand::LibraryShuffle(command)) => Some(command.player),
+            _ => None,
+        })
+        .collect();
+    let event_players: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(journal_players, vec![cycle.controller; shuffles]);
+    assert_eq!(event_players, journal_players);
+    events
+}
+
+fn finish_yidaro_draw(runner: &mut GameRunner, cycle: PendingYidaroCycle) {
+    let events = pass_top_entry(runner, cycle.draw);
+    assert_cycle_draw_count(&events, cycle.controller, 1);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player }
+        if player == runner.state().active_player)
+    );
+}
+
+fn cycle_yidaro_into_library(runner: &mut GameRunner, seat: PlayerId, source: ObjectId) {
+    let cycle = cycle_yidaro(runner, seat, source);
+    resolve_yidaro_trigger(runner, cycle, Some(Zone::Library), 1);
+    assert_eq!(zone(runner, source), Zone::Library);
+    finish_yidaro_draw(runner, cycle);
+    assert!(runner.state().stack.is_empty());
+}
+
+#[test]
+fn phase5_v2_three_cycles_shuffle_four_enter() {
+    let mut scenario = yidaro_scenario();
+    let cards: [_; 4] = std::array::from_fn(|_| printed(&mut scenario, P0, YIDARO, Zone::Hand));
+    let bystander = printed(&mut scenario, P0, YIDARO, Zone::Graveyard);
+    let opponent = printed(&mut scenario, P1, YIDARO, Zone::Hand);
+    let wraith = street_wraith(&mut scenario);
+    let mut runner = scenario.build();
+
+    for card in &cards[..2] {
+        cycle_yidaro_into_library(&mut runner, P0, *card);
+        assert_eq!(zone(&runner, bystander), Zone::Graveyard);
+    }
+    let first_turn = runner.state().turn_number;
+    advance_turn(&mut runner);
+    assert_eq!(runner.state().turn_number, first_turn + 1);
+    priority_for(&mut runner, P1, 2);
+    cycle_yidaro_into_library(&mut runner, P1, opponent);
+    assert_eq!(
+        runner.state().cycles_completed_this_game_by_player[&P1].len(),
+        1
+    );
+    priority_for(&mut runner, P0, 2);
+    let wraith_entry = cycle_wraith_for_phase5(&mut runner, wraith);
+    let events = pass_top_entry(&mut runner, wraith_entry);
+    assert_cycle_draw_count(&events, P0, 1);
+
+    priority_for(&mut runner, P0, 2);
+    cycle_yidaro_into_library(&mut runner, P0, cards[2]);
+    assert_eq!(zone(&runner, bystander), Zone::Graveyard);
+
+    priority_for(&mut runner, P0, 2);
+    let fourth = cycle_yidaro(&mut runner, P0, cards[3]);
+    let records = &runner.state().cycles_completed_this_game_by_player[&P0];
+    assert_eq!(records.len(), 5);
+    assert_eq!(records[0], cycle_record(YIDARO, first_turn));
+    assert_eq!(records[1], cycle_record(YIDARO, first_turn));
+    resolve_yidaro_trigger(&mut runner, fourth, Some(Zone::Battlefield), 0);
+    assert_eq!(zone(&runner, fourth.source), Zone::Battlefield);
+    assert_eq!(zone(&runner, bystander), Zone::Graveyard);
+    finish_yidaro_draw(&mut runner, fourth);
+    assert!(runner.state().stack.is_empty());
+}
+
+fn cycle_wraith_for_phase5(runner: &mut GameRunner, source: ObjectId) -> ObjectId {
+    let index = wraith_index(runner, source);
+    assert!(offered(runner, source).contains(&index));
+    let entry = cycle_wraith(runner, source);
+    assert_eq!(
+        runner.state().cycles_completed_this_game_by_player[&P0][2],
+        cycle_record("Street Wraith", runner.state().turn_number)
+    );
+    entry
+}
+
+#[test]
+fn phase5_v2a_pending_third_trigger_reads_fourth_cycle() {
+    let mut scenario = yidaro_scenario();
+    let [first, second, a, b] =
+        std::array::from_fn(|_| printed(&mut scenario, P0, YIDARO, Zone::Hand));
+    let mut runner = scenario.build();
+    for card in [first, second] {
+        cycle_yidaro_into_library(&mut runner, P0, card);
+    }
+    let a = cycle_yidaro(&mut runner, P0, a);
+    assert_eq!(
+        runner.state().cycles_completed_this_game_by_player[&P0].len(),
+        3
+    );
+    priority_for(&mut runner, P0, 2);
+    let b = cycle_yidaro(&mut runner, P0, b);
+    assert_eq!(
+        runner.state().cycles_completed_this_game_by_player[&P0].len(),
+        4
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        [a.draw, a.trigger, b.draw, b.trigger]
+    );
+    resolve_yidaro_trigger(&mut runner, b, Some(Zone::Battlefield), 0);
+    finish_yidaro_draw(&mut runner, b);
+    assert_eq!(zone(&runner, b.source), Zone::Battlefield);
+
+    // CR 704.5j: Both successful entries reach the legend choice.
+    resolve_yidaro_trigger(&mut runner, a, Some(Zone::Battlefield), 0);
+    let WaitingFor::ChooseLegend {
+        player: P0,
+        candidates,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("expected the controller's legend choice");
+    };
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates.contains(&a.source) && candidates.contains(&b.source));
+    act(&mut runner, GameAction::ChooseLegend { keep: a.source });
+    assert_eq!(zone(&runner, a.source), Zone::Battlefield);
+    assert_eq!(zone(&runner, b.source), Zone::Graveyard);
+    finish_yidaro_draw(&mut runner, a);
+    assert!(runner.state().stack.is_empty());
+}
+
+#[test]
+fn phase5_v3_departed_source_keeps_only_the_selected_branch() {
+    for prior_cycles in [2, 3] {
+        let mut scenario = yidaro_scenario();
+        let earlier: Vec<_> = (0..prior_cycles)
+            .map(|_| printed(&mut scenario, P0, YIDARO, Zone::Hand))
+            .collect();
+        let source = printed(&mut scenario, P0, YIDARO, Zone::Hand);
+        let crypt = printed(&mut scenario, P1, "Tormod's Crypt", Zone::Battlefield);
+        let mut runner = scenario.build();
+        for card in earlier {
+            cycle_yidaro_into_library(&mut runner, P0, card);
+        }
+        let cycle = cycle_yidaro(&mut runner, P0, source);
+        let discarded_incarnation = runner.state().objects[&source].incarnation;
+        assert_eq!(
+            runner.state().cycles_completed_this_game_by_player[&P0].len(),
+            prior_cycles + 1
+        );
+        priority_for(&mut runner, P1, 2);
+        let offered_crypt = offered(&runner, crypt);
+        let &[index] = offered_crypt.as_slice() else {
+            panic!("expected one Crypt activation, got {offered_crypt:?}");
+        };
+        act(&mut runner, activation(crypt, index, CastPaymentMode::Auto));
+        let WaitingFor::TargetSelection {
+            player: P1,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("expected Crypt's player target");
+        };
+        let target = TargetRef::Player(P0);
+        assert!(selection.current_legal_targets.contains(&target));
+        act(
+            &mut runner,
+            GameAction::ChooseTarget {
+                target: Some(target),
+            },
+        );
+        let entry = runner.state().stack.back().expect("Crypt ability");
+        assert!(
+            matches!(entry.kind, StackEntryKind::ActivatedAbility { source_id, .. } if source_id == crypt)
+        );
+        let entry_id = entry.id;
+        let events = pass_top_entry(&mut runner, entry_id);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged {
+            object_id, from: Some(Zone::Graveyard), to: Zone::Exile, ..
+        } if *object_id == source)));
+        assert_eq!(zone(&runner, source), Zone::Exile);
+        assert_ne!(
+            runner.state().objects[&source].incarnation,
+            discarded_incarnation
+        );
+
+        // CR 400.7 + CR 701.24c + CR 614.6: the exact discarded incarnation
+        // departed, so only the default instruction can still shuffle.
+        let events =
+            resolve_yidaro_trigger(&mut runner, cycle, None, usize::from(prior_cycles == 2));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged {
+            object_id, ..
+        } if *object_id == source)));
+        assert_eq!(zone(&runner, source), Zone::Exile);
+        finish_yidaro_draw(&mut runner, cycle);
+        assert!(runner.state().stack.is_empty());
     }
 }

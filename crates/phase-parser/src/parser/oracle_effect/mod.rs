@@ -48099,27 +48099,22 @@ pub(crate) fn parse_ability_ir_with_context(
     parse_ability_ir(text, kind, ChainLoweringMode::WithContext, ctx)
 }
 
-/// Parse a nested effect body with only its parent-target binding and its
-/// spell-anaphor binding preserved.
-///
-/// Nested replacement bodies are independent ability parses: parser-local state
-/// from their enclosing clause must not leak into them. Two bindings are
-/// inherited: `ParentTarget`, which names the earlier selected object that the
-/// nested body's pronouns may continue to reference, and the spell-anaphor
-/// binding (CR 608.2k), which keeps a bare "that spell" in an "instead"
-/// sub-body of a triggered ability naming the trigger's event spell.
+/// Parse a replacement body with fresh clause state and inherited bindings.
+/// CR 608.2k: The child can still refer to the object established by the trigger.
 pub(super) fn parse_child_ability_with_parent_target(
     text: &str,
     kind: AbilityKind,
     parent_target_available: bool,
-    spell_anaphor_binding: SpellAnaphorBinding,
+    parent_ctx: &ParseContext,
 ) -> AbilityDefinition {
     let mut child_ctx = ParseContext {
         parent_target_available,
-        // CR 608.2k: an "instead" sub-body parsed out of a triggered ability has
-        // no announced parent target; carry the binding so a bare "that spell"
-        // keeps the trigger's event-source reading.
-        spell_anaphor_binding,
+        spell_anaphor_binding: parent_ctx.effective_spell_anaphor_binding(),
+        object_pronoun_ref: parent_ctx.object_pronoun_ref.clone(),
+        condition_object_antecedent: parent_ctx
+            .object_pronoun_ref
+            .as_ref()
+            .and(parent_ctx.condition_object_antecedent),
         ..ParseContext::default()
     };
     lower_ability_ir(&parse_ability_ir_with_damage_context(
@@ -51328,7 +51323,7 @@ fn parse_effect_chain_ir_body(
                 &text,
                 kind,
                 instead_parent_target_available,
-                ctx.effective_spell_anaphor_binding(),
+                ctx,
             );
             if body.condition.is_some() {
                 builder
@@ -56332,8 +56327,7 @@ fn try_parse_put_zone_change_parts(
             // existing mass branch below), never the single-object
             // resolution-choice path. When `plural_object_pronoun_ref` is
             // `None` — every card outside the class — behavior is unchanged
-            // (the `parse_target` fallback below, which reads only the
-            // caller's player antecedents).
+            // (the `parse_target` fallback below).
             let plural_pool = if is_bare_plural_object_pronoun(&target_text.to_ascii_lowercase()) {
                 ctx.plural_object_pronoun_ref
                     .clone()
@@ -56346,8 +56340,9 @@ fn try_parse_put_zone_change_parts(
             let target = match plural_pool {
                 Some(pool) => pool,
                 None => {
-                    let parsed =
-                        parse_target_with_ctx(target_text, &mut ctx.clone_player_antecedents()).0;
+                    let mut target_ctx = ctx.clone_player_antecedents();
+                    target_ctx.object_pronoun_ref = ctx.object_pronoun_ref.clone();
+                    let parsed = parse_target_with_ctx(target_text, &mut target_ctx).0;
                     // CR 608.2c: a definite plural subject ("the nonland cards
                     // revealed this way") restricts the anaphor's set to its named
                     // type. The determiner is not part of the type phrase, so when
@@ -63950,4 +63945,58 @@ mod population_walk_destination_tests {
             "that creature gains flying"
         ));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn instead_child_projects_the_parent_pin_with_independent_clause_state() {
+    use crate::parser::oracle_ir::context::DeclaredSlotRegistry;
+
+    let parent = ParseContext {
+        chain_declared_slots: DeclaredSlotRegistry::Indeterminate,
+        object_pronoun_ref: Some(TargetFilter::SelfRef),
+        spell_anaphor_binding: SpellAnaphorBinding::EventSource,
+        ..ParseContext::default()
+    };
+    let child = parse_child_ability_with_parent_target(
+        "Put it onto the battlefield from your graveyard.",
+        AbilityKind::Spell,
+        false,
+        &parent,
+    );
+    assert!(
+        matches!(
+            child.effect.as_ref(),
+            Effect::ChangeZone {
+                target: TargetFilter::SelfRef,
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                ..
+            }
+        ),
+        "{child:#?}"
+    );
+    let separate_child = parse_child_ability_with_parent_target(
+        "Destroy target artifact.",
+        AbilityKind::Spell,
+        false,
+        &parent,
+    );
+    assert!(matches!(
+        separate_child.effect.as_ref(),
+        Effect::Destroy {
+            target: TargetFilter::Typed(_),
+            ..
+        }
+    ));
+    assert_eq!(
+        parent.chain_declared_slots,
+        DeclaredSlotRegistry::Indeterminate
+    );
+    assert_eq!(parent.object_pronoun_ref, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        parent.effective_spell_anaphor_binding(),
+        SpellAnaphorBinding::EventSource
+    );
+    assert!(!parent.parent_target_available);
 }
