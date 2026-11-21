@@ -282,7 +282,6 @@ face = [
   { key = "brood birthing", class = "missing_effect", clauses = ["If you control an Eldrazi Spawn, create three 0/1 colorless Eldrazi Spawn creature tokens.", "They have \"Sacrifice this token: Add {C}.\"", "Otherwise, create one of those tokens."] },
   { key = "brotherhood scribe", class = "trigger_wrong", clauses = ["Whenever you get one or more {E} during your turn, creatures you control get +1/+1 until end of turn."] },
   { key = "brown ouphe", class = "target_wrong", clauses = ["{1}{G}, {T}: Counter target activated ability from an artifact source."] },
-  { key = "bruenor battlehammer", class = "cost_wrong", clauses = ["You may pay {0} rather than pay the equip cost of the first equip ability you activate each turn."] },
   { key = "brutalizer exarch", class = "wrong_object", clauses = ["Search your library for a creature card, reveal it, then shuffle and put that card on top."] },
   { key = "bruvac the grandiloquent", class = "wrong_player", clauses = ["If an opponent would mill one or more cards, they mill twice that many cards instead."] },
   { key = "bullseye, death dealer", class = "cost_wrong", clauses = ["{3}, {T}, Sacrifice an artifact or discard a nonland card: Bullseye deals 2 damage to any target."] },
