@@ -911,8 +911,19 @@ pub(crate) fn plan_simultaneous_draw(
     state: &GameState,
     seats: &[(crate::types::player::PlayerId, ResolvedAbility)],
 ) -> Option<Vec<DrawDealerSeat>> {
+    if state.format_config.format.shared_zones().library != ZoneScope::Shared {
+        return None;
+    }
+    plan_coordinated_draw(state, seats)
+}
+
+/// CR 121.2a + CR 608.2e: Settle all drawers' counts before the first card
+/// moves. The dealer reads the appropriate library for each scheduled draw.
+pub(super) fn plan_coordinated_draw(
+    state: &GameState,
+    seats: &[(crate::types::player::PlayerId, ResolvedAbility)],
+) -> Option<Vec<DrawDealerSeat>> {
     if seats.len() < 2
-        || state.format_config.format.shared_zones().library != ZoneScope::Shared
         || state
             .active_draw_sequence()
             .is_some_and(|frame| frame.capture_next_child_delivery)

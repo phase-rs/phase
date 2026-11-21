@@ -4995,6 +4995,18 @@ fn filter_is_unionable(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 608.2c: The distributive adverb closes the subject of a coordinated
+/// player predicate. The subject application supplies the announced count.
+pub(super) fn has_distributive_player_subject(text: &str) -> bool {
+    extract_subject_text(text).is_some_and(|subject| {
+        let subject = subject.to_ascii_lowercase();
+        nom_primitives::scan_at_word_boundaries(&subject, |input| {
+            all_consuming(tag::<_, _, OracleError<'_>>("each")).parse(input)
+        })
+        .is_some()
+    })
+}
+
 pub(super) fn parse_leading_subject_application(
     text: &str,
     ctx: &mut ParseContext,
