@@ -76238,16 +76238,19 @@ mod replacement_action_continuation_tests {
         crate::game::layers::evaluate_layers(state);
         let accepted = draw_payment()
             .sub_ability(paid_life(3).sub_ability(draw_payment().sub_ability(paid_life(13))));
-        with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
-            prepend_to_pending_continuation_with_producer(
-                state,
-                accepted,
-                None,
-                None,
-                ResolutionPaymentOrigin::LatchedSuffix,
-            );
-            prepend_to_pending_continuation(state, action_life());
-        });
+        with_replacement_action_scope(
+            Some(crate::types::ability::HalfSigned::from_whole(2)),
+            || {
+                prepend_to_pending_continuation_with_producer(
+                    state,
+                    accepted,
+                    None,
+                    None,
+                    ResolutionPaymentOrigin::LatchedSuffix,
+                );
+                prepend_to_pending_continuation(state, action_life());
+            },
+        );
         assert_eq!(
             state.resolution_stack.len(),
             2,
@@ -76323,23 +76326,29 @@ mod replacement_action_continuation_tests {
         crate::game::layers::evaluate_layers(runner.state_mut());
         let library_before = runner.state().players[0].library.len();
         runner.state_mut().current_trigger_match_count = Some(9);
-        with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
-            resolve_ability_chain(
-                runner.state_mut(),
-                &draw(1).sub_ability(action_life()),
-                &mut Vec::new(),
-                1,
-            )
-            .unwrap();
-        });
+        with_replacement_action_scope(
+            Some(crate::types::ability::HalfSigned::from_whole(2)),
+            || {
+                resolve_ability_chain(
+                    runner.state_mut(),
+                    &draw(1).sub_ability(action_life()),
+                    &mut Vec::new(),
+                    1,
+                )
+                .unwrap();
+            },
+        );
         assert!(matches!(
             runner.state().waiting_for,
             WaitingFor::ReplacementChoice { player: P0, .. }
         ));
-        assert!(runner.state().resolution_stack.iter().any(|frame| matches!(
-            frame, ResolutionFrame::AbilityContinuation(frame)
-                if frame.pending.replacement_action == Some(ReplacementActionScope::whole(2))
-        )), "the paused draw has an action-owned continuation parent");
+        assert!(
+            runner.state().resolution_stack.iter().any(|frame| matches!(
+                frame, ResolutionFrame::AbilityContinuation(frame)
+                    if frame.pending.replacement_action == Some(ReplacementActionScope::whole(2))
+            )),
+            "the paused draw has an action-owned continuation parent"
+        );
         let state = runner.state_mut();
         state.battlefield.retain(|id| *id != humility);
         state.objects.get_mut(&humility).unwrap().zone = Zone::Graveyard;
@@ -76380,11 +76389,14 @@ mod replacement_action_continuation_tests {
     fn a_replacement_actions_continuation_never_merges_with_work_of_another_owner() {
         let action = Some(ReplacementActionScope::whole(2));
         let mut state = GameState::new_two_player(42);
-        with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
-            let pending = PendingContinuation::new(Box::new(draw(1)), &state);
-            state.park_ability_continuation(pending);
-            append_to_pending_continuation(&mut state, Some(Box::new(draw(2))));
-        });
+        with_replacement_action_scope(
+            Some(crate::types::ability::HalfSigned::from_whole(2)),
+            || {
+                let pending = PendingContinuation::new(Box::new(draw(1)), &state);
+                state.park_ability_continuation(pending);
+                append_to_pending_continuation(&mut state, Some(Box::new(draw(2))));
+            },
+        );
         assert_eq!(state.resolution_stack.len(), 1, "same owner: merged");
         let active = frame(state.resolution_stack.last());
         assert_eq!(active.replacement_action, action);
@@ -76470,9 +76482,12 @@ mod replacement_action_continuation_tests {
         may.optional = true;
         for accept in [true, false] {
             let mut runner = GameScenario::new().build();
-            with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
-                resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
-            });
+            with_replacement_action_scope(
+                Some(crate::types::ability::HalfSigned::from_whole(2)),
+                || {
+                    resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
+                },
+            );
             assert!(
                 matches!(
                     runner.state().waiting_for,
@@ -76536,9 +76551,12 @@ mod replacement_action_continuation_tests {
                 }));
             may.optional = true;
             may.optional_for = Some(OpponentMayScope::AnyOpponent);
-            with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
-                resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
-            });
+            with_replacement_action_scope(
+                Some(crate::types::ability::HalfSigned::from_whole(2)),
+                || {
+                    resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
+                },
+            );
             assert!(
                 matches!(
                     runner.state().waiting_for,
@@ -76578,9 +76596,12 @@ mod replacement_action_continuation_tests {
         );
         may.optional = true;
         may.optional_for = Some(OpponentMayScope::AnyPlayer);
-        with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
-            resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
-        });
+        with_replacement_action_scope(
+            Some(crate::types::ability::HalfSigned::from_whole(2)),
+            || {
+                resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
+            },
+        );
         assert!(
             matches!(
                 &runner.state().waiting_for,

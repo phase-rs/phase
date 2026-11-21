@@ -4588,10 +4588,7 @@ fn channel_harms_may_reads_the_prevented_amount_inside_a_resolving_trigger() {
                     assert!(cast_harm);
                     assert_eq!(life(&runner, P1), 16);
                     assert_eq!(prevented(&events), 1);
-                    assert_eq!(
-                        offered_in(&runner),
-                        Some(ReplacementActionScope::whole(1))
-                    );
+                    assert_eq!(offered_in(&runner), Some(ReplacementActionScope::whole(1)));
                     asked = true;
                     GameAction::DecideOptionalEffect { accept }
                 }

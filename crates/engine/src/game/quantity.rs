@@ -3910,9 +3910,7 @@ pub(crate) fn current_replacement_action(
     NESTED_AMOUNT_SCOPE.with(|c| match c.get() {
         NestedAmountScope::ReplacementAction {
             amount: Some(amount),
-        } => Some(crate::types::game_state::ReplacementActionScope::from_exact(
-            amount,
-        )),
+        } => Some(crate::types::game_state::ReplacementActionScope::from_exact(amount)),
         NestedAmountScope::ReplacementAction { amount: None }
         | NestedAmountScope::Enclosing
         | NestedAmountScope::Reflexive => None,
@@ -25754,14 +25752,18 @@ mod tests {
 
         assert_eq!(read(&state), 3, "outside any scope the match count wins");
         assert_eq!(
-            with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || read(&state)),
+            with_replacement_action_scope(
+                Some(crate::types::ability::HalfSigned::from_whole(2)),
+                || read(&state)
+            ),
             2,
             "the action's owned amount outranks every ambient tier"
         );
         assert_eq!(
-            with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
-                with_reflexive_resolution_scope(|| read(&state))
-            }),
+            with_replacement_action_scope(
+                Some(crate::types::ability::HalfSigned::from_whole(2)),
+                || { with_reflexive_resolution_scope(|| read(&state)) }
+            ),
             17,
             "a reflexive ability inside the action reads its own cascade"
         );
@@ -25797,20 +25799,30 @@ mod tests {
         // Reach-guard: outside any scope the enclosing trigger's match count answers.
         assert_eq!(read(&state), 3, "outside any scope the match count wins");
 
-        let (inner, after_inner) = with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
-            let inner = with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(5)), || read(&state));
-            (inner, read(&state))
-        });
+        let (inner, after_inner) = with_replacement_action_scope(
+            Some(crate::types::ability::HalfSigned::from_whole(2)),
+            || {
+                let inner = with_replacement_action_scope(
+                    Some(crate::types::ability::HalfSigned::from_whole(5)),
+                    || read(&state),
+                );
+                (inner, read(&state))
+            },
+        );
         assert_eq!(inner, 5, "a nested action reads its own amount");
         assert_eq!(after_inner, 2, "the outer action's amount is back after it");
 
-        let (resumed, after_resumed) = with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
-            let guard =
-                resume_replacement_action(Some(crate::types::game_state::ReplacementActionScope::whole(7)));
-            let resumed = read(&state);
-            drop(guard);
-            (resumed, read(&state))
-        });
+        let (resumed, after_resumed) = with_replacement_action_scope(
+            Some(crate::types::ability::HalfSigned::from_whole(2)),
+            || {
+                let guard = resume_replacement_action(Some(
+                    crate::types::game_state::ReplacementActionScope::whole(7),
+                ));
+                let resumed = read(&state);
+                drop(guard);
+                (resumed, read(&state))
+            },
+        );
         assert_eq!(resumed, 7, "a resumed action reads its carried amount");
         assert_eq!(
             after_resumed, 2,
@@ -25818,17 +25830,21 @@ mod tests {
         );
 
         assert_eq!(
-            with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
-                with_reflexive_resolution_scope(|| read(&state))
-            }),
+            with_replacement_action_scope(
+                Some(crate::types::ability::HalfSigned::from_whole(2)),
+                || { with_reflexive_resolution_scope(|| read(&state)) }
+            ),
             17,
             "a reflexive ability inside the action reads its own cascade"
         );
 
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(9)), || -> i32 {
-                panic!("the action's work unwinds");
-            })
+            with_replacement_action_scope(
+                Some(crate::types::ability::HalfSigned::from_whole(9)),
+                || -> i32 {
+                    panic!("the action's work unwinds");
+                },
+            )
         }));
         assert!(unwound.is_err(), "reach-guard: the scope's body unwound");
         assert_eq!(
