@@ -6,6 +6,7 @@ use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::error::{oracle_err, OracleError};
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_quantity::{parse_cda_quantity, parse_cda_quantity_with_context};
 use crate::types::ability::{
     Comparator, ObjectScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter,
@@ -967,10 +968,7 @@ fn parse_count_binder(input: &str) -> OracleResult<'_, CountBinder> {
         // ("draw a card for every five creature types among …" — Sarek). The
         // quantity after either marker goes to the same for-each authority,
         // which owns the grouped "N <things>" floor division.
-        value(
-            CountBinder::ForEach,
-            preceded(tag("for "), alt((tag("each "), tag("every ")))),
-        ),
+        value(CountBinder::ForEach, nom_quantity::parse_for_each_marker),
     ))
     .parse(input)
 }

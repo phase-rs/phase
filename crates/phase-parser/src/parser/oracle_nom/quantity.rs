@@ -6130,6 +6130,16 @@ pub fn parse_kicker_count_where_x_expression(input: &str) -> OracleResult<'_, Qu
     Ok(("", quantity))
 }
 
+/// Shared lowercased Oracle marker for "for each" and "for every" count clauses.
+/// Consumes the trailing space so the grouped quantity starts at the next word.
+pub(crate) fn parse_for_each_marker(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        preceded(tag("for "), alt((tag("each "), tag("every ")))),
+    )
+    .parse(input)
+}
+
 /// CR 107.1 + CR 608.2c: the group size N of "for each N <counted clause>"
 /// (N ≥ 2) — "for each five counters removed this way" counts complete groups
 /// of five. The single definition of a group size: the expression-level

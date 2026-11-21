@@ -695,6 +695,26 @@ describe("owner-printing battlefield identity", () => {
   const ids = (objects: GameObject[], enabled: boolean) =>
     groupByName(objects, undefined, undefined, undefined, enabled).map((group) => group.ids);
 
+  it("preserves both representatives for one Forest tuple with mixed provenance", () => {
+    const forest = (id: number, version?: number) => buildGameObjectWithCoreTypes(["Land"], {
+      id, name: "Forest", printed_ref: { oracle_id: "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6", face_name: "Forest" },
+      printing: { set_code: "m21", collector_number: "272",
+        ...(version === undefined ? {} : { automatic_art_catalog_version: version }) },
+    });
+    const owner = forest(1);
+    const automatic = forest(2, 1);
+    for (const pair of [[owner, automatic], [automatic, owner]]) {
+      const groups = groupByName(pair, undefined, undefined, undefined, true);
+      expect(groups.map((group) => group.ids)).toEqual(pair.map((member) => [member.id]));
+      expect(groups.map((group) => pair.find((member) => member.id === group.representative.id)?.printing)).toEqual(pair.map((member) => member.printing));
+      expect(ids(pair, false)).toEqual([pair.map((member) => member.id)]);
+    }
+    expect(ids([owner, forest(2)], true)).toEqual([[1, 2]]);
+    expect(ids([forest(1, 1), automatic], true)).toEqual([[1, 2]]);
+    expect(ids([forest(1, 2), automatic], true)).toEqual([[1], [2]]);
+    expect(ids([owner, forest(2, 256)], true)).toEqual([[1, 2]]);
+  });
+
   it("compares both delivered fields by value, with null and omission equal", () => {
     const objects = [
       card(1, a),

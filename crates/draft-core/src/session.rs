@@ -2837,10 +2837,7 @@ mod tests {
                     section: DeckSection::MainDeck,
                     name: name.into(),
                     count: 2,
-                    printing: CardPrinting {
-                        set_code: set.into(),
-                        collector_number: "001".into(),
-                    },
+                    printing: CardPrinting::owner(set, "001"),
                 })
                 .collect(),
         };
