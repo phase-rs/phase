@@ -397,6 +397,7 @@ mod issue_10130_detritivore_nonbasic_graveyard_count;
 mod issue_1016_peregrin_took_food_token;
 mod issue_1017_ring_tempts_you;
 mod issue_1018_manifest_dread_choice;
+mod issue_10192_raptor_polyraptor_loop_offer;
 mod issue_10195_exile_origin;
 mod issue_1019_heraldic_banner_chosen_color;
 mod issue_1021_recurring_nightmare;

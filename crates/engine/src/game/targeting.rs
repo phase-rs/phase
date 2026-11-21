@@ -4451,7 +4451,9 @@ pub fn own_cant_be_targeted_prohibits(
 
 /// CR 608.2g: expose a parked resolving spell only while its object is still
 /// on the stack, without duplicating entries that are already live there.
-fn targetable_stack_spell_entries(state: &GameState) -> impl Iterator<Item = &StackEntry> {
+pub(crate) fn targetable_stack_spell_entries(
+    state: &GameState,
+) -> impl Iterator<Item = &StackEntry> {
     state
         .stack
         .iter()
@@ -4486,13 +4488,8 @@ fn stack_spell_entry_matches_filter(
         return false;
     }
 
-    // CR 115.9b / CR 115.9c: "that targets [only] [X]", with "you" read from
+    // CR 115.9b: "that targets [X]", with "you" read from
     // `target_ctx` — the looking ability's controller (CR 109.5).
-    if super::filter::extract_targets_only(filter).is_some_and(|constraint| {
-        !super::filter::entry_targets_satisfy(state, entry, target_ctx, &constraint, true)
-    }) {
-        return false;
-    }
     if super::filter::extract_targets(filter).is_some_and(|constraint| {
         !super::filter::entry_targets_satisfy(state, entry, target_ctx, &constraint, false)
     }) {
