@@ -5182,6 +5182,19 @@ export interface GameState {
   /** CR 732.2a: opt-in gate for the live combo-detector (default Off). Set from the
    *  match's immutable `MatchConfig` at game creation; not mutable mid-game. */
   loop_detection?: LoopDetectionMode;
+  /** CR 101.4 + CR 101.4b: engine-projected APNAP scoped-unless poll state.
+   *  Public sacrifice selections keep their chosen object ids; discard card
+   *  identities are redacted by the engine for non-owning viewers. */
+  pending_player_scope_unless_punishment?: PendingPlayerScopeUnlessPunishmentView | null;
+}
+
+export interface PendingPlayerScopeUnlessPunishmentView {
+  declining_players: PlayerId[];
+  payments: Array<{
+    player: PlayerId;
+    action: "Sacrifice" | "Discard";
+    objects: Array<{ object_id: ObjectId; incarnation: number }>;
+  }>;
 }
 
 /**

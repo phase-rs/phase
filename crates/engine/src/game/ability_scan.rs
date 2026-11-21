@@ -11785,11 +11785,14 @@ mod tests {
             matches!(
                 &effect,
                 Effect::Pump {
-                    power: PtValue::Quantity(QuantityExpr::Ref {
-                        qty: QuantityRef::PropertyAggregate(_)
-                    }),
+                    power: PtValue::Quantity(QuantityExpr::ClampMin { inner, minimum: 0 }),
                     ..
-                }
+                } if matches!(
+                    **inner,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::PropertyAggregate(_)
+                    }
+                )
             ),
             "fixture pin: the attack pump's `power` must be a `QuantityRef::PropertyAggregate` \
              (\"the greatest mana value among artifacts you control\"), else the paired \
