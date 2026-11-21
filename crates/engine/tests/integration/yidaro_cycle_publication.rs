@@ -350,7 +350,8 @@ fn v2_granted_slivercycling_after_discard() {
             "Sidewinder Sliver",
             runner.state().turn_number,
         )];
-        let (_, _, finalize) = assert_placement(runner.state(), search, &expected[0], 0);
+        let (_, finalize_position, finalize) =
+            assert_placement(runner.state(), search, &expected[0], 0);
         assert_history(runner.state(), &expected);
         assert_eq!(cycle_command_counts(runner.state()), (1, 1));
         if second_grant {
@@ -376,6 +377,31 @@ fn v2_granted_slivercycling_after_discard() {
             );
         };
         assert_eq!(*player, P0);
+        let cycled = GameEvent::Cycled {
+            player_id: P0,
+            object_id: card,
+        };
+        let trigger_position = runner
+            .state()
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .position(|row| {
+                matches!(
+                    &row.command,
+                    Some(ResolvedRulesCommand::StackPush(command))
+                        if command.entry.source_id == snare
+                            && matches!(
+                                &command.entry.kind,
+                                StackEntryKind::TriggeredAbility {
+                                    trigger_event: Some(event),
+                                    ..
+                                } if event == &cycled
+                            )
+                )
+            })
+            .expect("Snare Tactician's collected trigger for this cycle was pushed");
+        assert!(finalize_position < trigger_position);
         assert_eq!(target_slots.len(), 1);
         let targets = &target_slots[0].legal_targets;
         assert_eq!(targets.len(), 2);
@@ -1023,21 +1049,6 @@ fn assert_placement<'a>(
     assert_eq!(live.id, entry);
     assert_eq!(&live.kind, finalize.resulting_kind.as_ref());
     assert_eq!(live.ability().unwrap().cycling_occurrence, Some(occurrence));
-    if let Some(collection) =
-        journal
-            .iter()
-            .enumerate()
-            .skip(push + 1)
-            .find_map(|(position, row)| {
-                matches!(
-                    row.command,
-                    Some(ResolvedRulesCommand::TriggerCollection(_))
-                )
-                .then_some(position)
-            })
-    {
-        assert!(finalize_position < collection);
-    }
     (edit_position, finalize_position, finalize)
 }
 

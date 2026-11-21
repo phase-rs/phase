@@ -3095,7 +3095,7 @@ impl ResolvedRulesJournal {
         )
     }
 
-    /// Records one exact CR 601.2i cast finalization under its causal node.
+    /// Records one resolved stack-entry finalization under its causal node.
     pub fn record_stack_entry_finalize(
         &mut self,
         command: ResolvedStackEntryFinalizeCommand,
