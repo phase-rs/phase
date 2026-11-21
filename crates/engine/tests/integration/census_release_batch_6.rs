@@ -143,9 +143,9 @@ fn offered_targets(r: &GameRunner) -> Vec<ObjectId> {
     let mut ids: Vec<ObjectId> = selection
         .current_legal_targets
         .iter()
-        .filter_map(|t| match t {
-            TargetRef::Object(o) => Some(*o),
-            TargetRef::Player(_) => None,
+        .map(|t| match t {
+            TargetRef::Object(o) => *o,
+            TargetRef::Player(p) => panic!("an object prompt offered player {p:?}"),
         })
         .collect();
     ids.sort_by_key(|o| o.0);
@@ -212,7 +212,8 @@ fn ioreth_untaps_exactly_two_other_legendary_creatures() {
     let ioreth = scenario.add_real_card(P0, "Ioreth of the Healing House", Zone::Battlefield, db());
     let isamaru = scenario.add_real_card(P0, "Isamaru, Hound of Konda", Zone::Battlefield, db());
     let tyrox = scenario.add_real_card(P0, "Tyrox, Saurid Tyrant", Zone::Battlefield, db());
-    let caelorna = scenario.add_real_card(P0, "Caelorna, Coral Tyrant", Zone::Battlefield, db());
+    // An opponent's legendary creature is a legal target too ("other target legendary creatures").
+    let caelorna = scenario.add_real_card(P1, "Caelorna, Coral Tyrant", Zone::Battlefield, db());
     let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db());
     let mut runner = scenario.build();
     for id in [isamaru, tyrox, caelorna, bears] {
@@ -978,8 +979,18 @@ fn beifongs_bounty_hunters_earthbent_land_returns_tapped_when_it_dies() {
         matches!(waiting, WaitingFor::Priority { .. }),
         "got {waiting:?}"
     );
-    // The dead creature is a land, so Beifong's "nonland creature" trigger does not fire (it would have
-    // offered the Mountain as a target and stopped above); the delayed return puts the Forest back tapped.
+    // The dead creature is a land, so Beifong's "nonland creature" trigger does not fire. If it did, the
+    // Mountain (the only land left that P0 controls) would be auto-targeted and earthbent, so it must still
+    // be an ordinary land without counters. The delayed return puts the Forest back tapped.
+    let mountain_object = &runner.state().objects[&mountain];
+    assert!(
+        !mountain_object
+            .card_types
+            .core_types
+            .contains(&engine::types::card_type::CoreType::Creature)
+            && mountain_object.counters.is_empty(),
+        "the Mountain was not earthbent"
+    );
     let forests: Vec<_> = runner
         .state()
         .objects
