@@ -494,17 +494,67 @@ interface AllocatableGroup {
   columns: number[];
 }
 
-function allocateGroups(groups: AllocatableGroup[], columnCount: number): void {
-  if (groups.length > columnCount) {
-    groups.forEach((group, index) => {
-      group.columns = [Math.floor(index * columnCount / groups.length)];
-    });
-    return;
+/** The column each of `count` ordered groups gets on `columnCount` columns. */
+function allocateColumnIndexes(count: number, columnCount: number): number[] {
+  if (count > columnCount) {
+    const overflow = count - columnCount;
+    if (overflow * 2 <= count) {
+      // Fewer columns than groups, but only by a little: fold the TRAILING
+      // groups into pairs and give every leading group its own column. The
+      // engine orders the catch-all groups last (multicolor and colorless
+      // under a color sort), so those share a column first and the five
+      // colors stay apart. An even spread would put white and blue together
+      // whenever seven color groups meet six columns.
+      const leading = count - overflow * 2;
+      return Array.from({ length: count }, (_, index) => (
+        index < leading ? index : leading + Math.floor((index - leading) / 2)
+      ));
+    }
+    // Heavily over-subscribed: no tail pairing can fit, so spread evenly.
+    return Array.from({ length: count }, (_, index) => Math.floor(index * columnCount / count));
   }
-  if (groups.length === 0) return;
+  return Array.from({ length: count }, (_, index) => index);
+}
+
+function allocateGroups(groups: AllocatableGroup[], columnCount: number): void {
+  const columns = allocateColumnIndexes(groups.length, columnCount);
   groups.forEach((group, index) => {
-    group.columns = [index];
+    group.columns = [columns[index]];
   });
+}
+
+/** The most groups any sort axis has (type sort: seven types plus other). */
+const MAX_AXIS_GROUPS = 8;
+
+/**
+ * Whether the allocator could itself have put every group of `shared` in one
+ * column. The board is sorted once and then edited, so a group may appear or
+ * empty out afterwards; the groups the sort laid out are therefore not
+ * recoverable from the zone's current cards. Any subset of the axis's other
+ * groups may have been present at sort time, so ask whether SOME plan shares
+ * these groups. A column the player mixed by hand (white and red at four
+ * columns) fits no plan and stays rejected.
+ */
+function allocatorCouldShareColumn(
+  rawAxis: readonly DraftPoolGroupKind[],
+  shared: readonly DraftPoolGroupKind[],
+  columnCount: number,
+): boolean {
+  // The groups come from the host's pool data, so bound the subset search: an
+  // axis holds each kind at most once, and there are only a handful of kinds.
+  const axis = rawAxis.filter((kind, index) => rawAxis.indexOf(kind) === index);
+  if (axis.length > MAX_AXIS_GROUPS) return false;
+  if (shared.some((kind) => !axis.includes(kind))) return false;
+  const optional = axis.filter((kind) => !shared.includes(kind));
+  for (let mask = 0; mask < 2 ** optional.length; mask += 1) {
+    const present = axis.filter((kind) => (
+      shared.includes(kind) || optional.includes(kind) && (mask >> optional.indexOf(kind) & 1) === 1
+    ));
+    const columns = allocateColumnIndexes(present.length, columnCount);
+    const sharedColumns = new Set(shared.map((kind) => columns[present.indexOf(kind)]));
+    if (sharedColumns.size === 1) return true;
+  }
+  return false;
 }
 
 export function rebuildWorkspaceZone(
@@ -1064,21 +1114,59 @@ export function resolveWorkspaceSortColumn(
     return manaValueColumn(card.cmc, model.columnCount);
   }
   const groupKind = cardSortGroup(card, model.effectiveSort);
-  const matches = model.columns.filter((column) => {
-    if (column.header.descriptors.some((descriptor) => descriptor.kind !== "engine-group")) {
-      return false;
-    }
-    const sortGroupKinds = column.header.descriptors.flatMap((descriptor) => (
-      descriptor.kind === "engine-group"
-      && SORT_GROUP_KINDS[model.effectiveSort].has(descriptor.groupKind)
-        ? [descriptor.groupKind]
-        : []
-    ));
-    return sortGroupKinds.length === 1 && sortGroupKinds[0] === groupKind;
+  const axis = axisGroups(model.effectiveSort, poolGroups);
+  const axisKinds = axis.map((group) => group.kind);
+  // Which columns the zone's cards of each group occupy, the card being placed
+  // aside. A group the player has spread over several columns was not laid
+  // out as a unit, so no shared column built from it is trusted.
+  const kindOf = new Map<string, DraftPoolGroupKind>();
+  axis.forEach((group) => group.cards.forEach((entry) => (
+    entry.instance_ids.forEach((instanceId) => kindOf.set(instanceId, group.kind))
+  )));
+  const groupColumns = new Map<DraftPoolGroupKind, Set<number>>();
+  for (const [instanceId, placement] of Object.entries(workspace.placements)) {
+    const kind = kindOf.get(instanceId);
+    if (placement.zone !== zone || instanceId === card.instance_id || kind === undefined) continue;
+    groupColumns.set(kind, (groupColumns.get(kind) ?? new Set()).add(placement.column));
+  }
+  const unsplit = (kinds: readonly DraftPoolGroupKind[]) => (
+    kinds.every((kind) => groupColumns.get(kind)?.size === 1)
+  );
+  const columnKinds = (column: WorkspaceBoardColumnModel): DraftPoolGroupKind[] | null => (
+    column.header.descriptors.some((descriptor) => descriptor.kind !== "engine-group")
+      ? null
+      : column.header.descriptors.flatMap((descriptor) => (
+        descriptor.kind === "engine-group"
+        && SORT_GROUP_KINDS[model.effectiveSort].has(descriptor.groupKind)
+          ? [descriptor.groupKind]
+          : []
+      ))
+  );
+  const holding = model.columns.flatMap((column) => {
+    const kinds = columnKinds(column);
+    return kinds === null ? [] : [{ column, kinds }];
   });
-  // A column already holding the group wins over an empty one merely reserved for it.
-  const matchingColumn = matches.find((column) => column.count > 0) ?? matches[0];
-  if (matchingColumn !== undefined) return matchingColumn.column;
+
+  // A column holding only this group wins over any shared one: it is the one
+  // the sort (or the player) gave the group, wherever the allocator might have
+  // folded it. A column already holding the group wins over an empty one
+  // merely reserved for it.
+  const pure = holding.filter(({ kinds }) => kinds.length === 1 && kinds[0] === groupKind);
+  const pureColumn = pure.find(({ column }) => column.count > 0) ?? null;
+  if (pureColumn !== null) return pureColumn.column.column;
+  // A shared column counts only when the allocator could have laid out its
+  // groups together and none of them was pulled apart afterwards; a column the
+  // player mixed by hand stays rejected.
+  const shared = holding.find(({ column, kinds }) => (
+    column.count > 0
+    && kinds.length > 1
+    && kinds.includes(groupKind)
+    && unsplit(kinds)
+    && allocatorCouldShareColumn(axisKinds, kinds, model.columnCount)
+  ));
+  if (shared !== undefined) return shared.column.column;
+  if (pure[0] !== undefined) return pure[0].column.column;
+
   if (model.effectiveSort === "color") {
     return model.columns.find((column) => column.count === 0)?.column ?? 0;
   }
@@ -1143,7 +1231,9 @@ export function placeArrivingPoolCards(
   preferences: DraftBoardPreferences,
 ): DraftWorkspaceState {
   let next = workspace;
+  const pending = new Set(arrivingInstanceIds);
   for (const instanceId of arrivingInstanceIds) {
+    pending.delete(instanceId);
     const card = pool.find((entry) => entry.instance_id === instanceId);
     if (card === undefined) continue;
     const placement = next.placements[instanceId];
@@ -1153,12 +1243,20 @@ export function placeArrivingPoolCards(
     // the belt to that braces, and the one thing it catches on its own is a
     // caller that widened the list to cards already in the sideboard.
     if (placement === undefined || placement.zone !== "deck") continue;
+    // Arrivals still waiting for their turn hold only reconcile's default
+    // column; leaving them in would read as cards spread over the board.
+    const settled: DraftWorkspaceState = {
+      ...next,
+      placements: Object.fromEntries(
+        Object.entries(next.placements).filter(([id]) => !pending.has(id)),
+      ),
+    };
     const hint = resolveWorkspacePickPlacement(
       card,
       "deck",
       pool,
       poolGroups,
-      next,
+      settled,
       preferences,
     );
     next = appendWorkspaceInstanceToResolvedDestination(next, pool, instanceId, {
