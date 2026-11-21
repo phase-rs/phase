@@ -1,3 +1,4 @@
+import basicLandArtCatalog from "../../../crates/engine/data/basic-land-art-v1.json";
 import { findPrintingById, pickOldestPrinting } from "./scryfall.ts";
 import type { PrintingEntry } from "./scryfall.ts";
 // Type-only, so no runtime dependency is created from `services/` back into
@@ -102,4 +103,22 @@ export function selectedPrinting(
   if (artChain.length > 0) return applyChain(artChain, printings, source);
   if (source) return matchSourcePrinting(printings, source);
   return null;
+}
+
+/** Preserve the owner's pin or imported art before applying general preferences to covered basics. */
+export function selectSubmissionPrinting(
+  oracleId: string,
+  printings: PrintingEntry[],
+  artChain: ArtChainEntry[],
+  artOverrides: Record<string, CardArtOverride>,
+  source?: SourcePrinting,
+): PrintingEntry | null {
+  if (!Object.prototype.hasOwnProperty.call(basicLandArtCatalog.lands, oracleId)) {
+    return selectedPrinting(oracleId, printings, artChain, artOverrides, source);
+  }
+
+  const override = artOverrides[oracleId];
+  return (override ? findPrintingById(printings, override.scryfallId) : null)
+    ?? (source ? matchSourcePrinting(printings, source) : null)
+    ?? applyChain(artChain, printings, source);
 }

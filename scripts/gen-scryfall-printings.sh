@@ -8,7 +8,16 @@ DATA_DIR="data/scryfall"
 CARDS_FILE="${SCRYFALL_DEFAULT_CARDS_FILE:-$DATA_DIR/default-cards.json}"
 OUTPUT="${SCRYFALL_PRINTINGS_OUTPUT:-client/public/scryfall-printings.json}"
 
+CATALOG="$SCRIPT_DIR/../crates/engine/data/basic-land-art-v1.json"
+VALIDATOR="$SCRIPT_DIR/validate-basic-land-art.sh"
+
 echo "=== Scryfall Printings Generation ==="
+
+if [ -f "$OUTPUT" ]; then
+  "$VALIDATOR" renderer "$CATALOG" "$OUTPUT"
+  echo "Skipping generation — $OUTPUT already exists (delete to regenerate)."
+  exit 0
+fi
 
 if [ ! -f "$CARDS_FILE" ]; then
   echo "Downloading Scryfall default-cards bulk data..."
@@ -17,18 +26,15 @@ if [ ! -f "$CARDS_FILE" ]; then
   echo "Downloaded $CARDS_FILE."
 fi
 
-if [ -f "$OUTPUT" ]; then
-  echo "Skipping generation — $OUTPUT already exists (delete to regenerate)."
-  exit 0
-fi
-
 echo "Generating $OUTPUT..."
 mkdir -p "$(dirname "$OUTPUT")"
+candidate=$(mktemp "${OUTPUT}.XXXXXX")
+trap 'rm -f -- "$candidate"' EXIT
 
 # Build a printings index keyed by oracle_id.
 #
-# Only cards with >1 unique artwork are included (nothing to pick from
-# otherwise). Each oracle_id maps to an array of PrintingEntry objects
+# Only cards with multiple printing rows are included. Each oracle_id maps
+# to an array of PrintingEntry objects
 # sorted by released_at descending (newest first).
 #
 # Face images: a face's own image_uris wins (DFCs), otherwise the card's
@@ -76,7 +82,11 @@ jq -c --argjson exclude "$NON_PLAYABLE" '
     value: ([.[].entry] | sort_by(.released_at) | reverse)
   }) |
   from_entries
-' "$CARDS_FILE" > "$OUTPUT"
+' "$CARDS_FILE" > "$candidate"
+
+"$VALIDATOR" renderer "$CATALOG" "$candidate"
+chmod a+r "$candidate"
+mv -f -- "$candidate" "$OUTPUT"
 
 ENTRY_COUNT=$(jq 'length' "$OUTPUT")
 FILE_SIZE=$(du -h "$OUTPUT" | cut -f1)

@@ -4174,7 +4174,9 @@ pub(crate) fn rebind_declared_groups_in_condition(
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::ChosenLabelIs { .. }
-        | AbilityCondition::SourceLacksKeyword { .. } => {}
+        | AbilityCondition::SourceLacksKeyword { .. }
+        // `PlayerScope` endpoints name no declared groups (no rebind target).
+        | AbilityCondition::PlayerAttackedPlayer { .. } => {}
     }
 }
 
@@ -12005,17 +12007,13 @@ fn matches_filter_prop(
         // cast-candidate filters read the same marker from the record captured by
         // `restrictions::spell_cast_record_for` (`spell_record_matches_property`).
         FilterProp::PrepareSpell => obj.zone == Zone::Stack && obj.prepared_copy_source.is_some(),
-        // CR 115.9c: Stack entry's targets all match the inner filter — permissive at
-        // per-object level, validated by trigger matchers and retarget effects against the
-        // stack entry's actual targets.
         // CR 707.2: Match face-down permanents on the battlefield.
         FilterProp::FaceDown => obj.face_down,
         // CR 701.27g: Match transformed permanents ("a double-faced permanent on the
         // battlefield with its back face up"), read through the one authority.
         FilterProp::Transformed => crate::game::transform::is_transformed_permanent(obj),
-        // CR 115.9c: If the object is a stack entry, ALL of its targets must match
-        // the inner filter. Falls back permissive for non-stack objects so trigger
-        // matchers remain the primary authority (they validate separately).
+        // CR 115.9c: a stack entry with exactly one different chosen target that matches;
+        // non-stack objects are permissive.
         FilterProp::TargetsOnly { filter } => stack_entry_targets_satisfy(
             state,
             object_id,
@@ -12071,16 +12069,15 @@ fn matches_filter_prop(
 
 /// CR 115.9b/115.9c: Check whether a stack entry's targets satisfy a filter.
 ///
-/// Used by `FilterProp::Targets` and `FilterProp::TargetsOnly` in
-/// `matches_filter_prop` when the object being evaluated is a stack entry.
-/// If `require_all` is `true` (TargetsOnly / CR 115.9c), every target must
-/// match `filter`; if `false` (Targets / CR 115.9b), at least one must.
+/// Evaluates `FilterProp::Targets` and `FilterProp::TargetsOnly` on a stack
+/// entry. If `require_all` is `true` (TargetsOnly / CR 115.9c + CR 115.9b),
+/// exactly one different object or player was chosen, it still counts, and it
+/// matches `filter`; if `false` (Targets / CR 115.9b), at least one counted
+/// target must match.
 ///
-/// Non-stack objects return `true` (permissive fallback) so trigger matchers,
-/// which validate targets through `stack_entry_targets_any`, remain the primary
-/// authority. Stack entries with no ability targets return `false` because
-/// "targets X" cannot be satisfied with an empty target list.
-fn stack_entry_targets_satisfy(
+/// Non-stack objects return `true` (permissive fallback). A stack entry with
+/// no counted target returns `false`.
+pub(crate) fn stack_entry_targets_satisfy(
     state: &GameState,
     stack_obj_id: ObjectId,
     source_id: ObjectId,
@@ -12088,22 +12085,32 @@ fn stack_entry_targets_satisfy(
     filter: &TargetFilter,
     require_all: bool,
 ) -> bool {
-    let Some(entry) = state.stack.iter().find(|e| e.id == stack_obj_id) else {
+    // CR 608.2g: a spell parked mid-resolution is found as legal-target enumeration finds it.
+    let Some(entry) = crate::game::targeting::targetable_stack_spell_entries(state)
+        .find(|e| e.id == stack_obj_id)
+    else {
         return true; // Not a stack entry — permissive.
     };
-    let Some(ability) = entry.ability() else {
-        return true; // KeywordAction entries carry no ability targets — permissive.
-    };
-    let targets = crate::game::ability_utils::declared_targets_in_chain(ability);
-    if targets.is_empty() {
-        return false; // "targets X" with no targets cannot be satisfied.
-    }
     let ctx = match source_controller {
         Some(controller) => FilterContext::from_source_with_controller(source_id, controller),
         None => FilterContext::from_source(state, source_id),
     };
+    entry_targets_satisfy(state, entry, &ctx, filter, require_all)
+}
+
+/// CR 115.9b/115.9c: [`stack_entry_targets_satisfy`] for a given entry, with
+/// "you" read from `ctx` — the looking ability's controller (CR 109.5), not
+/// its source's current controller.
+pub(crate) fn entry_targets_satisfy(
+    state: &GameState,
+    entry: &crate::types::game_state::StackEntry,
+    ctx: &FilterContext,
+    filter: &TargetFilter,
+    require_all: bool,
+) -> bool {
+    let slots = stack_entry_counted_targets(state, entry);
     let check = |t: &TargetRef| match t {
-        TargetRef::Object(id) => matches_target_filter(state, *id, filter, &ctx),
+        TargetRef::Object(id) => matches_target_filter(state, *id, filter, ctx),
         TargetRef::Player(pid) => player_matches_target_filter_in_state(
             state,
             filter,
@@ -12113,9 +12120,54 @@ fn stack_entry_targets_satisfy(
         ),
     };
     if require_all {
-        targets.iter().all(check)
+        // CR 115.9c + CR 115.9b: exactly one different object or player was chosen,
+        // and it still counts; a departed target is ignored, so it cannot be the "only" one.
+        match slots.split_first() {
+            Some((Some(first), rest)) => {
+                rest.iter().all(|slot| slot.as_ref() == Some(first)) && check(first)
+            }
+            _ => false,
+        }
     } else {
-        targets.iter().any(check)
+        slots.iter().flatten().any(check)
+    }
+}
+
+/// CR 115.9b: each chosen target of a stack entry, `None` when it is ignored —
+/// an object no longer in the zone it was targeted in, or a player who left
+/// the game.
+fn stack_entry_counted_targets(
+    state: &GameState,
+    entry: &crate::types::game_state::StackEntry,
+) -> Vec<Option<TargetRef>> {
+    match &entry.kind {
+        // CR 115.1e + CR 702.6a: equip targets a creature on the battlefield;
+        // the payload carries no pin, so only the target's zone is checked.
+        StackEntryKind::KeywordAction { action } => action
+            .targets()
+            .into_iter()
+            .map(|target| {
+                matches!(target, TargetRef::Object(id)
+                    if state.objects.get(&id).is_some_and(|o| o.zone == Zone::Battlefield))
+                .then_some(target)
+            })
+            .collect(),
+        StackEntryKind::Spell { .. }
+        | StackEntryKind::ActivatedAbility { .. }
+        | StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::CombatDamage { .. } => entry
+            .ability()
+            .map(crate::game::ability_utils::declared_target_entries_in_chain)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| {
+                let counted = match &entry.target {
+                    TargetRef::Object(_) => entry.pin.is_none_or(|pin| pin.is_current(state)),
+                    TargetRef::Player(pid) => crate::game::players::is_alive(state, *pid),
+                };
+                counted.then_some(entry.target)
+            })
+            .collect(),
     }
 }
 
@@ -13616,29 +13668,8 @@ pub fn player_matches_filter(
 }
 
 // ---------------------------------------------------------------------------
-// CR 115.9c: "that targets only [X]" shared helpers
+// CR 115.9: "that targets [X]" and "with a single target" shared helpers
 // ---------------------------------------------------------------------------
-
-/// CR 115.9c: Extract the first `TargetsOnly` inner filter from a filter tree.
-/// Walks through Or/And/Typed branches to find a `FilterProp::TargetsOnly`.
-pub(crate) fn extract_targets_only(filter: &TargetFilter) -> Option<TargetFilter> {
-    match filter {
-        TargetFilter::Typed(tf) => {
-            for prop in &tf.properties {
-                if let FilterProp::TargetsOnly { filter } = prop {
-                    return Some(*filter.clone());
-                }
-            }
-            None
-        }
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            // All branches should have the same TargetsOnly (distributed by parser);
-            // return the first one found.
-            filters.iter().find_map(extract_targets_only)
-        }
-        _ => None,
-    }
-}
 
 /// CR 115.9b: Extract the first `Targets` inner filter from a filter tree.
 /// Walks through Or/And/Typed branches to find a `FilterProp::Targets`.
