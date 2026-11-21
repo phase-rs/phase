@@ -794,7 +794,8 @@ fn a_later_combat_damage_step_reads_the_guard_afresh() {
 /// CR 608.2f: one spell's damage from several sources to one creature is one simultaneous batch,
 /// so the guard is read once at each noncombat resolver: Band Together ("Up to two target
 /// creatures you control each deal damage equal to their power to another target creature."),
-/// Moonlight Hunt and Coordinated Clobbering.
+/// Moonlight Hunt and Coordinated Clobbering. CR 615.13: the shield applies once to the batch's
+/// simultaneous damage events, so its prevention publishes as one `DamagePrevented`.
 #[test]
 fn noncombat_batches_read_the_guard_once() {
     // Band Together.
@@ -815,7 +816,7 @@ fn noncombat_batches_read_the_guard_once() {
     );
     assert_settled(&runner);
     assert_shielded_once(&runner, champion);
-    assert_eq!(prevented(&events), 2, "Band Together");
+    assert_eq!(prevented(&events), 1, "Band Together");
 
     // Moonlight Hunt.
     let mut scenario = main_phase();
@@ -830,7 +831,7 @@ fn noncombat_batches_read_the_guard_once() {
     let events = cast(&mut runner, hunt, vec![TargetRef::Object(champion)]);
     assert_settled(&runner);
     assert_shielded_once(&runner, champion);
-    assert_eq!(prevented(&events), 2, "Moonlight Hunt");
+    assert_eq!(prevented(&events), 1, "Moonlight Hunt");
 
     // Coordinated Clobbering.
     let mut scenario = main_phase();
@@ -855,7 +856,7 @@ fn noncombat_batches_read_the_guard_once() {
     );
     assert_settled(&runner);
     assert_shielded_once(&runner, champion);
-    assert_eq!(prevented(&events), 2, "Coordinated Clobbering");
+    assert_eq!(prevented(&events), 1, "Coordinated Clobbering");
 }
 
 /// CR 604.2: "while it's equipped". An unequipped Outfitted Jouster takes Lightning Bolt's 3 and
@@ -919,7 +920,7 @@ fn a_false_guard_stays_false_when_a_rider_adds_a_counter() {
     assert_settled(&runner);
     assert_eq!(plus_counters(&runner, champion), 4, "Vigor");
     assert_eq!(runner.state().objects[&champion].damage_marked, 0);
-    assert_eq!(prevented(&events), 2);
+    assert_eq!(prevented(&events), 1);
 
     // Panther Habit under Band Together.
     let mut scenario = main_phase();
@@ -1025,7 +1026,7 @@ fn a_paused_batch_keeps_its_guard_reading_in_every_answer_order() {
 
         assert_settled(&runner);
         assert_shielded_once(&runner, champion);
-        assert_eq!(prevented(&events), 2, "{picks:?}");
+        assert_eq!(prevented(&events), 1, "{picks:?}");
         assert_eq!(prompts.len(), 2, "{picks:?}: {prompts:?}");
         assert_eq!(prompts[1].watched_counters, 1, "{picks:?}");
         assert!(prompts[1].sources.contains(&champion), "{picks:?}");
@@ -1052,7 +1053,7 @@ fn the_parked_portion_rescans_under_the_batch_reading() {
 
     assert_settled(&runner);
     assert_shielded_once(&runner, champion);
-    assert_eq!(prevented(&events), 2);
+    assert_eq!(prevented(&events), 1);
 }
 
 /// CR 510.2 + CR 608.2f: three portions, two of them stashed while the first parks. Moonlight Hunt
@@ -1074,7 +1075,7 @@ fn every_stashed_portion_carries_the_batch_reading() {
     assert_settled(&runner);
     assert_shielded_once(&runner, champion);
     assert_eq!(prompts.len(), 3, "Moonlight Hunt");
-    assert_eq!(prevented(&events), 3, "Moonlight Hunt");
+    assert_eq!(prevented(&events), 1, "Moonlight Hunt");
 
     let mut scenario = main_phase();
     let champion = undergrowth_champion(&mut scenario, P1, 1);
@@ -1101,7 +1102,7 @@ fn every_stashed_portion_carries_the_batch_reading() {
     assert_settled(&runner);
     assert_shielded_once(&runner, champion);
     assert_eq!(prompts.len(), 2, "Coordinated Clobbering");
-    assert_eq!(prevented(&events), 2, "Coordinated Clobbering");
+    assert_eq!(prevented(&events), 1, "Coordinated Clobbering");
 }
 
 /// The Champion's printed shield and Acolyte's Reward's resolved shield, as the prompt names them.
@@ -1233,7 +1234,7 @@ fn fight_damage_redirected_to_the_host_meets_one_reading() {
         assert_eq!(object.damage_marked, 0);
         assert!(damage_dealt_to(&events, nomad).is_empty());
     }
-    assert_eq!(prevented(&events), 2);
+    assert_eq!(prevented(&events), 1);
     assert!(damage_dealt_to(&events, champion).is_empty());
     assert_shielded_once(&runner, champion);
 }
@@ -1282,7 +1283,7 @@ fn a_fights_capped_redirects_ask_the_recipients_shield_choice() {
     }
     assert!(damage_dealt_to(&events, wall).is_empty());
     assert_eq!(runner.state().objects[&wall].damage_marked, 0);
-    assert_eq!(prevented(&events), 2);
+    assert_eq!(prevented(&events), 1);
     let completions = events[fight_cast..]
         .iter()
         .filter(|e| {
@@ -1334,21 +1335,28 @@ fn a_capped_redirects_part_meets_its_new_recipients_protection() {
         );
 
         assert_settled(&runner);
-        let knight_prevented = events.iter().any(|e| {
-            matches!(
-                e,
-                GameEvent::DamagePrevented { source_id, target: TargetRef::Object(id), .. }
-                    if *source_id == giant && *id == knight
-            )
-        });
+        let knight_prevented: Vec<ObjectId> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::DamagePrevented {
+                    source_id,
+                    target: TargetRef::Object(id),
+                    ..
+                } if *id == knight => Some(*source_id),
+                _ => None,
+            })
+            .collect();
         if stomped {
             assert_eq!(damage_dealt_to(&events, knight), vec![1], "stomped");
             assert_eq!(runner.state().objects[&knight].damage_marked, 1);
-            assert!(!knight_prevented, "stomped: nothing is prevented");
+            assert!(knight_prevented.is_empty(), "stomped: nothing is prevented");
         } else {
             assert!(damage_dealt_to(&events, knight).is_empty());
             assert_eq!(runner.state().objects[&knight].damage_marked, 0);
-            assert!(knight_prevented);
+            // CR 615.13: the batch's aggregate `DamagePrevented` names the shield's host, and
+            // protection's prevention has none, so it carries the sourceless `ObjectId(0)`, not
+            // the Giant.
+            assert_eq!(knight_prevented, vec![ObjectId(0)]);
         }
         assert_eq!(
             damage_dealt_to(&events, nomads),
@@ -1358,51 +1366,59 @@ fn a_capped_redirects_part_meets_its_new_recipients_protection() {
     }
 }
 
-/// STRICT FAILURE (CR 616.1 + CR 702.16e, fenced by the
-/// `capped_redirect_recipient_choice_incomplete` coverage gap): the reviewer's board, with Test of
-/// Faith on the pro-red Silver Knight too. The redirected point meets two prevention effects, so
-/// the Knight's controller should choose which applies: Test of Faith (a +1/+1 counter and
-/// two points of prevention remaining) or protection (all three points of prevention remaining).
-/// Today protection prevents the point at the
-/// pre-replacement gate and no choice is offered. This row records that reading.
+/// CR 616.1 + CR 702.16e: the reviewer's board, with Test of Faith on the pro-red Silver Knight
+/// too. The redirected point meets two prevention effects, so the Knight's controller chooses which
+/// applies: Test of Faith (a +1/+1 counter and two points of prevention remaining) or protection
+/// (all three points of prevention remaining). Protection proposes into the replacement pipeline
+/// as a candidate, so neither pre-empts the other.
 #[test]
-fn a_capped_redirects_part_meets_protection_before_a_competing_shield() {
+fn a_capped_redirects_part_offers_protection_beside_a_competing_shield() {
     use engine::types::keywords::{Keyword, ProtectionTarget};
     use engine::types::mana::ManaColor;
-    let mut scenario = main_phase();
-    let giant = scenario
-        .add_creature(P0, "Hill Giant", 3, 3)
-        .with_color(vec![ManaColor::Red])
-        .id();
-    let nomads = nomads_shielding(&mut scenario, "Nomads en-Kor");
-    let knight = scenario
-        .add_creature(P0, "Silver Knight", 2, 2)
-        .with_keyword(Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)))
-        .id();
-    let faith = spell(&mut scenario, "Test of Faith", TEST_OF_FAITH, true);
-    let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
-    let mut runner = scenario.build();
-    activate_shields_at(&mut runner, &[nomads], knight);
-    cast(&mut runner, faith, vec![TargetRef::Object(knight)]);
+    for protection_first in [true, false] {
+        let mut scenario = main_phase();
+        let giant = scenario
+            .add_creature(P0, "Hill Giant", 3, 3)
+            .with_color(vec![ManaColor::Red])
+            .id();
+        let nomads = nomads_shielding(&mut scenario, "Nomads en-Kor");
+        let knight = scenario
+            .add_creature(P0, "Silver Knight", 2, 2)
+            .with_keyword(Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)))
+            .id();
+        let faith = spell(&mut scenario, "Test of Faith", TEST_OF_FAITH, true);
+        let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
+        let mut runner = scenario.build();
+        activate_shields_at(&mut runner, &[nomads], knight);
+        cast(&mut runner, faith, vec![TargetRef::Object(knight)]);
 
-    let events = cast(
-        &mut runner,
-        pit_fight,
-        vec![TargetRef::Object(giant), TargetRef::Object(nomads)],
-    );
+        let mut events = cast(
+            &mut runner,
+            pit_fight,
+            vec![TargetRef::Object(giant), TargetRef::Object(nomads)],
+        );
+        let pick = if protection_first {
+            Pick::Described("Prevent damage with protection from Red")
+        } else {
+            Pick::Described("Prevent damage")
+        };
+        let prompts = answer(&mut runner, &[pick], knight, &mut events);
 
-    assert_settled(&runner);
-    assert!(events.iter().any(|e| matches!(
-        e,
-        GameEvent::DamagePrevented { source_id, target: TargetRef::Object(id), amount: 1 }
-            if *source_id == giant && *id == knight
-    )));
-    assert_eq!(
-        plus_counters(&runner, knight),
-        0,
-        "STRICT FAILURE: Test of Faith is never offered"
-    );
-    assert_eq!(damage_dealt_to(&events, nomads), vec![2]);
+        assert_settled(&runner);
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::DamagePrevented { target: TargetRef::Object(id), amount: 1, .. }
+                if *id == knight
+        )));
+        assert!(damage_dealt_to(&events, knight).is_empty());
+        assert_eq!(
+            plus_counters(&runner, knight),
+            if protection_first { 0 } else { 1 },
+            "protection first {protection_first}"
+        );
+        assert_eq!(damage_dealt_to(&events, nomads), vec![2]);
+    }
 }
 
 /// CR 614.9 + CR 616.1 + CR 101.4d: a capped redirect chosen by an answer splits its 1 off to a
@@ -1489,37 +1505,66 @@ fn an_answered_capped_redirect_asks_its_recipients_choice_in_apnap_order() {
 /// Furnace of Rath, the Nomads' shield aimed at the Champion. The Nomads' 1 damage to the Champion
 /// meets Furnace of Rath and the Champion's shield and is answered shield first, which takes the
 /// counter; the Champion's damage back is stashed behind that choice, and the 1 of it the Nomads'
-/// shield then deals to the counterless Champion is still prevented.
+/// shield then deals to the counterless Champion is still prevented. The Champion's damage meets
+/// Furnace of Rath and the Nomads' redirect, whose order changes what each recipient is dealt
+/// (CR 614.9 + CR 616.1), so it is the second prompt, answered both ways. Furnace first doubles
+/// the 3 to 6 and the redirect then sends 1 of it to the Champion, leaving 5 on the Nomads; the
+/// redirect first sends 1 of the 3 to the Champion and Furnace doubles the remaining 2 to 4, and
+/// the redirected 1, which Furnace has not yet modified, is a third prompt for P0.
 #[test]
 fn a_paused_fight_keeps_its_guard_reading() {
-    let mut scenario = main_phase();
-    let champion = undergrowth_champion(&mut scenario, P0, 1);
-    let nomads = nomads_shielding(&mut scenario, "Nomads en-Kor");
-    furnace_of_rath(&mut scenario);
-    let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
-    let mut runner = scenario.build();
-    activate_shields_at(&mut runner, &[nomads], champion);
+    for furnace_first in [true, false] {
+        let mut scenario = main_phase();
+        let champion = undergrowth_champion(&mut scenario, P0, 1);
+        let nomads = nomads_shielding(&mut scenario, "Nomads en-Kor");
+        let furnace = furnace_of_rath(&mut scenario);
+        let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
+        let mut runner = scenario.build();
+        activate_shields_at(&mut runner, &[nomads], champion);
 
-    let mut events = cast(
-        &mut runner,
-        pit_fight,
-        vec![TargetRef::Object(nomads), TargetRef::Object(champion)],
-    );
-    let prompts = answer(&mut runner, &[Pick::From(champion)], champion, &mut events);
+        let mut events = cast(
+            &mut runner,
+            pit_fight,
+            vec![TargetRef::Object(nomads), TargetRef::Object(champion)],
+        );
+        let picks: &[Pick] = if furnace_first {
+            &[Pick::From(champion), Pick::From(furnace)]
+        } else {
+            &[
+                Pick::From(champion),
+                Pick::From(nomads),
+                Pick::From(champion),
+            ]
+        };
+        let prompts = answer(&mut runner, picks, champion, &mut events);
 
-    assert_settled(&runner);
-    assert!(
-        !prompts.is_empty(),
-        "the first direction parks on an order choice"
-    );
-    assert_eq!(prompts[0].watched_counters, 1, "{prompts:?}");
-    assert!(prompts[0].sources.contains(&champion), "{prompts:?}");
-    // The rest of the Champion's damage stays on the Nomads, which dies.
-    assert!(!damage_dealt_to(&events, nomads).is_empty());
-    assert_eq!(runner.state().objects[&nomads].zone, Zone::Graveyard);
-    assert_eq!(prevented(&events), 2);
-    assert!(damage_dealt_to(&events, champion).is_empty());
-    assert_shielded_once(&runner, champion);
+        assert_settled(&runner);
+        assert_eq!(
+            prompts.len(),
+            picks.len(),
+            "furnace first {furnace_first}: {prompts:?}"
+        );
+        assert!(prompts[1].sources.contains(&nomads), "{prompts:?}");
+        assert!(prompts[1].sources.contains(&furnace), "{prompts:?}");
+        if !furnace_first {
+            // The redirected 1 is a part Furnace of Rath has not yet modified, so it meets
+            // Furnace and the Champion's shield, and P0 orders them too (CR 616.1).
+            assert!(prompts[2].sources.contains(&furnace), "{prompts:?}");
+            assert!(prompts[2].sources.contains(&champion), "{prompts:?}");
+        }
+        assert_eq!(prompts[0].watched_counters, 1, "{prompts:?}");
+        assert!(prompts[0].sources.contains(&champion), "{prompts:?}");
+        // The rest of the Champion's damage stays on the Nomads, which dies.
+        assert_eq!(
+            damage_dealt_to(&events, nomads),
+            vec![if furnace_first { 5 } else { 4 }],
+            "furnace first {furnace_first}"
+        );
+        assert_eq!(runner.state().objects[&nomads].zone, Zone::Graveyard);
+        assert_eq!(prevented(&events), 1, "furnace first {furnace_first}");
+        assert!(damage_dealt_to(&events, champion).is_empty());
+        assert_shielded_once(&runner, champion);
+    }
 }
 
 const TEST_OF_FAITH: &str = "Prevent the next 3 damage that would be dealt to target creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.";
@@ -1811,7 +1856,7 @@ fn the_batch_reading_survives_serialization_at_the_pause() {
     }
     assert_settled(&runner);
     assert_shielded_once(&runner, champion);
-    assert_eq!(prevented(&events), 2);
+    assert_eq!(prevented(&events), 1);
 }
 
 /// CR 608.2f: one dealer's two damage clauses in one sentence are one action. Chandra's Outrage:
@@ -3799,7 +3844,9 @@ fn a_may_park_and_a_riders_own_prompt_asks_abundance_and_settles_channel_harm() 
 
         assert_batch_settled(&runner);
         assert_eq!(combat.prompts.len(), if abundance { 2 } else { 0 });
-        assert_eq!(prevented(&combat.events), 2);
+        // CR 615.13 + CR 120.3: Channel Harm's one application publishes once per recipient (the
+        // two Bears), and the Swans' once.
+        assert_eq!(prevented(&combat.events), 3);
         // CR 121.2: the Swans' 2 is two draws, so 2 cards either way.
         assert_eq!(hand_size(&runner, P0) - hand_before, 2);
         assert_eq!(
