@@ -310,6 +310,8 @@ mod a2_runtime {
             target: TargetRef::Object(victim),
             amount,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: Default::default(),
         }
     }
