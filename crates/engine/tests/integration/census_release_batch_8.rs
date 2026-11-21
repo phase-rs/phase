@@ -354,7 +354,7 @@ fn kozilek_cast_trigger_draws_cards_equal_to_the_difference_from_seven() {
         .collect();
     for name in top_four {
         assert!(
-            hand.contains(&name.to_string()),
+            hand.iter().any(|card| card == name),
             "{name} was drawn: {hand:?}"
         );
     }
