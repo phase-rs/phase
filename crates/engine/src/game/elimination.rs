@@ -654,75 +654,70 @@ pub(crate) fn eliminate_players(
     // neither answers nor remains an eligible future chooser. Preserve the
     // aggregate for the surviving seats, advancing past a departed current
     // prompt instead of leaving a serialized choice owned by a non-player.
-    if let Some(mut pending) = state.pending_player_scope_unless_payment.take() {
-        let original_controller = pending
-            .pending_effect
-            .original_controller
-            .unwrap_or(pending.pending_effect.controller);
-        if leaving_set.contains(&original_controller) {
-            // CR 800.4a: The resolving instruction leaves with its original
-            // controller. A previously-recorded decline cannot create tokens
-            // for a player no longer in the game, and its per-payer prompt
-            // must not outlive the abandoned aggregate.
-            let aggregate_prompt_is_live = match &state.waiting_for {
-                WaitingFor::UnlessPayment { pending_effect, .. }
-                | WaitingFor::WardSacrificeChoice { pending_effect, .. } => {
-                    pending_effect.source_id == pending.pending_effect.source_id
-                }
-                WaitingFor::ReplacementChoice { .. } => state
-                    .pending_replacement
-                    .as_ref()
-                    .and_then(|replacement| replacement.sacrifice_provenance.as_ref())
-                    .is_some_and(|provenance| provenance.player_id == pending.current_player),
-                _ => false,
-            };
-            if aggregate_prompt_is_live {
-                // The only parked replacement at this point belongs to the
-                // aggregate's current payer. Once its controller leaves, the
-                // aggregate cannot resume through that payer's choice.
-                state.pending_replacement = None;
-                state.replacement_may_cost_paused = false;
-                super::replacement::abandon_post_replacement_continuation(state);
-                state.waiting_for = WaitingFor::Priority {
-                    player: players::next_player(state, original_controller),
-                };
-            }
-        } else {
+    // CR 608.2m: the source's controller leaving does not end the poll — the
+    // instruction has started to resolve and continues fully; the surviving
+    // payers still answer and their recorded sacrifices are made, and the
+    // tokens owed to a departed controller are not created (CR 800.4b).
+    let token_unless_poll = match state.pending_player_scope_unless_payment.take() {
+        Some(mut pending) => {
             pending
                 .remaining_players
                 .retain(|player| !leaving_set.contains(player));
-            if leaving_set.contains(&pending.current_player) {
-                if let Some((next, rest)) = pending.remaining_players.split_first() {
-                    pending.current_player = *next;
-                    pending.remaining_players = rest.to_vec();
-                    state.waiting_for = WaitingFor::UnlessPayment {
-                        player: pending.current_player,
-                        cost: pending.cost.clone(),
-                        pending_effect: pending.pending_effect.clone(),
-                        trigger_event: None,
-                        effect_description: None,
-                        remaining: Vec::new(),
-                        affected_object: None,
-                        repeat: None,
-                    };
-                    state.pending_player_scope_unless_payment = Some(pending);
-                } else {
-                    // The departed prompt contributes no new decline, but earlier
-                    // surviving decliners still owe the source controller one
-                    // aggregate token batch. Reinstall then settle through the
-                    // regular terminal-payment authority so `waiting_for` cannot
-                    // retain this eliminated player's stale prompt.
-                    state.pending_player_scope_unless_payment = Some(pending);
-                    crate::game::engine_payment_choices::settle_eliminated_player_scope_token_unless_payment(
-                        state, events,
-                    )
-                    .expect("eliminated final payer must settle a token-unless aggregate");
-                }
-            } else {
+            if !leaving_set.contains(&pending.current_player) {
                 state.pending_player_scope_unless_payment = Some(pending);
+                super::engine_resolution_choices::DepartureSettlement::NotSettled
+            } else if let Some((next, rest)) = pending.remaining_players.split_first() {
+                pending.current_player = *next;
+                pending.remaining_players = rest.to_vec();
+                state.waiting_for = WaitingFor::UnlessPayment {
+                    player: pending.current_player,
+                    cost: pending.cost.clone(),
+                    pending_effect: pending.pending_effect.clone(),
+                    trigger_event: None,
+                    effect_description: None,
+                    remaining: Vec::new(),
+                    affected_object: None,
+                    repeat: None,
+                };
+                state.pending_player_scope_unless_payment = Some(pending);
+                super::engine_resolution_choices::DepartureSettlement::NotSettled
+            } else {
+                // The departed prompt contributes no new decline, but earlier
+                // surviving decliners still owe the source controller one
+                // aggregate token batch. Reinstall then settle through the
+                // regular terminal-payment authority so `waiting_for` cannot
+                // retain this eliminated player's stale prompt.
+                state.pending_player_scope_unless_payment = Some(pending);
+                crate::game::engine_payment_choices::settle_eliminated_player_scope_token_unless_payment(
+                    state, events,
+                )
+                .expect("eliminated final payer must settle a token-unless aggregate");
+                super::engine_resolution_choices::DepartureSettlement::Settled
             }
         }
-    }
+        None => super::engine_resolution_choices::DepartureSettlement::NotSettled,
+    };
+
+    // CR 800.4a + CR 101.4 + CR 608.2m: reconcile an open player-scope unless
+    // poll before the generic dead-actor repoint below: a departed seat makes
+    // no further choice and pays nothing, the surviving seats' answers stand,
+    // and the next surviving seat is asked (or the poll settles). A departed
+    // controller's instruction has started to resolve and goes on resolving.
+    let scoped_unless_poll = match crate::game::scoped_unless_poll::reconcile_departures(
+        state,
+        &leaving_set,
+        events,
+    ) {
+        Ok(settlement) => settlement,
+        Err(error) => {
+            tracing::error!(%error, "player-scope unless poll was not reconciled after a departure");
+            debug_assert!(
+                false,
+                "player-scope unless poll was not reconciled after a departure: {error}"
+            );
+            super::engine_resolution_choices::DepartureSettlement::NotSettled
+        }
+    };
 
     // CR 704.3 + CR 104.4a: a SINGLE game-over check after all simultaneous
     // eliminations — so a finish where every remaining player lost at once
@@ -784,6 +779,8 @@ pub(crate) fn eliminate_players(
         state.pending_player_scope_choice = None;
         // CR 104.1: nor is a choose-all-then-act unless poll.
         state.pending_simultaneous_unless = None;
+        // CR 104.1: nor is a player-scope unless poll.
+        state.pending_player_scope_unless_punishment = None;
         super::turns::abandon_phase_begin_choice(state);
         state.waiting_for = WaitingFor::GameOver { winner };
     } else {
@@ -1162,6 +1159,17 @@ pub(crate) fn eliminate_players(
                     resolution_player_choice,
                     super::engine_resolution_choices::DepartureSettlement::NotSettled
                 )
+                && matches!(
+                    scoped_unless_poll,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
+                && matches!(
+                    token_unless_poll,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
+                // CR 608.2m: a surviving player still owes a poll an answer.
+                && state.pending_player_scope_unless_punishment.is_none()
+                && state.pending_player_scope_unless_payment.is_none()
                 && state
                     .resolving_stack_entry
                     .as_ref()
@@ -2907,6 +2915,7 @@ fn retire_parked_resolution_work(state: &mut GameState) {
     state.payment_transaction_replay = false;
     state.payment_transaction_just_handled = false;
     state.pending_player_scope_unless_payment = None;
+    state.pending_player_scope_unless_punishment = None;
     state.pending_player_scope_sacrifice_choice = None;
     state.pending_player_scope_choice = None;
     state.pending_simultaneous_unless = None;

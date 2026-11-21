@@ -10,14 +10,19 @@
 //! turn order makes all of their choices, then all of the actions occur
 //! simultaneously."
 //!
-//! This module is the CR 101.4 authority for scoped unless polls whose answers
-//! must all come before any action: admission (`admits`), the per-instance
+//! This module is the CR 101.4 authority for counted scoped unless polls whose
+//! answers must all come before any action: admission (`admits`), the per-instance
 //! template, collection through the existing unless and pick prompts, delivery,
 //! and reconciliation with a departure. While a poll collects it holds its
 //! resolution open (`holds_resolution`): the resolving ability does not settle
 //! and what it triggered waits in the deferred queue (CR 608.2c + CR 117.2e).
-//! Polls that predate it (the player-scope token poll, Hag of Ceaseless
-//! Torment, Bellowing Mauler) migrate here under #11076.
+//! It owns only the counted form, where one seat answers several instances. A
+//! single scoped unless instruction (Hag of Ceaseless Torment, Bellowing
+//! Mauler) is polled by `game::scoped_unless_poll`, which admits a chain at the
+//! `player_scope` driver; this coordinator admits at the counted repeat above
+//! it, so an instruction admitted here never reaches that poll. A counted
+//! repeat this coordinator does not admit runs round by round, and each round
+//! may open that poll.
 
 use std::ops::Range;
 

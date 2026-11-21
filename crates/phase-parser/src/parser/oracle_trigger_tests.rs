@@ -12091,17 +12091,20 @@ fn doran_attack_block_pump_resolves_pt_difference() {
             "Doran, Besieged by Time",
         );
     let exec = def.execute.as_ref().expect("execute must be Some");
-    let expected = QuantityExpr::Difference {
-        left: Box::new(QuantityExpr::Ref {
-            qty: QuantityRef::Power {
-                scope: ObjectScope::Recipient,
-            },
+    let expected = QuantityExpr::ClampMin {
+        inner: Box::new(QuantityExpr::Difference {
+            left: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Recipient,
+                },
+            }),
+            right: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Recipient,
+                },
+            }),
         }),
-        right: Box::new(QuantityExpr::Ref {
-            qty: QuantityRef::Toughness {
-                scope: ObjectScope::Recipient,
-            },
-        }),
+        minimum: 0,
     };
     match &*exec.effect {
         Effect::Pump {
@@ -46479,7 +46482,7 @@ fn where_x_its_characteristic_binds_trigger_event_object() {
 /// #7851 preservation, CR 201.5 + CR 113.7: an explicit self-reference
 /// ("Ratatwotwo's power", "this creature's power") names the ability's source
 /// even when the trigger's "it" names another object; the rung never touches
-/// it and no clamp is added. Verbatim Oracle text. Ratatwotwo's trigger mode
+/// it, and each pump slot carries only the CR 107.1b floor. Verbatim Oracle text. Ratatwotwo's trigger mode
 /// stays `TriggerMode::Unknown`, but its body's "it" is still the trigger
 /// event's object (its Pump target is `TriggeringSource`, asserted below), so
 /// the characteristic rung is active and the explicit "Ratatwotwo's power" must
@@ -46523,7 +46526,12 @@ fn where_x_explicit_self_reference_keeps_source_under_event_subject() {
         // Reach guard: the self-reference was read at all.
         assert!(!scopes.is_empty(), "{name}: no power reference parsed");
         assert!(scopes.iter().all(|scope| *scope == source), "{name}: {scopes:?}");
-        assert!(!types.iter().any(|t| t == "ClampMin"), "{name}: {types:?}");
+        let pump_slots = if event_object_body { 2 } else { 0 };
+        assert_eq!(
+            types.iter().filter(|t| *t == "ClampMin").count(),
+            pump_slots,
+            "{name}: {types:?}"
+        );
     }
 }
 
@@ -46579,12 +46587,11 @@ fn where_x_its_characteristic_keeps_source_on_self_and_phase_triggers() {
     assert!(scopes.iter().all(|scope| *scope == anaphoric), "{scopes:?}");
 }
 
-/// #7851 containment, CR 107.1b: the zero clamp is confined to an X the
-/// characteristic rung bound. A signed pump whose X is a count (Altar of the
-/// Goyf) or a difference (Doran, Besieged by Time) under a non-self attack
-/// trigger is nonnegative already and gains no `ClampMin`. Verbatim Oracle text.
+/// CR 107.1b: every where-X feeding a signed pump is floored at zero once, at
+/// the root, whatever bound it: a count (Altar of the Goyf) or a difference
+/// (Doran, Besieged by Time). Verbatim Oracle text.
 #[test]
-fn where_x_pump_clamp_is_confined_to_rung_bound_characteristic() {
+fn where_x_pump_clamp_wraps_every_signed_x() {
     for (name, text, types, subtypes, expected_node) in [
         (
             "Altar of the Goyf",
@@ -46623,18 +46630,23 @@ fn where_x_pump_clamp_is_confined_to_rung_bound_characteristic() {
         // Reach guard: the pump amount was found and bound to a dynamic quantity.
         assert_eq!(slots.len(), 2, "{name}: {slots:?}");
         for (label, value) in &slots {
+            let QuantityExpr::ClampMin { inner, minimum: 0 } = value else {
+                panic!("{name} {label}: {value:?}");
+            };
             let mut types = Vec::new();
             walk_serialized_types(
                 &serde_json::to_value(value).unwrap(),
                 &mut Vec::new(),
                 &mut types,
             );
-            assert!(
-                types.iter().any(|t| t == expected_node),
+            assert_eq!(
+                types.iter().filter(|t| *t == "ClampMin").count(),
+                1,
                 "{name} {label}: {value:?}"
             );
-            assert!(
-                !types.iter().any(|t| t == "ClampMin"),
+            assert_eq!(
+                serde_json::to_value(inner.as_ref()).unwrap()["type"],
+                expected_node,
                 "{name} {label}: {value:?}"
             );
         }

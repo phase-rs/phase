@@ -50,7 +50,8 @@ use crate::types::game_state::{
     ManaAbilityResume, MayTriggerAutoChoiceKey, MemberOrderPurpose, PendingContinuation,
     PendingCostMoveResume, PendingDiscardBatchCompletion, PendingPlayerScopeSacrificeChoice,
     PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
-    PendingPlayerScopeTail, RepeatIterationChoice, RepeatIterationMovement, RepeatProcessRequest,
+    PendingPlayerScopeTail, PendingSacrificeMove, PendingSacrificeProvenance,
+    RepeatIterationChoice, RepeatIterationMovement, RepeatProcessRequest,
     RepeatUntilIterationWitness, RepeatUntilStopWitness, ResolutionOptionalPaymentOption,
     ResolutionPaymentOrigin, ReturnResultOccurrenceId, SeatCreatedTokens, TrackedMemberOrigin,
     WaitingFor, ZoneChangeRecord, ZoneOpponentChooserPurpose,
@@ -8071,6 +8072,23 @@ fn resolve_optional_effect_decision_step(
 ) -> Result<ResolutionProgress, EffectError> {
     // CR 608.2c: qualification is read from the state the prompt parked, before
     // the answer lowers optionality and strips the enclosing repeat driver.
+    // CR 118.3 + CR 608.2d: an accepted "you may <A> and <B>" option still
+    // needs the resources to pay it in full. Every acceptance — the prompt's
+    // answer, a remembered answer, a payment-branch choice — lands here before
+    // optionality lowers and any head component is spent, so an option no
+    // probed funding confirms resolves declined, never partially paid.
+    if choice == AutoMayChoice::Accept
+        && ability.optional
+        && !accepted_conjunction_commits(state, &ability)
+    {
+        return resolve_optional_effect_decision_step(
+            state,
+            ability,
+            AutoMayChoice::Decline,
+            events,
+            depth,
+        );
+    }
     let accepted_move = AcceptedOptionalMove::qualify(state, &ability);
     ability.optional = false;
     // CR 608.2c: the enclosing repeat driver owns progression. This answer
@@ -14780,6 +14798,125 @@ fn split_multi_target_player_chain(
     (per_target, tail)
 }
 
+/// CR 608.2e: Resolve each coordinated action for the announced population
+/// before advancing to the next action. Park that next action with its intact
+/// population whenever a choice or replacement suspends the current action.
+#[inline(never)]
+fn resolve_coordinated_target_player_action(
+    state: &mut GameState,
+    announcement: &ResolvedAbility,
+    chosen_players: &[PlayerId],
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    child_stack_start: ChildStackDepth,
+) -> Result<ResolutionProgress, EffectError> {
+    let mut action = Box::new(announcement.clone());
+    let mut tail = action.sub_ability.take();
+    let target = effect_target_filter(&announcement.effect)
+        .expect("coordinated action has a player announcement");
+    if matches!(action.effect, Effect::TargetOnly { .. }) {
+        action = tail.take().expect("announcement has a coordinated action");
+        tail = action.sub_ability.take();
+    }
+    if let Some(next) = tail.as_mut().filter(|next| {
+        next.sub_link == SubAbilityLink::ContinuationStep && node_references_scoped_player(next)
+    }) {
+        let mut resume = Box::new(announcement.clone());
+        resume.effect = Effect::TargetOnly {
+            target: target.clone(),
+        };
+        resume.sub_ability = Some(next.clone());
+        tail = Some(resume);
+    }
+    action.multi_target = None;
+    action.set_unpinned_targets(Vec::new());
+
+    let players: Vec<_> = crate::game::players::apnap_order(state)
+        .into_iter()
+        .filter(|player| chosen_players.contains(player))
+        .collect();
+    if should_collect_player_scope_sacrifice_choices(&action) {
+        return start_player_scope_sacrifice_choices(
+            state,
+            &action,
+            announcement.controller,
+            &players,
+            tail,
+            events,
+            depth,
+        );
+    }
+
+    action.multi_target.clone_from(&announcement.multi_target);
+    let progress = if scoped_discard::should_collect_player_scope_choices(&action) {
+        scoped_discard::start_player_scope_choices(
+            state,
+            &action,
+            announcement.controller,
+            &players,
+            events,
+            depth,
+        )?
+    } else {
+        action.multi_target = None;
+        let seats: Vec<_> = players
+            .iter()
+            .map(|&player| {
+                let mut bound = action.clone();
+                bound.set_scoped_player_recursive(player);
+                bound.set_unpinned_targets(vec![TargetRef::Player(player)]);
+                (player, *bound)
+            })
+            .collect();
+        if let Some(dealer) = draw::plan_coordinated_draw(state, &seats) {
+            let before = events.len();
+            match draw::start_simultaneous_draw(state, dealer, events) {
+                draw::SimultaneousDraw::Parked => {
+                    if let Some(tail) = tail {
+                        state
+                            .insert_ability_continuation_parent_at_child_boundary(
+                                PendingContinuation::new(tail, state),
+                                child_stack_start,
+                            )
+                            .expect("dealer's frames sit above the tail's boundary");
+                    }
+                    return Ok(ResolutionProgress::Waiting);
+                }
+                draw::SimultaneousDraw::Completed => {
+                    for _ in &players {
+                        events.push(GameEvent::EffectResolved {
+                            kind: EffectKind::from(&action.effect),
+                            source_id: action.source_id,
+                            subject: None,
+                        });
+                    }
+                    record_player_actions_performed(state, &events[before..]);
+                }
+            }
+        } else {
+            let mut seats = seats.into_iter();
+            while let Some((_, seat)) = seats.next() {
+                let progress = resolve_ability_chain_step(state, &seat, events, depth + 1)?;
+                if progress.is_pending() {
+                    for (_, mut remaining) in seats.rev() {
+                        remaining.sub_ability = tail;
+                        tail = Some(Box::new(remaining));
+                    }
+                    append_to_pending_continuation(state, tail);
+                    return Ok(progress);
+                }
+            }
+        }
+        ResolutionProgress::Complete
+    };
+    if progress.is_pending() {
+        append_to_pending_continuation(state, tail);
+    } else if let Some(tail) = tail {
+        return resolve_ability_chain_step(state, &tail, events, depth + 1);
+    }
+    Ok(progress)
+}
+
 /// CR 608.2c: Retain `ContinuationStep` clauses under the current "each target
 /// player" subject, but detach the first independently sequenced instruction.
 fn detach_after_multi_target_player_local_chain(
@@ -19879,50 +20016,287 @@ fn optional_pay_cost_affordability_is_decidable(cost: &AbilityCost) -> bool {
             if !crate::game::casting_costs::cost_has_x(cost))
 }
 
+/// What the steps of "you may <A> and <B>" before a conjunct have done to the
+/// pools a later conjunct draws from: the objects they move away, and the
+/// zones they may add objects to.
+#[derive(Clone)]
+struct ConjunctionPrefix {
+    departed: Vec<ObjectId>,
+    graveyard_may_grow: bool,
+    hand_may_grow: bool,
+}
+
+impl ConjunctionPrefix {
+    /// CR 400.7: an object an earlier step moves leaves the pool it came from
+    /// and may join the pool of the zone it moves to.
+    fn record_move(&mut self, departed: Vec<ObjectId>, destination: Zone) {
+        self.departed.extend(departed);
+        match destination {
+            Zone::Graveyard => self.graveyard_may_grow = true,
+            Zone::Hand => self.hand_may_grow = true,
+            Zone::Library | Zone::Battlefield | Zone::Stack | Zone::Exile | Zone::Command => {}
+        }
+    }
+}
+
+/// How the head of "you may <A> and <B>" changes the state its conjuncts are
+/// performed in before they are.
+enum ConjunctionHeadFunding {
+    /// The head spends no mana; its conjuncts are judged in the state as it is.
+    Unfunded,
+    /// CR 608.2g + CR 605.3a: a fixed mana payment by `payer`. The mana
+    /// abilities activated to fund it resolve inline (CR 605.3b), so the
+    /// conjuncts are judged in the state each legal funding leaves
+    /// ([`crate::game::casting::effect_mana_funding_candidates`]).
+    Mana {
+        payer: PlayerId,
+        cost: crate::types::mana::ManaCost,
+    },
+}
+
+/// The modeled head of "you may <A> and <B>", what it does to later pools and
+/// how it is funded, or `None` for a head whose effect on later pools the walk
+/// does not know.
+fn optional_conjunction_head(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<(ConjunctionPrefix, ConjunctionHeadFunding)> {
+    let mut prefix = ConjunctionPrefix {
+        departed: Vec::new(),
+        graveyard_may_grow: false,
+        hand_may_grow: false,
+    };
+    match &ability.effect {
+        Effect::ChangeZone {
+            target: TargetFilter::SelfRef | TargetFilter::TriggeringSource,
+            ..
+        } => {
+            let effective = hydrate_event_context_targets(state, ability);
+            let (departed, destination) =
+                change_zone::referent_move_departures(state, effective.as_ref())?;
+            prefix.record_move(departed, destination);
+            Some((prefix, ConjunctionHeadFunding::Unfunded))
+        }
+        // CR 118.12 + CR 119.4: "you may pay N life and <B>" — paying life
+        // moves no object.
+        Effect::PayCost {
+            cost: AbilityCost::PayLife { .. },
+            scale: None,
+            ..
+        } => Some((prefix, ConjunctionHeadFunding::Unfunded)),
+        // CR 118.12 + CR 605.3a: "you may pay {N} and <B>" moves no object
+        // itself, but CR 608.2g lets the payer activate mana abilities before
+        // paying — whether or not the pool already covers the cost — and each
+        // resolves immediately (CR 605.3b), so its resolution events meet the
+        // replacement pipeline and its costs may sacrifice permanents into the
+        // graveyard: funding can change what later conjuncts read (Nefarious
+        // Lich replaces Pristine Talisman's "You gain 1 life" with a draw). A
+        // later evidence pool is therefore never decided here, and every other
+        // conjunct is judged under each legal funding.
+        Effect::PayCost {
+            cost: AbilityCost::Mana { cost },
+            scale: None,
+            payer,
+            ..
+        } => {
+            prefix.graveyard_may_grow = true;
+            let payer = crate::game::targeting::resolve_effect_player_ref(state, ability, payer);
+            match (payer, crate::game::casting_costs::cost_has_x(cost)) {
+                (Some(payer), false) => Some((
+                    prefix,
+                    ConjunctionHeadFunding::Mana {
+                        payer,
+                        cost: cost.clone(),
+                    },
+                )),
+                // CR 107.3f: an undefined X in the effect text is chosen as it
+                // resolves (pay.rs PayAmountChoice), so the funding is
+                // undecided until that choice and the hand is not decided.
+                (_, true)
+                // An unresolvable payer falls to the PayCost affordability arm
+                // of [`optional_effect_is_infeasible`].
+                | (None, _) => {
+                    prefix.hand_may_grow = true;
+                    Some((prefix, ConjunctionHeadFunding::Unfunded))
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The verdict on a "you may <A> and <B>" option.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConjunctionVerdict {
+    /// The option may be chosen, and its mana head is funded this way: the
+    /// first legal funding that leaves every modeled conjunct performable, or
+    /// the planner's own when the walk decides none (an unmodeled chain or
+    /// step).
+    Offered(crate::game::casting::EffectManaFunding),
+    /// CR 118.3 + CR 608.2d: no legal funding leaves every conjunct
+    /// performable in full.
+    Impossible,
+    /// The funding search was cut short by its budget
+    /// (`EffectManaFundingCandidates::exhausted`) or a probed funding paused
+    /// for a choice, so no funding has been shown to leave every conjunct
+    /// performable AND none has been shown impossible. The option is offered,
+    /// but no funding is confirmed to pay it in full, so accepting it resolves
+    /// declined ([`accepted_conjunction_commits`], CR 118.3).
+    Undecided,
+}
+
 /// CR 118.12 + CR 118.3 + CR 608.2d: "you may <A> and <B>" is one option, a
 /// cost paid on resolution, so it can be chosen only if every conjoined step
 /// ([`is_step_of_optional_instruction`]) can be performed in full from what
 /// the earlier steps leave. A step's resources are judged after the earlier
 /// steps' departures (Lamplight Phoenix ruling: it can't be exiled as
-/// evidence for its own trigger; CR 701.59b). The walk models only earlier
-/// steps whose effect on later pools it knows — today a referent move, whose
-/// movers depart; any other step, or a move INTO the graveyard, may add to a
-/// later pool, so it answers `false` and the option is offered.
+/// evidence for its own trigger; CR 701.59b). The walk models only heads and
+/// steps whose effect on later pools it knows ([`optional_conjunction_head`],
+/// [`ConjunctionPrefix`]): a referent move, whose movers depart, and a mana
+/// or life payment. A mana head's conjuncts are judged under every legal
+/// funding (CR 608.2g: the payer may activate any mana ability before paying,
+/// so the automatic planner's choice of sources is not the only payment);
+/// the option is impossible only when none of them leaves the conjuncts
+/// performable. The fundings probed are bounded
+/// ([`crate::game::casting::effect_mana_funding_candidates`]): a search the
+/// budget cuts short is not decided ([`ConjunctionVerdict::Undecided`]): the
+/// option is offered, but only a confirmed funding commits an acceptance
+/// ([`accepted_conjunction_commits`], CR 118.3). A conjunct whose pool an
+/// earlier step may have added to, or any other unmodeled step, is not judged
+/// and the option is offered under the planner's funding.
 ///
-/// COUPLING: a head kind this walk admits must be in `resolve_chain_body`'s
-/// `auto_decline_infeasible_optional` set (`ChangeZone` is), so an
-/// infeasible conjunction is declined rather than resolved.
-fn optional_conjunction_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
-    // Only a referent-move head is modeled; every other head skips the
-    // hydration clone below.
-    if !matches!(
-        &ability.effect,
-        Effect::ChangeZone {
-            target: TargetFilter::SelfRef | TargetFilter::TriggeringSource,
-            ..
-        }
-    ) {
-        return false;
-    }
-    let effective = hydrate_event_context_targets(state, ability);
-    let Some((departed, destination)) =
-        change_zone::referent_move_departures(state, effective.as_ref())
-    else {
-        return false;
+/// Covered heads: "you may exile it and collect evidence N" (Lamplight
+/// Phoenix), "you may pay {1} and discard a card" (Banon, the Returners'
+/// Leader; Conspiracy Theorist; Wolf of Devil's Breach — ruling: "You can't
+/// choose to discard a card without also paying {1}{R}") and "you may pay
+/// {1} / 2 life and exile it" (Timothar, Baron of Bats; Kinzu of the Bleak
+/// Coven — ruling: "If you can't exile the card, … you can't pay {1}").
+///
+/// COUPLING: `resolve_chain_body` routes an impossible conjunction
+/// ([`OptionalInfeasibility::Conjunction`]) to the optional-decline authority
+/// for every head, so an impossible conjunct is declined rather than its head
+/// being performed alone; the accepted head's
+/// payment (`pay.rs`) funds itself through [`conjunction_head_funding`], so it
+/// funds the way this verdict found performable.
+fn optional_conjunction_verdict(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> ConjunctionVerdict {
+    use crate::game::casting::{EffectManaFunding, EffectManaFundingProbe};
+    let unjudged = ConjunctionVerdict::Offered(EffectManaFunding::Planned);
+    let Some((prefix, funding)) = optional_conjunction_head(state, ability) else {
+        return unjudged;
     };
-    // CR 400.7 + CR 701.59a: a move into the graveyard adds to the evidence
-    // pool, which this walk does not model.
-    if destination == Zone::Graveyard {
-        return false;
-    }
     let Some(first) = ability
         .sub_ability
         .as_ref()
         .and_then(|first| cast_from_zone::cast_metadata_continuation(ability, first))
     else {
-        return false;
+        return unjudged;
     };
-    for step in std::iter::successors(Some(first.as_ref()), |s| s.sub_ability.as_deref())
+    // No conjoined step ("you may pay {1}. If you do, …"): nothing to judge,
+    // so no funding is simulated.
+    if !is_step_of_optional_instruction(first) {
+        return unjudged;
+    }
+    match funding {
+        ConjunctionHeadFunding::Unfunded => {
+            if conjunct_steps_are_infeasible(state, first, prefix) {
+                ConjunctionVerdict::Impossible
+            } else {
+                unjudged
+            }
+        }
+        ConjunctionHeadFunding::Mana { payer, cost } => {
+            let candidates = crate::game::casting::effect_mana_funding_candidates(state, payer);
+            // A search cut short by the probe budget has not shown that no
+            // funding is performable, so it decides nothing: the option is
+            // offered, but only a confirmed funding commits it
+            // ([`accepted_conjunction_commits`]).
+            let mut any_undecided = candidates.exhausted;
+            for candidate in candidates.fundings {
+                match crate::game::casting::effect_mana_funding_probe(
+                    state,
+                    payer,
+                    ability.source_id,
+                    &cost,
+                    candidate,
+                ) {
+                    EffectManaFundingProbe::Funded(funded) => {
+                        if !conjunct_steps_are_infeasible(&funded, first, prefix.clone()) {
+                            return ConjunctionVerdict::Offered(candidate);
+                        }
+                    }
+                    EffectManaFundingProbe::Unpayable => {}
+                    EffectManaFundingProbe::Undecided => any_undecided = true,
+                }
+            }
+            if any_undecided {
+                ConjunctionVerdict::Undecided
+            } else {
+                ConjunctionVerdict::Impossible
+            }
+        }
+    }
+}
+
+/// See [`optional_conjunction_verdict`].
+fn optional_conjunction_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
+    optional_conjunction_verdict(state, ability) == ConjunctionVerdict::Impossible
+}
+
+/// CR 608.2g: How the accepted head of "you may pay {N} and <B>" is funded —
+/// the funding [`optional_conjunction_verdict`] found leaves its conjuncts
+/// performable, so the automated payment activates the mana ability the
+/// conjuncts need (Pristine Talisman under Nefarious Lich, ahead of floating
+/// mana or a land the planner prefers) rather than only the planner's choice.
+/// An undecided or impossible search names the planner's own funding: an
+/// optional head reaches this payment only when the verdict confirmed a
+/// funding ([`accepted_conjunction_commits`]), so that answer serves only a
+/// mandatory head, which is not an option to decline.
+pub(crate) fn conjunction_head_funding(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> crate::game::casting::EffectManaFunding {
+    match optional_conjunction_verdict(state, ability) {
+        ConjunctionVerdict::Offered(funding) => funding,
+        ConjunctionVerdict::Impossible | ConjunctionVerdict::Undecided => {
+            crate::game::casting::EffectManaFunding::Planned
+        }
+    }
+}
+
+/// CR 118.3 + CR 608.2d: whether an accepted "you may <A> and <B>" option
+/// commits as a whole. The head is spent only under a funding whose probe left
+/// every modeled conjunct performable ([`ConjunctionVerdict::Offered`]); the
+/// payment (`pay.rs`) then funds itself exactly that way
+/// ([`conjunction_head_funding`]). An [`ConjunctionVerdict::Undecided`] search
+/// was offered because it has not shown the option impossible, but it has not
+/// shown any funding that pays it in full either, and the same bounded search
+/// run again at acceptance cannot show more. Paying the head on it would risk
+/// the partial payment CR 118.3 forbids (a `{1}` spent, then a conjoined
+/// `discard` with no card), so such an acceptance resolves declined: nothing
+/// of the option is performed and its "If you do" rider does not happen.
+///
+/// Known limit of the bound: a board whose only performable funding lies past
+/// [`crate::game::casting::EFFECT_MANA_FUNDING_PROBE_BUDGET`] candidates, or
+/// behind a probe paused for a replacement choice, loses the option.
+fn accepted_conjunction_commits(state: &GameState, ability: &ResolvedAbility) -> bool {
+    match optional_conjunction_verdict(state, ability) {
+        ConjunctionVerdict::Offered(_) => true,
+        ConjunctionVerdict::Impossible | ConjunctionVerdict::Undecided => false,
+    }
+}
+
+/// Whether a conjunct after the head of "you may <A> and <B>" can't be
+/// performed in full in `judged` — the state the head leaves — from what the
+/// earlier steps (`prefix`) leave. Every pool is read from `judged`.
+fn conjunct_steps_are_infeasible(
+    judged: &GameState,
+    first: &ResolvedAbility,
+    mut prefix: ConjunctionPrefix,
+) -> bool {
+    for step in std::iter::successors(Some(first), |s| s.sub_ability.as_deref())
         .take_while(|s| is_step_of_optional_instruction(s))
     {
         match &step.effect {
@@ -19932,16 +20306,66 @@ fn optional_conjunction_is_infeasible(state: &GameState, ability: &ResolvedAbili
             // impossible. An optional, scoped or repeated evidence step is not
             // a single committed payment and falls to the stop arm.
             Effect::CollectEvidence { amount }
-                if !step.optional && step.player_scope.is_none() && step.repeat_for.is_none() =>
+                if !prefix.graveyard_may_grow
+                    && !step.optional
+                    && step.player_scope.is_none()
+                    && step.repeat_for.is_none() =>
             {
                 if !collect_evidence::can_collect_evidence_without(
-                    state,
+                    judged,
                     step.controller,
-                    &departed,
+                    &prefix.departed,
                     *amount,
                 ) {
                     return true;
                 }
+            }
+            // CR 118.3 + CR 701.9a: a discard the player can't pay in full
+            // from the hand the earlier steps leave makes the whole option
+            // impossible. Earlier departures only shrink that hand, so a
+            // shortfall now is a shortfall then. The discarded cards then join
+            // the graveyard. CR 608.2g: the hand is read as the head's funding
+            // leaves it — a draw the funding's own resolution met through a
+            // replacement (Nefarious Lich) counts, a card the funding spent
+            // does not.
+            Effect::Discard { .. } if !prefix.hand_may_grow => {
+                let effective = hydrate_event_context_targets(judged, step);
+                if discard::optional_discard_is_infeasible(judged, effective.as_ref()) {
+                    return true;
+                }
+                prefix.graveyard_may_grow = true;
+            }
+            // CR 400.7 + CR 608.2d: "and exile it" can't be performed once its
+            // referent left the zone it is expected in; no earlier step can
+            // bring that object back (a returned card is a new object).
+            Effect::ChangeZone {
+                origin,
+                target: target @ (TargetFilter::SelfRef | TargetFilter::TriggeringSource),
+                ..
+            } => {
+                let effective = hydrate_event_context_targets(judged, step);
+                let infeasible = if matches!(target, TargetFilter::SelfRef) {
+                    change_zone::optional_self_move_is_infeasible(
+                        judged,
+                        effective.as_ref(),
+                        *origin,
+                    )
+                } else {
+                    change_zone::optional_triggering_source_move_is_infeasible(
+                        judged,
+                        effective.as_ref(),
+                        *origin,
+                    )
+                };
+                if infeasible {
+                    return true;
+                }
+                let Some((departed, destination)) =
+                    change_zone::referent_move_departures(judged, effective.as_ref())
+                else {
+                    return false;
+                };
+                prefix.record_move(departed, destination);
             }
             // A step this walk does not model may change what later steps can
             // use, so the option is offered.
@@ -19966,6 +20390,26 @@ fn optional_conjunction_is_infeasible(state: &GameState, ability: &ResolvedAbili
 /// ([`optional_conjunction_is_infeasible`]). Suppressing the prompt lets the
 /// effect resolve as its defined no-op instead.
 fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
+    optional_effect_infeasibility(state, ability).is_some()
+}
+
+/// Why an optional instruction can't be chosen
+/// ([`optional_effect_infeasibility`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OptionalInfeasibility {
+    /// CR 118.12 + CR 118.3: a conjoined step of "you may <A> and <B>" can't
+    /// be performed in full ([`optional_conjunction_verdict`]).
+    Conjunction,
+    /// The instruction itself can't be performed.
+    Instruction,
+}
+
+/// [`optional_effect_is_infeasible`] with the reason, so a caller that routes
+/// on it judges the conjunction once.
+fn optional_effect_infeasibility(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<OptionalInfeasibility> {
     // CR 603.5 + CR 608.2d: an optional instruction on the source's
     // "enchanted/equipped X" is decided as it resolves; with no live host to
     // act on ("you may have that player gain control of equipped creature" on
@@ -19974,12 +20418,19 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         crate::game::targeting::ResolutionHostBinding::NotApplicable
         | crate::game::targeting::ResolutionHostBinding::Bound(_) => {}
         crate::game::targeting::ResolutionHostBinding::Absent
-        | crate::game::targeting::ResolutionHostBinding::Unaffectable(_) => return true,
+        | crate::game::targeting::ResolutionHostBinding::Unaffectable(_) => {
+            return Some(OptionalInfeasibility::Instruction)
+        }
     }
     // CR 608.2d + CR 118.3: every conjoined step of the option must be performable.
     if optional_conjunction_is_infeasible(state, ability) {
-        return true;
+        return Some(OptionalInfeasibility::Conjunction);
     }
+    optional_instruction_is_infeasible(state, ability).then_some(OptionalInfeasibility::Instruction)
+}
+
+/// The instruction-level arms of [`optional_effect_is_infeasible`].
+fn optional_instruction_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
     match &ability.effect {
         Effect::PutSticker { .. } => stickers::optional_is_infeasible(state, ability),
         Effect::PutChosenCounter {
@@ -23436,13 +23887,11 @@ fn player_scope_sacrifice_step(
                     && crate::game::filter::matches_target_filter(state, *id, target, &ctx)
                     // CR 608.2d: same candidate legality as the ordinary
                     // sacrifice-effect pool — a permanent its chooser is
-                    // barred from sacrificing is not offered.
-                    && !crate::game::static_abilities::object_cant_be_sacrificed_by(
-                        state, player, *id,
-                    )
-                    && !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
-                        state, &scoped, *id, player,
-                    )
+                    // barred from sacrificing is not offered. CR 109.5: the
+                    // template keeps the ability's real controller, so the
+                    // forced-action and triggered-cause bars read who is
+                    // forcing the sacrifice.
+                    && sacrifice::can_sacrifice_for_ability(state, template, *id, player)
             })
         })
         .collect();
@@ -23531,69 +23980,91 @@ fn perform_player_scope_sacrifices(
     let completed = record_sacrifice_batch_events(&mut completion, events);
     emit_sacrifice_batch_follow_ups(&mut completion, completed, events);
 
-    // CR 101.4: after every player has made the required APNAP choice, the
-    // chosen permanents are moved as one simultaneous instruction.
+    // CR 101.4: after every player has made the required APNAP choice, first
+    // consult every chosen permanent's outer Sacrifice and inner ZoneChange
+    // replacements while every co-sacrificed permanent is still on the
+    // battlefield (so e.g. Dauthi Voidwalker still replaces a co-sacrificed
+    // opponent's creature), then deliver all approved moves simultaneously.
     // CR 701.21a: to sacrifice a permanent, its controller moves it from the
     // battlefield to its owner's graveyard.
+    let park_sacrifice_pause = |state: &mut GameState,
+                                mut completion: PendingPlayerScopeSacrificeCompletion,
+                                selections: Vec<(PlayerId, Vec<ObjectId>)>,
+                                choice_player: PlayerId,
+                                events: &mut Vec<GameEvent>| {
+        // Keep the full event span, rather than exposing a prematurely partial
+        // event group. The replacement resume delivers the paused permanent in a
+        // fresh action buffer; terminal completion reunites this span with that
+        // event, stamps every actual departure together, and only then allows
+        // trigger collection to observe the batch.
+        completion
+            .deferred_events
+            .extend(events.drain(events_before_sacrifice..));
+        completion.spans_replacement_pause = true;
+        state.pending_player_scope_sacrifice_choice = Some(PendingPlayerScopeSacrificeChoice {
+            ability: Box::new(ability.clone()),
+            remaining_players: vec![],
+            selections,
+            completion,
+            // CR 608.2c: bind the carrier to the resolution that wrote it.
+            resolving_entry: state.resolving_stack_entry.as_ref().map(|entry| entry.id),
+        });
+        // A delivery tail that paused on an ordinary child prompt has already
+        // set its own `waiting_for`.
+        if state.pending_replacement.is_some() {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(choice_player, state);
+        }
+    };
+
     while !selections.is_empty() {
         let (player, mut cards) = selections.remove(0);
         while !cards.is_empty() {
             let card = cards.remove(0);
             record_announced_sacrifice(&mut completion, card);
-            let events_before_card = events.len();
-            match crate::game::sacrifice::sacrifice_permanent(state, card, player, events)
-                .map_err(|error| EffectError::InvalidParam(error.to_string()))?
-            {
-                crate::game::sacrifice::SacrificeOutcome::Complete => {
-                    let completed = record_sacrifice_batch_events(
-                        &mut completion,
-                        &events[events_before_card..],
-                    );
-                    emit_sacrifice_batch_follow_ups(&mut completion, completed, events);
+            match crate::game::sacrifice::consult_sacrifice(state, card, player, events) {
+                crate::game::sacrifice::SacrificeConsult::Ready(delivery) => {
+                    completion.pending_deliveries.push(*delivery);
                 }
+                crate::game::sacrifice::SacrificeConsult::NoMove => {}
                 // CR 609.3: a mid-resolution bar means the instruction can't
                 // move this object — skip it so terminal bookkeeping derives
                 // from actual departures, not attempts.
-                crate::game::sacrifice::SacrificeOutcome::Prohibited => {
+                crate::game::sacrifice::SacrificeConsult::Prohibited => {
                     completion.announced.retain(|&id| id != card);
                 }
-                crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
-                    let completed = record_sacrifice_batch_events(
-                        &mut completion,
-                        &events[events_before_card..],
-                    );
-                    emit_sacrifice_batch_follow_ups(&mut completion, completed, events);
+                // CR 101.4 + CR 616.1: the answer finishes only this consult;
+                // `answer_player_scope_sacrifice_consult` queues its move.
+                crate::game::sacrifice::SacrificeConsult::NeedsChoice(choice_player) => {
                     if !cards.is_empty() {
                         selections.insert(0, (player, cards));
                     }
-                    // Keep the full event span, rather than exposing a
-                    // prematurely partial event group. The replacement resume
-                    // delivers the paused permanent in a fresh action buffer;
-                    // terminal completion reunites this span with that event,
-                    // stamps every actual departure together, and only then
-                    // allows trigger collection to observe the batch.
-                    completion
-                        .deferred_events
-                        .extend(events.drain(events_before_sacrifice..));
-                    completion.spans_replacement_pause = true;
-                    state.pending_player_scope_sacrifice_choice =
-                        Some(PendingPlayerScopeSacrificeChoice {
-                            ability: Box::new(ability.clone()),
-                            remaining_players: vec![],
-                            selections,
-                            completion,
-                            // CR 608.2c: bind the carrier to the resolution that wrote it.
-                            resolving_entry: state
-                                .resolving_stack_entry
-                                .as_ref()
-                                .map(|entry| entry.id),
-                        });
-                    state.waiting_for = crate::game::replacement::replacement_choice_waiting_for(
-                        choice_player,
-                        state,
-                    );
+                    completion.consult_pause = Some(PendingSacrificeProvenance {
+                        object_id: card,
+                        player_id: player,
+                    });
+                    park_sacrifice_pause(state, completion, selections, choice_player, events);
                     return Ok(PlayerScopeSacrificePerformOutcome::PausedForReplacement);
                 }
+            }
+        }
+    }
+
+    while !completion.pending_deliveries.is_empty() {
+        let delivery = completion.pending_deliveries.remove(0);
+        let events_before_card = events.len();
+        let outcome = crate::game::sacrifice::deliver_consulted_sacrifice(state, delivery, events);
+        let completed =
+            record_sacrifice_batch_events(&mut completion, &events[events_before_card..]);
+        emit_sacrifice_batch_follow_ups(&mut completion, completed, events);
+        match outcome {
+            crate::game::sacrifice::SacrificeDelivery::Delivered
+            | crate::game::sacrifice::SacrificeDelivery::Skipped => {}
+            // CR 616.1: the rest of the queue was consulted already and is
+            // delivered when the batch resumes.
+            crate::game::sacrifice::SacrificeDelivery::NeedsChoice(choice_player) => {
+                park_sacrifice_pause(state, completion, Vec::new(), choice_player, events);
+                return Ok(PlayerScopeSacrificePerformOutcome::PausedForReplacement);
             }
         }
     }
@@ -23904,8 +24375,22 @@ pub(crate) fn perform_collected_player_scope_sacrifices_with_completion(
     }
 }
 
+/// CR 101.4: Collect per-seat sacrifice choices ahead of simultaneous execution
+/// only for an unconditional sacrifice clause — an `unless` gate, optional/may
+/// wrapper, condition, or `otherwise` branch keeps the per-seat route that owns
+/// those prompts (mirroring `bounce` and `scoped_discard`).
 fn should_collect_player_scope_sacrifice_choices(ability: &ResolvedAbility) -> bool {
-    matches!(ability.effect, Effect::Sacrifice { .. }) && ability.sub_ability.is_none()
+    matches!(ability.effect, Effect::Sacrifice { .. })
+        && ability.sub_ability.is_none()
+        && ability.else_ability.is_none()
+        && ability.unless_pay.is_none()
+        && !ability.optional
+        && ability.optional_for.is_none()
+        && ability.optional_player.is_none()
+        && ability.condition.is_none()
+        && ability.repeat_for.is_none()
+        && ability.repeat_until.is_none()
+        && ability.declares_return_result.is_none()
 }
 
 /// CR 608.2c: publish the members of a completed player-scope sacrifice
@@ -24184,6 +24669,84 @@ pub(crate) fn drain_pending_player_scope_sacrifice_after_replacement(
     }
 }
 
+/// CR 101.4 + CR 616.1: whether the open replacement choice interrupted the
+/// consult of the parked simultaneous sacrifice batch — the move it decides
+/// belongs to that batch and must wait for the rest of it.
+pub(crate) fn player_scope_sacrifice_consult_awaits_replacement_choice(state: &GameState) -> bool {
+    let Some(pending) = state.pending_player_scope_sacrifice_choice.as_ref() else {
+        return false;
+    };
+    let Some(paused) = pending.completion.consult_pause else {
+        return false;
+    };
+    let Some(replacement) = state.pending_replacement.as_ref() else {
+        return false;
+    };
+    // The outer Sacrifice proposal names the permanent; its inner graveyard
+    // move carries the sacrifice it belongs to.
+    let decided = replacement
+        .sacrifice_provenance
+        .map(|provenance| provenance.object_id)
+        .or_else(|| replacement.proposed.affected_object_id());
+    decided == Some(paused.object_id)
+        && player_scope_sacrifice_carrier_binds(
+            state,
+            pending,
+            PlayerScopeSacrificeAnswer::Replacement,
+        )
+}
+
+/// What answering the batch's consult-time replacement choice produced.
+pub(crate) enum PlayerScopeSacrificeConsultAnswer {
+    /// The consult finished; the batch resumes consulting the remaining
+    /// selections and then delivers every approved move together.
+    Consulted,
+    /// Another CR 616.1 choice is pending for the same sacrifice;
+    /// `state.waiting_for` asks it.
+    NeedsChoice,
+}
+
+/// CR 101.4 + CR 616.1: answer the replacement choice that interrupted the
+/// batch's consult. CR 616.1 lets the affected player choose the replacement,
+/// but the choice only decides how this permanent's move will happen: the
+/// approved move joins the batch's `pending_deliveries`, so every chosen
+/// permanent is still consulted while every co-sacrificed permanent is on the
+/// battlefield, and the batch then happens at once (CR 101.4).
+pub(crate) fn answer_player_scope_sacrifice_consult(
+    state: &mut GameState,
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) -> PlayerScopeSacrificeConsultAnswer {
+    let consult = crate::game::sacrifice::consult_answered_sacrifice(state, index, events);
+    if let crate::game::sacrifice::SacrificeConsult::NeedsChoice(choice_player) = consult {
+        state.waiting_for =
+            crate::game::replacement::replacement_choice_waiting_for(choice_player, state);
+        return PlayerScopeSacrificeConsultAnswer::NeedsChoice;
+    }
+    let completion = &mut state
+        .pending_player_scope_sacrifice_choice
+        .as_mut()
+        .expect("a consult pause is answered while its batch is parked")
+        .completion;
+    let paused = completion
+        .consult_pause
+        .take()
+        .expect("the answered consult was marked when it paused");
+    match consult {
+        crate::game::sacrifice::SacrificeConsult::Ready(delivery) => {
+            completion.pending_deliveries.push(*delivery);
+        }
+        // CR 609.3: as in the consult loop, a barred object is not part of
+        // what the instruction did.
+        crate::game::sacrifice::SacrificeConsult::Prohibited => {
+            completion.announced.retain(|&id| id != paused.object_id);
+        }
+        crate::game::sacrifice::SacrificeConsult::NoMove
+        | crate::game::sacrifice::SacrificeConsult::NeedsChoice(_) => {}
+    }
+    PlayerScopeSacrificeConsultAnswer::Consulted
+}
+
 /// What a departure did to an open player-scope sacrifice
 /// (`reconcile_player_scope_sacrifice`).
 pub(crate) enum PlayerScopeSacrificeReconciliation {
@@ -24233,6 +24796,32 @@ fn prune_player_scope_sacrifice_carrier(
         });
         !cards.is_empty()
     });
+    pending
+        .completion
+        .pending_deliveries
+        .retain(|delivery| match &delivery.sacrifice {
+            PendingSacrificeMove::Sacrifice {
+                object_id,
+                player_id,
+                ..
+            }
+            | PendingSacrificeMove::InnerPrevented {
+                object_id,
+                player_id,
+            } => {
+                crate::game::players::is_alive(state, *player_id)
+                    && state.objects.get(object_id).is_some_and(|object| {
+                        object.zone == Zone::Battlefield && object.controller == *player_id
+                    })
+            }
+            PendingSacrificeMove::DirectMove { zone_event } => zone_event
+                .affected_object_id()
+                .and_then(|id| state.objects.get(&id))
+                .is_some_and(|object| {
+                    object.zone == Zone::Battlefield
+                        && crate::game::players::is_alive(state, object.controller)
+                }),
+        });
 }
 
 /// CR 800.4a + CR 101.4 + CR 608.2m (+ CR 616.1 for a batch parked on a
@@ -24276,6 +24865,11 @@ pub(crate) fn reconcile_player_scope_sacrifice(
         // `do_eliminate` clears a departed latched chooser's question.
         if state.pending_replacement.is_some() {
             return PlayerScopeSacrificeReconciliation::Unchanged;
+        }
+        // CR 800.4a: a consult whose question left with its chooser decides
+        // nothing; that permanent left the battlefield with them.
+        if let Some(pending) = state.pending_player_scope_sacrifice_choice.as_mut() {
+            pending.completion.consult_pause = None;
         }
         return match state.waiting_for.acting_player() {
             // CR 616.1 + CR 800.4a + CR 608.2m: the paused question left with its
@@ -26209,6 +26803,21 @@ fn resolve_chain_body(
                 TargetRef::Object(_) => None,
             })
             .collect();
+        if !chosen_players.is_empty()
+            && ability.sub_ability.as_ref().is_some_and(|next| {
+                next.sub_link == SubAbilityLink::ContinuationStep
+                    && node_references_scoped_player(next)
+            })
+        {
+            return resolve_coordinated_target_player_action(
+                state,
+                ability,
+                &chosen_players,
+                events,
+                depth,
+                child_stack_start,
+            );
+        }
         if chosen_players.len() != 1 {
             // A sentence boundary begins an instruction that is not qualified
             // by the preceding "each target player" subject. Keep that tail
@@ -26461,16 +27070,25 @@ fn resolve_chain_body(
         let unobservable =
             fail_closed_unobservable_fan_out(player_scope_control_boundary(ability), ability);
         let ability = unobservable.as_ref().unwrap_or(ability);
-        // CR 101.4 + CR 118.12a: A scoped token instruction whose
-        // each player may avert the result by sacrificing has one aggregate
-        // outcome, not one token creation per iteration. Let its dedicated
-        // APNAP payment coordinator own the existing UnlessPayment and
-        // WardSacrificeChoice round trips before the generic fan-out clones it.
+        // CR 101.4 + CR 118.12a: A scoped token instruction whose each player
+        // may avert the result by sacrificing has one aggregate outcome, not
+        // one token creation batch per iteration. Its dedicated APNAP payment
+        // coordinator owns the existing UnlessPayment and WardSacrificeChoice
+        // round trips before the generic fan-out clones it.
         if crate::game::engine_payment_choices::begin_player_scope_token_unless_sacrifice(
             state,
             ability,
             matching_players.clone(),
         ) {
+            return Ok(ResolutionProgress::Waiting);
+        }
+        // CR 101.4 + CR 118.12a: "[instruction] unless [that player]
+        // sacrifices / discards ..." — every affected player answers in APNAP
+        // order before any chosen object moves or the instruction applies to
+        // anyone. The poll owns the whole chain: at settlement it re-enters
+        // this driver for the declining players, which splits and runs the
+        // instructions printed after the clause exactly once.
+        if crate::game::scoped_unless_poll::begin(state, ability, &matching_players) {
             return Ok(ResolutionProgress::Waiting);
         }
         // Inspect the original child chain before splitting it. The splitter
@@ -27258,9 +27876,11 @@ fn resolve_chain_body(
     // Per-iteration optionality must reach the rebound singleton ability before
     // feasibility is decided. In particular, the root's first member can have
     // no committable counter move while a later member remains offerable.
-    let optional_is_infeasible = ability.optional
-        && !optionality_is_per_iteration(state, ability)
-        && optional_effect_is_infeasible(state, ability);
+    let optional_infeasibility = (ability.optional
+        && !optionality_is_per_iteration(state, ability))
+    .then(|| optional_effect_infeasibility(state, ability))
+    .flatten();
+    let optional_is_infeasible = optional_infeasibility.is_some();
 
     // CR 608.2c + CR 608.2d: An infeasible optional instruction in this
     // dispatch does not happen. Route each outcome through the existing
@@ -27314,7 +27934,15 @@ fn resolve_chain_body(
     // CR 608.2d + CR 603.5: an optional instruction on a source's host with no
     // live host is likewise a declined option ("you may have that player gain
     // control of equipped creature. If you do, untap it." — no rider runs).
-    if optional_is_infeasible && (auto_decline_infeasible_optional || host_effect_impossible) {
+    // CR 118.12 + CR 118.3: an impossible conjunct makes the whole "you may
+    // <A> and <B>" a declined option whatever its head, so a payable head
+    // ("pay {1}" before an impossible "discard a card") is not paid alone and
+    // its "If you do" rider stays gated.
+    if optional_is_infeasible
+        && (auto_decline_infeasible_optional
+            || host_effect_impossible
+            || optional_infeasibility == Some(OptionalInfeasibility::Conjunction))
+    {
         return resolve_optional_effect_decision_step(
             state,
             ability.clone(),
@@ -31237,7 +31865,7 @@ fn instead_swap_applies(
 
 /// CR 118.4 + CR 107.3c: an unless cost as a fixed cost, resolved from the
 /// current game state.
-fn resolved_unless_cost(
+pub(crate) fn resolved_unless_cost(
     state: &GameState,
     ability: &ResolvedAbility,
     cost: &AbilityCost,
@@ -31325,7 +31953,7 @@ fn resolved_unless_cost(
 /// The prompt an unless-cost puts to `payer`, with `remaining_payers` next in line.
 /// Kept out of `resolve_chain_body` so its `WaitingFor` temporaries stay out of
 /// that recursive frame.
-fn unless_payment_prompt(
+pub(crate) fn unless_payment_prompt(
     state: &GameState,
     ability: &ResolvedAbility,
     payer: PlayerId,
@@ -65963,6 +66591,104 @@ mod tests {
             "reach: the source on the battlefield can move"
         );
         assert!(!optional_effect_is_infeasible(&state, &bury_and_collect));
+    }
+
+    /// CR 118.12 + CR 118.3 + CR 608.2d: a payment head ("you may pay 2 life /
+    /// {1} and discard a card") is one option with its conjunct: an empty hand
+    /// makes it impossible even though the payment alone is affordable, and a
+    /// card in hand makes it offerable. A conjunct whose pool an earlier step
+    /// may add to is not decided: a mana payment may sacrifice a permanent into
+    /// the graveyard, and a move into the hand adds to the discard pool.
+    #[test]
+    fn optional_payment_conjunction_judges_its_conjunct() {
+        let pay = |cost: AbilityCost| {
+            let mut head = ResolvedAbility::new(
+                Effect::PayCost {
+                    cost,
+                    scale: None,
+                    payer: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            head.optional = true;
+            head
+        };
+        let discard_step = || {
+            let mut step =
+                optional_discard(QuantityExpr::Fixed { value: 1 }, TargetFilter::Controller);
+            step.optional = false;
+            step.sub_link = SubAbilityLink::ContinuationStep;
+            step
+        };
+        let life = AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let mut pay_and_discard = pay(life.clone());
+        pay_and_discard.sub_ability = Some(Box::new(discard_step()));
+        assert!(
+            !optional_effect_is_infeasible(&state, &pay(life.clone())),
+            "reach: 2 life alone is payable at 20 life"
+        );
+        assert!(
+            optional_effect_is_infeasible(&state, &pay_and_discard),
+            "no card can be discarded, so the conjoined payment is impossible"
+        );
+        add_hand_card(&mut state, PlayerId(0), 10);
+        assert!(!optional_effect_is_infeasible(&state, &pay_and_discard));
+
+        // Gated: "you may pay 2 life. If you do, discard a card" — the discard is
+        // a later instruction, not part of the option.
+        let state = GameState::new_two_player(42);
+        let mut gated = pay_and_discard.clone();
+        gated.sub_ability.as_mut().expect("sub").condition =
+            Some(AbilityCondition::effect_performed());
+        assert!(!optional_effect_is_infeasible(&state, &gated));
+
+        // A mana payment may sacrifice a permanent into the graveyard, so a
+        // later evidence pool is not decided from the graveyard as it is now.
+        let mut pay_and_collect = pay(AbilityCost::Mana {
+            cost: crate::types::mana::ManaCost::zero(),
+        });
+        let mut evidence = ResolvedAbility::new(
+            Effect::CollectEvidence { amount: 4 },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        evidence.sub_link = SubAbilityLink::ContinuationStep;
+        pay_and_collect.sub_ability = Some(Box::new(evidence));
+        assert!(!optional_effect_is_infeasible(&state, &pay_and_collect));
+
+        // A move into the hand adds to the discard pool.
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Graveyard,
+        );
+        let mut return_and_discard = optional_referent_move(TargetFilter::SelfRef, None, source);
+        return_and_discard.source_incarnation = Some(state.objects[&source].incarnation);
+        if let Effect::ChangeZone {
+            destination,
+            enters_under,
+            ..
+        } = &mut return_and_discard.effect
+        {
+            *destination = Zone::Hand;
+            *enters_under = None;
+        }
+        return_and_discard.sub_ability = Some(Box::new(discard_step()));
+        assert!(
+            !change_zone::optional_self_move_is_infeasible(&state, &return_and_discard, None),
+            "reach: the source in the graveyard can return to the hand"
+        );
+        assert!(!optional_effect_is_infeasible(&state, &return_and_discard));
     }
 
     /// CR 118.3: "you may discard two cards. If you do, draw three cards." with one

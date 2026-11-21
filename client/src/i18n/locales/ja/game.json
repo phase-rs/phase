@@ -1384,7 +1384,8 @@
       "title": "支払わなければ：{{effect}}",
       "titleChooseOne": "いずれかを支払わなければ：{{effect}}",
       "dontPay": "支払わない",
-      "takeEffect": "効果を受ける"
+      "takeEffect": "効果を受ける",
+      "priorChoice": "プレイヤー{{id}}：{{choice}}"
     },
     "spliceOffer": {
       "title": "秘儀に連繋しますか？",

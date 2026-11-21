@@ -166,6 +166,7 @@ pub(crate) use evasion::{
     classify_block_exception, is_extra_blockers_static_candidate, is_forced_block_static_candidate,
     parse_forced_block_blocker_slot,
 };
+pub(crate) use grammar::cant_block_object_mode;
 pub(crate) use grammar::map_keyword;
 pub(crate) use grammar::parse_pt_mod;
 pub(crate) use grammar::promote_nested_ability_quotes;
@@ -184,6 +185,7 @@ pub(crate) use restriction::parse_passive_cant_be_cast_spell_filter;
 pub(crate) use restriction::try_parse_top_of_library_cast_permission;
 pub(crate) use shared::canonicalize_anchor_label;
 pub(crate) use shared::parse_activated_abilities_cant_be_activated;
+pub(crate) use shared::parse_block_object_filter;
 pub(crate) use shared::parse_cant_attack_defended_scope_nom;
 pub(crate) use shared::parse_conditional_protection_grant_list;
 pub(crate) use shared::parse_continuous_subject_filter;

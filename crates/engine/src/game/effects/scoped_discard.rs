@@ -26,9 +26,8 @@ use crate::types::zones::Zone;
 
 use super::discard::{player_hand_discard_pool, PlayerHandDiscardPool};
 
-/// CR 101.4: whether a `player_scope` fan-out of `ability` is a bare, chosen
-/// hand discard whose per-player choices must all be made before any card is
-/// discarded.
+/// CR 101.4: whether this player fan-out is a bare, chosen hand discard
+/// whose per-player choices must all be made before any card is discarded.
 ///
 /// Only the bare instruction is collected. A random discard makes no choice
 /// (CR 701.9b); an "unless" discard (CR 608.2c) and any per-player rider — an
@@ -39,11 +38,13 @@ pub(super) fn should_collect_player_scope_choices(ability: &ResolvedAbility) -> 
     matches!(
         &ability.effect,
         Effect::Discard {
-            target: TargetFilter::Controller | TargetFilter::ScopedPlayer,
+            target,
             selection,
             unless_filter: None,
             ..
         } if selection.is_chosen()
+            && (matches!(target, TargetFilter::Controller | TargetFilter::ScopedPlayer)
+                || (ability.multi_target.is_some() && super::is_multi_target_player_filter(target)))
     ) && ability.sub_ability.is_none()
         && ability.else_ability.is_none()
         && ability.unless_pay.is_none()
@@ -89,7 +90,16 @@ fn scoped_discard_step(
     original_controller: PlayerId,
     seat: PlayerId,
 ) -> ScopedDiscardStep {
-    let scoped = super::bind_scoped_seat(template, original_controller, seat);
+    let scoped = if template.multi_target.is_some() {
+        // CR 109.5 + CR 608.2e: Bind the chosen member, retaining the
+        // spell's controller for forced-action restrictions and caster reads.
+        let mut bound = template.clone();
+        bound.set_scoped_player_recursive(seat);
+        bound.set_unpinned_targets(vec![TargetRef::Player(seat)]);
+        bound
+    } else {
+        super::bind_scoped_seat(template, original_controller, seat)
+    };
     let Effect::Discard {
         count,
         target,
@@ -217,6 +227,7 @@ pub(super) fn scoped_discard_delivery_node(
         count: cards.len() as u32,
         target: TargetFilter::ParentTarget,
     };
+    delivery.multi_target = None;
     delivery.targets = cards;
     delivery.context.discard_cause = cause;
     delivery.sub_ability = None;
