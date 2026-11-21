@@ -7897,11 +7897,25 @@ pub(super) fn exile_land_play_authorization(
     land_id: ObjectId,
 ) -> Option<ExileLandPlayAuthorization> {
     let obj = state.objects.get(&land_id)?;
-    if !obj
+    // CR 712.8a: outside the battlefield and stack the card has only its front
+    // face's characteristics, so a spell//land modal card in exile is not a land
+    // card by itself. CR 712.12 nonetheless lets a player who plays it do so as
+    // a land by choosing its land face, which the shared play-land election
+    // (`handle_play_land`'s `modal_land_face_election_available` branch) then
+    // elects. The permission is read unchanged below (play mode, grantee,
+    // `card_filter` on the stored front face, frequency), so a Cast-mode grant
+    // still refuses the land face and only a Play-mode grant that authorizes the
+    // card (Light Up the Stage's "play those cards") reaches it. Exile only:
+    // `graveyard_lands_playable_by_permission` discovers graveyard lands by
+    // their front face and the gate must not admit what discovery never offers.
+    let front_is_land = obj
         .card_types
         .core_types
-        .contains(&crate::types::card_type::CoreType::Land)
-    {
+        .contains(&crate::types::card_type::CoreType::Land);
+    let modal_land_face_open = obj.zone == Zone::Exile
+        && !obj.cast_face_committed
+        && super::engine::modal_land_face_election_available(obj);
+    if !front_is_land && !modal_land_face_open {
         return None;
     }
     if let Some((casting_permission_index, source, frequency)) =
