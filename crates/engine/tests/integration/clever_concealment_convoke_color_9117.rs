@@ -31,8 +31,8 @@ struct Board {
 /// P0 in main phase with Arcane Signet, a Swamp, one creature per entry of
 /// `creature_colors`, and Clever Concealment in hand. `commander_colors` places a
 /// commander of those colors in the command zone; `None` means P0 has no commander.
-fn setup(commander_colors: Option<Vec<ManaColor>>, creature_colors: &[ManaColor]) -> Option<Board> {
-    let db = load_db()?;
+fn setup(commander_colors: Option<Vec<ManaColor>>, creature_colors: &[ManaColor]) -> Board {
+    let db = load_db().expect("the committed integration card fixture loads");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     if let Some(colors) = commander_colors {
@@ -57,13 +57,13 @@ fn setup(commander_colors: Option<Vec<ManaColor>>, creature_colors: &[ManaColor]
     let spell = scenario.add_real_card(P0, "Clever Concealment", Zone::Hand, db);
     let mut runner = scenario.build();
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
-    Some(Board {
+    Board {
         runner,
         spell,
         signet,
         swamp,
         creatures,
-    })
+    }
 }
 
 fn white_black() -> Option<Vec<ManaColor>> {
@@ -149,9 +149,7 @@ fn assert_cast_stuck_in_payment(board: &Board) {
 
 #[test]
 fn two_black_creatures_cannot_pay_the_second_white_pip() {
-    let Some(mut board) = setup(white_black(), &[ManaColor::Black, ManaColor::Black]) else {
-        return;
-    };
+    let mut board = setup(white_black(), &[ManaColor::Black, ManaColor::Black]);
     // Signet makes one {W}; the Swamp and the two black creatures make only {B} or {1}.
     assert!(!cast_offered(&board), "only one {{W}} is available");
 
@@ -171,9 +169,7 @@ fn two_black_creatures_cannot_pay_the_second_white_pip() {
 
 #[test]
 fn one_white_creature_and_the_signet_pay_both_white_pips() {
-    let Some(mut board) = setup(white_black(), &[ManaColor::White, ManaColor::Black]) else {
-        return;
-    };
+    let mut board = setup(white_black(), &[ManaColor::White, ManaColor::Black]);
     assert!(cast_offered(&board));
 
     begin_cast(&mut board);
@@ -189,12 +185,10 @@ fn one_white_creature_and_the_signet_pay_both_white_pips() {
 
 #[test]
 fn two_white_creatures_pay_both_white_pips_when_the_signet_makes_only_black() {
-    let Some(mut board) = setup(
+    let mut board = setup(
         Some(vec![ManaColor::Black]),
         &[ManaColor::White, ManaColor::White],
-    ) else {
-        return;
-    };
+    );
     assert!(cast_offered(&board));
 
     begin_cast(&mut board);
@@ -207,9 +201,7 @@ fn two_white_creatures_pay_both_white_pips_when_the_signet_makes_only_black() {
 
 #[test]
 fn without_a_commander_the_signet_adds_nothing() {
-    let Some(mut board) = setup(None, &[ManaColor::White, ManaColor::White]) else {
-        return;
-    };
+    let mut board = setup(None, &[ManaColor::White, ManaColor::White]);
     // CR 903.4f: the creatures pay {W}{W} and the Swamp {1}; the Signet can't pay the last {1}.
     assert!(!cast_offered(&board));
 
