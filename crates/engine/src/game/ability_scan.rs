@@ -5559,7 +5559,12 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             history: HistoryReads::of(HistoryMember::TurnNumber),
             that_player: false,
         },
-        TriggerCondition::SourceAttackedThisCombat => Axes {
+        TriggerCondition::SourceAttackedThisCombat
+        | TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::CurrentCombat { exclude_source: _ },
+            comparator: _,
+            count: _,
+        } => Axes {
             event: false,
             sibling: SiblingReads::None,
             projected: true,
@@ -5938,18 +5943,19 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
         },
         TriggerCondition::ChosenLabelIs { label: _ } => Axes::NONE,
         TriggerCondition::AttackersDeclaredCount {
-            subject,
+            subject:
+                AttackersDeclaredCountSubject::Controller {
+                    scope: player,
+                    filter,
+                }
+                | AttackersDeclaredCountSubject::AttackTarget {
+                    controller: player,
+                    attacked: _,
+                    filter,
+                },
             comparator: _,
             count: _,
         } => {
-            let (player, filter) = match subject {
-                AttackersDeclaredCountSubject::Controller { scope, filter } => (scope, filter),
-                AttackersDeclaredCountSubject::AttackTarget {
-                    controller,
-                    attacked: _,
-                    filter,
-                } => (controller, filter),
-            };
             let mut acc = Axes::CONSERVATIVE.or(scan_controller_ref(player));
             if let Some(filter) = filter {
                 acc = acc.or(scan_target_filter(

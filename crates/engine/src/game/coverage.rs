@@ -25,20 +25,21 @@ use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
     ActivationRestriction, AdditionalCost, AggregateFunction, AttachmentReferent, AttackSubject,
-    AttackedYouScope, AttackerBlockStatus, CardTypeSetSource, ChoiceAssignmentSide, ChoiceType,
-    CoinFlipResult, CoinFlipRun, CombatDamageScope, CombatHistoryScope, CommanderOwnership,
-    Comparator, ContinuousEffectOnset, ContinuousModification, ControllerRef, CountScope,
-    CounterKindChooser, CounterKindDomain, CounterSourceRider, DelayedTriggerCondition,
-    DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
-    EffectScope, FilterProp, ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition,
-    LibraryShuffleMode, ManaProduction, NameStickerSet, NumberQuality, ObjectProperty, ObjectScope,
+    AttackedYouScope, AttackerBlockStatus, AttackersDeclaredCountSubject, CardTypeSetSource,
+    ChoiceAssignmentSide, ChoiceType, CoinFlipResult, CoinFlipRun, CombatDamageScope,
+    CombatHistoryScope, CommanderOwnership, Comparator, ContinuousEffectOnset,
+    ContinuousModification, ControllerRef, CountScope, CounterKindChooser, CounterKindDomain,
+    CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
+    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition, LibraryShuffleMode,
+    ManaProduction, NameStickerSet, NumberQuality, ObjectProperty, ObjectScope,
     ObjectSelectionCardinality, ObjectSelectionEligibility, Parity, ParsedCondition,
     PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope, ProhibitedActivity, PtStat,
     PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
-    SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StackAbilityKind,
-    StaticCondition, StaticDefinition, SubAbilityLink, TapStateChange, TargetFilter,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SourceExclusion,
+    SpeedDelta, SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement,
+    StackAbilityKind, StaticCondition, StaticDefinition, SubAbilityLink, TapStateChange,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::ability_visit::{ability_tree_any, visit_direct_effect_ability_payloads};
 use crate::types::card::CardFace;
@@ -5374,8 +5375,22 @@ fn fmt_trigger_condition(
         TC::DamagedPlayerIsEventSourceOwner => "damaged player is the source's owner".into(),
         TC::ChosenLabelIs { label } => format!("chosen label is {label}"),
         TC::AttackersDeclaredCount {
-            comparator, count, ..
-        } => format!("attackers declared {} {count}", fmt_comparator(comparator)),
+            subject,
+            comparator,
+            count,
+        } => {
+            let description = match subject {
+                AttackersDeclaredCountSubject::CurrentCombat { exclude_source } => {
+                    match exclude_source {
+                        SourceExclusion::Include => "creatures that attacked this combat",
+                        SourceExclusion::Exclude => "other creatures that attacked this combat",
+                    }
+                }
+                AttackersDeclaredCountSubject::Controller { .. }
+                | AttackersDeclaredCountSubject::AttackTarget { .. } => "attackers declared",
+            };
+            format!("{description} {} {count}", fmt_comparator(comparator))
+        }
         TC::ExceptFirstDrawInDrawStep => "except first draw in draw step".into(),
         TC::PlacedByAbilitySource => "placed by this ability".into(),
         TC::AddedManaWithThisAbilityThisTurn => "added mana with this ability this turn".into(),

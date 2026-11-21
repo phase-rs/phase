@@ -250,6 +250,7 @@ mod kroxa_titan_nonland_discard_life_loss;
 mod kutzils_flanker_mode_one_counter;
 mod kwain_drew_this_way_gains_life;
 mod kylox_voltstrider;
+mod kytheon_end_of_combat;
 mod l02_bb1_activation_conditions;
 mod l02_bb2_cast_origin;
 mod l02_bb3_cast_permission_finality;

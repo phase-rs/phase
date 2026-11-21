@@ -17609,11 +17609,13 @@ impl Comparator {
     }
 }
 
-/// CR 508.1 / CR 508.1b: Subject axis for counting members of a triggering
-/// `AttackersDeclared` event.
+/// CR 508.1a + CR 508.1b: Subject axis for counting declared attackers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AttackersDeclaredCountSubject {
+    /// CR 508.1a + CR 508.4: Count creatures declared as attackers in this combat,
+    /// optionally excluding the source's observed incarnation (CR 400.7).
+    CurrentCombat { exclude_source: SourceExclusion },
     /// Count attackers whose controller matches `scope` relative to the trigger
     /// controller. `filter` is the optional condition-level type axis (CR
     /// 508.1): when `Some(f)`, only attackers whose object matches `f` are
@@ -41111,13 +41113,15 @@ pub enum TriggerCondition {
     ChosenLabelIs { label: String },
 
     /// CR 506.2 + CR 508.1 + CR 508.1b + CR 603.4: Intervening-if comparison
-    /// over the current attack declaration. Handles "attacks with N or more
+    /// over the current attack declaration or the current combat’s declaration
+    /// history. Handles "attacks with N or more
     /// creatures", "none of those creatures attacked you", and attack-target
     /// count gates such as "two or more of those creatures are attacking you
     /// and/or planeswalkers you control."
     ///
     /// The `subject` axis selects what is counted (attackers by controller, or
-    /// attacks by their announced target); the `Controller` subject also carries
+    /// attacks by their announced target, or declarations in this combat); the
+    /// `Controller` subject also carries
     /// the optional condition-level type filter (CR 508.1) so "you attack with
     /// two or more Dinosaurs" counts only Dinosaur attackers. `comparator` and
     /// `count` express the threshold (`GE 2` for "two or more", `EQ 0` for

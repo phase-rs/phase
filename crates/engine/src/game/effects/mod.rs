@@ -12446,6 +12446,7 @@ fn trigger_condition_reads_filter_population(
         TriggerCondition::EventDamageSourceMatchesFilter { filter } => has_filter(filter),
         TriggerCondition::EventObjectMatchesFilter { filter } => has_filter(filter),
         TriggerCondition::AttackersDeclaredCount { subject, .. } => match subject {
+            AttackersDeclaredCountSubject::CurrentCombat { .. } => false,
             AttackersDeclaredCountSubject::Controller { filter, .. }
             | AttackersDeclaredCountSubject::AttackTarget { filter, .. } => {
                 filter.as_ref().is_some_and(has_filter)

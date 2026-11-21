@@ -21432,33 +21432,13 @@ fn evaluate_trigger_condition_with_source(
                 co_attacker_count >= *minimum as usize
             })
         }
-        // CR 506.2 + CR 508.1 + CR 508.1b + CR 603.4: Compare a count over the
-        // current attack declaration, either by attacker controller (optionally
-        // narrowed to a typed class, e.g. "two or more Dinosaurs") or by the
-        // announced attack target.
+        // CR 508.1a + CR 508.1b + CR 603.4: Compare the scoped declaration count.
         TriggerCondition::AttackersDeclaredCount {
             subject,
             comparator,
             count,
-        } => {
-            let Some(GameEvent::AttackersDeclared {
-                attacker_ids,
-                attacks,
-                ..
-            }) = trigger_event
-            else {
-                return false;
-            };
-            let actual = attackers_declared_count(
-                state,
-                attacker_ids,
-                attacks,
-                controller,
-                source_context,
-                subject,
-            );
-            comparator.evaluate(actual as i32, *count as i32)
-        }
+        } => attackers_declared_count(state, trigger_event, controller, source_context, subject)
+            .is_some_and(|actual| comparator.evaluate(actual as i32, *count as i32)),
         // CR 719.2: True when the source Case is unsolved and its solve condition is met.
         TriggerCondition::SolveConditionMet => source_context.is_some_and(|source| {
             source
@@ -22713,14 +22693,39 @@ pub(crate) fn exploit_record_matches_dying_object(
 
 fn attackers_declared_count(
     state: &GameState,
-    attacker_ids: &[ObjectId],
-    attacks: &[(ObjectId, crate::game::combat::AttackTarget)],
+    trigger_event: Option<&GameEvent>,
     trigger_controller: PlayerId,
     source_context: Option<&TriggerSourceContext>,
     subject: &crate::types::ability::AttackersDeclaredCountSubject,
-) -> usize {
-    match subject {
-        crate::types::ability::AttackersDeclaredCountSubject::Controller { scope, filter } => {
+) -> Option<usize> {
+    use crate::types::ability::{AttackersDeclaredCountSubject, SourceExclusion};
+
+    let declaration = match trigger_event {
+        Some(GameEvent::AttackersDeclared {
+            attacker_ids,
+            attacks,
+            ..
+        }) => Some((attacker_ids, attacks)),
+        _ => None,
+    };
+    let count = match subject {
+        AttackersDeclaredCountSubject::CurrentCombat { exclude_source } => {
+            // CR 508.4 + CR 506.4: This ledger records declarations and survives
+            // removal from combat. Exclusion uses the observed incarnation (CR 400.7).
+            let excluded = match exclude_source {
+                SourceExclusion::Include => None,
+                SourceExclusion::Exclude => Some(source_context?.identity.reference),
+            };
+            state.combat.as_ref().map_or(0, |combat| {
+                combat
+                    .attacking_incarnations_this_combat
+                    .iter()
+                    .filter(|&&attacker| Some(attacker) != excluded)
+                    .count()
+            })
+        }
+        AttackersDeclaredCountSubject::Controller { scope, filter } => {
+            let (attacker_ids, _) = declaration?;
             // `TriggeringPlayer` reads the controller of the first attacker in
             // the (possibly per-attacker narrowed) event. Under shared team
             // turns one combined declaration can hold several attacking
@@ -22778,11 +22783,12 @@ fn attackers_declared_count(
                 })
                 .count()
         }
-        crate::types::ability::AttackersDeclaredCountSubject::AttackTarget {
+        AttackersDeclaredCountSubject::AttackTarget {
             controller,
             attacked,
             filter,
-        } => attacks
+        } => declaration?
+            .1
             .iter()
             .filter(|(attacker_id, target)| {
                 attack_target_matches_controller_scope(
@@ -22805,7 +22811,8 @@ fn attackers_declared_count(
                 })
             })
             .count(),
-    }
+    };
+    Some(count)
 }
 
 /// CR 603.4 + CR 608.2h + CR 400.7 + CR 508.1: evaluate the resolution
@@ -22954,6 +22961,8 @@ fn condition_is_attack_event_only(
                 && matches!(trigger.mode, TriggerMode::Attacks)
         }
         TriggerCondition::AttackersDeclaredCount { subject, .. } => match subject {
+            // CR 603.4: The combat ledger is available for the resolution recheck.
+            crate::types::ability::AttackersDeclaredCountSubject::CurrentCombat { .. } => false,
             crate::types::ability::AttackersDeclaredCountSubject::Controller { .. } => {
                 trigger_mode_uses_attack_declaration_count(&trigger.mode)
             }
@@ -27437,6 +27446,87 @@ pub mod tests {
             comparator: Comparator::GE,
             count: 1,
         }
+    }
+
+    #[test]
+    fn current_combat_attacker_count_uses_incarnations_and_resets_between_combats() {
+        use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+        use crate::types::ability::SourceExclusion;
+
+        let mut state = setup();
+        let player = PlayerId(0);
+        let source = make_creature(&mut state, player, "Source", 2, 2);
+        let other = make_creature(&mut state, player, "Other attacker", 2, 2);
+        let source_ref = ObjectIncarnationRef::from_object(&state.objects[&source]);
+        let other_ref = ObjectIncarnationRef::from_object(&state.objects[&other]);
+        // CR 506.4 + CR 508.4: An attacker removed from combat still attacked.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                source,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            )],
+            attacking_incarnations_this_combat: [source_ref, other_ref].into_iter().collect(),
+            ..CombatState::default()
+        });
+        state.creatures_attacked_this_turn.extend([source, other]);
+
+        let condition = |exclude_source, count| TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::CurrentCombat { exclude_source },
+            comparator: Comparator::EQ,
+            count,
+        };
+        let excluded = condition(SourceExclusion::Exclude, 1);
+        let included = condition(SourceExclusion::Include, 2);
+        assert!(check_trigger_condition(
+            &state,
+            &excluded,
+            player,
+            Some(source),
+            None
+        ));
+        assert!(check_trigger_condition(
+            &state, &included, player, None, None
+        ));
+        assert!(!check_trigger_condition(
+            &state, &excluded, player, None, None
+        ));
+
+        state.combat = Some(CombatState::default());
+        assert!(!check_trigger_condition(
+            &state, &included, player, None, None
+        ));
+        assert!(check_trigger_condition(
+            &state,
+            &condition(SourceExclusion::Include, 0),
+            player,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn current_combat_attacker_count_survives_as_resolution_condition() {
+        use crate::types::ability::SourceExclusion;
+
+        let trigger = make_trigger(TriggerMode::Phase);
+        let condition = TriggerCondition::And {
+            conditions: vec![
+                TriggerCondition::SourceAttackedThisCombat,
+                TriggerCondition::AttackersDeclaredCount {
+                    subject: AttackersDeclaredCountSubject::CurrentCombat {
+                        exclude_source: SourceExclusion::Exclude,
+                    },
+                    comparator: Comparator::GE,
+                    count: 2,
+                },
+            ],
+        };
+        // CR 603.4: Preserve both conjuncts for the resolution-time check.
+        assert_eq!(
+            stack_condition_for_trigger(&trigger, &condition),
+            Some(condition)
+        );
     }
 
     #[test]
