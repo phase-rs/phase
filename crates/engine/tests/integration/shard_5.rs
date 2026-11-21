@@ -299,6 +299,7 @@ mod the_notary_hobbits;
 mod the_sentry_golden_guardian;
 mod the_ur_dragon_eminence;
 mod the_who_opponent_guess_resolution;
+mod theorists_sanctum;
 mod there_are_no_permanents_state_trigger;
 mod they_gain_keyword_anaphor;
 mod thickest_in_the_thicket_target_anaphor_8460;

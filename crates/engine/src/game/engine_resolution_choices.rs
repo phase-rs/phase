@@ -4599,6 +4599,17 @@ pub(super) fn handle_resolution_choice(
             // controlled battlefield permanent is already public). The non-chosen
             // candidates are never revealed — they stay hidden.
             effects::behold::reveal_if_from_hand(state, player, chosen_id, events);
+            // CR 614.12a: a Behold choice can pay a parked as-enters MayCost;
+            // resume that replacement instead of the ordinary effect continuation.
+            if state
+                .pending_replacement
+                .as_ref()
+                .is_some_and(|pending| pending.may_cost_paid)
+            {
+                let waiting_for =
+                    super::engine_replacement::handle_replacement_choice(state, 0, events)?;
+                return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
+            }
             // CR 608.2c: the behold was performed → the "if you do, [rider]" gate
             // fires. On the optional Sarkhan path this re-affirms the accept-time
             // clobber (`resolve_optional_effect_decision`); for a mandatory

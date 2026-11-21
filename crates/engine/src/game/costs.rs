@@ -3149,8 +3149,28 @@ fn pay_ability_cost_inner(
         // interactive `WaitingFor::PayCost { kind: UnattachFrom }` detour before
         // this resume runs, so this arm is an idempotent no-op (mirrors the
         // non-self Exile/Sacrifice interactive-cost arms).
-        | AbilityCost::UnattachFrom { .. }
-        | AbilityCost::Behold { .. } => {}
+        | AbilityCost::UnattachFrom { .. } => {}
+        // CR 614.12a + CR 118.3 + CR 701.4a: resolution-time single-object
+        // Behold costs either auto-pay their sole candidate or pause for a
+        // selection; the replacement resume continues after that choice.
+        AbilityCost::Behold {
+            count: 1,
+            filter,
+            action: crate::types::ability::BeholdCostAction::ChooseOrReveal,
+            type_choice: None,
+        } if matches!(scope, PaymentScope::Resolution { .. }) => {
+            use super::effects::behold::{begin_behold, BeholdStart};
+            return Ok(
+                match begin_behold(state, player, source_id, filter, events) {
+                    BeholdStart::Unavailable => payment_failed("no eligible object to behold"),
+                    BeholdStart::Selected => PaymentOutcome::Paid,
+                    BeholdStart::Parked => PaymentOutcome::Paused {
+                        remaining_cost: None,
+                    },
+                },
+            );
+        }
+        AbilityCost::Behold { .. } => {}
         AbilityCost::Discard { .. } | AbilityCost::NinjutsuFamily { .. } => {
             // At Activation these shapes are intercepted by the interactive
             // WaitingFor detours before payment is invoked, so passing through
@@ -4099,6 +4119,20 @@ fn can_pay_resolution(
             );
             eligible.len() >= count
         }
+        // CR 614.12a + CR 118.3 + CR 701.4a: a single-object Behold
+        // replacement cost is payable only when a matching object exists.
+        AbilityCost::Behold {
+            count: 1,
+            filter,
+            action: crate::types::ability::BeholdCostAction::ChooseOrReveal,
+            type_choice: None,
+        } => !super::casting_costs::eligible_behold_choices(
+            state,
+            payer,
+            ability.source_id,
+            filter,
+        )
+        .is_empty(),
         // CR 118.12 + CR 701.26a: Resolution-time optional tap-creatures costs
         // are payable when enough currently untapped matching creatures can be
         // selected. The concrete selection is surfaced through WaitingFor::PayCost.
