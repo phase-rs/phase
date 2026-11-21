@@ -1680,22 +1680,27 @@ fn assign_step_to_defender(remaining: &mut Vec<i32>, power: i32, has_trample: bo
     0
 }
 
-/// How much damage is needed to kill this creature.
-/// CR 702.2c: Deathtouch — any amount of damage from a deathtouch source is lethal.
+/// CR 120.4a + CR 120.10: the excess-damage reading — how much of a hit on this creature is
+/// not excess.
 ///
-/// CR 120.4a: the excess-damage reading — lethal damage less damage already marked,
-/// with no other combat damage in flight. Public so consumers estimating how much a
-/// creature absorbs read the same number the resolver uses rather than re-deriving it
-/// from raw toughness. Combat damage assignment itself reads
-/// `lethal_damage::combat_lethal_damage_remaining`, which also counts damage other
-/// attackers committed earlier in the step (CR 702.19b).
+/// Without deathtouch it is lethal damage less damage already marked, with no other combat
+/// damage in flight. With a deathtouch source it is 1: "Any amount of damage greater than 1
+/// is excess damage if the source dealing that damage to a creature has deathtouch" (CR
+/// 120.4a). Public so consumers estimating how much a creature absorbs read the same number
+/// the resolver uses rather than re-deriving it from raw toughness.
+///
+/// This is not the combat assignment minimum. Assignment reads
+/// `lethal_damage::combat_lethal_damage_remaining` (CR 702.19b), which also counts damage
+/// other attackers committed earlier in the step and never asks a deathtouch attacker for
+/// more than the ordinary remainder. It owes 0 to a blocker that already has lethal damage,
+/// or whose lethal damage is 0, where this reading is 1.
 pub fn lethal_damage_needed(
     state: &GameState,
     object_id: ObjectId,
     source_has_deathtouch: bool,
 ) -> u32 {
     if source_has_deathtouch {
-        // CR 702.2c + CR 702.19b: With deathtouch, 1 damage is lethal.
+        // CR 120.4a: from a deathtouch source, any amount greater than 1 is excess.
         return 1;
     }
     state
@@ -2033,7 +2038,6 @@ fn complete_combat_phase_c_remnant(
             stashed.source_incarnation,
             stashed.controller,
             &TargetRef::Player(stashed.target),
-            stashed.actual_amount,
             stashed.actual_amount,
             0,
             true,

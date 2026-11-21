@@ -12,9 +12,9 @@
 //! Oracle text verified verbatim against `data/mtgjson/AtomicCards.json`: Zilortha, Strength
 //! Incarnate, Lava Dart, Flame Slash, Flame Spill, Lightning Bolt, Unsummon, Disfigure, Giant
 //! Growth, Act of Treason, Darksteel Myr, Rith, Liberated Primeval, Colossal Dreadmaw, Charging
-//! Monstrosaur, Sedge Scorpion, War Mammoth, Archetype of Finality, and the textless Yoked Ox
-//! (0/4). Every creature that carries a keyword under test is one of these printed cards; the
-//! remaining bodies are textless P/T fillers.
+//! Monstrosaur, Sedge Scorpion, War Mammoth, Archetype of Finality, Flumph, Ram Through,
+//! Putrefax, and the textless Yoked Ox (0/4). Every creature that carries a keyword under test
+//! is one of these printed cards; the remaining bodies are textless P/T fillers.
 //!
 //! No printed creature has both deathtouch and trample of its own, so the deathtouch trampler
 //! is War Mammoth ("Trample") under Archetype of Finality ("Creatures you control have
@@ -64,6 +64,15 @@ const ARCHETYPE_OF_FINALITY: &str = "Creatures you control have deathtouch.\nCre
 const RITH: &str = "Flying, ward {2}\nOther Dragons you control have ward {2}.\nAt the beginning \
      of your end step, if a creature or planeswalker an opponent controlled was dealt excess \
      damage this turn, create a 4/4 red Dragon creature token with flying.";
+
+const FLUMPH: &str = "Defender, flying\nWhenever this creature is dealt damage, you and target \
+     opponent each draw a card.";
+const RAM_THROUGH: &str = "Target creature you control deals damage equal to its power to target \
+     creature you don't control. If the creature you control has trample, excess damage is dealt \
+     to that creature's controller instead.";
+const PUTREFAX: &str = "Trample, haste\nInfect (This creature deals damage to creatures in the \
+     form of -1/-1 counters and to players in the form of poison counters.)\nAt the beginning of \
+     the end step, sacrifice this creature.";
 
 fn board() -> GameScenario {
     let mut scenario = GameScenario::new_n_player(2, 42);
@@ -592,7 +601,7 @@ fn excess_damage_by_power_is_recorded_for_excess_readers() {
 
 /// Z13: CR 120.4a with power substituted — an undamaged Yoked Ox I control has lethal damage 0,
 /// so all 4 of Flame Spill's damage is excess: none is dealt to the Ox, 4 is dealt to me, and
-/// the Ox survives.
+/// the Ox survives. CR 120.8: the Ox is dealt no damage, so no damage event names it.
 #[test]
 fn flame_spill_on_zero_power_creature_is_all_excess() {
     let mut scenario = board();
@@ -605,11 +614,17 @@ fn flame_spill_on_zero_power_creature_is_all_excess() {
     let events = cast_at(&mut runner, spill, ox);
     assert_eq!(runner.life(P0), p0_life - 4);
     assert!(
-        damage_to(&events, ox)
-            .iter()
-            .all(|(amount, _)| *amount == 0),
+        damage_to(&events, ox).is_empty(),
         "no damage is dealt to the Ox: {:?}",
         damage_to(&events, ox)
+    );
+    assert!(
+        !runner
+            .state()
+            .damage_dealt_this_turn
+            .iter()
+            .any(|record| record.target == TargetRef::Object(ox)),
+        "CR 120.8: the Ox has no damage record"
     );
     assert_eq!(zone(&runner, ox), Zone::Battlefield);
     assert_eq!(marked(&runner, ox), 0);
@@ -691,4 +706,111 @@ fn already_lethal_by_power_owes_deathtouch_nothing() {
     finish_combat(&mut runner);
     assert_eq!(runner.life(P1), p1_life - 3);
     assert_eq!(zone(&runner, myr), Zone::Battlefield);
+}
+
+/// A board with P0's Flumph (0/4), P0's Zilortha when `with_zilortha`, a free `spell` in P0's
+/// hand, and a card on top of each library.
+fn flumph_board(with_zilortha: bool, name: &str, text: &str) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = board();
+    if with_zilortha {
+        zilortha(&mut scenario, P0);
+    }
+    let flumph = printed(
+        &mut scenario,
+        P0,
+        "Flumph",
+        (0, 4),
+        &["Defender", "Flying"],
+        FLUMPH,
+    );
+    let spell = spell(&mut scenario, name, true, text);
+    scenario.with_library_top(P0, &["Island"]);
+    scenario.with_library_top(P1, &["Island"]);
+    (scenario.build(), flumph, spell)
+}
+
+/// Z16: CR 120.4a + CR 120.8 — under P0's Zilortha, Flame Spill sends all 4 damage past P0's
+/// undamaged Flumph to P0. Flumph is dealt no damage, so "whenever this creature is dealt damage"
+/// does not trigger and nobody draws. Reach guard: without Zilortha, Lava Dart's 1 damage to the
+/// same Flumph triggers it and both players draw.
+#[test]
+fn fully_redirected_damage_does_not_trigger_dealt_damage() {
+    let (mut runner, flumph, dart) = flumph_board(false, "Lava Dart", LAVA_DART);
+    let outcome = runner.cast(dart).target_object(flumph).resolve();
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    assert_eq!(damage_to(outcome.events(), flumph), vec![(1, 0)]);
+    outcome.assert_hand_drawn(P0, 1);
+    outcome.assert_hand_drawn(P1, 1);
+
+    let (mut runner, flumph, spill) = flumph_board(true, "Flame Spill", FLAME_SPILL);
+    let outcome = runner.cast(spill).target_object(flumph).resolve();
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    outcome.assert_life_delta(P0, -4);
+    outcome.assert_hand_drawn(P0, 0);
+    outcome.assert_hand_drawn(P1, 0);
+    assert!(
+        damage_to(outcome.events(), flumph).is_empty(),
+        "CR 120.8: Flumph is dealt no damage: {:?}",
+        damage_to(outcome.events(), flumph)
+    );
+    outcome.assert_zone(&[flumph], Zone::Battlefield);
+}
+
+/// Z17: the counter-form leg of Z16 (CR 120.3b + CR 120.3d + CR 702.90c). Ram Through from
+/// Putrefax ("Trample, haste / Infect") at P1's undamaged Yoked Ox under P1's Zilortha: the Ox's
+/// lethal damage is 0, so all 5 damage is excess and goes to P1 as poison counters. The Ox gets
+/// no -1/-1 counters and is dealt no damage (CR 120.8).
+#[test]
+fn fully_redirected_infect_damage_deals_the_creature_nothing() {
+    let mut scenario = board();
+    let putrefax = printed(
+        &mut scenario,
+        P0,
+        "Putrefax",
+        (5, 3),
+        &["Haste", "Infect", "Trample"],
+        PUTREFAX,
+    );
+    zilortha(&mut scenario, P1);
+    let ox = yoked_ox(&mut scenario, P1);
+    let ram = spell(&mut scenario, "Ram Through", true, RAM_THROUGH);
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(ram).target_objects(&[putrefax, ox]).resolve();
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    let p1 = outcome
+        .state()
+        .players
+        .iter()
+        .find(|player| player.id == P1)
+        .expect("P1 exists");
+    assert_eq!(
+        p1.poison_counters, 5,
+        "CR 120.3b: all 5 is excess, as poison"
+    );
+    outcome.assert_zone(&[ox], Zone::Battlefield);
+    assert!(
+        !outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::CounterAdded { object_id, .. } if *object_id == ox
+        )),
+        "the Ox gets no counters"
+    );
+    assert!(
+        damage_to(outcome.events(), ox).is_empty(),
+        "CR 120.8: the Ox is dealt no damage: {:?}",
+        damage_to(outcome.events(), ox)
+    );
 }

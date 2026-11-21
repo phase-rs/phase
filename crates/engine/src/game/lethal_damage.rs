@@ -87,8 +87,9 @@ pub struct AssignedThisStep {
 ///
 /// CR 702.19b: "take into account damage already marked on the creature and damage from other
 /// creatures that's being assigned during the same combat damage step". A blocker that already
-/// has lethal damage, marked or committed, owes nothing, even to a deathtouch attacker; only a
-/// blocker that is not yet lethal owes a deathtouch attacker 1 (CR 702.2c).
+/// has lethal damage, marked or committed, owes nothing, even to a deathtouch attacker. If
+/// damage is still owed, deathtouch caps the remaining assignment at 1. A zero minimum stays
+/// zero.
 ///
 /// CR 510.1e (partial): `assigned` holds only damage committed by attackers whose assignments
 /// were made earlier in this step. An earlier attacker cannot assign excess based on damage that
