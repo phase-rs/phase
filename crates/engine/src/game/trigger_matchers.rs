@@ -5578,7 +5578,8 @@ pub(super) fn match_damage_prevented(
     };
     // CR 615.13: "... and prevents some or all of that damage" — a zero-prevention
     // application is not a trigger event. A half-point remainder alone is some
-    // damage prevented (CR 107.1a).
+    // damage prevented (Unhinged half points are an exception to CR 107.1a's
+    // integer-only rule).
     if *amount == 0 && amount_fraction.is_zero() {
         return false;
     }
