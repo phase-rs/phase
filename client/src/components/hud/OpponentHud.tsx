@@ -269,6 +269,9 @@ export function OpponentHud({
     const compact = forceCompactHud;
 
     const hudTone = isValidTarget ? "cyan" : isOpponentTurn ? "rose" : "neutral";
+    // As in PlayerHud: the plate is a target button only while this opponent
+    // is a valid target; otherwise a tap on a badge shows its explanation.
+    const badgeTouch = isValidTarget ? "ignore" : "toggle";
     const opponentSeatColor = getSeatColor(opponentId, gameState?.seat_order);
     const isOpponentUnderAttack = gameState?.combat?.attackers.some(
       (a) => a.attack_target.type === "Player" && a.attack_target.data === opponentId,
@@ -300,10 +303,10 @@ export function OpponentHud({
               ) : null}
               <EnchantmentsBadge playerId={opponentId} />
               {matchScore ? <ScoreBadge score={matchScore} player={1} /> : null}
-              {opponentDesignations.isMonarch ? <MonarchBadge /> : null}
-              {opponentDesignations.hasInitiative ? <InitiativeBadge /> : null}
-              {opponentDesignations.hasCityBlessing ? <CityBlessingBadge /> : null}
-              {opponentDesignations.hasEnduringStory ? <EnduringStoryBadge /> : null}
+              {opponentDesignations.isMonarch ? <MonarchBadge touch={badgeTouch} /> : null}
+              {opponentDesignations.hasInitiative ? <InitiativeBadge touch={badgeTouch} /> : null}
+              {opponentDesignations.hasCityBlessing ? <CityBlessingBadge touch={badgeTouch} /> : null}
+              {opponentDesignations.hasEnduringStory ? <EnduringStoryBadge touch={badgeTouch} /> : null}
               {opponentDesignations.dungeonRoom ? (
                 <DungeonBadge room={opponentDesignations.dungeonRoom} />
               ) : null}
@@ -313,15 +316,24 @@ export function OpponentHud({
                   kind="ring"
                   value={opponentDesignations.ringLevel}
                   ringBearerName={opponentDesignations.ringBearerName}
+                  touch={badgeTouch}
                 />
               ) : null}
-              {opponentDesignations.energy > 0 ? <CounterBadge kind="energy" value={opponentDesignations.energy} /> : null}
-              {opponentPoisonCounters > 0 ? <PoisonCounterBadge playerId={opponentId} value={opponentPoisonCounters} /> : null}
-              {opponentRadCounters > 0 ? <CounterBadge kind="rad" value={opponentRadCounters} /> : null}
-              {opponentExperienceCounters > 0 ? <CounterBadge kind="experience" value={opponentExperienceCounters} /> : null}
-              {opponentSpeed > 0 ? <CounterBadge kind="speed" value={opponentSpeed} /> : null}
+              {opponentDesignations.energy > 0 ? (
+                <CounterBadge kind="energy" value={opponentDesignations.energy} touch={badgeTouch} />
+              ) : null}
+              {opponentPoisonCounters > 0 ? (
+                <PoisonCounterBadge playerId={opponentId} value={opponentPoisonCounters} touch={badgeTouch} />
+              ) : null}
+              {opponentRadCounters > 0 ? (
+                <CounterBadge kind="rad" value={opponentRadCounters} touch={badgeTouch} />
+              ) : null}
+              {opponentExperienceCounters > 0 ? (
+                <CounterBadge kind="experience" value={opponentExperienceCounters} touch={badgeTouch} />
+              ) : null}
+              {opponentSpeed > 0 ? <CounterBadge kind="speed" value={opponentSpeed} touch={badgeTouch} /> : null}
               {opponentDesignations.unboundedFamilies.map((u) => (
-                <UnboundedBadge key={u.family} family={u.family} state={u.state} />
+                <UnboundedBadge key={u.family} family={u.family} state={u.state} touch={badgeTouch} />
               ))}
               {opponentCompanion ? <StatusBadge label={t("badges.companion")} /> : null}
               {isOnline ? <ConnectionDotInline disconnected={isDisconnected} /> : null}
@@ -732,6 +744,10 @@ function OpponentTab({
       ? t("opponentHud.clickToViewThenTarget", { name: label })
       : t("opponentHud.clickToViewBoard", { name: label });
   const onTabClick = commitReady ? onTargetPlayer : onSelectFocus;
+  // A tap on a badge is a tap on this tab. It acts unless the tab is focused
+  // and not a target (the no-op above), so only then does a tap on a badge
+  // show its explanation.
+  const badgeTouch = isFocused && !isValidTarget ? "toggle" : "ignore";
   const liveSizeClass = splitOverview
     ? "max-w-[12rem] min-w-[4.75rem] flex-1"
     : "max-w-[16rem] min-w-[5.5rem] flex-1";
@@ -766,10 +782,10 @@ function OpponentTab({
       {player.has_no_life_total && hordeMeta ? (
         <HordeRulesBadge deckLabel={hordeMeta.label} rules={hordeMeta.rules} />
       ) : null}
-      {designations.isMonarch ? <MonarchBadge /> : null}
-      {designations.hasInitiative ? <InitiativeBadge /> : null}
-      {designations.hasCityBlessing ? <CityBlessingBadge /> : null}
-      {designations.hasEnduringStory ? <EnduringStoryBadge /> : null}
+      {designations.isMonarch ? <MonarchBadge touch={badgeTouch} /> : null}
+      {designations.hasInitiative ? <InitiativeBadge touch={badgeTouch} /> : null}
+      {designations.hasCityBlessing ? <CityBlessingBadge touch={badgeTouch} /> : null}
+      {designations.hasEnduringStory ? <EnduringStoryBadge touch={badgeTouch} /> : null}
       {designations.dungeonRoom ? (
         <DungeonBadge room={designations.dungeonRoom} />
       ) : null}
@@ -778,15 +794,22 @@ function OpponentTab({
           kind="ring"
           value={designations.ringLevel}
           ringBearerName={designations.ringBearerName}
+          touch={badgeTouch}
         />
       ) : null}
-      {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
-      {poisonCounters > 0 ? <PoisonCounterBadge playerId={playerId} value={poisonCounters} /> : null}
-      {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
-      {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
-      {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
+      {designations.energy > 0 ? (
+        <CounterBadge kind="energy" value={designations.energy} touch={badgeTouch} />
+      ) : null}
+      {poisonCounters > 0 ? (
+        <PoisonCounterBadge playerId={playerId} value={poisonCounters} touch={badgeTouch} />
+      ) : null}
+      {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} touch={badgeTouch} /> : null}
+      {experienceCounters > 0 ? (
+        <CounterBadge kind="experience" value={experienceCounters} touch={badgeTouch} />
+      ) : null}
+      {speed > 0 ? <CounterBadge kind="speed" value={speed} touch={badgeTouch} /> : null}
       {designations.unboundedFamilies.map((u) => (
-        <UnboundedBadge key={u.family} family={u.family} state={u.state} />
+        <UnboundedBadge key={u.family} family={u.family} state={u.state} touch={badgeTouch} />
       ))}
       {isOnline && <ConnectionDotInline disconnected={isDisconnected} />}
       <PlayerLatency playerId={playerId} />
