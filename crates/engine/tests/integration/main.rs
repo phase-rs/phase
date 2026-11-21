@@ -310,6 +310,7 @@ mod ureni_attack_trigger;
 mod vengeful_ancestor_goaded_attack_trigger;
 mod viewer_projection_ingest_gate;
 mod void_winnower_announced_x;
+mod vren_the_relentless;
 mod vrestin_menoptra_leader_5949;
 mod vulcan_mind_meld_exiler_plays;
 mod wba_fodder_multiset;
