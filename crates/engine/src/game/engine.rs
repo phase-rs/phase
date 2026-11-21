@@ -8708,6 +8708,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                     | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                    | PendingCostMoveResume::PlayerScopeUnlessSettlement(..)
                     | PendingCostMoveResume::TurnFaceUpCostMove { .. }
             )
         ),
@@ -8740,6 +8741,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                     | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                    | PendingCostMoveResume::PlayerScopeUnlessSettlement(..)
                     | PendingCostMoveResume::TurnFaceUpCostMove { .. }
             )
         ),
@@ -8786,6 +8788,14 @@ pub(crate) fn drain_pending_cost_move_resume(
         Some(PendingCostMoveResume::WardSacrificePayment { .. })
     ) {
         engine_payment_choices::resume_ward_sacrifice_payment(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::PlayerScopeUnlessSettlement(..))
+    ) {
+        // CR 118.12 + CR 101.4: a settled poll's discard paused on a CR 616.1
+        // choice; the payer already chose to pay, so the settlement continues
+        // whether the move was delivered or prevented.
+        super::scoped_unless_poll::resume_settlement(state, events)?
     } else if matches!(
         state.pending_cost_move_resume,
         Some(PendingCostMoveResume::ReplacementMayCost { .. })

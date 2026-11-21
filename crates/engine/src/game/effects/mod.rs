@@ -50,7 +50,8 @@ use crate::types::game_state::{
     ManaAbilityResume, MayTriggerAutoChoiceKey, MemberOrderPurpose, PendingContinuation,
     PendingCostMoveResume, PendingDiscardBatchCompletion, PendingPlayerScopeSacrificeChoice,
     PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
-    PendingPlayerScopeTail, RepeatIterationChoice, RepeatIterationMovement, RepeatProcessRequest,
+    PendingPlayerScopeTail, PendingSacrificeMove, PendingSacrificeProvenance,
+    RepeatIterationChoice, RepeatIterationMovement, RepeatProcessRequest,
     RepeatUntilIterationWitness, RepeatUntilStopWitness, ResolutionOptionalPaymentOption,
     ResolutionPaymentOrigin, ReturnResultOccurrenceId, SeatCreatedTokens, TrackedMemberOrigin,
     WaitingFor, ZoneChangeRecord, ZoneOpponentChooserPurpose,
@@ -23945,69 +23946,91 @@ fn perform_player_scope_sacrifices(
     let completed = record_sacrifice_batch_events(&mut completion, events);
     emit_sacrifice_batch_follow_ups(&mut completion, completed, events);
 
-    // CR 101.4: after every player has made the required APNAP choice, the
-    // chosen permanents are moved as one simultaneous instruction.
+    // CR 101.4: after every player has made the required APNAP choice, first
+    // consult every chosen permanent's outer Sacrifice and inner ZoneChange
+    // replacements while every co-sacrificed permanent is still on the
+    // battlefield (so e.g. Dauthi Voidwalker still replaces a co-sacrificed
+    // opponent's creature), then deliver all approved moves simultaneously.
     // CR 701.21a: to sacrifice a permanent, its controller moves it from the
     // battlefield to its owner's graveyard.
+    let park_sacrifice_pause = |state: &mut GameState,
+                                mut completion: PendingPlayerScopeSacrificeCompletion,
+                                selections: Vec<(PlayerId, Vec<ObjectId>)>,
+                                choice_player: PlayerId,
+                                events: &mut Vec<GameEvent>| {
+        // Keep the full event span, rather than exposing a prematurely partial
+        // event group. The replacement resume delivers the paused permanent in a
+        // fresh action buffer; terminal completion reunites this span with that
+        // event, stamps every actual departure together, and only then allows
+        // trigger collection to observe the batch.
+        completion
+            .deferred_events
+            .extend(events.drain(events_before_sacrifice..));
+        completion.spans_replacement_pause = true;
+        state.pending_player_scope_sacrifice_choice = Some(PendingPlayerScopeSacrificeChoice {
+            ability: Box::new(ability.clone()),
+            remaining_players: vec![],
+            selections,
+            completion,
+            // CR 608.2c: bind the carrier to the resolution that wrote it.
+            resolving_entry: state.resolving_stack_entry.as_ref().map(|entry| entry.id),
+        });
+        // A delivery tail that paused on an ordinary child prompt has already
+        // set its own `waiting_for`.
+        if state.pending_replacement.is_some() {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(choice_player, state);
+        }
+    };
+
     while !selections.is_empty() {
         let (player, mut cards) = selections.remove(0);
         while !cards.is_empty() {
             let card = cards.remove(0);
             record_announced_sacrifice(&mut completion, card);
-            let events_before_card = events.len();
-            match crate::game::sacrifice::sacrifice_permanent(state, card, player, events)
-                .map_err(|error| EffectError::InvalidParam(error.to_string()))?
-            {
-                crate::game::sacrifice::SacrificeOutcome::Complete => {
-                    let completed = record_sacrifice_batch_events(
-                        &mut completion,
-                        &events[events_before_card..],
-                    );
-                    emit_sacrifice_batch_follow_ups(&mut completion, completed, events);
+            match crate::game::sacrifice::consult_sacrifice(state, card, player, events) {
+                crate::game::sacrifice::SacrificeConsult::Ready(delivery) => {
+                    completion.pending_deliveries.push(*delivery);
                 }
+                crate::game::sacrifice::SacrificeConsult::NoMove => {}
                 // CR 609.3: a mid-resolution bar means the instruction can't
                 // move this object — skip it so terminal bookkeeping derives
                 // from actual departures, not attempts.
-                crate::game::sacrifice::SacrificeOutcome::Prohibited => {
+                crate::game::sacrifice::SacrificeConsult::Prohibited => {
                     completion.announced.retain(|&id| id != card);
                 }
-                crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
-                    let completed = record_sacrifice_batch_events(
-                        &mut completion,
-                        &events[events_before_card..],
-                    );
-                    emit_sacrifice_batch_follow_ups(&mut completion, completed, events);
+                // CR 101.4 + CR 616.1: the answer finishes only this consult;
+                // `answer_player_scope_sacrifice_consult` queues its move.
+                crate::game::sacrifice::SacrificeConsult::NeedsChoice(choice_player) => {
                     if !cards.is_empty() {
                         selections.insert(0, (player, cards));
                     }
-                    // Keep the full event span, rather than exposing a
-                    // prematurely partial event group. The replacement resume
-                    // delivers the paused permanent in a fresh action buffer;
-                    // terminal completion reunites this span with that event,
-                    // stamps every actual departure together, and only then
-                    // allows trigger collection to observe the batch.
-                    completion
-                        .deferred_events
-                        .extend(events.drain(events_before_sacrifice..));
-                    completion.spans_replacement_pause = true;
-                    state.pending_player_scope_sacrifice_choice =
-                        Some(PendingPlayerScopeSacrificeChoice {
-                            ability: Box::new(ability.clone()),
-                            remaining_players: vec![],
-                            selections,
-                            completion,
-                            // CR 608.2c: bind the carrier to the resolution that wrote it.
-                            resolving_entry: state
-                                .resolving_stack_entry
-                                .as_ref()
-                                .map(|entry| entry.id),
-                        });
-                    state.waiting_for = crate::game::replacement::replacement_choice_waiting_for(
-                        choice_player,
-                        state,
-                    );
+                    completion.consult_pause = Some(PendingSacrificeProvenance {
+                        object_id: card,
+                        player_id: player,
+                    });
+                    park_sacrifice_pause(state, completion, selections, choice_player, events);
                     return Ok(PlayerScopeSacrificePerformOutcome::PausedForReplacement);
                 }
+            }
+        }
+    }
+
+    while !completion.pending_deliveries.is_empty() {
+        let delivery = completion.pending_deliveries.remove(0);
+        let events_before_card = events.len();
+        let outcome = crate::game::sacrifice::deliver_consulted_sacrifice(state, delivery, events);
+        let completed =
+            record_sacrifice_batch_events(&mut completion, &events[events_before_card..]);
+        emit_sacrifice_batch_follow_ups(&mut completion, completed, events);
+        match outcome {
+            crate::game::sacrifice::SacrificeDelivery::Delivered
+            | crate::game::sacrifice::SacrificeDelivery::Skipped => {}
+            // CR 616.1: the rest of the queue was consulted already and is
+            // delivered when the batch resumes.
+            crate::game::sacrifice::SacrificeDelivery::NeedsChoice(choice_player) => {
+                park_sacrifice_pause(state, completion, Vec::new(), choice_player, events);
+                return Ok(PlayerScopeSacrificePerformOutcome::PausedForReplacement);
             }
         }
     }
@@ -24318,8 +24341,22 @@ pub(crate) fn perform_collected_player_scope_sacrifices_with_completion(
     }
 }
 
+/// CR 101.4: Collect per-seat sacrifice choices ahead of simultaneous execution
+/// only for an unconditional sacrifice clause — an `unless` gate, optional/may
+/// wrapper, condition, or `otherwise` branch keeps the per-seat route that owns
+/// those prompts (mirroring `bounce` and `scoped_discard`).
 fn should_collect_player_scope_sacrifice_choices(ability: &ResolvedAbility) -> bool {
-    matches!(ability.effect, Effect::Sacrifice { .. }) && ability.sub_ability.is_none()
+    matches!(ability.effect, Effect::Sacrifice { .. })
+        && ability.sub_ability.is_none()
+        && ability.else_ability.is_none()
+        && ability.unless_pay.is_none()
+        && !ability.optional
+        && ability.optional_for.is_none()
+        && ability.optional_player.is_none()
+        && ability.condition.is_none()
+        && ability.repeat_for.is_none()
+        && ability.repeat_until.is_none()
+        && ability.declares_return_result.is_none()
 }
 
 /// CR 608.2c: publish the members of a completed player-scope sacrifice
@@ -24598,6 +24635,84 @@ pub(crate) fn drain_pending_player_scope_sacrifice_after_replacement(
     }
 }
 
+/// CR 101.4 + CR 616.1: whether the open replacement choice interrupted the
+/// consult of the parked simultaneous sacrifice batch — the move it decides
+/// belongs to that batch and must wait for the rest of it.
+pub(crate) fn player_scope_sacrifice_consult_awaits_replacement_choice(state: &GameState) -> bool {
+    let Some(pending) = state.pending_player_scope_sacrifice_choice.as_ref() else {
+        return false;
+    };
+    let Some(paused) = pending.completion.consult_pause else {
+        return false;
+    };
+    let Some(replacement) = state.pending_replacement.as_ref() else {
+        return false;
+    };
+    // The outer Sacrifice proposal names the permanent; its inner graveyard
+    // move carries the sacrifice it belongs to.
+    let decided = replacement
+        .sacrifice_provenance
+        .map(|provenance| provenance.object_id)
+        .or_else(|| replacement.proposed.affected_object_id());
+    decided == Some(paused.object_id)
+        && player_scope_sacrifice_carrier_binds(
+            state,
+            pending,
+            PlayerScopeSacrificeAnswer::Replacement,
+        )
+}
+
+/// What answering the batch's consult-time replacement choice produced.
+pub(crate) enum PlayerScopeSacrificeConsultAnswer {
+    /// The consult finished; the batch resumes consulting the remaining
+    /// selections and then delivers every approved move together.
+    Consulted,
+    /// Another CR 616.1 choice is pending for the same sacrifice;
+    /// `state.waiting_for` asks it.
+    NeedsChoice,
+}
+
+/// CR 101.4 + CR 616.1: answer the replacement choice that interrupted the
+/// batch's consult. CR 616.1 lets the affected player choose the replacement,
+/// but the choice only decides how this permanent's move will happen: the
+/// approved move joins the batch's `pending_deliveries`, so every chosen
+/// permanent is still consulted while every co-sacrificed permanent is on the
+/// battlefield, and the batch then happens at once (CR 101.4).
+pub(crate) fn answer_player_scope_sacrifice_consult(
+    state: &mut GameState,
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) -> PlayerScopeSacrificeConsultAnswer {
+    let consult = crate::game::sacrifice::consult_answered_sacrifice(state, index, events);
+    if let crate::game::sacrifice::SacrificeConsult::NeedsChoice(choice_player) = consult {
+        state.waiting_for =
+            crate::game::replacement::replacement_choice_waiting_for(choice_player, state);
+        return PlayerScopeSacrificeConsultAnswer::NeedsChoice;
+    }
+    let completion = &mut state
+        .pending_player_scope_sacrifice_choice
+        .as_mut()
+        .expect("a consult pause is answered while its batch is parked")
+        .completion;
+    let paused = completion
+        .consult_pause
+        .take()
+        .expect("the answered consult was marked when it paused");
+    match consult {
+        crate::game::sacrifice::SacrificeConsult::Ready(delivery) => {
+            completion.pending_deliveries.push(*delivery);
+        }
+        // CR 609.3: as in the consult loop, a barred object is not part of
+        // what the instruction did.
+        crate::game::sacrifice::SacrificeConsult::Prohibited => {
+            completion.announced.retain(|&id| id != paused.object_id);
+        }
+        crate::game::sacrifice::SacrificeConsult::NoMove
+        | crate::game::sacrifice::SacrificeConsult::NeedsChoice(_) => {}
+    }
+    PlayerScopeSacrificeConsultAnswer::Consulted
+}
+
 /// What a departure did to an open player-scope sacrifice
 /// (`reconcile_player_scope_sacrifice`).
 pub(crate) enum PlayerScopeSacrificeReconciliation {
@@ -24647,6 +24762,32 @@ fn prune_player_scope_sacrifice_carrier(
         });
         !cards.is_empty()
     });
+    pending
+        .completion
+        .pending_deliveries
+        .retain(|delivery| match &delivery.sacrifice {
+            PendingSacrificeMove::Sacrifice {
+                object_id,
+                player_id,
+                ..
+            }
+            | PendingSacrificeMove::InnerPrevented {
+                object_id,
+                player_id,
+            } => {
+                crate::game::players::is_alive(state, *player_id)
+                    && state.objects.get(object_id).is_some_and(|object| {
+                        object.zone == Zone::Battlefield && object.controller == *player_id
+                    })
+            }
+            PendingSacrificeMove::DirectMove { zone_event } => zone_event
+                .affected_object_id()
+                .and_then(|id| state.objects.get(&id))
+                .is_some_and(|object| {
+                    object.zone == Zone::Battlefield
+                        && crate::game::players::is_alive(state, object.controller)
+                }),
+        });
 }
 
 /// CR 800.4a + CR 101.4 + CR 608.2m (+ CR 616.1 for a batch parked on a
@@ -24690,6 +24831,11 @@ pub(crate) fn reconcile_player_scope_sacrifice(
         // `do_eliminate` clears a departed latched chooser's question.
         if state.pending_replacement.is_some() {
             return PlayerScopeSacrificeReconciliation::Unchanged;
+        }
+        // CR 800.4a: a consult whose question left with its chooser decides
+        // nothing; that permanent left the battlefield with them.
+        if let Some(pending) = state.pending_player_scope_sacrifice_choice.as_mut() {
+            pending.completion.consult_pause = None;
         }
         return match state.waiting_for.acting_player() {
             // CR 616.1 + CR 800.4a + CR 608.2m: the paused question left with its
@@ -26883,16 +27029,25 @@ fn resolve_chain_body(
         let unobservable =
             fail_closed_unobservable_fan_out(player_scope_control_boundary(ability), ability);
         let ability = unobservable.as_ref().unwrap_or(ability);
-        // CR 101.4 + CR 118.12a: A scoped token instruction whose
-        // each player may avert the result by sacrificing has one aggregate
-        // outcome, not one token creation per iteration. Let its dedicated
-        // APNAP payment coordinator own the existing UnlessPayment and
-        // WardSacrificeChoice round trips before the generic fan-out clones it.
+        // CR 101.4 + CR 118.12a: A scoped token instruction whose each player
+        // may avert the result by sacrificing has one aggregate outcome, not
+        // one token creation batch per iteration. Its dedicated APNAP payment
+        // coordinator owns the existing UnlessPayment and WardSacrificeChoice
+        // round trips before the generic fan-out clones it.
         if crate::game::engine_payment_choices::begin_player_scope_token_unless_sacrifice(
             state,
             ability,
             matching_players.clone(),
         ) {
+            return Ok(ResolutionProgress::Waiting);
+        }
+        // CR 101.4 + CR 118.12a: "[instruction] unless [that player]
+        // sacrifices / discards ..." — every affected player answers in APNAP
+        // order before any chosen object moves or the instruction applies to
+        // anyone. The poll owns the whole chain: at settlement it re-enters
+        // this driver for the declining players, which splits and runs the
+        // instructions printed after the clause exactly once.
+        if crate::game::scoped_unless_poll::begin(state, ability, &matching_players) {
             return Ok(ResolutionProgress::Waiting);
         }
         // Inspect the original child chain before splitting it. The splitter
@@ -31669,7 +31824,7 @@ fn instead_swap_applies(
 
 /// CR 118.4 + CR 107.3c: an unless cost as a fixed cost, resolved from the
 /// current game state.
-fn resolved_unless_cost(
+pub(crate) fn resolved_unless_cost(
     state: &GameState,
     ability: &ResolvedAbility,
     cost: &AbilityCost,
@@ -31757,7 +31912,7 @@ fn resolved_unless_cost(
 /// The prompt an unless-cost puts to `payer`, with `remaining_payers` next in line.
 /// Kept out of `resolve_chain_body` so its `WaitingFor` temporaries stay out of
 /// that recursive frame.
-fn unless_payment_prompt(
+pub(crate) fn unless_payment_prompt(
     state: &GameState,
     ability: &ResolvedAbility,
     payer: PlayerId,
