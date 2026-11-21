@@ -10714,7 +10714,6 @@ fn find_applicable_replacements_on_entry_board(
     // Amount-gated, so a fully-prevented event draws nothing on re-derive.
     if let ProposedEvent::Damage {
         target,
-        amount,
         source_id,
         source_name,
         source_incarnation,
@@ -10725,8 +10724,10 @@ fn find_applicable_replacements_on_entry_board(
         // prevention parts of applicable effects have no effect — draw no
         // virtual protection candidates, mirroring the definition-matcher
         // `is_prevention_disabled` suppression (no riders are lost: protection
-        // carries no riders).
-        if *amount > 0 && !is_prevention_disabled(state, event) {
+        // carries no riders). Exact: Little Girl's ½ damage is damage to prevent.
+        if event_quantity(event).is_some_and(|exact| !exact.is_zero())
+            && !is_prevention_disabled(state, event)
+        {
             let applicable = match target {
                 TargetRef::Object(object_id) => {
                     match state.objects.get(object_id) {
@@ -13309,19 +13310,20 @@ fn apply_single_replacement(
     let replacement_applied = proposed.applied_set().clone();
     let is_damage_event = proposed_damage_source.is_some();
     // CR 609.7b + CR 120.8: Membership requires positive damage actually changed
-    // or prevented. Capture scalar provenance only; do not clone damage events.
+    // or prevented — exact, so Vile Bile's ½ portion to one blocker is positive
+    // damage. Capture scalar provenance only; do not clone damage events.
     let damage_batch_application =
         state
             .damage_batch_ledger
             .as_ref()
-            .and_then(|_| match &proposed {
-                ProposedEvent::Damage {
-                    source_id, amount, ..
-                } if *amount > 0 => Some((
-                    AppliedReplacementKey::for_event(&proposed, rid),
-                    *source_id,
-                    *amount,
-                )),
+            .and_then(|_| match (&proposed, replaced_quantity) {
+                (ProposedEvent::Damage { source_id, .. }, Some(exact)) if !exact.is_zero() => {
+                    Some((
+                        AppliedReplacementKey::for_event(&proposed, rid),
+                        *source_id,
+                        exact,
+                    ))
+                }
                 _ => None,
             });
     // CR 614.5 + CR 609.7b: a one-shot replacement is consumed when it
@@ -13544,13 +13546,10 @@ fn apply_single_replacement(
                     if let Some((key, damage_source, damage_amount)) = damage_batch_application {
                         let changed = match &new_event {
                             ProposedEvent::Damage {
-                                source_id,
-                                target,
-                                amount,
-                                ..
+                                source_id, target, ..
                             } => {
                                 *source_id != damage_source
-                                    || *amount != damage_amount
+                                    || event_quantity(&new_event) != Some(damage_amount)
                                     || Some(target) != proposed_event_target.as_ref()
                             }
                             _ => true,

@@ -1189,3 +1189,137 @@ fn a_half_only_prevention_reaches_selfless_squires_trigger() {
     );
     assert!(runner.state().stack.is_empty());
 }
+
+/// Round-4 F3 sibling (CR 702.16e): protection prevents a half-only amount.
+/// Little Girl (½/½) attacks and Commander Eesha ("Flying, protection from
+/// creatures") blocks: the ½ is prevented, not marked.
+#[test]
+fn protection_prevents_little_girls_half_point_damage() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let girl = scenario.add_real_card(P0, "Little Girl", Zone::Battlefield, db);
+    let eesha = scenario.add_real_card(P1, "Commander Eesha", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+
+    let outcome = attack_into(&mut runner, girl, &[(eesha, girl)]);
+    assert_eq!(
+        prevented_exact(outcome.events()),
+        vec![(TargetRef::Object(eesha), HalfMagnitude::HALF)],
+        "protection from creatures prevents Little Girl's ½"
+    );
+    assert_eq!(
+        combat_damage_dealt_exact(outcome.events(), girl, TargetRef::Object(eesha)),
+        HalfMagnitude::ZERO,
+        "no damage is dealt to Eesha"
+    );
+    assert_eq!(
+        runner.state().objects[&eesha].exact_damage_marked(),
+        HalfMagnitude::ZERO
+    );
+    assert_eq!(
+        combat_damage_dealt_exact(outcome.events(), eesha, TargetRef::Object(girl)),
+        HalfMagnitude::from_whole(2),
+        "reach guard: combat damage was dealt this step"
+    );
+}
+
+/// Round-4 F2 sibling (CR 510.2 + CR 615.3): Awe Strike's "next time" covers
+/// all of Vile Bile's simultaneous combat damage, even when the first portion
+/// it meets is a half-only ½. Vile Bile, double-blocked, assigns ½ to one Bear
+/// and 2 to the other; both portions are prevented and its controller gains
+/// exactly 2½.
+#[test]
+fn awe_strike_covers_a_split_assignment_that_starts_with_a_half_point() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bile = scenario.add_real_card(P0, "Vile Bile", Zone::Battlefield, db);
+    let awe = scenario.add_real_card(P0, "Awe Strike", Zone::Hand, db);
+    scenario.add_basic_land(P0, ManaColor::White);
+    let bear_a = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let bear_b = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+
+    runner.cast(awe).target_object(bile).resolve();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(bile, AttackTarget::Player(P1))])
+        .expect("Vile Bile attacks");
+    pass_to_declare_blockers(&mut runner);
+    runner
+        .declare_blockers(&[(bear_a, bile), (bear_b, bile)])
+        .expect("two Bears block");
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::AssignCombatDamage { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass to combat damage");
+    }
+    let WaitingFor::AssignCombatDamage {
+        total_damage,
+        total_damage_fraction,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected Vile Bile's assignment prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        (total_damage, total_damage_fraction),
+        (2, HalfFraction::Half)
+    );
+    let assigned = runner
+        .act(GameAction::AssignCombatDamage {
+            mode: CombatDamageAssignmentMode::Normal,
+            assignments: vec![(bear_a, 0), (bear_b, 2)],
+            assignments_fraction: vec![(bear_a, HalfFraction::Half)],
+            trample_damage: 0,
+            trample_damage_fraction: HalfFraction::Zero,
+            controller_damage: 0,
+            controller_damage_fraction: HalfFraction::Zero,
+        })
+        .expect("½ to one Bear, 2 to the other");
+    // Combat damage is dealt as the assignment is submitted (CR 510.2).
+    let mut events = assigned.events;
+    events.extend(runner.combat_damage().events().iter().cloned());
+    runner.advance_until_stack_empty();
+
+    for bear in [bear_a, bear_b] {
+        assert_eq!(
+            combat_damage_dealt_exact(&events, bile, TargetRef::Object(bear)),
+            HalfMagnitude::ZERO,
+            "Awe Strike prevented Vile Bile's damage to each Bear"
+        );
+        assert_eq!(runner.state().objects[&bear].zone, Zone::Battlefield);
+    }
+    assert_eq!(
+        combat_damage_dealt_exact(&events, bear_a, TargetRef::Object(bile)),
+        HalfMagnitude::from_whole(2),
+        "reach guard: the Bears dealt their combat damage"
+    );
+    assert_eq!(
+        prevented_exact(&events)
+            .into_iter()
+            .map(|(_, exact)| exact)
+            .fold(HalfMagnitude::ZERO, HalfMagnitude::saturating_add),
+        HalfMagnitude::from_halves(5),
+        "½ + 2 prevented"
+    );
+    assert_eq!(
+        exact_life(&runner, P0),
+        HalfSigned::from_halves(45),
+        "you gain the 2½ prevented: 20 + 2½ = 22½"
+    );
+}
