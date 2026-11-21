@@ -164,8 +164,8 @@ fn filter_names_single_object(filter: &TargetFilter, source_id: ObjectId) -> Opt
 /// 2. it comes from a printed static definition (`def_index`), not a resolved
 ///    transient: CR 400.7 makes a source that changed zones a new object, so a
 ///    resolved effect must not write into it (CR 611.2c);
-/// 3. it is not a characteristic-defining ability: CDA application off the
-///    battlefield (CR 604.3) is a separate class and is not changed here;
+/// 3. for a characteristic-defining ability, it sets P/T and the source is a
+///    spell on the stack (CR 208.2a);
 /// 4. its layer is one the remote-recipient bookkeeping restores
 ///    (`layer_restored_on_remote_objects`), so what is written can be undone;
 ///    Layer 6 stays on demand (`off_zone_characteristics`);
@@ -182,12 +182,27 @@ fn declared_zone_self_static_candidates(
 ) -> Option<Vec<ObjectId>> {
     if effect.affected_filter != TargetFilter::SelfRef
         || effect.def_index.is_none()
-        || effect.characteristic_defining
         || !layer_restored_on_remote_objects(effect.layer)
     {
         return None;
     }
     let zone = state.objects.get(&effect.source_id)?.zone;
+    if effect.characteristic_defining {
+        return (zone == Zone::Stack
+            && effect.layer == Layer::CharDef
+            && state
+                .stack
+                .iter()
+                .chain(state.resolving_stack_entry.iter())
+                .any(|entry| {
+                    entry.id == effect.source_id
+                        && matches!(
+                            entry.kind,
+                            crate::types::game_state::StackEntryKind::Spell { .. }
+                        )
+                }))
+        .then(|| vec![effect.source_id]);
+    }
     if zone == Zone::Battlefield || !zone_cache.zone_contains(state, zone, effect.source_id) {
         return None;
     }
