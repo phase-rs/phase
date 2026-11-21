@@ -366,6 +366,19 @@ describe("workspace placement", () => {
       expect(pickFor(board, sendTo(board.state, "satyr", "sideboard"), "satyr", "deck")).toBe(5);
     });
 
+    it("rejoins_the_column_the_sort_gave_the_group_not_another_that_could_share", () => {
+      const board = colorBoard([
+        ["pacifism", "white", "deck"], ["opt", "blue", "deck"],
+        ["night", "black", "deck"], ["plains", "colorless", "deck"],
+      ], 2);
+      expect([column(board.state, "pacifism"), column(board.state, "opt")]).toEqual([0, 0]);
+      expect([column(board.state, "night"), column(board.state, "plains")]).toEqual([1, 1]);
+      // Opt and Plains go to the sideboard, then Opt comes back: it was sorted
+      // beside Pacifism, not beside Child of Night.
+      const away = sendTo(sendTo(board.state, "opt", "sideboard"), "plains", "sideboard");
+      expect(pickFor(board, away, "opt", "deck")).toBe(0);
+    });
+
     it("folds_the_trailing_groups_first_as_columns_get_scarcer", () => {
       expect(sideboardColumns(5)).toEqual({
         white: 0, blue: 1, black: 2, red: 3, green: 3, multicolor: 4, colorless: 4,
