@@ -98,6 +98,7 @@ mod shared;
 mod static_helpers;
 mod type_change;
 
+pub(crate) use anthem::PrintedSubject;
 pub(crate) use shared::add_property;
 pub(crate) use shared::parse_affected_scoped_static_condition;
 pub(crate) use shared::parse_commander_subject_filter_prefix;

@@ -1355,14 +1355,16 @@ fn is_blocked_by_cant_cast_spells_for(
 /// CR 305.1 + CR 116.2a: Check if any `PlayLands` restriction prevents `player`
 /// from playing `land_obj` as a land. Filter-scoped sibling of
 /// `is_blocked_by_cant_cast_spells_for` — a land play is not a cast, so this
-/// reads the land's own `GameObject` directly through the generic per-object
-/// filter evaluator (`filter::matches_target_filter`) rather than a spell-record
-/// projection.
+/// reads the land's own `GameObject` through the generic per-object filter
+/// evaluator (`filter::matches_target_filter`) rather than a spell-record
+/// projection. CR 712.12: a spell//land modal card is read as the land back face
+/// it would be played as (`engine::land_face_played`), evaluated once per call.
 pub(crate) fn is_blocked_by_cant_play_lands(
     state: &GameState,
     player: PlayerId,
     land_obj: &GameObject,
 ) -> bool {
+    let played_face = std::cell::OnceCell::new();
     state.restrictions.iter().any(|restriction| {
         let GameRestriction::ProhibitActivity {
             source,
@@ -1385,11 +1387,8 @@ pub(crate) fn is_blocked_by_cant_play_lands(
 
         player_affected
             && match land_filter {
-                Some(filter) => super::filter::matches_target_filter(
-                    state,
-                    land_obj.id,
-                    filter,
-                    &super::filter::FilterContext {
+                Some(filter) => {
+                    let ctx = super::filter::FilterContext {
                         source_id: *source,
                         source_controller,
                         ability: None,
@@ -1404,8 +1403,20 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                         declared_slot_view: None,
                         granting_object: None,
                         pre_entry_battlefield: None,
-                    },
-                ),
+                    };
+                    // CR 712.12 + CR 101.2: a spell//land modal card is played
+                    // as its land back face, so the prohibition is read on that
+                    // face. One face-evaluation path for discovery and for the
+                    // submitted play; the real object is not mutated.
+                    match played_face.get_or_init(|| super::engine::land_face_played(land_obj)) {
+                        Some(face) => super::filter::matches_target_filter_on_object(
+                            state, face, filter, &ctx,
+                        ),
+                        None => {
+                            super::filter::matches_target_filter(state, land_obj.id, filter, &ctx)
+                        }
+                    }
+                }
                 None => true,
             }
     })
@@ -6758,7 +6769,7 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -7898,11 +7909,25 @@ pub(super) fn exile_land_play_authorization(
     land_id: ObjectId,
 ) -> Option<ExileLandPlayAuthorization> {
     let obj = state.objects.get(&land_id)?;
-    if !obj
+    // CR 712.8a: outside the battlefield and stack the card has only its front
+    // face's characteristics, so a spell//land modal card in exile is not a land
+    // card by itself. CR 712.12 nonetheless lets a player who plays it do so as
+    // a land by choosing its land face, which the shared play-land election
+    // (`handle_play_land`'s `modal_land_face_election_available` branch) then
+    // elects. The permission is read unchanged below (play mode, grantee,
+    // `card_filter` on the stored front face, frequency), so a Cast-mode grant
+    // still refuses the land face and only a Play-mode grant that authorizes the
+    // card (Light Up the Stage's "play those cards") reaches it. Exile only:
+    // `graveyard_lands_playable_by_permission` discovers graveyard lands by
+    // their front face and the gate must not admit what discovery never offers.
+    let front_is_land = obj
         .card_types
         .core_types
-        .contains(&crate::types::card_type::CoreType::Land)
-    {
+        .contains(&crate::types::card_type::CoreType::Land);
+    let modal_land_face_open = obj.zone == Zone::Exile
+        && !obj.cast_face_committed
+        && super::engine::modal_land_face_election_available(obj);
+    if !front_is_land && !modal_land_face_open {
         return None;
     }
     if let Some((casting_permission_index, source, frequency)) =
