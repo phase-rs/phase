@@ -526,6 +526,11 @@ pub(crate) enum DamageResult {
 /// auto-apply, Matt R14-MED), and `Gated` drops fully gated damage silently.
 /// Shared by the single-source `apply_damage_to_target` path and the
 /// combat-damage batch path so both run identical pre-pipeline gating.
+///
+/// `Proposed` carries the event inline: every caller destructures the outcome
+/// immediately and feeds the event to the replacement pipeline, so boxing it
+/// would add an allocation per damage event without saving retained state.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum DamageGateOutcome {
     Proposed(ProposedEvent),
     Gated,
