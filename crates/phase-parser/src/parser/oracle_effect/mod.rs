@@ -34122,7 +34122,28 @@ fn lower_subject_predicate_ast_body(
             if seeds_source_subject {
                 ctx.subject = Some(TargetFilter::SelfRef);
             }
-            let mut clause = lower_imperative_clause(&text, ctx, damage_context);
+            let target_population = distributive_target_player(
+                subject.affected.as_ref(),
+                subject.multi_target.as_ref(),
+                original_clause,
+            );
+            // CR 608.2e: A targeted-population sacrifice below binds its
+            // permanent filter per seat. The same member is the antecedent
+            // inside a nested population such as "creatures that player controls".
+            let mut clause = if target_population.is_some()
+                && tag::<_, _, OracleError<'_>>("sacrifice ")
+                    .parse(pred_lower.as_str())
+                    .is_ok()
+            {
+                let declared = ctx.declared_player_scope.take();
+                let clause = ctx.with_player_scope(ControllerRef::ScopedPlayer, |ctx| {
+                    lower_imperative_clause(&text, ctx, damage_context)
+                });
+                ctx.declared_player_scope = declared;
+                clause
+            } else {
+                lower_imperative_clause(&text, ctx, damage_context)
+            };
             if seeds_source_subject {
                 ctx.subject = None;
             }
@@ -34523,6 +34544,39 @@ fn lower_subject_predicate_ast_body(
                 // merged exile tracked set, one Clue per nontoken creature exiled.
                 if let Some(qty) = repeat_for_each_this_way_suffix(&pred_lower) {
                     ctx.pending_repeat_for = Some(qty);
+                }
+            }
+            if let Some(player_target) = target_population {
+                let scoped = CarriedPlayerSubject::TargetPopulation.subject_phrase(None);
+                // CR 608.2e: Nested coordinated predicates have already been
+                // split into continuation nodes by imperative lowering.
+                let mut next = clause.sub_ability.as_deref_mut();
+                while let Some(step) = next.filter(|step| {
+                    step.sub_link == SubAbilityLink::ContinuationStep
+                        && !step
+                            .condition
+                            .as_ref()
+                            .is_some_and(AbilityCondition::has_when_you_do_marker)
+                        && extract_target_filter_from_effect(&step.effect).is_none()
+                }) {
+                    inject_subject_target(&mut step.effect, &scoped, original_clause);
+                    stamp_subject_actor(&mut step.effect, None, &TargetFilter::ScopedPlayer);
+                    next = step.sub_ability.as_deref_mut();
+                }
+
+                // CR 701.21a + CR 608.2b: A sacrifice filter selects a
+                // permanent at resolution. Announce the players on a distinct
+                // node so the permanent filter does not open a stack slot.
+                if matches!(clause.effect, Effect::Sacrifice { .. }) {
+                    inject_subject_target(&mut clause.effect, &scoped, original_clause);
+                    let mut action = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
+                    action.sub_ability = clause.sub_ability;
+                    clause.effect = Effect::TargetOnly {
+                        target: player_target.clone(),
+                    };
+                    clause.sub_ability = Some(Box::new(action));
+                    clause.multi_target = subject.multi_target;
+                    return clause;
                 }
             }
             inject_subject_target(&mut clause.effect, &subject, original_clause);
@@ -35837,6 +35891,26 @@ fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 608.2c: Match an announced player population whose predicate is
+/// distributed by the printed subject.
+fn distributive_target_player<'a>(
+    affected: Option<&'a TargetFilter>,
+    count: Option<&MultiTargetSpec>,
+    text: &str,
+) -> Option<&'a TargetFilter> {
+    count?;
+    let filter = affected.filter(|filter| match filter {
+        TargetFilter::Player | TargetFilter::Opponent => true,
+        TargetFilter::Typed(typed) => {
+            typed.type_filters.is_empty()
+                && typed.properties.is_empty()
+                && typed.controller == Some(ControllerRef::Opponent)
+        }
+        _ => false,
+    })?;
+    subject::has_distributive_player_subject(text).then_some(filter)
+}
+
 /// CR 109.4 + CR 115.1: map a targeted player subject to the announced-target
 /// chooser it names. Opponent-ness is read from either subject leg (the bare
 /// opponent filter "target opponent" lowers its `affected` to, or an
@@ -35915,6 +35989,8 @@ enum CarriedPlayerSubject {
     /// which would surface a second target slot and prompt again (#2344). The
     /// only form whose subject phrase carries `target`.
     Declared,
+    /// CR 608.2e: The current member of one announced player population.
+    TargetPopulation,
     /// CR 608.2c: a player an earlier instruction already named, re-supplied as
     /// the context reference `filter` (`ScopedPlayer`, a `ParentTargetSlot`, an
     /// anaphor's own reference, ...). It names the player without declaring a
@@ -35927,6 +36003,7 @@ enum CarriedPlayerSubject {
 
 /// `Declared`'s reference; a `static` so `reference` can lend it.
 static DECLARED_REFERENCE: TargetFilter = TargetFilter::ParentTarget;
+static TARGET_POPULATION_MEMBER: TargetFilter = TargetFilter::ScopedPlayer;
 
 impl CarriedPlayerSubject {
     /// The carry a chunk's leading subject establishes, if it is a player
@@ -35980,6 +36057,7 @@ impl CarriedPlayerSubject {
     fn reference(&self) -> &TargetFilter {
         match self {
             Self::Declared => &DECLARED_REFERENCE,
+            Self::TargetPopulation => &TARGET_POPULATION_MEMBER,
             Self::Reference { filter, .. } => filter,
         }
     }
@@ -53353,8 +53431,20 @@ fn parse_effect_chain_ir_body(
         // "draw") continues the previous chunk's subject.
         let continues_elided_subject = leading_subject_application.is_none()
             && player_scope.is_none()
-            && chunk_continues_anchored_subject(&text);
+            && (chunk_continues_anchored_subject(&text)
+                || (carried_player == Some(CarriedPlayerSubject::TargetPopulation)
+                    && !is_optional
+                    && subject::find_predicate_start(&text) == Some(0)));
         let inherited_player_subject = carried_player.clone().filter(|_| continues_elided_subject);
+        // CR 608.2c: An independently named actor ends the distributive
+        // instruction even when both instructions occupy the same sentence.
+        if carried_player == Some(CarriedPlayerSubject::TargetPopulation)
+            && inherited_player_subject.is_none()
+        {
+            if let Some(previous) = builder.last_mut() {
+                previous.boundary = Some(ClauseBoundary::Sentence);
+            }
+        }
         // CR 608.2c: the carry spans a run of inheriting continuations. A new
         // leading subject replaces it, a chunk that neither states a subject nor
         // continues one ends it, and it never crosses a sentence boundary.
@@ -53364,12 +53454,21 @@ fn parse_effect_chain_ir_body(
         if chunk.boundary_after == Some(ClauseBoundary::Sentence) {
             carried_player = carried_player.filter(CarriedPlayerSubject::persists_across_sentences);
         } else if let Some(application) = leading_subject_application.as_ref() {
-            carried_player =
+            carried_player = if distributive_target_player(
+                Some(&application.affected),
+                application.multi_target.as_ref(),
+                &text,
+            )
+            .is_some()
+            {
+                Some(CarriedPlayerSubject::TargetPopulation)
+            } else {
                 CarriedPlayerSubject::from_leading_subject(application).or_else(|| {
                     carried_player
                         .take()
                         .filter(CarriedPlayerSubject::persists_across_sentences)
-                });
+                })
+            };
         } else if !continues_elided_subject {
             carried_player = carried_player.filter(CarriedPlayerSubject::persists_across_sentences);
         }
