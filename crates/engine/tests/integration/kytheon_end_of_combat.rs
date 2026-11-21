@@ -14,17 +14,38 @@ use engine::types::GameAction;
 const ATTACKER: PlayerId = PlayerId(0);
 const DEFENDER: PlayerId = PlayerId(1);
 const ORACLE: &str = "At end of combat, if Kytheon and at least two other creatures attacked this combat, exile Kytheon, then return him to the battlefield transformed under his owner's control.\n{2}{W}: Kytheon gains indestructible until end of turn.";
+const ADELINE_ORACLE: &str = "Vigilance\n\
+    Adeline's power is equal to the number of creatures you control.\n\
+    Whenever you attack, for each opponent, create a 1/1 white Human creature token that's tapped and attacking that player or a planeswalker they control.";
 
 #[test]
 fn kytheon_end_of_combat_uses_declared_attackers_and_returns_to_owner() {
-    for (case, source_attacks, others_present, others_attacking, block, transforms) in [
-        ("Kytheon alone", true, 0, 0, false, false),
-        ("one other creature", true, 1, 1, false, false),
+    for (
+        case,
+        source_attacks,
+        others_present,
+        others_attacking,
+        adeline_attacks,
+        block,
+        transforms,
+    ) in [
+        ("Kytheon alone", true, 0, 0, false, false, false),
+        ("one other creature", true, 1, 1, false, false, false),
+        (
+            "Adeline creates an attacking Human",
+            true,
+            1,
+            1,
+            true,
+            false,
+            false,
+        ),
         (
             "one of two other creatures stays home",
             true,
             2,
             1,
+            false,
             false,
             false,
         ),
@@ -35,13 +56,23 @@ fn kytheon_end_of_combat_uses_declared_attackers_and_returns_to_owner() {
             2,
             false,
             false,
+            false,
         ),
-        ("Kytheon and two others attack", true, 2, 2, false, true),
+        (
+            "Kytheon and two others attack",
+            true,
+            2,
+            2,
+            false,
+            false,
+            true,
+        ),
         (
             "a co-attacker dies before end of combat",
             true,
             2,
             2,
+            false,
             true,
             true,
         ),
@@ -52,11 +83,25 @@ fn kytheon_end_of_combat_uses_declared_attackers_and_returns_to_owner() {
             .add_creature_from_oracle(DEFENDER, "Kytheon, Hero of Akros", 2, 1, ORACLE)
             .controlled_by(ATTACKER)
             .id();
-        let first = (others_present >= 1).then(|| {
-            scenario
-                .add_creature(ATTACKER, "First co-attacker", 1, 1)
-                .id()
-        });
+        let first = if adeline_attacks {
+            Some(
+                scenario
+                    .add_creature_from_oracle(
+                        ATTACKER,
+                        "Adeline, Resplendent Cathar",
+                        0,
+                        4,
+                        ADELINE_ORACLE,
+                    )
+                    .id(),
+            )
+        } else {
+            (others_present >= 1).then(|| {
+                scenario
+                    .add_creature(ATTACKER, "First co-attacker", 1, 1)
+                    .id()
+            })
+        };
         let second = (others_present == 2).then(|| {
             scenario
                 .add_creature(ATTACKER, "Second co-attacker", 1, 1)
@@ -100,6 +145,7 @@ fn kytheon_end_of_combat_uses_declared_attackers_and_returns_to_owner() {
             parse_warnings: vec![],
         });
 
+        let front_incarnation = runner.state().objects[&kytheon].incarnation;
         runner.advance_to_combat();
         assert!(
             matches!(
@@ -118,6 +164,26 @@ fn kytheon_end_of_combat_uses_declared_attackers_and_returns_to_owner() {
             .map(|id| (id, AttackTarget::Player(DEFENDER)))
             .collect::<Vec<_>>();
         runner.declare_attackers(&attacks).unwrap();
+        if adeline_attacks {
+            assert_eq!(runner.state().stack.len(), 1, "{case}");
+            runner.resolve_top();
+            assert!(runner.state().stack.is_empty(), "{case}");
+            // CR 508.4: The Human enters attacking and was never declared.
+            let state = runner.state();
+            let attackers = &state.combat.as_ref().unwrap().attackers;
+            assert_eq!(attackers.len(), 3, "{case}");
+            assert!(
+                attackers.iter().any(|attacker| {
+                    let object = &state.objects[&attacker.object_id];
+                    object.zone == Zone::Battlefield
+                        && object.controller == ATTACKER
+                        && object.is_token
+                        && object.tapped
+                        && object.card_types.subtypes.iter().any(|s| s == "Human")
+                }),
+                "{case}"
+            );
+        }
         for _ in 0..2 {
             if runner.state().phase == Phase::DeclareBlockers {
                 break;
@@ -195,6 +261,7 @@ fn kytheon_end_of_combat_uses_declared_attackers_and_returns_to_owner() {
         } else {
             assert_eq!(source.name, "Kytheon, Hero of Akros", "{case}");
             assert_eq!(source.controller, ATTACKER, "{case}");
+            assert_eq!(source.incarnation, front_incarnation, "{case}");
         }
     }
 }

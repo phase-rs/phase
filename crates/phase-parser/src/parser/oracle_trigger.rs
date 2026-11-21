@@ -8704,11 +8704,6 @@ impl IfExtraction {
 fn parse_attacked_this_combat_condition(input: &str) -> OracleResult<'_, TriggerCondition> {
     use super::oracle_nom::condition::parse_ge_threshold;
 
-    let count_condition = |exclude_source, count| TriggerCondition::AttackersDeclaredCount {
-        subject: AttackersDeclaredCountSubject::CurrentCombat { exclude_source },
-        comparator: Comparator::GE,
-        count,
-    };
     let source = map(
         preceded(
             tag("~"),
@@ -8717,24 +8712,26 @@ fn parse_attacked_this_combat_condition(input: &str) -> OracleResult<'_, Trigger
                 terminated(parse_ge_threshold, tag("other creatures")),
             )),
         ),
-        move |count| match count {
+        |count| match count {
             None => TriggerCondition::SourceAttackedThisCombat,
             Some(count) => TriggerCondition::And {
                 conditions: vec![
                     TriggerCondition::SourceAttackedThisCombat,
-                    count_condition(SourceExclusion::Exclude, count),
+                    TriggerCondition::AttackersDeclaredCount {
+                        subject: AttackersDeclaredCountSubject::CurrentCombat {
+                            exclude_source: SourceExclusion::Exclude,
+                        },
+                        comparator: Comparator::GE,
+                        count,
+                    },
                 ],
             },
         },
     );
-    let creatures = map(
-        terminated(parse_ge_threshold, tag("creatures")),
-        move |count| count_condition(SourceExclusion::Include, count),
-    );
     preceded(
         tag("if "),
         terminated(
-            alt((source, creatures)),
+            source,
             pair(tag(" attacked this combat"), peek(alt((tag(","), eof)))),
         ),
     )

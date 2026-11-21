@@ -2855,36 +2855,10 @@ fn kytheon_end_of_combat_parses_condition_and_transformed_return() {
 }
 
 #[test]
-fn unqualified_combat_count_includes_the_source() {
-    // Synthetic grammar coverage for an unqualified declaration count.
-    let trigger = parse_trigger_line(
-        "At end of combat, if three or more creatures attacked this combat, draw a card.",
-        "Test Combat Observer",
-    );
-    assert_eq!(
-        trigger.condition,
-        Some(TriggerCondition::AttackersDeclaredCount {
-            subject: AttackersDeclaredCountSubject::CurrentCombat {
-                exclude_source: SourceExclusion::Include,
-            },
-            comparator: Comparator::GE,
-            count: 3,
-        })
-    );
-    assert!(matches!(
-        trigger
-            .execute
-            .as_deref()
-            .map(|ability| ability.effect.as_ref()),
-        Some(Effect::Draw { .. })
-    ));
-}
-
-#[test]
 fn sentence_local_combat_count_does_not_gate_the_trigger() {
     let trigger = parse_trigger_line(
-        "At end of combat, draw a card. Then if three or more creatures attacked this combat, draw a card.",
-        "Test Combat Observer",
+        "At end of combat, draw a card. Then if Kytheon and at least two other creatures attacked this combat, draw a card.",
+        "Kytheon, Hero of Akros",
     );
     assert_eq!(trigger.condition, None);
     assert!(matches!(
