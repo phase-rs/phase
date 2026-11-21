@@ -8840,9 +8840,43 @@ fn teferis_response_destroy_rider_absorbed_draw_chains() {
         );
 
     let ability = &result.abilities[0];
-    let Effect::Counter { source_rider, .. } = &*ability.effect else {
+    let Effect::Counter {
+        target,
+        source_rider,
+        ..
+    } = &*ability.effect
+    else {
         panic!("expected Counter effect, got {:?}", ability.effect);
     };
+    let qualifier = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![],
+        controller: Some(ControllerRef::Opponent),
+        properties: vec![FilterProp::Targets {
+            filter: Box::new(TargetFilter::Typed(
+                TypedFilter::land().controller(ControllerRef::You),
+            )),
+        }],
+    });
+    assert_eq!(
+        *target,
+        TargetFilter::Or {
+            filters: vec![
+                TargetFilter::And {
+                    filters: vec![TargetFilter::StackSpell, qualifier.clone()],
+                },
+                TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackAbility {
+                            controller: None,
+                            tag: None,
+                            kind: None,
+                        },
+                        qualifier,
+                    ],
+                },
+            ],
+        }
+    );
     assert!(
         matches!(source_rider, Some(CounterSourceRider::Destroy)),
         "destroy should be absorbed into source_rider, got {source_rider:?}"
@@ -36235,21 +36269,69 @@ fn change_targets_spell_or_ability_with_single_target() {
     };
     assert!(matches!(scope, RetargetScope::Single));
     assert!(forced_to.is_none());
-    // Should be Or(StackSpell+HasSingleTarget, StackAbility+HasSingleTarget)
-    let TargetFilter::Or { filters } = &target else {
-        panic!("Expected Or filter, got {0:?}", target);
+    let single = || {
+        TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::HasSingleTarget],
+            ..TypedFilter::default()
+        })
     };
-    assert_eq!(filters.len(), 2);
-    for f in filters {
-        let TargetFilter::And { filters: inner } = f else {
-            panic!("Expected And filter inside Or, got {f:?}");
-        };
-        assert!(inner.iter().any(|f| matches!(
-            f,
-            TargetFilter::Typed(TypedFilter { properties, .. })
-                if properties.contains(&FilterProp::HasSingleTarget)
-        )));
-    }
+    assert_eq!(
+        target,
+        TargetFilter::Or {
+            filters: vec![
+                TargetFilter::And {
+                    filters: vec![TargetFilter::StackSpell, single()],
+                },
+                TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackAbility {
+                            controller: None,
+                            tag: None,
+                            kind: None,
+                        },
+                        single(),
+                    ],
+                },
+            ],
+        }
+    );
+}
+
+/// CR 115.9c: Silver Wyvern — the "that targets only" qualifier reaches both legs.
+#[test]
+fn change_targets_spell_or_ability_that_targets_only_self() {
+    let e = parse_effect("change the target of target spell or ability that targets only ~");
+    let Effect::ChangeTargets { target, .. } = e else {
+        panic!("Expected ChangeTargets, got {e:?}");
+    };
+    let only_self = || {
+        TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::TargetsOnly {
+                filter: Box::new(TargetFilter::SelfRef),
+            }],
+            ..TypedFilter::default()
+        })
+    };
+    assert_eq!(
+        target,
+        TargetFilter::Or {
+            filters: vec![
+                TargetFilter::And {
+                    filters: vec![TargetFilter::StackSpell, only_self()],
+                },
+                TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackAbility {
+                            controller: None,
+                            tag: None,
+                            kind: None,
+                        },
+                        only_self(),
+                    ],
+                },
+            ],
+        }
+    );
 }
 
 #[test]
