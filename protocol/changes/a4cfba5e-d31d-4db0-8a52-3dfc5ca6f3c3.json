@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "SpellContext gains direct_damage_recipient, the object the immediately preceding damage instruction actually dealt damage to (CR 608.2c + CR 614.9), read by a slotless 'if a [type] is dealt damage this way' rider (Marauding Raptor). It is serialized inside ResolvedAbility, omitted when absent and defaulted when missing, so an older peer reading a resolution paused between the damage and its rider drops the recipient and suppresses the rider."
+}

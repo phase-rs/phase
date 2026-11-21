@@ -39703,19 +39703,11 @@ pub enum AbilityCondition {
         )]
         subject: ObjectScope,
     },
-    /// CR 601.2c + CR 608.2c + CR 115.1: True iff the parent ability actually has
-    /// at least one *object* target. Guards reflexive-target riders ("If that
-    /// creature …, …") against the optional-declined-target case: when a
-    /// variable-number-of-targets antecedent ("destroy up to one target
-    /// creature") is announced with zero targets (CR 601.2c), the anaphor "that
-    /// creature" has no antecedent (CR 608.2c — read the whole text), so the
-    /// rider must not fire. `evaluate_condition` checks the resolved ability's
-    /// declared targets (CR 115.1) for a `TargetRef::Object`, with NO
-    /// `TriggeringSource` fallback (unlike `TargetMatchesFilter`), so a declined
-    /// optional target reads false. The lowering pass conjoins this with the
-    /// reflexive sub-condition (`And{[HasObjectTarget, …]}`) only when the
-    /// antecedent's `multi_target.min_is_fixed_zero()` — a no-op for
-    /// mandatory-single-target cards (`multi_target == None`).
+    /// CR 608.2c + CR 601.2c + CR 115.6: Guard reflexive object riders
+    /// against an absent antecedent, including a declined optional target.
+    /// Referent selection follows the resolver's chain and event-context rules.
+    /// This guard alone does not establish that an object received damage;
+    /// damage riders must also check the preceding instruction's actual result.
     HasObjectTarget,
     /// CR 608.2c + CR 603.2: "if it targets a [filter]" on a triggered ability —
     /// gates the sub_ability on whether the triggering spell's chosen targets
