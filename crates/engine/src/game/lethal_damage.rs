@@ -48,15 +48,19 @@ pub fn lethal_damage_basis(state: &GameState, object_id: ObjectId) -> LethalDama
 /// CR 120.6 + CR 704.5g: total marked damage at or above which `obj` has been dealt lethal
 /// damage.
 ///
-/// Toughness basis: toughness at or below 0 yields 0; a creature in that state is put into its
-/// owner's graveyard by CR 704.5f, which is not a consequence of damage. Power basis: at least 1,
-/// because CR 704.5g also requires that the creature "has damage marked on it" (a creature with
-/// 0 power isn't destroyed unless it has at least 1 damage marked on it).
+/// Lethal damage is "an amount of damage greater than or equal to a creature's toughness"
+/// (glossary), with power substituted under the power basis. Either characteristic at or below 0
+/// yields 0, so a 0-power creature under the power basis is already owed no lethal damage: a
+/// trampler may assign it nothing and excess damage passes it entirely (CR 702.19b, CR 120.4a).
+/// Destruction separately needs damage marked; that is `is_lethal_damage`'s nonzero test (CR
+/// 704.5g: "it has damage marked on it"). A creature with toughness 0 or less is put into its
+/// owner's graveyard by CR 704.5f, which is not a consequence of damage.
 pub fn lethal_damage_threshold(state: &GameState, obj: &GameObject) -> u32 {
-    match lethal_damage_basis(state, obj.id) {
-        LethalDamageBasis::Toughness => obj.toughness.unwrap_or(0).max(0) as u32,
-        LethalDamageBasis::Power => obj.power.unwrap_or(0).max(1) as u32,
-    }
+    let characteristic = match lethal_damage_basis(state, obj.id) {
+        LethalDamageBasis::Toughness => obj.toughness,
+        LethalDamageBasis::Power => obj.power,
+    };
+    characteristic.unwrap_or(0).max(0) as u32
 }
 
 /// CR 120.6 + CR 704.5g: `total` damage is lethal for `obj`: it is nonzero ("it has damage marked
@@ -109,11 +113,14 @@ pub fn combat_lethal_damage_remaining(
     if is_lethal_damage(state, obj, counted) {
         return 0;
     }
-    // CR 702.2c + CR 702.19b: one damage from a deathtouch source is lethal.
+    let remaining = lethal_damage_threshold(state, obj).saturating_sub(counted);
+    // CR 702.2c + CR 702.19b: one damage from a deathtouch source is lethal. It never raises
+    // the requirement above the ordinary remainder, which is 0 for a creature whose lethal
+    // damage is 0 (a 0-power creature under the power basis).
     if source_has_deathtouch {
-        return 1;
+        return remaining.min(1);
     }
-    lethal_damage_threshold(state, obj).saturating_sub(counted)
+    remaining
 }
 
 #[cfg(test)]
@@ -274,14 +281,24 @@ mod tests {
         );
     }
 
-    /// CR 704.5g + ruling 1: the power threshold is at least 1; the toughness arm is unchanged,
-    /// including 0 for toughness 0 (CR 704.5f's territory).
+    /// Glossary "Lethal Damage" with power substituted: the power threshold floors at 0, like the
+    /// toughness arm (0 for toughness 0, CR 704.5f's territory). Destruction still needs damage
+    /// marked: `is_lethal_damage` rejects a total of 0 even when the threshold is 0 (CR 704.5g;
+    /// a creature with 0 power isn't destroyed unless it has at least 1 damage marked on it).
     #[test]
-    fn lethal_damage_threshold_floors_power_at_one() {
+    fn lethal_damage_threshold_floors_power_at_zero() {
         let (mut state, mine, theirs) = zilortha_board(true, 0, 4, 0);
-        assert_eq!(lethal_damage_threshold(&state, &state.objects[&mine]), 1);
+        assert_eq!(lethal_damage_threshold(&state, &state.objects[&mine]), 0);
+        assert!(!is_lethal_damage(&state, &state.objects[&mine], 0));
+        assert!(is_lethal_damage(&state, &state.objects[&mine], 1));
+        assert_eq!(remaining(&state, mine, false, 0, 0), 0);
+        assert_eq!(
+            remaining(&state, mine, true, 0, 0),
+            0,
+            "deathtouch never raises the requirement above the ordinary 0"
+        );
         state.objects.get_mut(&mine).unwrap().power = Some(-1);
-        assert_eq!(lethal_damage_threshold(&state, &state.objects[&mine]), 1);
+        assert_eq!(lethal_damage_threshold(&state, &state.objects[&mine]), 0);
         state.objects.get_mut(&mine).unwrap().power = Some(5);
         assert_eq!(lethal_damage_threshold(&state, &state.objects[&mine]), 5);
         assert_eq!(lethal_damage_threshold(&state, &state.objects[&theirs]), 4);

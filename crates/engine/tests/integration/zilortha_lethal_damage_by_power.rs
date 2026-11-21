@@ -11,8 +11,14 @@
 //!
 //! Oracle text verified verbatim against `data/mtgjson/AtomicCards.json`: Zilortha, Strength
 //! Incarnate, Lava Dart, Flame Slash, Flame Spill, Lightning Bolt, Unsummon, Disfigure, Giant
-//! Growth, Act of Treason, Darksteel Myr, Rith, Liberated Primeval. Other bodies are textless
-//! vanilla creatures.
+//! Growth, Act of Treason, Darksteel Myr, Rith, Liberated Primeval, Colossal Dreadmaw, Charging
+//! Monstrosaur, Sedge Scorpion, War Mammoth, Archetype of Finality, and the textless Yoked Ox
+//! (0/4). Every creature that carries a keyword under test is one of these printed cards; the
+//! remaining bodies are textless P/T fillers.
+//!
+//! No printed creature has both deathtouch and trample of its own, so the deathtouch trampler
+//! is War Mammoth ("Trample") under Archetype of Finality ("Creatures you control have
+//! deathtouch.").
 
 use engine::game::combat::AttackTarget;
 use engine::game::coverage::unimplemented_mechanics;
@@ -47,6 +53,14 @@ const ACT_OF_TREASON: &str = "Gain control of target creature until end of turn.
      creature. It gains haste until end of turn. (It can attack and {T} this turn.)";
 const DARKSTEEL_MYR: &str = "Indestructible (Damage and effects that say \"destroy\" don't \
      destroy this creature. If its toughness is 0 or less, it still dies.)";
+const COLOSSAL_DREADMAW: &str =
+    "Trample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)";
+const CHARGING_MONSTROSAUR: &str = "Trample, haste";
+const SEDGE_SCORPION: &str =
+    "Deathtouch (Any amount of damage this deals to a creature is enough to destroy it.)";
+const WAR_MAMMOTH: &str = "Trample";
+const ARCHETYPE_OF_FINALITY: &str = "Creatures you control have deathtouch.\nCreatures your \
+     opponents control lose deathtouch and can't have or gain deathtouch.";
 const RITH: &str = "Flying, ward {2}\nOther Dragons you control have ward {2}.\nAt the beginning \
      of your end step, if a creature or planeswalker an opponent controlled was dealt excess \
      damage this turn, create a 4/4 red Dragon creature token with flying.";
@@ -63,6 +77,46 @@ fn zilortha(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
         .as_legendary()
         .from_oracle_text_with_keywords(&["Trample"], ZILORTHA)
         .id()
+}
+
+/// A printed creature on the battlefield with its verbatim Oracle text and MTGJSON keywords.
+fn printed(
+    scenario: &mut GameScenario,
+    player: PlayerId,
+    name: &str,
+    (power, toughness): (i32, i32),
+    keywords: &[&str],
+    text: &str,
+) -> ObjectId {
+    scenario
+        .add_creature(player, name, power, toughness)
+        .from_oracle_text_with_keywords(keywords, text)
+        .id()
+}
+
+/// Yoked Ox: a printed, textless 0/4.
+fn yoked_ox(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    scenario.add_creature(player, "Yoked Ox", 0, 4).id()
+}
+
+/// War Mammoth ("Trample") with deathtouch from Archetype of Finality, both P0's.
+fn deathtouch_trampler(scenario: &mut GameScenario) -> ObjectId {
+    printed(
+        scenario,
+        P0,
+        "Archetype of Finality",
+        (2, 3),
+        &[],
+        ARCHETYPE_OF_FINALITY,
+    );
+    printed(
+        scenario,
+        P0,
+        "War Mammoth",
+        (3, 3),
+        &["Trample"],
+        WAR_MAMMOTH,
+    )
 }
 
 /// A free copy of a spell in P0's hand.
@@ -302,7 +356,14 @@ fn opponents_trampler_assigns_lethal_by_my_blockers_power() {
     let mut scenario = board();
     zilortha(&mut scenario, P1);
     let blocker = scenario.add_creature(P1, "One Five", 1, 5).id();
-    let attacker = scenario.add_creature(P0, "Six Six", 6, 6).trample().id();
+    let attacker = printed(
+        &mut scenario,
+        P0,
+        "Colossal Dreadmaw",
+        (6, 6),
+        &["Trample"],
+        COLOSSAL_DREADMAW,
+    );
     let mut runner = scenario.build();
     let p1_life = runner.life(P1);
 
@@ -323,7 +384,14 @@ fn opponents_trampler_assigns_lethal_by_my_blockers_power() {
 fn attacker_side_zilortha_leaves_the_blocker_on_toughness() {
     let mut scenario = board();
     zilortha(&mut scenario, P0);
-    let attacker = scenario.add_creature(P0, "Six Six", 6, 6).trample().id();
+    let attacker = printed(
+        &mut scenario,
+        P0,
+        "Colossal Dreadmaw",
+        (6, 6),
+        &["Trample"],
+        COLOSSAL_DREADMAW,
+    );
     let blocker = scenario.add_creature(P1, "One Five", 1, 5).id();
     let mut runner = scenario.build();
 
@@ -331,12 +399,13 @@ fn attacker_side_zilortha_leaves_the_blocker_on_toughness() {
     assert_eq!(prompt_minimum(&runner, blocker), 5);
 }
 
-/// Z5: ruling 1 — a 0-power creature I control survives with no damage marked, then dies to 1.
+/// Z5: ruling 1 — a 0-power creature I control (Yoked Ox) survives with no damage marked, and
+/// direct positive damage destroys it (its lethal damage is 0; CR 704.5g needs damage marked).
 #[test]
 fn zero_power_creature_needs_one_damage() {
     let mut scenario = board();
     zilortha(&mut scenario, P0);
-    let wall = scenario.add_creature(P0, "Zero Four", 0, 4).id();
+    let wall = yoked_ox(&mut scenario, P0);
     let mine = scenario.add_creature(P0, "One Five", 1, 5).id();
     let dart_a = spell(&mut scenario, "Lava Dart", true, LAVA_DART);
     let dart_b = spell(&mut scenario, "Lava Dart", true, LAVA_DART);
@@ -357,10 +426,14 @@ fn deathtouch_still_destroys_my_creature() {
     let mut scenario = board();
     zilortha(&mut scenario, P0);
     let attacker = scenario.add_creature(P0, "Five Five", 5, 5).id();
-    let blocker = scenario
-        .add_creature(P1, "Deathtouch", 1, 1)
-        .deathtouch()
-        .id();
+    let blocker = printed(
+        &mut scenario,
+        P1,
+        "Sedge Scorpion",
+        (1, 1),
+        &["Deathtouch"],
+        SEDGE_SCORPION,
+    );
     let mut runner = scenario.build();
 
     attack_and_block(&mut runner, &[attacker], &[(blocker, attacker)]);
@@ -517,26 +590,81 @@ fn excess_damage_by_power_is_recorded_for_excess_readers() {
     );
 }
 
-/// Z13: ruling 1 in production — a 0/4 I control takes 1 from Flame Spill and the other 3 are
-/// excess to me.
+/// Z13: CR 120.4a with power substituted — an undamaged Yoked Ox I control has lethal damage 0,
+/// so all 4 of Flame Spill's damage is excess: none is dealt to the Ox, 4 is dealt to me, and
+/// the Ox survives.
 #[test]
-fn flame_spill_on_zero_power_creature_deals_one() {
+fn flame_spill_on_zero_power_creature_is_all_excess() {
     let mut scenario = board();
     zilortha(&mut scenario, P0);
-    let wall = scenario.add_creature(P0, "Zero Four", 0, 4).id();
+    let ox = yoked_ox(&mut scenario, P0);
     let spill = spell(&mut scenario, "Flame Spill", true, FLAME_SPILL);
     let mut runner = scenario.build();
     let p0_life = runner.life(P0);
 
-    let events = cast_at(&mut runner, spill, wall);
-    assert_eq!(runner.life(P0), p0_life - 3);
-    assert_eq!(damage_to(&events, wall), vec![(1, 0)]);
-    assert_eq!(zone(&runner, wall), Zone::Graveyard);
+    let events = cast_at(&mut runner, spill, ox);
+    assert_eq!(runner.life(P0), p0_life - 4);
+    assert!(
+        damage_to(&events, ox)
+            .iter()
+            .all(|(amount, _)| *amount == 0),
+        "no damage is dealt to the Ox: {:?}",
+        damage_to(&events, ox)
+    );
+    assert_eq!(zone(&runner, ox), Zone::Battlefield);
+    assert_eq!(marked(&runner, ox), 0);
+}
+
+/// Z13b: CR 702.19b with power substituted — Charging Monstrosaur blocked by an undamaged Yoked
+/// Ox under the defender's Zilortha owes the Ox nothing and may trample all 5 over.
+#[test]
+fn trampler_owes_a_zero_power_blocker_nothing() {
+    let mut scenario = board();
+    zilortha(&mut scenario, P1);
+    let ox = yoked_ox(&mut scenario, P1);
+    let attacker = printed(
+        &mut scenario,
+        P0,
+        "Charging Monstrosaur",
+        (5, 5),
+        &["Trample", "Haste"],
+        CHARGING_MONSTROSAUR,
+    );
+    let mut runner = scenario.build();
+    let p1_life = runner.life(P1);
+
+    attack_and_block(&mut runner, &[attacker], &[(ox, attacker)]);
+    assert_eq!(prompt_minimum(&runner, ox), 0);
+    assign(&mut runner, ox, 0, 5).expect("the 0-power Ox is owed no lethal damage");
+    finish_combat(&mut runner);
+    assert_eq!(runner.life(P1), p1_life - 5);
+    assert_eq!(zone(&runner, ox), Zone::Battlefield);
+    assert_eq!(marked(&runner, ox), 0);
+}
+
+/// Z13c: CR 702.2c only adds a way to be lethal; it never raises the requirement above the
+/// ordinary 0. A deathtouch trampler blocked by the same Ox also owes it nothing.
+#[test]
+fn deathtouch_trampler_owes_a_zero_power_blocker_nothing() {
+    let mut scenario = board();
+    zilortha(&mut scenario, P1);
+    let ox = yoked_ox(&mut scenario, P1);
+    let attacker = deathtouch_trampler(&mut scenario);
+    let mut runner = scenario.build();
+    let p1_life = runner.life(P1);
+
+    attack_and_block(&mut runner, &[attacker], &[(ox, attacker)]);
+    assert_eq!(prompt_minimum(&runner, ox), 0);
+    assign(&mut runner, ox, 0, 3).expect("the 0-power Ox is owed no lethal damage");
+    finish_combat(&mut runner);
+    assert_eq!(runner.life(P1), p1_life - 3);
+    assert_eq!(zone(&runner, ox), Zone::Battlefield);
 }
 
 /// Z14: already lethal under power before deathtouch (CR 702.19b). Giant Growth makes the Myr
 /// 3/4; Lightning Bolt marks 3, lethal by power 3 but not by toughness 4, and indestructible
-/// keeps it alive. A deathtouch trampler then owes it nothing.
+/// keeps it alive. A deathtouch trampler (War Mammoth under Archetype of Finality) then owes it
+/// nothing.
 #[test]
 fn already_lethal_by_power_owes_deathtouch_nothing() {
     let mut scenario = board();
@@ -546,11 +674,7 @@ fn already_lethal_by_power_owes_deathtouch_nothing() {
         .as_artifact_creature()
         .from_oracle_text_with_keywords(&["Indestructible"], DARKSTEEL_MYR)
         .id();
-    let attacker = scenario
-        .add_creature(P0, "Deathtouch Trampler", 3, 3)
-        .deathtouch()
-        .trample()
-        .id();
+    let attacker = deathtouch_trampler(&mut scenario);
     let growth = spell(&mut scenario, "Giant Growth", true, GIANT_GROWTH);
     let bolt = spell(&mut scenario, "Lightning Bolt", true, LIGHTNING_BOLT);
     let mut runner = scenario.build();

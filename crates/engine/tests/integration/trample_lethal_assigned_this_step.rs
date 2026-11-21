@@ -13,7 +13,12 @@
 //! (Command Zone #285). `shared_blocker_committed_damage_lowers_the_next_minimum` pins that.
 //!
 //! Oracle text verified verbatim against `data/mtgjson/AtomicCards.json`: Foriysian Brigade,
-//! Darksteel Myr, Lava Dart. Attackers and other bodies are textless vanilla creatures.
+//! Darksteel Myr, Lava Dart, War Mammoth (3/3), Fangren Hunter (4/4), Giant Warthog (5/5), Sedge
+//! Scorpion (1/1) and Archetype of Finality. Every attacker is one of these printed cards.
+//!
+//! No printed creature has both deathtouch and trample of its own, so the deathtouch trampler
+//! is War Mammoth ("Trample") under Archetype of Finality ("Creatures you control have
+//! deathtouch.").
 
 use engine::game::combat::{AttackTarget, DamageAssignment, DamageTarget};
 use engine::game::engine::EngineError;
@@ -28,9 +33,30 @@ use engine::types::zones::Zone;
 const FORIYSIAN_BRIGADE: &str = "This creature can block an additional creature each combat.";
 const DARKSTEEL_MYR: &str = "Indestructible (Damage and effects that say \"destroy\" don't \
      destroy this creature. If its toughness is 0 or less, it still dies.)";
+const WAR_MAMMOTH: &str = "Trample";
+const FANGREN_HUNTER: &str = "Trample";
+const GIANT_WARTHOG: &str = "Trample";
+const SEDGE_SCORPION: &str =
+    "Deathtouch (Any amount of damage this deals to a creature is enough to destroy it.)";
+const ARCHETYPE_OF_FINALITY: &str = "Creatures you control have deathtouch.\nCreatures your \
+     opponents control lose deathtouch and can't have or gain deathtouch.";
 const LAVA_DART: &str = "Lava Dart deals 1 damage to any target.\n\
      Flashback\u{2014}Sacrifice a Mountain. (You may cast this card from your graveyard for its \
      flashback cost. Then exile it.)";
+
+/// A printed P0 creature on the battlefield with its verbatim Oracle text and MTGJSON keywords.
+fn printed(
+    scenario: &mut GameScenario,
+    name: &str,
+    (power, toughness): (i32, i32),
+    keywords: &[&str],
+    text: &str,
+) -> ObjectId {
+    scenario
+        .add_creature(P0, name, power, toughness)
+        .from_oracle_text_with_keywords(keywords, text)
+        .id()
+}
 
 /// Attack P1 with `attackers` (declared in this order), declare `blocks` (`(blocker, attacker)`)
 /// for P1, then pass priority until combat damage is assigned: either an `AssignCombatDamage`
@@ -158,14 +184,20 @@ fn zone(runner: &GameRunner, id: ObjectId) -> Zone {
 fn shared_blocker_committed_damage_lowers_the_next_minimum() {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    let first = scenario
-        .add_creature(P0, "First Trampler", 3, 3)
-        .trample()
-        .id();
-    let second = scenario
-        .add_creature(P0, "Second Trampler", 3, 3)
-        .trample()
-        .id();
+    let first = printed(
+        &mut scenario,
+        "War Mammoth",
+        (3, 3),
+        &["Trample"],
+        WAR_MAMMOTH,
+    );
+    let second = printed(
+        &mut scenario,
+        "War Mammoth",
+        (3, 3),
+        &["Trample"],
+        WAR_MAMMOTH,
+    );
     let brigade = scenario
         .add_creature_from_oracle(P1, "Foriysian Brigade", 2, 4, FORIYSIAN_BRIGADE)
         .id();
@@ -201,14 +233,20 @@ fn shared_blocker_committed_damage_lowers_the_next_minimum() {
 fn shared_blocker_with_lethal_committed_owes_nothing() {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    let first = scenario
-        .add_creature(P0, "First Trampler", 4, 4)
-        .trample()
-        .id();
-    let second = scenario
-        .add_creature(P0, "Second Trampler", 4, 4)
-        .trample()
-        .id();
+    let first = printed(
+        &mut scenario,
+        "Fangren Hunter",
+        (4, 4),
+        &["Trample"],
+        FANGREN_HUNTER,
+    );
+    let second = printed(
+        &mut scenario,
+        "Fangren Hunter",
+        (4, 4),
+        &["Trample"],
+        FANGREN_HUNTER,
+    );
     let brigade = scenario
         .add_creature_from_oracle(P1, "Foriysian Brigade", 2, 4, FORIYSIAN_BRIGADE)
         .id();
@@ -234,16 +272,26 @@ fn shared_blocker_with_lethal_committed_owes_nothing() {
     assert_eq!(zone(&runner, brigade), Zone::Graveyard);
 }
 
-/// Board for T2/T3: P1's Darksteel Myr (0/1, indestructible) blocks P0's 3/3 deathtouch trampler.
+/// Board for T2/T3: P1's Darksteel Myr (0/1, indestructible) blocks P0's 3/3 deathtouch trampler
+/// (War Mammoth under Archetype of Finality).
 /// With `dart`, P0 first casts Lava Dart at the Myr, which survives with 1 damage marked.
 fn myr_blocks_deathtouch_trampler(dart: bool) -> (GameRunner, ObjectId, i32) {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    let attacker = scenario
-        .add_creature(P0, "Deathtouch Trampler", 3, 3)
-        .deathtouch()
-        .trample()
-        .id();
+    printed(
+        &mut scenario,
+        "Archetype of Finality",
+        (2, 3),
+        &[],
+        ARCHETYPE_OF_FINALITY,
+    );
+    let attacker = printed(
+        &mut scenario,
+        "War Mammoth",
+        (3, 3),
+        &["Trample"],
+        WAR_MAMMOTH,
+    );
     let myr = scenario
         .add_creature(P1, "Darksteel Myr", 0, 1)
         .as_artifact_creature()
@@ -312,11 +360,20 @@ fn undamaged_blocker_still_owes_a_deathtouch_trampler_one() {
 fn committed_deathtouch_damage_is_lethal_for_a_later_trampler() {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    let deathtouch = scenario
-        .add_creature(P0, "Deathtouch Attacker", 1, 1)
-        .deathtouch()
-        .id();
-    let trampler = scenario.add_creature(P0, "Trampler", 3, 3).trample().id();
+    let deathtouch = printed(
+        &mut scenario,
+        "Sedge Scorpion",
+        (1, 1),
+        &["Deathtouch"],
+        SEDGE_SCORPION,
+    );
+    let trampler = printed(
+        &mut scenario,
+        "War Mammoth",
+        (3, 3),
+        &["Trample"],
+        WAR_MAMMOTH,
+    );
     let brigade = scenario
         .add_creature_from_oracle(P1, "Foriysian Brigade", 2, 4, FORIYSIAN_BRIGADE)
         .id();
@@ -350,14 +407,20 @@ fn committed_deathtouch_damage_is_lethal_for_a_later_trampler() {
 fn answered_prompt_damage_counts_for_the_next_trampler() {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    let first = scenario
-        .add_creature(P0, "First Trampler", 5, 5)
-        .trample()
-        .id();
-    let second = scenario
-        .add_creature(P0, "Second Trampler", 5, 5)
-        .trample()
-        .id();
+    let first = printed(
+        &mut scenario,
+        "Giant Warthog",
+        (5, 5),
+        &["Trample"],
+        GIANT_WARTHOG,
+    );
+    let second = printed(
+        &mut scenario,
+        "Giant Warthog",
+        (5, 5),
+        &["Trample"],
+        GIANT_WARTHOG,
+    );
     let brigade = scenario
         .add_creature_from_oracle(P1, "Foriysian Brigade", 2, 4, FORIYSIAN_BRIGADE)
         .id();
