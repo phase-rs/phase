@@ -43730,3 +43730,45 @@ fn edgar_exile_permission_tapped_rider_declines() {
         parsed.statics
     );
 }
+
+#[test]
+fn spell_cost_pt_qualifiers_parse_complete_static_definitions() {
+    let goreclaw = "Creature spells you cast with power 4 or greater cost {2} less to cast.";
+    let doran = "Each creature spell you cast with toughness greater than its power costs {1} less to cast.";
+
+    for (oracle, reduction, property) in [
+        (
+            goreclaw,
+            2,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 4 },
+            },
+        ),
+        (doran, 1, FilterProp::ToughnessGTPower),
+    ] {
+        let expected = StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::generic(reduction),
+            spell_filter: Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![property]),
+            )),
+            dynamic_count: None,
+            reach: CostReductionReach::SpillsToGeneric,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::You),
+        ))
+        .description(oracle.to_string());
+        assert_eq!(parse_static_line(oracle), Some(expected), "{oracle}");
+    }
+}
+
+#[test]
+fn spell_cost_pt_qualifier_rejects_malformed_tail() {
+    assert!(parse_static_line(
+        "Creature spells you cast with power 4 or greater except on Tuesdays cost {2} less to cast."
+    ).is_none());
+}
