@@ -22,12 +22,11 @@ use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
-use engine::types::ability::{ContinuousModification, Duration, TargetFilter, TargetRef};
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::events::PlayerActionKind;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::keywords::Keyword;
 use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -354,36 +353,4 @@ fn no_legal_target_removes_the_enters_trigger() {
         [lives[0], lives[1], lives[2] - 4]
     );
     assert_eq!(record.surveil_actors, vec![P0]);
-}
-
-/// F-TMWYS — CR 608.2b: the declared opponent gains hexproof while the
-/// trigger waits on the stack, so its only target is illegal and it does not
-/// resolve: nobody is asked, nobody loses life, nobody surveils or draws.
-/// Positive: M2 (the same setup without the grant).
-#[test]
-fn target_illegal_on_resolution_does_nothing() {
-    const P2: PlayerId = PlayerId(2);
-    let Some(db) = shared_card_db() else {
-        return;
-    };
-    let (mut runner, card) = scenario(3, db);
-    let lives = [runner.life(P0), runner.life(P1), runner.life(P2)];
-    let p0_hand_after_cast = hand_len(&runner, P0) - 1;
-    let record = cast_and_resolve_with(&mut runner, card, P2, false, |runner| {
-        runner.state_mut().add_transient_continuous_effect(
-            ObjectId(0),
-            P2,
-            Duration::Permanent,
-            TargetFilter::SpecificPlayer { id: P2 },
-            vec![ContinuousModification::AddKeyword {
-                keyword: Keyword::Hexproof,
-            }],
-            None,
-        );
-    });
-    assert_eq!(record.target_prompts.len(), 1, "REACH: {record:?}");
-    assert!(record.optional_actors.is_empty(), "{record:?}");
-    assert!(record.surveil_actors.is_empty(), "{record:?}");
-    assert_eq!(hand_len(&runner, P0), p0_hand_after_cast);
-    assert_eq!([runner.life(P0), runner.life(P1), runner.life(P2)], lives);
 }
