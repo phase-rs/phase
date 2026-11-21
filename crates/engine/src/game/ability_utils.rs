@@ -1672,7 +1672,7 @@ fn modal_indices_have_legal_target_assignment(
 }
 
 /// CR 700.17 (edition effective 2026-11-06; the repo's pinned edition predates it)
-/// + CR 700.2a + CR 700.2b + CR 700.2e: the player who faces a dilemma for this
+/// and CR 700.2a, CR 700.2b, CR 700.2e: the player who faces a dilemma for this
 /// mode choice — the mode chooser — or `None` when zero modes are chosen ("as
 /// you choose one or more modes"; CR 603.3c removes a zero-mode trigger).
 ///
