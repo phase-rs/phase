@@ -105908,10 +105908,22 @@ fn each_target_player_keeps_coordinated_predicate_recipients() {
 
 #[test]
 fn each_target_player_keeps_life_and_permanent_actions_under_one_announcement() {
-    for predicate in [
-        "lose 2 life and sacrifice a creature of their choice",
-        "sacrifice a creature of their choice and lose 2 life",
-        "mill a card and lose 2 life",
+    /// The ordered action pair each predicate must lower to.
+    enum Expected {
+        LoseThenSacrifice,
+        SacrificeThenLose,
+        MillThenLose,
+    }
+    for (predicate, expected) in [
+        (
+            "lose 2 life and sacrifice a creature of their choice",
+            Expected::LoseThenSacrifice,
+        ),
+        (
+            "sacrifice a creature of their choice and lose 2 life",
+            Expected::SacrificeThenLose,
+        ),
+        ("mill a card and lose 2 life", Expected::MillThenLose),
     ] {
         let chain = parse_effect_chain(
             &format!("Any number of target players each {predicate}. You add {{B}}{{B}} and draw a card."),
@@ -105935,52 +105947,46 @@ fn each_target_player_keeps_life_and_permanent_actions_under_one_announcement() 
         let second = first.sub_ability.as_deref().expect("second action");
         assert_eq!(second.multi_target, None);
         assert_eq!(second.sub_link, SubAbilityLink::ContinuationStep);
-        match &*first.effect {
-            Effect::LoseLife {
-                target: Some(TargetFilter::Player),
-                ..
-            } => {
-                let Effect::Sacrifice { target, .. } = &*second.effect else {
-                    panic!("expected scoped sacrifice, got {chain:#?}");
-                };
-                assert_eq!(
-                    target_filter_controller_ref(target),
-                    Some(ControllerRef::ScopedPlayer)
-                );
+        let scoped_sacrifice = |effect: &Effect| {
+            matches!(effect, Effect::Sacrifice { target, .. }
+                if target_filter_controller_ref(target) == Some(ControllerRef::ScopedPlayer))
+        };
+        let scoped_loss = |effect: &Effect| {
+            matches!(
+                effect,
+                Effect::LoseLife {
+                    target: Some(TargetFilter::ScopedPlayer),
+                    ..
+                }
+            )
+        };
+        let (first_ok, second_ok) = match expected {
+            Expected::LoseThenSacrifice => (
+                matches!(
+                    *first.effect,
+                    Effect::LoseLife {
+                        target: Some(TargetFilter::Player),
+                        ..
+                    }
+                ),
+                scoped_sacrifice(&second.effect),
+            ),
+            Expected::SacrificeThenLose => {
+                (scoped_sacrifice(&first.effect), scoped_loss(&second.effect))
             }
-            Effect::Sacrifice { target, .. } => {
-                assert_eq!(
-                    target_filter_controller_ref(target),
-                    Some(ControllerRef::ScopedPlayer)
-                );
-                assert!(
-                    matches!(
-                        *second.effect,
-                        Effect::LoseLife {
-                            target: Some(TargetFilter::ScopedPlayer),
-                            ..
-                        }
-                    ),
-                    "{chain:#?}"
-                );
-            }
-            Effect::Mill {
-                target: TargetFilter::Player,
-                ..
-            } => {
-                assert!(
-                    matches!(
-                        *second.effect,
-                        Effect::LoseLife {
-                            target: Some(TargetFilter::ScopedPlayer),
-                            ..
-                        }
-                    ),
-                    "{chain:#?}"
-                );
-            }
-            _ => panic!("unexpected action {chain:#?}"),
-        }
+            Expected::MillThenLose => (
+                matches!(
+                    *first.effect,
+                    Effect::Mill {
+                        target: TargetFilter::Player,
+                        ..
+                    }
+                ),
+                scoped_loss(&second.effect),
+            ),
+        };
+        assert!(first_ok, "{predicate}: first action {chain:#?}");
+        assert!(second_ok, "{predicate}: second action {chain:#?}");
         let mana = second
             .sub_ability
             .as_deref()
