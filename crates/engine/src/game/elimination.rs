@@ -796,6 +796,10 @@ pub(crate) fn eliminate_players(
         }
         state.waiting_for = WaitingFor::GameOver { winner };
     } else {
+        // CR 800.4a + CR 701.21a: the replacement settlement below can resume a
+        // sacrifice batch parked on a CR 616.1 choice, so the batch is pruned to
+        // the players and members still in the game before it can be consulted.
+        super::effects::prune_paused_player_scope_sacrifice(state);
         // CR 800.4a + CR 616.1: preserve the current proposal through the whole
         // departure transaction, then refresh candidates and authority before
         // any drain or generic dead-actor priority fallback can advance it.

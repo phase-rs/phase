@@ -24799,6 +24799,25 @@ pub(crate) enum PlayerScopeSacrificeReconciliation {
     Retired,
 }
 
+/// CR 800.4a + CR 701.21a: prune a sacrifice batch parked on a CR 616.1 choice
+/// before a departure's replacement settlement can resume it, so the resumed
+/// consult never asks about a departed player's selection.
+/// `reconcile_player_scope_sacrifice` prunes the same carrier again; pruning is
+/// idempotent.
+pub(crate) fn prune_paused_player_scope_sacrifice(state: &mut GameState) {
+    let Some(mut pending) = state.pending_player_scope_sacrifice_choice.take() else {
+        return;
+    };
+    if player_scope_sacrifice_carrier_binds(
+        state,
+        &pending,
+        PlayerScopeSacrificeAnswer::Replacement,
+    ) {
+        prune_player_scope_sacrifice_carrier(state, &mut pending);
+    }
+    state.pending_player_scope_sacrifice_choice = Some(pending);
+}
+
 /// Prune a player-scope sacrifice carrier to the players and collected members
 /// still in the game after a departure.
 fn prune_player_scope_sacrifice_carrier(
