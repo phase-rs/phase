@@ -40604,89 +40604,20 @@ impl AbilityCondition {
 
     /// CR 608.2c: does this condition, or any condition it composes, read the player actions
     /// an earlier instruction of the same chain performed ("if you search your library this
-    /// way")?
+    /// way")? One authority: the shared [`Self::any_filter_grammar`] walk, which already recurses
+    /// the `Not` / `ConditionInstead` / `And` / `Or` wrappers and the `AnyOf` / `AllExcept`
+    /// player filters the evaluator recurses through (it may also see one nested in a compared
+    /// quantity, which only stamps more often).
     pub fn reads_performed_action_this_way(&self) -> bool {
-        match self {
-            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
-                conditions
-                    .iter()
-                    .any(AbilityCondition::reads_performed_action_this_way)
-            }
-            AbilityCondition::Not { condition } => condition.reads_performed_action_this_way(),
-            AbilityCondition::ConditionInstead { inner } => inner.reads_performed_action_this_way(),
-            // The evaluator recurses through `AnyOf` / `AllExcept`, so the gate is found through
-            // the shared player-filter walker rather than a one-variant test (it may also see a
-            // nested one the evaluator never reads, which only stamps more often).
-            AbilityCondition::ScopedPlayerMatches { filter } => {
-                player_filter_grammar_any(filter, &|node| {
-                    matches!(
-                        node,
-                        FilterGrammarNode::Player(PlayerFilter::PerformedActionThisWay {
-                            relation: _,
-                            action: _
-                        })
-                    )
+        self.any_filter_grammar(&|node| {
+            matches!(
+                node,
+                FilterGrammarNode::Player(PlayerFilter::PerformedActionThisWay {
+                    relation: _,
+                    action: _
                 })
-            }
-            // Exhaustive, no wildcard: a new `AbilityCondition` variant that nests a condition
-            // must be classified here deliberately, or the stamp would silently never be taken.
-            AbilityCondition::WhenYouDo
-            | AbilityCondition::EffectOutcome { .. }
-            | AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
-            | AbilityCondition::TriggerEventTargetExploitedBySource
-            | AbilityCondition::AdditionalCostPaidInstead
-            | AbilityCondition::AlternativeManaCostPaid
-            | AbilityCondition::EventOutcomeWon
-            | AbilityCondition::SourceEnteredThisTurn
-            | AbilityCondition::HasMaxSpeed
-            | AbilityCondition::IsMonarch
-            | AbilityCondition::IsInitiative
-            | AbilityCondition::HasCityBlessing
-            | AbilityCondition::HasEnduringStory
-            | AbilityCondition::ControlsCommander { .. }
-            | AbilityCondition::DiscardedCardMatchesFilter { .. }
-            | AbilityCondition::IsRingBearer
-            | AbilityCondition::HasObjectTarget
-            | AbilityCondition::IsYourTurn
-            | AbilityCondition::FirstCombatPhaseOfTurn
-            | AbilityCondition::FirstEndStepOfTurn
-            | AbilityCondition::SourceIsTapped
-            | AbilityCondition::SourceAttachedToCreature
-            | AbilityCondition::DayNightIsNeither
-            | AbilityCondition::AdditionalCostPaid { .. }
-            | AbilityCondition::CoinFlipOutcome { .. }
-            | AbilityCondition::ChosenLabelIs { .. }
-            | AbilityCondition::WasCast { .. }
-            | AbilityCondition::CastDuringPhase { .. }
-            | AbilityCondition::CurrentPhaseIs { .. }
-            | AbilityCondition::CastTimingPermission { .. }
-            | AbilityCondition::ManaColorSpent { .. }
-            | AbilityCondition::RevealedHasCardType { .. }
-            | AbilityCondition::ObjectsShareQuality { .. }
-            | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
-            | AbilityCondition::CastVariantPaid { .. }
-            | AbilityCondition::CastVariantPaidInstead { .. }
-            | AbilityCondition::QuantityCheck { .. }
-            | AbilityCondition::QuantityQuality { .. }
-            | AbilityCondition::PreviousEffectAmount { .. }
-            | AbilityCondition::CompletedDungeon { .. }
-            | AbilityCondition::TargetHasKeywordInstead { .. }
-            | AbilityCondition::TargetMatchesFilter { .. }
-            | AbilityCondition::TriggeringSpellTargetsFilter { .. }
-            | AbilityCondition::SourceMatchesFilter { .. }
-            | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
-            | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
-            | AbilityCondition::ControllerControlsMatching { .. }
-            | AbilityCondition::ControllerControlledMatchingAsCast { .. }
-            | AbilityCondition::WasStartingPlayer { .. }
-            | AbilityCondition::SpellCastWithVariantThisTurn { .. }
-            | AbilityCondition::ZoneChangedThisWay { .. }
-            | AbilityCondition::CostPaidObjectMatchesFilter { .. }
-            | AbilityCondition::DayNightIs { .. }
-            | AbilityCondition::AbilityUseCountThisTurn { .. }
-            | AbilityCondition::PlayerAttackedPlayer { .. }
-            | AbilityCondition::SourceLacksKeyword { .. } => false,
-        }
+            )
+        })
     }
 
     /// CR 608.2d + CR 101.4: `Not(OptionalEffectPerformed)` — the "if no one

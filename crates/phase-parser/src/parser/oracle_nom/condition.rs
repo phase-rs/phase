@@ -13228,14 +13228,14 @@ pub fn parse_you_draw_this_way_condition(input: &str) -> OracleResult<'_, Abilit
 pub fn parse_you_search_library_this_way_condition(
     input: &str,
 ) -> OracleResult<'_, AbilityCondition> {
-    value(
-        AbilityCondition::ScopedPlayerMatches {
+    map(
+        crate::parser::oracle_quantity::parse_you_action_this_way,
+        |action| AbilityCondition::ScopedPlayerMatches {
             filter: PlayerFilter::PerformedActionThisWay {
                 relation: PlayerRelation::Controller,
-                action: PlayerActionKind::SearchedLibrary,
+                action,
             },
         },
-        tag("you search your library this way"),
     )
     .parse(input)
 }

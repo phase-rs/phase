@@ -4976,8 +4976,10 @@ fn detect_condition_if(
     // before scanning. These are built-in rules of their parent effect, not
     // separate conditions:
     //   "If you search your library this way, shuffle." — no CR makes this
-    //   implicit; the guard is represented (a `ScopedPlayerMatches` gate on
-    //   the sentence's own `Shuffle`), so the sentence is not a swallowed one.
+    //   implicit; where the rung lowers it, the guard is represented (a
+    //   `ScopedPlayerMatches` gate on the sentence's own `Shuffle`), so the
+    //   sentence is not a swallowed one. A chain it does not lower still
+    //   reaches this exemption.
     //   CR 305.9 :  "If you don't, [it/this/this land] enters tapped." — the
     //               mana-payment alternative is encoded as a replacement
     //               with `ReplacementMode::Optional { decline: Tap(SelfRef) }`,
@@ -5304,8 +5306,9 @@ fn strip_cr_implicit_if_phrases(cleaned: &str) -> String {
         if s.is_empty() {
             continue;
         }
-        // The search-shuffle guard is represented (a `ScopedPlayerMatches`
-        // gate on the sentence's own `Shuffle`), not swallowed.
+        // The search-shuffle guard is represented where the rung lowers it (a
+        // `ScopedPlayerMatches` gate on the sentence's own `Shuffle`); a chain
+        // it does not lower is still exempted here.
         // allow-noncombinator: swallow detector phrase scan on classified text
         if s.contains("if you search your library this way") {
             continue;
