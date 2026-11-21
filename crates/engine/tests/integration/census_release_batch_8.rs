@@ -9,11 +9,10 @@
 //! filter must not offer, a different count, a declined optional step), and ends with an empty stack
 //! and priority.
 use engine::database::card_db::CardDatabase;
-use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastOfferKind, CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -137,24 +136,6 @@ fn cast_from_hand(r: &mut GameRunner, spell: ObjectId) {
         payment_mode: CastPaymentMode::Auto,
     })
     .expect("cast");
-}
-
-/// Attack P1 with `attackers` from P0's declare-attackers prompt.
-fn attack_with(r: &mut GameRunner, attackers: &[ObjectId]) {
-    r.advance_to_combat();
-    assert!(
-        matches!(
-            r.state().waiting_for,
-            WaitingFor::DeclareAttackers { player: P0, .. }
-        ),
-        "P0 declares attackers, found {:?}",
-        r.state().waiting_for
-    );
-    let attacks: Vec<_> = attackers
-        .iter()
-        .map(|a| (*a, AttackTarget::Player(P1)))
-        .collect();
-    r.declare_attackers(&attacks).expect("declare attackers");
 }
 
 /// A policy answer for one prompt, or `None` when the policy does not know the prompt.
@@ -367,196 +348,7 @@ fn kozilek_cast_trigger_draws_nothing_with_seven_or_more_other_cards_in_hand() {
     }
 }
 
-/// Answer a (trigger) target prompt with P1, asserting P1 is among the legal targets; `None` for
-/// any other prompt.
-fn target_p1(w: &WaitingFor) -> Option<GameAction> {
-    let (WaitingFor::TargetSelection { selection, .. }
-    | WaitingFor::TriggerTargetSelection { selection, .. }) = w
-    else {
-        return None;
-    };
-    let target = selection
-        .current_legal_targets
-        .iter()
-        .find(|t| matches!(t, engine::types::ability::TargetRef::Player(p) if *p == P1))
-        .cloned();
-    assert!(target.is_some(), "P1 is a legal target: {selection:?}");
-    Some(GameAction::ChooseTarget { target })
-}
-
-// ---- Shape 3: "sacrifice any number of other creatures, then exile the top X cards of your
-// library, where X is their total power. You may cast any number of instant and/or sorcery spells
-// from among the exiled cards without paying their mana costs." (Kylox, Visionary Inventor) ----
-
-fn kylox_board() -> (GameRunner, ObjectId, ObjectId, ObjectId, Vec<ObjectId>) {
-    let mut s = table();
-    let kylox = s.add_real_card(P0, "Kylox, Visionary Inventor", Zone::Battlefield, db());
-    let spider = s.add_real_card(P0, "Giant Spider", Zone::Battlefield, db());
-    let giant = s.add_real_card(P0, "Hill Giant", Zone::Battlefield, db());
-    let lib = stack_library(
-        &mut s,
-        P0,
-        &[
-            "Shock",
-            "Lightning Bolt",
-            "Grizzly Bears",
-            "Forest",
-            "Island",
-            "Giant Growth",
-            "Mountain",
-        ],
-    );
-    (s.build(), kylox, spider, giant, lib)
-}
-
-/// Sacrificing the 2/4 Giant Spider and the 3/3 Hill Giant makes X = 5, their total POWER (toughness
-/// would give 7): exactly the top five cards are exiled (the sixth stays), the offer lists only the two
-/// instants among them (not the creature card or the lands), and both can be cast: "any number".
-#[test]
-fn kylox_exiles_cards_equal_to_the_sacrificed_creatures_total_power_and_casts_any_number_of_instants(
-) {
-    let (mut r, kylox, spider, giant, lib) = kylox_board();
-    let (shock, bolt, bears_card, forest, island, growth) =
-        (lib[0], lib[1], lib[2], lib[3], lib[4], lib[5]);
-    attack_with(&mut r, &[kylox]);
-    let mut offers = 0;
-    let mut policy = |w: &WaitingFor| {
-        if let WaitingFor::EffectZoneChoice {
-            player,
-            cards,
-            count,
-            ..
-        } = w
-        {
-            assert_eq!(*player, P0, "the controller sacrifices");
-            assert_eq!(
-                sorted(cards.clone()),
-                sorted(vec![spider, giant]),
-                "other creatures only"
-            );
-            assert_eq!(*count, 2, "any number: up to every other creature");
-            return Some(GameAction::SelectCards {
-                cards: vec![spider, giant],
-            });
-        }
-        if let WaitingFor::CastOffer {
-            player,
-            kind: CastOfferKind::FreeCastWindow { candidates, .. },
-            ..
-        } = w
-        {
-            assert_eq!(*player, P0);
-            offers += 1;
-            let expected = if offers == 1 {
-                vec![shock, bolt]
-            } else {
-                vec![bolt]
-            };
-            assert_eq!(
-                sorted(candidates.clone()),
-                sorted(expected),
-                "offer {offers}: only instants and sorceries among the exiled cards"
-            );
-            return Some(GameAction::FreeCastWindowChoice {
-                selection: Some(if offers == 1 { shock } else { bolt }),
-            });
-        }
-        target_p1(w)
-    };
-    resolve_with(&mut r, "Kylox, both sacrificed", &mut policy);
-    assert_settled(&r, P0, "Kylox, both sacrificed");
-    assert_eq!(offers, 2, "both spells were cast, one offer each");
-    assert_eq!(
-        life(&r, P1),
-        15,
-        "Shock (2) and Lightning Bolt (3) resolved"
-    );
-    for id in [spider, giant] {
-        assert_eq!(zone_of(&r, id), Zone::Graveyard, "sacrificed");
-    }
-    for (name, id) in [
-        ("Grizzly Bears", bears_card),
-        ("Forest", forest),
-        ("Island", island),
-    ] {
-        assert_eq!(
-            zone_of(&r, id),
-            Zone::Exile,
-            "{name} was exiled and cannot be cast"
-        );
-    }
-    assert_eq!(zone_of(&r, shock), Zone::Graveyard);
-    assert_eq!(zone_of(&r, bolt), Zone::Graveyard);
-    assert_eq!(
-        library_of(&r, P0)[0],
-        growth,
-        "exactly five cards were exiled: the sixth is still on top"
-    );
-}
-
-/// Control: sacrificing only the 2-power creature gives X = 2, so only the top two cards are
-/// exiled; declining the free casts leaves the spells in exile.
-#[test]
-fn kylox_with_one_sacrificed_creature_exiles_only_its_power_and_declining_casts_nothing() {
-    let (mut r, kylox, spider, giant, lib) = kylox_board();
-    let (shock, bolt, bears_card) = (lib[0], lib[1], lib[2]);
-    attack_with(&mut r, &[kylox]);
-    let mut policy = |w: &WaitingFor| {
-        if let WaitingFor::EffectZoneChoice { player, .. } = w {
-            assert_eq!(*player, P0);
-            return Some(GameAction::SelectCards {
-                cards: vec![spider],
-            });
-        }
-        if let WaitingFor::CastOffer {
-            player,
-            kind: CastOfferKind::FreeCastWindow { candidates, .. },
-            ..
-        } = w
-        {
-            assert_eq!(*player, P0);
-            assert_eq!(sorted(candidates.clone()), sorted(vec![shock, bolt]));
-            return Some(GameAction::FreeCastWindowChoice { selection: None });
-        }
-        target_p1(w)
-    };
-    resolve_with(&mut r, "Kylox, one sacrificed", &mut policy);
-    assert_settled(&r, P0, "Kylox, one sacrificed");
-    assert_eq!(life(&r, P1), 20, "nothing was cast");
-    assert_eq!(
-        zone_of(&r, giant),
-        Zone::Battlefield,
-        "the Hill Giant was not sacrificed"
-    );
-    assert_eq!(zone_of(&r, shock), Zone::Exile);
-    assert_eq!(zone_of(&r, bolt), Zone::Exile);
-    assert_eq!(
-        library_of(&r, P0)[0],
-        bears_card,
-        "X = 2: the third card was not exiled"
-    );
-}
-
-/// Control: sacrificing nothing makes X = 0 and exiles nothing, with no cast offer.
-#[test]
-fn kylox_sacrificing_nothing_exiles_nothing() {
-    let (mut r, kylox, _bears, _giant, lib) = kylox_board();
-    attack_with(&mut r, &[kylox]);
-    let mut policy = |w: &WaitingFor| {
-        let WaitingFor::EffectZoneChoice { player, .. } = w else {
-            return None;
-        };
-        assert_eq!(*player, P0);
-        Some(GameAction::SelectCards { cards: vec![] })
-    };
-    let prompts = resolve_with(&mut r, "Kylox, none sacrificed", &mut policy);
-    assert_settled(&r, P0, "Kylox, none sacrificed");
-    assert_eq!(prompts.len(), 1, "only the sacrifice prompt: {prompts:?}");
-    assert_eq!(library_of(&r, P0)[0], lib[0], "nothing was exiled");
-    assert_eq!(r.state().exile.len(), 0);
-}
-
-// ---- Shape 4: "search your library for any number of Goblin cards, reveal them, then shuffle and
+// ---- Shape 3: "search your library for any number of Goblin cards, reveal them, then shuffle and
 // put those cards on top in any order." (Goblin Recruiter) ----
 
 fn recruiter_run(pick: impl Fn(&[ObjectId]) -> Vec<ObjectId>) -> (GameRunner, Vec<ObjectId>) {

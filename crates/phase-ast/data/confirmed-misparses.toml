@@ -1328,6 +1328,7 @@ face = [
   { key = "kurkesh, onakke ancient", class = "wrong_zone", clauses = ["Whenever you activate an ability of an artifact, if it isn't a mana ability, you may pay {R}."] },
   { key = "kuroki, thief of talents", class = "wrong_player", clauses = ["If they do, look at that player's hand and you may cast a spell from their hand without paying its mana cost."] },
   { key = "kusari-gama", class = "wrong_object", clauses = ["Whenever equipped creature deals damage to a blocking creature, this Equipment deals that much damage to each other creature defending player controls."] },
+  { key = "kylox, visionary inventor", class = "wrong_count", clauses = ["You may cast any number of instant and/or sorcery spells from among the exiled cards without paying their mana costs."] },
   { key = "labro bot", class = "dropped_qualifier", clauses = ["When this creature enters, return target host card or card with augment from your graveyard to your hand."] },
   { key = "labyrinth raptor", class = "dropped_qualifier", clauses = ["Whenever a creature you control with menace becomes blocked, defending player sacrifices a creature of their choice that's blocking it."] },
   { key = "ladies' knight", class = "condition_wrong", clauses = ["Spells cast by players wearing at least one item of women's clothing cost {1} less to cast."] },
