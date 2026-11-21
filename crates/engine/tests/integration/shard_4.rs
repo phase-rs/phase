@@ -231,6 +231,7 @@ mod kicker_enters_with_keyword_rider;
 mod kicker_enters_with_quoted_rider;
 mod kicker_x_cap_search_termination;
 mod kid_loki_counter_hexproof_static;
+mod kili_the_resourceful;
 mod kiora_self_library_peek_cast;
 mod klaw_play_from_exile_trigger_msh_wave1;
 mod knighthood_first_strike_grant;

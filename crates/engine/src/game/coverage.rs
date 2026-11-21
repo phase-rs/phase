@@ -85,6 +85,15 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // permanents. Not registry-keyed (mirrors the marker cluster).
             | StaticMode::CantBecomeSuspected
             | StaticMode::ReduceAbilityCost { .. }
+            // CR 118.9 + CR 602.2b: runtime enforcement is
+            // `casting::activation_cost_with_alternative_keyword_costs`, which
+            // folds active grants into the Equip/Cycling activation cost. Crew
+            // has no such hook and stays a coverage gap.
+            | StaticMode::AlternativeKeywordCost {
+                keyword: crate::types::keywords::KeywordKind::Cycling
+                    | crate::types::keywords::KeywordKind::Equip,
+                ..
+            }
             // CR 116.2 + CR 118.7a: ReduceActionCost carries `action`
             // (SpecialAction), `mode`, and `amount`. Runtime enforcement is the
             // special-action cost-reduction resolver
@@ -10457,7 +10466,9 @@ fn is_static_definition_supported(
     static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
     token_static_traversal: TokenStaticTraversal,
 ) -> bool {
-    (static_registry.contains_key(&stat.mode) || is_data_carrying_static(&stat.mode))
+    let mode_supported =
+        static_registry.contains_key(&stat.mode) || is_data_carrying_static(&stat.mode);
+    mode_supported
         && !stat
             .condition
             .as_ref()
@@ -27059,25 +27070,24 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     }
 
     #[test]
-    fn alternative_keyword_cost_static_remains_runtime_coverage_gap() {
+    fn alternative_keyword_cost_coverage_tracks_runtime_ability_classes() {
         let mut face = make_face();
-        face.oracle_text = Some("You may pay {0} rather than pay cycling costs.".to_string());
+        face.oracle_text = Some("You may pay {0} rather than pay the equip cost of the first equip ability you activate each turn.".to_string());
         face.static_abilities.push(
             StaticDefinition::new(StaticMode::AlternativeKeywordCost {
-                keyword: KeywordKind::Cycling,
+                keyword: KeywordKind::Equip,
                 cost: AbilityCost::Mana {
                     cost: ManaCost::generic(0),
                 },
-                frequency: None,
+                frequency: Some(crate::types::statics::CastFrequency::OncePerTurn),
             })
-            .description("You may pay {0} rather than pay cycling costs.".to_string()),
+            .description("You may pay {0} rather than pay the equip cost of the first equip ability you activate each turn.".to_string()),
         );
 
         let gaps = card_face_gaps(&face);
         assert!(
-            gaps.iter()
-                .any(|gap| gap == "Static:AlternativeKeywordCost(Cycling)"),
-            "runtime-deferred AlternativeKeywordCost must remain a coverage gap: {gaps:?}"
+            gaps.is_empty(),
+            "Equip alternative cost should be supported: {gaps:?}"
         );
 
         let parse_details = build_parse_details_for_face(&face);
@@ -27086,8 +27096,33 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             .find(|item| item.category == ParseCategory::Static)
             .expect("static parse item");
         assert!(
-            !static_item.supported,
-            "runtime-deferred AlternativeKeywordCost must not be marked supported"
+            static_item.supported,
+            "runtime-supported Equip AlternativeKeywordCost should be supported"
+        );
+
+        let mut crew_face = make_face();
+        // Heart of Kiran's printed line.
+        crew_face.oracle_text = Some("You may remove a loyalty counter from a planeswalker you control rather than pay Heart of Kiran's crew cost.".to_string());
+        crew_face.static_abilities.push(StaticDefinition::new(
+            StaticMode::AlternativeKeywordCost {
+                keyword: KeywordKind::Crew,
+                cost: AbilityCost::RemoveCounter {
+                    count: 1,
+                    counter_type: CounterMatch::OfType(CounterType::Loyalty),
+                    target: Some(TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::You),
+                    )),
+                    selection: Default::default(),
+                },
+                frequency: None,
+            },
+        ));
+        let crew_gaps = card_face_gaps(&crew_face);
+        assert!(
+            crew_gaps
+                .iter()
+                .any(|gap| gap == "Static:AlternativeKeywordCost(Crew)"),
+            "Crew still routes through a separate special-action cost seam: {crew_gaps:?}"
         );
     }
 
