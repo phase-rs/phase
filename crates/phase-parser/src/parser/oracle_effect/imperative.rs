@@ -21,7 +21,7 @@ use super::counter::{
 };
 use super::lower::{
     parse_multi_target_count_expr, parse_where_x_quantity_expression,
-    parse_where_x_quantity_expression_with_owner, rebind_cost_paid_object_pt_to_target,
+    parse_where_x_quantity_expression_with_owner, rebind_pt_scope_to_target,
     strip_leading_quantifier, strip_terminal_where_x, strip_trailing_where_x, WhereXBinding,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
@@ -62,7 +62,7 @@ use crate::types::ability::{
     CopyRetargetPermission, CountBinding, CountScope, CounterAdjustment, CounterKindChooser,
     CounterKindDomain, DigSource, DoorLockOp, Duration, Effect, EffectScope, ExtraPhaseAnchor,
     ExtraPhaseRecipient, FaceDownProfile, FilterProp, ForceBlockAttackerRef, GrantedAbilityScope,
-    LibraryPosition, LibraryShuffleMode, MultiTargetSpec, ObjectSelectionCardinality,
+    LibraryPosition, LibraryShuffleMode, MultiTargetSpec, ObjectScope, ObjectSelectionCardinality,
     ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerFilter,
     PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat,
     PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, ReturnResultReadSpec,
@@ -19733,7 +19733,7 @@ pub(super) fn try_parse_amass(text: &str, lower: &str, player: TargetFilter) -> 
     // already resolves against (see `parent_target_controller`) and reads the
     // object live while present, falling back to its LKI once it has left
     // (CR 608.2h) — mirroring the identical rebind
-    // `rebind_cost_paid_object_pt_to_target` already performs for a targeted
+    // `rebind_pt_scope_to_target` already performs for a targeted
     // continuous grant's "that creature's power" (Xenagos, God of Revels).
     // Gated on the parent-target player anaphor so a plain "you"/"they"
     // amass (`player == Controller`, no parent-target dependency) is
@@ -19742,7 +19742,7 @@ pub(super) fn try_parse_amass(text: &str, lower: &str, player: TargetFilter) -> 
         player,
         TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner
     ) {
-        rebind_cost_paid_object_pt_to_target(&mut count);
+        rebind_pt_scope_to_target(&mut count, ObjectScope::CostPaidObject);
     }
 
     Some(Effect::Amass {
@@ -24369,7 +24369,7 @@ mod tests {
     /// other target creature" — established), not a cost/trigger-condition
     /// snapshot. The shared where-X/CDA grammar lowers the context-free
     /// phrase to `ObjectScope::CostPaidObject`; `try_parse_amass` rebinds it
-    /// to `ObjectScope::Target` (`rebind_cost_paid_object_pt_to_target`) so
+    /// to `ObjectScope::Target` (`rebind_pt_scope_to_target`) so
     /// the quantity reads the referenced creature LIVE while it remains on
     /// the battlefield (indestructible, regenerated, or otherwise-prevented
     /// destruction) and falls back to its LKI only once it has actually
