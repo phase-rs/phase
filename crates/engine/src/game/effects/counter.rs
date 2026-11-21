@@ -196,7 +196,7 @@ pub fn resolve(
                         }
                     };
                     if casting_variant.restores_front_face_after_stack_exit() {
-                        super::super::stack::restore_alternative_spell_normal_face(
+                        super::super::stack::restore_alternative_spell_face_before_zone_delivery(
                             state,
                             obj_id,
                             casting_variant,
@@ -491,7 +491,7 @@ pub fn resolve_all(
                 Zone::Graveyard
             };
             if casting_variant.restores_front_face_after_stack_exit() {
-                super::super::stack::restore_alternative_spell_normal_face(
+                super::super::stack::restore_alternative_spell_face_before_zone_delivery(
                     state,
                     obj_id,
                     casting_variant,

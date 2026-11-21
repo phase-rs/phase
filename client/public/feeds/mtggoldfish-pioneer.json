@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-11-19T00:00:00Z",
+  "updated": "2026-11-20T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -842,8 +842,8 @@
       "author": "MTGGoldfish",
       "colors": [
         "W",
-        "G",
-        "B"
+        "B",
+        "G"
       ],
       "tags": [
         "metagame"
@@ -854,8 +854,8 @@
           "name": "Bitter Triumph"
         },
         {
-          "count": 4,
-          "name": "Thoughtseize"
+          "count": 2,
+          "name": "Godless Shrine"
         },
         {
           "count": 4,
@@ -882,8 +882,8 @@
           "name": "Jennifer Walters"
         },
         {
-          "count": 2,
-          "name": "Godless Shrine"
+          "count": 4,
+          "name": "Blooming Marsh"
         },
         {
           "count": 3,
@@ -927,10 +927,6 @@
         },
         {
           "count": 4,
-          "name": "Blooming Marsh"
-        },
-        {
-          "count": 4,
           "name": "Formidable Speaker"
         },
         {
@@ -948,6 +944,10 @@
         {
           "count": 1,
           "name": "Yathan Roadwatcher"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
         }
       ],
       "sideboard": [
@@ -966,10 +966,6 @@
         {
           "count": 1,
           "name": "Professor Dellian Fel"
-        },
-        {
-          "count": 3,
-          "name": "Unlicensed Hearse"
         },
         {
           "count": 2,
@@ -998,6 +994,10 @@
         {
           "count": 1,
           "name": "Duress"
+        },
+        {
+          "count": 3,
+          "name": "Unlicensed Hearse"
         }
       ]
     },

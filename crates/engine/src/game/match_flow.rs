@@ -1681,10 +1681,7 @@ mod tests {
                     section: DeckSection::MainDeck,
                     name: name.clone(),
                     count: 2,
-                    printing: CardPrinting {
-                        set_code: format!("seat-{seat}"),
-                        collector_number: "1".to_string(),
-                    },
+                    printing: CardPrinting::owner(format!("seat-{seat}"), "1"),
                 };
                 let lookup =
                     DeckFaceLookupName::of(DeckSection::MainDeck, &basic_land(&name), name.clone());

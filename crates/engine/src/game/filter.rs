@@ -540,6 +540,14 @@ pub(crate) fn target_filter_characteristic_reads(filter: &TargetFilter) -> Chara
     target_filter_characteristic_reads_at(filter, CHARACTERISTIC_READ_DEPTH)
 }
 
+/// CR 202.3 + CR 707.9b: whether a single filter property reads the mana-cost characteristic and
+/// nothing else (`Cmc` with a fixed threshold, `ManaValueParity`, `ManaCostIn`, ...). It reuses the
+/// exhaustive per-property classification, so a new property variant is decided at that one seam.
+pub(crate) fn filter_prop_reads_only_mana_cost(prop: &FilterProp) -> bool {
+    filter_prop_characteristic_reads_at(prop, CHARACTERISTIC_READ_DEPTH)
+        == CharacteristicKinds::MANA_COST
+}
+
 pub(crate) fn target_filter_characteristic_reads_at(
     filter: &TargetFilter,
     depth: u32,
@@ -4166,7 +4174,9 @@ pub(crate) fn rebind_declared_groups_in_condition(
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::ChosenLabelIs { .. }
-        | AbilityCondition::SourceLacksKeyword { .. } => {}
+        | AbilityCondition::SourceLacksKeyword { .. }
+        // `PlayerScope` endpoints name no declared groups (no rebind target).
+        | AbilityCondition::PlayerAttackedPlayer { .. } => {}
     }
 }
 
@@ -6539,6 +6549,72 @@ fn entry_filter_matches_staged(
     )
 }
 
+/// CR 614.12: an entry replacement of ANOTHER source (Hallowed Moonlight, Containment
+/// Priest) applies according to the entrant as it would exist on the battlefield, with the
+/// continuous effects that already exist applied (Opalescence makes an Enchantment token a
+/// creature). The single authority for that reading of a token entry: a liminal `TokenEntry`
+/// is projected on the board without the tokens entering in the same event, and a `CreateToken`
+/// batch view on the board as it is. Every other entry, a reference to the replacement's own
+/// source, and every entry replacement of the entrant's own (whose retention is checked through
+/// the same projection) read [`matches_target_filter_on_battlefield_entry`] unchanged.
+pub(crate) fn matches_target_filter_on_projected_battlefield_entry(
+    state: &GameState,
+    event: &ProposedEvent,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    if matches!(filter, TargetFilter::SelfRef) {
+        return matches_target_filter_on_battlefield_entry(state, event, filter, ctx);
+    }
+    match event {
+        // CR 614.12 + CR 614.4: every token entering in the same event is absent from the board
+        // (Clone Legion ruling: the tokens enter at the same time), the resolution's earlier
+        // batches included — the same authority the entrant's own-replacement retention reads.
+        ProposedEvent::TokenEntry { entry_ref, .. }
+            if state.liminal_entries.contains_key(entry_ref) =>
+        {
+            let co_entrants =
+                crate::game::effects::token_copy::entering_token_co_entrants(state, *entry_ref);
+            if let Some(projection) =
+                BattlefieldEntrantProjection::for_liminal_token(state, *entry_ref, &co_entrants)
+            {
+                return projection.matches(filter, ctx);
+            }
+        }
+        ProposedEvent::CreateToken {
+            owner,
+            spec,
+            copy,
+            enter_tapped,
+            ..
+        } => {
+            // CR 707.2 + CR 614.12: a copy batch's entrant is its complete copy body — the
+            // copied statics and mana cost included — not the flattened characteristics of
+            // the replacement-matching spec.
+            let obj = match copy.as_deref() {
+                Some(copy) => {
+                    build_battlefield_entry_copy_object(state, *owner, copy, *enter_tapped)
+                }
+                None => build_battlefield_entry_token_object(*owner, spec, *enter_tapped),
+            };
+            // CR 614.12 + CR 614.4: the resolution's earlier batches enter in the same event.
+            let co_entrants = crate::game::effects::token_copy::copy_token_co_entrants(
+                state,
+                ObjectId(u64::MAX),
+                &[],
+            );
+            if let Some(projection) = BattlefieldEntrantProjection::token_on_pre_entry_board(
+                pre_entry_board(state, &co_entrants),
+                &obj,
+            ) {
+                return projection.matches(filter, ctx);
+            }
+        }
+        _ => {}
+    }
+    matches_target_filter_on_battlefield_entry(state, event, filter, ctx)
+}
+
 pub fn matches_target_filter_on_battlefield_entry(
     state: &GameState,
     event: &ProposedEvent,
@@ -8289,6 +8365,42 @@ fn filter_inner_for_object(
 /// the filter is read for; unbound, nothing is.
 fn is_stamped_granter(obj: &GameObject, granting_object: Option<ObjectIncarnationRef>) -> bool {
     granting_object.is_some_and(|granter| ObjectIncarnationRef::from_object(obj) == granter)
+}
+
+/// CR 707.2 + CR 707.9b: the body of a copy-token batch's entrant, built by the single
+/// copy-body authority (`token::materialize_token_copy_body`), as the batch's entrants will
+/// exist before any continuous effect applies.
+fn build_battlefield_entry_copy_object(
+    state: &GameState,
+    owner: PlayerId,
+    copy: &crate::types::proposed_event::CopyTokenSpec,
+    enter_tapped: EtbTapState,
+) -> GameObject {
+    let mut obj = GameObject::new(
+        ObjectId(u64::MAX),
+        CardId(0),
+        owner,
+        copy.values.name.clone(),
+        Zone::Battlefield,
+    );
+    obj.controller = owner;
+    let modifications = if copy.additional_modifications.is_empty() {
+        crate::types::resolved_commands::ResolvedCopyBodyModifications::NoExceptions
+    } else {
+        crate::types::resolved_commands::ResolvedCopyBodyModifications::Folded {
+            modifications: copy.additional_modifications.clone(),
+            all_creature_types: state.all_creature_types.clone(),
+        }
+    };
+    crate::game::effects::token::materialize_token_copy_body(
+        &mut obj,
+        copy,
+        &modifications,
+        state.turn_number,
+        0,
+        enter_tapped.resolve(copy.tapped),
+    );
+    obj
 }
 
 /// Build a synthetic `GameObject` from a `TokenSpec` for filter evaluation
@@ -12053,16 +12165,14 @@ fn matches_filter_prop(
 
 /// CR 115.9b/115.9c: Check whether a stack entry's targets satisfy a filter.
 ///
-/// Used by `FilterProp::Targets` and `FilterProp::TargetsOnly` in
-/// `matches_filter_prop` when the object being evaluated is a stack entry.
-/// If `require_all` is `true` (TargetsOnly / CR 115.9c), every target must
-/// match `filter`; if `false` (Targets / CR 115.9b), at least one must.
+/// Evaluates `FilterProp::Targets` and `FilterProp::TargetsOnly` on a stack
+/// entry. If `require_all` is `true` (TargetsOnly / CR 115.9c), every chosen target
+/// must still count and match `filter`; if `false` (Targets / CR 115.9b), at
+/// least one counted target must.
 ///
-/// Non-stack objects return `true` (permissive fallback) so trigger matchers,
-/// which validate targets through `stack_entry_targets_any`, remain the primary
-/// authority. Stack entries with no ability targets return `false` because
-/// "targets X" cannot be satisfied with an empty target list.
-fn stack_entry_targets_satisfy(
+/// Non-stack objects return `true` (permissive fallback). A stack entry with
+/// no counted target returns `false`.
+pub(crate) fn stack_entry_targets_satisfy(
     state: &GameState,
     stack_obj_id: ObjectId,
     source_id: ObjectId,
@@ -12073,19 +12183,26 @@ fn stack_entry_targets_satisfy(
     let Some(entry) = state.stack.iter().find(|e| e.id == stack_obj_id) else {
         return true; // Not a stack entry — permissive.
     };
-    let Some(ability) = entry.ability() else {
-        return true; // KeywordAction entries carry no ability targets — permissive.
-    };
-    let targets = crate::game::ability_utils::declared_targets_in_chain(ability);
-    if targets.is_empty() {
-        return false; // "targets X" with no targets cannot be satisfied.
-    }
     let ctx = match source_controller {
         Some(controller) => FilterContext::from_source_with_controller(source_id, controller),
         None => FilterContext::from_source(state, source_id),
     };
+    entry_targets_satisfy(state, entry, &ctx, filter, require_all)
+}
+
+/// CR 115.9b/115.9c: [`stack_entry_targets_satisfy`] for a given entry, with
+/// "you" read from `ctx` — the looking ability's controller (CR 109.5), not
+/// its source's current controller.
+pub(crate) fn entry_targets_satisfy(
+    state: &GameState,
+    entry: &crate::types::game_state::StackEntry,
+    ctx: &FilterContext,
+    filter: &TargetFilter,
+    require_all: bool,
+) -> bool {
+    let slots = stack_entry_counted_targets(state, entry);
     let check = |t: &TargetRef| match t {
-        TargetRef::Object(id) => matches_target_filter(state, *id, filter, &ctx),
+        TargetRef::Object(id) => matches_target_filter(state, *id, filter, ctx),
         TargetRef::Player(pid) => player_matches_target_filter_in_state(
             state,
             filter,
@@ -12095,9 +12212,47 @@ fn stack_entry_targets_satisfy(
         ),
     };
     if require_all {
-        targets.iter().all(check)
+        !slots.is_empty() && slots.iter().all(|slot| slot.as_ref().is_some_and(check))
     } else {
-        targets.iter().any(check)
+        slots.iter().flatten().any(check)
+    }
+}
+
+/// CR 115.9b: each chosen target of a stack entry, `None` when it is ignored —
+/// an object no longer in the zone it was targeted in, or a player who left
+/// the game.
+fn stack_entry_counted_targets(
+    state: &GameState,
+    entry: &crate::types::game_state::StackEntry,
+) -> Vec<Option<TargetRef>> {
+    match &entry.kind {
+        // CR 115.1e + CR 702.6a: equip targets a creature on the battlefield;
+        // the payload carries no pin, so only the target's zone is checked.
+        StackEntryKind::KeywordAction { action } => action
+            .targets()
+            .into_iter()
+            .map(|target| {
+                matches!(target, TargetRef::Object(id)
+                    if state.objects.get(&id).is_some_and(|o| o.zone == Zone::Battlefield))
+                .then_some(target)
+            })
+            .collect(),
+        StackEntryKind::Spell { .. }
+        | StackEntryKind::ActivatedAbility { .. }
+        | StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::CombatDamage { .. } => entry
+            .ability()
+            .map(crate::game::ability_utils::declared_target_entries_in_chain)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| {
+                let counted = match &entry.target {
+                    TargetRef::Object(_) => entry.pin.is_none_or(|pin| pin.is_current(state)),
+                    TargetRef::Player(pid) => crate::game::players::is_alive(state, *pid),
+                };
+                counted.then_some(entry.target)
+            })
+            .collect(),
     }
 }
 
