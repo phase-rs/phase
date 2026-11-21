@@ -744,6 +744,8 @@ fn condition_reads_a_hand(condition: &ParsedCondition) -> bool {
         | ParsedCondition::PlayerCountAtLeast { .. }
         | ParsedCondition::HasCityBlessing
         | ParsedCondition::HasEnduringStory
+        // CR 725.1: reads the monarch designation, not a hand.
+        | ParsedCondition::IsMonarch
         | ParsedCondition::CompletedDungeon { .. }
         | ParsedCondition::HasMaxSpeed
         | ParsedCondition::IsYourTurn
