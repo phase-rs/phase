@@ -288,7 +288,6 @@ face = [
   { key = "bruvac the grandiloquent", class = "wrong_player", clauses = ["If an opponent would mill one or more cards, they mill twice that many cards instead."] },
   { key = "bullseye, death dealer", class = "cost_wrong", clauses = ["{3}, {T}, Sacrifice an artifact or discard a nonland card: Bullseye deals 2 damage to any target."] },
   { key = "bumper cars", class = "missing_effect", clauses = ["Visit — Target creature must be blocked this turn if able."] },
-  { key = "burden of proof", class = "missing_effect", clauses = ["Otherwise, it has base power and toughness 1/1 and can't block Detectives."] },
   { key = "burn away", class = "wrong_object", clauses = ["When that creature dies this turn, exile its controller's graveyard."] },
   { key = "burn down the house", class = "missing_effect", clauses = ["They gain haste until end of turn."] },
   { key = "burning sun's avatar", class = "target_wrong", clauses = ["it deals 3 damage to target opponent or planeswalker", "and 3 damage to up to one target creature."] },

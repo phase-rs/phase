@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4472
-- **Total card appearances across root causes:** 4505 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4471
+- **Total card appearances across root causes:** 4504 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > **Staleness warning.** This list is pruned one card at a time and has not been
 > regenerated from current parser state. A measurement at `bd1f78ed0` (#8907)
@@ -71,7 +71,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 | 13 | State/game-state condition → StaticCondition::Unrecognized | 125 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
 | 14 | Granted/quoted ability or continuous modification dropped | 92 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
 | 15 | Multi-target / 'up to N' optionality or count dropped | 79 | parser/oracle_effect/lower.rs `apply_optional_target_fixup` + `imperative.rs` Attach host capture — preserve MultiTargetSpec / optional_targeting; lift the detector exclusions (DealDamage, Transform, Any-target, Token, Counter, MoveCounters, BecomeCopy, CopySpell) as each resolver grows a declined-target no-op |
-| 16 | Keyword payload / multiplicity / mis-tokenization | 81 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
+| 16 | Keyword payload / multiplicity / mis-tokenization | 80 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
 | 17 | Copy 'except' / additional-modification clause dropped | 80 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
 | 18 | Subtype / type-change modification malformed or dropped | 78 | oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set |
 | 20 | Damage subject/recipient set incomplete | 70 | Effect::DealDamage handling — capture all damage subjects/recipients per CR 120 |
@@ -86,7 +86,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2379/4505 ≈ 52.8% of all misparse appearances; the top 10 cover 3355/4505 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
+> The top **5** root causes cover 2379/4504 ≈ 52.8% of all misparse appearances; the top 10 cover 3355/4504 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
 
 ## Full card lists per root cause
 
@@ -4217,7 +4217,7 @@ are outside the detector's class.
 
 </details>
 
-### 16. Keyword payload / multiplicity / mis-tokenization  (81 cards)
+### 16. Keyword payload / multiplicity / mis-tokenization  (80 cards)
 
 **Signature.** A keyword cost or discriminant is wrong (ward life cost as {0}, devour type hardcoded, multi-kicker merged, protection color stored on CardType axis), a keyword is deduped, or a flavor ability-word label is read as a keyword.
 
@@ -4244,7 +4244,6 @@ are outside the detector's class.
 - Benevolent Bodyguard
 - Bold Biochemist
 - Brineborn Cutthroat
-- Burden of Proof
 - Cactus Preserve
 - Caprichrome
 - Cartel Aristocrat
