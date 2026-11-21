@@ -25623,6 +25623,58 @@ fn strip_temporal_suffix_player_next_step_shapes() {
     );
 }
 
+/// CR 608.2c + CR 108.3: "their next <step>" after an owner control clause
+/// names that owner (Phytotitan: "return it to the battlefield tapped under its
+/// owner's control at the beginning of their next upkeep"). The control clause
+/// is the pronoun's antecedent and stays in the instruction; every other
+/// antecedent, and a bare "their", keeps today's undelayed reading.
+#[test]
+fn strip_temporal_suffix_their_next_step_names_owner_antecedent() {
+    use crate::types::ability::{DelayedTriggerPlayerBinding as B, TurnGate as G};
+    for (step_text, phase) in [
+        ("upkeep", Phase::Upkeep),
+        ("upkeep step", Phase::Upkeep),
+        ("end step", Phase::End),
+        ("draw step", Phase::Draw),
+        ("declare attackers step", Phase::DeclareAttackers),
+    ] {
+        for possessor in ["its owner's", "their owner's", "its owner\u{2019}s"] {
+            let text = format!(
+                "Return it to the battlefield tapped under {possessor} control at the beginning of their next {step_text}"
+            );
+            let (rest, cond) = strip_temporal_suffix(&text);
+            assert_eq!(
+                rest,
+                format!("Return it to the battlefield tapped under {possessor} control"),
+                "{text}"
+            );
+            assert_eq!(
+                cond,
+                Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase,
+                    player: crate::types::player::PlayerId(0),
+                    gate: G::None,
+                    binding: B::ParentTargetOwner,
+                }),
+                "{text}"
+            );
+        }
+    }
+
+    // Declined: "their" is accepted only with an owner antecedent.
+    for declined in [
+        // Plague Reaver's return clause (verbatim): "their" is the chosen opponent.
+        "Return this creature to the battlefield under that player's control at the beginning of their next upkeep",
+        "Return it to the battlefield under your control at the beginning of their next upkeep",
+        "Return it to the battlefield under their control at the beginning of their next upkeep",
+        // Glass Asp's effect clause (verbatim).
+        "that player loses 2 life at the beginning of their next draw step unless they pay {2} before that step",
+        "you draw a card at the beginning of their next upkeep",
+    ] {
+        assert_eq!(strip_temporal_suffix(declined).1, None, "{declined}");
+    }
+}
+
 /// CR 506.1 + CR 608.2c: Noctis's "that combat" rider rides the delayed
 /// declare-attackers return; "this combat" names the current combat and stays
 /// a sibling.

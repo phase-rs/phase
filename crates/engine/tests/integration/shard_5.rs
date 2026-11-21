@@ -118,6 +118,7 @@ mod self_copy_last_known_values;
 mod self_destruct_target_power;
 mod self_exile_at_resolution_8721;
 mod self_name_of_short_name_rules_words;
+mod self_reveal_hand_activation_cost;
 mod selfless_squire_damage_prevented_trigger;
 mod selfless_squire_furnace_protection_ordering;
 mod sensei_golden_tail_5950;

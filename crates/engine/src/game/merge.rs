@@ -943,25 +943,70 @@ fn recorded_departure_components(state: &GameState, ability: &ResolvedAbility) -
     let Some(source) = ability.trigger_source.as_ref() else {
         return Vec::new();
     };
-    let expected = source.identity.reference;
-    let Some(GameEvent::ZoneChanged {
-        object_id,
-        from,
-        to,
-        record,
-    }) = state.current_trigger_event.as_ref()
+    let Some(event @ GameEvent::ZoneChanged { object_id, .. }) =
+        state.current_trigger_event.as_ref()
     else {
         return Vec::new();
     };
-    if *object_id != ability.source_id || *from != Some(Zone::Battlefield) || !to.is_public() {
+    if *object_id != ability.source_id {
         return Vec::new();
     }
-    let recorded_by_source = state
+    // The ability's own capture is the departing identity; the turn ledger
+    // confirms it, so an event copy without source context still answers.
+    departed_identity_components(state, event, source.identity.reference)
+}
+
+/// CR 730.3 + CR 730.3c + CR 400.7e: the component cards a merged permanent split
+/// into when the battlefield departure `event` moved its survivor, read from the
+/// recorded event: the public zone the survivor moved to and the successor
+/// incarnation its split components were pinned to. The pin is a value, so a
+/// survivor that moved again does not hide its sibling (CR 609.3). A component
+/// that left that zone since has lost its back-link (`zones.rs` exit cleanup) and
+/// is not listed. The departing identity is the one the event itself records, so
+/// an event without it, any other event, a non-public destination, or a record
+/// the turn ledger does not confirm gives none. Returned in id order.
+pub(crate) fn departure_event_components(state: &GameState, event: &GameEvent) -> Vec<ObjectId> {
+    let GameEvent::ZoneChanged { record, .. } = event else {
+        return Vec::new();
+    };
+    let Some(departing) = record
+        .trigger_source_context()
+        .map(|context| context.identity.reference)
+    else {
+        return Vec::new();
+    };
+    departed_identity_components(state, event, departing)
+}
+
+/// CR 730.3 + CR 730.3c + CR 400.7e: the single scan behind both callers. The
+/// caller supplies the departing identity it holds (`expected`): the ability's
+/// captured source for a source's own departure, or the identity the event
+/// records. The turn ledger entry at the event's index must carry that identity,
+/// and the components are the objects in the event's public destination whose
+/// back-link names the survivor's successor incarnation.
+fn departed_identity_components(
+    state: &GameState,
+    event: &GameEvent,
+    expected: ObjectIncarnationRef,
+) -> Vec<ObjectId> {
+    let GameEvent::ZoneChanged {
+        from: Some(Zone::Battlefield),
+        to,
+        record,
+        ..
+    } = event
+    else {
+        return Vec::new();
+    };
+    if !to.is_public() {
+        return Vec::new();
+    }
+    let recorded = state
         .zone_changes_this_turn
         .get(record.turn_zone_change_index)
         .and_then(|recorded| recorded.trigger_source_context())
-        .is_some_and(|event_source| event_source.identity.reference == expected);
-    if !recorded_by_source {
+        .is_some_and(|context| context.identity.reference == expected);
+    if !recorded {
         return Vec::new();
     }
     let successor = ObjectIncarnationRef::of(expected.object_id, expected.incarnation + 1);
@@ -1150,6 +1195,149 @@ mod tests {
 
     fn ward_2() -> Keyword {
         Keyword::Ward(WardCost::Mana(ManaCost::generic(2)))
+    }
+
+    /// V16 — CR 730.3 + CR 730.3c + CR 400.7e: the components a battlefield
+    /// departure made are read from the recorded event. A co-located component
+    /// of a different split group is not one of them, a component that left the
+    /// zone since is not listed, and an event that is not a departure lists none.
+    #[test]
+    fn departure_event_components_reads_only_the_recorded_split_group() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let mut events = Vec::new();
+
+        // An earlier merged permanent's split leaves its component in the graveyard.
+        let other_host = make_creature(&mut state, 1, player, "Other Host", 2, 2);
+        let other_rider = make_creature(&mut state, 2, player, "Other Rider", 1, 1);
+        merge_object_onto(
+            &mut state,
+            other_rider,
+            other_host,
+            MergeSide::Bottom,
+            &mut events,
+        );
+        crate::game::zones::move_to_zone(&mut state, other_host, Zone::Graveyard, &mut events);
+        assert!(
+            state.objects[&other_rider]
+                .split_from_merge_survivor
+                .is_some(),
+            "reach-guard: the other group's component carries its own back-link"
+        );
+
+        let host = make_creature(&mut state, 3, player, "Host", 7, 2);
+        let rider = make_creature(&mut state, 4, player, "Rider", 4, 4);
+        merge_object_onto(&mut state, rider, host, MergeSide::Bottom, &mut events);
+        let mut departure_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, host, Zone::Graveyard, &mut departure_events);
+        let departure = departure_events
+            .iter()
+            .find(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(Zone::Battlefield),
+                        ..
+                    } if *object_id == host
+                )
+            })
+            .cloned()
+            .expect("the merged permanent's departure is recorded");
+        assert_eq!(state.objects[&other_rider].zone, Zone::Graveyard);
+
+        assert_eq!(
+            departure_event_components(&state, &departure),
+            vec![rider],
+            "only the recorded survivor's split group"
+        );
+
+        let not_a_departure = GameEvent::EffectResolved {
+            kind: crate::types::ability::EffectKind::ChangeZone,
+            source_id: host,
+            subject: None,
+        };
+        assert!(departure_event_components(&state, &not_a_departure).is_empty());
+
+        crate::game::zones::move_to_zone(&mut state, rider, Zone::Exile, &mut events);
+        assert!(
+            departure_event_components(&state, &departure).is_empty(),
+            "a component that left the zone lost its back-link"
+        );
+    }
+
+    /// CR 701.24a + CR 730.3c + CR 400.7e: a source's own terminal-shuffle
+    /// return answers from the ability's captured identity plus the matching
+    /// turn-ledger entry, even when the event copy it reads carries no source
+    /// context (the wire format allows it to be absent). The event-only reader
+    /// used by delayed triggers has no identity to confirm and lists none.
+    #[test]
+    fn terminal_shuffle_return_keeps_components_when_the_event_copy_lacks_context() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let host = make_creature(&mut state, 1, player, "Host", 7, 2);
+        let rider = make_creature(&mut state, 2, player, "Rider", 4, 4);
+        let mut events = Vec::new();
+        merge_object_onto(&mut state, rider, host, MergeSide::Bottom, &mut events);
+        let mut departure_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, host, Zone::Graveyard, &mut departure_events);
+        let mut departure = departure_events
+            .into_iter()
+            .find(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(Zone::Battlefield),
+                        ..
+                    } if *object_id == host
+                )
+            })
+            .expect("the merged permanent's departure is recorded");
+        let GameEvent::ZoneChanged { record, .. } = &mut departure else {
+            unreachable!("matched a zone change above");
+        };
+        let captured = record
+            .trigger_source_context
+            .take()
+            .expect("reach-guard: the live departure records its identity");
+        state.current_trigger_event = Some(departure.clone());
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
+                origin: None,
+                destination: Zone::Library,
+                target: TargetFilter::SelfRef,
+                owner_library: true,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            host,
+            player,
+        );
+        ability.trigger_source = Some(captured);
+
+        let expanded =
+            expand_returned_merge_components(&state, &ability, vec![host], &TargetFilter::SelfRef);
+        assert_eq!(
+            expanded,
+            vec![host, rider],
+            "the captured identity and the ledger still find the component"
+        );
+        assert!(
+            departure_event_components(&state, &departure).is_empty(),
+            "the event-only reader needs the event's own identity"
+        );
     }
 
     // Plan test 4: a creature mutated UNDER a face-down survivor — the survivor
