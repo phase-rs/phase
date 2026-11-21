@@ -40969,6 +40969,7 @@ fn scoped_decline_body_gated_continuation_is_idempotent_under_rewrites() {
                 count: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Controller,
                 destination: crate::types::zones::Zone::Graveyard,
+                position: LibraryPosition::Top,
             },
         )
         .condition(not_effect_performed().expect("gate"))

@@ -6,9 +6,12 @@
 //! predicate and the body, "they" / "them" / "that player" / "the player" name
 //! the declared target; no other opponent is asked or affected.
 //!
-//! Cards (verbatim Oracle text below): Bane, Lord of Darkness; Combustible
-//! Gearhulk; Palantír of Orthanc; Terrapact Intimidator; Risk Factor. Tell Me
-//! What You See, the sixth member, lives in `tell_me_what_you_see_etb.rs`.
+//! Cards (printed, added through `add_real_card` on the curated card
+//! database): Bane, Lord of Darkness; Combustible Gearhulk; Palantír of
+//! Orthanc; Terrapact Intimidator; Risk Factor. Tell Me What You See, the
+//! sixth member, lives in `tell_me_what_you_see_etb.rs`. Printed costs are
+//! made payable by adding basic lands; the other hand and library cards are
+//! textless builder fillers.
 //!
 //! Every row seats three players and targets the SECOND opponent, P2, so
 //! neither seat order (P1 first) nor a controller fallback (P0) can satisfy an
@@ -19,26 +22,23 @@
 
 use std::collections::VecDeque;
 
+use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-const P2: PlayerId = PlayerId(2);
+use crate::support::shared_card_db;
 
-const BANE: &str = "As long as your life total is less than or equal to half your starting life total, Bane has indestructible.\nWhenever another nontoken creature you control dies, target opponent may have you draw a card. If they don't, you may put a creature card with equal or lesser toughness from your hand onto the battlefield.";
-const GEARHULK: &str = "First strike\nWhen this creature enters, target opponent may have you draw three cards. If the player doesn't, you mill three cards, then this creature deals damage to that player equal to the total mana value of those cards.";
-const PALANTIR: &str = "At the beginning of your end step, put an influence counter on Palantír of Orthanc and scry 2. Then target opponent may have you draw a card. If that player doesn't, you mill X cards, where X is the number of influence counters on Palantír of Orthanc, and that player loses life equal to the total mana value of those cards.";
-const TERRAPACT: &str = "When this creature enters, target opponent may have you create two Lander tokens. If they don't, put two +1/+1 counters on this creature. (A Lander token is an artifact with \"{2}, {T}, Sacrifice this token: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.\")";
-const RISK_FACTOR: &str = "Target opponent may have Risk Factor deal 4 damage to them. If that player doesn't, you draw three cards.\nJump-start (You may cast this card from your graveyard by discarding a card in addition to paying its other costs. Then exile this card.)";
-const LEYLINE: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nYou have hexproof. (You can't be the target of spells or abilities your opponents control.)";
+const P2: PlayerId = PlayerId(2);
 
 /// Every prompt the drive raised, in order, with its actor.
 #[derive(Debug, Default)]
@@ -162,9 +162,9 @@ fn three_players() -> GameScenario {
 }
 
 /// CR 702.11c: Leyline of Sanctity gives each listed opponent hexproof.
-fn add_leylines(scenario: &mut GameScenario, players: &[PlayerId]) {
+fn add_leylines(scenario: &mut GameScenario, players: &[PlayerId], db: &CardDatabase) {
     for &player in players {
-        scenario.add_enchantment_from_oracle(player, "Leyline of Sanctity", LEYLINE);
+        scenario.add_real_card(player, "Leyline of Sanctity", Zone::Battlefield, db);
     }
 }
 
@@ -212,15 +212,17 @@ struct BaneBoard {
     c2: ObjectId,
 }
 
-/// Bane and Grizzly Bears under P0; P0 holds a bolt, two 2/2 creature cards
-/// (C0, C0b, so the put raises a choice) and a land; P1 and P2 each hold a 2/2
-/// creature card (C1, C2), so a hand-owner misreading shows up in the
-/// zone-choice candidates themselves.
-fn bane_board(leylines: &[PlayerId]) -> BaneBoard {
+/// Bane, Grizzly Bears and a Mountain (Lightning Bolt's printed {R}) under
+/// P0; P0 holds the printed bolt, two 2/2 creature cards (C0, C0b, so the
+/// put raises a choice) and a land; P1 and P2 each hold a 2/2 creature card
+/// (C1, C2), so a hand-owner misreading shows up in the zone-choice
+/// candidates themselves.
+fn bane_board(db: &CardDatabase, leylines: &[PlayerId]) -> BaneBoard {
     let mut scenario = three_players();
-    scenario.add_creature_from_oracle(P0, "Bane, Lord of Darkness", 5, 2, BANE);
-    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
-    let bolt = scenario.add_bolt_to_hand(P0);
+    scenario.add_basic_land(P0, ManaColor::Red);
+    scenario.add_real_card(P0, "Bane, Lord of Darkness", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
     let c0 = scenario
         .add_creature_to_hand(P0, "P0 Creature Card", 2, 2)
         .id();
@@ -234,7 +236,7 @@ fn bane_board(leylines: &[PlayerId]) -> BaneBoard {
     let c2 = scenario
         .add_creature_to_hand(P2, "P2 Creature Card", 2, 2)
         .id();
-    add_leylines(&mut scenario, leylines);
+    add_leylines(&mut scenario, leylines, db);
     BaneBoard {
         runner: scenario.build(),
         bears,
@@ -258,7 +260,10 @@ fn bane_kill_bears(board: &mut BaneBoard, mut answers: Answers) -> Record {
 /// one asked, and only P0's creature card is a candidate.
 #[test]
 fn bane_decline_controller_puts_from_own_hand() {
-    let mut board = bane_board(&[]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut board = bane_board(db, &[]);
     let hands_before = [
         hand_len(&board.runner, P0),
         hand_len(&board.runner, P1),
@@ -291,7 +296,10 @@ fn bane_decline_controller_puts_from_own_hand() {
 /// to put anything.
 #[test]
 fn bane_accept_controller_draws() {
-    let mut board = bane_board(&[]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut board = bane_board(db, &[]);
     let p0_hand = hand_len(&board.runner, P0);
     let record = bane_kill_bears(&mut board, Answers::new(&[TargetRef::Player(P2)], &[true]));
     assert_eq!(record.optional_actors, vec![P2]);
@@ -305,7 +313,10 @@ fn bane_accept_controller_draws() {
 /// target and is removed; nobody is asked.
 #[test]
 fn bane_no_legal_target_removes_the_trigger() {
-    let mut board = bane_board(&[P1, P2]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut board = bane_board(db, &[P1, P2]);
     let p0_hand = hand_len(&board.runner, P0);
     let record = bane_kill_bears(&mut board, Answers::default());
     assert_eq!(record.target_prompts.len(), 1, "only the bolt: {record:?}");
@@ -319,7 +330,10 @@ fn bane_no_legal_target_removes_the_trigger() {
 /// the controller's own hand.
 #[test]
 fn bane_sole_legal_target_is_chosen_without_prompt() {
-    let mut board = bane_board(&[P1]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut board = bane_board(db, &[P1]);
     let mut answers = Answers::new(&[], &[false, true]);
     answers.zone_picks.push_back(vec![board.c0]);
     let record = bane_kill_bears(&mut board, answers);
@@ -351,20 +365,21 @@ fn assert_zone_choice_is_p0_hand(record: &Record, board: &BaneBoard) {
 
 // ── Combustible Gearhulk ───────────────────────────────────────────────────
 
-fn gearhulk_board(leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
+fn gearhulk_board(db: &CardDatabase, leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
     let mut scenario = three_players();
-    let gearhulk = scenario
-        .add_creature_to_hand_from_oracle(P0, "Combustible Gearhulk", 6, 6, GEARHULK)
-        .with_mana_cost(ManaCost::zero())
-        .id();
+    let gearhulk = scenario.add_real_card(P0, "Combustible Gearhulk", Zone::Hand, db);
+    // Printed cost {4}{R}{R}: six Mountains pay it.
+    for _ in 0..6 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
     // `add_spell_to_library_top` inserts at index zero, so the reversed
-    // fixture order leaves the library top reading 2, 5, 1, 9.
+    // filler order leaves the library top reading 2, 5, 1, 9.
     for (index, mana_value) in [2, 5, 1, 9].into_iter().rev().enumerate() {
         scenario
             .add_spell_to_library_top(P0, &format!("Gearhulk Library {index}"), false)
             .with_mana_cost(ManaCost::generic(mana_value));
     }
-    add_leylines(&mut scenario, leylines);
+    add_leylines(&mut scenario, leylines, db);
     (scenario.build(), gearhulk)
 }
 
@@ -372,7 +387,10 @@ fn gearhulk_board(leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
 /// three, and Gearhulk deals P2 (only P2) the milled cards' total mana value.
 #[test]
 fn gearhulk_decline_damages_only_the_target() {
-    let (mut runner, gearhulk) = gearhulk_board(&[]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, gearhulk) = gearhulk_board(db, &[]);
     let before = lives(&runner);
     runner.cast(gearhulk).commit();
     let record = drive(
@@ -389,7 +407,10 @@ fn gearhulk_decline_damages_only_the_target() {
 /// T-Gear-a — CR 118.12: P2 accepts; P0 draws three and nothing is milled.
 #[test]
 fn gearhulk_accept_controller_draws_three() {
-    let (mut runner, gearhulk) = gearhulk_board(&[]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, gearhulk) = gearhulk_board(db, &[]);
     let before = lives(&runner);
     let p0_hand = hand_len(&runner, P0);
     runner.cast(gearhulk).commit();
@@ -403,7 +424,10 @@ fn gearhulk_accept_controller_draws_three() {
 /// L-Gear — CR 603.3d: no legal target, so the trigger is removed.
 #[test]
 fn gearhulk_no_legal_target_removes_the_trigger() {
-    let (mut runner, gearhulk) = gearhulk_board(&[P1, P2]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, gearhulk) = gearhulk_board(db, &[P1, P2]);
     let before = lives(&runner);
     let p0_hand = hand_len(&runner, P0);
     runner.cast(gearhulk).commit();
@@ -419,7 +443,10 @@ fn gearhulk_no_legal_target_removes_the_trigger() {
 /// prompt, and takes the decline damage.
 #[test]
 fn gearhulk_sole_legal_target_is_chosen_without_prompt() {
-    let (mut runner, gearhulk) = gearhulk_board(&[P1]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, gearhulk) = gearhulk_board(db, &[P1]);
     let before = lives(&runner);
     runner.cast(gearhulk).commit();
     let record = drive(&mut runner, Answers::new(&[], &[false]));
@@ -430,16 +457,14 @@ fn gearhulk_sole_legal_target_is_chosen_without_prompt() {
 
 // ── Palantír of Orthanc ────────────────────────────────────────────────────
 
-fn palantir_board(leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
+fn palantir_board(db: &CardDatabase, leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
     let mut scenario = three_players();
     scenario.at_phase(Phase::PostCombatMain);
-    let palantir = scenario
-        .add_artifact_from_oracle(P0, "Palantír of Orthanc", PALANTIR)
-        .id();
+    let palantir = scenario.add_real_card(P0, "Palantír of Orthanc", Zone::Battlefield, db);
     scenario
         .add_spell_to_library_top(P0, "Palantír Library Top", false)
         .with_mana_cost(ManaCost::generic(3));
-    add_leylines(&mut scenario, leylines);
+    add_leylines(&mut scenario, leylines, db);
     (scenario.build(), palantir)
 }
 
@@ -455,7 +480,10 @@ fn influence(runner: &GameRunner, palantir: ObjectId) -> u32 {
 /// mills X = 1 and P2 (only P2) loses that card's mana value.
 #[test]
 fn palantir_decline_only_the_target_loses_life() {
-    let (mut runner, palantir) = palantir_board(&[]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, palantir) = palantir_board(db, &[]);
     let before = lives(&runner);
     runner.advance_to_end_step();
     let record = drive(
@@ -474,7 +502,10 @@ fn palantir_decline_only_the_target_loses_life() {
 /// T-Pal-a — CR 118.12: P2 accepts; P0 draws one, nothing is milled.
 #[test]
 fn palantir_accept_controller_draws() {
-    let (mut runner, palantir) = palantir_board(&[]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, palantir) = palantir_board(db, &[]);
     let before = lives(&runner);
     let p0_hand = hand_len(&runner, P0);
     runner.advance_to_end_step();
@@ -490,7 +521,10 @@ fn palantir_accept_controller_draws() {
 /// and no scry either.
 #[test]
 fn palantir_no_legal_target_removes_the_whole_ability() {
-    let (mut runner, palantir) = palantir_board(&[P1, P2]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, palantir) = palantir_board(db, &[P1, P2]);
     let before = lives(&runner);
     runner.advance_to_end_step();
     let record = drive(&mut runner, Answers::default());
@@ -504,7 +538,10 @@ fn palantir_no_legal_target_removes_the_whole_ability() {
 /// L-Pal paired positive.
 #[test]
 fn palantir_sole_legal_target_is_chosen_without_prompt() {
-    let (mut runner, palantir) = palantir_board(&[P1]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, palantir) = palantir_board(db, &[P1]);
     let before = lives(&runner);
     runner.advance_to_end_step();
     let record = drive(&mut runner, Answers::new(&[], &[false]));
@@ -516,13 +553,14 @@ fn palantir_sole_legal_target_is_chosen_without_prompt() {
 
 // ── Terrapact Intimidator ──────────────────────────────────────────────────
 
-fn terrapact_board(leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
+fn terrapact_board(db: &CardDatabase, leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
     let mut scenario = three_players();
-    let terrapact = scenario
-        .add_creature_to_hand_from_oracle(P0, "Terrapact Intimidator", 2, 1, TERRAPACT)
-        .with_mana_cost(ManaCost::zero())
-        .id();
-    add_leylines(&mut scenario, leylines);
+    let terrapact = scenario.add_real_card(P0, "Terrapact Intimidator", Zone::Hand, db);
+    // Printed cost {1}{R}: two Mountains pay it.
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    add_leylines(&mut scenario, leylines, db);
     (scenario.build(), terrapact)
 }
 
@@ -549,7 +587,10 @@ fn plus_counters(runner: &GameRunner, id: ObjectId) -> u32 {
 /// and are controlled by P0, who created them.
 #[test]
 fn terrapact_accept_controller_creates_and_owns_landers() {
-    let (mut runner, terrapact) = terrapact_board(&[]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, terrapact) = terrapact_board(db, &[]);
     runner.cast(terrapact).commit();
     let record = drive(&mut runner, Answers::new(&[TargetRef::Player(P2)], &[true]));
     assert_eq!(record.target_prompts.len(), 1, "{record:?}");
@@ -562,7 +603,10 @@ fn terrapact_accept_controller_creates_and_owns_landers() {
 /// T-Ter-d — CR 118.12: P2 declines; two +1/+1 counters, no Lander.
 #[test]
 fn terrapact_decline_gets_two_counters() {
-    let (mut runner, terrapact) = terrapact_board(&[]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, terrapact) = terrapact_board(db, &[]);
     runner.cast(terrapact).commit();
     let record = drive(
         &mut runner,
@@ -576,7 +620,10 @@ fn terrapact_decline_gets_two_counters() {
 /// L-Ter — CR 603.3d, with its paired positive.
 #[test]
 fn terrapact_no_legal_target_removes_the_trigger() {
-    let (mut runner, terrapact) = terrapact_board(&[P1, P2]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, terrapact) = terrapact_board(db, &[P1, P2]);
     runner.cast(terrapact).commit();
     let record = drive(&mut runner, Answers::default());
     assert!(record.target_prompts.is_empty(), "{record:?}");
@@ -595,13 +642,14 @@ fn terrapact_no_legal_target_removes_the_trigger() {
 
 // ── Risk Factor ────────────────────────────────────────────────────────────
 
-fn risk_factor_board(leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
+fn risk_factor_board(db: &CardDatabase, leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
     let mut scenario = three_players();
-    let risk = scenario
-        .add_spell_to_hand_from_oracle(P0, "Risk Factor", true, RISK_FACTOR)
-        .with_mana_cost(ManaCost::zero())
-        .id();
-    add_leylines(&mut scenario, leylines);
+    let risk = scenario.add_real_card(P0, "Risk Factor", Zone::Hand, db);
+    // Printed cost {2}{R}: three Mountains pay it.
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    add_leylines(&mut scenario, leylines, db);
     (scenario.build(), risk)
 }
 
@@ -609,7 +657,10 @@ fn risk_factor_board(leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
 /// targeted; P2 accepts and Risk Factor deals 4 damage to "them" = P2.
 #[test]
 fn risk_factor_accept_damages_only_the_target() {
-    let (mut runner, risk) = risk_factor_board(&[]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, risk) = risk_factor_board(db, &[]);
     let before = lives(&runner);
     let p0_hand = hand_len(&runner, P0);
     announce_cast(&mut runner, risk);
@@ -624,7 +675,10 @@ fn risk_factor_accept_damages_only_the_target() {
 /// T-Risk-d — CR 118.12: P2 declines; P0 draws three and nobody is damaged.
 #[test]
 fn risk_factor_decline_controller_draws_three() {
-    let (mut runner, risk) = risk_factor_board(&[]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, risk) = risk_factor_board(db, &[]);
     let before = lives(&runner);
     let p0_hand = hand_len(&runner, P0);
     announce_cast(&mut runner, risk);
@@ -641,7 +695,10 @@ fn risk_factor_decline_controller_draws_three() {
 /// has no legal target and cannot be cast; it stays in hand.
 #[test]
 fn risk_factor_without_legal_target_cannot_be_cast() {
-    let (mut runner, risk) = risk_factor_board(&[P1, P2]);
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, risk) = risk_factor_board(db, &[P1, P2]);
     let before = lives(&runner);
     let card_id = runner.state().objects[&risk].card_id;
     let cast = runner.act(GameAction::CastSpell {

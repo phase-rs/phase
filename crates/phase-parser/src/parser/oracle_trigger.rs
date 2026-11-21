@@ -23151,9 +23151,8 @@ fn parse_player_action_phrase_nom(input: &str) -> OracleResult<'_, PlayerActionK
             alt((tag("surveils"), tag("surveil"))),
         ),
         value(PlayerActionKind::Scry, alt((tag("scries"), tag("scry")))),
-        // CR 700.2: "face(s) a dilemma" — the TRK reminder text defines it as
-        // choosing one or more modes for a spell or ability (needs manual
-        // verification; no CR rule names it).
+        // CR 700.17 (edition effective 2026-11-06): "face(s) a dilemma" — choosing
+        // one or more modes for a spell or ability.
         value(
             PlayerActionKind::FaceDilemma,
             (

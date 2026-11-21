@@ -91,10 +91,10 @@ pub enum PlayerActionKind {
     /// drawing player once; a draw that delivered no card (empty library, or every
     /// unit replaced away) emits nothing because that player did not draw.
     Draw,
-    /// CR 700.2a + CR 700.2b + CR 700.2e + CR 601.2b + CR 602.2b + CR 603.3c: a
-    /// player chose one or more modes for a spell or ability ("face a dilemma" —
-    /// TRK reminder text; needs manual verification, no CR rule names it). One
-    /// action per mode-choice announcement, not per mode.
+    /// CR 700.17 (edition effective 2026-11-06; the repo's pinned edition predates
+    /// it) + CR 700.2a + CR 700.2b + CR 700.2e + CR 601.2b + CR 602.2b + CR 603.3c:
+    /// a player chose one or more modes for a spell or ability ("face a dilemma").
+    /// One action per mode-choice announcement, not per mode (CR 700.17).
     FaceDilemma,
 }
 

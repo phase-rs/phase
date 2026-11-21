@@ -4,19 +4,25 @@
 //!
 //! "Whenever this creature attacks, defending player may have you draw a card.
 //! If they do, untap this creature and remove it from combat."
+//!
+//! Shakedown Heavy is the printed card ({2}{B} Ogre Warrior), added from the
+//! curated card database through `add_real_card`.
 
+use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 
-const SHAKEDOWN_HEAVY: &str = "Menace\nWhenever this creature attacks, defending player may have you draw a card. If they do, untap this creature and remove it from combat.";
+use crate::support::shared_card_db;
 
-fn attack(accept: bool) -> (GameRunner, ObjectId, Vec<PlayerId>, usize) {
+fn attack(db: &CardDatabase, accept: bool) -> (GameRunner, ObjectId, Vec<PlayerId>, usize) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     for player in [P0, P1] {
@@ -24,9 +30,7 @@ fn attack(accept: bool) -> (GameRunner, ObjectId, Vec<PlayerId>, usize) {
             scenario.add_spell_to_library_top(player, &format!("Library {index}"), false);
         }
     }
-    let heavy = scenario
-        .add_creature_from_oracle(P0, "Shakedown Heavy", 6, 4, SHAKEDOWN_HEAVY)
-        .id();
+    let heavy = scenario.add_real_card(P0, "Shakedown Heavy", Zone::Battlefield, db);
     let mut runner = scenario.build();
     let hand_before = runner.state().players[P0.0 as usize].hand.len();
     runner.advance_to_combat();
@@ -76,7 +80,8 @@ fn hand_len(runner: &GameRunner) -> usize {
 /// "If they do" effect.
 #[test]
 fn decline_stays_tapped_and_attacking() {
-    let (runner, heavy, actors, hand_before) = attack(false);
+    let Some(db) = shared_card_db() else { return; };
+    let (runner, heavy, actors, hand_before) = attack(db, false);
     let tapped = runner.state().objects[&heavy].tapped;
     let attacking = is_attacking(&runner, heavy);
     assert_eq!(actors, vec![P1]);

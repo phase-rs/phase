@@ -71,8 +71,8 @@ pub(super) fn handle_ability_mode_choice(
         None => pending_trigger_modal_history_source(state)?,
     };
     record_modal_mode_choices(state, history_source, &modal, &indices);
-    // CR 700.2a + CR 700.2b + CR 700.2e: the prompted player faces one dilemma
-    // for this mode choice (face a dilemma: needs manual verification).
+    // CR 700.17 (edition effective 2026-11-06) + CR 700.2a + CR 700.2b + CR 700.2e:
+    // the prompted player faces one dilemma for this mode choice.
     let dilemma_chooser = super::ability_utils::mode_choice_dilemma_chooser(player, &indices);
 
     let mut resolved =
@@ -632,9 +632,8 @@ pub(super) fn resolve_random_modal_trigger(
         &modal,
         &indices,
     );
-    // CR 700.2b: the controller is still the mode chooser of a random draw, so
-    // the nonempty draw faces one dilemma (face a dilemma: needs manual
-    // verification).
+    // CR 700.2b + CR 700.17 (edition effective 2026-11-06): the controller is still
+    // the mode chooser of a random draw, so the nonempty draw faces one dilemma.
     let dilemma_chooser = super::ability_utils::mode_choice_dilemma_chooser(player, &indices);
     let mut resolved =
         build_chained_resolved(&mode_abilities, indices.as_slice(), source_id, player)?;

@@ -9798,7 +9798,7 @@ pub(super) fn push_ability_entry(
     );
     super::casting::commit_crime_after_stack_placement(state, crime_candidate, player, events);
     // CR 602.2b + CR 733.1: the activation's mode choice faced a dilemma; it is on
-    // the stack now, so record it (face a dilemma: needs manual verification).
+    // the stack now, so record it (CR 700.17, edition effective 2026-11-06).
     super::ability_utils::record_face_dilemma_after_stack_placement(state, mode_chooser);
     if let Some(activation_player) = pending_loyalty_activation_player {
         super::planeswalker::record_loyalty_activation(state, source_id, activation_player);
@@ -16082,7 +16082,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
         || super::casting::targets_commit_crime(state, &announced_targets, player);
     super::casting::commit_crime_after_stack_placement(state, crime_candidate, player, events);
     // CR 601.2i + CR 733.1: the spell's mode choice faced a dilemma; it is on the
-    // stack now, so record it (face a dilemma: needs manual verification).
+    // stack now, so record it (CR 700.17, edition effective 2026-11-06).
     super::ability_utils::record_face_dilemma_after_stack_placement(state, mode_chooser);
 
     // Track commander cast count for tax calculation

@@ -1671,15 +1671,15 @@ fn modal_indices_have_legal_target_assignment(
     }
 }
 
-/// CR 700.2a + CR 700.2b + CR 700.2e: the player who faces a dilemma for this
+/// CR 700.17 (edition effective 2026-11-06; the repo's pinned edition predates it)
+/// + CR 700.2a + CR 700.2b + CR 700.2e: the player who faces a dilemma for this
 /// mode choice — the mode chooser — or `None` when zero modes are chosen ("as
 /// you choose one or more modes"; CR 603.3c removes a zero-mode trigger).
 ///
 /// The selection procedure does not change the chooser: a "choose one at
 /// random" trigger (Cult of Skaro) is still the controller's mode choice under
 /// CR 700.2b — "at random" fixes how the mode is picked, not who chooses it —
-/// so a nonempty random draw faces a dilemma exactly like a prompted one. Face
-/// a dilemma: needs manual verification (TRK rulings unpublished).
+/// so a nonempty random draw faces a dilemma exactly like a prompted one.
 pub(crate) fn mode_choice_dilemma_chooser(
     chooser: PlayerId,
     indices: &[usize],
@@ -1687,9 +1687,9 @@ pub(crate) fn mode_choice_dilemma_chooser(
     (!indices.is_empty()).then_some(chooser)
 }
 
-/// CR 603.2: the dilemma is a game event as the modes are announced; abilities
-/// that trigger on it ("whenever you face a dilemma") trigger now. Face a
-/// dilemma: needs manual verification.
+/// CR 700.17 (edition effective 2026-11-06) + CR 603.2: the dilemma is a game
+/// event as the modes are announced; abilities that trigger on it ("whenever you
+/// face a dilemma") trigger now.
 pub(crate) fn emit_face_dilemma_event(
     chooser: PlayerId,
     events: &mut Vec<crate::types::events::GameEvent>,
@@ -1703,9 +1703,9 @@ pub(crate) fn emit_face_dilemma_event(
     });
 }
 
-/// CR 601.2i + CR 602.2b + CR 733.1: record the dilemma in the per-turn history
-/// once the announcement that faced it has reached the stack, so an undone
-/// announcement records nothing. Face a dilemma: needs manual verification.
+/// CR 700.17 (edition effective 2026-11-06) + CR 601.2i + CR 602.2b + CR 733.1:
+/// record the dilemma in the per-turn history once the announcement that faced
+/// it has reached the stack, so an undone announcement records nothing.
 pub(crate) fn record_face_dilemma_after_stack_placement(
     state: &mut GameState,
     chooser: Option<PlayerId>,

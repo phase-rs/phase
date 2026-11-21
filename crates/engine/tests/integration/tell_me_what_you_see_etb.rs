@@ -13,8 +13,14 @@
 //!
 //! The ETB targets one opponent as it is put on the stack (CR 115.1d); only that
 //! opponent decides. The dilemma bounce is covered in `face_a_dilemma.rs`.
+//!
+//! Every named card below (Tell Me What You See, Leyline of Sanctity) is the
+//! printed card, added from the curated card database through `add_real_card`;
+//! the enchantment's printed {1}{B} is paid with basic lands.
 
+use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::{ContinuousModification, Duration, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
@@ -22,13 +28,12 @@ use engine::types::events::PlayerActionKind;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::ManaCost;
+use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 
-const TELL_ME: &str = "When this enchantment enters, target opponent may have you draw a card. If they don't, they lose 4 life and you surveil 1.\nWhenever you face a dilemma, you may return this enchantment to its owner's hand. (You face a dilemma as you choose one or more modes for a spell or ability.)";
-
-const LEYLINE: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nYou have hexproof. (You can't be the target of spells or abilities your opponents control.)";
+use crate::support::shared_card_db;
 
 /// Every prompt the trigger raised, in order, with its actor.
 #[derive(Debug, Default)]
@@ -41,13 +46,17 @@ struct Record {
     surveil_actors: Vec<PlayerId>,
 }
 
-fn scenario(player_count: u8) -> (GameRunner, ObjectId) {
-    scenario_with_leylines(player_count, &[])
+fn scenario(player_count: u8, db: &CardDatabase) -> (GameRunner, ObjectId) {
+    scenario_with_leylines(player_count, &[], db)
 }
 
 /// `scenario`, with Leyline of Sanctity (CR 702.11c: its controller has
 /// hexproof) on the battlefield under each player in `leylines`.
-fn scenario_with_leylines(player_count: u8, leylines: &[PlayerId]) -> (GameRunner, ObjectId) {
+fn scenario_with_leylines(
+    player_count: u8,
+    leylines: &[PlayerId],
+    db: &CardDatabase,
+) -> (GameRunner, ObjectId) {
     let mut scenario = if player_count == 2 {
         GameScenario::new()
     } else {
@@ -61,13 +70,13 @@ fn scenario_with_leylines(player_count: u8, leylines: &[PlayerId]) -> (GameRunne
         }
     }
     for &player in leylines {
-        scenario.add_enchantment_from_oracle(player, "Leyline of Sanctity", LEYLINE);
+        scenario.add_real_card(player, "Leyline of Sanctity", Zone::Battlefield, db);
     }
-    let card = scenario
-        .add_spell_to_hand_from_oracle(P0, "Tell Me What You See", false, TELL_ME)
-        .as_enchantment()
-        .with_mana_cost(ManaCost::zero())
-        .id();
+    // Tell Me What You See's printed cost is {1}{B}: one land per shard and
+    // per generic.
+    scenario.add_basic_land(P0, ManaColor::Black);
+    scenario.add_basic_land(P0, ManaColor::Black);
+    let card = scenario.add_real_card(P0, "Tell Me What You See", Zone::Hand, db);
     (scenario.build(), card)
 }
 
@@ -162,7 +171,8 @@ fn cast_and_resolve_with(
 /// surveils and the controller does not draw.
 #[test]
 fn decline_opponent_loses_four_and_controller_surveils_one() {
-    let (mut runner, card) = scenario(2);
+    let Some(db) = shared_card_db() else { return; };
+    let (mut runner, card) = scenario(2, db);
     let p0_life = runner.life(P0);
     let p1_life = runner.life(P1);
     let p0_hand_after_cast = hand_len(&runner, P0) - 1;
@@ -197,7 +207,8 @@ fn decline_opponent_loses_four_and_controller_surveils_one() {
 /// surveil 1" is the "If they don't" effect.
 #[test]
 fn accept_controller_draws_one_and_nobody_surveils() {
-    let (mut runner, card) = scenario(2);
+    let Some(db) = shared_card_db() else { return; };
+    let (mut runner, card) = scenario(2, db);
     let p0_life = runner.life(P0);
     let p1_life = runner.life(P1);
     let p0_hand_after_cast = hand_len(&runner, P0) - 1;
@@ -229,7 +240,8 @@ fn accept_controller_draws_one_and_nobody_surveils() {
 /// a legal target for the enters trigger.
 #[test]
 fn enters_trigger_offers_only_opponents_as_targets() {
-    let (mut runner, card) = scenario(2);
+    let Some(db) = shared_card_db() else { return; };
+    let (mut runner, card) = scenario(2, db);
     let p1_life = runner.life(P1);
     let record = cast_and_resolve(&mut runner, card, P1, false);
     eprintln!(
@@ -260,7 +272,8 @@ fn enters_trigger_offers_only_opponents_as_targets() {
 #[test]
 fn three_players_only_the_targeted_opponent_decides() {
     const P2: PlayerId = PlayerId(2);
-    let (mut runner, card) = scenario(3);
+    let Some(db) = shared_card_db() else { return; };
+    let (mut runner, card) = scenario(3, db);
     let p0_life = runner.life(P0);
     let p1_life = runner.life(P1);
     let p2_life = runner.life(P2);
@@ -284,7 +297,8 @@ fn three_players_only_the_targeted_opponent_decides() {
 #[test]
 fn three_players_accept_targets_one_opponent_and_controller_draws() {
     const P2: PlayerId = PlayerId(2);
-    let (mut runner, card) = scenario(3);
+    let Some(db) = shared_card_db() else { return; };
+    let (mut runner, card) = scenario(3, db);
     let lives = [runner.life(P0), runner.life(P1), runner.life(P2)];
     let p0_hand_after_cast = hand_len(&runner, P0) - 1;
     let record = cast_and_resolve(&mut runner, card, P2, true);
@@ -307,7 +321,8 @@ fn three_players_accept_targets_one_opponent_and_controller_draws() {
 #[test]
 fn no_legal_target_removes_the_enters_trigger() {
     const P2: PlayerId = PlayerId(2);
-    let (mut runner, card) = scenario_with_leylines(3, &[P1, P2]);
+    let Some(db) = shared_card_db() else { return; };
+    let (mut runner, card) = scenario_with_leylines(3, &[P1, P2], db);
     let lives = [runner.life(P0), runner.life(P1), runner.life(P2)];
     let p0_hand_after_cast = hand_len(&runner, P0) - 1;
     let record = cast_and_resolve(&mut runner, card, P2, false);
@@ -317,7 +332,7 @@ fn no_legal_target_removes_the_enters_trigger() {
     assert_eq!(hand_len(&runner, P0), p0_hand_after_cast);
     assert_eq!([runner.life(P0), runner.life(P1), runner.life(P2)], lives);
 
-    let (mut runner, card) = scenario_with_leylines(3, &[P1]);
+    let (mut runner, card) = scenario_with_leylines(3, &[P1], db);
     let lives = [runner.life(P0), runner.life(P1), runner.life(P2)];
     let record = cast_and_resolve(&mut runner, card, P2, false);
     assert!(record.target_prompts.is_empty(), "{record:?}");
@@ -336,7 +351,8 @@ fn no_legal_target_removes_the_enters_trigger() {
 #[test]
 fn target_illegal_on_resolution_does_nothing() {
     const P2: PlayerId = PlayerId(2);
-    let (mut runner, card) = scenario(3);
+    let Some(db) = shared_card_db() else { return; };
+    let (mut runner, card) = scenario(3, db);
     let lives = [runner.life(P0), runner.life(P1), runner.life(P2)];
     let p0_hand_after_cast = hand_len(&runner, P0) - 1;
     let record = cast_and_resolve_with(&mut runner, card, P2, false, |runner| {

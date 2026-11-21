@@ -159,9 +159,9 @@ pub(crate) fn handle_select_modes(
     // finish_pending_cast_cost_or_pay, deferred-X and deferred-target-selection via
     // PendingCast::new), so the top-level context carries the count to finalize.
     resolved.context.chosen_modes = sorted_indices.clone();
-    // CR 601.2b + CR 700.2a + CR 700.2e + CR 603.2: the mode chooser faces one
-    // dilemma as the modes are announced (face a dilemma: needs manual
-    // verification). Latch it for the placement commit, and stage a spell's
+    // CR 700.17 (edition effective 2026-11-06) + CR 601.2b + CR 700.2a + CR 700.2e
+    // + CR 603.2: the mode chooser faces one dilemma as the modes are announced.
+    // Latch it for the placement commit, and stage a spell's
     // triggers against the board now; an activation's custody is `end_action`.
     let dilemma_chooser = super::ability_utils::mode_choice_dilemma_chooser(mode_chooser, &indices);
     resolved.context.mode_chooser = dilemma_chooser;

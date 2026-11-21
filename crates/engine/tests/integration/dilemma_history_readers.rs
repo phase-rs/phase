@@ -1,7 +1,7 @@
-//! Readers of the per-turn dilemma history (TRK "face a dilemma"; you face a
-//! dilemma as you choose one or more modes for a spell or ability — needs
-//! manual verification, no CR rule names it; the mode choices are CR 700.2a /
-//! CR 700.2b).
+//! Readers of the per-turn dilemma history (CR 700.17, edition effective
+//! 2026-11-06; the repo's pinned edition predates it: "faced a dilemma this
+//! turn" means the player chose modes for a spell or ability this turn; the
+//! mode choices are CR 700.2a / CR 700.2b).
 //!
 //! - Captain Benjamin Sisko: "At the beginning of your end step, create a 1/1
 //!   red Officer creature token for each dilemma you've faced this turn."
@@ -11,40 +11,24 @@
 //!   mana cost." The "if" is an intervening-if (CR 603.4); the free cast is
 //!   CR 608.2g.
 //!
-//! Both read the controller's own history, which starts empty each turn.
+//! Every named card below is the printed card, added from the curated card
+//! database through `add_real_card`; Abzan Charm's printed {W}{B}{G} is paid
+//! with basic lands.
 
+use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastOfferKind, CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-const SISKO: &str = "At the beginning of your end step, create a 1/1 red Officer creature token for each dilemma you've faced this turn.\n{2}{W}{U}{B}{R}{G}, {T}: Exile the top five cards of your library. You may cast any number of spells with mana value less than or equal to the number of Officers you control from among those cards without paying their mana costs.";
-const CARETAKER: &str = "Vigilance, ward {2}\nAt the beginning of each end step, if you faced a dilemma this turn, target opponent exiles cards from the top of their library until they exile a nonland card. You may cast that card without paying its mana cost. (You face a dilemma as you choose one or more modes for a spell or ability.)";
-const ABZAN_CHARM: &str = "Choose one —\n• Exile target creature with power 3 or greater.\n• You draw two cards and you lose 2 life.\n• Distribute two +1/+1 counters among one or two target creatures.";
-const SACRED_NECTAR: &str = "You gain 4 life.";
-const ANGELS_MERCY: &str = "You gain 7 life.";
-
-/// Sacred Nectar's printed cost, {1}{W} (mana value 2).
-fn sacred_nectar_cost() -> ManaCost {
-    ManaCost::Cost {
-        shards: vec![ManaCostShard::White],
-        generic: 1,
-    }
-}
-
-/// Angel's Mercy's printed cost, {2}{W}{W} (mana value 4).
-fn angels_mercy_cost() -> ManaCost {
-    ManaCost::Cost {
-        shards: vec![ManaCostShard::White, ManaCostShard::White],
-        generic: 2,
-    }
-}
+use crate::support::shared_card_db;
 
 #[derive(Default)]
 struct Plan {
@@ -156,7 +140,19 @@ fn officers(runner: &GameRunner) -> usize {
         .count()
 }
 
-fn sisko_board(charms: usize) -> (GameRunner, Vec<ObjectId>) {
+/// `add_real_card` stages a pre-existing permanent (not summoning-sick). Mark
+/// `id` as having entered this turn (CR 302.6) so a turn walk's
+/// declare-attackers step has no candidate and the engine auto-submits the
+/// empty declaration (CR 508.1a): the walk reaches the end step without an
+/// attack prompt.
+fn mark_entered_this_turn(runner: &mut GameRunner, id: ObjectId) {
+    let turn = runner.state().turn_number;
+    let object = runner.state_mut().objects.get_mut(&id).unwrap();
+    object.entered_battlefield_turn = Some(turn);
+    object.summoning_sick = true;
+}
+
+fn sisko_board(charms: usize, db: &CardDatabase) -> (GameRunner, Vec<ObjectId>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     for player in [P0, P1] {
@@ -168,27 +164,26 @@ fn sisko_board(charms: usize) -> (GameRunner, Vec<ObjectId>) {
             );
         }
     }
-    // Summoning sick, so the turn walks to the end step without an attack
-    // declaration.
-    scenario
-        .add_creature_from_oracle(P0, "Captain Benjamin Sisko", 2, 2, SISKO)
-        .with_subtypes(vec!["Human", "Officer"])
-        .with_summoning_sickness();
+    let sisko = scenario.add_real_card(P0, "Captain Benjamin Sisko", Zone::Battlefield, db);
     let charms = (0..charms)
         .map(|_| {
-            scenario
-                .add_spell_to_hand_from_oracle(P0, "Abzan Charm", true, ABZAN_CHARM)
-                .with_mana_cost(ManaCost::zero())
-                .id()
+            // Abzan Charm's printed cost is {W}{B}{G}: one land per shard.
+            scenario.add_basic_land(P0, ManaColor::White);
+            scenario.add_basic_land(P0, ManaColor::Black);
+            scenario.add_basic_land(P0, ManaColor::Green);
+            scenario.add_real_card(P0, "Abzan Charm", Zone::Hand, db)
         })
         .collect();
-    (scenario.build(), charms)
+    let mut runner = scenario.build();
+    mark_entered_this_turn(&mut runner, sisko);
+    (runner, charms)
 }
 
 /// S1 — one Officer per dilemma faced this turn: two dilemmas, two Officers.
 #[test]
 fn sisko_creates_an_officer_per_dilemma() {
-    let (mut runner, charms) = sisko_board(2);
+    let Some(db) = shared_card_db() else { return; };
+    let (mut runner, charms) = sisko_board(2, db);
     for charm in charms {
         face_one_dilemma(&mut runner, charm);
     }
@@ -201,7 +196,8 @@ fn sisko_creates_an_officer_per_dilemma() {
 /// S2 — no dilemma this turn, no Officer.
 #[test]
 fn sisko_creates_nothing_without_a_dilemma() {
-    let (mut runner, _) = sisko_board(0);
+    let Some(db) = shared_card_db() else { return; };
+    let (mut runner, _) = sisko_board(0, db);
     runner.advance_to_end_step();
     drive(&mut runner, Plan::default());
     assert_eq!(officers(&runner), 0);
@@ -211,7 +207,8 @@ fn sisko_creates_nothing_without_a_dilemma() {
 /// at a later end step of P0's.
 #[test]
 fn sisko_counts_only_this_turns_dilemmas() {
-    let (mut runner, charms) = sisko_board(1);
+    let Some(db) = shared_card_db() else { return; };
+    let (mut runner, charms) = sisko_board(1, db);
     face_one_dilemma(&mut runner, charms[0]);
     runner.advance_to_end_step();
     drive(&mut runner, Plan::default());
@@ -234,27 +231,25 @@ fn sisko_counts_only_this_turns_dilemmas() {
     assert_eq!(officers(&runner), 1, "no Officer for last turn's dilemma");
 }
 
-fn caretaker_board() -> (GameRunner, ObjectId) {
+fn caretaker_board(db: &CardDatabase) -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     for index in 0..5 {
         scenario.add_spell_to_library_top(P0, &format!("P0 Library {index}"), false);
     }
     // P1's library top reads: land, land, Sacred Nectar (a sorcery).
-    scenario
-        .add_spell_to_library_top(P1, "Sacred Nectar", false)
-        .with_mana_cost(sacred_nectar_cost())
-        .from_oracle_text(SACRED_NECTAR);
+    scenario.add_real_card(P1, "Sacred Nectar", Zone::Library, db);
     scenario.add_land_to_library_top(P1, "P1 Land A");
     scenario.add_land_to_library_top(P1, "P1 Land B");
-    scenario
-        .add_creature_from_oracle(P0, "The Caretaker", 5, 6, CARETAKER)
-        .with_summoning_sickness();
-    let charm = scenario
-        .add_spell_to_hand_from_oracle(P0, "Abzan Charm", true, ABZAN_CHARM)
-        .with_mana_cost(ManaCost::zero())
-        .id();
-    (scenario.build(), charm)
+    let caretaker = scenario.add_real_card(P0, "The Caretaker", Zone::Battlefield, db);
+    // Abzan Charm's printed cost is {W}{B}{G}: one land per shard.
+    scenario.add_basic_land(P0, ManaColor::White);
+    scenario.add_basic_land(P0, ManaColor::Black);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let charm = scenario.add_real_card(P0, "Abzan Charm", Zone::Hand, db);
+    let mut runner = scenario.build();
+    mark_entered_this_turn(&mut runner, caretaker);
+    (runner, charm)
 }
 
 fn exiled(runner: &GameRunner, name: &str) -> bool {
@@ -270,7 +265,8 @@ fn exiled(runner: &GameRunner, name: &str) -> bool {
 /// gains 4).
 #[test]
 fn caretaker_exiles_until_nonland_and_offers_the_free_cast() {
-    let (mut runner, charm) = caretaker_board();
+    let Some(db) = shared_card_db() else { return; };
+    let (mut runner, charm) = caretaker_board(db);
     face_one_dilemma(&mut runner, charm);
     let life = runner.life(P0);
     runner.advance_to_end_step();
@@ -290,7 +286,8 @@ fn caretaker_exiles_until_nonland_and_offers_the_free_cast() {
 /// C2 — CR 603.4: with no dilemma this turn the ability does not trigger.
 #[test]
 fn caretaker_does_not_trigger_without_a_dilemma() {
-    let (mut runner, _) = caretaker_board();
+    let Some(db) = shared_card_db() else { return; };
+    let (mut runner, _) = caretaker_board(db);
     let life = runner.life(P0);
     runner.advance_to_end_step();
     let record = drive(&mut runner, Plan::default());
@@ -307,23 +304,15 @@ fn caretaker_does_not_trigger_without_a_dilemma() {
 /// castable; Angel's Mercy (mana value 4, one over the count) is not.
 #[test]
 fn sisko_casts_only_spells_within_the_officer_count() {
+    let Some(db) = shared_card_db() else { return; };
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     for index in 0..3 {
         scenario.add_spell_to_library_top(P0, &format!("P0 Filler {index}"), false);
     }
-    scenario
-        .add_spell_to_library_top(P0, "Angel's Mercy", true)
-        .with_mana_cost(angels_mercy_cost())
-        .from_oracle_text(ANGELS_MERCY);
-    scenario
-        .add_spell_to_library_top(P0, "Sacred Nectar", false)
-        .with_mana_cost(sacred_nectar_cost())
-        .from_oracle_text(SACRED_NECTAR);
-    let sisko = scenario
-        .add_creature_from_oracle(P0, "Captain Benjamin Sisko", 2, 2, SISKO)
-        .with_subtypes(vec!["Human", "Officer"])
-        .id();
+    scenario.add_real_card(P0, "Angel's Mercy", Zone::Library, db);
+    scenario.add_real_card(P0, "Sacred Nectar", Zone::Library, db);
+    let sisko = scenario.add_real_card(P0, "Captain Benjamin Sisko", Zone::Battlefield, db);
     for _ in 0..2 {
         scenario
             .add_creature(P0, "Officer", 1, 1)
@@ -417,7 +406,8 @@ fn drive_casting_from_among(runner: &mut GameRunner) -> FromAmong {
 /// modal spell) makes The Caretaker trigger at P1's end step.
 #[test]
 fn caretaker_triggers_at_an_opponents_end_step() {
-    let (mut runner, charm) = caretaker_board();
+    let Some(db) = shared_card_db() else { return; };
+    let (mut runner, charm) = caretaker_board(db);
     for _ in 0..64 {
         if runner.state().active_player == P1 && runner.state().phase == Phase::PreCombatMain {
             break;

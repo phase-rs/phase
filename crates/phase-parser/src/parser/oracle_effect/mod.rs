@@ -33754,9 +33754,6 @@ fn lower_subject_predicate_ast_player_seeded(
     }
 }
 
-/// The body of [`lower_subject_predicate_ast`]. `seeded` is the subject
-/// antecedent the entry wrote into the context (whichever field carries it), or
-/// `None` when the entry seeded nothing.
 /// CR 115.1 + CR 608.2d + CR 118.12: "target opponent may have <causee>
 /// <predicate>" — the subject declares the targeted opponent (a `TargetOnly`
 /// root) who decides; the causee performs the predicate as a continuation step
@@ -33798,24 +33795,24 @@ fn lower_targeted_opponent_causative(
     // The last ctx write before return, so it wins over any value the predicate
     // parse left: the class predicates mint no player group of their own.
     ctx.clause_declared_group = Some(group);
-    let inner = ability_definition_from_clause(AbilityKind::Spell, parsed);
-    ParsedEffectClause {
-        optional_targeting: false,
-        unlowered_guard: None,
-        effect: Effect::TargetOnly {
-            target: declared.clone(),
-        },
-        duration: None,
-        sub_ability: Some(Box::new(inner)),
-        distribute: None,
-        multi_target: subject.multi_target.clone(),
-        condition: None,
-        optional: subject.is_optional,
-        unless_pay: None,
-        entry_onset: ContinuousEffectOnset::WhenFollowed,
-    }
+    let (inner, history) = ability_definition_from_clause(AbilityKind::Spell, parsed);
+    let mut clause = parsed_clause(Effect::TargetOnly {
+        target: declared.clone(),
+    });
+    clause.sub_ability = Some(Box::new(inner));
+    clause.multi_target = subject.multi_target.clone();
+    clause.optional = subject.is_optional;
+    carry_nested_clause_history(
+        &mut clause.history,
+        history,
+        crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+    );
+    clause
 }
 
+/// The body of [`lower_subject_predicate_ast`]. `seeded` is the subject
+/// antecedent the entry wrote into the context (whichever field carries it), or
+/// `None` when the entry seeded nothing.
 fn lower_subject_predicate_ast_body(
     subject: SubjectPhraseAst,
     predicate: PredicateAst,

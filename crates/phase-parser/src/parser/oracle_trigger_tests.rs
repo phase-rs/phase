@@ -17882,9 +17882,9 @@ fn trigger_you_proliferate() {
     );
 }
 
-/// CR 700.2a + CR 700.2b: "Whenever you face a dilemma" (TRK; you face a
-/// dilemma as you choose one or more modes — needs manual verification) is the
-/// generic player-action trigger for `PlayerActionKind::FaceDilemma`.
+/// CR 700.17 (edition effective 2026-11-06): "Whenever you face a dilemma" (you
+/// face a dilemma as you choose one or more modes) is the generic player-action
+/// trigger for `PlayerActionKind::FaceDilemma`.
 #[test]
 fn trigger_you_face_a_dilemma_uses_generic_player_action_path() {
     let def = parse_trigger_line(

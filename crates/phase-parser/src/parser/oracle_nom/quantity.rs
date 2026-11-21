@@ -6158,10 +6158,10 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     )
 }
 
-/// CR 700.2a + CR 700.2b: "dilemma you've faced this turn" (after "for each ")
-/// — the controller's faced dilemmas this turn, one per mode-choice
-/// announcement (TRK "face a dilemma"; needs manual verification). "This turn"
-/// is the count's own window, so it is consumed here.
+/// CR 700.17 (edition effective 2026-11-06): "dilemma you've faced this turn"
+/// (after "for each ") — the controller's faced dilemmas this turn, one per
+/// spell or ability whose modes were chosen. "This turn" is the count's own
+/// window, so it is consumed here.
 fn parse_for_each_dilemma_faced_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
     value(
         QuantityRef::PlayerActionsThisTurn {

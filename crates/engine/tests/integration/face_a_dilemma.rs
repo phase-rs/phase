@@ -1,6 +1,7 @@
-//! "Whenever you face a dilemma" (TRK). The reminder text reads: "You face a
-//! dilemma as you choose one or more modes for a spell or ability." No CR rule
-//! names it (needs manual verification); the mode choices it reads are CR
+//! "Whenever you face a dilemma" (TRK). CR 700.17 (edition effective
+//! 2026-11-06; the repo's pinned edition predates it): "A player faces a
+//! dilemma whenever they choose one or more modes for a spell or ability." The
+//! mode choices it reads are CR
 //! 700.2a (spells and activated abilities, CR 601.2b / CR 602.2b), CR 700.2b
 //! (triggered abilities, CR 603.3c) and CR 700.2e (a player other than the
 //! controller chooses).
@@ -9,13 +10,18 @@
 //! event happens as the modes are announced (CR 603.2); the per-turn history is
 //! written once the announcement reaches the stack (CR 601.2i + CR 733.1: an
 //! undone announcement records nothing). Copies (CR 707.10, CR 700.2g) face
-//! no dilemma (engine policy, needs manual verification). Modes drawn at
+//! no dilemma (a copy copies the chosen modes and chooses none, CR 700.2g). Modes drawn at
 //! random are still the controller's choice (CR 700.2b), so a nonempty random
 //! draw faces one.
 //!
-//! Every card below is built from its verbatim Oracle text.
+//! Every named card below is the printed card, added from the curated card
+//! database through `add_real_card`; its printed cost is paid with basic lands.
+//! Textless fillers (vanilla creatures, library cards, basic lands) remain
+//! scenario builders.
 
+use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
@@ -23,30 +29,12 @@ use engine::types::counter::CounterType;
 use engine::types::events::PlayerActionKind;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost};
+use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-const SEVEN_OF_NINE: &str = "Whenever you face a dilemma, draw a card. (You face a dilemma as you choose one or more modes for a spell or ability.)";
-const OBSIDIAN_ORDER_OPERATIVE: &str = "Whenever you face a dilemma, each opponent loses 1 life and you gain 1 life. (You face a dilemma as you choose one or more modes for a spell or ability.)";
-const JETT_RENO: &str = "Whenever Jett Reno becomes tapped, surveil 1. If her power is 4 or greater, instead draw a card.\nWhenever you face a dilemma, put a +1/+1 counter on Jett Reno. (You face a dilemma as you choose one or more modes for a spell or ability.)";
-const ELIM_GARAK: &str = "Menace\nWhenever you face a dilemma, each opponent loses 2 life and you gain 2 life. (You face a dilemma as you choose one or more modes for a spell or ability.)";
-const MELKOTIAN_ADJUDICATOR: &str = "Flying, vigilance\nWhenever you face a dilemma, put a +1/+1 counter on this creature. (You face a dilemma as you choose one or more modes for a spell or ability.)";
-const GABRIEL_LORCA: &str = "Menace\nWhenever you face a dilemma, you may pay {B}. If you do, return this card from your graveyard to your hand. (You face a dilemma as you choose one or more modes for a spell or ability.)";
-const TELL_ME: &str = "When this enchantment enters, target opponent may have you draw a card. If they don't, they lose 4 life and you surveil 1.\nWhenever you face a dilemma, you may return this enchantment to its owner's hand. (You face a dilemma as you choose one or more modes for a spell or ability.)";
-
-const ABZAN_CHARM: &str = "Choose one —\n• Exile target creature with power 3 or greater.\n• You draw two cards and you lose 2 life.\n• Distribute two +1/+1 counters among one or two target creatures.";
-const ATARKAS_COMMAND: &str = "Choose two —\n• Your opponents can't gain life this turn.\n• Atarka's Command deals 3 damage to each opponent.\n• You may put a land card from your hand onto the battlefield.\n• Creatures you control get +1/+1 and gain reach until end of turn.";
-const CANKERBLOOM: &str = "{1}, Sacrifice this creature: Choose one —\n• Destroy target artifact.\n• Destroy target enchantment.\n• Proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)";
-const CHARMING_PRINCE: &str = "When this creature enters, choose one —\n• Scry 2.\n• You gain 3 life.\n• Exile another target creature you own. Return it to the battlefield under your control at the beginning of the next end step.";
-const FATAL_LORE: &str = "An opponent chooses one —\n• You draw three cards.\n• You destroy up to two target creatures that player controls. They can't be regenerated. That player draws up to three cards.";
-const TWINCAST: &str =
-    "Copy target instant or sorcery spell. You may choose new targets for the copy.";
-const CULT_OF_SKARO: &str = "Whenever Cult of Skaro attacks, choose one at random —\n• Thay — Put a +1/+1 counter on each artifact creature you control.\n• Caan — Draw two cards.\n• Sec — Create a 3/3 black Dalek artifact creature token with menace.\n• Jast — Each opponent loses 4 life.";
-const CALL_DAMAGE_CONTROL: &str = "Choose up to two. Return those cards from your graveyard to your hand.\n• Target artifact card.\n• Target creature card.\n• Target enchantment card.\n• Target land card.";
-const CHAOS_WAND: &str = "{4}, {T}: Target opponent exiles cards from the top of their library until they exile an instant or sorcery card. You may cast that card without paying its mana cost. Then put the exiled cards that weren't cast this way on the bottom of that library in a random order.";
-const LOBELIA: &str = "When Lobelia enters, look at the top card of each opponent's library and exile those cards face down.\n{T}, Sacrifice an artifact: Choose one —\n• Until end of turn, you may play a card exiled with Lobelia without paying its mana cost.\n• Each opponent loses 2 life and you gain 2 life.";
+use crate::support::shared_card_db;
 
 /// `player`'s faced dilemmas in the per-turn history.
 fn dilemmas(runner: &GameRunner, player: PlayerId) -> usize {
@@ -86,18 +74,16 @@ fn board() -> GameScenario {
     scenario
 }
 
-fn add_seven(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
-    scenario
-        .add_creature_from_oracle(player, "Seven of Nine", 2, 4, SEVEN_OF_NINE)
-        .as_artifact_creature()
-        .id()
+fn add_seven(scenario: &mut GameScenario, player: PlayerId, db: &CardDatabase) -> ObjectId {
+    scenario.add_real_card(player, "Seven of Nine", Zone::Battlefield, db)
 }
 
-fn add_abzan_charm(scenario: &mut GameScenario) -> ObjectId {
-    scenario
-        .add_spell_to_hand_from_oracle(P0, "Abzan Charm", true, ABZAN_CHARM)
-        .with_mana_cost(ManaCost::zero())
-        .id()
+/// Abzan Charm in P0's hand, with its printed {W}{B}{G} payable.
+fn add_abzan_charm(scenario: &mut GameScenario, db: &CardDatabase) -> ObjectId {
+    for color in [ManaColor::White, ManaColor::Black, ManaColor::Green] {
+        scenario.add_basic_land(P0, color);
+    }
+    scenario.add_real_card(P0, "Abzan Charm", Zone::Hand, db)
 }
 
 /// Prompts answered by `drive`, consumed in order; anything unplanned panics.
@@ -199,9 +185,10 @@ fn cast(runner: &mut GameRunner, spell: ObjectId) {
 /// of Nine draws once and the history records one dilemma.
 #[test]
 fn spell_mode_choice_faces_a_dilemma() {
+    let Some(db) = shared_card_db() else { return };
     let mut scenario = board();
-    add_seven(&mut scenario, P0);
-    let charm = add_abzan_charm(&mut scenario);
+    add_seven(&mut scenario, P0, db);
+    let charm = add_abzan_charm(&mut scenario, db);
     let mut runner = scenario.build();
     let hand = hand_len(&runner, P0);
     let life = runner.life(P0);
@@ -223,15 +210,14 @@ fn spell_mode_choice_faces_a_dilemma() {
 /// R2 — CR 700.2a + CR 700.2d: two modes chosen are one dilemma.
 #[test]
 fn two_modes_are_one_dilemma() {
+    let Some(db) = shared_card_db() else { return };
     let mut scenario = board();
-    add_seven(&mut scenario, P0);
-    let melkotian = scenario
-        .add_creature_from_oracle(P0, "Melkotian Adjudicator", 2, 1, MELKOTIAN_ADJUDICATOR)
-        .id();
-    let command = scenario
-        .add_spell_to_hand_from_oracle(P0, "Atarka's Command", true, ATARKAS_COMMAND)
-        .with_mana_cost(ManaCost::zero())
-        .id();
+    add_seven(&mut scenario, P0, db);
+    let melkotian = scenario.add_real_card(P0, "Melkotian Adjudicator", Zone::Battlefield, db);
+    // Atarka's Command {R}{G}.
+    scenario.add_basic_land(P0, ManaColor::Red);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let command = scenario.add_real_card(P0, "Atarka's Command", Zone::Hand, db);
     let mut runner = scenario.build();
     let hand = hand_len(&runner, P0);
     let p1_life = runner.life(P1);
@@ -257,11 +243,10 @@ fn two_modes_are_one_dilemma() {
 /// dilemma; the history is written when the ability reaches the stack.
 #[test]
 fn activated_mode_choice_faces_a_dilemma() {
+    let Some(db) = shared_card_db() else { return };
     let mut scenario = board();
-    add_seven(&mut scenario, P0);
-    let cankerbloom = scenario
-        .add_creature_from_oracle(P0, "Cankerbloom", 3, 2, CANKERBLOOM)
-        .id();
+    add_seven(&mut scenario, P0, db);
+    let cankerbloom = scenario.add_real_card(P0, "Cankerbloom", Zone::Battlefield, db);
     scenario.add_basic_land(P0, ManaColor::Green);
     let mut runner = scenario.build();
     let hand = hand_len(&runner, P0);
@@ -295,11 +280,10 @@ fn activated_mode_choice_faces_a_dilemma() {
 /// the battlefield when the event happened.
 #[test]
 fn trigger_source_sacrificed_as_the_cost_still_triggers() {
+    let Some(db) = shared_card_db() else { return };
     let mut scenario = board();
-    let seven = add_seven(&mut scenario, P0);
-    let lobelia = scenario
-        .add_creature_from_oracle(P0, "Lobelia, Defender of Bag End", 2, 2, LOBELIA)
-        .id();
+    let seven = add_seven(&mut scenario, P0, db);
+    let lobelia = scenario.add_real_card(P0, "Lobelia, Defender of Bag End", Zone::Battlefield, db);
     let mut runner = scenario.build();
     let hand = hand_len(&runner, P0);
     let lives = (runner.life(P0), runner.life(P1));
@@ -332,12 +316,14 @@ fn trigger_source_sacrificed_as_the_cost_still_triggers() {
 /// dilemma.
 #[test]
 fn triggered_mode_choice_faces_a_dilemma() {
+    let Some(db) = shared_card_db() else { return };
     let mut scenario = board();
-    add_seven(&mut scenario, P0);
-    let prince = scenario
-        .add_creature_to_hand_from_oracle(P0, "Charming Prince", 2, 2, CHARMING_PRINCE)
-        .with_mana_cost(ManaCost::zero())
-        .id();
+    add_seven(&mut scenario, P0, db);
+    // Charming Prince {1}{W}.
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let prince = scenario.add_real_card(P0, "Charming Prince", Zone::Hand, db);
     let mut runner = scenario.build();
     let hand = hand_len(&runner, P0);
     let life = runner.life(P0);
@@ -359,17 +345,12 @@ fn triggered_mode_choice_faces_a_dilemma() {
 /// Garak and Obsidian Order Operative, never P1's copies.
 #[test]
 fn only_the_choosers_dilemma_abilities_trigger() {
+    let Some(db) = shared_card_db() else { return };
     let mut scenario = board();
-    scenario.add_creature_from_oracle(P0, "Elim Garak, Simple Tailor", 3, 3, ELIM_GARAK);
-    scenario.add_creature_from_oracle(
-        P0,
-        "Obsidian Order Operative",
-        2,
-        5,
-        OBSIDIAN_ORDER_OPERATIVE,
-    );
-    scenario.add_creature_from_oracle(P1, "Elim Garak, Simple Tailor", 3, 3, ELIM_GARAK);
-    let charm = add_abzan_charm(&mut scenario);
+    scenario.add_real_card(P0, "Elim Garak, Simple Tailor", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Obsidian Order Operative", Zone::Battlefield, db);
+    scenario.add_real_card(P1, "Elim Garak, Simple Tailor", Zone::Battlefield, db);
+    let charm = add_abzan_charm(&mut scenario, db);
     let mut runner = scenario.build();
     let (p0, p1) = (runner.life(P0), runner.life(P1));
     cast(&mut runner, charm);
@@ -392,19 +373,15 @@ fn only_the_choosers_dilemma_abilities_trigger() {
 /// the dilemma, not the caster.
 #[test]
 fn the_mode_chooser_faces_the_dilemma_not_the_caster() {
+    let Some(db) = shared_card_db() else { return };
     let mut scenario = board();
-    add_seven(&mut scenario, P0);
-    scenario.add_creature_from_oracle(
-        P1,
-        "Obsidian Order Operative",
-        2,
-        5,
-        OBSIDIAN_ORDER_OPERATIVE,
-    );
-    let lore = scenario
-        .add_spell_to_hand_from_oracle(P0, "Fatal Lore", false, FATAL_LORE)
-        .with_mana_cost(ManaCost::zero())
-        .id();
+    add_seven(&mut scenario, P0, db);
+    scenario.add_real_card(P1, "Obsidian Order Operative", Zone::Battlefield, db);
+    // Fatal Lore {2}{B}{B}.
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, ManaColor::Black);
+    }
+    let lore = scenario.add_real_card(P0, "Fatal Lore", Zone::Hand, db);
     let mut runner = scenario.build();
     let hand = hand_len(&runner, P0);
     let (p0, p1) = (runner.life(P0), runner.life(P1));
@@ -426,16 +403,17 @@ fn the_mode_chooser_faces_the_dilemma_not_the_caster() {
 /// R9 — CR 707.10 + CR 700.2g: a copy copies the modes and faces no dilemma.
 #[test]
 fn a_copy_faces_no_dilemma() {
+    let Some(db) = shared_card_db() else { return };
     let mut scenario = board();
-    add_seven(&mut scenario, P0);
-    let command = scenario
-        .add_spell_to_hand_from_oracle(P0, "Atarka's Command", true, ATARKAS_COMMAND)
-        .with_mana_cost(ManaCost::zero())
-        .id();
-    let twincast = scenario
-        .add_spell_to_hand_from_oracle(P0, "Twincast", true, TWINCAST)
-        .with_mana_cost(ManaCost::zero())
-        .id();
+    add_seven(&mut scenario, P0, db);
+    // Atarka's Command {R}{G}, Twincast {U}{U}.
+    scenario.add_basic_land(P0, ManaColor::Red);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let command = scenario.add_real_card(P0, "Atarka's Command", Zone::Hand, db);
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+    }
+    let twincast = scenario.add_real_card(P0, "Twincast", Zone::Hand, db);
     let mut runner = scenario.build();
     let hand = hand_len(&runner, P0);
     let p1 = runner.life(P1);
@@ -463,12 +441,13 @@ fn a_copy_faces_no_dilemma() {
 /// that is recorded, and its trigger never reaches the stack.
 #[test]
 fn a_cancelled_cast_records_no_dilemma() {
+    let Some(db) = shared_card_db() else { return };
     let mut scenario = board();
-    add_seven(&mut scenario, P0);
+    add_seven(&mut scenario, P0, db);
     // Two legal exile targets, so the target prompt is raised.
     scenario.add_creature(P1, "P1 Giant", 4, 4);
     scenario.add_creature(P1, "P1 Second Giant", 4, 4);
-    let charm = add_abzan_charm(&mut scenario);
+    let charm = add_abzan_charm(&mut scenario, db);
     let mut runner = scenario.build();
     let hand = hand_len(&runner, P0);
     cast(&mut runner, charm);
@@ -505,14 +484,13 @@ fn a_cancelled_cast_records_no_dilemma() {
 /// {B} returns it to its owner's hand.
 #[test]
 fn lorca_returns_from_the_graveyard_when_paid() {
+    let Some(db) = shared_card_db() else { return };
     for accept in [true, false] {
         let mut scenario = board();
-        let lorca = scenario
-            .add_creature_to_graveyard(P0, "Gabriel Lorca, Mirror Menace", 5, 4)
-            .from_oracle_text(GABRIEL_LORCA)
-            .id();
+        let lorca = scenario.add_real_card(P0, "Gabriel Lorca, Mirror Menace", Zone::Graveyard, db);
+        // Lorca's printed {B} in addition to Abzan Charm's {W}{B}{G}.
         scenario.add_basic_land(P0, ManaColor::Black);
-        let charm = add_abzan_charm(&mut scenario);
+        let charm = add_abzan_charm(&mut scenario, db);
         let mut runner = scenario.build();
         cast(&mut runner, charm);
         let record = drive(
@@ -539,8 +517,9 @@ fn lorca_returns_from_the_graveyard_when_paid() {
 /// card-level reading is Captain Benjamin Sisko's, phase 4).
 #[test]
 fn the_dilemma_history_resets_each_turn() {
+    let Some(db) = shared_card_db() else { return };
     let mut scenario = board();
-    let charm = add_abzan_charm(&mut scenario);
+    let charm = add_abzan_charm(&mut scenario, db);
     let mut runner = scenario.build();
     cast(&mut runner, charm);
     drive(
@@ -568,14 +547,11 @@ fn the_dilemma_history_resets_each_turn() {
 /// for one dilemma.
 #[test]
 fn counter_creatures_grow_once_per_dilemma() {
+    let Some(db) = shared_card_db() else { return };
     let mut scenario = board();
-    let jett = scenario
-        .add_creature_from_oracle(P0, "Jett Reno, Problem Solver", 1, 2, JETT_RENO)
-        .id();
-    let melkotian = scenario
-        .add_creature_from_oracle(P0, "Melkotian Adjudicator", 2, 1, MELKOTIAN_ADJUDICATOR)
-        .id();
-    let charm = add_abzan_charm(&mut scenario);
+    let jett = scenario.add_real_card(P0, "Jett Reno, Problem Solver", Zone::Battlefield, db);
+    let melkotian = scenario.add_real_card(P0, "Melkotian Adjudicator", Zone::Battlefield, db);
+    let charm = add_abzan_charm(&mut scenario, db);
     let mut runner = scenario.build();
     cast(&mut runner, charm);
     drive(
@@ -595,13 +571,10 @@ fn counter_creatures_grow_once_per_dilemma() {
 /// prompt.
 #[test]
 fn random_modes_face_a_dilemma() {
+    let Some(db) = shared_card_db() else { return };
     let mut scenario = board();
-    let cult = scenario
-        .add_creature_from_oracle(P0, "Cult of Skaro", 4, 4, CULT_OF_SKARO)
-        .as_artifact_creature()
-        .with_subtypes(vec!["Dalek"])
-        .id();
-    let seven = add_seven(&mut scenario, P0);
+    let cult = scenario.add_real_card(P0, "Cult of Skaro", Zone::Battlefield, db);
+    let seven = add_seven(&mut scenario, P0, db);
     let mut runner = scenario.build();
     let hand = hand_len(&runner, P0);
     let p1 = runner.life(P1);
@@ -635,12 +608,11 @@ fn random_modes_face_a_dilemma() {
 /// this enchantment to its owner's hand."
 #[test]
 fn tell_me_what_you_see_may_return_to_hand() {
+    let Some(db) = shared_card_db() else { return };
     for accept in [true, false] {
         let mut scenario = board();
-        let tell_me = scenario
-            .add_enchantment_from_oracle(P0, "Tell Me What You See", TELL_ME)
-            .id();
-        let charm = add_abzan_charm(&mut scenario);
+        let tell_me = scenario.add_real_card(P0, "Tell Me What You See", Zone::Battlefield, db);
+        let charm = add_abzan_charm(&mut scenario, db);
         let mut runner = scenario.build();
         cast(&mut runner, charm);
         let record = drive(
@@ -671,13 +643,15 @@ fn tell_me_what_you_see_may_return_to_hand() {
 /// to two" faces no dilemma. Positive: the same turn's Abzan Charm does.
 #[test]
 fn zero_modes_face_no_dilemma() {
+    let Some(db) = shared_card_db() else { return };
     let mut scenario = board();
-    add_seven(&mut scenario, P0);
-    let call = scenario
-        .add_spell_to_hand_from_oracle(P0, "Call Damage Control", false, CALL_DAMAGE_CONTROL)
-        .with_mana_cost(ManaCost::zero())
-        .id();
-    let charm = add_abzan_charm(&mut scenario);
+    add_seven(&mut scenario, P0, db);
+    // Call Damage Control {1}{G}.
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
+    let call = scenario.add_real_card(P0, "Call Damage Control", Zone::Hand, db);
+    let charm = add_abzan_charm(&mut scenario, db);
     let mut runner = scenario.build();
     let hand = hand_len(&runner, P0);
     cast(&mut runner, call);
@@ -714,17 +688,20 @@ fn zero_modes_face_no_dilemma() {
 /// own unit test in `phase-ast`; this row pins the end-to-end count.
 #[test]
 fn a_free_cast_during_resolution_records_one_dilemma() {
+    let Some(db) = shared_card_db() else { return };
     let mut scenario = board();
-    add_seven(&mut scenario, P0);
-    let wand = scenario
-        .add_artifact_from_oracle(P0, "Chaos Wand", CHAOS_WAND)
-        .id();
+    add_seven(&mut scenario, P0, db);
+    let wand = scenario.add_real_card(P0, "Chaos Wand", Zone::Battlefield, db);
+    // Chaos Wand's activation costs {4}.
     for _ in 0..4 {
         scenario.add_basic_land(P0, ManaColor::Green);
     }
-    scenario
-        .add_spell_to_library_top(P1, "Abzan Charm", true)
-        .from_oracle_text(ABZAN_CHARM);
+    // `add_real_card` appends to the library (the bottom); Chaos Wand exiles
+    // from the top, so re-seat the charm at index 0.
+    let charm = scenario.add_real_card(P1, "Abzan Charm", Zone::Library, db);
+    let library = scenario.state_mut().library_of_mut(P1);
+    library.retain(|&object| object != charm);
+    library.push_front(charm);
     let mut runner = scenario.build();
     let hand = hand_len(&runner, P0);
     let life = runner.life(P0);

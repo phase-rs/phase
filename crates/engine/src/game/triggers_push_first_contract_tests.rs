@@ -583,7 +583,7 @@ fn random_modal_trigger_resolves_without_prompting() {
     );
     // CR 700.2b: the controller still chooses the randomly drawn mode, so it
     // faces one dilemma — the event in the dispatch's event custody, and one
-    // history entry (face a dilemma: needs manual verification).
+    // history entry (CR 700.17, edition effective 2026-11-06).
     assert_eq!(face_dilemma_events(&events, PlayerId(0)), 1);
     assert_eq!(face_dilemma_history(&state, PlayerId(0)), 1);
 }
