@@ -105935,8 +105935,9 @@ fn each_target_player_keeps_life_and_permanent_actions_under_one_announcement() 
             Some(MultiTargetSpec::unlimited(0)),
             "{card}: {chain:#?}"
         );
-        // CR 608.2b: a sacrifice-first clause announces its players on a
-        // node of their own, so the permanent filter opens no target slot.
+        // CR 601.2c + CR 608.2d: the players are announced as targets, while
+        // the permanent is chosen during resolution, so a sacrifice-first
+        // clause announces its players on a node of their own.
         let first = match expected {
             Expected::SacrificeThenLose => {
                 assert!(
