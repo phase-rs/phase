@@ -1782,7 +1782,6 @@ face = [
   { key = "phyrexian harvester", class = "wrong_count", clauses = ["Whenever Phyrexian Harvester is dealt damage, seek that many nonland cards."] },
   { key = "phyrexian revoker", class = "dropped_qualifier", clauses = ["As this creature enters, choose a nonland card name."] },
   { key = "phyrexian unlife", class = "dropped_qualifier", clauses = ["You don't lose the game for having 0 or less life.", "As long as you have 0 or less life, all damage is dealt to you as though its source had infect."] },
-  { key = "phytotitan", class = "trigger_wrong", clauses = ["When this creature dies, return it to the battlefield tapped under its owner's control at the beginning of their next upkeep."] },
   { key = "pillar of flame", class = "dropped_qualifier", clauses = ["If a creature dealt damage this way would die this turn, exile it instead."] },
   { key = "pin collection", class = "missing_effect", clauses = ["When this Equipment enters, you may put an ability sticker with ticket cost X or less on it without paying that sticker's ticket cost.", "and has all abilities of ability stickers on this Equipment."] },
   { key = "pinchy mcstingbutt", class = "wrong_object", clauses = ["Whenever Pinchy McStingbutt deals combat damage to a player, conjure a card named Death of a Thousand Stings, Lethal Sting, or Stinging Shot at random into your hand", "and reveal it."] },
