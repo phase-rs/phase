@@ -71,8 +71,8 @@ use super::oracle_target::{
 };
 use super::oracle_util::{
     canonicalize_subtype_name, is_core_type_name, is_non_subtype_subject_name, merge_or_filters,
-    normalize_card_name_refs, parse_number, parse_ordinal, parse_subtype, strip_after,
-    strip_reminder_text, TextPair, GRANTING_SELF_PLACEHOLDER,
+    normalize_card_name_refs, parse_number, parse_ordinal, parse_ordinal_list, parse_subtype,
+    strip_after, strip_reminder_text, TextPair, GRANTING_SELF_PLACEHOLDER,
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::ManaProduction;
@@ -24019,6 +24019,20 @@ fn try_parse_nth_draw_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefini
     None
 }
 
+fn parse_nth_draw_ordinal(after: &str) -> Option<(u32, Comparator, &str)> {
+    let (ordinals, rest) = parse_ordinal_list(after)?;
+    match ordinals.as_slice() {
+        [single] => Some((*single, Comparator::EQ, rest)),
+        [first, .., last] => {
+            let contiguous = ordinals
+                .windows(2)
+                .all(|pair| pair[0].checked_add(1) == Some(pair[1]));
+            (contiguous && *first == 1).then_some((*last, Comparator::LE, rest))
+        }
+        [] => None,
+    }
+}
+
 /// "you draw your <ordinal> card each turn"
 ///
 /// CR 121.2 + CR 603.2: The "you" subject restricts the trigger to the
@@ -24028,14 +24042,14 @@ fn try_parse_nth_draw_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefini
 fn try_parse_nth_draw_you(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let prefix = "you draw your ";
     let after = strip_after(lower, prefix)?;
-    let (n, rest) = parse_ordinal(after)?;
+    let (n, comparator, rest) = parse_nth_draw_ordinal(after)?;
     let timing = classify_nth_draw_timing(rest)?;
     let mut def = make_base();
     def.mode = TriggerMode::Drawn;
     def.valid_target = Some(TargetFilter::Typed(
         TypedFilter::default().controller(ControllerRef::You),
     ));
-    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n });
+    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n, comparator });
     def.condition = timing_condition(timing);
     Some((TriggerMode::Drawn, def))
 }
@@ -24044,14 +24058,14 @@ fn try_parse_nth_draw_you(lower: &str) -> Option<(TriggerMode, TriggerDefinition
 fn try_parse_nth_draw_opponent(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let prefix = "an opponent draws their ";
     let after = strip_after(lower, prefix)?;
-    let (n, rest) = parse_ordinal(after)?;
+    let (n, comparator, rest) = parse_nth_draw_ordinal(after)?;
     let timing = classify_nth_draw_timing(rest)?;
     let mut def = make_base();
     def.mode = TriggerMode::Drawn;
     def.valid_target = Some(TargetFilter::Typed(
         TypedFilter::default().controller(ControllerRef::Opponent),
     ));
-    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n });
+    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n, comparator });
     def.condition = timing_condition(timing);
     Some((TriggerMode::Drawn, def))
 }
@@ -24061,11 +24075,11 @@ fn try_parse_nth_draw_opponent(lower: &str) -> Option<(TriggerMode, TriggerDefin
 fn try_parse_nth_draw_any_player(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let prefix = "a player draws their ";
     let after = strip_after(lower, prefix)?;
-    let (n, rest) = parse_ordinal(after)?;
+    let (n, comparator, rest) = parse_nth_draw_ordinal(after)?;
     let timing = classify_nth_draw_timing(rest)?;
     let mut def = make_base();
     def.mode = TriggerMode::Drawn;
-    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n });
+    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n, comparator });
     def.condition = timing_condition(timing);
     Some((TriggerMode::Drawn, def))
 }

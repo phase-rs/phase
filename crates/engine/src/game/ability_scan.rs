@@ -5485,9 +5485,10 @@ fn scan_trigger_constraint(x: &TriggerConstraint, mode: ScanMode) -> Axes<'_> {
         }
         // Turn/phase windows, a draw ordinal, and class levels: literal thresholds only. No
         // filter, no board aggregate, no player resource.
-        TriggerConstraint::NthDrawThisTurn { n: _ } => {
-            Axes::history_of(HistoryMember::CardsDrawnThisTurn)
-        }
+        TriggerConstraint::NthDrawThisTurn {
+            n: _,
+            comparator: _,
+        } => Axes::history_of(HistoryMember::CardsDrawnThisTurn),
         TriggerConstraint::OnlyDuringYourTurn
         | TriggerConstraint::OnlyDuringOpponentsTurn
         | TriggerConstraint::OnlyDuringYourMainPhase

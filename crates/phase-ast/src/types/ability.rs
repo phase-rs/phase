@@ -41874,13 +41874,14 @@ pub enum ReplacementCondition {
     Unrecognized { text: String },
 }
 
-/// The historical wire shape of `NthSpellThisTurn` represented an exact ordinal.
+/// The historical wire shape of `NthSpellThisTurn` (and `NthDrawThisTurn`) represented an
+/// exact ordinal.
 /// Keep that meaning when a persisted export has no comparator field.
-fn default_nth_spell_comparator() -> Comparator {
+fn default_exact_ordinal_comparator() -> Comparator {
     Comparator::EQ
 }
 
-fn is_default_nth_spell_comparator(comparator: &Comparator) -> bool {
+fn is_default_exact_ordinal_comparator(comparator: &Comparator) -> bool {
     *comparator == Comparator::EQ
 }
 
@@ -41927,16 +41928,24 @@ pub enum TriggerConstraint {
     NthSpellThisTurn {
         n: u32,
         #[serde(
-            default = "default_nth_spell_comparator",
-            skip_serializing_if = "is_default_nth_spell_comparator"
+            default = "default_exact_ordinal_comparator",
+            skip_serializing_if = "is_default_exact_ordinal_comparator"
         )]
         comparator: Comparator,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
     },
-    /// "Whenever you draw your Nth card each turn" — fires exactly when the
-    /// triggering draw event's per-turn ordinal equals `n`.
-    NthDrawThisTurn { n: u32 },
+    /// "Whenever you draw your Nth card each turn" — the triggering draw event's
+    /// per-turn ordinal satisfies `comparator` against `n`. `EQ` preserves exact
+    /// ordinals; `LE` covers a contiguous prefix such as "your first or second card."
+    NthDrawThisTurn {
+        n: u32,
+        #[serde(
+            default = "default_exact_ordinal_comparator",
+            skip_serializing_if = "is_default_exact_ordinal_comparator"
+        )]
+        comparator: Comparator,
+    },
     /// "At the beginning of each opponent's [phase]"
     OnlyDuringOpponentsTurn,
     /// CR 505.1: Trigger fires only during the controller's main phase
