@@ -6394,7 +6394,9 @@ pub enum DelayedTriggerPlayerBinding {
     /// step" — the exiled permanent may belong to any player, so "that
     /// player" (its owner, CR 400.3) is resolved from the parent target, or
     /// else the object the parent moved, at delayed-trigger creation, not
-    /// assumed to be the controller.
+    /// assumed to be the controller. Phytotitan's "their next upkeep" after
+    /// "under its owner's control" has neither, so the owner is read from the
+    /// payload's creation referent: the object its creation event moved.
     ParentTargetOwner,
     /// CR 603.7a + CR 608.2c: "that player's next [phase]" where "that
     /// player" anaphorically refers to a player CHOSEN earlier in the same
@@ -15856,7 +15858,7 @@ pub enum CopyChooseScope {
 
 /// CR 102.1 / CR 102.2 / CR 109.5: Relative player set for player filters that
 /// compose with an independent condition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PlayerRelation {
     /// The controller of the effect or quantity.

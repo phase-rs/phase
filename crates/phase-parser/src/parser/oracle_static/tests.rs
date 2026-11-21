@@ -24,6 +24,201 @@ use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 use crate::types::zones::Zone;
 
+fn dynamic_power_value(modification: &ContinuousModification) -> Option<&QuantityExpr> {
+    match modification {
+        ContinuousModification::AddDynamicPower { value } => Some(value),
+        ContinuousModification::CopyValues { .. }
+        | ContinuousModification::CopyChosen
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
+        | ContinuousModification::SubstituteTextWord { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::GrantTrigger { .. }
+        | ContinuousModification::GrantReplacement { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::SetDynamicPower { .. }
+        | ContinuousModification::SetDynamicToughness { .. }
+        | ContinuousModification::SetPowerDynamic { .. }
+        | ContinuousModification::SetToughnessDynamic { .. }
+        | ContinuousModification::AddDynamicToughness { .. }
+        | ContinuousModification::AddDynamicKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor { .. }
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddChosenKeyword
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::AddStaticMode { .. }
+        | ContinuousModification::GrantStaticAbility { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::ChangeControllerToDesignation { .. }
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::SetChosenName
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. }
+        | ContinuousModification::RemoveManaCost => None,
+    }
+}
+
+/// CR 202.3 + CR 608.2h + CR 701.14: Algorithmic Ferocity's static pump must
+/// retain the hand-card mana-value predicate while the same resolved effect
+/// keeps its indestructible grant and Fight clause.
+#[test]
+fn algorithmic_ferocity_static_parse_keeps_dynamic_cmc_pump_and_fight() {
+    use crate::parser::oracle::parse_oracle_text;
+    let parsed = parse_oracle_text(
+        "Until end of turn, target creature you control gains indestructible and gets +1/+0 for each card in your hand with mana value 4 or greater. Then it fights target creature an opponent controls.",
+        "Algorithmic Ferocity",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(parsed.parse_warnings.iter().all(|warning| {
+        warning.to_string().split_whitespace().next() != Some("Swallow:DynamicQty")
+    }));
+
+    let ability = &parsed.abilities[0];
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        ..
+    } = ability.effect.as_ref()
+    else {
+        panic!("expected the static grant to lower through GenericEffect");
+    };
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    let [static_ability] = static_abilities.as_slice() else {
+        panic!("expected one static grant, got {static_abilities:?}");
+    };
+    assert!(
+        !static_ability
+            .modifications
+            .iter()
+            .any(|modification| matches!(
+                modification,
+                ContinuousModification::AddPower { .. }
+                    | ContinuousModification::AddToughness { .. }
+            )),
+        "the +1/+0 must not remain fixed: {:?}",
+        static_ability.modifications
+    );
+    assert!(static_ability
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Indestructible,
+        }));
+    let dynamic_power = static_ability
+        .modifications
+        .iter()
+        .find_map(dynamic_power_value)
+        .expect("expected dynamic power");
+    assert_eq!(
+        dynamic_power,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Hand,
+                card_types: Vec::new(),
+                scope: CountScope::Controller,
+                filter: Some(TargetFilter::Typed(TypedFilter::default().properties(
+                    vec![FilterProp::Cmc {
+                        comparator: Comparator::GE,
+                        value: QuantityExpr::Fixed { value: 4 },
+                    }]
+                ),)),
+            },
+        }
+    );
+
+    let Some(fight_ability) = ability.sub_ability.as_deref() else {
+        panic!("expected the chained Fight effect");
+    };
+    assert!(matches!(
+        fight_ability.effect.as_ref(),
+        Effect::Fight {
+            subject: TargetFilter::ParentTarget,
+            target: TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::Opponent),
+                properties,
+            }),
+        } if type_filters == &vec![TypeFilter::Creature] && properties.is_empty()
+    ));
+}
+
+#[test]
+fn filtered_cmc_compound_pump_preserves_non_unit_multiplier() {
+    // Synthetic class-shape fixture: Algorithmic Ferocity is the reviewed
+    // printed example for this filtered-count grammar, but its real coefficient
+    // is +1/+0. The census found no printed card exercising a non-unit
+    // coefficient, so +2/+0 proves the shared `Multiply` wrapper cannot collapse
+    // the same class back to a fixed pump.
+    use crate::parser::oracle::parse_oracle_text;
+
+    let parsed = parse_oracle_text(
+        "Until end of turn, target creature you control gains indestructible and gets +2/+0 for each card in your hand with mana value 4 or greater.",
+        "Filtered CMC compound pump",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = parsed.abilities[0].effect.as_ref()
+    else {
+        panic!("expected the static grant to lower through GenericEffect");
+    };
+    let [static_ability] = static_abilities.as_slice() else {
+        panic!("expected one static grant, got {static_abilities:?}");
+    };
+    let dynamic_power = static_ability
+        .modifications
+        .iter()
+        .find_map(dynamic_power_value)
+        .expect("expected dynamic power");
+    assert!(matches!(
+        dynamic_power,
+        QuantityExpr::Multiply { factor: 2, inner }
+            if matches!(inner.as_ref(), QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                    ..
+                }
+            } if properties.contains(&FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 4 },
+            }))
+    ));
+}
+
 /// CR 613.1f (Layer 6) + CR 105.2: Scion of Draco — "Each creature you control has
 /// vigilance if it's white, hexproof if it's blue, lifelink if it's black, first
 /// strike if it's red, and trample if it's green." Each `if it's <color>` qualifies
@@ -20069,6 +20264,35 @@ fn static_gets_for_each_leading_keyword_class_generic() {
 }
 
 #[test]
+fn static_gets_for_each_fists_of_flame_preserves_drawn_count_and_trample() {
+    let modifications = parse_continuous_modifications(
+        "Target creature gains trample and gets +1/+0 for each card you've drawn this turn.",
+    );
+    assert!(modifications.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddKeyword { keyword } if *keyword == Keyword::Trample
+    )));
+    let power = modifications
+        .iter()
+        .find_map(|modification| {
+            if let ContinuousModification::AddDynamicPower { value } = modification {
+                Some(value)
+            } else {
+                None
+            }
+        })
+        .expect("the shared extractor must emit dynamic power");
+    assert_eq!(
+        *power,
+        QuantityExpr::Ref {
+            qty: QuantityRef::CardsDrawnThisTurn {
+                player: PlayerScope::Controller,
+            },
+        }
+    );
+}
+
+#[test]
 fn static_parse_for_each_clause_other_creature() {
     // Verify parse_for_each_clause handles "other creature you control"
     let result =
@@ -20359,7 +20583,10 @@ fn dynamic_pt_in_text_x_over_0_with_where_clause_still_uses_where_clause() {
             _ => None,
         })
         .expect("expected AddDynamicPower");
-    match dyn_pow {
+    let QuantityExpr::ClampMin { inner, minimum: 0 } = dyn_pow else {
+        panic!("expected a floored where-X, got {dyn_pow:?}");
+    };
+    match inner.as_ref() {
         QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
         } => match filter {
@@ -21123,11 +21350,14 @@ fn static_self_ref_exact_base_power_object_count_filter() {
         })
         .expect("expected AddDynamicPower for the X scaling");
 
+    let QuantityExpr::ClampMin { inner, minimum: 0 } = dyn_pow else {
+        panic!("expected a floored where-X, got {dyn_pow:?}");
+    };
     let QuantityExpr::Ref {
         qty: QuantityRef::ObjectCount {
             filter: TargetFilter::Typed(typed),
         },
-    } = dyn_pow
+    } = inner.as_ref()
     else {
         panic!("expected ObjectCount over Typed filter, got {dyn_pow:?}");
     };
@@ -37683,10 +37913,13 @@ fn training_grounds_standalone_line_stays_static_no_transient_effect() {
 /// scope: Source }`, which `game::quantity` evaluates at runtime.
 #[test]
 fn dynamic_pt_pump_scales_by_source_intensity() {
-    let intensity = QuantityExpr::Ref {
-        qty: QuantityRef::Intensity {
-            scope: ObjectScope::Source,
-        },
+    let intensity = QuantityExpr::ClampMin {
+        inner: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::Intensity {
+                scope: ObjectScope::Source,
+            },
+        }),
+        minimum: 0,
     };
 
     // +X/+0: power scales by intensity, toughness untouched.
@@ -37798,22 +38031,24 @@ fn dynamic_pt_pump_binds_x_and_y_axes_to_distinct_quantities() {
     assert!(
         matches!(
             power,
-            Some(QuantityExpr::DivideRounded {
-                divisor: 2,
-                rounding: RoundingMode::Down,
-                ..
-            })
+            Some(QuantityExpr::ClampMin { inner, minimum: 0 })
+                if matches!(**inner, QuantityExpr::DivideRounded {
+                    divisor: 2,
+                    rounding: RoundingMode::Down,
+                    ..
+                })
         ),
         "power axis must be half rounded DOWN, got {power:?}"
     );
     assert!(
         matches!(
             toughness,
-            Some(QuantityExpr::DivideRounded {
-                divisor: 2,
-                rounding: RoundingMode::Up,
-                ..
-            })
+            Some(QuantityExpr::ClampMin { inner, minimum: 0 })
+                if matches!(**inner, QuantityExpr::DivideRounded {
+                    divisor: 2,
+                    rounding: RoundingMode::Up,
+                    ..
+                })
         ),
         "toughness axis must be half rounded UP, got {toughness:?}"
     );
@@ -43776,4 +44011,113 @@ fn lethal_damage_determined_by_power_routes_as_a_static_line() {
     assert!(crate::parser::oracle_classifier::is_static_pattern(
         &ZILORTHA_LETHAL_LINE.to_lowercase()
     ));
+}
+
+/// Burden of Proof, verbatim Oracle text (MTGJSON).
+const BURDEN_OF_PROOF_ORACLE: &str = "Flash\nEnchant creature\nEnchanted creature gets +2/+2 as long as it's a Detective you control. Otherwise, it has base power and toughness 1/1 and can't block Detectives.";
+
+/// CR 509.1b + CR 613.4b + CR 109.5: Burden of Proof's Otherwise branch sets the
+/// enchanted creature's base P/T to 1/1 (layer 7b), and its "can't block
+/// Detectives" whitelist is an effect of the Aura's static ability, hosted on
+/// the Aura under the same Otherwise gate (CR 509.1b + CR 611.3a). It is not an
+/// ability granted at layer 6 (CR 613.1f), so no def carries `AddStaticMode`.
+/// Before the fix "can't block Detectives" was dropped with no parse warning.
+#[test]
+fn burden_of_proof_otherwise_branch_cannot_block_detectives() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        BURDEN_OF_PROOF_ORACLE,
+        "Burden of Proof",
+        &["Enchant".to_string(), "Flash".to_string()],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    let enchanted_creature =
+        TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
+    // CR 109.5: "you" in "a Detective you control" is the Aura's controller.
+    let detective_you_control = StaticCondition::RecipientMatchesFilter {
+        filter: TargetFilter::Typed(
+            TypedFilter::default()
+                .subtype("Detective".to_string())
+                .controller(ControllerRef::You),
+        ),
+    };
+    let line = "Enchanted creature gets +2/+2 as long as it's a Detective you control. Otherwise, it has base power and toughness 1/1 and can't block Detectives.";
+    assert_eq!(
+        parsed.statics.len(),
+        3,
+        "expected the +2/+2 def, the Otherwise def and the Aura-hosted restriction, got {:?}",
+        parsed.statics
+    );
+    for def in &parsed.statics {
+        assert_eq!(def.affected, Some(enchanted_creature.clone()));
+        assert_eq!(def.description.as_deref(), Some(line));
+    }
+
+    // Reach guard: the "as long as" def is the condition's other outcome.
+    let detective_def = parsed
+        .statics
+        .iter()
+        .find(|def| def.condition.as_ref() == Some(&detective_you_control))
+        .expect("the +2/+2 def gated on a Detective you control");
+    assert_eq!(detective_def.mode, StaticMode::Continuous);
+    assert_eq!(
+        detective_def.modifications,
+        vec![
+            ContinuousModification::AddPower { value: 2 },
+            ContinuousModification::AddToughness { value: 2 },
+        ]
+    );
+
+    let otherwise = StaticCondition::Not {
+        condition: Box::new(detective_you_control),
+    };
+    let otherwise_def = parsed
+        .statics
+        .iter()
+        .find(|def| {
+            def.mode == StaticMode::Continuous && def.condition.as_ref() == Some(&otherwise)
+        })
+        .expect("the Otherwise def gated on the negated condition");
+    // CR 613.4b: the Otherwise def only sets base P/T.
+    assert_eq!(
+        otherwise_def.modifications,
+        vec![
+            ContinuousModification::SetPower { value: 1 },
+            ContinuousModification::SetToughness { value: 1 },
+        ]
+    );
+
+    // CR 509.1b: "can't block Detectives" is the whitelist "can block only
+    // non-Detectives"; "Detectives" names no controller. CR 611.3a: it is the
+    // Aura's own static, under the same Otherwise gate.
+    let cant_block_detectives = StaticMode::BlockRestriction {
+        filter: TargetFilter::Not {
+            filter: Box::new(TargetFilter::Typed(
+                TypedFilter::default().subtype("Detective".to_string()),
+            )),
+        },
+    };
+    let restriction_def = parsed
+        .statics
+        .iter()
+        .find(|def| def.mode == cant_block_detectives)
+        .expect("the Aura-hosted block restriction");
+    assert_eq!(restriction_def.condition.as_ref(), Some(&otherwise));
+    assert!(restriction_def.modifications.is_empty());
+
+    // CR 613.1f: nothing is granted at layer 6, so a later ability-removing
+    // effect cannot erase the restriction.
+    assert!(
+        parsed.statics.iter().all(|def| !def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddStaticMode { .. }))),
+        "no def may carry AddStaticMode, got {:?}",
+        parsed.statics
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "no clause may be swallowed; warnings = {:?}",
+        parsed.parse_warnings
+    );
 }

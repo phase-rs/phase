@@ -16,6 +16,7 @@ use crate::game::coverage::{
     GapDetail, GapDiagnosis, ResolverFeatureFamily,
 };
 use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind};
+use crate::types::confirmed_misparse::MisparseClass;
 
 /// A report category: the layer that explains a gap, refined by the parser verdict or
 /// the resolver feature family. A gap with no diagnosis is `Undiagnosed`; its family is
@@ -24,6 +25,9 @@ use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind};
 pub enum GapClass {
     Parser(ClauseGapKind),
     Resolver(ResolverFeatureFamily),
+    /// A census-confirmed misparse: the parser accepted the clause, so the class names
+    /// the defect instead of a rejected sub-grammar.
+    Misparse(MisparseClass),
     Undiagnosed,
 }
 
@@ -33,6 +37,7 @@ impl GapClass {
         ClauseGapKind::iter()
             .map(Self::Parser)
             .chain(ResolverFeatureFamily::iter().map(Self::Resolver))
+            .chain(MisparseClass::iter().map(Self::Misparse))
             .chain(std::iter::once(Self::Undiagnosed))
     }
 
@@ -43,6 +48,7 @@ impl GapClass {
         match self {
             Self::Parser(kind) => format!("parser:{}", kind.unimplemented_name()),
             Self::Resolver(family) => format!("resolver:{}", family.tag()),
+            Self::Misparse(class) => format!("misparse:{}", class.tag()),
             Self::Undiagnosed => "undiagnosed".to_string(),
         }
     }
@@ -121,6 +127,10 @@ fn gap_keys(gap: &GapDetail) -> BTreeSet<GapKey> {
             GapDiagnosis::Resolver { family, feature } => GapKey {
                 category: GapClass::Resolver(*family).label(),
                 family: feature.clone(),
+            },
+            GapDiagnosis::Misparse { class, clause } => GapKey {
+                category: GapClass::Misparse(*class).label(),
+                family: normalize_oracle_pattern(clause),
             },
         })
         .collect()
@@ -454,7 +464,10 @@ mod tests {
         let labels: Vec<String> = GapClass::all().map(GapClass::label).collect();
         assert_eq!(
             labels.len(),
-            ClauseGapKind::iter().count() + ResolverFeatureFamily::iter().count() + 1
+            ClauseGapKind::iter().count()
+                + ResolverFeatureFamily::iter().count()
+                + MisparseClass::iter().count()
+                + 1
         );
         assert_eq!(
             labels.iter().collect::<BTreeSet<_>>().len(),
