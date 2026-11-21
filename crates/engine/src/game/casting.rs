@@ -1355,14 +1355,16 @@ fn is_blocked_by_cant_cast_spells_for(
 /// CR 305.1 + CR 116.2a: Check if any `PlayLands` restriction prevents `player`
 /// from playing `land_obj` as a land. Filter-scoped sibling of
 /// `is_blocked_by_cant_cast_spells_for` — a land play is not a cast, so this
-/// reads the land's own `GameObject` directly through the generic per-object
-/// filter evaluator (`filter::matches_target_filter`) rather than a spell-record
-/// projection.
+/// reads the land's own `GameObject` through the generic per-object filter
+/// evaluator (`filter::matches_target_filter`) rather than a spell-record
+/// projection. CR 712.12: a spell//land modal card is read as the land back face
+/// it would be played as (`engine::land_face_played`), evaluated once per call.
 pub(crate) fn is_blocked_by_cant_play_lands(
     state: &GameState,
     player: PlayerId,
     land_obj: &GameObject,
 ) -> bool {
+    let played_face = std::cell::OnceCell::new();
     state.restrictions.iter().any(|restriction| {
         let GameRestriction::ProhibitActivity {
             source,
@@ -1406,9 +1408,9 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                     // as its land back face, so the prohibition is read on that
                     // face. One face-evaluation path for discovery and for the
                     // submitted play; the real object is not mutated.
-                    match super::engine::land_face_played(land_obj) {
+                    match played_face.get_or_init(|| super::engine::land_face_played(land_obj)) {
                         Some(face) => super::filter::matches_target_filter_on_object(
-                            state, &face, filter, &ctx,
+                            state, face, filter, &ctx,
                         ),
                         None => {
                             super::filter::matches_target_filter(state, land_obj.id, filter, &ctx)
