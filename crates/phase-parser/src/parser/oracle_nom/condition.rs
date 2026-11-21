@@ -28941,30 +28941,42 @@ mod intervening_if_state_condition_tests {
 fn named_cycling_guard_requires_a_complete_whole_game_minimum() {
     use crate::types::ability::{CyclingHistoryWindow, TypedFilter};
 
-    let guard = "you've cycled a card named Yidaro, Wandering Monster four or more times this game";
-    let lower = guard.to_lowercase();
-    let (rest, parsed) = parse_inner_condition(&lower).expect("complete game-history guard");
-    assert!(rest.is_empty());
-    assert_eq!(
-        parsed,
-        StaticCondition::QuantityComparison {
-            lhs: QuantityExpr::Ref {
-                qty: QuantityRef::CardsCycled {
-                    scope: CountScope::Controller,
-                    window: CyclingHistoryWindow::ThisGame,
-                    filter: Some(TargetFilter::Typed(TypedFilter {
-                        type_filters: vec![],
-                        controller: None,
-                        properties: vec![FilterProp::Named {
-                            name: "yidaro, wandering monster".into()
-                        }],
-                    })),
+    for (guard, name, minimum) in [
+        (
+            "you've cycled a card named Yidaro, Wandering Monster four or more times this game",
+            "yidaro, wandering monster",
+            4,
+        ),
+        // No printed card has this wording. Yidaro, Wandering Monster is the nearest printed case.
+        (
+            "you have cycled a card named Street Wraith seven or more times this game",
+            "street wraith",
+            7,
+        ),
+    ] {
+        let lower = guard.to_lowercase();
+        let (rest, parsed) = parse_inner_condition(&lower).expect(guard);
+        assert!(rest.is_empty(), "{guard}");
+        assert_eq!(
+            parsed,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CardsCycled {
+                        scope: CountScope::Controller,
+                        window: CyclingHistoryWindow::ThisGame,
+                        filter: Some(TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![],
+                            controller: None,
+                            properties: vec![FilterProp::Named { name: name.into() }],
+                        })),
+                    },
                 },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: minimum },
             },
-            comparator: Comparator::GE,
-            rhs: QuantityExpr::Fixed { value: 4 },
-        }
-    );
+            "{guard}"
+        );
+    }
     // No printed card has these adversarial shapes. Yidaro, Wandering Monster
     // is the nearest printed case.
     for malformed in [
