@@ -2487,12 +2487,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
         .expect("the carrier slot was checked empty before popping");
 
     // CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
-    // resolve via their typed payload — they have no ResolvedAbility/targets
-    // to validate and no zone-change routing (the source stays where it is).
+    // resolve via their typed payload — they have no ResolvedAbility and no
+    // zone-change routing (the source stays where it is); equip's one target
+    // is rechecked in `resolve_keyword_action` (CR 608.2b).
     // Returning early keeps the keyword-action branch out of the targeting /
     // fizzle / permanent-spell pipeline below.
     if let StackEntryKind::KeywordAction { action } = entry.kind {
-        resolve_keyword_action(state, action, events);
+        resolve_keyword_action(state, entry.controller, action, events);
         events.push(GameEvent::StackResolved {
             object_id: entry.id,
         });
@@ -3992,39 +3993,60 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
 /// keyword's effect against last-known information — if a participating
 /// object has left its expected zone between announcement and resolution,
 /// the effect is either skipped or applied using the snapshot carried on
-/// the `KeywordAction` payload (e.g. `Station::snapshot_power`).
+/// the `KeywordAction` payload (e.g. `Station::snapshot_power`). An equip
+/// whose one target is illegal doesn't resolve at all (CR 608.2b).
 fn resolve_keyword_action(
     state: &mut GameState,
+    controller: PlayerId,
     action: KeywordAction,
     events: &mut Vec<GameEvent>,
 ) {
     match action {
-        // CR 702.6a: Attach source Equipment to target creature. If either
-        // object has left the battlefield by resolution, the effect does nothing
-        // (CR 608.2b — illegal-target check on resolution).
+        // CR 608.2b + CR 702.6a + CR 400.7: equip's one target is the creature chosen
+        // at activation, rechecked as "target creature you control". One that left the
+        // battlefield is a new object even after it returns, so its pin no longer
+        // names it; one that is no longer a creature, that its controller no longer
+        // controls, that phased out (CR 702.26b), or that the Equipment's ability can
+        // no longer target (shroud, CR 702.18a; protection, CR 702.16b) is an illegal
+        // target. The announcement (`engine::handle_equip_activation`) and this recheck
+        // read one targeting authority with one filter. With its one target illegal the
+        // ability doesn't resolve: nothing moves (the Equipment stays on whatever it
+        // was attached to) and no `EffectResolved` is emitted.
         KeywordAction::Equip {
-            equipment_id,
-            target_creature_id,
+            equipment,
+            target_creature,
         } => {
-            let still_valid = state
-                .objects
-                .get(&equipment_id)
-                .is_some_and(|e| e.zone == Zone::Battlefield)
-                && state.objects.get(&target_creature_id).is_some_and(|t| {
-                    t.zone == Zone::Battlefield
-                        && t.card_types.core_types.contains(&CoreType::Creature)
-                });
-            if still_valid {
+            let source = super::keywords::protection_source(
+                state,
+                Some(equipment.object_id),
+                Some(equipment.incarnation),
+            );
+            if !targeting::pinned_battlefield_target_is_legal(
+                state,
+                target_creature,
+                &TargetFilter::equip_target(),
+                controller,
+                equipment.object_id,
+                source,
+            ) {
+                return;
+            }
+            // CR 113.7a + CR 400.7 + CR 702.26b: the ability resolves independently.
+            // Only the original, phased-in Equipment can move.
+            if source
+                .live()
+                .is_some_and(|object| object.is_phased_in_permanent())
+            {
                 effects::attach::attach_to_with_events(
                     state,
-                    equipment_id,
-                    target_creature_id,
+                    equipment.object_id,
+                    target_creature.object_id,
                     events,
                 );
             }
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Equip,
-                source_id: equipment_id,
+                source_id: equipment.object_id,
                 subject: None,
             });
         }
@@ -10206,19 +10228,18 @@ mod tests {
             "Grizzly Bears B".to_string(),
             Zone::Battlefield,
         );
-        let mk_entry = |id: u64, target: ObjectId| StackEntry {
+        let mk_entry = |id: u64, target: &crate::game::game_object::GameObject| StackEntry {
             id: ObjectId(id),
             source_id: equip,
             controller: PlayerId(0),
             kind: StackEntryKind::KeywordAction {
-                action: KeywordAction::Equip {
-                    equipment_id: equip,
-                    target_creature_id: target,
-                },
+                action: KeywordAction::equip(&state.objects[&equip], target),
             },
         };
-        state.stack.push_back(mk_entry(10_001, creature_a));
-        state.stack.push_back(mk_entry(10_002, creature_b));
+        let entry_a = mk_entry(10_001, &state.objects[&creature_a]);
+        let entry_b = mk_entry(10_002, &state.objects[&creature_b]);
+        state.stack.push_back(entry_a);
+        state.stack.push_back(entry_b);
 
         let groups = stack_display_groups(&state);
         assert_eq!(
@@ -17541,10 +17562,10 @@ mod tests {
                 source_id: equipment,
                 controller: PlayerId(0),
                 kind: StackEntryKind::KeywordAction {
-                    action: KeywordAction::Equip {
-                        equipment_id: equipment,
-                        target_creature_id: creature,
-                    },
+                    action: KeywordAction::equip(
+                        &state.objects[&equipment],
+                        &state.objects[&creature],
+                    ),
                 },
             });
             let depth = state.stack.len();

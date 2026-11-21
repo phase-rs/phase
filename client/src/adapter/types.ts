@@ -2483,11 +2483,14 @@ export interface ResolvedAbility {
 
 // ── Stack ────────────────────────────────────────────────────────────────
 
+/** A bare id preserves the unknown incarnation of an equip imported from a legacy save. */
+type EquipPin = ObjectIncarnationRef | ObjectId;
+
 export type KeywordAction =
-  | { Equip: { equipment_id: ObjectId; target_creature_id: ObjectId } }
-  | { Crew: { vehicle_id: ObjectId; paid_creature_ids: ObjectId[] } }
-  | { Saddle: { mount_id: ObjectId; paid_creature_ids: ObjectId[] } }
-  | { Station: { spacecraft_id: ObjectId; paid_creature_id: ObjectId; snapshot_power: number } };
+  | { type: "Equip"; data: { equipment: EquipPin; target_creature: EquipPin } }
+  | { type: "Crew"; data: { vehicle_id: ObjectId; paid_creature_ids: ObjectId[] } }
+  | { type: "Saddle"; data: { mount_id: ObjectId; paid_creature_ids: ObjectId[] } }
+  | { type: "Station"; data: { spacecraft_id: ObjectId; paid_creature_id: ObjectId; snapshot_power: number } };
 
 export type StackEntryKind =
   | { type: "Spell"; data: { card_id: CardId; ability?: ResolvedAbility; actual_mana_spent?: number } }

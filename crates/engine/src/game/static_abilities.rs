@@ -2258,8 +2258,7 @@ fn all_matching_player_protections(
     // latched name alone.
     // A departed source must never silently lose name protection (Runed Halo
     // over a dead Clone keeps stopping that name).
-    let source_ref =
-        crate::game::keywords::damage_protection_source(state, source, source_incarnation);
+    let source_ref = crate::game::keywords::protection_source(state, source, source_incarnation);
     // CR 702.16b + CR 702.16e: resolution-created "you gain protection from
     // [quality]" (Seht's Tiger, Faith's Shield) and "protection from that
     // player" (Eon Frolicker) are player-bound transient grants, not

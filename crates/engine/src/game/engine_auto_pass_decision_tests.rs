@@ -28,8 +28,11 @@ fn stack_entry(controller: PlayerId) -> StackEntry {
         controller,
         kind: StackEntryKind::KeywordAction {
             action: KeywordAction::Equip {
-                equipment_id: ObjectId(0),
-                target_creature_id: ObjectId(0),
+                equipment: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(0), 0),
+                target_creature: crate::types::identifiers::ObjectIncarnationRef::of(
+                    ObjectId(0),
+                    0,
+                ),
             },
         },
     }

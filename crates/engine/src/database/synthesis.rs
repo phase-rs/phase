@@ -596,7 +596,7 @@ pub(crate) fn equip_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefi
         AbilityKind::Activated,
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
-            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            target: TargetFilter::equip_target(),
             // CR 702.6a: the keyword's "target" names the HOST (the equipped
             // creature); the attachment ("this permanent") is determined.
             selection: AttachSelection::AtResolution {

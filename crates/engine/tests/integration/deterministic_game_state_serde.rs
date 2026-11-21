@@ -2960,8 +2960,8 @@ fn stack_resolution_session_fixture(budget: StackResolutionBudget) -> GameState 
         controller: PlayerId(2),
         kind: StackEntryKind::KeywordAction {
             action: KeywordAction::Equip {
-                equipment_id: ObjectId(9_004),
-                target_creature_id: ObjectId(9_005),
+                equipment: ObjectIncarnationRef::of(ObjectId(9_004), 0),
+                target_creature: ObjectIncarnationRef::of(ObjectId(9_005), 0),
             },
         },
     };

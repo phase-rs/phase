@@ -15751,7 +15751,7 @@ fn apply_non_priority_pass_action(
             WaitingFor::EquipTarget {
                 player,
                 equipment_id,
-                valid_targets,
+                ..
             },
             GameAction::Equip {
                 equipment_id: eq_id,
@@ -15763,22 +15763,16 @@ fn apply_non_priority_pass_action(
                     "Equipment ID mismatch".to_string(),
                 ));
             }
-            if !valid_targets.contains(&target_id) {
+            let p = *player;
+            // A saved offer or an intervening concession can name a target
+            // that is now illegal. Bind both objects only on a legal pick.
+            if !equip_activation_targets(state, p, eq_id)?.contains(&target_id) {
                 return Err(EngineError::InvalidAction(
                     "Invalid equip target".to_string(),
                 ));
             }
-            let p = *player;
-            push_keyword_action(
-                state,
-                p,
-                eq_id,
-                KeywordAction::Equip {
-                    equipment_id: eq_id,
-                    target_creature_id: target_id,
-                },
-                &mut events,
-            )
+            let action = KeywordAction::equip(&state.objects[&eq_id], &state.objects[&target_id]);
+            push_keyword_action(state, p, eq_id, action, &mut events)
         }
         // CR 602.2b + CR 601.2c/601.2h: no cost is paid until the equip
         // announcement, so backing out before target selection is complete
@@ -19495,12 +19489,12 @@ fn mana_unit_eligible_for_cost(
     })
 }
 
-fn handle_equip_activation(
-    state: &mut GameState,
+/// Legal choices for this player's equip announcement on the current board.
+fn equip_activation_targets(
+    state: &GameState,
     player: PlayerId,
     equipment_id: ObjectId,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
+) -> Result<Vec<ObjectId>, EngineError> {
     // Validate sorcery-speed timing: main phase, empty stack, active player
     match state.phase {
         Phase::PreCombatMain | Phase::PostCombatMain => {}
@@ -19527,9 +19521,9 @@ fn handle_equip_activation(
         .ok_or_else(|| EngineError::InvalidAction("Equipment not found".to_string()))?;
 
     // Validate it's an equipment on the battlefield controlled by player
-    if obj.zone != Zone::Battlefield {
+    if !obj.is_phased_in_permanent() {
         return Err(EngineError::InvalidAction(
-            "Equipment is not on the battlefield".to_string(),
+            "Equipment is not a phased-in permanent".to_string(),
         ));
     }
     if obj.controller != player {
@@ -19543,25 +19537,53 @@ fn handle_equip_activation(
         ));
     }
 
-    // Find valid targets: creatures controlled by the equipping player on battlefield
-    let valid_targets: Vec<ObjectId> = state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .map(|o| {
-                    o.controller == player
-                        && o.card_types
-                            .core_types
-                            .contains(&crate::types::card_type::CoreType::Creature)
-                })
-                .unwrap_or(false)
-        })
-        .collect();
+    // CR 702.6a + CR 115.2 + CR 601.2c: equip targets "creature you control";
+    // the targeting authority also excludes a creature the Equipment's ability
+    // can't target (shroud, CR 702.18a; protection, CR 702.16b) or one that
+    // phased out (CR 702.26b). The resolution recheck
+    // (`stack::resolve_keyword_action`) reads the same authority with the same
+    // filter (CR 608.2b).
+    Ok(super::targeting::find_legal_targets(
+        state,
+        &TargetFilter::equip_target(),
+        player,
+        equipment_id,
+    )
+    .into_iter()
+    .filter_map(|target| match target {
+        TargetRef::Object(id) => Some(id),
+        TargetRef::Player(_) => None,
+    })
+    .collect())
+}
 
+/// A concession can change the available targets while the controller is
+/// choosing. Keep the pending offer current without picking on their behalf;
+/// even an empty offer can be canceled before anything has been paid.
+pub(super) fn refresh_equip_target_offer(state: &mut GameState) {
+    if let WaitingFor::EquipTarget {
+        player,
+        equipment_id,
+        ..
+    } = state.waiting_for
+    {
+        let valid_targets =
+            equip_activation_targets(state, player, equipment_id).unwrap_or_default();
+        state.waiting_for = WaitingFor::EquipTarget {
+            player,
+            equipment_id,
+            valid_targets,
+        };
+    }
+}
+
+fn handle_equip_activation(
+    state: &mut GameState,
+    player: PlayerId,
+    equipment_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let valid_targets = equip_activation_targets(state, player, equipment_id)?;
     if valid_targets.is_empty() {
         return Err(EngineError::ActionNotAllowed(
             "No valid creatures to equip".to_string(),
@@ -19572,14 +19594,14 @@ fn handle_equip_activation(
     // + priority window; we skip only the target-selection UI.
     if valid_targets.len() == 1 {
         let target_id = valid_targets[0];
+        // CR 601.2c + CR 400.7: the target is pinned as it is chosen.
+        let action =
+            KeywordAction::equip(&state.objects[&equipment_id], &state.objects[&target_id]);
         return Ok(push_keyword_action(
             state,
             player,
             equipment_id,
-            KeywordAction::Equip {
-                equipment_id,
-                target_creature_id: target_id,
-            },
+            action,
             events,
         ));
     }

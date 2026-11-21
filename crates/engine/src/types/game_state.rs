@@ -40453,6 +40453,37 @@ impl GameState {
         }
     }
 
+    /// Equip checks both announced incarnations. Only the source can supply
+    /// last-known characteristics when rechecking protection on the target.
+    fn visit_loop_equip_pins_mut(
+        &mut self,
+        mut source_lki: impl FnMut(ObjectIncarnationRef),
+        mut visit_pin: impl FnMut(&mut ObjectIncarnationRef),
+    ) {
+        for entry in self
+            .stack
+            .iter_mut()
+            .chain(self.resolving_stack_entry.iter_mut())
+        {
+            if let StackEntryKind::KeywordAction {
+                action:
+                    KeywordAction::Equip {
+                        equipment,
+                        target_creature,
+                    },
+            } = &mut entry.kind
+            {
+                if equipment.incarnation != crate::types::identifiers::LEGACY_INCARNATION {
+                    source_lki(*equipment);
+                    visit_pin(equipment);
+                }
+                if target_creature.incarnation != crate::types::identifiers::LEGACY_INCARNATION {
+                    visit_pin(target_creature);
+                }
+            }
+        }
+    }
+
     pub(crate) fn retain_carrier_referenced_lki(&mut self) {
         // CR 104.4b + CR 732.2a: incarnation-versioned LKI is historical support
         // state, not independently loop-material state. Retain only snapshots
@@ -40518,6 +40549,12 @@ impl GameState {
                 referenced_lki.insert(ObjectIncarnationRef::of(object_id, *incarnation));
             });
         });
+        self.visit_loop_equip_pins_mut(
+            |source| {
+                referenced_lki.insert(source);
+            },
+            |_| {},
+        );
 
         // CR 508.1 + CR 608.2h: an attack trigger's intervening-if rechecks a departed
         // attacker against the snapshot of the incarnation that attacked
@@ -41820,6 +41857,17 @@ impl GameState {
                 });
             });
         });
+        self.visit_loop_equip_pins_mut(
+            |source| {
+                carrier_read.insert(source);
+            },
+            |pin| {
+                present
+                    .entry(pin.object_id)
+                    .or_default()
+                    .push(pin.incarnation)
+            },
+        );
         // CR 122.6 + CR 400.7: a counter record's recipient stamp is ranked with the live
         // incarnation it is compared against, so a stale stamp stays distinct from the current one.
         for record in self.counter_added_this_turn.iter() {
@@ -42196,6 +42244,7 @@ impl GameState {
         let rank_incarnation = |reference: &mut ObjectIncarnationRef| {
             reference.incarnation = canonical(reference.object_id, reference.incarnation);
         };
+        self.visit_loop_equip_pins_mut(|_| {}, rank_incarnation);
         if let Some(combat) = self.combat.as_mut() {
             combat.attacking_incarnations_this_combat = rank_hash_set(
                 std::mem::take(&mut combat.attacking_incarnations_this_combat),
@@ -42381,7 +42430,8 @@ impl GameState {
             // RANKED THROUGH A CARRIER — these hold the events, abilities and records
             // whose own pins sections 1 and 3 classify. The abilities are the ones
             // `for_each_loop_ability_carrier_mut` walks: their captured pins, snapshots
-            // and creation lookback events all rank. A parked `resolution_stack` frame
+            // and creation lookback events all rank. Equip's keyword entries also rank
+            // their own source and target pins. A parked `resolution_stack` frame
             // holds abilities nothing walks, so `is_loop_comparable` refuses a state that
             // holds one.
             stack: _,
@@ -57213,6 +57263,116 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
 
     fn normalized_equal(a: &GameState, b: &GameState) -> bool {
         loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop())
+    }
+
+    #[test]
+    fn loop_equip_keeps_source_and_target_incarnation_relations() {
+        fn position(resolving: bool, epoch: u64) -> (GameState, ObjectId, ObjectId) {
+            let mut state = GameState::new_two_player(7);
+            let mut permanent = |card, name: &str| {
+                let id = create_object(
+                    &mut state,
+                    CardId(card),
+                    PlayerId(0),
+                    name.into(),
+                    Zone::Battlefield,
+                );
+                state.objects.get_mut(&id).unwrap().incarnation = epoch;
+                id
+            };
+            let source = permanent(1, "Bonesplitter");
+            let creature = permanent(2, "Grizzly Bears");
+            let entry = StackEntry {
+                id: ObjectId(30),
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::KeywordAction {
+                    action: KeywordAction::equip(
+                        &state.objects[&source],
+                        &state.objects[&creature],
+                    ),
+                },
+            };
+            if resolving {
+                state.resolving_stack_entry = Some(entry);
+            } else {
+                state.stack.push_back(entry);
+            }
+            (state, source, creature)
+        }
+
+        fn pins(state: &GameState) -> [ObjectIncarnationRef; 2] {
+            let entry = state
+                .resolving_stack_entry
+                .as_ref()
+                .or_else(|| state.stack.front())
+                .unwrap();
+            let StackEntryKind::KeywordAction {
+                action:
+                    KeywordAction::Equip {
+                        equipment,
+                        target_creature,
+                    },
+            } = &entry.kind
+            else {
+                panic!("the equip must survive loop normalization");
+            };
+            [*equipment, *target_creature]
+        }
+
+        for resolving in [false, true] {
+            let (live, equipment, creature) = position(resolving, 3);
+            let (renumbered, _, _) = position(resolving, 71);
+            assert!(
+                normalized_equal(&live, &renumbered),
+                "consistently shifted equip pins"
+            );
+            assert_eq!(
+                pins(&live.normalize_for_loop()),
+                pins(&renumbered.normalize_for_loop())
+            );
+            for id in [equipment, creature] {
+                let mut returned = live.clone();
+                returned.objects.get_mut(&id).unwrap().incarnation += 2;
+                // The resolving entry itself is transient and omitted from
+                // GameState equality. Check the normalized pins there directly.
+                let ranked = returned.normalize_for_loop();
+                for pin in pins(&ranked) {
+                    assert_eq!(pin.is_current(&ranked), pin.object_id != id);
+                }
+                if !resolving {
+                    assert!(
+                        !normalized_equal(&live, &returned),
+                        "stale equip pin on {id:?}"
+                    );
+                }
+            }
+
+            let mut departed = live.clone();
+            departed.objects.get_mut(&equipment).unwrap().incarnation += 2;
+            let mut selected = live.objects[&equipment].snapshot_public_characteristics();
+            let mut other_color = departed.clone();
+            other_color
+                .lki_by_incarnation
+                .entry(equipment)
+                .or_default()
+                .insert(3, selected.clone());
+            selected.colors = vec![ManaColor::Red];
+            departed
+                .lki_by_incarnation
+                .entry(equipment)
+                .or_default()
+                .insert(3, selected.clone());
+            assert!(
+                !normalized_equal(&departed, &other_color),
+                "the departed source's color can change target legality"
+            );
+            let normalized = departed.normalize_for_loop();
+            assert_eq!(
+                normalized.lki_by_incarnation[&equipment].get(&pins(&normalized)[0].incarnation),
+                Some(&selected)
+            );
+        }
     }
 
     // Controlled identity fixtures, not independently played damage histories.

@@ -39,7 +39,7 @@ use engine::types::actions::GameAction;
 use engine::types::game_state::{
     CastPaymentMode, GameState, StackEntry, StackEntryKind, WaitingFor,
 };
-use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -142,10 +142,10 @@ fn push_ability_entry(
         },
         AbilityEntry::KeywordEquip => StackEntryKind::KeywordAction {
             action: KeywordAction::Equip {
-                equipment_id: source,
+                equipment: ObjectIncarnationRef::of(source, 0),
                 // Never dereferenced: these tests stop at target legality and
                 // never resolve the equip.
-                target_creature_id: ObjectId(9_000),
+                target_creature: ObjectIncarnationRef::of(ObjectId(9_000), 0),
             },
         },
     };

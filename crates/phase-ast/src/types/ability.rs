@@ -30470,6 +30470,11 @@ pub enum VoteVisibility {
 }
 
 impl TargetFilter {
+    /// CR 702.6a: the target of ordinary equip is a creature you control.
+    pub fn equip_target() -> Self {
+        Self::Typed(TypedFilter::creature().controller(ControllerRef::You))
+    }
+
     /// CR 608.2c + CR 110.1: the members of a reveal's published set that are
     /// permanents — "those creature cards" / "those permanents" after "Put those …
     /// cards onto the battlefield". The reveal publishes every card it revealed

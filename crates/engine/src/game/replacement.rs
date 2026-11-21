@@ -10516,7 +10516,7 @@ fn find_applicable_replacements_on_entry_board(
                             // else its exit last-known information, else the
                             // event's latched name alone. A departed target still
                             // binds nothing (no bearer to shelter).
-                            let source_ref = crate::game::keywords::damage_protection_source(
+                            let source_ref = crate::game::keywords::protection_source(
                                 state,
                                 Some(*source_id),
                                 *source_incarnation,
