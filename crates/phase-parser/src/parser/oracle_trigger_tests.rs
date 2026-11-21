@@ -2854,6 +2854,10 @@ fn kytheon_end_of_combat_parses_condition_and_transformed_return() {
     ));
 }
 
+// Synthetic grammar test: no printed card puts this combat count in a
+// sentence-local "Then if" clause. The nearest printed card is Kytheon, Hero
+// of Akros, whose "if" directly follows the trigger condition, so CR 603.4
+// makes it an intervening-if gate there.
 #[test]
 fn sentence_local_combat_count_does_not_gate_the_trigger() {
     let trigger = parse_trigger_line(
