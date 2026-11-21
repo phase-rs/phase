@@ -4469,7 +4469,7 @@ fn channel_harms_may_deals_the_prevented_amount_after_a_spell() {
             runner.state().waiting_for
         );
         assert_eq!(prevented(&events), 1, "{label}");
-        let action = Some(ReplacementActionScope { amount: 3 });
+        let action = Some(ReplacementActionScope::whole(3));
         assert_eq!(offered_in(&runner), action, "{label}");
         if reload {
             let json = serde_json::to_string(runner.state()).expect("serialize at the prompt");
@@ -4590,7 +4590,7 @@ fn channel_harms_may_reads_the_prevented_amount_inside_a_resolving_trigger() {
                     assert_eq!(prevented(&events), 1);
                     assert_eq!(
                         offered_in(&runner),
-                        Some(ReplacementActionScope { amount: 1 })
+                        Some(ReplacementActionScope::whole(1))
                     );
                     asked = true;
                     GameAction::DecideOptionalEffect { accept }
@@ -4670,7 +4670,7 @@ fn two_channel_harms_loop_until_a_player_declines() {
             choosers.push(player);
             assert_eq!(
                 offered_in(&runner),
-                Some(ReplacementActionScope { amount: 3 }),
+                Some(ReplacementActionScope::whole(3)),
                 "{label}"
             );
             decide(&mut runner, accept, &mut events);
@@ -4750,9 +4750,9 @@ fn a_riders_may_amount_does_not_reach_the_spells_tail() {
         assert_eq!(life(&runner, P0), 20, "{label}");
         assert_eq!(
             offered_in(&runner),
-            Some(ReplacementActionScope {
-                amount: i32::try_from(rider).expect("a small amount")
-            }),
+            Some(ReplacementActionScope::whole(
+                i32::try_from(rider).expect("a small amount")
+            )),
             "{label}"
         );
         decide(&mut runner, accept, &mut events);

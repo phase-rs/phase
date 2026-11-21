@@ -3853,9 +3853,9 @@ enum NestedAmountScope {
     Enclosing,
     /// CR 603.12: a reflexive triggered ability's own target slots and frozen count.
     Reflexive,
-    /// CR 614.6 + CR 615.5: a replacement's own action, with the amount of the event it
-    /// replaced or prevented (`None` when that event had no amount).
-    ReplacementAction { amount: Option<i32> },
+    /// CR 614.6 + CR 615.5: a replacement's own action, with the exact amount of the event
+    /// it replaced or prevented (`None` when that event had no amount).
+    ReplacementAction { amount: Option<HalfSigned> },
 }
 
 /// Run `f` in `scope`, restoring the previous scope afterwards. Mirrors
@@ -3884,7 +3884,10 @@ pub(crate) fn with_reflexive_resolution_scope<R>(f: impl FnOnce() -> R) -> R {
 /// modified event that occurs instead (CR 614.1a), not one of the instructions of the spell
 /// or ability resolving around it (CR 608.2c). The enclosing-trigger tiers stay suppressed
 /// when `amount` is `None`, as in the reflexive scope.
-pub(crate) fn with_replacement_action_scope<R>(amount: Option<i32>, f: impl FnOnce() -> R) -> R {
+pub(crate) fn with_replacement_action_scope<R>(
+    amount: Option<HalfSigned>,
+    f: impl FnOnce() -> R,
+) -> R {
     with_nested_amount_scope(NestedAmountScope::ReplacementAction { amount }, f)
 }
 
@@ -3894,8 +3897,8 @@ fn enclosing_trigger_event_amount_suppressed() -> bool {
 
 /// CR 614.6 + CR 615.5: the amount the replacement action now running owns, if any.
 /// `None` outside a replacement's action, and inside a reflexive ability created within one.
-fn replacement_action_amount() -> Option<i32> {
-    current_replacement_action().map(|action| action.amount)
+fn replacement_action_amount() -> Option<HalfSigned> {
+    current_replacement_action().map(crate::types::game_state::ReplacementActionScope::exact)
 }
 
 /// CR 614.6 + CR 615.5: the replacement action whose work is running now, if it owns an amount —
@@ -3907,7 +3910,9 @@ pub(crate) fn current_replacement_action(
     NESTED_AMOUNT_SCOPE.with(|c| match c.get() {
         NestedAmountScope::ReplacementAction {
             amount: Some(amount),
-        } => Some(crate::types::game_state::ReplacementActionScope { amount }),
+        } => Some(crate::types::game_state::ReplacementActionScope::from_exact(
+            amount,
+        )),
         NestedAmountScope::ReplacementAction { amount: None }
         | NestedAmountScope::Enclosing
         | NestedAmountScope::Reflexive => None,
@@ -3939,7 +3944,7 @@ pub(crate) fn resume_replacement_action(
         previous: action.map(|action| {
             NESTED_AMOUNT_SCOPE.with(|c| {
                 c.replace(NestedAmountScope::ReplacementAction {
-                    amount: Some(action.amount),
+                    amount: Some(action.exact()),
                 })
             })
         }),
@@ -8607,7 +8612,7 @@ fn event_context_amount_exact(
         // tiers of the resolution around it. Farideh's Fireball's "deals 2 damage to
         // each opponent" under Delaying Shield puts 2 delay counters on it, not the
         // d20 face. `None` outside that scope, so every other reader is unchanged.
-        .or_else(|| whole(replacement_action_amount()))
+        .or_else(replacement_action_amount)
         .or_else(|| whole(enclosing_trigger_match_count(state)))
         // CR 706.4: Die results recorded earlier in THIS resolution
         // outrank the triggering event's own amount, so "roll one or more
@@ -25749,12 +25754,12 @@ mod tests {
 
         assert_eq!(read(&state), 3, "outside any scope the match count wins");
         assert_eq!(
-            with_replacement_action_scope(Some(2), || read(&state)),
+            with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || read(&state)),
             2,
             "the action's owned amount outranks every ambient tier"
         );
         assert_eq!(
-            with_replacement_action_scope(Some(2), || {
+            with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
                 with_reflexive_resolution_scope(|| read(&state))
             }),
             17,
@@ -25792,18 +25797,16 @@ mod tests {
         // Reach-guard: outside any scope the enclosing trigger's match count answers.
         assert_eq!(read(&state), 3, "outside any scope the match count wins");
 
-        let (inner, after_inner) = with_replacement_action_scope(Some(2), || {
-            let inner = with_replacement_action_scope(Some(5), || read(&state));
+        let (inner, after_inner) = with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
+            let inner = with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(5)), || read(&state));
             (inner, read(&state))
         });
         assert_eq!(inner, 5, "a nested action reads its own amount");
         assert_eq!(after_inner, 2, "the outer action's amount is back after it");
 
-        let (resumed, after_resumed) = with_replacement_action_scope(Some(2), || {
+        let (resumed, after_resumed) = with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
             let guard =
-                resume_replacement_action(Some(crate::types::game_state::ReplacementActionScope {
-                    amount: 7,
-                }));
+                resume_replacement_action(Some(crate::types::game_state::ReplacementActionScope::whole(7)));
             let resumed = read(&state);
             drop(guard);
             (resumed, read(&state))
@@ -25815,7 +25818,7 @@ mod tests {
         );
 
         assert_eq!(
-            with_replacement_action_scope(Some(2), || {
+            with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
                 with_reflexive_resolution_scope(|| read(&state))
             }),
             17,
@@ -25823,7 +25826,7 @@ mod tests {
         );
 
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            with_replacement_action_scope(Some(9), || -> i32 {
+            with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(9)), || -> i32 {
                 panic!("the action's work unwinds");
             })
         }));

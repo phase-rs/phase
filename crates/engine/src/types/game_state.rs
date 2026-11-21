@@ -4277,6 +4277,33 @@ pub struct ReplacementActionScope {
     /// The amount of the event the replacement replaced or prevented, bound when the
     /// replacement applied.
     pub amount: i32,
+    /// The Unhinged half point of `amount`; read together through [`Self::exact`].
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub amount_fraction: HalfFraction,
+}
+
+impl ReplacementActionScope {
+    /// A scope owning a whole amount.
+    pub const fn whole(amount: i32) -> Self {
+        Self {
+            amount,
+            amount_fraction: HalfFraction::Zero,
+        }
+    }
+
+    /// A scope owning `exact`, split into its wire fields.
+    pub fn from_exact(exact: HalfSigned) -> Self {
+        let (amount, amount_fraction) = exact.into_whole_and_fraction();
+        Self {
+            amount,
+            amount_fraction,
+        }
+    }
+
+    /// The exact amount the replacement action owns.
+    pub const fn exact(self) -> HalfSigned {
+        HalfSigned::from_whole_and_fraction(self.amount, self.amount_fraction)
+    }
 }
 
 /// CR 118.12 + CR 614.17b: how a resolution-time payment enters the single
@@ -32865,6 +32892,12 @@ pub struct PostReplacementDrain {
     #[serde(default)]
     pub event_amount: Option<u32>,
 
+    /// The Unhinged half point of [`Self::event_amount`] (Little Girl's ½ prevented, Vile
+    /// Bile's 2½), carried beside the whole part like every exact amount on the wire. Read
+    /// together through [`Self::exact_event_amount`].
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub event_amount_fraction: HalfFraction,
+
     /// CR 109.5: the player "you" names inside this continuation — the
     /// controller of the object whose ability is doing the replacing.
     ///
@@ -33014,6 +33047,7 @@ impl PostReplacementDrain {
             event_source: None,
             event_target: None,
             event_amount: None,
+            event_amount_fraction: HalfFraction::Zero,
             controller: None,
             parked_entrants: Vec::new(),
         }
@@ -33030,9 +33064,26 @@ impl PostReplacementDrain {
             event_source: None,
             event_target: None,
             event_amount: None,
+            event_amount_fraction: HalfFraction::Zero,
             controller: None,
             parked_entrants: vec![entrant],
         }
+    }
+
+    /// CR 614.6 + CR 615.5: the exact amount this drain's replacement replaced or prevented.
+    pub fn exact_event_amount(&self) -> Option<HalfMagnitude> {
+        self.event_amount
+            .map(|whole| HalfMagnitude::from_whole_and_fraction(whole, self.event_amount_fraction))
+    }
+
+    /// Latch `amount` as the amount this drain's replacement replaced or prevented.
+    pub fn set_exact_event_amount(&mut self, amount: Option<HalfMagnitude>) {
+        let (whole, fraction) = amount.map_or((None, HalfFraction::Zero), |exact| {
+            let (whole, fraction) = exact.into_whole_and_fraction();
+            (Some(whole), fraction)
+        });
+        self.event_amount = whole;
+        self.event_amount_fraction = fraction;
     }
 
     /// The continuation, if it has not been taken for dispatch yet.

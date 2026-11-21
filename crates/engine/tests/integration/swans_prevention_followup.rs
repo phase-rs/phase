@@ -74,6 +74,7 @@ fn swans_followup_draws_for_damage_sources_controller() {
             event_source: Some(damage_source),
             event_target: None,
             event_amount: None,
+            event_amount_fraction: engine::types::ability::HalfFraction::Zero,
             // CR 109.5: this fixture drives the event-context read directly and
             // installs no replacing object, so "you" falls back to the affected
             // object's controller exactly as before the slot existed.

@@ -2777,7 +2777,6 @@ pub(crate) fn fire_batch_prevention_riders(
         if exact_total == HalfMagnitude::ZERO {
             continue;
         }
-        let total_whole = exact_total.whole_floor();
 
         // CR 702.16e + CR 615.13 (Matt F4): protection prevention aggregates
         // under its own key — no registry shield, no rider, never a
@@ -2846,9 +2845,10 @@ pub(crate) fn fire_batch_prevention_riders(
         push_prevented_events(group, rid.source, events);
 
         // CR 615.5: Resolve the prevention's additional effect ("for each 1
-        // damage prevented this way, create a token"). Stamp the aggregate
-        // prevented amount so `EventContextAmount` resolves against the batch
-        // total, then run the rider continuation exactly once — ONCE PER SHIELD,
+        // damage prevented this way, create a token"). The rider's drain owns
+        // the exact aggregate prevented amount, so `EventContextAmount` resolves
+        // against the batch total — half point included (Awe Strike preventing
+        // Vile Bile's 2½ gains 2½) — then the rider continuation runs exactly once — ONCE PER SHIELD,
         // not once per recipient, because CR 615.13 makes the application the
         // unit and CR 615.5's "that much damage was prevented" refers to the
         // whole application. Skipped for inline-drained riders (above): theirs
@@ -2859,7 +2859,7 @@ pub(crate) fn fire_batch_prevention_riders(
         let Some(runtime) = runtime else {
             continue;
         };
-        state.last_effect_count = Some(total_whole.min(i32::MAX as u32) as i32);
+        state.last_effect_count = Some(exact_total.whole_floor().min(i32::MAX as u32) as i32);
         // Policy is `Replace`: this path has always overwritten a resident
         // continuation rather than deferring to it. The rider inherits no applied
         // set (it is the batch's own aggregate follow-up) — the fresh drain says
@@ -2868,11 +2868,12 @@ pub(crate) fn fire_batch_prevention_riders(
         state.install_ready_continuation(
             crate::types::ability::PostReplacementContinuation::Resolved(Box::new(runtime)),
         );
-        if let Some(source) = event_source {
-            if let Some(drain) = state
-                .active_post_replacement_drains_mut()
-                .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
-            {
+        if let Some(drain) = state
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+        {
+            drain.set_exact_event_amount(Some(exact_total));
+            if let Some(source) = event_source {
                 drain.event_source = Some(source);
             }
         }
@@ -2912,8 +2913,9 @@ fn push_prevented_events(
         // CR 120.8 + CR 615.13: a prevention that prevented nothing for this
         // recipient is not a prevention event. The group total is already known
         // positive, so this guard only ever suppresses a zero recipient sharing a
-        // batch with a nonzero one.
-        if entry.amount <= 0 {
+        // batch with a nonzero one. Exact: Little Girl's ½ prevented is a
+        // prevention, though its whole part is 0.
+        if entry.exact_amount().is_zero() {
             continue;
         }
         events.push(GameEvent::DamagePrevented {

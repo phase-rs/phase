@@ -3787,6 +3787,7 @@ fn markerless_rest(rest: TerminalRest, core_type: CoreType, zone: Zone) -> (Game
                 event_source: None,
                 event_target: None,
                 event_amount: None,
+                event_amount_fraction: engine::types::ability::HalfFraction::Zero,
                 controller: None,
                 parked_entrants: Vec::new(),
             },

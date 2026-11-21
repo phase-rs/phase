@@ -1047,7 +1047,8 @@ pub(crate) enum DamageRiderDrain {
 struct ReplacedEventContext {
     source: Option<ObjectId>,
     target: Option<TargetRef>,
-    amount: Option<u32>,
+    /// Exact, so a prevention of 2½ damage owns 2½ (CR 615.5).
+    amount: Option<HalfMagnitude>,
 }
 
 /// CR 614.6: Install a mandatory post-effect's continuation — the replacement's own
@@ -1212,15 +1213,14 @@ fn mandatory_post_drain(
         target: event_target,
         amount: event_amount,
     } = replaced;
-    PostReplacementDrain {
+    let mut drain = PostReplacementDrain {
         status: DrainStatus::Ready(continuation),
         source: Some(source),
         applied,
         event_source,
         event_target,
-        // CR 614.6 + CR 615.5: the amount this replacement replaced or prevented, latched as it
-        // applied (`replaced_event_amount`).
-        event_amount,
+        event_amount: None,
+        event_amount_fraction: HalfFraction::Zero,
         // CR 109.5: "you" in the continuation is the REPLACING ability's
         // controller. Carried beside `source` rather than derived from it,
         // because `source` is the affected object on every zone-change
@@ -1234,7 +1234,11 @@ fn mandatory_post_drain(
         // place of that fallback.
         controller,
         parked_entrants: Vec::new(),
-    }
+    };
+    // CR 614.6 + CR 615.5: the exact amount this replacement replaced or prevented, latched as
+    // it applied (`replaced_event_amount`).
+    drain.set_exact_event_amount(event_amount);
+    drain
 }
 
 /// CR 615.5 + CR 608.2c: where a damage replacement's actions wait: behind a rider of the same
@@ -4239,11 +4243,26 @@ pub(crate) fn is_damage_substitution(repl: &ReplacementDefinition) -> bool {
 /// CR 614.6 + CR 615.5: the quantity of a replaced event — its damage, life gained or life
 /// lost — captured as a scalar before the applier consumes the event. `None` for every event
 /// with no such amount.
-fn event_quantity(event: &ProposedEvent) -> Option<u32> {
+fn event_quantity(event: &ProposedEvent) -> Option<HalfMagnitude> {
     match event {
-        ProposedEvent::Damage { amount, .. }
-        | ProposedEvent::LifeGain { amount, .. }
-        | ProposedEvent::LifeLoss { amount, .. } => Some(*amount),
+        ProposedEvent::Damage {
+            amount,
+            amount_fraction,
+            ..
+        }
+        | ProposedEvent::LifeGain {
+            amount,
+            amount_fraction,
+            ..
+        }
+        | ProposedEvent::LifeLoss {
+            amount,
+            amount_fraction,
+            ..
+        } => Some(HalfMagnitude::from_whole_and_fraction(
+            *amount,
+            *amount_fraction,
+        )),
         _ => None,
     }
 }
@@ -4317,9 +4336,9 @@ fn damage_shape_prevents(repl: &ReplacementDefinition) -> Option<bool> {
 fn replaced_event_amount(
     state: &GameState,
     rid: ReplacementId,
-    before: Option<u32>,
+    before: Option<HalfMagnitude>,
     outcome: ReplacementOutcome<'_>,
-) -> Option<u32> {
+) -> Option<HalfMagnitude> {
     let def = stored_replacement_definition(state, rid)?;
     let before = before?;
     match def.event {
@@ -17671,19 +17690,21 @@ fn continue_replacement_impl(
         };
         match (branch, post_effect) {
             (ReplacementBranch::Execute | ReplacementBranch::Decline, Some(def)) => {
-                let drain = PostReplacementDrain {
+                let mut drain = PostReplacementDrain {
                     status: DrainStatus::Ready(PostReplacementContinuation::Template(def)),
                     source: Some(rid.source),
                     applied: proposed.applied_set().clone(),
                     event_source: replaced.source,
                     event_target: replaced.target,
-                    event_amount: replaced.amount,
+                    event_amount: None,
+                    event_amount_fraction: HalfFraction::Zero,
                     // CR 109.5: same split as the mandatory stash — the
                     // zone-change drain rebinds `source` to the entering /
                     // moving object, so the branch's "you" needs its own slot.
                     controller: branch_controller,
                     parked_entrants: Vec::new(),
                 };
+                drain.set_exact_event_amount(replaced.amount);
                 // CR 616.1: a damage batch settling its original choices holds the branch's
                 // action as it holds a mandatory one (`hold_damage_rider`).
                 let drain = match &proposed {
@@ -23750,6 +23771,7 @@ mod tests {
                     event_source: None,
                     event_target: Some(TargetRef::Player(PlayerId(0))),
                     event_amount: None,
+                    event_amount_fraction: crate::types::ability::HalfFraction::Zero,
                     controller: Some(PlayerId(0)),
                     parked_entrants: Vec::new(),
                 },
@@ -27231,7 +27253,15 @@ mod tests {
         let left_3 = damage_event(3);
         let left_4 = damage_event(4);
         let left_6 = damage_event(6);
-        let latch = |rid, before, outcome| replaced_event_amount(&state, rid, before, outcome);
+        // Whole inputs latch whole amounts; the half-point cases follow at the end.
+        let latch = |rid, before: Option<u32>, outcome| {
+            replaced_event_amount(&state, rid, before.map(HalfMagnitude::from_whole), outcome).map(
+                |exact| {
+                    assert!(!exact.has_half(), "whole inputs latch a whole amount");
+                    exact.whole_floor()
+                },
+            )
+        };
         fn modified(after: &ProposedEvent) -> ReplacementOutcome<'_> {
             ReplacementOutcome::Modified(after)
         }
@@ -27275,6 +27305,34 @@ mod tests {
         assert_eq!(latch(rid(8), Some(3), ReplacementOutcome::Replaced), None);
         // An event with no quantity owns no amount.
         assert_eq!(latch(rid(1), None, ReplacementOutcome::Replaced), None);
+
+        // CR 615.5: an Unhinged half point stays exact. Preventing all of Vile Bile's 2½ owns
+        // 2½; "prevent the next 3" leaving ½ of 3½ owns 3; leaving 2 of 2½ owns ½.
+        let exact = |halves| Some(HalfMagnitude::from_halves(halves));
+        let mut left_half = damage_event(0);
+        if let ProposedEvent::Damage {
+            amount_fraction, ..
+        } = &mut left_half
+        {
+            *amount_fraction = HalfFraction::Half;
+        }
+        assert_eq!(
+            replaced_event_amount(&state, rid(1), exact(5), ReplacementOutcome::Replaced),
+            exact(5)
+        );
+        assert_eq!(
+            replaced_event_amount(&state, rid(0), exact(7), modified(&left_half)),
+            exact(6)
+        );
+        assert_eq!(
+            replaced_event_amount(&state, rid(2), exact(5), modified(&left_2)),
+            exact(1)
+        );
+        assert_eq!(
+            event_quantity(&left_half),
+            exact(1),
+            "the latch reads the event's half point"
+        );
     }
 
     /// CR 614.1a + CR 614.6: one predicate classifies a damage substitution by the definition's

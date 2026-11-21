@@ -76238,7 +76238,7 @@ mod replacement_action_continuation_tests {
         crate::game::layers::evaluate_layers(state);
         let accepted = draw_payment()
             .sub_ability(paid_life(3).sub_ability(draw_payment().sub_ability(paid_life(13))));
-        with_replacement_action_scope(Some(2), || {
+        with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
             prepend_to_pending_continuation_with_producer(
                 state,
                 accepted,
@@ -76257,7 +76257,7 @@ mod replacement_action_continuation_tests {
         assert!(active.head_payment_origin.is_fresh_choice());
         assert_eq!(
             active.replacement_action,
-            Some(ReplacementActionScope { amount: 2 })
+            Some(ReplacementActionScope::whole(2))
         );
         let accepted = frame(state.resolution_stack.active_predecessor());
         assert_eq!(
@@ -76267,7 +76267,7 @@ mod replacement_action_continuation_tests {
         assert!(matches!(accepted.chain.effect, Effect::PayCost { .. }));
         assert_eq!(
             accepted.replacement_action,
-            Some(ReplacementActionScope { amount: 2 })
+            Some(ReplacementActionScope::whole(2))
         );
 
         prepend_to_pending_continuation(state, draw_payment().sub_ability(paid_life(11)));
@@ -76323,7 +76323,7 @@ mod replacement_action_continuation_tests {
         crate::game::layers::evaluate_layers(runner.state_mut());
         let library_before = runner.state().players[0].library.len();
         runner.state_mut().current_trigger_match_count = Some(9);
-        with_replacement_action_scope(Some(2), || {
+        with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
             resolve_ability_chain(
                 runner.state_mut(),
                 &draw(1).sub_ability(action_life()),
@@ -76338,7 +76338,7 @@ mod replacement_action_continuation_tests {
         ));
         assert!(runner.state().resolution_stack.iter().any(|frame| matches!(
             frame, ResolutionFrame::AbilityContinuation(frame)
-                if frame.pending.replacement_action == Some(ReplacementActionScope { amount: 2 })
+                if frame.pending.replacement_action == Some(ReplacementActionScope::whole(2))
         )), "the paused draw has an action-owned continuation parent");
         let state = runner.state_mut();
         state.battlefield.retain(|id| *id != humility);
@@ -76378,9 +76378,9 @@ mod replacement_action_continuation_tests {
     /// prepended from outside is parked above it (it runs first, as a merge would have run it).
     #[test]
     fn a_replacement_actions_continuation_never_merges_with_work_of_another_owner() {
-        let action = Some(ReplacementActionScope { amount: 2 });
+        let action = Some(ReplacementActionScope::whole(2));
         let mut state = GameState::new_two_player(42);
-        with_replacement_action_scope(Some(2), || {
+        with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
             let pending = PendingContinuation::new(Box::new(draw(1)), &state);
             state.park_ability_continuation(pending);
             append_to_pending_continuation(&mut state, Some(Box::new(draw(2))));
@@ -76470,7 +76470,7 @@ mod replacement_action_continuation_tests {
         may.optional = true;
         for accept in [true, false] {
             let mut runner = GameScenario::new().build();
-            with_replacement_action_scope(Some(2), || {
+            with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
                 resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
             });
             assert!(
@@ -76483,7 +76483,7 @@ mod replacement_action_continuation_tests {
             );
             assert_eq!(
                 offered_in(runner.state()),
-                Some(ReplacementActionScope { amount: 2 })
+                Some(ReplacementActionScope::whole(2))
             );
             assert_eq!(crate::game::quantity::current_replacement_action(), None);
             let events = runner
@@ -76536,7 +76536,7 @@ mod replacement_action_continuation_tests {
                 }));
             may.optional = true;
             may.optional_for = Some(OpponentMayScope::AnyOpponent);
-            with_replacement_action_scope(Some(2), || {
+            with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
                 resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
             });
             assert!(
@@ -76549,7 +76549,7 @@ mod replacement_action_continuation_tests {
             );
             assert_eq!(
                 offered_in(runner.state()),
-                Some(ReplacementActionScope { amount: 2 })
+                Some(ReplacementActionScope::whole(2))
             );
             let events = runner
                 .act(GameAction::DecideOptionalEffect { accept })
@@ -76578,7 +76578,7 @@ mod replacement_action_continuation_tests {
         );
         may.optional = true;
         may.optional_for = Some(OpponentMayScope::AnyPlayer);
-        with_replacement_action_scope(Some(2), || {
+        with_replacement_action_scope(Some(crate::types::ability::HalfSigned::from_whole(2)), || {
             resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
         });
         assert!(
@@ -76591,7 +76591,7 @@ mod replacement_action_continuation_tests {
         );
         assert_eq!(
             offered_in(runner.state()),
-            Some(ReplacementActionScope { amount: 2 })
+            Some(ReplacementActionScope::whole(2))
         );
         let events = runner
             .act(GameAction::DecideOptionalEffect { accept: true })
@@ -76608,7 +76608,7 @@ mod replacement_action_continuation_tests {
         );
         assert_eq!(
             offered_in(runner.state()),
-            Some(ReplacementActionScope { amount: 2 }),
+            Some(ReplacementActionScope::whole(2)),
             "the re-offer belongs to the same action"
         );
         assert_eq!(crate::game::quantity::current_replacement_action(), None);

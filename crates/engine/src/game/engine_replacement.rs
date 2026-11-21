@@ -6972,7 +6972,7 @@ pub(crate) fn dispatch_pending_post_replacement_effect(
     let captured_amount = state
         .active_post_replacement_drains()
         .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
-        .and_then(|drain| drain.event_amount);
+        .and_then(crate::types::game_state::PostReplacementDrain::exact_event_amount);
     // CR 614.12a + CR 603.6d: the entrant's delivery already holds its entry
     // when a pause came before this as-enters roll; read before the dispatch
     // takes the continuation.
@@ -6980,7 +6980,9 @@ pub(crate) fn dispatch_pending_post_replacement_effect(
         && as_enters_roll_chain_mut(state).is_some();
     let (continuation, dispatch) = state.begin_post_replacement_dispatch()?;
     if let Some(amount) = captured_amount {
-        state.last_effect_count = Some(crate::game::arithmetic::u32_to_i32_saturating(amount));
+        state.last_effect_count = Some(crate::game::arithmetic::u32_to_i32_saturating(
+            amount.whole_floor(),
+        ));
     }
     // CR 603.3b + CR 608.2c: this dispatch is now live on this thread's call
     // stack. Constructed AFTER the mint so the `?` early-return path never
@@ -7008,7 +7010,8 @@ pub(crate) fn dispatch_pending_post_replacement_effect(
     // Work the action leaves for a later `apply()` (a step after a child prompt) carries this
     // scope on its `PendingContinuation` and re-enters it when it resumes
     // (`effects::drain_pending_continuation`).
-    let owned_amount = captured_amount.map(crate::game::arithmetic::u32_to_i32_saturating);
+    // Exact, so a prevention of Vile Bile's 2½ damage owns 2½ (Awe Strike gains 2½ life).
+    let owned_amount = captured_amount.map(crate::types::ability::HalfMagnitude::as_signed);
     let waiting_for =
         crate::game::quantity::with_replacement_action_scope(owned_amount, || match continuation {
             PostReplacementContinuation::Resolved(resolved) => {

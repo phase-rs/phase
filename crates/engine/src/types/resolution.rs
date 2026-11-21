@@ -7734,6 +7734,7 @@ impl LegacyReplacementTailsWire {
                         // The split-slot wire shape predates the CR 614.1a
                         // substitution amount; no damage substitution existed.
                         event_amount: None,
+                        event_amount_fraction: crate::types::ability::HalfFraction::Zero,
                         // The pre-fold split-slot wire shape predates the
                         // CR 109.5 controller slot; a migrated drain falls back
                         // to the affected object's controller, exactly as it did
