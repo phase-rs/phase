@@ -37,6 +37,7 @@ mod deferred_target_cost_determination;
 mod delayed_declare_attackers_return;
 mod delayed_departure_lookback;
 mod delayed_parent_target_incarnation;
+mod delayed_return_owner_upkeep_and_incarnation;
 mod delayed_trigger_binds_added_combat;
 mod delayed_trigger_continuation;
 mod delayed_trigger_occurrence_fanout;
