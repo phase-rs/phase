@@ -793,9 +793,10 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
                     let damage = if eligible.len() >= required && required <= max {
                         // The defender picks the blocker group, so assume the one
                         // that lets the least damage through: for each legal group
-                        // size, the highest-toughness blockers absorb the most
-                        // trample damage (CR 702.19b), and declining to block is
-                        // never better for the defender than blocking.
+                        // size, rank blockers by the engine's combat assignment
+                        // minimum to estimate how much trample damage gets through
+                        // (CR 702.19b), and declining to block is never better for
+                        // the defender than blocking.
                         // CR 702.19b + CR 702.2c: rank by the engine's assignment
                         // minimum, the amount `combat_damage_to_defender` makes the
                         // attacker assign before trampling over. Damage already marked
