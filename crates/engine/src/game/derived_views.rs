@@ -1835,7 +1835,8 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // O(battlefield size); the BTreeMap stays empty (and `skip_serializing_if`
     // omits the field) when no Auras are enchanting any player, which is the
     // dominant case.
-    let block_restrictions = crate::game::combat::collect_block_restriction_statics(state);
+    let block_restrictions =
+        crate::game::combat::collect_functioning_block_restriction_statics(state);
     for &obj_id in &state.battlefield {
         let Some(obj) = state.objects.get(&obj_id) else {
             continue;
@@ -3399,7 +3400,7 @@ fn combat_damage_label(sub_step: CombatDamageSubStep) -> String {
 
 fn stack_entry_targets(state: &GameState, entry: &StackEntry) -> Vec<StackTargetDisplay> {
     let targets = match &entry.kind {
-        StackEntryKind::KeywordAction { action } => keyword_action_targets(action),
+        StackEntryKind::KeywordAction { action } => action.targets(),
         _ => effective_stack_ability(state, entry)
             .ability
             .map(|ability| {
@@ -3420,17 +3421,6 @@ fn stack_entry_targets(state: &GameState, entry: &StackEntry) -> Vec<StackTarget
             target,
         })
         .collect()
-}
-
-fn keyword_action_targets(action: &KeywordAction) -> Vec<TargetRef> {
-    match action {
-        KeywordAction::Equip {
-            target_creature_id, ..
-        } => vec![TargetRef::Object(*target_creature_id)],
-        KeywordAction::Crew { .. }
-        | KeywordAction::Saddle { .. }
-        | KeywordAction::Station { .. } => Vec::new(),
-    }
 }
 
 fn target_label(state: &GameState, target: &TargetRef) -> String {
@@ -3687,10 +3677,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn emblem_printing(collector: &str) -> SharedPrinting {
-        SharedPrinting::new(CardPrinting {
-            set_code: "owner".into(),
-            collector_number: collector.into(),
-        })
+        SharedPrinting::new(CardPrinting::owner("owner", collector))
     }
 
     /// A synthetic emblem row fixture. No printed emblem carries an activated ability or empty
@@ -8250,6 +8237,7 @@ mod tests {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }]
             .into();
         }

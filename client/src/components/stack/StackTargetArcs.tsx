@@ -144,6 +144,22 @@ export function StackTargetArcs({
 
 // ── RAF position polling (specialized for heterogeneous selectors) ───────
 
+/**
+ * The rect an arc uses for an element: its own, except that a stack entry the
+ * panel's pile has scrolled partly or wholly out of view (#11119) is cut to
+ * the pile's visible band, so an arc starts or ends at what shows of it, or at
+ * the band's nearest edge, rather than behind the header or over the board.
+ */
+function visibleRect(element: Element): DOMRect {
+  const rect = element.getBoundingClientRect();
+  const pile = element.closest("[data-stack-pile-scroller]");
+  if (!pile) return rect;
+  const band = pile.getBoundingClientRect();
+  const top = Math.min(Math.max(rect.top, band.top), band.bottom);
+  const bottom = Math.max(Math.min(rect.bottom, band.bottom), band.top);
+  return new DOMRect(rect.left, top, rect.width, bottom - top);
+}
+
 function useStackArcPositions(arcs: ArcDatum[]): Map<string, ArcPosition> {
   const [positions, setPositions] = useState<Map<string, ArcPosition>>(new Map());
   const prevRectsRef = useRef<Map<string, DOMRect>>(new Map());
@@ -157,7 +173,7 @@ function useStackArcPositions(arcs: ArcDatum[]): Map<string, ArcPosition> {
 
     stableCountRef.current = 0;
     prevRectsRef.current = new Map();
-    let rafId: number;
+    let rafId = 0;
 
     function poll() {
       const currentRects = new Map<string, DOMRect>();
@@ -169,14 +185,15 @@ function useStackArcPositions(arcs: ArcDatum[]): Map<string, ArcPosition> {
           if (currentRects.has(selector)) continue;
           const el = document.querySelector(selector);
           if (!el) continue;
-          const rect = el.getBoundingClientRect();
+          const rect = visibleRect(el);
           currentRects.set(selector, rect);
           const prev = prevRectsRef.current.get(selector);
           if (
             !prev ||
             Math.abs(prev.left - rect.left) > 0.5 ||
             Math.abs(prev.top - rect.top) > 0.5 ||
-            Math.abs(prev.width - rect.width) > 0.5
+            Math.abs(prev.width - rect.width) > 0.5 ||
+            Math.abs(prev.height - rect.height) > 0.5
           ) {
             changed = true;
           }
@@ -214,11 +231,27 @@ function useStackArcPositions(arcs: ArcDatum[]): Map<string, ArcPosition> {
       // Stop polling after 10 stable frames
       if (stableCountRef.current < 10) {
         rafId = requestAnimationFrame(poll);
+      } else {
+        rafId = 0;
       }
     }
 
+    const restartPolling = () => {
+      if (rafId !== 0) cancelAnimationFrame(rafId);
+      stableCountRef.current = 0;
+      rafId = requestAnimationFrame(poll);
+    };
+
     rafId = requestAnimationFrame(poll);
-    return () => cancelAnimationFrame(rafId);
+    // A scroll moves an arc's ends without changing the arcs: the stack panel
+    // scrolls its pile when it is too short for all of it (#11119). As in
+    // `useRafPositions`, a capture-phase `scroll` listener sees scrolls inside
+    // inner containers, and restarts the polling that had settled.
+    window.addEventListener("scroll", restartPolling, true);
+    return () => {
+      if (rafId !== 0) cancelAnimationFrame(rafId);
+      window.removeEventListener("scroll", restartPolling, true);
+    };
   }, [arcs]);
 
   return positions;
