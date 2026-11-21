@@ -47,7 +47,7 @@ use super::oracle_util::{
 use crate::types::text_grammar::{
     parse_color_prefix, parse_color_quality_prefix, parse_core_type, parse_exile_visibility_prefix,
     parse_leading_keyword_match, parse_leading_pt_designation, parse_token_suffix,
-    separator_continues_enclosing_list, starts_with_type_phrase_lead, KeywordMatch,
+    separator_stops_keyword_list, starts_with_type_phrase_lead, KeywordMatch,
 };
 pub(crate) use crate::types::text_grammar::{
     parse_combat_status_prefix, parse_without_keyword_suffix, starts_with_type_word,
@@ -5541,7 +5541,7 @@ fn starts_with_article_core_type_segment(text: &str) -> bool {
     false
 }
 
-fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
+pub(crate) fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(tf) => !tf.type_filters.is_empty() || !tf.properties.is_empty(),
         TargetFilter::StackSpell
@@ -8575,61 +8575,10 @@ pub(crate) fn parse_mana_value_suffix(
         }
     }
 
-    // Static "N or less" / "N or greater" — also accepts literal X via
-    // `parse_quantity_expr_number`, which emits `QuantityRef::Variable { "X" }`
-    // resolved at effect time against the resolving ability's `chosen_x`.
-    // CR 107.3a + CR 601.2b: X announced at cast, read at resolution.
-    //
-    // CR 202.3: "mana value 4, 5, or 6" / "mana value 4 or 5" — an exact-value
-    // disjunction, one EQ comparison per listed value. Tried before the single
-    // number so the list is read whole; it stops before any clause comma.
-    if let Ok((after, values)) = nom_quantity::parse_number_disjunction(rest) {
-        let props = values
-            .into_iter()
-            .map(|value| FilterProp::Cmc {
-                comparator: Comparator::EQ,
-                value,
-            })
-            .collect();
-        return Some((FilterProp::AnyOf { props }, text.len() - after.len()));
-    }
-    let (after_num_raw, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
-    let after_num = after_num_raw.trim_start();
-
-    let (prop, after) =
-        if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or greater").parse(after_num) {
-            (
-                FilterProp::Cmc {
-                    comparator: Comparator::GE,
-                    value,
-                },
-                a,
-            )
-        } else if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or less").parse(after_num) {
-            (
-                FilterProp::Cmc {
-                    comparator: Comparator::LE,
-                    value,
-                },
-                a,
-            )
-        } else {
-            // An "or" tail that neither the comparator arms above nor the
-            // exact-value list read ("mana value 4 or blue") is not an exact
-            // reading: decline the whole suffix rather than keep EQ N and strand
-            // the "or" clause.
-            not(tag::<_, _, OracleError<'_>>("or "))
-                .parse(after_num)
-                .ok()?;
-            // CR 202.3: Exact mana value match — "with mana value N" (no "or less"/"or greater").
-            (
-                FilterProp::Cmc {
-                    comparator: Comparator::EQ,
-                    value,
-                },
-                after_num,
-            )
-        };
+    // CR 202.3: Literal/X thresholds and exact-value disjunctions are shared
+    // with zone-card counts; contextual and superlative branches above remain
+    // target-parser-specific.
+    let (after, prop) = nom_filter::parse_mana_value_comparison_tail(rest).ok()?;
     // CR 107.3a + CR 202.3: rebind a bare `X` mana-value gate from a trailing
     // ", where X is <quantity>" clause (As Foretold). No-op for every other caller.
     let (prop, after) = rebind_bare_x_mana_value(prop, after);
@@ -9309,10 +9258,11 @@ fn parse_keyword_suffix(text: &str) -> Option<(KeywordSuffix, usize)> {
         let mut found_sep = false;
         for sep in &[", and ", ", or ", " and ", " or ", ", "] {
             if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*sep).parse(remaining) {
-                // A separator followed by a type word rather than a keyword
-                // belongs to the enclosing type list ("creature with disturb,
-                // or enchantment") and stays unconsumed for the caller.
-                if separator_continues_enclosing_list(rest) {
+                // A separator followed by anything other than another keyword
+                // stays unconsumed: it either belongs to the enclosing type
+                // list ("creature with disturb, or enchantment") or opens the
+                // following clause (Jadar, Ghoulcaller of Nephalia).
+                if separator_stops_keyword_list(rest) {
                     break;
                 }
                 if matches!(*sep, ", or " | " or ") {
@@ -16659,7 +16609,9 @@ mod tests {
     fn card_with_flashback_or_disturb_uses_keyword_kind_filters() {
         let (f, rest) =
             parse_type_phrase_folding("card with flashback or disturb, put it into your graveyard");
-        assert_eq!(rest, "put it into your graveyard");
+        // Preserve the comma that terminates the keyword qualifier so callers
+        // that parse a following clause can validate its boundary.
+        assert_eq!(rest, ", put it into your graveyard");
         let TargetFilter::Or { filters } = f else {
             panic!("expected Or filter, got {f:?}");
         };
@@ -16747,7 +16699,9 @@ mod tests {
         let (f, rest) = parse_type_phrase_folding(
             "creature with deathtouch, hexproof, reach, or trample and reveal it",
         );
-        assert_eq!(rest, "reveal it");
+        // The final "and" is a clause delimiter, not a fifth keyword-list
+        // separator; preserve it for the caller that owns the next clause.
+        assert_eq!(rest, " and reveal it");
         let TargetFilter::Or { filters } = f else {
             panic!("expected Or filter, got {f:?}");
         };
@@ -26209,6 +26163,19 @@ mod tests {
                 if t.properties.iter().filter(|p| matches!(p, FilterProp::WithKeyword { .. })).count() == 2),
             "{filter:?}"
         );
+    }
+
+    #[test]
+    fn keyword_suffix_preserves_following_clause_delimiter() {
+        let text = "with decayed, create a token";
+        let (suffix, consumed) = parse_keyword_suffix(text).expect("keyword suffix");
+        assert!(matches!(
+            suffix.properties.as_slice(),
+            [FilterProp::WithKeyword {
+                value: Keyword::Decayed
+            }]
+        ));
+        assert_eq!(&text[consumed..], ", create a token");
     }
 
     /// A non-list target followed by an unrelated ", or" clause stays untouched.

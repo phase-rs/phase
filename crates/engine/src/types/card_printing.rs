@@ -5,6 +5,7 @@
 
 use std::fmt;
 use std::marker::PhantomData;
+use std::num::NonZeroU8;
 use std::sync::Arc;
 
 use serde::de::{DeserializeOwned, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -13,11 +14,23 @@ use serde_json::{Map, Number, Value};
 
 use crate::types::card::CardFace;
 
-/// One printing of a card: its set code and collector number.
+/// One printing of a card, with its automatic catalog provenance when assigned.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardPrinting {
     pub set_code: String,
     pub collector_number: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_art_catalog_version: Option<NonZeroU8>,
+}
+
+impl CardPrinting {
+    pub fn owner(set_code: impl Into<String>, collector_number: impl Into<String>) -> Self {
+        Self {
+            set_code: set_code.into(),
+            collector_number: collector_number.into(),
+            automatic_art_catalog_version: None,
+        }
+    }
 }
 
 /// The printing an object-level display carrier holds (`GameObject`, `TriggerSourceContext`,
@@ -56,7 +69,41 @@ pub struct DeckPrinting {
     pub section: DeckSection,
     pub name: String,
     pub count: u32,
+    #[serde(with = "owner_printing_pair")]
     pub printing: CardPrinting,
+}
+
+mod owner_printing_pair {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::CardPrinting;
+
+    #[derive(Serialize, Deserialize)]
+    struct Pair<S> {
+        set_code: S,
+        collector_number: S,
+    }
+
+    pub(super) fn serialize<S: Serializer>(
+        printing: &CardPrinting,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        Pair {
+            set_code: printing.set_code.as_str(),
+            collector_number: printing.collector_number.as_str(),
+        }
+        .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<CardPrinting, D::Error> {
+        let Pair {
+            set_code,
+            collector_number,
+        } = Pair::<String>::deserialize(deserializer)?;
+        Ok(CardPrinting::owner(set_code, collector_number))
+    }
 }
 
 /// Resource bound against abuse, not a validity rule: the most elements one deck
@@ -134,6 +181,7 @@ pub fn validate_deck_printings_bounds(
                 CardPrinting {
                     set_code,
                     collector_number,
+                    automatic_art_catalog_version: _,
                 },
         } = entry;
         if name.len() > MAX_DECK_CARD_NAME_LEN {
@@ -582,15 +630,47 @@ mod tests {
         assert!(err.contains("number out of range"), "{err}");
     }
 
+    #[test]
+    fn owner_sidecar_ignores_forged_display_provenance() {
+        for marker in ["1", r#"{"malformed":true}"#] {
+            let row = format!(
+                r#"{{"section":"main_deck","name":"Forest","count":2,"printing":{{"set_code":"m21","collector_number":"272","automatic_art_catalog_version":{marker}}}}}"#
+            );
+            for (shape, result) in decode_every_shape(&deck_json(&[&row])) {
+                let deck = result.unwrap_or_else(|err| panic!("{shape}: {err}"));
+                assert_eq!(deck.printings.len(), 1, "{shape}: {marker}");
+                assert_eq!(
+                    deck.printings[0].printing.automatic_art_catalog_version,
+                    None
+                );
+                assert_eq!(
+                    serde_json::to_value(&deck.printings).unwrap(),
+                    serde_json::json!([
+                        {"section":"main_deck","name":"Forest","count":2,
+                         "printing":{"set_code":"m21","collector_number":"272"}}
+                    ]),
+                    "{shape}: {marker}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_owner_sidecar_serializes_only_the_printing_pair() {
+        let mut row = entry("Forest", "m21", "272");
+        row.printing.automatic_art_catalog_version = NonZeroU8::new(1);
+        assert_eq!(
+            serde_json::to_value(row).unwrap()["printing"],
+            serde_json::json!({"set_code":"m21","collector_number":"272"})
+        );
+    }
+
     fn entry(name: &str, set_code: &str, collector_number: &str) -> DeckPrinting {
         DeckPrinting {
             section: DeckSection::MainDeck,
             name: name.to_string(),
             count: 1,
-            printing: CardPrinting {
-                set_code: set_code.to_string(),
-                collector_number: collector_number.to_string(),
-            },
+            printing: CardPrinting::owner(set_code, collector_number),
         }
     }
 

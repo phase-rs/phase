@@ -1922,6 +1922,12 @@ pub struct ParkedDamageBatch {
     /// settle together when it ends (`elimination::settle_event_outcomes`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcomes: Option<EventOutcomes>,
+    /// CR 615.13 + CR 120.3: the batch's prevention so far, one entry per (shield, recipient),
+    /// in `sorted_prevention_entries` order. One prevention effect applying to simultaneous
+    /// damage is one application, so the batch publishes these once, after its damage, however
+    /// many pauses it spans.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prevention_tally: Vec<crate::types::game_state::PreventedDamageEntry>,
 }
 
 /// CR 104.3e + CR 104.3f + CR 104.4a: the effect-stated wins and losses of one simultaneous
@@ -2721,6 +2727,19 @@ pub enum KeywordAction {
         paid_creature_id: ObjectId,
         snapshot_power: i32,
     },
+}
+
+impl KeywordAction {
+    /// CR 115.1e + CR 702.6a: the targets chosen for this keyword action; only
+    /// equip targets (crew, saddle and station target nothing).
+    pub fn targets(&self) -> Vec<TargetRef> {
+        match self {
+            Self::Equip {
+                target_creature_id, ..
+            } => vec![TargetRef::Object(*target_creature_id)],
+            Self::Crew { .. } | Self::Saddle { .. } | Self::Station { .. } => Vec::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4312,6 +4331,53 @@ pub fn keyed_target_pin_is_current(
         .is_none_or(|pin| pin.is_current(state))
 }
 
+/// CR 400.7e: true when `zone` is the public zone `record`'s move put the object
+/// in (`to`), the turn ledger entry at `record.turn_zone_change_index` is this
+/// very move (the same departing identity), and no later zone change of the same
+/// storage id has been recorded — except `in_flight_departure`, the departing
+/// incarnation of a move still being applied (an incarnation departs only once,
+/// so a record carrying it is that move, not an earlier one). The live object at
+/// that id is then the new object that move created. A trigger cannot find the
+/// new object in a hidden zone.
+pub(crate) fn zone_change_record_has_live_successor(
+    state: &crate::types::game_state::GameState,
+    record: &crate::types::game_state::ZoneChangeRecord,
+    to: Zone,
+    zone: Zone,
+    in_flight_departure: Option<u64>,
+) -> bool {
+    let Some(departing) = record
+        .trigger_source_context()
+        .map(|context| context.identity.reference)
+    else {
+        return false;
+    };
+    if zone != to || !zone.is_public() {
+        return false;
+    }
+    let Some(recorded_event) = state
+        .zone_changes_this_turn
+        .get(record.turn_zone_change_index)
+    else {
+        return false;
+    };
+    recorded_event
+        .trigger_source_context()
+        .is_some_and(|context| context.identity.reference == departing)
+        && state
+            .zone_changes_this_turn
+            .iter()
+            .skip(record.turn_zone_change_index + 1)
+            .all(|later| {
+                later.object_id != record.object_id
+                    || in_flight_departure.is_some_and(|departing| {
+                        later.trigger_source_context().is_some_and(|context| {
+                            context.identity.reference.incarnation == departing
+                        })
+                    })
+            })
+}
+
 impl ResolvedAbility {
     /// CR 113.7a + CR 603.3: the definition of the triggered ability this resolving node
     /// belongs to, read from the trigger-time snapshot of its source — never live state.
@@ -4964,6 +5030,32 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 113.7a + CR 602.2a + CR 608.2h + CR 400.7: pin the activation-time
+    /// source identity over this entire ability chain WITHOUT building
+    /// triggered provenance. Each node keeps its announcement-epoch
+    /// incarnation in `announced_source_incarnation` (the epoch the source had
+    /// before any cost was paid, CR 601.2h). `source_incarnation` is left
+    /// alone so the stack-push boundary stamps the post-cost epoch (stack.rs),
+    /// and `trigger_source` is left alone so `trigger_source.is_some()`
+    /// proxies keep their pre-pin activated arm (the `ability_utils` carrier
+    /// contract: activated carriers supply only incarnation epochs, never a
+    /// trigger latch). Plot never stack-pushes, so its `source_incarnation`
+    /// remains `None` and the `is_none_or` fail-open holds. Unlike
+    /// [`Self::set_trigger_source_recursive`], this never writes `controller`
+    /// / `original_controller`: for an activated ability the controller is the
+    /// activating player (CR 602.2a), so every `Controller`-relative consumer
+    /// keeps the activator binding. An existing `announced_source_incarnation`
+    /// capture is never overwritten: the earliest announcement wins.
+    pub fn set_departure_pin_recursive(&mut self, source_id: ObjectId, incarnation: u64) {
+        self.source_id = source_id;
+        if self.announced_source_incarnation.is_none() {
+            self.announced_source_incarnation = Some(incarnation);
+        }
+        for (_, child) in self.child_links_mut() {
+            child.set_departure_pin_recursive(source_id, incarnation);
+        }
+    }
+
     /// CR 400.7 + CR 113.7a: carry a random-result branch's source identity
     /// without changing its actor, targets, pins, or other resolution context.
     /// Different-source nodes bound the traversal, including their descendants;
@@ -5486,9 +5578,10 @@ impl ResolvedAbility {
 
     /// CR 400.7 + CR 602.2a: Propagate the source incarnation captured at an
     /// activation's announcement — before any cost is paid — to this ability
-    /// and every continuation branch. Called only by
-    /// `casting::record_activation_announcement`; stack placement and trigger
-    /// creation never touch it.
+    /// and every continuation branch. Called by
+    /// `casting::record_activation_announcement` and by the activation-time
+    /// departure pin (`set_departure_pin_recursive`); stack placement and
+    /// trigger creation never touch it.
     pub fn set_announced_source_incarnation_recursive(&mut self, incarnation: Option<u64>) {
         self.announced_source_incarnation = incarnation;
         for (_, child) in self.child_links_mut() {
@@ -5821,35 +5914,10 @@ impl ResolvedAbility {
             || record.trigger_source_context().is_none_or(|event_source| {
                 event_source.identity.reference != source.identity.reference
             })
-            || zone != *to
-            || !zone.is_public()
         {
             return false;
         }
-
-        let Some(recorded_event) = state
-            .zone_changes_this_turn
-            .get(record.turn_zone_change_index)
-        else {
-            return false;
-        };
-        recorded_event
-            .trigger_source_context()
-            .is_some_and(|event_source| {
-                event_source.identity.reference == source.identity.reference
-            })
-            && state
-                .zone_changes_this_turn
-                .iter()
-                .skip(record.turn_zone_change_index + 1)
-                .all(|later| {
-                    later.object_id != self.source_id
-                        || in_flight_departure.is_some_and(|departing| {
-                            later.trigger_source_context().is_some_and(|context| {
-                                context.identity.reference.incarnation == departing
-                            })
-                        })
-                })
+        zone_change_record_has_live_successor(state, record, *to, zone, in_flight_departure)
     }
 
     /// CR 400.7e: True when an off-battlefield zone-match would mis-latch SelfRef
@@ -6829,6 +6897,73 @@ mod tests {
     use crate::types::events::GameEvent;
     use crate::types::game_state::{DelayedTrigger, GameState, ZoneChangeRecord};
     use crate::types::zones::{EtbTapState, Zone};
+
+    /// V12 — CR 400.7e: the zone-change record successor authority. The live
+    /// object at the record's id is the object that move created only while no
+    /// later zone change of that id is recorded, except the in-flight move named
+    /// by its departing incarnation, and only in a public zone.
+    #[test]
+    fn zone_change_record_successor_requires_no_later_move_of_that_id() {
+        use crate::game::zones::{create_object, move_to_zone};
+        use crate::types::identifiers::CardId;
+        use crate::types::player::PlayerId;
+
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+        let record = events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id, record, ..
+                } if *object_id == id => Some(record.as_ref().clone()),
+                _ => None,
+            })
+            .expect("the death is recorded");
+
+        // (a) No later entry: the graveyard object is that move's successor.
+        assert!(zone_change_record_has_live_successor(
+            &state,
+            &record,
+            Zone::Graveyard,
+            Zone::Graveyard,
+            None
+        ));
+        // (d) A hidden zone never names the new object.
+        assert!(!zone_change_record_has_live_successor(
+            &state,
+            &record,
+            Zone::Library,
+            Zone::Library,
+            None
+        ));
+
+        let departing = state.objects[&id].incarnation;
+        move_to_zone(&mut state, id, Zone::Exile, &mut Vec::new());
+        // (b) A later same-id entry: no longer the successor.
+        assert!(!zone_change_record_has_live_successor(
+            &state,
+            &record,
+            Zone::Graveyard,
+            Zone::Graveyard,
+            None
+        ));
+        // (c) That later entry is the in-flight move named by its departing incarnation.
+        assert!(zone_change_record_has_live_successor(
+            &state,
+            &record,
+            Zone::Graveyard,
+            Zone::Graveyard,
+            Some(departing)
+        ));
+    }
 
     /// CR 607.1 + CR 607.5 + CR 613.1f: every trigger occurrence classifies
     /// exhaustively — printed and copied-value occurrences are characteristic

@@ -43,7 +43,8 @@ use crate::types::resolved_commands::{
     ResolvedTriggerCollectionReplayInvariantError,
 };
 use crate::types::statics::{
-    StaticMode, SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
+    CausingObject, ControlledCreatureEvent, PlayerCauseAction, StaticMode, SuppressedTriggerEvent,
+    TriggerCause, ZoneChangeQualifier,
 };
 use crate::types::triggers::{AttackTargetFilter, TriggerEventKey, TriggerMode};
 use crate::types::zones::Zone;
@@ -2251,15 +2252,16 @@ fn cause_axis_events(
         TriggerCause::CreatureAttacking,
         TriggerCause::EntersBattlefield {
             core_types: Vec::new(),
+            entrant: crate::types::statics::CausingObject::Any,
         },
     ];
     events
         .into_iter()
         .filter(|event| {
             AXES.iter().any(|cause| {
-                // The axis carries no controller-relative predicate, so the
-                // controller argument is never read.
-                trigger_cause_matches(state, cause, Some(event), PlayerId(0))
+                // The axis carries no controller- or object-relative
+                // predicate (entrant `Any`), so those arguments are never read.
+                trigger_cause_matches(state, cause, Some(event), PlayerId(0), ObjectId(0))
             })
         })
         .collect()
@@ -6287,7 +6289,7 @@ fn apnap_rank(order: &[PlayerId], controller: PlayerId) -> usize {
         .unwrap_or(order.len())
 }
 
-fn trigger_apnap_rank(state: &GameState, controller: PlayerId) -> usize {
+pub(crate) fn trigger_apnap_rank(state: &GameState, controller: PlayerId) -> usize {
     if state.format_config.topology().has_shared_team_turns() {
         super::topology::apnap_team_rank(state, controller)
     } else {
@@ -16104,27 +16106,6 @@ fn dispatch_deferred_triggers_in_order(
     drain_deferred_triggers_after_trigger_construction(state, events_out)
 }
 
-/// CR 603.2d: Apply trigger doubling from `StaticMode::DoubleTriggers`
-/// static abilities. Scans battlefield for permanents with a DoubleTriggers
-/// static, then clones matching pending triggers an additional time. The
-/// `TriggerCause` predicate restricts which spawning events qualify
-/// (Panharmonicon: ETB; Isshin: creature attacking; Any: unrestricted).
-/// CR 603.2d: True when `filter` references the doubler's own source object —
-/// directly (`SelfRef`) or transitively through an `Or`/`And`/`Not` composition
-/// (e.g. Cloud's "Cloud or an Equipment attached to it"). Mirrors the parser-side
-/// `filter_references_self` in `oracle_trigger.rs`; used to decide whether a
-/// trigger doubler may double its own triggered abilities.
-fn filter_references_self(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::SelfRef => true,
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(filter_references_self)
-        }
-        TargetFilter::Not { filter } => filter_references_self(filter),
-        _ => false,
-    }
-}
-
 /// CR 403.3: A doubler's "ability of a permanent" scope refers to a source
 /// that was a battlefield permanent when it triggered. The `Permanent` type
 /// filter remains available for "permanent card" queries in other zones, so
@@ -16289,6 +16270,8 @@ pub enum LatchedScopePlan {
     /// "~": the watcher is the doubler, by exact incarnation.
     SelfRef,
     Object(ObjectId),
+    /// CR 112.1: "a ... spell": the watcher was latched on the stack.
+    StackSpell,
     Or(Vec<LatchedScopePlan>),
     And(Vec<LatchedScopePlan>),
     Not(Box<LatchedScopePlan>),
@@ -16317,6 +16300,10 @@ pub enum LatchedRelativeProperty {
     EquippedByDoubler,
     /// Greater power than the doubler's.
     PowerGreaterThanDoubler,
+    /// CR 108.3 + CR 109.5: owned by the doubler's controller ("a permanent you
+    /// control but don't own" — Jabs, Mistress of Mockery), judged on the
+    /// watcher's latched owner.
+    OwnedByDoublerController,
 }
 
 /// Whether a printed doubler scope is judged on the latched (look-back) path
@@ -16333,6 +16320,7 @@ pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopeP
         TargetFilter::Any => LatchedScopePlan::Any,
         TargetFilter::SelfRef => LatchedScopePlan::SelfRef,
         TargetFilter::SpecificObject { id } => LatchedScopePlan::Object(*id),
+        TargetFilter::StackSpell => LatchedScopePlan::StackSpell,
         TargetFilter::Or { filters } => LatchedScopePlan::Or(
             filters
                 .iter()
@@ -16379,7 +16367,6 @@ pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopeP
         | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
-        | TargetFilter::StackSpell
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::PlayerMatching { .. }
@@ -16505,6 +16492,12 @@ fn latched_property_kind(
         } => Some(LatchedRelativeProperty::AttachedToDoubler),
         FilterProp::EquippedBy => Some(LatchedRelativeProperty::EquippedByDoubler),
         FilterProp::PowerGTSource => Some(LatchedRelativeProperty::PowerGreaterThanDoubler),
+        // CR 108.3 + CR 603.10d: "you own" names the doubler's latched
+        // controller; the watcher's owner is captured with it. Any other
+        // ownership reference reads players the capture doesn't hold.
+        FilterProp::Owned {
+            controller: crate::types::ability::ControllerRef::You,
+        } => Some(LatchedRelativeProperty::OwnedByDoublerController),
         FilterProp::HasSupertype { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::HasColor { .. }
@@ -16654,6 +16647,7 @@ fn latched_scope_plan_matches(
             watcher.identity.reference == doubler.source.identity.reference
         }
         LatchedScopePlan::Object(id) => watcher.identity.reference.object_id == *id,
+        LatchedScopePlan::StackSpell => watcher.identity.expected_zone == Zone::Stack,
         LatchedScopePlan::Or(plans) => plans
             .iter()
             .any(|plan| latched_scope_plan_matches(state, watcher, plan, doubler)),
@@ -16728,6 +16722,9 @@ fn latched_relative_matches(
                 _ => false,
             }
         }
+        LatchedRelativeProperty::OwnedByDoublerController => {
+            watcher.lki.owner == doubler.controller()
+        }
     }
 }
 
@@ -16752,26 +16749,18 @@ fn doubler_applies(
     if trigger.controller != doubler.controller() {
         return false;
     }
-    // CR 603.2d: Self-exclusion. A doubler normally never doubles its own
-    // triggered abilities — Panharmonicon/Yarok/Isshin/Wayta all scope to
-    // OTHER permanents. The carve-out: when the doubler's `affected` filter
-    // references the source itself (`~`, e.g. Cloud's "a triggered ability
-    // of Cloud or an Equipment attached to it"), CR 603.2d makes its own
-    // triggered abilities eligible, so skip the exclusion and let the
-    // `affected` match below decide.
-    let affected_references_self = doubler
-        .affected
-        .as_ref()
-        .is_some_and(filter_references_self);
-    if !affected_references_self && trigger.source_id == doubler.source_id() {
-        return false;
-    }
+    // CR 603.2d: No blanket self-exclusion. The doubler's `affected` scope
+    // decides whether its own triggered abilities qualify: "a permanent you
+    // control" includes the doubler (Veyran's own Magecraft, Wulfgar's melee),
+    // while "another Wizard you control" excludes it through the `Another`
+    // property, and "~ or an Equipment attached to it" names it (Cloud).
     // CR 603.2d: Check the cause predicate against the spawning event.
     if !trigger_cause_matches(
         state,
         &doubler.cause,
         trigger.trigger_event.as_ref(),
         doubler.controller(),
+        doubler.source_id(),
     ) {
         return false;
     }
@@ -16788,6 +16777,11 @@ fn doubler_applies(
         })
 }
 
+/// CR 603.2d: Apply trigger doubling from `StaticMode::DoubleTriggers`
+/// static abilities. Scans battlefield for permanents with a DoubleTriggers
+/// static, then clones matching pending triggers an additional time. The
+/// `TriggerCause` predicate restricts which spawning events qualify
+/// (Panharmonicon: ETB; Isshin: creature attacking; Any: unrestricted).
 fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTriggerContext>) {
     let live = active_trigger_doublers(state);
     let mut extra: Vec<PendingTriggerContext> = Vec::new();
@@ -16842,9 +16836,11 @@ pub fn trigger_cause_can_match_control_change(cause: &TriggerCause) -> bool {
         TriggerCause::EntersBattlefield { .. }
         | TriggerCause::CreatureAttacking
         | TriggerCause::CreatureDying
-        | TriggerCause::ControlledCreatureDealtDamage
+        | TriggerCause::ControlledCreature { .. }
         | TriggerCause::ControllerCastOrCopiedSpell { .. }
         | TriggerCause::RoomEntered
+        | TriggerCause::PlayerAction { .. }
+        | TriggerCause::TurnedFaceUp
         | TriggerCause::BattlefieldTransition { .. } => false,
     }
 }
@@ -16859,20 +16855,30 @@ pub fn trigger_cause_can_match_control_change(cause: &TriggerCause) -> bool {
 ///   events moving to the battlefield whose object's core types intersect
 ///   the predicate's `core_types`. An empty `core_types` list means "any
 ///   permanent" (reserved for hypothetical cards that don't narrow by type).
+///   `entrant: OtherThanDoubler` rejects the doubler's own entering.
 /// - `TriggerCause::CreatureAttacking` matches `AttackersDeclared` events.
 ///   CR 508.1a: every object declared as an attacker must be a creature,
 ///   so no further type check is required.
-/// - `TriggerCause::ControlledCreatureDealtDamage` matches `DamageDealt`
-///   events whose target is a creature controlled by `doubler_controller`.
+/// - `TriggerCause::ControlledCreature { event }` matches the event `event`
+///   names (`DamageDealt` to, `BecomesTarget` of, or combat damage to a
+///   player by) a creature controlled by `doubler_controller`.
+/// - `TriggerCause::PlayerAction { player, action }` matches a life gain
+///   (`LifeChanged` with a positive amount) or a card draw (`CardDrawn` /
+///   `CardsDrawn`) by the named player.
+/// - `TriggerCause::TurnedFaceUp` matches `TurnedFaceUp` events.
 pub(super) fn trigger_cause_matches(
     state: &GameState,
     cause: &TriggerCause,
     event: Option<&GameEvent>,
     doubler_controller: PlayerId,
+    doubler_id: ObjectId,
 ) -> bool {
     match cause {
         TriggerCause::Any => true,
-        TriggerCause::EntersBattlefield { core_types } => {
+        TriggerCause::EntersBattlefield {
+            core_types,
+            entrant,
+        } => {
             let Some(GameEvent::ZoneChanged {
                 to: Zone::Battlefield,
                 record,
@@ -16882,6 +16888,11 @@ pub(super) fn trigger_cause_matches(
             else {
                 return false;
             };
+            // CR 603.2d: "another permanent entering" (The Fish Brewer) is
+            // not caused by the doubler's own entering.
+            if *entrant == CausingObject::OtherThanDoubler && *object_id == doubler_id {
+                return false;
+            }
             if core_types.is_empty() {
                 return true;
             }
@@ -16916,25 +16927,93 @@ pub(super) fn trigger_cause_matches(
             };
             record.core_types.contains(&CoreType::Creature)
         }
-        TriggerCause::ControlledCreatureDealtDamage => {
-            // CR 603.2d: Wayta doubles triggers caused by a creature you control being dealt damage.
-            let Some(GameEvent::DamageDealt { target, .. }) = event else {
-                return false;
+        TriggerCause::ControlledCreature {
+            event: creature_event,
+        } => {
+            let controlled_creature = |id: &ObjectId| {
+                state.objects.get(id).is_some_and(|obj| {
+                    obj.controller == doubler_controller
+                        && obj.card_types.core_types.contains(&CoreType::Creature)
+                })
             };
-            let TargetRef::Object(target_id) = target else {
-                return false;
-            };
-            let Some(obj) = state.objects.get(target_id) else {
-                return false;
-            };
-            obj.controller == doubler_controller
-                && obj.card_types.core_types.contains(&CoreType::Creature)
+            match (creature_event, event) {
+                // CR 603.2d + CR 120.3: Wayta — a creature you control being
+                // dealt damage.
+                (
+                    ControlledCreatureEvent::DealtDamage,
+                    Some(GameEvent::DamageDealt {
+                        target: TargetRef::Object(target_id),
+                        ..
+                    }),
+                ) => controlled_creature(target_id),
+                // CR 603.2d + CR 115.1: Valiant Emberkin — a creature you
+                // control becoming the target of a spell or ability.
+                (
+                    ControlledCreatureEvent::BecameTarget,
+                    Some(GameEvent::BecomesTarget {
+                        target: TargetRef::Object(target_id),
+                        ..
+                    }),
+                ) => controlled_creature(target_id),
+                // CR 603.2d + CR 510.2: Felix Five-Boots — a creature you
+                // control dealing combat damage to a player, seen per source
+                // or as the step's per-player batch.
+                (
+                    ControlledCreatureEvent::DealsCombatDamageToPlayer,
+                    Some(GameEvent::DamageDealt {
+                        source_id,
+                        target: TargetRef::Player(_),
+                        is_combat: true,
+                        ..
+                    }),
+                ) => controlled_creature(source_id),
+                (
+                    ControlledCreatureEvent::DealsCombatDamageToPlayer,
+                    Some(GameEvent::CombatDamageDealtToPlayer { source_amounts, .. }),
+                ) => source_amounts
+                    .iter()
+                    .any(|(source_id, _)| controlled_creature(source_id)),
+                (
+                    ControlledCreatureEvent::DealtDamage
+                    | ControlledCreatureEvent::BecameTarget
+                    | ControlledCreatureEvent::DealsCombatDamageToPlayer,
+                    _,
+                ) => false,
+            }
         }
         TriggerCause::RoomEntered => {
             // CR 309.4c: Room abilities of dungeons you own trigger an
             // additional time when a dungeon room is entered.
             matches!(event, Some(GameEvent::RoomEntered { .. }))
         }
+        TriggerCause::PlayerAction { player, action } => {
+            let acting_player = match (action, event) {
+                // CR 119.3: a positive life change is a life gain (Dr.
+                // Beverly Crusher: "you gaining life").
+                (
+                    PlayerCauseAction::GainedLife,
+                    Some(GameEvent::LifeChanged {
+                        player_id, amount, ..
+                    }),
+                ) if *amount > 0 => *player_id,
+                // CR 121.1: a card draw (Krang, the All-Powerful: "a player
+                // drawing a card").
+                (
+                    PlayerCauseAction::DrewCard,
+                    Some(
+                        GameEvent::CardDrawn { player_id, .. }
+                        | GameEvent::CardsDrawn { player_id, .. },
+                    ),
+                ) => *player_id,
+                (PlayerCauseAction::GainedLife | PlayerCauseAction::DrewCard, _) => return false,
+            };
+            // CR 109.5: the player relation is relative to the doubler's
+            // controller ("you" — Crusher; "a player" — Krang).
+            super::players::matches_relation(state, acting_player, doubler_controller, *player)
+        }
+        // CR 116.2b + CR 708.8: turning a face-down permanent face up
+        // (Panoptic Projektor).
+        TriggerCause::TurnedFaceUp => matches!(event, Some(GameEvent::TurnedFaceUp { .. })),
         TriggerCause::ControllerCastOrCopiedSpell { core_types } => {
             // CR 601.2 + CR 707.10: Veyran-class doublers fire only for
             // triggers caused by the doubler's controller casting or copying
@@ -17784,6 +17863,11 @@ fn gate_binding_diverges_at_fire_time(condition: &AbilityCondition) -> bool {
         // CR 115.10: the per-iteration player of the RESOLVING ability, which the
         // fire-time context derives from the matched event instead.
         | AbilityCondition::ScopedPlayerMatches { .. }
+        // CR 115.1 + CR 608.2c: reads the resolving ability's declared
+        // targets via a `Target` endpoint (the stamped chosen player);
+        // empty at fire time -- same resolution-scoped class as
+        // `ScopedPlayerMatches` above.
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         // CR 615.5: the post-replacement window, populated only while a
         // prevention replacement is being applied.
         | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
@@ -23521,6 +23605,7 @@ pub mod tests {
                     let observer = TriggerDefinition::new(TriggerMode::AbilityTriggered {
                         cause: TriggerCause::EntersBattlefield {
                             core_types: Vec::new(),
+                            entrant: crate::types::statics::CausingObject::Any,
                         },
                         source: crate::types::triggers::CausedAbilitySource::Any,
                     })
@@ -24717,11 +24802,15 @@ pub mod tests {
             ),
             (
                 "Echoes of Eternity",
-                r#"{"filters": [{"controller": "You", "properties": [{"comparator": "EQ", "count": 0, "type": "ColorCount"}], "type": "Typed", "type_filters": ["Card"]}, {"controller": "You", "properties": [{"type": "Another"}, {"comparator": "EQ", "count": 0, "type": "ColorCount"}], "type": "Typed", "type_filters": ["Permanent"]}], "type": "Or"}"#,
+                r#"{"filters": [{"filters": [{"type": "StackSpell"}, {"controller": "You", "properties": [{"comparator": "EQ", "count": 0, "type": "ColorCount"}], "type": "Typed", "type_filters": []}], "type": "And"}, {"controller": "You", "properties": [{"type": "Another"}, {"comparator": "EQ", "count": 0, "type": "ColorCount"}], "type": "Typed", "type_filters": ["Permanent"]}], "type": "Or"}"#,
             ),
             (
                 "Harmonic Prodigy",
                 r#"{"filters": [{"controller": "You", "properties": [], "type": "Typed", "type_filters": [{"Subtype": "Shaman"}]}, {"controller": "You", "properties": [{"type": "Another"}], "type": "Typed", "type_filters": [{"Subtype": "Wizard"}]}], "type": "Or"}"#,
+            ),
+            (
+                "Jabs, Mistress of Mockery",
+                r#"{"filters": [{"controller": "You", "properties": [], "type": "Typed", "type_filters": ["Permanent"]}, {"filter": {"controller": null, "properties": [{"controller": "You", "type": "Owned"}], "type": "Typed", "type_filters": []}, "type": "Not"}], "type": "And"}"#,
             ),
             (
                 "Katara, the Fearless",
@@ -24795,14 +24884,38 @@ pub mod tests {
         };
         for cause in [
             TriggerCause::Any,
-            TriggerCause::EntersBattlefield { core_types: vec![] },
+            TriggerCause::EntersBattlefield {
+                core_types: vec![],
+                entrant: CausingObject::Any,
+            },
+            TriggerCause::EntersBattlefield {
+                core_types: vec![],
+                entrant: CausingObject::OtherThanDoubler,
+            },
             TriggerCause::CreatureAttacking,
             TriggerCause::CreatureDying,
-            TriggerCause::ControlledCreatureDealtDamage,
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealtDamage,
+            },
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::BecameTarget,
+            },
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealsCombatDamageToPlayer,
+            },
             TriggerCause::ControllerCastOrCopiedSpell {
                 core_types: vec![CoreType::Instant],
             },
             TriggerCause::RoomEntered,
+            TriggerCause::PlayerAction {
+                player: crate::types::ability::PlayerRelation::Controller,
+                action: PlayerCauseAction::GainedLife,
+            },
+            TriggerCause::PlayerAction {
+                player: crate::types::ability::PlayerRelation::All,
+                action: PlayerCauseAction::DrewCard,
+            },
+            TriggerCause::TurnedFaceUp,
             TriggerCause::BattlefieldTransition {
                 enter: true,
                 leave: true,
@@ -24811,7 +24924,7 @@ pub mod tests {
         ] {
             assert_eq!(
                 trigger_cause_can_match_control_change(&cause),
-                trigger_cause_matches(&state, &cause, Some(&event), PlayerId(0)),
+                trigger_cause_matches(&state, &cause, Some(&event), PlayerId(0), ObjectId(2)),
                 "{cause:?}"
             );
         }
@@ -53603,6 +53716,7 @@ pub mod tests {
             granting_object: None,
             duration_event_source: None,
             source_name: "Jhoira".to_string(),
+            bound_actor: None,
         };
         state.transient_continuous_effects.push_back(grant.clone());
 
@@ -54697,6 +54811,7 @@ pub mod tests {
             granting_object: None,
             duration_event_source: None,
             source_name: "Keyword Granter".to_string(),
+            bound_actor: None,
         }
     }
 
@@ -54818,6 +54933,7 @@ pub mod tests {
                 granting_object: None,
                 duration_event_source: None,
                 source_name: "Grant source".to_string(),
+                bound_actor: None,
             });
 
         // This is the ordinary production trigger entry point: it flushes
@@ -54965,6 +55081,7 @@ pub mod tests {
                     granting_object: None,
                     duration_event_source: None,
                     source_name: "Jhoira of the Ghitu".to_string(),
+                    bound_actor: None,
                 },
             );
             suspended.push(card);
