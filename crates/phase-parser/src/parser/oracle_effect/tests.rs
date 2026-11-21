@@ -4423,6 +4423,192 @@ fn compound_mass_counter_first_conjunct_stays_put_counter_all() {
     assert!(!matches!(*sub.effect, Effect::Unimplemented { .. }));
 }
 
+/// CR 608.2c + CR 122.1: a verbless counter conjunct led by a NUMBER WORD carries the
+/// primary "put" verb forward exactly like its article twin (Stand Together: "Put two
+/// +1/+1 counters on target creature and two +1/+1 counters on another target creature").
+#[test]
+fn compound_targeted_counter_number_led_conjunct_carries_put_forward() {
+    let def = parse_effect_chain(
+        "Put two +1/+1 counters on target creature and two +1/+1 counters on another target creature.",
+        AbilityKind::Spell,
+    );
+    let second = assert_plus_counter_node(&def, 2, false).expect("second counter node");
+    assert!(
+        assert_plus_counter_node(second, 2, true).is_none(),
+        "counter chain should contain exactly two nodes",
+    );
+}
+
+/// CR 608.2c + CR 122.1: Ajani Unyielding's ultimate — the number-led conjunct names a
+/// different counter kind and a different recipient set ("five loyalty counters on each
+/// other planeswalker you control"), and both halves stay mass placements.
+#[test]
+fn compound_mass_counter_number_led_conjunct_stays_put_counter_all() {
+    let clause = parse_effect_clause(
+        "put five +1/+1 counters on each creature you control and five loyalty counters on each other planeswalker you control",
+        &mut ParseContext::default(),
+    );
+    match &clause.effect {
+        Effect::PutCounterAll {
+            counter_type,
+            count: QuantityExpr::Fixed { value },
+            target,
+        } => {
+            assert_eq!(*counter_type, CounterType::Plus1Plus1);
+            assert_eq!(*value, 5);
+            let tf = typed_leg(target).expect("primary target should be typed");
+            assert!(has_type(tf, TypeFilter::Creature));
+        }
+        other => panic!("expected primary PutCounterAll, got {other:?}"),
+    }
+    let sub = clause.sub_ability.expect("expected a trailing sub_ability");
+    match &*sub.effect {
+        Effect::PutCounterAll {
+            counter_type,
+            count: QuantityExpr::Fixed { value },
+            target,
+        } => {
+            assert_eq!(*counter_type, CounterType::Loyalty);
+            assert_eq!(*value, 5);
+            let tf = typed_leg(target).expect("sub target should be typed");
+            assert!(has_type(tf, TypeFilter::Planeswalker));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(tf.properties.contains(&FilterProp::Another));
+        }
+        other => panic!("expected sub PutCounterAll, got {other:?}"),
+    }
+}
+
+/// The count axis of `starts_counted_counter_placement` is the shared count grammar, and
+/// the noun axis is singular/plural; a conjunct that names no counters placed "on" a
+/// recipient is not a counter placement and stays a gap (reach guard: the primary placed
+/// counters, so the arm WAS consulted).
+#[test]
+fn counted_counter_placement_gate_ranges_over_counts_and_requires_a_recipient() {
+    for placement in [
+        "a loyalty counter on each planeswalker you control",
+        "an oil counter on target artifact",
+        "two +1/+1 counters on another target creature",
+        "five loyalty counters on each other planeswalker you control",
+        "3 +1/+1 counters on target creature",
+        "x +1/+1 counters on target creature",
+    ] {
+        assert!(
+            starts_counted_counter_placement(placement),
+            "{placement:?} is a verbless counter placement"
+        );
+    }
+    for other in [
+        "two cards from your graveyard",
+        "five +1/+1 counters",
+        "target creature",
+        "counters on target creature",
+    ] {
+        assert!(
+            !starts_counted_counter_placement(other),
+            "{other:?} is not a counted counter placement"
+        );
+    }
+    let clause = parse_effect_clause(
+        "put two +1/+1 counters on target creature and three fish tokens",
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(clause.effect, Effect::PutCounter { .. }),
+        "reach guard: the primary placed counters, got {:?}",
+        clause.effect
+    );
+    let sub = clause.sub_ability.expect("the verbless tail is chained");
+    assert!(
+        matches!(*sub.effect, Effect::Unimplemented { .. }),
+        "a counter-free number-led tail stays an honest gap, got {:?}",
+        sub.effect
+    );
+}
+
+/// CR 608.2c + CR 701.13a: a mass exile carries its verb forward to a verbless "all <filter>"
+/// conjunct ("Exile all creatures and all artifacts"), and Shadows' Verdict's two zone
+/// legs become two exile moves, each keeping its own zone and mana-value filter.
+#[test]
+fn compound_mass_exile_conjunct_carries_exile_forward() {
+    let def = parse_effect_chain("Exile all creatures and all artifacts.", AbilityKind::Spell);
+    match &*def.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            target,
+            ..
+        } => assert!(has_type(
+            typed_leg(target).expect("typed"),
+            TypeFilter::Creature
+        )),
+        other => panic!("expected primary exile of creatures, got {other:?}"),
+    }
+    let sub = def.sub_ability.as_ref().expect("second exile leg");
+    match &*sub.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            target,
+            ..
+        } => assert!(has_type(
+            typed_leg(target).expect("typed"),
+            TypeFilter::Artifact
+        )),
+        other => panic!("expected sub exile of artifacts, got {other:?}"),
+    }
+
+    let verdict = parse_effect_chain(
+        "Exile all creatures and planeswalkers with mana value 3 or less from the battlefield and all creature and planeswalker cards with mana value 3 or less from all graveyards.",
+        AbilityKind::Spell,
+    );
+    let in_zone = |filter: &TargetFilter, zone: Zone| {
+        typed_legs(filter)
+            .iter()
+            .all(|leg| leg.properties.contains(&FilterProp::InZone { zone }))
+    };
+    match &*verdict.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            target,
+            ..
+        } => assert!(in_zone(target, Zone::Battlefield), "{target:?}"),
+        other => panic!("expected battlefield exile, got {other:?}"),
+    }
+    let graveyard_leg = verdict.sub_ability.as_ref().expect("graveyard leg");
+    match &*graveyard_leg.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            target,
+            ..
+        } => assert!(in_zone(target, Zone::Graveyard), "{target:?}"),
+        other => panic!("expected graveyard exile, got {other:?}"),
+    }
+}
+
+/// Tested fence: a mass RETURN to hand is dispatched with one origin zone inferred from the
+/// whole remainder, so Soulquake's two-zone conjunction ("all creatures on the battlefield
+/// and all creature cards in graveyards") would carry the wrong origin for its first leg.
+/// The verb carry-forward is deliberately limited to mass exile; this card stays an honest
+/// gap until the origin inference reads each leg's own zone. Reach guard: the first leg
+/// parsed as a mass move, so the compound splitter was consulted.
+#[test]
+fn compound_mass_return_two_zone_conjunct_stays_an_honest_gap() {
+    let def = parse_effect_chain(
+        "Return all creatures on the battlefield and all creature cards in graveyards to their owners' hands.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::ChangeZoneAll { .. }),
+        "reach guard: first leg is a mass move, got {:?}",
+        def.effect
+    );
+    let sub = def.sub_ability.as_ref().expect("second leg is chained");
+    assert!(
+        matches!(&*sub.effect, Effect::Unimplemented { .. }),
+        "the mass-return conjunct must stay unsupported, got {:?}",
+        sub.effect
+    );
+}
+
 /// CR 608.2c + issue #6065: Inspiring Call — "Draw a card for each creature you
 /// control with a +1/+1 counter on it. Those creatures gain indestructible until
 /// end of turn." Unlike Nalia (whose `PutCounterAll` publishes a tracked set),

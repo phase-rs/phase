@@ -25359,20 +25359,16 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         }
     }
 
-    // CR 608.2c: Article-led counter carry-forward for compound actions.
+    // CR 608.2c + CR 122.1: Counted counter carry-forward for compound actions.
     // "put a +1/+1 counter on each creature you control and a loyalty counter
     // on each planeswalker you control" splits on " and " into sub-text
     // "a loyalty counter on each planeswalker you control" — a verbless counter
-    // clause starting with an article. Prepend the primary verb so it becomes
-    // "put a loyalty counter on each planeswalker you control".
+    // clause led by its count (article, number word, digit or X: "put five +1/+1
+    // counters on each creature you control and five loyalty counters on each
+    // other planeswalker you control"). Prepend the primary verb so it becomes
+    // "put five loyalty counters on each other planeswalker you control".
     if matches!(sub_clause.effect, Effect::Unimplemented { .. })
-        && alt((
-            tag::<_, _, OracleError<'_>>("a "),
-            tag::<_, _, OracleError<'_>>("an "),
-        ))
-        .parse(sub_lower.as_str())
-        .is_ok()
-        && nom_primitives::scan_contains(&sub_lower, "counter on")
+        && starts_counted_counter_placement(&sub_lower)
     {
         if let Some(verb) = extract_effect_verb(&primary_effect) {
             let reparsed_text = format!("{verb} {sub_text}");
@@ -28974,6 +28970,23 @@ fn try_parse_becomes_plotted_clause(lower: &str) -> bool {
     )))
     .parse(trimmed)
     .is_ok()
+}
+
+/// CR 122.1: a verbless counter-placement conjunct — a count (article, number word, digit
+/// or X, all read by `parse_number_or_x`) followed by counters placed "on" a recipient, with no verb of its own. The count
+/// axis is the shared count grammar; the singular and plural noun are one axis ("counter
+/// on" / "counters on"), so "a loyalty counter on …" and "five loyalty counters on …" both
+/// qualify.
+fn starts_counted_counter_placement(sub_lower: &str) -> bool {
+    let Ok((after_count, _)) = terminated(
+        nom_primitives::parse_number_or_x,
+        tag::<_, _, OracleError<'_>>(" "),
+    )
+    .parse(sub_lower) else {
+        return false;
+    };
+    nom_primitives::scan_contains(after_count, "counter on")
+        || nom_primitives::scan_contains(after_count, "counters on")
 }
 
 /// Check if text contains anaphoric pronouns referencing a previously mentioned object.
@@ -58869,6 +58882,15 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
             origin: Some(Zone::Battlefield),
             ..
         } => Some("return"),
+        // CR 608.2c: a mass exile carries its verb forward to a verbless "all <filter>"
+        // conjunct, like the single-object arm above ("exile all A and all B"). Only the
+        // exile destination: a mass return to hand is dispatched with a single inferred
+        // origin zone, which a two-zone conjunction ("all A on the battlefield and all B
+        // in graveyards") cannot share, so it stays an honest gap.
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            ..
+        } => Some("exile"),
         Effect::Bounce { .. } | Effect::BounceAll { .. } => Some("return"),
         Effect::Sacrifice { .. } => Some("sacrifice"),
         // CR 701.26a: the carry-forward verb depends on tap/untap polarity only;
