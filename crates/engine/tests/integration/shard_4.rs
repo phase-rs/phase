@@ -565,6 +565,7 @@ mod printed_damage_prevention_survives_turn;
 mod printed_spell_graveyard_triggers;
 mod proctor_of_potential_restriction;
 mod professor_hojo_activation_cost;
+mod proft_eidetic_memory;
 mod proliferate_time_counters;
 mod proliferate_zero_counter;
 mod promise_of_loyalty;
