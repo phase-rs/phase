@@ -5,6 +5,10 @@
 // MEASURED, not assumed — the alternative already in this tree is `test_support.rs` / `support.rs`,
 // twin files kept equal by a comment asking a human to remember.
 #![recursion_limit = "512"]
+// Debug builds of this crate's large dispatch functions allocate stack frames above
+// clippy's 512 KB `large_unopt_stack_frames` default. Test threads run with
+// RUST_MIN_STACK = 16 MiB (.cargo/config.toml) and server runtime threads with 32 MiB.
+#![allow(clippy::large_unopt_stack_frames)]
 #[path = "../../src/source_census.rs"]
 mod source_census;
 
@@ -47,6 +51,7 @@ mod bracket_fixture_signals;
 mod bracket_lists_data;
 mod bracket_tier_reconciliation;
 mod bring_to_light_free_cast_2880;
+mod bringer_of_the_last_gift;
 mod call_for_aid_phase2;
 mod candidate_pairs;
 mod cartographers_hawk_relative_damage_recipient;
@@ -211,6 +216,7 @@ mod lathiel_end_step_counters_repro;
 mod layer_boundary_census;
 mod layer_two_control_change_triggers;
 mod leyline_tyrant_pay_any_red_damage;
+mod lost_in_the_maze;
 mod lost_monarch_combat_damage_by_type_intervening_if;
 mod mana_ability_mana_payment_window;
 mod mana_burn;

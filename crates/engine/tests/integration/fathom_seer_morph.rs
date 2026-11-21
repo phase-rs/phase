@@ -2134,7 +2134,7 @@ fn turn_face_up_reveal_and_discard_redacts_private_choices_for_opponent_and_spec
                 card_ids,
                 card_names,
                 ..
-            } if card_ids.contains(&black_card) && card_names.contains(&"Black Card".to_string())
+            } if card_ids.contains(&black_card) && card_names.iter().any(|i: &String| i == "Black Card")
         )
     });
     assert!(

@@ -346,9 +346,7 @@ fn master_of_ceremonies_apnap_order_with_three_opponents() {
     let mut events = Vec::new();
     resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
 
-    let first_voter;
-    let second_voter_id;
-    match &state.waiting_for {
+    let (first_voter, second_voter_id) = match &state.waiting_for {
         WaitingFor::VoteChoice {
             player,
             ref remaining_voters,
@@ -359,11 +357,10 @@ fn master_of_ceremonies_apnap_order_with_three_opponents() {
             assert_eq!(remaining_voters.len(), 1);
             assert_ne!(remaining_voters[0].0, controller);
             assert_ne!(remaining_voters[0].0, *player);
-            first_voter = *player;
-            second_voter_id = remaining_voters[0].0;
+            (*player, remaining_voters[0].0)
         }
         other => panic!("expected VoteChoice, got {:?}", other),
-    }
+    };
 
     // Both opponents vote "secrets".
     apply(

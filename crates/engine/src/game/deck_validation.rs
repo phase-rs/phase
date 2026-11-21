@@ -362,7 +362,7 @@ pub fn evaluate_deck_compatibility(
     ) && selected_format_reasons == [CUSTOM_FORMAT_UNRESOLVED.to_string()]
     {
         selected_format_compatible = None;
-        selected_format_reasons = Vec::new();
+        selected_format_reasons.clear();
     }
 
     let coverage = evaluate_deck_coverage(db, request);
@@ -6950,7 +6950,7 @@ mod tests {
         // The verdict and the candidate list are two surfaces over one rule.
         assert_eq!(
             verdict.selected_format_compatible == Some(true),
-            candidates.contains(&"Yorion, Sky Nomad".to_string()),
+            candidates.iter().any(|i| i == "Yorion, Sky Nomad"),
             "compatibility verdict and candidate list must agree: {:?}",
             verdict.selected_format_reasons
         );
@@ -7076,7 +7076,7 @@ mod tests {
 
         let candidates = companion_candidates(&db, &request);
         assert!(
-            !candidates.contains(&"Lurrus".to_string()),
+            !candidates.iter().any(|i| i == "Lurrus"),
             "Lurrus must not be eligible when a second Lurrus copy remains in the starting main deck"
         );
 
