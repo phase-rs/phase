@@ -213,6 +213,7 @@ mod census_release_batch_1;
 mod census_release_batch_2;
 mod census_release_batch_3;
 mod census_release_batch_4;
+mod census_release_batch_6;
 mod chain_of_smog_copy;
 mod chain_root_target_suspension;
 mod chains_of_mephistopheles_discard_draw_or_mill;
