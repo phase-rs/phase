@@ -410,47 +410,55 @@ fn mauler_poll_moves_past_a_prompted_player_who_concedes() {
     assert_settled(&runner);
 }
 
-/// CR 800.4a: the instruction leaves the game with its controller, taking the
-/// poll and its open prompt with it.
+/// CR 608.2m + CR 800.4a: the instruction's controller concedes while a later
+/// player's prompt is open. The ability had already started to resolve, so it
+/// continues to resolve fully: the surviving players still answer, the payer's
+/// sacrifice happens, and the decliner loses 4 life. P0 makes no further
+/// choice, and their earlier decline goes with them.
 #[test]
-fn mauler_poll_leaves_with_its_controller() {
+fn mauler_poll_continues_after_its_controller_concedes() {
     let (mut runner, bears) = mauler_end_step(3);
+    expect_unless_prompt(&runner, P0);
     runner
-        .act(GameAction::PayUnlessCost { pay: true })
-        .expect("P0 chooses to sacrifice");
-    select(&mut runner, bears[0]);
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("P0 declines");
     expect_unless_prompt(&runner, P1);
 
     runner
         .act(GameAction::Concede { player_id: P0 })
         .expect("a player may concede at any time");
 
+    expect_unless_prompt(&runner, P1);
     assert!(
         runner
             .state()
             .pending_player_scope_unless_punishment
-            .is_none(),
-        "the poll leaves with its controller"
+            .is_some(),
+        "CR 608.2m: the poll outlives its controller"
     );
-    assert!(
-        !matches!(
-            runner.state().waiting_for,
-            WaitingFor::UnlessPayment { .. } | WaitingFor::UnlessPaymentChooseCost { .. }
-        ),
-        "no orphaned prompt survives, got {:?}",
-        runner.state().waiting_for
-    );
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("P1 chooses to sacrifice");
+    select(&mut runner, bears[1]);
+    expect_unless_prompt(&runner, P2);
     assert_eq!(
-        runner.life(P1),
-        20,
-        "the abandoned instruction does nothing"
+        zone(&runner, bears[1]),
+        Zone::Battlefield,
+        "CR 101.4: still nothing moves before the last surviving player has chosen"
     );
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("P2 declines");
+
+    assert_eq!(zone(&runner, bears[1]), Zone::Graveyard, "P1 paid");
     assert_eq!(
-        runner.life(P2),
-        20,
-        "the abandoned instruction does nothing"
+        zone(&runner, bears[2]),
+        Zone::Battlefield,
+        "P2 paid nothing"
     );
-    assert_eq!(zone(&runner, bears[1]), Zone::Battlefield);
+    assert_eq!(runner.life(P1), 20, "paying spares P1");
+    assert_eq!(runner.life(P2), 16, "declining costs P2 4 life");
+    assert_settled(&runner);
 }
 
 const DAUTHI_VOIDWALKER: &str = "Shadow (This creature can block or be blocked by only creatures with shadow.)\nIf a card would be put into an opponent's graveyard from anywhere, instead exile it with a void counter on it.\n{T}, Sacrifice this creature: Choose an exiled card an opponent owns with a void counter on it. You may play it this turn without paying its mana cost.";
@@ -568,6 +576,160 @@ fn mauler_simultaneous_sacrifice_with_rip_and_voidwalker_suspends_and_resumes_on
         Some(1),
         "choosing Dauthi Voidwalker's replacement puts a void counter on P1's Mauler"
     );
+    assert_settled(&runner);
+}
+
+/// Answer the open CR 616.1 ordering prompt with the replacement `source`
+/// generates, after checking that `chooser` is asked and that it applies.
+fn choose_replacement_from(runner: &mut GameRunner, chooser: PlayerId, source: ObjectId) {
+    let index = match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } => {
+            assert_eq!(
+                *player, chooser,
+                "CR 616.1: the affected permanent's controller orders the replacements"
+            );
+            candidates
+                .iter()
+                .position(|candidate| candidate.source_id == source)
+                .unwrap_or_else(|| {
+                    panic!("{source:?}'s replacement must apply to {chooser:?}'s sacrifice")
+                })
+        }
+        other => panic!("expected {chooser:?}'s replacement choice, got {other:?}"),
+    };
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("the offered replacement is a legal answer");
+}
+
+fn void_counters(runner: &GameRunner, id: ObjectId) -> Option<u32> {
+    runner.state().objects[&id]
+        .counters
+        .get(&engine::types::counter::CounterType::Generic(
+            "void".to_string(),
+        ))
+        .copied()
+}
+
+/// Both players sacrifice their Dauthi Voidwalker, and P1 controls Rest in
+/// Peace. CR 616.1: P0 orders the two replacements for P0's Voidwalker (Rest in
+/// Peace, P1's Voidwalker) and picks Rest in Peace. CR 101.4: that answer moves
+/// nothing yet, so P0's Voidwalker is still on the battlefield when P1's
+/// sacrifice is consulted, and P1 can apply it: P1's Voidwalker is exiled with a
+/// void counter. Then both move at once.
+fn assert_answer_waits_for_the_whole_batch(
+    runner: &mut GameRunner,
+    p0_walker: ObjectId,
+    p1_walker: ObjectId,
+    rest_in_peace: ObjectId,
+) {
+    choose_replacement_from(runner, P0, rest_in_peace);
+    assert_eq!(
+        zone(runner, p0_walker),
+        Zone::Battlefield,
+        "CR 101.4: an answered replacement does not move its permanent ahead of the batch"
+    );
+    assert_eq!(zone(runner, p1_walker), Zone::Battlefield);
+
+    choose_replacement_from(runner, P1, p0_walker);
+
+    assert_eq!(zone(runner, p0_walker), Zone::Exile, "Rest in Peace");
+    assert_eq!(void_counters(runner, p0_walker), None);
+    assert_eq!(zone(runner, p1_walker), Zone::Exile);
+    assert_eq!(
+        void_counters(runner, p1_walker),
+        Some(1),
+        "P0's co-sacrificed Voidwalker replaced P1's Voidwalker's move"
+    );
+}
+
+/// CR 101.4 + CR 616.1: the answer to one sacrifice's replacement ordering
+/// waits for the rest of Bellowing Mauler's batch to be consulted.
+#[test]
+fn mauler_replacement_answer_waits_until_every_sacrifice_is_consulted() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PostCombatMain);
+    scenario.add_creature_from_oracle(P0, "Bellowing Mauler", 4, 6, BELLOWING_MAULER);
+    let p0_walker = scenario
+        .add_creature_from_oracle(P0, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER)
+        .id();
+    let p1_walker = scenario
+        .add_creature_from_oracle(P1, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER)
+        .id();
+    let rest_in_peace = scenario
+        .add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE)
+        .id();
+    let mut runner = scenario.build();
+    runner.advance_to_end_step();
+    runner.advance_until_stack_empty();
+
+    expect_unless_prompt(&runner, P0);
+    runner.act(GameAction::PayUnlessCost { pay: true }).unwrap();
+    select(&mut runner, p0_walker);
+    expect_unless_prompt(&runner, P1);
+    runner.act(GameAction::PayUnlessCost { pay: true }).unwrap();
+    select(&mut runner, p1_walker);
+
+    assert_answer_waits_for_the_whole_batch(&mut runner, p0_walker, p1_walker, rest_in_peace);
+    assert_eq!(runner.life(P0), 20, "P0 paid");
+    assert_eq!(runner.life(P1), 20, "P1 paid");
+    assert_settled(&runner);
+}
+
+const INNOCENT_BLOOD: &str = "Each player sacrifices a creature of their choice.";
+
+/// CR 101.4 + CR 616.1: the same holds for a plain "each player sacrifices"
+/// batch, which shares the simultaneous sacrifice authority.
+#[test]
+fn innocent_blood_replacement_answer_waits_until_every_sacrifice_is_consulted() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let blood = scenario
+        .add_spell_to_hand_from_oracle(P0, "Innocent Blood", false, INNOCENT_BLOOD)
+        .with_mana_cost(engine::types::mana::ManaCost::Cost {
+            shards: vec![engine::types::mana::ManaCostShard::Black],
+            generic: 0,
+        })
+        .id();
+    let swamp = scenario.add_basic_land(P0, engine::types::mana::ManaColor::Black);
+    let p0_walker = scenario
+        .add_creature_from_oracle(P0, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER)
+        .id();
+    let p0_bear = scenario.add_creature(P0, "P0 Bear", 2, 2).id();
+    let p1_walker = scenario
+        .add_creature_from_oracle(P1, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER)
+        .id();
+    let p1_bear = scenario.add_creature(P1, "P1 Bear", 2, 2).id();
+    let rest_in_peace = scenario
+        .add_enchantment_from_oracle(P1, "Rest in Peace", REST_IN_PEACE)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(blood).commit();
+    assert!(
+        runner.state().objects[&swamp].tapped,
+        "Innocent Blood's {{B}} was paid"
+    );
+    for _ in 0..2 {
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    for (player, walker) in [(P0, p0_walker), (P1, p1_walker)] {
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::EffectZoneChoice { player: chooser, .. } if chooser == player
+            ),
+            "CR 101.4: {player:?} chooses in APNAP order, got {:?}",
+            runner.state().waiting_for
+        );
+        select(&mut runner, walker);
+    }
+
+    assert_answer_waits_for_the_whole_batch(&mut runner, p0_walker, p1_walker, rest_in_peace);
+    assert_eq!(zone(&runner, p0_bear), Zone::Battlefield);
+    assert_eq!(zone(&runner, p1_bear), Zone::Battlefield);
     assert_settled(&runner);
 }
 

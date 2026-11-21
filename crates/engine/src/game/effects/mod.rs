@@ -50,11 +50,11 @@ use crate::types::game_state::{
     ManaAbilityResume, MayTriggerAutoChoiceKey, MemberOrderPurpose, PendingContinuation,
     PendingCostMoveResume, PendingDiscardBatchCompletion, PendingPlayerScopeSacrificeChoice,
     PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
-    PendingPlayerScopeTail, PendingSacrificeMove, RepeatIterationChoice, RepeatIterationMovement,
-    RepeatProcessRequest, RepeatUntilIterationWitness, RepeatUntilStopWitness,
-    ResolutionOptionalPaymentOption, ResolutionPaymentOrigin, ReturnResultOccurrenceId,
-    SeatCreatedTokens, TrackedMemberOrigin, WaitingFor, ZoneChangeRecord,
-    ZoneOpponentChooserPurpose,
+    PendingPlayerScopeTail, PendingSacrificeMove, PendingSacrificeProvenance,
+    RepeatIterationChoice, RepeatIterationMovement, RepeatProcessRequest,
+    RepeatUntilIterationWitness, RepeatUntilStopWitness, ResolutionOptionalPaymentOption,
+    ResolutionPaymentOrigin, ReturnResultOccurrenceId, SeatCreatedTokens, TrackedMemberOrigin,
+    WaitingFor, ZoneChangeRecord, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{DiscardFrameId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -23551,10 +23551,16 @@ fn perform_player_scope_sacrifices(
                 crate::game::sacrifice::SacrificeConsult::Prohibited => {
                     completion.announced.retain(|&id| id != card);
                 }
+                // CR 101.4 + CR 616.1: the answer finishes only this consult;
+                // `answer_player_scope_sacrifice_consult` queues its move.
                 crate::game::sacrifice::SacrificeConsult::NeedsChoice(choice_player) => {
                     if !cards.is_empty() {
                         selections.insert(0, (player, cards));
                     }
+                    completion.consult_pause = Some(PendingSacrificeProvenance {
+                        object_id: card,
+                        player_id: player,
+                    });
                     park_sacrifice_pause(state, completion, selections, choice_player, events);
                     return Ok(PlayerScopeSacrificePerformOutcome::PausedForReplacement);
                 }
@@ -24181,6 +24187,84 @@ pub(crate) fn drain_pending_player_scope_sacrifice_after_replacement(
     }
 }
 
+/// CR 101.4 + CR 616.1: whether the open replacement choice interrupted the
+/// consult of the parked simultaneous sacrifice batch — the move it decides
+/// belongs to that batch and must wait for the rest of it.
+pub(crate) fn player_scope_sacrifice_consult_awaits_replacement_choice(state: &GameState) -> bool {
+    let Some(pending) = state.pending_player_scope_sacrifice_choice.as_ref() else {
+        return false;
+    };
+    let Some(paused) = pending.completion.consult_pause else {
+        return false;
+    };
+    let Some(replacement) = state.pending_replacement.as_ref() else {
+        return false;
+    };
+    // The outer Sacrifice proposal names the permanent; its inner graveyard
+    // move carries the sacrifice it belongs to.
+    let decided = replacement
+        .sacrifice_provenance
+        .map(|provenance| provenance.object_id)
+        .or_else(|| replacement.proposed.affected_object_id());
+    decided == Some(paused.object_id)
+        && player_scope_sacrifice_carrier_binds(
+            state,
+            pending,
+            PlayerScopeSacrificeAnswer::Replacement,
+        )
+}
+
+/// What answering the batch's consult-time replacement choice produced.
+pub(crate) enum PlayerScopeSacrificeConsultAnswer {
+    /// The consult finished; the batch resumes consulting the remaining
+    /// selections and then delivers every approved move together.
+    Consulted,
+    /// Another CR 616.1 choice is pending for the same sacrifice;
+    /// `state.waiting_for` asks it.
+    NeedsChoice,
+}
+
+/// CR 101.4 + CR 616.1: answer the replacement choice that interrupted the
+/// batch's consult. CR 616.1 lets the affected player choose the replacement,
+/// but the choice only decides how this permanent's move will happen: the
+/// approved move joins the batch's `pending_deliveries`, so every chosen
+/// permanent is still consulted while every co-sacrificed permanent is on the
+/// battlefield, and the batch then happens at once (CR 101.4).
+pub(crate) fn answer_player_scope_sacrifice_consult(
+    state: &mut GameState,
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) -> PlayerScopeSacrificeConsultAnswer {
+    let consult = crate::game::sacrifice::consult_answered_sacrifice(state, index, events);
+    if let crate::game::sacrifice::SacrificeConsult::NeedsChoice(choice_player) = consult {
+        state.waiting_for =
+            crate::game::replacement::replacement_choice_waiting_for(choice_player, state);
+        return PlayerScopeSacrificeConsultAnswer::NeedsChoice;
+    }
+    let completion = &mut state
+        .pending_player_scope_sacrifice_choice
+        .as_mut()
+        .expect("a consult pause is answered while its batch is parked")
+        .completion;
+    let paused = completion
+        .consult_pause
+        .take()
+        .expect("the answered consult was marked when it paused");
+    match consult {
+        crate::game::sacrifice::SacrificeConsult::Ready(delivery) => {
+            completion.pending_deliveries.push(*delivery);
+        }
+        // CR 609.3: as in the consult loop, a barred object is not part of
+        // what the instruction did.
+        crate::game::sacrifice::SacrificeConsult::Prohibited => {
+            completion.announced.retain(|&id| id != paused.object_id);
+        }
+        crate::game::sacrifice::SacrificeConsult::NoMove
+        | crate::game::sacrifice::SacrificeConsult::NeedsChoice(_) => {}
+    }
+    PlayerScopeSacrificeConsultAnswer::Consulted
+}
+
 /// What a departure did to an open player-scope sacrifice
 /// (`reconcile_player_scope_sacrifice`).
 pub(crate) enum PlayerScopeSacrificeReconciliation {
@@ -24299,6 +24383,11 @@ pub(crate) fn reconcile_player_scope_sacrifice(
         // `do_eliminate` clears a departed latched chooser's question.
         if state.pending_replacement.is_some() {
             return PlayerScopeSacrificeReconciliation::Unchanged;
+        }
+        // CR 800.4a: a consult whose question left with its chooser decides
+        // nothing; that permanent left the battlefield with them.
+        if let Some(pending) = state.pending_player_scope_sacrifice_choice.as_mut() {
+            pending.completion.consult_pause = None;
         }
         return match state.waiting_for.acting_player() {
             // CR 616.1 + CR 800.4a + CR 608.2m: the paused question left with its

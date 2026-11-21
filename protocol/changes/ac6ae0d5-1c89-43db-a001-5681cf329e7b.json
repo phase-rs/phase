@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "Add pending_player_scope_unless_punishment APNAP poll state, deferred payments on the token-unless poll, and simultaneous sacrifice deliveries"
+  "reason": "Add pending_player_scope_unless_punishment APNAP poll state, deferred payments on the token-unless poll, and simultaneous sacrifice deliveries with a consult-pause marker"
 }

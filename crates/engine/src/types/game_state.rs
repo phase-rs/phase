@@ -7271,6 +7271,13 @@ pub struct PendingPlayerScopeSacrificeCompletion {
     /// co-sacrificed permanent in the batch has cleared replacement consult.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_deliveries: Vec<PendingSacrificeDelivery>,
+    /// CR 101.4 + CR 616.1: the sacrifice whose replacement consult a CR 616.1
+    /// choice interrupted, before every selection was consulted. Answering
+    /// that choice only finishes this sacrifice's consult: its approved move
+    /// joins `pending_deliveries`, and nothing moves until the rest of the
+    /// batch has been consulted too. `None` while the batch is delivering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consult_pause: Option<PendingSacrificeProvenance>,
 }
 
 /// CR 702.110b + CR 701.21a + CR 616.1: A per-sacrifice consequence carried

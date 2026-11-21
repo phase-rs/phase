@@ -39,6 +39,7 @@
 
 use crate::game::engine::EngineError;
 use crate::game::engine_payment_choices::UnlessSelectionPrep;
+use crate::game::engine_resolution_choices::DepartureSettlement;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     AbilityCost, PlayerFilter, ResolvedAbility, SacrificeRequirement, TargetFilter,
@@ -669,39 +670,45 @@ fn prompt_is_live(state: &GameState, poll: &PendingPlayerScopeUnlessPunishment) 
     }
 }
 
-/// CR 800.4a + CR 101.4: reconcile an open poll with the players who just left
-/// the game. A departed player makes no further choice and pays nothing; an
-/// earlier answer by a player still in the game stands. When the instruction's
-/// controller leaves, the instruction leaves with them and the poll is retired
-/// together with its prompt.
+/// CR 800.4a + CR 101.4 + CR 608.2m: reconcile an open poll with the players
+/// who just left the game. A departed player makes no further choice and pays
+/// nothing (CR 800.4f); an earlier answer by a player still in the game stands,
+/// and the next surviving player is asked, or the poll settles.
+///
+/// The instruction's controller leaving does not end the poll: the ability had
+/// already started to resolve, so it continues to resolve fully (CR 608.2m).
+/// Its controller is reconciled like any other affected player, and what the
+/// instruction would still do for them is governed by the rules for objects
+/// tied to a departed player (CR 800.4b: no token is created for them).
+///
+/// Reports whether the departure settled the poll, so the elimination leaves a
+/// departed controller's spell the settlement continued to the action
+/// boundary's final-part convergence instead of retiring it.
 pub(crate) fn reconcile_departures(
     state: &mut GameState,
     leaving: &std::collections::HashSet<PlayerId>,
     events: &mut Vec<GameEvent>,
-) -> Result<(), EngineError> {
+) -> Result<DepartureSettlement, EngineError> {
     let Some(mut poll) = state.pending_player_scope_unless_punishment.take() else {
-        return Ok(());
+        return Ok(DepartureSettlement::NotSettled);
     };
     let live = prompt_is_live(state, &poll);
-    let controller = poll.ability.controller;
-    if leaving.contains(&controller) {
-        if live {
-            crate::game::engine_payment_choices::set_active_priority(state);
-        }
-        return Ok(());
-    }
     poll.remaining_players
         .retain(|player| !leaving.contains(player));
     poll.declining_players
         .retain(|player| !leaving.contains(player));
     poll.payments
         .retain(|payment| !leaving.contains(&payment.player));
-    if leaving.contains(&poll.current_player) && live {
-        advance(state, poll, events)?;
-    } else {
+    if !(leaving.contains(&poll.current_player) && live) {
         state.pending_player_scope_unless_punishment = Some(poll);
+        return Ok(DepartureSettlement::NotSettled);
     }
-    Ok(())
+    advance(state, poll, events)?;
+    Ok(if state.pending_player_scope_unless_punishment.is_some() {
+        DepartureSettlement::NotSettled
+    } else {
+        DepartureSettlement::Settled
+    })
 }
 
 /// CR 101.4a + CR 101.4b + CR 400.2: the viewer's copy of an open poll. An

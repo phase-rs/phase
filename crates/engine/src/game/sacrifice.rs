@@ -238,12 +238,49 @@ pub(crate) fn consult_sacrifice(
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> SacrificeConsult {
-    // CR 614.6: a ready drain resident before the consult belongs to earlier
-    // work; only one this consult installed is this move's rider.
+    with_consult_rider(state, |state| {
+        consult_sacrifice_move(state, object_id, player, events)
+    })
+}
+
+/// CR 101.4 + CR 616.1: finish the consult of a sacrifice that
+/// [`consult_sacrifice`] parked on a CR 616.1 choice, with the answer `index`.
+/// Like the consult itself, nothing moves: an approved move is returned
+/// `Ready` for the caller to queue with the rest of the batch, and another
+/// pending choice is returned `NeedsChoice`.
+pub(crate) fn consult_answered_sacrifice(
+    state: &mut GameState,
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) -> SacrificeConsult {
+    // The inner graveyard move carries the sacrifice it belongs to; the outer
+    // Sacrifice proposal names it itself.
+    let inner = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.sacrifice_provenance);
+    with_consult_rider(state, |state| {
+        let result = replacement::continue_replacement(state, index, events);
+        match inner {
+            Some(PendingSacrificeProvenance {
+                object_id,
+                player_id,
+            }) => consult_graveyard_move(state, object_id, player_id, result),
+            None => consult_sacrifice_result(state, result, events),
+        }
+    })
+}
+
+/// CR 614.6: a ready drain resident before the consult belongs to earlier
+/// work; only one this consult installed is this move's rider.
+fn with_consult_rider(
+    state: &mut GameState,
+    consult: impl FnOnce(&mut GameState) -> SacrificeConsult,
+) -> SacrificeConsult {
     let ready_before = state
         .active_post_replacement_drains()
         .is_some_and(|drains| drains.has_ready());
-    let mut consult = consult_sacrifice_move(state, object_id, player, events);
+    let mut consult = consult(state);
     if let SacrificeConsult::Ready(delivery) = &mut consult {
         if !ready_before {
             delivery.rider = state.take_ready_post_replacement_drain();
@@ -275,7 +312,18 @@ fn consult_sacrifice_move(
         player_id: player,
         applied: HashSet::new(),
     };
-    match replacement::replace_event(state, proposed, events) {
+    let result = replacement::replace_event(state, proposed, events);
+    consult_sacrifice_result(state, result, events)
+}
+
+/// CR 614.1: the outer Sacrifice replacement pass has a result; consult the
+/// graveyard move it leads to.
+fn consult_sacrifice_result(
+    state: &mut GameState,
+    result: ReplacementResult,
+    events: &mut Vec<GameEvent>,
+) -> SacrificeConsult {
+    match result {
         ReplacementResult::Execute(ProposedEvent::Sacrifice {
             object_id: oid,
             player_id: pid,
@@ -286,32 +334,8 @@ fn consult_sacrifice_move(
             restrictions::record_sacrifice(state, oid, pid);
             let zone_proposed =
                 ProposedEvent::zone_change(oid, Zone::Battlefield, Zone::Graveyard, None);
-            match replacement::replace_event(state, zone_proposed, events) {
-                ReplacementResult::Execute(zone_event @ ProposedEvent::ZoneChange { .. }) => {
-                    SacrificeConsult::ready(PendingSacrificeMove::Sacrifice {
-                        object_id: oid,
-                        player_id: pid,
-                        zone_event,
-                    })
-                }
-                // Defensive: the inner proposal is always a ZoneChange. A
-                // prevented move is still a sacrifice (CR 701.21).
-                ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
-                    SacrificeConsult::ready(PendingSacrificeMove::InnerPrevented {
-                        object_id: oid,
-                        player_id: pid,
-                    })
-                }
-                ReplacementResult::NeedsChoice(choice_player) => {
-                    if let Some(pending) = state.pending_replacement.as_mut() {
-                        pending.sacrifice_provenance = Some(PendingSacrificeProvenance {
-                            object_id: oid,
-                            player_id: pid,
-                        });
-                    }
-                    SacrificeConsult::NeedsChoice(choice_player)
-                }
-            }
+            let result = replacement::replace_event(state, zone_proposed, events);
+            consult_graveyard_move(state, oid, pid, result)
         }
         // CR 614.6: the outer replacement redirected straight to a zone change.
         ReplacementResult::Execute(zone_event @ ProposedEvent::ZoneChange { .. }) => {
@@ -319,6 +343,42 @@ fn consult_sacrifice_move(
         }
         ReplacementResult::Execute(_) | ReplacementResult::Prevented => SacrificeConsult::NoMove,
         ReplacementResult::NeedsChoice(choice_player) => {
+            SacrificeConsult::NeedsChoice(choice_player)
+        }
+    }
+}
+
+/// CR 701.21a + CR 614.1: the inner graveyard move of an accepted sacrifice
+/// has a replacement result.
+fn consult_graveyard_move(
+    state: &mut GameState,
+    object_id: ObjectId,
+    player_id: PlayerId,
+    result: ReplacementResult,
+) -> SacrificeConsult {
+    match result {
+        ReplacementResult::Execute(zone_event @ ProposedEvent::ZoneChange { .. }) => {
+            SacrificeConsult::ready(PendingSacrificeMove::Sacrifice {
+                object_id,
+                player_id,
+                zone_event,
+            })
+        }
+        // Defensive: the inner proposal is always a ZoneChange. A prevented
+        // move is still a sacrifice (CR 701.21).
+        ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
+            SacrificeConsult::ready(PendingSacrificeMove::InnerPrevented {
+                object_id,
+                player_id,
+            })
+        }
+        ReplacementResult::NeedsChoice(choice_player) => {
+            if let Some(pending) = state.pending_replacement.as_mut() {
+                pending.sacrifice_provenance = Some(PendingSacrificeProvenance {
+                    object_id,
+                    player_id,
+                });
+            }
             SacrificeConsult::NeedsChoice(choice_player)
         }
     }

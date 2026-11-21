@@ -236,14 +236,19 @@ fn scoped_unless_sacrifice_keeps_a_departed_decliners_tokens_owed() {
     expect_aggregate_payment_finished(&runner);
 }
 
+/// CR 608.2m + CR 800.4a: the source's controller leaves while P1 is asked.
+/// The instruction had already started to resolve and continues fully: P1 and
+/// P2 still answer and P1's chosen creature is sacrificed, but the Zombie owed
+/// for P2's decline is not created for the departed controller (CR 800.4b).
 #[test]
-fn scoped_unless_sacrifice_abandons_when_its_original_controller_leaves() {
+fn scoped_unless_sacrifice_continues_when_its_original_controller_leaves() {
     let mut scenario = GameScenario::new_n_player(3, 42);
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
         .with_mana_cost(ManaCost::zero())
         .id();
-    let _p2_creature = scenario.add_creature(P2, "P2 Sacrifice", 1, 1).id();
+    let p1_creature = scenario.add_creature(P1, "P1 Sacrifice", 1, 1).id();
+    let p2_creature = scenario.add_creature(P2, "P2 Sacrifice", 1, 1).id();
     let mut runner = scenario.build();
     give_p0_sorcery_window(&mut runner);
     runner.cast(spell).resolve();
@@ -256,12 +261,43 @@ fn scoped_unless_sacrifice_abandons_when_its_original_controller_leaves() {
         &mut Vec::new(),
     );
 
-    assert!(runner.state().pending_player_scope_unless_payment.is_none());
-    assert_eq!(zombie_count(&runner), 0);
+    expect_unless(&runner, P1);
     assert!(
-        !matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. }),
-        "the departed source controller cannot leave an aggregate prompt behind"
+        runner.state().pending_player_scope_unless_payment.is_some(),
+        "CR 608.2m: the poll outlives its controller"
     );
+    pay_sacrifice(&mut runner, p1_creature);
+    expect_unless(&runner, P2);
+    assert_eq!(
+        runner.state().objects[&p1_creature].zone,
+        Zone::Battlefield,
+        "CR 101.4: nothing moves before the last opponent has chosen"
+    );
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("P2 declines");
+
+    assert_eq!(
+        runner.state().objects[&p1_creature].zone,
+        Zone::Graveyard,
+        "P1's chosen creature is sacrificed"
+    );
+    assert_eq!(runner.state().objects[&p2_creature].zone, Zone::Battlefield);
+    assert_eq!(
+        runner
+            .state()
+            .battlefield
+            .iter()
+            .filter(|id| runner.state().objects[id].name == "Zombie")
+            .count(),
+        0,
+        "CR 800.4b: no token is created for the departed controller"
+    );
+    expect_aggregate_payment_finished(&runner);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 
 #[test]
@@ -457,4 +493,81 @@ fn scoped_unless_sacrifice_settles_the_sacrifices_simultaneously() {
     );
     assert_eq!(zombie_count(&runner), 0, "both opponents paid");
     expect_aggregate_payment_finished(&runner);
+}
+
+/// CR 101.4 + CR 616.1: the paying opponents' sacrifices are all consulted
+/// before any moves. P2 controls Rest in Peace. P1 orders the replacements for
+/// P1's Voidwalker and picks Rest in Peace; that answer moves nothing yet, so
+/// P1's Voidwalker still replaces P2's Voidwalker's move when P2 orders theirs.
+#[test]
+fn scoped_unless_sacrifice_replacement_answer_waits_for_the_whole_batch() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Scoped Zombie Test", false, SCOPED_UNLESS_ZOMBIE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let p1_walker = scenario
+        .add_creature_from_oracle(P1, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER)
+        .id();
+    let p2_walker = scenario
+        .add_creature_from_oracle(P2, "Dauthi Voidwalker", 3, 2, DAUTHI_VOIDWALKER)
+        .id();
+    let rest_in_peace = scenario
+        .add_enchantment_from_oracle(P2, "Rest in Peace", REST_IN_PEACE)
+        .id();
+    let mut runner = scenario.build();
+    give_p0_sorcery_window(&mut runner);
+    runner.cast(spell).resolve();
+
+    expect_unless(&runner, P1);
+    pay_sacrifice(&mut runner, p1_walker);
+    expect_unless(&runner, P2);
+    pay_sacrifice(&mut runner, p2_walker);
+
+    choose_replacement_from(&mut runner, P1, rest_in_peace);
+    assert_eq!(
+        runner.state().objects[&p1_walker].zone,
+        Zone::Battlefield,
+        "CR 101.4: an answered replacement does not move its permanent ahead of the batch"
+    );
+    choose_replacement_from(&mut runner, P2, p1_walker);
+
+    assert_eq!(runner.state().objects[&p1_walker].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&p2_walker].zone, Zone::Exile);
+    assert_eq!(
+        runner.state().objects[&p2_walker]
+            .counters
+            .get(&engine::types::counter::CounterType::Generic(
+                "void".to_string()
+            ))
+            .copied(),
+        Some(1),
+        "P1's co-sacrificed Voidwalker replaced P2's Voidwalker's move"
+    );
+    assert_eq!(zombie_count(&runner), 0, "both opponents paid");
+    expect_aggregate_payment_finished(&runner);
+    assert!(runner.state().stack.is_empty());
+}
+
+fn choose_replacement_from(runner: &mut GameRunner, chooser: PlayerId, source: ObjectId) {
+    let index = match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } => {
+            assert_eq!(
+                *player, chooser,
+                "CR 616.1: the affected permanent's controller orders the replacements"
+            );
+            candidates
+                .iter()
+                .position(|candidate| candidate.source_id == source)
+                .unwrap_or_else(|| {
+                    panic!("{source:?}'s replacement must apply to {chooser:?}'s sacrifice")
+                })
+        }
+        other => panic!("expected {chooser:?}'s replacement choice, got {other:?}"),
+    };
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("the offered replacement is a legal answer");
 }

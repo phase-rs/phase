@@ -430,7 +430,13 @@ pub(super) fn handle_replacement_choice(
     let parked_for_rejection = state.pending_replacement.as_ref().is_some_and(|pending| {
         pending.unrepresentable_life_change == UnrepresentablePolicy::Reject
     });
-    let waiting_for = if parked_for_rejection {
+    // CR 101.4 + CR 616.1: the choice decides one sacrifice of a simultaneous
+    // batch that is still being consulted. Its move waits with the batch instead
+    // of happening now; the generic dispatcher below would deliver it at once.
+    let waiting_for = if effects::player_scope_sacrifice_consult_awaits_replacement_choice(state) {
+        validate_replacement_choice_index(state, index)?;
+        answer_player_scope_sacrifice_consult(state, index, events)?
+    } else if parked_for_rejection {
         let (inner, window) = within_ingress_life_window(state, |state| {
             handle_replacement_choice_inner(state, index, events)
         });
@@ -474,6 +480,31 @@ pub(super) fn handle_replacement_choice(
         events,
     )
     .unwrap_or(waiting_for))
+}
+
+/// CR 101.4 + CR 616.1: answer the replacement choice that interrupted a
+/// simultaneous sacrifice batch's consult, then continue the batch: consult the
+/// remaining selections, deliver every approved move together, and resume the
+/// instruction's later work through the common priority boundary (CR 608.2c).
+/// The batch's events stay in this action's buffer for the post-action
+/// pipeline's trigger scan (CR 603.2).
+fn answer_player_scope_sacrifice_consult(
+    state: &mut GameState,
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match effects::answer_player_scope_sacrifice_consult(state, index, events) {
+        effects::PlayerScopeSacrificeConsultAnswer::NeedsChoice => {
+            return Ok(state.waiting_for.clone());
+        }
+        effects::PlayerScopeSacrificeConsultAnswer::Consulted => {}
+    }
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    resume_paused_player_scope_sacrifice(state, events)?;
+    super::engine::resume_pending_continuation_if_priority(state, events)?;
+    Ok(state.waiting_for.clone())
 }
 
 /// What resuming a parked player-scope sacrifice batch produced.
