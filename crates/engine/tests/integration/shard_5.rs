@@ -330,6 +330,7 @@ mod top_of_library_object_form_permission;
 mod torch_the_tower_die_exile;
 mod tracked_set_anaphor_quantity_binds;
 mod tracked_set_anaphor_source;
+mod trample_lethal_assigned_this_step;
 mod treasure_map_landmark_transform;
 mod treasured_find_regression;
 mod trench_behemoth_landfall_force_attack;

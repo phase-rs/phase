@@ -7,6 +7,7 @@ use crate::game::effects::deal_damage::{
 use crate::game::effects::life::ReplacementDeferred;
 use crate::game::game_object::GameObject;
 use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::game::lethal_damage::{self, AssignedThisStep};
 use crate::game::replacement;
 use crate::game::sba;
 use crate::game::triggers;
@@ -913,7 +914,14 @@ fn collect_damage_assignments(
                 .flatten()
                 .map(|&bid| DamageSlot {
                     blocker_id: bid,
-                    lethal_minimum: lethal_damage_needed(state, bid, has_deathtouch),
+                    // CR 702.19b: counts damage earlier attackers committed this step; see
+                    // `combat_lethal_damage_remaining` for the CR 510.1e restriction.
+                    lethal_minimum: lethal_damage::combat_lethal_damage_remaining(
+                        state,
+                        bid,
+                        has_deathtouch,
+                        assigned_this_step(state, bid),
+                    ),
                 })
                 .collect();
             let assignment_modes = combat_damage_assignment_modes(
@@ -1175,11 +1183,48 @@ pub(crate) fn needs_interactive_assignment(
             .get(&attacker_info.object_id)
             .and_then(|b| b.first())
         {
-            return power > lethal_damage_needed(state, blocker_id, has_deathtouch);
+            return power
+                > lethal_damage::combat_lethal_damage_remaining(
+                    state,
+                    blocker_id,
+                    has_deathtouch,
+                    assigned_this_step(state, blocker_id),
+                );
         }
     }
 
     blocker_count >= 2
+}
+
+/// CR 702.19b: combat damage other attackers have already committed to `blocker_id` earlier in
+/// this combat damage step, split by whether the assigning source has deathtouch (CR 702.2c).
+///
+/// Reads the live `state.combat`, never a copy taken before the attacker loop, so it sees both
+/// earlier auto-assignments and an answered `AssignCombatDamage` prompt. Mirrors
+/// `compute_pw_loyalty_threshold` (CR 702.19c).
+///
+/// CR 510.1e (partial): only damage already committed is counted. An earlier attacker cannot
+/// assign excess based on damage that a later attacker will assign. Tracked by Command Zone #285.
+fn assigned_this_step(state: &GameState, blocker_id: ObjectId) -> AssignedThisStep {
+    let Some(combat) = state.combat.as_ref() else {
+        return AssignedThisStep::default();
+    };
+    combat
+        .pending_damage
+        .iter()
+        .filter(|(_, da)| da.target == DamageTarget::Object(blocker_id))
+        .fold(AssignedThisStep::default(), |mut acc, (source, da)| {
+            let source_has_deathtouch = state
+                .objects
+                .get(source)
+                .is_some_and(|obj| obj.has_keyword(&Keyword::Deathtouch));
+            if source_has_deathtouch {
+                acc.from_deathtouch += da.amount;
+            } else {
+                acc.from_other += da.amount;
+            }
+            acc
+        })
 }
 
 /// CR 702.19c: Compute effective PW loyalty threshold for trample-over-PW,
@@ -1352,7 +1397,12 @@ fn assign_attacker_damage(
                     // when power <= lethal (excess == 0). The excess sub-block below stays as
                     // the shared lethal-then-excess logic used by the no-blockers and PW paths.
                     // CR 702.19b: Trample — assign lethal to blocker, excess to attack target.
-                    let lethal = lethal_damage_needed(state, blockers[0], has_deathtouch);
+                    let lethal = lethal_damage::combat_lethal_damage_remaining(
+                        state,
+                        blockers[0],
+                        has_deathtouch,
+                        assigned_this_step(state, blockers[0]),
+                    );
                     let to_blocker = power.min(lethal);
                     let excess = power.saturating_sub(to_blocker);
                     let mut result = vec![DamageAssignment {
@@ -1413,7 +1463,8 @@ fn assign_attacker_damage(
 /// - CR 510.1c: a blocked creature assigns to its blockers, and none to the player.
 /// - CR 702.19b: trample assigns lethal to every blocker first, then the excess to
 ///   the player — and *no* damage to the player if lethal is not assigned to all of
-///   them. "Lethal" counts damage already marked (via `lethal_damage_needed`).
+///   them. "Lethal" counts damage already marked (via
+///   `lethal_damage::combat_lethal_damage_remaining`).
 /// - CR 702.19d: a blocked trampler with no blockers left when damage is assigned
 ///   assigns everything to the player, as though all blockers had been assigned
 ///   lethal damage. This is what makes the second strike of a double striker so
@@ -1458,10 +1509,18 @@ pub fn combat_damage_to_defender(
         return if has_double_strike { power * 2 } else { power };
     }
 
-    // Remaining lethal per blocker, in the order the attacker would exhaust them.
+    // Remaining lethal per blocker, in the order the attacker would exhaust them. A
+    // hypothetical single-attacker exchange: no other attacker has committed damage.
     let mut remaining: Vec<i32> = blockers
         .iter()
-        .map(|&bid| lethal_damage_needed(state, bid, has_deathtouch) as i32)
+        .map(|&bid| {
+            lethal_damage::combat_lethal_damage_remaining(
+                state,
+                bid,
+                has_deathtouch,
+                AssignedThisStep::default(),
+            ) as i32
+        })
         .collect();
     remaining.sort_unstable();
 
@@ -1483,21 +1542,31 @@ pub fn combat_damage_to_defender(
         }
         // CR 702.7b: first-striking blockers assign now, and can kill the attacker
         // before it ever reaches the regular step.
-        let attacker_lethal = lethal_damage_needed(
-            state,
-            attacker_id,
-            first_strike_blockers
-                .iter()
-                .any(|b| b.has_keyword(&Keyword::Deathtouch)),
-        ) as i32;
         // CR 510.1a + CR 613.11: same authority for the blockers — a first-striking
         // Doran-style blocker kills the attacker with its toughness, and one that
         // assigns no combat damage cannot kill it at all.
-        let first_strike_damage: i32 = first_strike_blockers
+        let first_strike_damage: u32 = first_strike_blockers
             .iter()
-            .map(|b| combat_damage_amount(b) as i32)
+            .map(|b| combat_damage_amount(b))
             .sum();
-        if first_strike_damage >= attacker_lethal {
+        let deathtouch_damage: u32 = first_strike_blockers
+            .iter()
+            .filter(|b| b.has_keyword(&Keyword::Deathtouch))
+            .map(|b| combat_damage_amount(b))
+            .sum();
+        // CR 702.7b + CR 704.5g + CR 704.5h + CR 702.12b: first-striking blockers destroy the
+        // attacker only through damage they actually assign: nonzero deathtouch damage, or
+        // marked plus first-strike damage that is lethal; an indestructible attacker is never
+        // destroyed by damage.
+        let destroyed = !attacker.has_keyword(&Keyword::Indestructible)
+            && attacker.toughness.is_some_and(|t| t > 0)
+            && (deathtouch_damage > 0
+                || lethal_damage::is_lethal_damage(
+                    state,
+                    attacker,
+                    attacker.damage_marked.saturating_add(first_strike_damage),
+                ));
+        if destroyed {
             attacker_alive = false;
         }
     }
@@ -1600,11 +1669,12 @@ fn assign_step_to_defender(remaining: &mut Vec<i32>, power: i32, has_trample: bo
 /// How much damage is needed to kill this creature.
 /// CR 702.2c: Deathtouch — any amount of damage from a deathtouch source is lethal.
 ///
-/// Public because this is the single authority for "how much does this blocker
-/// absorb": CR 702.19b requires a trampling attacker to assign this much to each
-/// blocker before any excess is assigned to the player, so a consumer estimating
-/// trample absorption must read the same number this resolver assigns rather than
-/// re-deriving it from raw toughness and silently ignoring damage already marked.
+/// CR 120.4a: the excess-damage reading — lethal damage less damage already marked,
+/// with no other combat damage in flight. Public so consumers estimating how much a
+/// creature absorbs read the same number the resolver uses rather than re-deriving it
+/// from raw toughness. Combat damage assignment itself reads
+/// `lethal_damage::combat_lethal_damage_remaining`, which also counts damage other
+/// attackers committed earlier in the step (CR 702.19b).
 pub fn lethal_damage_needed(
     state: &GameState,
     object_id: ObjectId,
@@ -1618,8 +1688,8 @@ pub fn lethal_damage_needed(
         .objects
         .get(&object_id)
         .map(|obj| {
-            let toughness = obj.toughness.unwrap_or(0).max(0) as u32;
-            toughness.saturating_sub(obj.damage_marked)
+            // CR 120.6: lethal damage counts the damage already marked.
+            lethal_damage::lethal_damage_threshold(state, obj).saturating_sub(obj.damage_marked)
         })
         .unwrap_or(1)
 }
@@ -6554,6 +6624,111 @@ mod tests {
         kw(&mut state, a, vec![Keyword::DoubleStrike, Keyword::Trample]);
         let b = create_creature(&mut state, PlayerId(1), "B", 0, 6);
         assert_eq!(combat_damage_to_defender(&state, a, &[b]), 4);
+    }
+
+    // ── First-striking blockers destroy the attacker only through damage they assign ──
+    //
+    // CR 702.7b + CR 704.5g + CR 704.5h + CR 702.12b: whether the attacker survives to the
+    // regular step depends on the damage the first-striking blockers actually assign, not on
+    // the assignment minimum a deathtouch source would need.
+
+    /// The attacker already has lethal damage marked but is indestructible; the 0-power
+    /// deathtouch blocker assigns nothing (CR 510.1a). First step: 2 to the blocker, 1 through;
+    /// regular step: no blockers left, all 3 through (CR 702.19d).
+    #[test]
+    fn already_lethal_indestructible_double_striker_survives_a_zero_power_deathtouch_blocker() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 3, 3);
+        kw(
+            &mut state,
+            a,
+            vec![
+                Keyword::DoubleStrike,
+                Keyword::Trample,
+                Keyword::Indestructible,
+            ],
+        );
+        state.objects.get_mut(&a).unwrap().damage_marked = 3;
+        let b = create_creature(&mut state, PlayerId(1), "B", 0, 2);
+        kw(
+            &mut state,
+            b,
+            vec![Keyword::FirstStrike, Keyword::Deathtouch],
+        );
+        assert_eq!(combat_damage_to_defender(&state, a, &[b]), 4);
+    }
+
+    /// CR 702.12b: deathtouch damage does not destroy an indestructible attacker, so it strikes
+    /// again: 1 lethal and 2 through, then 3 through.
+    #[test]
+    fn indestructible_double_striker_survives_a_first_strike_deathtouch_blocker() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 3, 3);
+        kw(
+            &mut state,
+            a,
+            vec![
+                Keyword::DoubleStrike,
+                Keyword::Trample,
+                Keyword::Indestructible,
+            ],
+        );
+        let b = create_creature(&mut state, PlayerId(1), "B", 1, 1);
+        kw(
+            &mut state,
+            b,
+            vec![Keyword::FirstStrike, Keyword::Deathtouch],
+        );
+        assert_eq!(combat_damage_to_defender(&state, a, &[b]), 5);
+    }
+
+    /// CR 704.5g: a first-striking blocker whose damage is lethal still kills the attacker
+    /// before the regular step (2 to the 2/3, nothing through; the 2/2 dies).
+    #[test]
+    fn lethal_first_strike_blocker_still_kills_a_double_striker() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 2, 2);
+        kw(&mut state, a, vec![Keyword::DoubleStrike, Keyword::Trample]);
+        let b = create_creature(&mut state, PlayerId(1), "B", 2, 3);
+        kw(&mut state, b, vec![Keyword::FirstStrike]);
+        assert_eq!(combat_damage_to_defender(&state, a, &[b]), 0);
+    }
+
+    /// CR 702.2b + CR 510.1a: deathtouch destroys only through damage its holder assigns. The
+    /// deathtouch blocker has 0 power and the 1-power blocker has no deathtouch, so the 5/5
+    /// survives the first step (2 lethal, 3 through) and tramples all 5 in the regular step.
+    #[test]
+    fn deathtouch_on_a_zero_power_first_striker_does_not_kill_the_attacker() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 5, 5);
+        kw(&mut state, a, vec![Keyword::DoubleStrike, Keyword::Trample]);
+        let b1 = create_creature(&mut state, PlayerId(1), "B1", 0, 1);
+        kw(
+            &mut state,
+            b1,
+            vec![Keyword::FirstStrike, Keyword::Deathtouch],
+        );
+        let b2 = create_creature(&mut state, PlayerId(1), "B2", 1, 1);
+        kw(&mut state, b2, vec![Keyword::FirstStrike]);
+        assert_eq!(combat_damage_to_defender(&state, a, &[b1, b2]), 8);
+    }
+
+    /// CR 702.2b + CR 704.5h: the control for the case above — deathtouch on the blocker that
+    /// assigns 1 damage destroys the 5/5 after the first step's 3 through.
+    #[test]
+    fn deathtouch_on_a_damaging_first_striker_kills_the_attacker() {
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "A", 5, 5);
+        kw(&mut state, a, vec![Keyword::DoubleStrike, Keyword::Trample]);
+        let b1 = create_creature(&mut state, PlayerId(1), "B1", 0, 1);
+        kw(&mut state, b1, vec![Keyword::FirstStrike]);
+        let b2 = create_creature(&mut state, PlayerId(1), "B2", 1, 1);
+        kw(
+            &mut state,
+            b2,
+            vec![Keyword::FirstStrike, Keyword::Deathtouch],
+        );
+        assert_eq!(combat_damage_to_defender(&state, a, &[b1, b2]), 3);
     }
 
     #[test]

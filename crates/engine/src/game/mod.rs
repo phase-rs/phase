@@ -94,6 +94,7 @@ pub mod keywords;
 pub mod layers;
 pub mod ledger;
 pub(crate) mod legend_scope;
+pub mod lethal_damage;
 pub mod library;
 pub mod life_costs;
 pub mod life_safety;
