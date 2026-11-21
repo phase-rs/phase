@@ -20,7 +20,7 @@ use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChooseOneOfKind, ChosenSubtypeKind, ColorChangeMode,
     ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRecipient, Duration,
     EachDamageRecipient, Effect, EffectScope, FilterProp, MultiTargetSpec, ObjectScope,
-    PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr, QuantityRef, StaticCondition,
+    PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr, StaticCondition,
     StaticDefinition, TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::game_state_kinds::DayNight;
@@ -45,7 +45,7 @@ use super::super::oracle_quantity;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
     parse_cant_attack_defended_scope_nom, parse_cant_be_activated_exemption_in_text,
-    parse_chosen_qualifier_subject, parse_continuous_gets_has, parse_continuous_modifications,
+    parse_chosen_qualifier_subject, parse_continuous_modifications,
     parse_continuous_subject_filter, parse_static_line, parse_static_line_multi,
     parse_targeting_bypass_tail, peel_compound_all_quantified_conjuncts,
 };
