@@ -105862,87 +105862,90 @@ fn sproutwatch_dryad_preserves_per_keyword_conditions_and_duration() {
 
 #[test]
 fn each_target_player_keeps_coordinated_predicate_recipients() {
-    for (head, expected_count) in [
-        ("Any number of", MultiTargetSpec::unlimited(0)),
-        ("Two", MultiTargetSpec::fixed(2, 2)),
-    ] {
-        let chain = parse_effect_chain(
-            &format!("{head} target players each draw a card and discard a card. You draw a card."),
-            AbilityKind::Spell,
-        );
-        assert_eq!(chain.multi_target, Some(expected_count), "{chain:#?}");
-        assert!(
-            matches!(
-                *chain.effect,
-                Effect::Draw {
-                    target: TargetFilter::Player,
-                    ..
-                }
-            ),
-            "{chain:#?}"
-        );
-        let discard = chain.sub_ability.as_deref().expect("discard action");
-        assert!(
-            matches!(
-                *discard.effect,
-                Effect::Discard {
-                    target: TargetFilter::ScopedPlayer,
-                    ..
-                }
-            ),
-            "{chain:#?}"
-        );
-        assert_eq!(discard.multi_target, None);
-        assert_eq!(discard.sub_link, SubAbilityLink::ContinuationStep);
-        let rider = discard.sub_ability.as_deref().expect("controller rider");
-        assert_eq!(rider.sub_link, SubAbilityLink::SequentialSibling);
-        assert!(matches!(
-            *rider.effect,
-            Effect::Draw {
-                target: TargetFilter::Controller,
+    // Synthetic by necessity: no printed card has a fixed-count "two target
+    // players each A and B". The nearest printed cards are Huddle Up ("Two
+    // target players each draw a card.") for the count and Priest of
+    // Forgotten Gods for the coordinated predicate. This pins the exact-count
+    // subject form, which builds its application with no single target and an
+    // exact `MultiTargetSpec`.
+    let chain = parse_effect_chain(
+        "Two target players each lose 2 life and sacrifice a creature of their choice.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        chain.multi_target,
+        Some(MultiTargetSpec::fixed(2, 2)),
+        "{chain:#?}"
+    );
+    assert!(
+        matches!(
+            *chain.effect,
+            Effect::LoseLife {
+                target: Some(TargetFilter::Player),
                 ..
             }
-        ));
-    }
+        ),
+        "{chain:#?}"
+    );
+    let sacrifice = chain.sub_ability.as_deref().expect("sacrifice action");
+    assert!(
+        matches!(&*sacrifice.effect, Effect::Sacrifice { target, .. }
+            if target_filter_controller_ref(target) == Some(ControllerRef::ScopedPlayer)),
+        "{chain:#?}"
+    );
+    assert_eq!(sacrifice.multi_target, None);
+    assert_eq!(sacrifice.sub_link, SubAbilityLink::ContinuationStep);
+    assert!(sacrifice.sub_ability.is_none(), "{chain:#?}");
 }
 
 #[test]
 fn each_target_player_keeps_life_and_permanent_actions_under_one_announcement() {
-    /// The ordered action pair each predicate must lower to.
+    /// The ordered action pair each printed clause must lower to.
     enum Expected {
         LoseThenSacrifice,
         SacrificeThenLose,
         MillThenLose,
     }
-    for (predicate, expected) in [
+    for (card, text, kind, expected, controller_riders) in [
         (
-            "lose 2 life and sacrifice a creature of their choice",
-            Expected::LoseThenSacrifice,
-        ),
-        (
-            "sacrifice a creature of their choice and lose 2 life",
-            Expected::SacrificeThenLose,
-        ),
-        ("mill a card and lose 2 life", Expected::MillThenLose),
-    ] {
-        let chain = parse_effect_chain(
-            &format!("Any number of target players each {predicate}. You add {{B}}{{B}} and draw a card."),
+            "Priest of Forgotten Gods",
+            "Any number of target players each lose 2 life and sacrifice a creature of their choice. You add {B}{B} and draw a card.",
             AbilityKind::Activated,
-        );
+            Expected::LoseThenSacrifice,
+            true,
+        ),
+        (
+            "Will of the Abzan",
+            "Any number of target opponents each sacrifice a creature with the greatest power among creatures that player controls and lose 3 life.",
+            AbilityKind::Spell,
+            Expected::SacrificeThenLose,
+            false,
+        ),
+        (
+            "Tinybones Joins Up",
+            "any number of target players each mill a card and lose 1 life.",
+            AbilityKind::Spell,
+            Expected::MillThenLose,
+            false,
+        ),
+    ] {
+        let chain = parse_effect_chain(text, kind);
         assert_eq!(
             chain.multi_target,
             Some(MultiTargetSpec::unlimited(0)),
-            "{chain:#?}"
+            "{card}: {chain:#?}"
         );
-        let first = if matches!(
-            *chain.effect,
-            Effect::TargetOnly {
-                target: TargetFilter::Player
+        // CR 608.2b: a sacrifice-first clause announces its players on a
+        // node of their own, so the permanent filter opens no target slot.
+        let first = match expected {
+            Expected::SacrificeThenLose => {
+                assert!(
+                    matches!(*chain.effect, Effect::TargetOnly { .. }),
+                    "{card}: {chain:#?}"
+                );
+                chain.sub_ability.as_deref().expect("first action")
             }
-        ) {
-            chain.sub_ability.as_deref().expect("first action")
-        } else {
-            &chain
+            Expected::LoseThenSacrifice | Expected::MillThenLose => &chain,
         };
         let second = first.sub_ability.as_deref().expect("second action");
         assert_eq!(second.multi_target, None);
@@ -105985,8 +105988,13 @@ fn each_target_player_keeps_life_and_permanent_actions_under_one_announcement() 
                 scoped_loss(&second.effect),
             ),
         };
-        assert!(first_ok, "{predicate}: first action {chain:#?}");
-        assert!(second_ok, "{predicate}: second action {chain:#?}");
+        assert!(first_ok, "{card}: first action {chain:#?}");
+        assert!(second_ok, "{card}: second action {chain:#?}");
+        if !controller_riders {
+            assert!(second.sub_ability.is_none(), "{card}: {chain:#?}");
+            continue;
+        }
+        // CR 109.5: "You add {B}{B} and draw a card." stays the controller's.
         let mana = second
             .sub_ability
             .as_deref()
