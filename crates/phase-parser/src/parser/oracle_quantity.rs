@@ -11061,8 +11061,11 @@ mod tests {
         else {
             panic!("{:?}", armor.statics[0].modifications[0]);
         };
+        let QuantityExpr::ClampMin { inner, minimum: 0 } = value else {
+            panic!("{value:?}");
+        };
         assert_eq!(
-            *aggregate_population(value),
+            *aggregate_population(inner),
             your_commanders_in_every_zone()
         );
         let ContinuousModification::AddDynamicToughness { value } =
@@ -11070,8 +11073,11 @@ mod tests {
         else {
             panic!("{:?}", armor.statics[0].modifications[1]);
         };
+        let QuantityExpr::ClampMin { inner, minimum: 0 } = value else {
+            panic!("{value:?}");
+        };
         assert_eq!(
-            *aggregate_population(value),
+            *aggregate_population(inner),
             your_commanders_in_every_zone()
         );
 

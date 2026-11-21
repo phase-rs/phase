@@ -34,7 +34,7 @@ pub(super) use lower::{
     extract_exact_target_multi_target, extract_optional_target_multi_target,
     parse_dynamic_counter_suffix_body, parse_multi_target_count_expr,
     parse_where_x_quantity_expression, strip_exact_target_prefix, strip_optional_target_prefix,
-    try_parse_pump, WhereXBinding,
+    try_parse_pump, WhereXBinding, WhereXSlot,
 };
 // Test-only re-exports from lower module.
 #[cfg(test)]
