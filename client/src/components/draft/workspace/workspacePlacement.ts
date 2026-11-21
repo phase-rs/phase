@@ -494,6 +494,26 @@ interface AllocatableGroup {
   columns: number[];
 }
 
+/**
+ * The column each sort group was given the last time a zone was sorted.
+ *
+ * The workspace records where cards are, not how the board was laid out, so
+ * once a group's last card leaves the zone nothing says where the group lived.
+ * A later pick of that group needs that answer (a merged column's partner is
+ * still there; the group itself is not), and no function of the board alone
+ * can give it. This client-side memory is written by `rebuildWorkspaceZone`
+ * and read by `resolveWorkspaceSortColumn`, which trusts it only while the
+ * board still matches it. It is never sent over the network or persisted: a
+ * reload simply starts without it and placement falls back to the board.
+ */
+interface RecordedSortLayout {
+  sort: DraftBoardSort;
+  columnCount: number;
+  columns: ReadonlyMap<DraftPoolGroupKind, number>;
+}
+
+const recordedSortLayouts = new Map<DraftZone, RecordedSortLayout>();
+
 /** The column each of `count` ordered groups gets on `columnCount` columns. */
 function allocateColumnIndexes(count: number, columnCount: number): number[] {
   if (count > columnCount) {
@@ -591,6 +611,13 @@ export function rebuildWorkspaceZone(
     });
     allocateGroups(boardGroups, effective.columnCount);
     boardGroups.forEach(({ group, columns }) => sortColumns.set(group.kind, columns));
+    recordedSortLayouts.set(zone, {
+      sort: effective.sort,
+      columnCount: effective.columnCount,
+      columns: new Map(boardGroups.map(({ group, columns }) => [group.kind, columns[0]])),
+    });
+  } else {
+    recordedSortLayouts.delete(zone);
   }
 
   for (let row = 0; row < rowCount; row += 1) {
@@ -1154,6 +1181,32 @@ export function resolveWorkspaceSortColumn(
   const pure = holding.filter(({ kinds }) => kinds.length === 1 && kinds[0] === groupKind);
   const pureColumn = pure.find(({ column }) => column.count > 0) ?? null;
   if (pureColumn !== null) return pureColumn.column.column;
+  // The column the last sort gave this group, while the board still matches
+  // that sort. This is what returns a group whose own cards have all left the
+  // zone to its place, including beside a merged-column partner.
+  const layout = recordedSortLayouts.get(zone);
+  if (
+    layout !== undefined
+    && layout.sort === model.effectiveSort
+    && layout.columnCount === model.columnCount
+    && [...groupColumns].every(([kind, columns]) => {
+      const laidOut = layout.columns.get(kind);
+      return laidOut === undefined || (columns.size === 1 && columns.has(laidOut));
+    })
+  ) {
+    const home = layout.columns.get(groupKind);
+    const homeColumn = home === undefined ? undefined : model.columns[home];
+    const homeOccupants = holding.find(({ column }) => column.column === home);
+    if (
+      home !== undefined
+      && homeColumn !== undefined
+      && (homeColumn.count === 0
+        || homeOccupants?.kinds.every((kind) => layout.columns.get(kind) === home) === true)
+    ) {
+      return home;
+    }
+  }
+
   // A shared column counts only when the allocator could have laid out its
   // groups together and none of them was pulled apart afterwards; a column the
   // player mixed by hand stays rejected.

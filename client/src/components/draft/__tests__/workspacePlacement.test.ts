@@ -321,6 +321,12 @@ describe("workspace placement", () => {
       board.pool.find((entry) => entry.instance_id === id)!,
       zone, board.pool, board.poolGroups, state, board.preferences,
     ).column;
+    const sendTo = (
+      state: DraftWorkspaceState, id: string, zone: "deck" | "sideboard",
+    ): DraftWorkspaceState => ({
+      ...state,
+      placements: { ...state.placements, [id]: { ...state.placements[id], zone } },
+    });
     const dragTo = (state: DraftWorkspaceState, id: string, destination: number): DraftWorkspaceState => ({
       ...state,
       placements: { ...state.placements, [id]: { ...state.placements[id], column: destination } },
@@ -346,6 +352,61 @@ describe("workspace placement", () => {
       // Grizzly Bears is dragged into the red column.
       const mixed = dragTo(board.state, "bears", 3);
       expect(pickFor(board, mixed, "elves", "deck")).toBe(4);
+    });
+
+    // A returning card goes back to the column the sort gave its group, even
+    // when no card of the group is left in the zone (the board alone cannot say).
+    it("returns_a_card_beside_its_merged_partner_after_the_group_left", () => {
+      const board = colorBoard([
+        ["pacifism", "white", "deck"], ["satyr", "multicolor", "deck"],
+        ["manalith", "colorless", "deck"],
+      ], 2);
+      expect([column(board.state, "pacifism"), column(board.state, "satyr")]).toEqual([0, 1]);
+      expect(column(board.state, "manalith")).toBe(1);
+      const away = sendTo(board.state, "manalith", "sideboard");
+      expect(pickFor(board, away, "manalith", "deck")).toBe(1);
+    });
+
+    it("returns_a_card_to_the_column_its_group_had_in_the_zone_it_was_sorted_with", () => {
+      // The sideboard group (black) was never in the deck: Opt sorted beside Plains.
+      const never = colorBoard([
+        ["pacifism", "white", "deck"], ["opt", "blue", "deck"], ["plains", "colorless", "deck"],
+        ["night", "black", "sideboard"],
+      ], 2);
+      expect([column(never.state, "opt"), column(never.state, "plains")]).toEqual([1, 1]);
+      expect(pickFor(never, sendTo(never.state, "opt", "sideboard"), "opt", "deck")).toBe(1);
+
+      // The groups that left were in the deck: Opt sorted beside Pacifism.
+      const left = colorBoard([
+        ["pacifism", "white", "deck"], ["opt", "blue", "deck"],
+        ["night", "black", "deck"], ["plains", "colorless", "deck"],
+      ], 2);
+      expect([column(left.state, "opt"), column(left.state, "night")]).toEqual([0, 1]);
+      const away = sendTo(sendTo(left.state, "opt", "sideboard"), "plains", "sideboard");
+      expect(pickFor(left, away, "opt", "deck")).toBe(0);
+    });
+
+    it("returns_either_half_of_a_six_column_merged_pair_to_column_five", () => {
+      const board = colorBoard([
+        ["pacifism", "white", "deck"], ["opt", "blue", "deck"], ["night", "black", "deck"],
+        ["shock", "red", "deck"], ["elves", "green", "deck"],
+        ["satyr", "multicolor", "deck"], ["manalith", "colorless", "deck"],
+      ], 6);
+      expect(pickFor(board, sendTo(board.state, "manalith", "sideboard"), "manalith", "deck")).toBe(5);
+      expect(pickFor(board, sendTo(board.state, "satyr", "sideboard"), "satyr", "deck")).toBe(5);
+    });
+
+    it("stops_trusting_the_recorded_layout_once_a_group_was_moved_by_hand", () => {
+      const board = colorBoard([
+        ["pacifism", "white", "deck"], ["satyr", "multicolor", "deck"],
+        ["manalith", "colorless", "deck"],
+      ], 2);
+      const away = sendTo(board.state, "manalith", "sideboard");
+      expect(pickFor(board, away, "manalith", "deck")).toBe(1);
+      // Pacifism is dragged out of its sorted column, so the recorded layout no
+      // longer describes the board and the card takes the first empty column.
+      const moved = dragTo(away, "pacifism", 1);
+      expect(pickFor(board, moved, "manalith", "deck")).toBe(0);
     });
 
     it("folds_the_trailing_groups_first_as_columns_get_scarcer", () => {
