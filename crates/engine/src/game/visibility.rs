@@ -1329,6 +1329,7 @@ fn redact_activation_records(filtered: &mut GameState) {
             | PendingCostMoveResume::ManaAbilityPayment { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             | PendingCostMoveResume::RandomDiscardUnlessPayment(_)
+            | PendingCostMoveResume::PlayerScopeUnlessSettlement(_)
             | PendingCostMoveResume::TurnFaceUpCostMove { .. } => {}
         }
     }
@@ -1598,6 +1599,15 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // prompt is the complete viewer-facing surface.
     if let Some(choice) = filtered.pending_player_scope_choice.as_mut() {
         choice.selections.clear();
+    }
+    // CR 101.4a + CR 101.4b + CR 400.2: an open player-scope unless poll shows
+    // every viewer the earlier seats' chosen sacrifices (later choosers know
+    // them), but a chosen discard names a card still in its payer's hidden hand.
+    if let Some(poll) = filtered
+        .pending_player_scope_unless_punishment
+        .as_deref_mut()
+    {
+        crate::game::scoped_unless_poll::redact_for_viewer(poll, can_view_private_for_player);
     }
     // CR 401.4 + CR 608.2c: Queued owner batches retain exact hidden-card
     // identities and origins for later private choices, and the orders owners
@@ -4517,7 +4527,8 @@ fn redact_ability_triggered_causes(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `CollectEvidenceChoice` and `ChooseManaColor`, `ManaChoiceContext::ResolvingEffect`,
 /// `CollectEvidenceResume::Effect`,
 /// and the roots `pending_player_scope_sacrifice_choice`,
-/// `pending_player_scope_choice`, `pending_player_scope_unless_payment`, `pending_scoped_library_search`,
+/// `pending_player_scope_choice`, `pending_player_scope_unless_payment`,
+/// `pending_player_scope_unless_punishment`, `pending_scoped_library_search`,
 /// `pending_library_search_delivery`, `epic_effects` and the prevention riders of
 /// `replacement_continuations`, which every shield's `runtime_execute` names
 /// (`redact_waiting_for_payment`, `redact_paused_ability_payment`). Applied
@@ -4904,6 +4915,9 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
     }
     if let Some(pending) = state.pending_player_scope_unless_payment.as_deref_mut() {
         redact_ability_payment(&mut pending.pending_effect, hidden_ids);
+    }
+    if let Some(poll) = state.pending_player_scope_unless_punishment.as_deref_mut() {
+        redact_ability_payment(&mut poll.ability, hidden_ids);
     }
     if let Some(search) = state.pending_scoped_library_search.as_mut() {
         redact_ability_payment(&mut search.ability, hidden_ids);
@@ -7740,7 +7754,8 @@ mod tests {
         use crate::types::game_state::{
             CollectEvidenceResume, EpicEffect, LibrarySearchDeliveryResume, ManaChoiceContext,
             ManaChoicePrompt, PayableResource, PendingPlayerScopeSacrificeChoice,
-            PendingPlayerScopeUnlessPayment, ScopedLibrarySearchPhase,
+            PendingPlayerScopeUnlessPayment, PendingPlayerScopeUnlessPunishment,
+            ScopedLibrarySearchPhase,
         };
         let fixture = payment_fixture();
         let (owner, opponent_id, paid) = (fixture.owner, fixture.opponent, fixture.paid);
@@ -8168,6 +8183,24 @@ mod tests {
                             declining_players: Vec::new(),
                             current_player: opponent_id,
                             cost: pay_life(),
+                            payments: Vec::new(),
+                        }));
+                }),
+            ),
+            (
+                "pending_player_scope_unless_punishment",
+                "/pending_player_scope_unless_punishment/".to_string(),
+                2,
+                Box::new(|state: &mut GameState| {
+                    state.pending_player_scope_unless_punishment =
+                        Some(Box::new(PendingPlayerScopeUnlessPunishment {
+                            ability: effect(),
+                            current_player: opponent_id,
+                            remaining_players: Vec::new(),
+                            declining_players: Vec::new(),
+                            payments: Vec::new(),
+                            current_picks: Vec::new(),
+                            trigger_event: None,
                         }));
                 }),
             ),
