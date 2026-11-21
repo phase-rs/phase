@@ -502,7 +502,10 @@ fn palantir_decline_only_the_target_loses_life() {
     // the card keeps its confirmed-misparse row and is not claimed as supported.
     let after = lives(&runner);
     assert_eq!([after[0], after[1]], [before[0], before[1]]);
-    assert!(after[2] < before[2], "the declared target lost life: {after:?}");
+    assert!(
+        after[2] < before[2],
+        "the declared target lost life: {after:?}"
+    );
 }
 
 /// T-Pal-a — CR 118.12: P2 accepts; P0 draws one, nothing is milled.
@@ -560,7 +563,10 @@ fn palantir_sole_legal_target_is_chosen_without_prompt() {
     // the card keeps its confirmed-misparse row and is not claimed as supported.
     let after = lives(&runner);
     assert_eq!([after[0], after[1]], [before[0], before[1]]);
-    assert!(after[2] < before[2], "the declared target lost life: {after:?}");
+    assert!(
+        after[2] < before[2],
+        "the declared target lost life: {after:?}"
+    );
 }
 
 // ── Terrapact Intimidator ──────────────────────────────────────────────────
