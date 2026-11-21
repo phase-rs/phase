@@ -119,7 +119,7 @@ fn assert_settled(r: &GameRunner, player: PlayerId, what: &str) {
 /// stopped in.
 fn resolve_stack(r: &mut GameRunner) -> WaitingFor {
     for _ in 0..40 {
-        if !matches!(r.state().waiting_for, WaitingFor::Priority { .. })
+        if !matches!(r.state().waiting_for, WaitingFor::Priority { player: _ })
             || r.state().stack.is_empty()
         {
             break;
@@ -165,7 +165,7 @@ fn pass_until_prompt(r: &mut GameRunner, label: &str, pred: impl Fn(&WaitingFor)
             return;
         }
         match r.state().waiting_for {
-            WaitingFor::Priority { .. } => {
+            WaitingFor::Priority { player: _ } => {
                 r.act(GameAction::PassPriority).expect(label);
             }
             ref other => panic!("{label}: stopped at {other:?}"),
@@ -469,11 +469,11 @@ fn resolve_with(r: &mut GameRunner, label: &str, policy: Policy) -> Vec<String> 
     let mut seen = Vec::new();
     for _ in 0..80 {
         let waiting = r.state().waiting_for.clone();
-        if matches!(waiting, WaitingFor::Priority { .. }) && r.state().stack.is_empty() {
+        if matches!(waiting, WaitingFor::Priority { player: _ }) && r.state().stack.is_empty() {
             return seen;
         }
         let action = match &waiting {
-            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::Priority { player: _ } => GameAction::PassPriority,
             other => {
                 let name: String = format!("{other:?}").chars().take(24).collect();
                 seen.push(name);
@@ -670,20 +670,21 @@ fn kozilek_cast_trigger_draws_nothing_with_seven_or_more_other_cards_in_hand() {
     }
 }
 
+/// Answer a (trigger) target prompt with P1, asserting P1 is among the legal targets; `None` for
+/// any other prompt.
 fn target_p1(w: &WaitingFor) -> Option<GameAction> {
-    match w {
-        WaitingFor::TargetSelection { selection, .. }
-        | WaitingFor::TriggerTargetSelection { selection, .. } => {
-            let target = selection
-                .current_legal_targets
-                .iter()
-                .find(|t| matches!(t, engine::types::ability::TargetRef::Player(p) if *p == P1))
-                .cloned();
-            assert!(target.is_some(), "P1 is a legal target: {selection:?}");
-            Some(GameAction::ChooseTarget { target })
-        }
-        _ => None,
-    }
+    let (WaitingFor::TargetSelection { selection, .. }
+    | WaitingFor::TriggerTargetSelection { selection, .. }) = w
+    else {
+        return None;
+    };
+    let target = selection
+        .current_legal_targets
+        .iter()
+        .find(|t| matches!(t, engine::types::ability::TargetRef::Player(p) if *p == P1))
+        .cloned();
+    assert!(target.is_some(), "P1 is a legal target: {selection:?}");
+    Some(GameAction::ChooseTarget { target })
 }
 
 // ---- Shape 4: "sacrifice any number of other creatures, then exile the top X cards of your
@@ -803,7 +804,9 @@ fn kylox_with_one_sacrificed_creature_exiles_only_its_power_and_declining_casts_
     let mut policy = |w: &WaitingFor| match w {
         WaitingFor::EffectZoneChoice { player, .. } => {
             assert_eq!(*player, P0);
-            Some(GameAction::SelectCards { cards: vec![spider] })
+            Some(GameAction::SelectCards {
+                cards: vec![spider],
+            })
         }
         WaitingFor::CastOffer {
             kind: CastOfferKind::FreeCastWindow { candidates, .. },
@@ -835,12 +838,12 @@ fn kylox_with_one_sacrificed_creature_exiles_only_its_power_and_declining_casts_
 fn kylox_sacrificing_nothing_exiles_nothing() {
     let (mut r, kylox, _bears, _giant, lib) = kylox_board();
     attack_with(&mut r, &[kylox]);
-    let mut policy = |w: &WaitingFor| match w {
-        WaitingFor::EffectZoneChoice { player, .. } => {
-            assert_eq!(*player, P0);
-            Some(GameAction::SelectCards { cards: vec![] })
-        }
-        _ => None,
+    let mut policy = |w: &WaitingFor| {
+        let WaitingFor::EffectZoneChoice { player, .. } = w else {
+            return None;
+        };
+        assert_eq!(*player, P0);
+        Some(GameAction::SelectCards { cards: vec![] })
     };
     let prompts = resolve_with(&mut r, "Kylox, none sacrificed", &mut policy);
     assert_eq!(prompts.len(), 1, "only the sacrifice prompt: {prompts:?}");
@@ -870,25 +873,26 @@ fn recruiter_run(pick: impl Fn(&[ObjectId]) -> Vec<ObjectId>) -> (GameRunner, Ve
     let mut r = s.build();
     cast_from_hand(&mut r, recruiter);
     let goblins = vec![lib[1], lib[3], lib[5]];
-    let mut policy = |w: &WaitingFor| match w {
-        WaitingFor::SearchChoice {
+    let mut policy = |w: &WaitingFor| {
+        let WaitingFor::SearchChoice {
             player,
             cards,
             count,
             up_to,
             ..
-        } => {
-            assert_eq!(*player, P0);
-            assert_eq!(
-                sorted(cards.clone()),
-                sorted(goblins.clone()),
-                "only Goblin cards are offered"
-            );
-            assert_eq!(*count, 3, "any number of them");
-            assert!(*up_to, "zero to all three");
-            Some(GameAction::SelectCards { cards: pick(&lib) })
-        }
-        _ => None,
+        } = w
+        else {
+            return None;
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(
+            sorted(cards.clone()),
+            sorted(goblins.clone()),
+            "only Goblin cards are offered"
+        );
+        assert_eq!(*count, 3, "any number of them");
+        assert!(*up_to, "zero to all three");
+        Some(GameAction::SelectCards { cards: pick(&lib) })
     };
     let prompts = resolve_with(&mut r, "Goblin Recruiter", &mut policy);
     assert!(
