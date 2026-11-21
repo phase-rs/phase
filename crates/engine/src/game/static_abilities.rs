@@ -9,8 +9,8 @@ use crate::game::functioning_abilities::{
 use crate::game::game_object::GameObject;
 use crate::game::layers::{evaluate_condition, evaluate_condition_with_context, ConditionContext};
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, CostCategory, ManaSpendPermission, StaticCondition,
-    StaticDefinition, TargetFilter, TypedFilter,
+    ContinuousModification, ControllerRef, CostCategory, HalfSigned, ManaSpendPermission,
+    StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -2372,15 +2372,31 @@ pub fn object_has_cant_crew(state: &GameState, object_id: ObjectId) -> bool {
 /// though its power were N greater" adds N. Multiple deltas accumulate. The
 /// result is clamped to 0, matching the plain `power.unwrap_or(0).max(0)` it
 /// replaces.
+///
+/// The whole-number view of [`object_crew_power_contribution_exact`], for a
+/// consumer that needs a count (Station's charge counters, CR 702.184a). Every
+/// "total power N or greater" threshold reads the exact value instead.
 pub fn object_crew_power_contribution(
     state: &GameState,
     object_id: ObjectId,
     action: CrewAction,
 ) -> i32 {
+    object_crew_power_contribution_exact(state, object_id, action).whole_floor()
+}
+
+/// CR 702.122a / 702.171a / 702.184c: The exact power a creature contributes
+/// toward a crew / saddle / station cost (see [`object_crew_power_contribution`]).
+/// An Unhinged ½-power creature contributes ½, so two Little Girls together
+/// meet Crew 1.
+pub fn object_crew_power_contribution_exact(
+    state: &GameState,
+    object_id: ObjectId,
+    action: CrewAction,
+) -> HalfSigned {
     let Some(obj) = state.objects.get(&object_id) else {
-        return 0;
+        return HalfSigned::ZERO;
     };
-    let mut base = obj.power.unwrap_or(0);
+    let mut base = obj.exact_power().unwrap_or(HalfSigned::ZERO);
     let mut delta = 0;
     for def in super::functioning_abilities::active_static_definitions(state, obj) {
         if let StaticMode::CrewContribution { kind, actions } = &def.mode {
@@ -2389,13 +2405,14 @@ pub fn object_crew_power_contribution(
             }
             match kind {
                 CrewContributionKind::ToughnessInsteadOfPower => {
-                    base = obj.toughness.unwrap_or(0);
+                    base = obj.exact_toughness().unwrap_or(HalfSigned::ZERO);
                 }
                 CrewContributionKind::PowerDelta { delta: d } => delta += *d,
             }
         }
     }
-    (base + delta).max(0)
+    base.saturating_add(HalfSigned::from_whole(delta))
+        .max(HalfSigned::ZERO)
 }
 
 /// Check if a static ability named `name` applies to a specific object

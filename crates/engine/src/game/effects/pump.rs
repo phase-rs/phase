@@ -1,6 +1,6 @@
 use crate::game::filter;
 use crate::game::quantity::{
-    resolve_quantity_with_targets, resolve_quantity_with_targets_and_recipient,
+    resolve_quantity_with_targets_and_recipient_exact, resolve_quantity_with_targets_exact,
 };
 use crate::types::ability::{
     quantity_expr_uses_recipient, ContinuousModification, DoublePTMode, Duration, Effect,
@@ -357,10 +357,12 @@ fn resolve_pt_quantity(
     state: &GameState,
     ability: &ResolvedAbility,
     recipient: Option<ObjectId>,
-) -> i32 {
+) -> HalfSigned {
+    // CR 208.1 + CR 608.2h: keep an Unhinged half-point amount ("gets +X/+X,
+    // where X is that creature's power") exact through the frozen pump.
     match recipient {
-        Some(id) => resolve_quantity_with_targets_and_recipient(state, expr, ability, id),
-        None => resolve_quantity_with_targets(state, expr, ability),
+        Some(id) => resolve_quantity_with_targets_and_recipient_exact(state, expr, ability, id),
+        None => resolve_quantity_with_targets_exact(state, expr, ability),
     }
 }
 
@@ -400,8 +402,8 @@ fn pt_modifications(
         }
         PtValue::Quantity(expr) => {
             let resolved = resolve_pt_quantity(expr, state, ability, recipient);
-            if resolved != 0 {
-                mods.push(ContinuousModification::add_power(resolved));
+            if !resolved.is_zero() {
+                mods.push(ContinuousModification::add_power_exact(resolved));
             }
         }
         _ => {}
@@ -424,8 +426,8 @@ fn pt_modifications(
         }
         PtValue::Quantity(expr) => {
             let resolved = resolve_pt_quantity(expr, state, ability, recipient);
-            if resolved != 0 {
-                mods.push(ContinuousModification::add_toughness(resolved));
+            if !resolved.is_zero() {
+                mods.push(ContinuousModification::add_toughness_exact(resolved));
             }
         }
         _ => {}

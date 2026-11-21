@@ -2,6 +2,7 @@ import type {
   GameAction,
   GameObject,
   GameState,
+  HalfFraction,
   ObjectCounterDisplay,
   ObjectId,
   PlayerId,
@@ -18,6 +19,7 @@ import {
   partitionByType,
   type GroupedPermanent,
 } from "./battlefieldProps";
+import { halfPointValue } from "./halfPoints";
 import { getSeatCount } from "./seatCount";
 
 export { getSeatCount };
@@ -444,19 +446,24 @@ export interface BoardChoiceView {
 /**
  * Zip the engine's parallel `eligible_creatures` / `contributions` arrays into a
  * lookup from object id to its adjusted crew/saddle contribution. The engine
- * emits them index-aligned (CR 702.122a / 702.171a); a length mismatch falls
- * back to an empty map so the caller degrades to raw power rather than misreads.
+ * emits them index-aligned (CR 702.122a / 702.171a), with an optional aligned
+ * `contribution_fractions` carrying a half-point remainder (an Unhinged
+ * ½-power creature contributes 0 + "Half"); a length mismatch falls back to an
+ * empty map so the caller degrades to raw power rather than misreads.
  */
 function zipContributions(
   eligibleCreatures: ObjectId[],
   contributions?: number[],
+  contributionFractions?: HalfFraction[],
 ): Record<ObjectId, number> {
   const map: Record<ObjectId, number> = {};
   if (!contributions || eligibleCreatures.length !== contributions.length) {
     return map;
   }
+  const fractions =
+    contributionFractions?.length === contributions.length ? contributionFractions : undefined;
   eligibleCreatures.forEach((id, index) => {
-    map[id] = contributions[index];
+    map[id] = halfPointValue(contributions[index], fractions?.[index]);
   });
   return map;
 }
@@ -692,6 +699,7 @@ export function getBoardChoiceView(
           contributions: zipContributions(
             waitingFor.data.eligible_creatures,
             waitingFor.data.contributions,
+            waitingFor.data.contribution_fractions,
           ),
         },
         response: { type: "CrewVehicle", vehicleId: waitingFor.data.vehicle_id },
@@ -709,6 +717,7 @@ export function getBoardChoiceView(
           contributions: zipContributions(
             waitingFor.data.eligible_creatures,
             waitingFor.data.contributions,
+            waitingFor.data.contribution_fractions,
           ),
         },
         response: { type: "SaddleMount", mountId: waitingFor.data.mount_id },

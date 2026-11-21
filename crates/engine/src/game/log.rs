@@ -548,7 +548,11 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::DebugActionUsed { .. }
         | GameEvent::DebugPermissionGranted { .. }
         | GameEvent::DebugPermissionRevoked { .. } => LogTone::Diagnostic,
-        GameEvent::LifeChanged { amount, .. } if *amount > 0 => LogTone::Positive,
+        GameEvent::LifeChanged {
+            amount,
+            amount_fraction,
+            ..
+        } if *amount > 0 || (*amount == 0 && amount_fraction.is_half()) => LogTone::Positive,
         GameEvent::TokenCreated { .. }
         | GameEvent::ObjectConjured { .. }
         | GameEvent::CardCopyCreated { .. }

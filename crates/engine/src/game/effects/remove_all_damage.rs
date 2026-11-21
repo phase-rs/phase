@@ -55,11 +55,13 @@ pub fn resolve(
 }
 
 /// CR 120.6 + CR 120.3: Clear all marked damage (and the deathtouch flag) from a
-/// creature. Single authority shared by the standalone `RemoveAllDamage`
-/// resolver and the Wolverine `dealt_damage_applier` heal, mirroring the
-/// umbra-armor / regeneration inline heal.
+/// creature, including an Unhinged half-point remainder. Single authority for
+/// every "remove all damage" site: the standalone `RemoveAllDamage` resolver,
+/// the Wolverine `dealt_damage_applier` heal, cleanup (CR 514.2), regeneration
+/// (CR 701.19a), umbra armor (CR 702.89a), and the regeneration-shaped SBA
+/// destruction replacements.
 pub(crate) fn heal_marked_damage(obj: &mut crate::game::game_object::GameObject) {
-    obj.damage_marked = 0;
+    obj.set_exact_damage_marked(crate::types::ability::HalfMagnitude::ZERO);
     obj.dealt_deathtouch_damage = false;
 }
 

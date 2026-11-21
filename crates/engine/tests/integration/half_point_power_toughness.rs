@@ -6,15 +6,20 @@
 //! exact half-integer values across printed objects, tokens, animation, pumps,
 //! layer evaluation, combat damage, noncombat damage, life changes, and SBAs
 //! (CR 510.1a, CR 704.5f, CR 704.5g).
+//!
+//! Every runtime regression below drives printed cards through public actions.
+//! No printed card animates, pumps, or creates a token with a *literal*
+//! half-point P/T, so those `PtValue::HalfPoints` branches are covered only
+//! where a printed card reaches them: dynamic quantities that read a half-point
+//! power or life total (Nantuko Mentor, Serra Avatar, Bouncer's Beatdown) and
+//! the token-copy path (Cackling Counterpart).
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{
-    DoublePTMode, Effect, HalfFraction, HalfMagnitude, HalfSigned, ObjectScope, PtValue,
-    QuantityExpr, QuantityRef, TargetFilter, TargetRef, TokenAttackDestination, TypedFilter,
-};
+use engine::types::ability::{HalfFraction, HalfMagnitude, HalfSigned, PtValue, TargetRef};
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CombatDamageAssignmentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -440,161 +445,512 @@ fn two_half_power_blockers_combine_for_one_lethal_damage() {
     );
 }
 
-/// Exact half-point P/T flows through Token, Animate, Pump, DoublePT,
-/// SwitchPowerToughness, and Fight/DealDamage resolution.
+fn exact_life(runner: &GameRunner, player: engine::types::player::PlayerId) -> HalfSigned {
+    runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .expect("player")
+        .exact_life()
+}
+
+/// Attack `attacker` into `P1`, let `blockers` block it, and run combat damage.
+fn attack_into(
+    runner: &mut GameRunner,
+    attacker: ObjectId,
+    blockers: &[(ObjectId, ObjectId)],
+) -> engine::game::scenario::Outcome {
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .expect("declare attackers");
+    pass_to_declare_blockers(runner);
+    if runner.waiting_for_kind() == "DeclareBlockers" {
+        runner.declare_blockers(blockers).expect("declare blockers");
+    }
+    runner.combat_damage()
+}
+
+/// F1 (CR 603.2c + CR 608.2c): Spitemare — "Whenever this creature is dealt
+/// damage, it deals that much damage to any target." Blocking Vile Bile, it is
+/// dealt 2½ and deals that much, 2½, not 2.
 #[test]
-fn half_point_token_animate_pump_double_switch_and_damage_stay_exact() {
+fn spitemare_reflects_the_exact_half_point_damage_it_was_dealt() {
+    let Some(db) = load_db() else {
+        return;
+    };
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let bear = scenario.add_creature(P0, "Grizzly Bears", 1, 1).id();
-    let target_bear = scenario.add_creature(P1, "Enemy Bear", 1, 2).id();
-    let reliquary = scenario.add_artifact_from_oracle(P0, "Test Relic", "").id();
-
-    let token_spell = scenario
-        .add_spell_to_hand(P0, "Half Token", true)
-        .with_ability(Effect::Token {
-            name: "Mini".to_string(),
-            power: PtValue::HalfPoints(1),
-            toughness: PtValue::HalfPoints(3),
-            types: vec!["Creature".to_string()],
-            colors: vec![],
-            keywords: vec![],
-            tapped: false,
-            count: QuantityExpr::Fixed { value: 1 },
-            owner: TargetFilter::Controller,
-            attach_to: None,
-            enters_attacking: false,
-            attack_destination: TokenAttackDestination::ControllerChooses,
-            supertypes: vec![],
-            static_abilities: vec![],
-            enter_with_counters: vec![],
-        })
-        .id();
-    let animate_spell = scenario
-        .add_spell_to_hand(P0, "Half Animate", true)
-        .with_ability(Effect::Animate {
-            power: Some(PtValue::HalfPoints(5)),
-            toughness: Some(PtValue::HalfPoints(3)),
-            types: vec!["Creature".to_string()],
-            remove_types: vec![],
-            target: TargetFilter::Typed(TypedFilter::permanent()),
-            keywords: vec![],
-        })
-        .id();
-    let pump_spell = scenario
-        .add_spell_to_hand(P0, "Half Pump", true)
-        .with_ability(Effect::Pump {
-            power: PtValue::HalfPoints(1),
-            toughness: PtValue::HalfPoints(1),
-            target: TargetFilter::Typed(TypedFilter::creature()),
-        })
-        .id();
-    let double_spell = scenario
-        .add_spell_to_hand(P0, "Half Double", true)
-        .with_ability(Effect::DoublePT {
-            mode: DoublePTMode::PowerAndToughness,
-            target: TargetFilter::Typed(TypedFilter::creature()),
-            factor: 2,
-        })
-        .id();
-    let switch_spell = scenario
-        .add_spell_to_hand(P0, "Half Switch", true)
-        .with_ability(Effect::SwitchPT {
-            target: TargetFilter::Typed(TypedFilter::creature()),
-        })
-        .id();
-    let deal_power_spell = scenario
-        .add_spell_to_hand(P0, "Half Punch", true)
-        .with_ability(Effect::DealDamage {
-            amount: QuantityExpr::Ref {
-                qty: QuantityRef::Power {
-                    scope: ObjectScope::Target,
-                },
-            },
-            target: TargetFilter::Any,
-            damage_source: None,
-            excess: None,
-        })
-        .id();
-
+    let bile = scenario.add_real_card(P0, "Vile Bile", Zone::Battlefield, db);
+    let spitemare = scenario.add_real_card(P1, "Spitemare", Zone::Battlefield, db);
     let mut runner = scenario.build();
 
-    // 1. Token creation: ½ / 1½.
-    runner.cast(token_spell).resolve();
-    let token_id = runner
+    let outcome = attack_into(&mut runner, bile, &[(spitemare, bile)]);
+    assert_eq!(
+        combat_damage_dealt_exact(outcome.events(), bile, TargetRef::Object(spitemare)),
+        HalfMagnitude::from_halves(5),
+        "Spitemare is dealt 2½"
+    );
+    assert_eq!(
+        runner.waiting_for_kind(),
+        "TriggerTargetSelection",
+        "Spitemare's damage trigger asks for its target"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P0)),
+        })
+        .expect("Spitemare targets Vile Bile's controller");
+    runner.advance_until_stack_empty();
+
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        exact_life(&runner, P0),
+        HalfSigned::from_halves(35),
+        "that much damage is 2½: 20 - 2½ = 17½"
+    );
+    assert_eq!(exact_life(&runner, P1), HalfSigned::from_whole(20));
+}
+
+/// F1 (CR 119.3 + CR 603.2c): Exquisite Blood — "Whenever an opponent loses
+/// life, you gain that much life." An opponent losing 2½ (stored as −3 + ½)
+/// gives exactly 2½, not 3.
+#[test]
+fn exquisite_blood_gains_the_exact_half_point_life_an_opponent_lost() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bile = scenario.add_real_card(P0, "Vile Bile", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Exquisite Blood", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+
+    let _ = attack_into(&mut runner, bile, &[]);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        exact_life(&runner, P1),
+        HalfSigned::from_halves(35),
+        "P1 lost 2½"
+    );
+    assert_eq!(
+        exact_life(&runner, P0),
+        HalfSigned::from_halves(45),
+        "Exquisite Blood gained that much life: 20 + 2½ = 22½"
+    );
+}
+
+/// F1 (CR 119.3 + CR 603.2): Swords to Plowshares exiling Little Girl ("Its
+/// controller gains life equal to its power") gains ½ life, which is a life
+/// gain: Ajani's Pridemate ("Whenever you gain life, put a +1/+1 counter on
+/// this creature") triggers.
+#[test]
+fn gaining_half_a_life_triggers_ajanis_pridemate() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let swords = scenario.add_real_card(P0, "Swords to Plowshares", Zone::Hand, db);
+    let girl = scenario.add_real_card(P0, "Little Girl", Zone::Battlefield, db);
+    let pridemate = scenario.add_real_card(P0, "Ajani's Pridemate", Zone::Battlefield, db);
+    scenario.add_basic_land(P0, ManaColor::White);
+    let mut runner = scenario.build();
+    assert_eq!(
+        runner.state().objects[&pridemate]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        None,
+        "Pridemate starts with no counters"
+    );
+
+    runner.cast(swords).target_object(girl).resolve();
+    runner.advance_until_stack_empty();
+
+    assert_eq!(runner.state().objects[&girl].zone, Zone::Exile);
+    assert_eq!(
+        exact_life(&runner, P0),
+        HalfSigned::from_halves(41),
+        "P0 gained ½ life (Little Girl's power)"
+    );
+    assert_eq!(
+        runner.state().objects[&pridemate]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        Some(&1),
+        "a ½ life gain is a life gain, so Pridemate gets a +1/+1 counter"
+    );
+    assert!(runner.state().stack.is_empty());
+}
+
+/// F3 (CR 514.2): cleanup removes all marked damage, including a half point.
+/// Hill Giant blocks one Vile Bile (marked 2½), cleanup clears it, and a second
+/// Vile Bile next turn marks 2½ again, which a 3/3 survives. Leaving the ½
+/// behind would total 3 and destroy it.
+#[test]
+fn cleanup_clears_half_point_damage_so_hill_giant_survives_a_second_vile_bile() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Swamp", "Swamp", "Swamp", "Swamp", "Swamp"]);
+    scenario.with_library_top(P1, &["Swamp", "Swamp", "Swamp", "Swamp", "Swamp"]);
+    let first_bile = scenario.add_real_card(P0, "Vile Bile", Zone::Battlefield, db);
+    let second_bile = scenario.add_real_card(P0, "Vile Bile", Zone::Battlefield, db);
+    let giant = scenario.add_real_card(P1, "Hill Giant", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+
+    let first = attack_into(&mut runner, first_bile, &[(giant, first_bile)]);
+    assert_eq!(
+        first.zone_of(first_bile),
+        Zone::Graveyard,
+        "3 is lethal to 2½"
+    );
+    assert_eq!(
+        runner.state().objects[&giant].exact_damage_marked(),
+        HalfMagnitude::from_halves(5),
+        "Hill Giant has 2½ marked"
+    );
+
+    runner.advance_to_phase(Phase::End);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    let giant_obj = &runner.state().objects[&giant];
+    assert_eq!(
+        (giant_obj.damage_marked, giant_obj.damage_marked_fraction),
+        (0, HalfFraction::Zero),
+        "cleanup removed the whole and the half point"
+    );
+
+    // P1's Hill Giant stays home; then on to P0's next combat (`attack_into`
+    // advances).
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[])
+        .expect("P1 declares no attackers");
+    runner.advance_to_phase(Phase::End);
+    let second = attack_into(&mut runner, second_bile, &[(giant, second_bile)]);
+    assert_eq!(second.zone_of(second_bile), Zone::Graveyard);
+    assert_eq!(
+        second.zone_of(giant),
+        Zone::Battlefield,
+        "2½ is short of Hill Giant's toughness 3"
+    );
+    assert_eq!(
+        runner.state().objects[&giant].exact_damage_marked(),
+        HalfMagnitude::from_halves(5)
+    );
+}
+
+/// F4 (CR 208.1 + CR 608.2h): Bouncer's Beatdown deals "X damage ..., where X
+/// is the greatest power among creatures you control." With Vile Bile as the
+/// only creature, X is 2½ — lethal to an opposing Vile Bile, which the card then
+/// exiles. A floored X of 2 would leave it on the battlefield.
+#[test]
+fn bouncers_beatdown_deals_the_greatest_exact_power() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Vile Bile", Zone::Battlefield, db);
+    let target = scenario.add_real_card(P1, "Vile Bile", Zone::Battlefield, db);
+    let beatdown = scenario.add_real_card(P0, "Bouncer's Beatdown", Zone::Hand, db);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(beatdown).target_object(target).resolve();
+    runner.advance_until_stack_empty();
+
+    let dealt = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamageDealt {
+                target: TargetRef::Object(id),
+                amount,
+                amount_fraction,
+                ..
+            } if *id == target => Some(HalfMagnitude::from_whole_and_fraction(
+                *amount,
+                *amount_fraction,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(dealt, vec![HalfMagnitude::from_halves(5)], "X is 2½");
+    assert_eq!(
+        runner.state().objects[&target].zone,
+        Zone::Exile,
+        "2½ damage is lethal to 2½ toughness, and Beatdown exiles it instead"
+    );
+}
+
+/// F5 (CR 613.4a): Serra Avatar — "Serra Avatar's power and toughness are each
+/// equal to your life total." After an unblocked Vile Bile leaves its
+/// controller at 17½, it is 17½/17½.
+#[test]
+fn serra_avatar_tracks_a_half_point_life_total_exactly() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bile = scenario.add_real_card(P0, "Vile Bile", Zone::Battlefield, db);
+    let avatar = scenario.add_real_card(P1, "Serra Avatar", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+
+    let _ = attack_into(&mut runner, bile, &[]);
+
+    assert_eq!(exact_life(&runner, P1), HalfSigned::from_halves(35));
+    let avatar_obj = &runner.state().objects[&avatar];
+    assert_eq!(avatar_obj.exact_power(), Some(HalfSigned::from_halves(35)));
+    assert_eq!(
+        avatar_obj.exact_toughness(),
+        Some(HalfSigned::from_halves(35))
+    );
+}
+
+/// F5 (CR 608.2h): Nantuko Mentor — "Target creature gets +X/+X until end of
+/// turn, where X is that creature's power." Targeting Vile Bile, X is 2½, so it
+/// becomes exactly 5/5.
+#[test]
+fn nantuko_mentor_pumps_vile_bile_by_its_exact_power() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bile = scenario.add_real_card(P0, "Vile Bile", Zone::Battlefield, db);
+    let mentor = scenario.add_real_card(P0, "Nantuko Mentor", Zone::Battlefield, db);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let mut runner = scenario.build();
+
+    runner.activate(mentor, 0).target_object(bile).resolve();
+    runner.advance_until_stack_empty();
+
+    assert!(runner.state().objects[&mentor].tapped, "{{T}} was paid");
+    let bile_obj = &runner.state().objects[&bile];
+    assert_eq!(bile_obj.exact_power(), Some(HalfSigned::from_whole(5)));
+    assert_eq!(bile_obj.exact_toughness(), Some(HalfSigned::from_whole(5)));
+}
+
+/// F9: Cackling Counterpart — "Create a token that's a copy of target creature
+/// you control." Copying Vile Bile creates an exact 2½/2½ token.
+#[test]
+fn cackling_counterpart_copies_vile_bile_as_an_exact_half_point_token() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bile = scenario.add_real_card(P0, "Vile Bile", Zone::Battlefield, db);
+    let counterpart = scenario.add_real_card(P0, "Cackling Counterpart", Zone::Hand, db);
+    scenario.add_basic_land(P0, ManaColor::Blue);
+    scenario.add_basic_land(P0, ManaColor::Blue);
+    scenario.add_basic_land(P0, ManaColor::Blue);
+    let mut runner = scenario.build();
+
+    runner.cast(counterpart).target_object(bile).resolve();
+    runner.advance_until_stack_empty();
+
+    let token = runner
         .state()
         .battlefield
         .iter()
         .copied()
-        .find(|id| runner.state().objects[id].name == "Mini")
-        .expect("token created");
-    let token_obj = &runner.state().objects[&token_id];
-    assert_eq!(
-        (
-            token_obj.power,
-            token_obj.power_fraction,
-            token_obj.toughness,
-            token_obj.toughness_fraction
-        ),
-        (Some(0), HalfFraction::Half, Some(1), HalfFraction::Half),
-        "token keeps ½/1½"
-    );
-
-    // 2. SwitchPowerToughness on ½ / 1½ -> 1½ / ½.
-    runner.cast(switch_spell).target_object(token_id).resolve();
-    let token_obj = &runner.state().objects[&token_id];
-    assert_eq!(
-        token_obj.exact_power(),
-        Some(HalfSigned::from_halves(3)),
-        "switched power becomes 1½"
-    );
+        .find(|id| *id != bile && runner.state().objects[id].name == "Vile Bile")
+        .expect("a Vile Bile token was created");
+    let token_obj = &runner.state().objects[&token];
+    assert!(token_obj.is_token);
+    assert_eq!(token_obj.exact_power(), Some(HalfSigned::from_halves(5)));
     assert_eq!(
         token_obj.exact_toughness(),
-        Some(HalfSigned::from_halves(1)),
-        "switched toughness becomes ½"
+        Some(HalfSigned::from_halves(5))
+    );
+}
+
+/// F6 (CR 614.1a): Boon Reflection — "If you would gain life, you gain twice
+/// that much life instead." Swords to Plowshares on your own Vile Bile proposes
+/// a 2½ gain; twice that is exactly 5.
+#[test]
+fn boon_reflection_doubles_a_half_point_life_gain_exactly() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bile = scenario.add_real_card(P0, "Vile Bile", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Boon Reflection", Zone::Battlefield, db);
+    let swords = scenario.add_real_card(P0, "Swords to Plowshares", Zone::Hand, db);
+    scenario.add_basic_land(P0, ManaColor::White);
+    let mut runner = scenario.build();
+
+    runner.cast(swords).target_object(bile).resolve();
+    runner.advance_until_stack_empty();
+
+    assert_eq!(runner.state().objects[&bile].zone, Zone::Exile);
+    assert_eq!(
+        exact_life(&runner, P0),
+        HalfSigned::from_whole(25),
+        "twice 2½ is 5: 20 + 5 = 25"
+    );
+}
+
+/// F7 (CR 701.10d): Revenge — "Double your life total. Target opponent loses
+/// half their life, rounded up." After Swords to Plowshares on your own Vile
+/// Bile legally reaches 22½, doubling gives exactly 45.
+#[test]
+fn revenge_doubles_a_half_point_life_total_exactly() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bile = scenario.add_real_card(P0, "Vile Bile", Zone::Battlefield, db);
+    let swords = scenario.add_real_card(P0, "Swords to Plowshares", Zone::Hand, db);
+    let revenge = scenario.add_real_card(P0, "Revenge", Zone::Hand, db);
+    scenario.add_basic_land(P0, ManaColor::White);
+    scenario.add_basic_land(P0, ManaColor::White);
+    scenario.add_basic_land(P0, ManaColor::Black);
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, ManaColor::Black);
+    }
+    let mut runner = scenario.build();
+
+    runner.cast(swords).target_object(bile).resolve();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        exact_life(&runner, P0),
+        HalfSigned::from_halves(45),
+        "20 + 2½"
     );
 
-    // 3. Animate an artifact to 2½ / 1½.
+    // Revenge is a half of the split card Revival // Revenge; the object is
+    // built from the Revenge face.
     runner
-        .cast(animate_spell)
-        .target_object(reliquary)
+        .cast(revenge)
+        .modal_back_face(false)
+        .target_player(P1)
         .resolve();
-    let anim_obj = &runner.state().objects[&reliquary];
-    assert_eq!(anim_obj.exact_power(), Some(HalfSigned::from_halves(5)));
-    assert_eq!(anim_obj.exact_toughness(), Some(HalfSigned::from_halves(3)));
+    runner.advance_until_stack_empty();
 
-    // 4. Pump 1/1 by +½/+½ -> 1½/1½, then DoublePT -> exact 3/3!
-    runner.cast(pump_spell).target_object(bear).resolve();
     assert_eq!(
-        runner.state().objects[&bear].exact_power(),
-        Some(HalfSigned::from_halves(3))
-    );
-    runner.cast(double_spell).target_object(bear).resolve();
-    assert_eq!(
-        runner.state().objects[&bear].exact_power(),
-        Some(HalfSigned::from_whole(3)),
-        "double 1½ = exact 3"
+        exact_life(&runner, P0),
+        HalfSigned::from_whole(45),
+        "22½ doubled is 45"
     );
     assert_eq!(
-        runner.state().objects[&bear].exact_toughness(),
-        Some(HalfSigned::from_whole(3)),
-        "double 1½ = exact 3"
+        exact_life(&runner, P1),
+        HalfSigned::from_whole(10),
+        "half of 20, rounded up, is 10"
+    );
+}
+
+/// F8 (CR 702.122a): Smuggler's Copter's "Crew 1" needs creatures "with total
+/// power 1 or greater." One Little Girl (½) cannot crew it; two can.
+#[test]
+fn two_little_girls_crew_smugglers_copter_but_one_cannot() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let crew_with = |girls: usize| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let copter = scenario.add_real_card(P0, "Smuggler's Copter", Zone::Battlefield, db);
+        let crew: Vec<ObjectId> = (0..girls)
+            .map(|_| scenario.add_real_card(P0, "Little Girl", Zone::Battlefield, db))
+            .collect();
+        (scenario.build(), copter, crew)
+    };
+
+    let (mut runner, copter, _) = crew_with(1);
+    assert!(
+        runner
+            .act(GameAction::CrewVehicle {
+                vehicle_id: copter,
+                creature_ids: vec![],
+            })
+            .is_err(),
+        "½ total power cannot crew a Crew 1 Vehicle"
     );
 
-    // 5. DealDamage with Target power (1½ on token_id) -> marks 1½ on target_bear (1/2 survives!).
-    // Wait: Half Punch reads Target power (`targets[0]`) — if cast targeting `target_bear` itself (1/2) vs `reliquary` (2½), wait:
-    // "Half Punch" reads `QuantityRef::Power { scope: Target }` of its single target!
-    // Targeting `target_bear` isn't what we want; test targeting `P1`? No, player has no power.
-    // Instead test `Fight` or `DealDamage` with `damage_source` or `Effect::LoseLife`:
-    // Actually casting `Half Punch` targeting `reliquary` (power 2½, toughness 1½) deals 2½ damage to reliquary -> lethal (2½ >= 1½) and destroys it!
+    let (mut runner, copter, girls) = crew_with(2);
     runner
-        .cast(deal_power_spell)
-        .target_object(reliquary)
-        .resolve();
-    assert_eq!(
-        runner.state().objects[&reliquary].zone,
-        Zone::Graveyard,
-        "2½ noncombat damage is lethal to 1½ toughness"
+        .act(GameAction::CrewVehicle {
+            vehicle_id: copter,
+            creature_ids: vec![],
+        })
+        .expect("½ + ½ = 1 power is enough to announce Crew 1");
+    match &runner.state().waiting_for {
+        WaitingFor::CrewVehicle {
+            contributions,
+            contribution_fractions,
+            ..
+        } => {
+            assert_eq!(contributions, &vec![0, 0]);
+            assert_eq!(
+                contribution_fractions,
+                &vec![HalfFraction::Half, HalfFraction::Half],
+                "each Little Girl contributes ½"
+            );
+        }
+        other => panic!("expected the crew selection, got {other:?}"),
+    }
+    runner
+        .act(GameAction::CrewVehicle {
+            vehicle_id: copter,
+            creature_ids: girls.clone(),
+        })
+        .expect("two Little Girls pay Crew 1");
+    runner.advance_until_stack_empty();
+
+    assert!(girls.iter().all(|id| runner.state().objects[id].tapped));
+    assert!(
+        runner.state().objects[&copter]
+            .card_types
+            .core_types
+            .contains(&engine::types::card_type::CoreType::Creature),
+        "the crewed Copter is an artifact creature"
     );
-    let _ = target_bear;
+}
+
+/// F8 (CR 702.118b): Persistent Nightmare has skulk ("can't be blocked by
+/// creatures with greater power"). Cardpecker's 1½ power is greater than 1, so
+/// it cannot block; Little Girl's ½ power is not, so it can.
+#[test]
+fn skulk_compares_exact_half_point_power() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let nightmare = scenario.add_real_card(P0, "Persistent Nightmare", Zone::Battlefield, db);
+    let cardpecker = scenario.add_real_card(P1, "Cardpecker", Zone::Battlefield, db);
+    let girl = scenario.add_real_card(P1, "Little Girl", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    assert_eq!(
+        runner.state().objects[&cardpecker].exact_power(),
+        Some(HalfSigned::from_halves(3)),
+        "Cardpecker is 1½ power"
+    );
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(nightmare, AttackTarget::Player(P1))])
+        .expect("Persistent Nightmare attacks");
+    pass_to_declare_blockers(&mut runner);
+    assert!(
+        runner.declare_blockers(&[(cardpecker, nightmare)]).is_err(),
+        "1½ power is greater than 1: Cardpecker can't block a skulk creature"
+    );
+    runner
+        .declare_blockers(&[(girl, nightmare)])
+        .expect("½ power is not greater than 1: Little Girl can block");
 }

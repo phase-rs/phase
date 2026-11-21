@@ -20568,6 +20568,11 @@ pub enum WaitingFor {
         /// the UI MUST sum these values, not raw power, when gating the selection.
         #[serde(default)]
         contributions: Vec<i32>,
+        /// CR 702.122a: the half-point remainder of each contribution, aligned
+        /// with `contributions` (an Unhinged ½-power creature contributes
+        /// `0` + `Half`). Empty when no contribution has a half.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        contribution_fractions: Vec<HalfFraction>,
     },
     /// CR 702.184a: Player must pick another untapped creature they control
     /// to tap as the station ability's cost. The chosen creature's power
@@ -20591,6 +20596,10 @@ pub enum WaitingFor {
         /// aligned index-for-index with `eligible_creatures`.
         #[serde(default)]
         contributions: Vec<i32>,
+        /// CR 702.171a: the half-point remainder of each contribution, aligned
+        /// with `contributions`. Empty when no contribution has a half.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        contribution_fractions: Vec<HalfFraction>,
     },
     ScryChoice {
         player: PlayerId,

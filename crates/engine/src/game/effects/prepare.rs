@@ -518,8 +518,7 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     // permanent's battlefield state (marked damage, attachment and pairing
     // relationships, entry bookkeeping, combat-assignment flags, face
     // orientation) and none of the alternative forms it was cast or exists in.
-    copy.damage_marked = 0;
-    copy.dealt_deathtouch_damage = false;
+    super::remove_all_damage::heal_marked_damage(copy);
     copy.attached_to = None;
     copy.attachments.clear();
     copy.paired_with = None;

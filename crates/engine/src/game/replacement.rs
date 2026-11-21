@@ -4352,8 +4352,7 @@ fn destroy_applier(
 
     // CR 701.19a: Remove all damage marked on it.
     if let Some(obj) = state.objects.get_mut(&oid) {
-        obj.damage_marked = 0;
-        obj.dealt_deathtouch_damage = false;
+        super::effects::remove_all_damage::heal_marked_damage(obj);
         // CR 701.19b: Tap it.
         obj.tapped = true;
     }
@@ -4570,8 +4569,7 @@ fn apply_umbra_armor_replacement(
     // CR 702.89a: remove all damage marked on the enchanted permanent. (No tap and
     // no combat removal — that is regeneration, CR 701.19b/c, not umbra armor.)
     if let Some(obj) = state.objects.get_mut(&object_id) {
-        obj.damage_marked = 0;
-        obj.dealt_deathtouch_damage = false;
+        super::effects::remove_all_damage::heal_marked_damage(obj);
     }
 
     // CR 702.89a: destroy this Aura. Routed through the post-replacement destroy so
@@ -5407,82 +5405,114 @@ fn resolve_event_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> 
 }
 
 /// Checked evaluation of a replacement quantity expression: no clamp, no wrap.
+/// Integer view of [`try_resolve_event_replacement_quantity_exact`] for the
+/// whole-number count replacements (an integer event amount yields a whole
+/// result at every step, so the floor is exact).
 fn try_resolve_event_replacement_quantity(
     expr: &QuantityExpr,
     event_count: u32,
 ) -> Result<i32, EventQuantityError> {
+    try_resolve_event_replacement_quantity_exact(expr, HalfMagnitude::from_whole(event_count))
+        .map(HalfSigned::whole_floor)
+}
+
+/// CR 614.1a + CR 608.2c: Checked exact evaluation of a replacement quantity
+/// expression against the proposed event's exact amount — the single arithmetic
+/// authority for oracle-parsed replacement amounts ("you gain twice that much
+/// life instead" applied to a 2½ gain is 5, not 2 × 2 + ½). No clamp, no wrap: a
+/// step whose whole part leaves the engine's `i32` range is an `Overflow`.
+fn try_resolve_event_replacement_quantity_exact(
+    expr: &QuantityExpr,
+    event_amount: HalfMagnitude,
+) -> Result<HalfSigned, EventQuantityError> {
     use EventQuantityError::{NotStatic, Overflow};
+    // A value is representable when its whole part fits the engine's `i32`.
+    fn fit(halves: i64) -> Result<HalfSigned, EventQuantityError> {
+        let whole = halves.div_euclid(2);
+        if whole < i64::from(i32::MIN) || whole > i64::from(i32::MAX) {
+            Err(EventQuantityError::Overflow)
+        } else {
+            Ok(HalfSigned(halves))
+        }
+    }
+    let eval =
+        |inner: &QuantityExpr| try_resolve_event_replacement_quantity_exact(inner, event_amount);
     match expr {
         QuantityExpr::Ref {
             qty: crate::types::ability::QuantityRef::EventContextAmount,
-        } => i32::try_from(event_count).map_err(|_| Overflow),
-        QuantityExpr::Fixed { value } => Ok(*value),
+        } => fit(i64::try_from(event_amount.0).map_err(|_| Overflow)?),
+        QuantityExpr::Fixed { value } => Ok(HalfSigned::from_whole(*value)),
+        // CR 107.1a: a quotient is rounded to a whole number as instructed.
         QuantityExpr::DivideRounded {
             inner,
             divisor,
             rounding,
         } => {
-            let value = try_resolve_event_replacement_quantity(inner, event_count)?;
+            let value = eval(inner)?;
             // A divisor above i32::MAX is not an overflow of the quotient.
             let divisor = i32::try_from((*divisor).max(1)).map_err(|_| NotStatic)?;
-            Ok(match rounding {
+            // Half-point units: dividing by `divisor` divides by `2 * divisor`
+            // to reach a whole quotient.
+            let denominator = i64::from(divisor) * 2;
+            let quotient = match rounding {
                 crate::types::ability::RoundingMode::Up => {
-                    // divisor >= 1, so `divisor - 1` cannot overflow.
-                    value.checked_add(divisor - 1).ok_or(Overflow)? / divisor
+                    // denominator >= 2, so `denominator - 1` cannot overflow.
+                    fit(value.0.checked_add(denominator - 1).ok_or(Overflow)?)?.0 / denominator
                 }
-                crate::types::ability::RoundingMode::Down => value / divisor,
-            })
+                crate::types::ability::RoundingMode::Down => value.0 / denominator,
+            };
+            fit(quotient * 2)
         }
-        QuantityExpr::Offset { inner, offset } => {
-            try_resolve_event_replacement_quantity(inner, event_count)?
-                .checked_add(*offset)
-                .ok_or(Overflow)
-        }
+        QuantityExpr::Offset { inner, offset } => fit(eval(inner)?
+            .0
+            .checked_add(i64::from(*offset) * 2)
+            .ok_or(Overflow)?),
         QuantityExpr::ClampMin { inner, minimum } => {
-            Ok(try_resolve_event_replacement_quantity(inner, event_count)?.max(*minimum))
+            Ok(eval(inner)?.max(HalfSigned::from_whole(*minimum)))
         }
-        QuantityExpr::Multiply { factor, inner } => (*factor)
-            .checked_mul(try_resolve_event_replacement_quantity(inner, event_count)?)
-            .ok_or(Overflow),
+        QuantityExpr::Multiply { factor, inner } => fit(eval(inner)?
+            .0
+            .checked_mul(i64::from(*factor))
+            .ok_or(Overflow)?),
         QuantityExpr::Sum { exprs } => {
-            let mut total = 0i32;
+            let mut total = HalfSigned::ZERO;
             for inner in exprs {
-                total = total
-                    .checked_add(try_resolve_event_replacement_quantity(inner, event_count)?)
-                    .ok_or(Overflow)?;
+                total = fit(total.0.checked_add(eval(inner)?.0).ok_or(Overflow)?)?;
             }
             Ok(total)
         }
         // CR 107.1: the maximum of the computed operand values; empty → 0.
         QuantityExpr::Max { exprs } => {
-            let mut best: Option<i32> = None;
+            let mut best: Option<HalfSigned> = None;
             for inner in exprs {
-                let value = try_resolve_event_replacement_quantity(inner, event_count)?;
+                let value = eval(inner)?;
                 best = Some(best.map_or(value, |b| b.max(value)));
             }
-            Ok(best.unwrap_or(0))
+            Ok(best.unwrap_or(HalfSigned::ZERO))
         }
         // CR 107.1c + CR 608.2d: For replacement quantity resolution, treat
         // `UpTo` transparently as its upper bound — the replacement-effect
         // pipeline does not honor "may pick fewer" semantics (the choice
         // already happened at effect resolution before the replacement fires).
-        QuantityExpr::UpTo { max } => try_resolve_event_replacement_quantity(max, event_count),
+        QuantityExpr::UpTo { max } => eval(max),
         // CR 107.3: `base ^ exponent`. Negative exponents clamp to 0 per
         // CR 107.1b; `checked_pow` reports an overflow instead of saturating.
         QuantityExpr::Power { base, exponent } => {
-            let exp = try_resolve_event_replacement_quantity(exponent, event_count)?.max(0) as u32;
-            base.checked_pow(exp).ok_or(Overflow)
+            let exp = eval(exponent)?.whole_floor().max(0) as u32;
+            base.checked_pow(exp)
+                .map(HalfSigned::from_whole)
+                .ok_or(Overflow)
         }
         // "The difference between A and B" being unsigned is an Oracle
         // templating convention with no dedicated CR number — resolves to the
         // absolute value of the gap. (CR 107.1b is distinct: it clamps a
         // negative result to zero, not the operand-order-independent magnitude
-        // taken here.) The unsigned gap is computed without overflow; only a
-        // gap above i32::MAX is unrepresentable.
+        // taken here.) Only a gap whose whole part is above i32::MAX is
+        // unrepresentable.
         QuantityExpr::Difference { left, right } => {
-            let l = try_resolve_event_replacement_quantity(left, event_count)?;
-            let r = try_resolve_event_replacement_quantity(right, event_count)?;
-            i32::try_from(l.abs_diff(r)).map_err(|_| Overflow)
+            let l = eval(left)?;
+            let r = eval(right)?;
+            fit(l.0.abs_diff(r.0).try_into().map_err(|_| Overflow)?)
         }
         QuantityExpr::Ref { .. } => Err(NotStatic),
     }
@@ -5500,21 +5530,52 @@ enum ScaledQuantity {
     Unrepresentable,
 }
 
-/// Applies `modification` to `amount` with checked `Times` / `Plus`
-/// arithmetic, shared by the life and player-counter/energy appliers.
+/// Applies `modification` to a whole `amount` — the player-counter/energy view
+/// of [`scale_event_quantity_exact`] (a whole amount scales to a whole amount,
+/// `Half` rounding down).
 fn scale_event_quantity(amount: u32, modification: &QuantityModification) -> ScaledQuantity {
-    match *modification {
-        QuantityModification::Times { factor } => amount
-            .checked_mul(factor)
-            .map_or(ScaledQuantity::Unrepresentable, ScaledQuantity::Scaled),
-        QuantityModification::Half => ScaledQuantity::Scaled(amount / 2),
-        QuantityModification::Plus { value } => amount
-            .checked_add(value)
-            .map_or(ScaledQuantity::Unrepresentable, ScaledQuantity::Scaled),
-        QuantityModification::Minus { value } => {
-            ScaledQuantity::Scaled(amount.saturating_sub(value))
+    match scale_event_quantity_exact(HalfMagnitude::from_whole(amount), modification) {
+        ScaledExactQuantity::Scaled(scaled) => ScaledQuantity::Scaled(scaled.whole_floor()),
+        ScaledExactQuantity::Prevented => ScaledQuantity::Prevented,
+        ScaledExactQuantity::Unrepresentable => ScaledQuantity::Unrepresentable,
+    }
+}
+
+/// The result of applying a `QuantityModification` to an exact event quantity.
+enum ScaledExactQuantity {
+    Scaled(HalfMagnitude),
+    /// CR 614.6 + CR 614.7: the modified event never happens.
+    Prevented,
+    /// Engine numeric capacity: a `Times` / `Plus` result whose whole part is
+    /// past `u32`.
+    Unrepresentable,
+}
+
+/// CR 614.1a: Applies `modification` to the proposed event's exact amount with
+/// checked `Times` / `Plus` arithmetic — the single arithmetic authority for
+/// structured life, player-counter and energy replacements. Boon Reflection's
+/// "twice that much life" doubles a 2½ gain to 5; `Half` rounds the exact half
+/// down to a whole number (CR 107.1a).
+fn scale_event_quantity_exact(
+    amount: HalfMagnitude,
+    modification: &QuantityModification,
+) -> ScaledExactQuantity {
+    let fit = |halves: Option<u64>| match halves {
+        Some(halves) if halves / 2 <= u64::from(u32::MAX) => {
+            ScaledExactQuantity::Scaled(HalfMagnitude(halves))
         }
-        QuantityModification::Prevent => ScaledQuantity::Prevented,
+        _ => ScaledExactQuantity::Unrepresentable,
+    };
+    match *modification {
+        QuantityModification::Times { factor } => fit(amount.0.checked_mul(u64::from(factor))),
+        QuantityModification::Half => {
+            ScaledExactQuantity::Scaled(HalfMagnitude::from_halves(amount.0 / 4 * 2))
+        }
+        QuantityModification::Plus { value } => fit(amount.0.checked_add(u64::from(value) * 2)),
+        QuantityModification::Minus { value } => {
+            ScaledExactQuantity::Scaled(amount.saturating_sub(HalfMagnitude::from_whole(value)))
+        }
+        QuantityModification::Prevent => ScaledExactQuantity::Prevented,
     }
 }
 
@@ -5565,10 +5626,11 @@ fn gain_life_applier(
             applied,
         } = event
         {
-            let new_amount = match scale_event_quantity(amount, &modification) {
-                ScaledQuantity::Scaled(new_amount) => new_amount,
-                ScaledQuantity::Prevented => return ApplyResult::Prevented,
-                ScaledQuantity::Unrepresentable => {
+            let exact = HalfMagnitude::from_whole_and_fraction(amount, amount_fraction);
+            let scaled = match scale_event_quantity_exact(exact, &modification) {
+                ScaledExactQuantity::Scaled(scaled) => scaled,
+                ScaledExactQuantity::Prevented => return ApplyResult::Prevented,
+                ScaledExactQuantity::Unrepresentable => {
                     return record_quantity_overflow(
                         state,
                         rid,
@@ -5581,35 +5643,11 @@ fn gain_life_applier(
                     );
                 }
             };
-            let new_fraction = if !amount_fraction.is_zero() {
-                match modification {
-                    QuantityModification::Times { factor } if factor % 2 == 0 => HalfFraction::Zero,
-                    QuantityModification::Half => HalfFraction::Zero,
-                    _ => amount_fraction,
-                }
-            } else {
-                HalfFraction::Zero
-            };
-            let scaled_exact = match modification {
-                QuantityModification::Times { factor } if !amount_fraction.is_zero() => {
-                    HalfMagnitude::from_whole_and_fraction(amount, amount_fraction)
-                        .0
-                        .checked_mul(factor as u64)
-                        .map(HalfMagnitude)
-                }
-                _ => None,
-            };
-            let (final_amount, final_fraction) = match scaled_exact {
-                Some(m) => {
-                    let (w, f) = m.into_whole_and_fraction();
-                    (w, f)
-                }
-                None => (new_amount, new_fraction),
-            };
+            let (amount, amount_fraction) = scaled.into_whole_and_fraction();
             return ApplyResult::Modified(ProposedEvent::LifeGain {
                 player_id,
-                amount: final_amount,
-                amount_fraction: final_fraction,
+                amount,
+                amount_fraction,
                 applied,
             });
         }
@@ -5619,15 +5657,13 @@ fn gain_life_applier(
     match gain_life_replacement_amount(state, rid, &event) {
         Ok(Some(new_amount)) => {
             if let ProposedEvent::LifeGain {
-                player_id,
-                amount_fraction,
-                applied,
-                ..
+                player_id, applied, ..
             } = event
             {
+                let (amount, amount_fraction) = new_amount.into_whole_and_fraction();
                 return ApplyResult::Modified(ProposedEvent::LifeGain {
                     player_id,
-                    amount: new_amount,
+                    amount,
                     amount_fraction,
                     applied,
                 });
@@ -5708,8 +5744,13 @@ fn gain_life_replacement_amount(
     state: &GameState,
     rid: ReplacementId,
     event: &ProposedEvent,
-) -> Result<Option<u32>, EventQuantityOverflow> {
-    let ProposedEvent::LifeGain { amount, .. } = event else {
+) -> Result<Option<HalfMagnitude>, EventQuantityOverflow> {
+    let ProposedEvent::LifeGain {
+        amount,
+        amount_fraction,
+        ..
+    } = event
+    else {
         return Ok(None);
     };
 
@@ -5727,11 +5768,16 @@ fn gain_life_replacement_amount(
     }
 
     match &*execute.effect {
+        // CR 614.1a: the replacement amount is computed from the exact
+        // proposed gain (twice a 2½ gain is 5).
         Effect::GainLife { amount: qty, .. } => {
-            match try_resolve_event_replacement_quantity(qty, *amount) {
+            match try_resolve_event_replacement_quantity_exact(
+                qty,
+                HalfMagnitude::from_whole_and_fraction(*amount, *amount_fraction),
+            ) {
                 // A negative result floors at 0 = no gain, which the settle
                 // step already treats as no change.
-                Ok(resolved) => Ok(Some(resolved.max(0) as u32)),
+                Ok(resolved) => Ok(Some(resolved.clamp_non_negative())),
                 Err(EventQuantityError::NotStatic) => Ok(None),
                 Err(EventQuantityError::Overflow) => Err(EventQuantityOverflow),
             }
@@ -5782,10 +5828,11 @@ fn lose_life_applier(
         else {
             return ApplyResult::Modified(event);
         };
-        let new_amount = match scale_event_quantity(amount, &modification) {
-            ScaledQuantity::Scaled(new_amount) => new_amount,
-            ScaledQuantity::Prevented => return ApplyResult::Prevented,
-            ScaledQuantity::Unrepresentable => {
+        let exact = HalfMagnitude::from_whole_and_fraction(amount, amount_fraction);
+        let scaled = match scale_event_quantity_exact(exact, &modification) {
+            ScaledExactQuantity::Scaled(scaled) => scaled,
+            ScaledExactQuantity::Prevented => return ApplyResult::Prevented,
+            ScaledExactQuantity::Unrepresentable => {
                 return record_quantity_overflow(
                     state,
                     rid,
@@ -5798,23 +5845,11 @@ fn lose_life_applier(
                 );
             }
         };
-        let scaled_exact = match modification {
-            QuantityModification::Times { factor } if !amount_fraction.is_zero() => {
-                HalfMagnitude::from_whole_and_fraction(amount, amount_fraction)
-                    .0
-                    .checked_mul(factor as u64)
-                    .map(HalfMagnitude)
-            }
-            _ => None,
-        };
-        let (final_amount, final_fraction) = match scaled_exact {
-            Some(m) => m.into_whole_and_fraction(),
-            None => (new_amount, amount_fraction),
-        };
+        let (amount, amount_fraction) = scaled.into_whole_and_fraction();
         return ApplyResult::Modified(ProposedEvent::LifeLoss {
             player_id,
-            amount: final_amount,
-            amount_fraction: final_fraction,
+            amount,
+            amount_fraction,
             applied,
         });
     }
@@ -5836,12 +5871,18 @@ fn lose_life_applier(
             },
         ) = (&event, &*execute.effect)
         {
-            match try_resolve_event_replacement_quantity(replacement_amount, *amount) {
+            // CR 614.1a: computed from the exact proposed loss.
+            match try_resolve_event_replacement_quantity_exact(
+                replacement_amount,
+                HalfMagnitude::from_whole_and_fraction(*amount, *amount_fraction),
+            ) {
                 Ok(resolved) => {
+                    let (amount, amount_fraction) =
+                        resolved.clamp_non_negative().into_whole_and_fraction();
                     return ApplyResult::Modified(ProposedEvent::LifeLoss {
                         player_id: *player_id,
-                        amount: resolved.max(0) as u32,
-                        amount_fraction: *amount_fraction,
+                        amount,
+                        amount_fraction,
                         applied: applied.clone(),
                     });
                 }

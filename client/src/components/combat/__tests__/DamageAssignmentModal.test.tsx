@@ -237,4 +237,108 @@ describe("DamageAssignmentModal", () => {
       });
     });
   });
+
+  describe("Unhinged half-point damage", () => {
+    // Vile Bile (2½/2½, Unhinged) blocked by two Llanowar Elves (1/1): the engine
+    // prompts 2 + "Half" and requires an exact 2½ assignment.
+    function renderVileBileBlockedByElves() {
+      setObjects(
+        creature(10, "Vile Bile", 2, 2),
+        creature(20, "Llanowar Elves", 1, 1),
+        creature(21, "Llanowar Elves", 1, 1),
+      );
+      render(
+        <DamageAssignmentModal
+          data={{
+            player: 0,
+            attacker_id: 10,
+            total_damage: 2,
+            total_damage_fraction: "Half",
+            blockers: [
+              { blocker_id: 20, lethal_minimum: 1 },
+              { blocker_id: 21, lethal_minimum: 1 },
+            ],
+            trample: null,
+            defending_player: 1,
+            attack_target: { type: "Player", data: 1 },
+          }}
+        />,
+      );
+    }
+
+    it("divides 2½ in half-point steps and submits the half remainder", () => {
+      renderVileBileBlockedByElves();
+
+      expect(screen.getByText("Assign 2½ Combat Damage")).toBeInTheDocument();
+      const assignButton = screen.getByRole("button", { name: "Assign Damage" });
+      const [firstElvesIncrement] = screen.getAllByRole("button", { name: "+" });
+
+      // Half-point prompt: each step is ½, so two steps assign 1.
+      fireEvent.click(firstElvesIncrement);
+      fireEvent.click(firstElvesIncrement);
+      expect(assignButton).toBeDisabled();
+      // Both Elves rows share a name; the second shortcut fills the second blocker.
+      fireEvent.click(
+        screen.getAllByRole("button", { name: "Assign the remaining 1.5 damage to Llanowar Elves" })[1],
+      );
+
+      expect(assignButton).toBeEnabled();
+      fireEvent.click(assignButton);
+      expect(dispatchAction).toHaveBeenCalledWith({
+        type: "AssignCombatDamage",
+        data: {
+          assignments: [
+            [20, 1],
+            [21, 1],
+          ],
+          assignments_fraction: [[21, "Half"]],
+          trample_damage: 0,
+          controller_damage: 0,
+        },
+      });
+    });
+
+    it("rejects a whole-number split that leaves the half unassigned", () => {
+      renderVileBileBlockedByElves();
+
+      const [firstElvesIncrement, secondElvesIncrement] = screen.getAllByRole("button", { name: "+" });
+      for (let i = 0; i < 2; i += 1) fireEvent.click(firstElvesIncrement);
+      for (let i = 0; i < 2; i += 1) fireEvent.click(secondElvesIncrement);
+
+      const assignButton = screen.getByRole("button", { name: "Assign Damage" });
+      expect(assignButton).toBeDisabled();
+      fireEvent.click(assignButton);
+      expect(dispatchAction).not.toHaveBeenCalled();
+    });
+
+    it("submits a half-point banding blocker division", () => {
+      // Vile Bile (2½/2½) blocking a band of Benalish Hero ("Banding") and Grizzly Bears.
+      setObjects(
+        creature(40, "Vile Bile", 2, 2),
+        creature(50, "Benalish Hero", 1, 1),
+        creature(51, "Grizzly Bears", 2, 2),
+      );
+      render(
+        <BlockerDamageAssignmentModal
+          data={{ player: 0, blocker_id: 40, total_damage: 2, total_damage_fraction: "Half", attackers: [50, 51] }}
+        />,
+      );
+
+      fireEvent.click(
+        screen.getByRole("button", { name: "Assign the remaining 2.5 damage to Grizzly Bears" }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Assign Damage" }));
+
+      expect(dispatchAction).toHaveBeenCalledWith({
+        type: "AssignBlockerDamage",
+        data: {
+          assignments: [
+            [50, 0],
+            [51, 2],
+          ],
+          assignments_fraction: [[51, "Half"]],
+        },
+      });
+    });
+  });
 });

@@ -8,7 +8,8 @@
 
 use crate::game::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use crate::game::game_object::ObjectIncarnationRefExt;
-use crate::game::static_abilities::object_crew_power_contribution;
+use crate::game::static_abilities::object_crew_power_contribution_exact;
+use crate::types::ability::HalfSigned;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -229,7 +230,7 @@ impl PreparedTapPayment {
             .map(|&payer| {
                 (
                     payer,
-                    object_crew_power_contribution(state, payer.object_id, self.action),
+                    object_crew_power_contribution_exact(state, payer.object_id, self.action),
                 )
             })
             .collect();
@@ -245,20 +246,22 @@ impl PreparedTapPayment {
 /// toughness, or statics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedContributionSnapshot {
-    contributions: Vec<(ObjectIncarnationRef, i32)>,
+    contributions: Vec<(ObjectIncarnationRef, HalfSigned)>,
     required_power: i32,
 }
 
 impl PreparedContributionSnapshot {
-    /// Total captured power across all payers (pre-mutation values).
-    pub fn total_contribution(&self) -> i32 {
-        self.contributions.iter().map(|(_, p)| *p).sum()
+    /// Total captured exact power across all payers (pre-mutation values).
+    pub fn total_contribution(&self) -> HalfSigned {
+        self.contributions
+            .iter()
+            .fold(HalfSigned::ZERO, |total, (_, p)| total.saturating_add(*p))
     }
 
     /// CR 702.122a: whether the captured total meets the required power. Reads only
     /// stored values.
     pub fn meets_threshold(&self) -> bool {
-        self.total_contribution() >= self.required_power
+        self.total_contribution() >= HalfSigned::from_whole(self.required_power)
     }
 
     /// Consume the snapshot, yielding the prepared payer set. Infallible: no
@@ -296,7 +299,7 @@ mod tests {
         let snapshot = prepared.prepare_contribution_snapshot(runner.state());
         assert_eq!(
             snapshot.total_contribution(),
-            3,
+            HalfSigned::from_whole(3),
             "captures pre-mutation power"
         );
         assert!(snapshot.meets_threshold(), "3 power meets Crew 2");
@@ -306,7 +309,7 @@ mod tests {
         runner.state_mut().objects.get_mut(&payer).unwrap().power = Some(8);
         assert_eq!(
             snapshot.total_contribution(),
-            3,
+            HalfSigned::from_whole(3),
             "snapshot is immutable to post-preparation live-state changes"
         );
 

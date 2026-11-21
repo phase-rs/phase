@@ -356,38 +356,38 @@ impl<'a> CharacteristicView<'a> {
     /// Reads the characteristic supplied by this population member. In
     /// particular, an attack declaration record must not be re-resolved through
     /// the live object: Pack Tactics is defined by the declaration event.
-    fn property_value(&self, property: ObjectProperty) -> Option<i32> {
+    ///
+    /// CR 208.1: power and toughness are read exactly, so an Unhinged 2½ power
+    /// contributes 2½ to a greatest/total-power aggregate, not 2.
+    fn property_value(&self, property: ObjectProperty) -> Option<HalfSigned> {
+        let whole = |value: u32| Some(HalfSigned::from_whole(u32_to_i32_saturating(value)));
         match (self, property) {
-            (CharacteristicView::Object(obj), ObjectProperty::Power) => obj.power,
-            (CharacteristicView::Object(obj), ObjectProperty::Toughness) => obj.toughness,
+            (CharacteristicView::Object(obj), ObjectProperty::Power) => obj.exact_power(),
+            (CharacteristicView::Object(obj), ObjectProperty::Toughness) => obj.exact_toughness(),
             (CharacteristicView::Object(obj), ObjectProperty::ManaValue) => {
-                Some(u32_to_i32_saturating(obj.effective_mana_value()))
+                whole(obj.effective_mana_value())
             }
-            (CharacteristicView::Object(obj), ObjectProperty::ManaSymbolCount(color)) => {
-                Some(u32_to_i32_saturating(
-                    crate::game::devotion::count_cost_color_symbols(&obj.mana_cost, color),
-                ))
-            }
-            (CharacteristicView::Lki(lki), ObjectProperty::Power) => lki.power,
-            (CharacteristicView::Lki(lki), ObjectProperty::Toughness) => lki.toughness,
-            (CharacteristicView::Lki(lki), ObjectProperty::ManaValue) => {
-                Some(u32_to_i32_saturating(lki.mana_value))
-            }
+            (CharacteristicView::Object(obj), ObjectProperty::ManaSymbolCount(color)) => whole(
+                crate::game::devotion::count_cost_color_symbols(&obj.mana_cost, color),
+            ),
+            (CharacteristicView::Lki(lki), ObjectProperty::Power) => lki.exact_power(),
+            (CharacteristicView::Lki(lki), ObjectProperty::Toughness) => lki.exact_toughness(),
+            (CharacteristicView::Lki(lki), ObjectProperty::ManaValue) => whole(lki.mana_value),
             (CharacteristicView::Lki(_), ObjectProperty::ManaSymbolCount(_)) => None,
             (CharacteristicView::AttackDeclaration(record), ObjectProperty::Power) => {
-                record.lki.power
+                record.lki.exact_power()
             }
             (CharacteristicView::AttackDeclaration(record), ObjectProperty::Toughness) => {
-                record.lki.toughness
+                record.lki.exact_toughness()
             }
             (CharacteristicView::AttackDeclaration(record), ObjectProperty::ManaValue) => {
-                Some(u32_to_i32_saturating(record.lki.mana_value))
+                whole(record.lki.mana_value)
             }
             (CharacteristicView::AttackDeclaration(_), ObjectProperty::ManaSymbolCount(_)) => None,
             (CharacteristicView::SpellRecord(_), ObjectProperty::Power)
             | (CharacteristicView::SpellRecord(_), ObjectProperty::Toughness) => None,
             (CharacteristicView::SpellRecord(record), ObjectProperty::ManaValue) => {
-                Some(u32_to_i32_saturating(record.mana_value))
+                whole(record.mana_value)
             }
             (CharacteristicView::SpellRecord(_), ObjectProperty::ManaSymbolCount(_)) => None,
         }
@@ -3957,18 +3957,18 @@ fn enclosing_trigger_match_count(state: &GameState) -> Option<i32> {
 /// Suppressed inside `with_reflexive_resolution_scope` so a reflexive trigger
 /// falls through to the action that created it, and inside
 /// `with_replacement_action_scope` (CR 614.6).
-fn enclosing_trigger_event_amount(state: &GameState) -> Option<i32> {
+fn enclosing_trigger_event_amount(state: &GameState) -> Option<HalfSigned> {
     if enclosing_trigger_event_amount_suppressed() {
         return None;
     }
     state
         .current_trigger_event
         .as_ref()
-        .and_then(crate::game::targeting::extract_amount_from_event)
+        .and_then(crate::game::targeting::extract_exact_amount_from_event)
         .or_else(|| {
             detection_trigger_event()
                 .as_ref()
-                .and_then(crate::game::targeting::extract_amount_from_event)
+                .and_then(crate::game::targeting::extract_exact_amount_from_event)
         })
 }
 
@@ -4623,39 +4623,50 @@ pub(crate) fn aggregate_property_over(
     function: AggregateFunction,
     property: ObjectProperty,
 ) -> i32 {
+    // CR 208.1: aggregate the exact values, then floor the result once, so two
+    // ½-power creatures total 1 rather than 0.
     let values = ids
         .iter()
         .filter_map(|&id| object_property_value(state, id, property));
-    reduce_property_values(values, function)
+    reduce_property_values(values, function).whole_floor()
 }
 
-fn object_property_value(state: &GameState, id: ObjectId, property: ObjectProperty) -> Option<i32> {
+fn object_property_value(
+    state: &GameState,
+    id: ObjectId,
+    property: ObjectProperty,
+) -> Option<HalfSigned> {
+    let whole = |value: u32| Some(HalfSigned::from_whole(u32_to_i32_saturating(value)));
     let live = state.objects.get(&id).and_then(|obj| match property {
-        ObjectProperty::Power => obj.power,
-        ObjectProperty::Toughness => obj.toughness,
+        ObjectProperty::Power => obj.exact_power(),
+        ObjectProperty::Toughness => obj.exact_toughness(),
         // CR 202.3e: include X when on the stack (cost_x_paid).
-        ObjectProperty::ManaValue => Some(u32_to_i32_saturating(obj.effective_mana_value())),
+        ObjectProperty::ManaValue => whole(obj.effective_mana_value()),
         // CR 107.4a + CR 107.4e + CR 202.1: colored mana symbols of `color`;
         // hybrid symbols contribute to each of their colors.
-        ObjectProperty::ManaSymbolCount(color) => Some(u32_to_i32_saturating(
+        ObjectProperty::ManaSymbolCount(color) => whole(
             crate::game::devotion::count_cost_color_symbols(&obj.mana_cost, color),
-        )),
+        ),
     });
     live.or_else(|| {
         state.lki_cache.get(&id).and_then(|lki| match property {
-            ObjectProperty::Power => lki.power,
-            ObjectProperty::Toughness => lki.toughness,
-            ObjectProperty::ManaValue => Some(u32_to_i32_saturating(lki.mana_value)),
+            ObjectProperty::Power => lki.exact_power(),
+            ObjectProperty::Toughness => lki.exact_toughness(),
+            ObjectProperty::ManaValue => whole(lki.mana_value),
             ObjectProperty::ManaSymbolCount(_) => None,
         })
     })
 }
 
-fn reduce_property_values(values: impl Iterator<Item = i32>, function: AggregateFunction) -> i32 {
+/// CR 208.1: reduce exact per-member values; an empty population reads 0.
+fn reduce_property_values(
+    values: impl Iterator<Item = HalfSigned>,
+    function: AggregateFunction,
+) -> HalfSigned {
     match function {
-        AggregateFunction::Max => values.max().unwrap_or(0),
-        AggregateFunction::Min => values.min().unwrap_or(0),
-        AggregateFunction::Sum => values.sum(),
+        AggregateFunction::Max => values.max().unwrap_or(HalfSigned::ZERO),
+        AggregateFunction::Min => values.min().unwrap_or(HalfSigned::ZERO),
+        AggregateFunction::Sum => values.fold(HalfSigned::ZERO, HalfSigned::saturating_add),
     }
 }
 
@@ -5242,6 +5253,59 @@ fn resolve_ref_exact(
             |obj| obj.exact_toughness(),
             |lki| lki.exact_toughness(),
         ),
+        // CR 603.2c + CR 608.2c: "that much" reads the event's exact amount
+        // (see `event_context_amount_exact`); an undetermined amount reads as 0.
+        QuantityRef::EventContextAmount => {
+            event_context_amount_exact(state, &ctx, chosen_x, ability).unwrap_or(HalfSigned::ZERO)
+        }
+        // CR 208.1 + CR 608.2h: "the greatest power among creatures you control"
+        // aggregates exact P/T (Essence Harvest with Vile Bile reads 2½), over
+        // live objects, LKI and this turn's zone-change journal alike.
+        QuantityRef::PropertyAggregate(aggregate) => {
+            let trigger_source = ctx.trigger_source.clone();
+            let filter_ctx = quantity_filter_context(
+                state,
+                controller,
+                &ctx,
+                trigger_source.as_ref(),
+                ability,
+                ability_targets,
+            );
+            resolve_property_aggregate_exact(
+                state,
+                aggregate,
+                controller,
+                &ctx,
+                ability,
+                &filter_ctx,
+            )
+        }
+        QuantityRef::ZoneChangeAggregateThisTurn {
+            from,
+            to,
+            filter,
+            function,
+            property,
+        } => {
+            let trigger_source = ctx.trigger_source.clone();
+            let filter_ctx = quantity_filter_context(
+                state,
+                controller,
+                &ctx,
+                trigger_source.as_ref(),
+                ability,
+                ability_targets,
+            );
+            zone_change_aggregate_exact(
+                state,
+                *from,
+                *to,
+                filter,
+                *function,
+                *property,
+                &filter_ctx,
+            )
+        }
         _ => HalfSigned::from_whole(resolve_ref_int(
             state,
             qty,
@@ -5255,18 +5319,123 @@ fn resolve_ref_exact(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn resolve_ref_int(
+/// CR 608.2h + CR 400.7: For look-back aggregates over non-battlefield
+/// objects (Oversimplify: "the total power of creatures they controlled
+/// that were exiled this way"), the live object's `power`/`toughness`
+/// are `None` because the at-exile layer values are not maintained off
+/// battlefield. Fall back to the LKI snapshot captured by
+/// `change_zone` on leaving the battlefield (`game::zones`),
+/// which holds the post-layer-7 values from the moment of departure —
+/// exactly what the "as they last existed on the battlefield" ruling
+/// requires. `ManaValue` doesn't need LKI: the printed mana cost is
+/// stable across zones.
+fn resolve_property_aggregate_exact(
     state: &GameState,
-    qty: &QuantityRef,
+    aggregate: &crate::types::ability::PropertyAggregate,
     controller: PlayerId,
-    ctx: QuantityContext,
-    targets: &[TargetRef],
-    chosen_x: Option<u32>,
+    ctx: &QuantityContext,
     ability: Option<&ResolvedAbility>,
-    ability_targets: Option<ParkedTargets<'_>>,
-) -> i32 {
-    let source_id = ctx.source;
+    filter_ctx: &FilterContext<'_>,
+) -> HalfSigned {
+    let journal_controller = ability
+        .and_then(|ability| ability.original_controller)
+        .unwrap_or(controller);
+    // Preserve the legacy Aggregate rule used by Skyclave Apparition:
+    // during a per-owner fanout, "cards you own exiled by this source"
+    // binds "you" to that owner. Other object filters and journal
+    // scopes keep their normal controller authority.
+    let scoped_owned_exile_filter_ctx = ability.and_then(|ability| {
+        (ability.scoped_player.is_some()
+            || ability
+                .original_controller
+                .is_some_and(|original| original != ability.controller))
+        .then(|| {
+            let scoped = ability.scoped_player.unwrap_or(ability.controller);
+            let mut scoped_ctx = FilterContext::from_ability_with_controller(ability, scoped);
+            scoped_ctx.recipient_id = ctx.recipient;
+            scoped_ctx
+        })
+    });
+    let mut seen = HashSet::new();
+    let mut values = Vec::new();
+    visit_characteristic_source(
+        state,
+        aggregate.source(),
+        ctx.clone(),
+        CharacteristicFilterContexts {
+            base: filter_ctx,
+            scoped_owned_exile: scoped_owned_exile_filter_ctx.as_ref(),
+        },
+        controller,
+        journal_controller,
+        &mut |member, view, excludes_current| {
+            if excludes_current
+                && ability
+                    .is_some_and(|ability| current_cast_occurrence_matches(state, ability, member))
+            {
+                return;
+            }
+            if !seen.insert(member) {
+                return;
+            }
+            let value = view.property_value(aggregate.property());
+            if let Some(value) = value {
+                values.push(value);
+            }
+        },
+    );
+    reduce_property_values(values.into_iter(), aggregate.function())
+}
+
+/// CR 400.7 + CR 603.10a: Reduce `property` over this turn's matching
+/// zone-change snapshots (`QuantityRef::ZoneChangeAggregateThisTurn`). Mirrors
+/// ZoneChangeCountThisTurn's population scan but sums/maxes/mins the per-record
+/// P/T/MV (CR 208.1 / CR 202.3) instead of counting. P/T is read exactly, so a
+/// departed Unhinged 2½-power creature contributes 2½.
+fn zone_change_aggregate_exact(
+    state: &GameState,
+    from: Option<Zone>,
+    to: Option<Zone>,
+    filter: &TargetFilter,
+    function: AggregateFunction,
+    property: ObjectProperty,
+    filter_ctx: &FilterContext<'_>,
+) -> HalfSigned {
+    let vals = state
+        .zone_changes_this_turn
+        .iter()
+        .filter(|record| {
+            from.is_none_or(|zone| record.from_zone == Some(zone))
+                && to.is_none_or(|zone| record.to_zone == zone)
+                && matches_target_filter_on_zone_change_record(state, record, filter, filter_ctx)
+        })
+        .filter_map(|record| match property {
+            ObjectProperty::Power => record
+                .power
+                .map(|p| HalfSigned::from_whole_and_fraction(p, record.power_fraction)),
+            ObjectProperty::Toughness => record
+                .toughness
+                .map(|t| HalfSigned::from_whole_and_fraction(t, record.toughness_fraction)),
+            ObjectProperty::ManaValue => Some(HalfSigned::from_whole(u32_to_i32_saturating(
+                record.mana_value,
+            ))),
+            // Damage records do not retain the source's individual mana
+            // symbols; symbol-count aggregation is not defined over them.
+            ObjectProperty::ManaSymbolCount(_) => None,
+        });
+    reduce_property_values(vals, function)
+}
+
+/// The `FilterContext` a `QuantityRef` read evaluates its filters in — shared by
+/// the integer and exact resolvers so both read the same population.
+fn quantity_filter_context<'a>(
+    state: &'a GameState,
+    controller: PlayerId,
+    ctx: &QuantityContext,
+    trigger_source: Option<&'a TriggerSourceContext>,
+    ability: Option<&'a ResolvedAbility>,
+    ability_targets: Option<ParkedTargets<'a>>,
+) -> FilterContext<'a> {
     // Build a FilterContext that preserves ability scope (for `chosen_x`/targets
     // in nested filter thresholds) when available, falling back to the controller
     // override used by `resolve_quantity_scoped`. CR 107.2 governs the fallback
@@ -5275,10 +5444,6 @@ fn resolve_ref_int(
     // CR 613.4c: The optional `recipient` from `QuantityContext` flows into
     // `FilterContext::recipient_id` so recipient-relative filter properties
     // resolve against the per-object recipient bound by the layer evaluator.
-    // Keep the exact source snapshot in an independent local. `FilterContext`
-    // borrows it for filter evaluation, while quantity branches still consume
-    // `ctx` when they recurse through player scopes.
-    let trigger_source = ctx.trigger_source.clone();
     let mut filter_ctx = match ability {
         // CR 109.5: "you"/"your" on a triggered ability refer to the ability's
         // (printed) controller. A quantity is a value sub-expression, not an effect
@@ -5292,8 +5457,8 @@ fn resolve_ref_int(
             a.original_controller.unwrap_or(a.controller),
         ),
         None => {
-            let mut fc = trigger_source.as_ref().map_or_else(
-                || FilterContext::from_source_with_controller(source_id, controller),
+            let mut fc = trigger_source.map_or_else(
+                || FilterContext::from_source_with_controller(ctx.source, controller),
                 |source| FilterContext::from_trigger_source_with_controller(source, controller),
             );
             // CR 120.3: DamageEachPlayer binds ControllerRef::ScopedPlayer to
@@ -5312,6 +5477,33 @@ fn resolve_ref_int(
     filter_ctx.pre_entry_battlefield = ctx
         .entering
         .and(state.active_pre_entry_battlefield_snapshot());
+    filter_ctx
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_ref_int(
+    state: &GameState,
+    qty: &QuantityRef,
+    controller: PlayerId,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    chosen_x: Option<u32>,
+    ability: Option<&ResolvedAbility>,
+    ability_targets: Option<ParkedTargets<'_>>,
+) -> i32 {
+    let source_id = ctx.source;
+    // Keep the exact source snapshot in an independent local. `FilterContext`
+    // borrows it for filter evaluation, while quantity branches still consume
+    // `ctx` when they recurse through player scopes.
+    let trigger_source = ctx.trigger_source.clone();
+    let filter_ctx = quantity_filter_context(
+        state,
+        controller,
+        &ctx,
+        trigger_source.as_ref(),
+        ability,
+        ability_targets,
+    );
     let player = state.players.iter().find(|p| p.id == controller);
     match qty {
         // CR 402: hand size for the scoped player(s).
@@ -5792,68 +5984,16 @@ fn resolve_ref_int(
         // "each other creature's power" excludes the triggering object via the
         // shared helper, so count and aggregate population are identical.
         //
-        // CR 608.2h + CR 400.7: For look-back aggregates over non-battlefield
-        // objects (Oversimplify: "the total power of creatures they controlled
-        // that were exiled this way"), the live object's `power`/`toughness`
-        // are `None` because the at-exile layer values are not maintained off
-        // battlefield. Fall back to the LKI snapshot captured by
-        // `change_zone` on leaving the battlefield (`game::zones`),
-        // which holds the post-layer-7 values from the moment of departure —
-        // exactly what the "as they last existed on the battlefield" ruling
-        // requires. `ManaValue` doesn't need LKI: the printed mana cost is
-        // stable across zones.
-        QuantityRef::PropertyAggregate(aggregate) => {
-            let journal_controller = ability
-                .and_then(|ability| ability.original_controller)
-                .unwrap_or(controller);
-            // Preserve the legacy Aggregate rule used by Skyclave Apparition:
-            // during a per-owner fanout, "cards you own exiled by this source"
-            // binds "you" to that owner. Other object filters and journal
-            // scopes keep their normal controller authority.
-            let scoped_owned_exile_filter_ctx = ability.and_then(|ability| {
-                (ability.scoped_player.is_some()
-                    || ability
-                        .original_controller
-                        .is_some_and(|original| original != ability.controller))
-                .then(|| {
-                    let scoped = ability.scoped_player.unwrap_or(ability.controller);
-                    let mut scoped_ctx =
-                        FilterContext::from_ability_with_controller(ability, scoped);
-                    scoped_ctx.recipient_id = ctx.recipient;
-                    scoped_ctx
-                })
-            });
-            let mut seen = HashSet::new();
-            let mut values = Vec::new();
-            visit_characteristic_source(
-                state,
-                aggregate.source(),
-                ctx.clone(),
-                CharacteristicFilterContexts {
-                    base: &filter_ctx,
-                    scoped_owned_exile: scoped_owned_exile_filter_ctx.as_ref(),
-                },
-                controller,
-                journal_controller,
-                &mut |member, view, excludes_current| {
-                    if excludes_current
-                        && ability.is_some_and(|ability| {
-                            current_cast_occurrence_matches(state, ability, member)
-                        })
-                    {
-                        return;
-                    }
-                    if !seen.insert(member) {
-                        return;
-                    }
-                    let value = view.property_value(aggregate.property());
-                    if let Some(value) = value {
-                        values.push(value);
-                    }
-                },
-            );
-            reduce_property_values(values.into_iter(), aggregate.function())
-        }
+        // CR 608.2h + CR 400.7: see `resolve_property_aggregate_exact`.
+        QuantityRef::PropertyAggregate(aggregate) => resolve_property_aggregate_exact(
+            state,
+            aggregate,
+            controller,
+            &ctx,
+            ability,
+            &filter_ctx,
+        )
+        .whole_floor(),
         // CR 107.1 + CR 700.1: min/max across players of the count of
         // battlefield objects matching `filter` each player controls.
         QuantityRef::ControlledByEachPlayer {
@@ -6954,34 +7094,16 @@ fn resolve_ref_int(
             filter,
             function,
             property,
-        } => {
-            let vals = state
-                .zone_changes_this_turn
-                .iter()
-                .filter(|record| {
-                    from.is_none_or(|zone| record.from_zone == Some(zone))
-                        && to.is_none_or(|zone| record.to_zone == zone)
-                        && matches_target_filter_on_zone_change_record(
-                            state,
-                            record,
-                            filter,
-                            &filter_ctx,
-                        )
-                })
-                .filter_map(|record| match property {
-                    ObjectProperty::Power => record.power,
-                    ObjectProperty::Toughness => record.toughness,
-                    ObjectProperty::ManaValue => Some(u32_to_i32_saturating(record.mana_value)),
-                    // Damage records do not retain the source's individual mana
-                    // symbols; symbol-count aggregation is not defined over them.
-                    ObjectProperty::ManaSymbolCount(_) => None,
-                });
-            match function {
-                AggregateFunction::Max => vals.max().unwrap_or(0),
-                AggregateFunction::Min => vals.min().unwrap_or(0),
-                AggregateFunction::Sum => vals.sum(),
-            }
-        }
+        } => zone_change_aggregate_exact(
+            state,
+            *from,
+            *to,
+            filter,
+            *function,
+            *property,
+            &filter_ctx,
+        )
+        .whole_floor(),
         // CR 120.1 + CR 120.9 + CR 603.4: Damage dealt this turn matching the
         // supplied source/target filters. `group_by` selects whether records are
         // partitioned (per CR 120.9 "by a specific source") before `aggregate`
@@ -8449,39 +8571,52 @@ fn event_context_amount(
     chosen_x: Option<u32>,
     ability: Option<&ResolvedAbility>,
 ) -> Option<i32> {
-    ctx
-        // CR 121.2a + CR 614.1a: a replacement condition evaluated against a
-        // proposed event reads that event's own amount ("would draw two or
-        // more cards" compares the pending draw's count). `Some` only in the
-        // replacement-condition context, so every other caller falls through
-        // to the cascade below unchanged.
-        .event_amount
+    event_context_amount_exact(state, ctx, chosen_x, ability).map(HalfSigned::whole_floor)
+}
+
+/// CR 603.2c + CR 608.2c: The exact form of [`event_context_amount`]. Only the
+/// triggering event's own amount can carry an Unhinged half-point remainder
+/// (Spitemare dealt 2½ damage deals "that much damage", 2½); every other tier is
+/// a whole count.
+fn event_context_amount_exact(
+    state: &GameState,
+    ctx: &QuantityContext,
+    chosen_x: Option<u32>,
+    ability: Option<&ResolvedAbility>,
+) -> Option<HalfSigned> {
+    let whole = |amount: Option<i32>| amount.map(HalfSigned::from_whole);
+    // CR 121.2a + CR 614.1a: a replacement condition evaluated against a
+    // proposed event reads that event's own amount ("would draw two or
+    // more cards" compares the pending draw's count). `Some` only in the
+    // replacement-condition context, so every other caller falls through
+    // to the cascade below unchanged.
+    whole(ctx.event_amount)
         // CR 614.1a: Moonlit-scoped "that many" copy count — highest priority
         // after the proposed event's own amount, which is never set while a
         // substitution continuation resolves. `Some` only while a
         // `CopyTokenOf` substitution continuation resolves (Moonlit
         // Meditation); `None` otherwise, so it falls straight through to the
         // existing trigger/effect cascade.
-        .or(state.post_replacement_token_substitution_count)
+        .or(whole(state.post_replacement_token_substitution_count))
         // CR 614.6 + CR 615.5: a replacement's own action reads the amount of the
         // event it replaced or prevented, ahead of the die result and the trigger
         // tiers of the resolution around it. Farideh's Fireball's "deals 2 damage to
         // each opponent" under Delaying Shield puts 2 delay counters on it, not the
         // d20 face. `None` outside that scope, so every other reader is unchanged.
-        .or_else(replacement_action_amount)
-        .or_else(|| enclosing_trigger_match_count(state))
+        .or_else(|| whole(replacement_action_amount()))
+        .or_else(|| whole(enclosing_trigger_match_count(state)))
         // CR 706.4: Die results recorded earlier in THIS resolution
         // outrank the triggering event's own amount, so "roll one or more
         // dice. <effect> equal to the result(s)" consumes the roll total,
         // not the combat damage / life change that triggered it.
-        .or(state.die_result_this_resolution)
+        .or(whole(state.die_result_this_resolution))
         // CR 608.2c + CR 109.5: A scoped continuation's per-player
         // accounting binds "that many" to its current recipient before a
         // scalar enclosing trigger/event can shadow the recipient's own
         // result. A present map deliberately returns 0 for a player with
         // no counted events.
         .or_else(|| {
-            ctx.scoped_player.and_then(|player| {
+            whole(ctx.scoped_player.and_then(|player| {
                 (!state.last_effect_counts_by_player.is_empty()).then(|| {
                     state
                         .last_effect_counts_by_player
@@ -8489,7 +8624,7 @@ fn event_context_amount(
                         .copied()
                         .unwrap_or(0)
                 })
-            })
+            }))
         })
         // CR 603.2c: The triggering event's own scalar amount (damage,
         // life change, cards drawn, counters, die results), plus the CR
@@ -8500,13 +8635,13 @@ fn event_context_amount(
         // ability's nor a replacement action's "that many" reads the event of
         // the trigger resolving around it.
         .or_else(|| enclosing_trigger_event_amount(state))
-        .or(state.last_effect_count)
-        .or(state.last_effect_amount)
+        .or(whole(state.last_effect_count))
+        .or(whole(state.last_effect_amount))
         // CR 107.3a + CR 601.2b + CR 602.2b: If "that many" has no live
         // trigger/effect context, it may refer to the variable count chosen
         // for the spell or activated ability's cost (for example, "Remove
         // any number of counters: Create that many tokens.").
-        .or_else(|| chosen_x.map(u32_to_i32_saturating))
+        .or_else(|| whole(chosen_x.map(u32_to_i32_saturating)))
         // CR 603.10 + CR 608.2h + CR 122.2: A "leaves the battlefield / dies,
         // if it had one or more <X> counters on it, put that many <X> counters
         // on …" look-back (Reyhan, Last of the Abzan) resolves "that many" to
@@ -8519,7 +8654,7 @@ fn event_context_amount(
         // effect (Whirlpool Drake: "shuffle the cards from your hand into your
         // library, then draw that many cards") is a non-counter effect, so it
         // resolves via `last_effect_count`/`last_effect_amount` above.
-        .or_else(|| event_context_counter_count_from_lki(state, ability))
+        .or_else(|| whole(event_context_counter_count_from_lki(state, ability)))
 }
 
 /// CR 603.10 + CR 608.2h + CR 122.2: For a battlefield-departure look-back

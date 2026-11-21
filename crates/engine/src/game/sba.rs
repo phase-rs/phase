@@ -1200,8 +1200,7 @@ fn perform_creature_deaths(
                     }
                     if let Some(obj) = state.objects.get_mut(&object_id) {
                         if obj.zone == Zone::Battlefield {
-                            obj.damage_marked = 0;
-                            obj.dealt_deathtouch_damage = false;
+                            crate::game::effects::remove_all_damage::heal_marked_damage(obj);
                         }
                     }
                 }
@@ -1324,8 +1323,9 @@ fn perform_creature_deaths(
                                 // entry reset instead of this scrub).
                                 if let Some(obj) = state.objects.get_mut(&object_id) {
                                     if obj.zone == Zone::Battlefield {
-                                        obj.damage_marked = 0;
-                                        obj.dealt_deathtouch_damage = false;
+                                        crate::game::effects::remove_all_damage::heal_marked_damage(
+                                            obj,
+                                        );
                                     }
                                 }
                             }

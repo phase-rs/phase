@@ -17517,15 +17517,17 @@ fn affected_objects_from_events(
         // Jaya Ballard, Task Mage). Object targets only — a player carries no
         // regen shield and the static is inert on players. CR 120.3/120.6: only
         // creatures actually dealt a nonzero amount were "dealt damage this way"
-        // (fully-prevented damage doesn't count), so require `amount > 0`.
+        // (fully-prevented damage doesn't count), so require a nonzero exact
+        // amount (an Unhinged ½ counts).
         Effect::DealDamage { .. } | Effect::DamageAll { .. } => events
             .iter()
             .filter_map(|event| match event {
                 GameEvent::DamageDealt {
                     target: TargetRef::Object(id),
                     amount,
+                    amount_fraction,
                     ..
-                } if *amount > 0 => Some(*id),
+                } if *amount > 0 || amount_fraction.is_half() => Some(*id),
                 _ => None,
             })
             .collect(),

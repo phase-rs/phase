@@ -1,4 +1,5 @@
 pub use phase_ast::types::ability::*;
+pub use phase_ast::types::ability::{HalfFraction, HalfMagnitude, HalfSigned};
 
 use std::collections::HashSet;
 

@@ -631,6 +631,34 @@ describe("getBoardChoiceView", () => {
     expect(canConfirmBoardChoice(choice, [10], objects)).toBe(true);
   });
 
+  // CR 702.122a: two Little Girls (½/½, Unhinged) together have total power 1,
+  // so they crew Smuggler's Copter ("Crew 1"). The engine sends each
+  // contribution as 0 + "Half"; one alone is not enough.
+  it("gates CrewVehicle on half-point engine contributions", () => {
+    const choice = getBoardChoiceView({
+      type: "CrewVehicle",
+      data: {
+        player: 0,
+        vehicle_id: 30,
+        crew_power: 1,
+        eligible_creatures: [10, 11],
+        contributions: [0, 0],
+        contribution_fractions: ["Half", "Half"],
+      },
+    });
+    const objects = buildObjectMap(
+      buildGameObject({ id: 10, power: 0 }),
+      buildGameObject({ id: 11, power: 0 }),
+    );
+
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    expect(boardChoiceSelectedPower(choice, [10], objects)).toBe(0.5);
+    expect(canConfirmBoardChoice(choice, [10], objects)).toBe(false);
+    expect(boardChoiceSelectedPower(choice, [10, 11], objects)).toBe(1);
+    expect(canConfirmBoardChoice(choice, [10, 11], objects)).toBe(true);
+  });
+
   it("gates SaddleMount by the engine contribution, not printed power", () => {
     const choice = getBoardChoiceView({
       type: "SaddleMount",

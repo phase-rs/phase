@@ -1,6 +1,6 @@
 use crate::game::mana_sources::mana_color_to_type;
 use crate::types::ability::{
-    DoubleTarget, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
+    DoubleTarget, Effect, EffectError, EffectKind, HalfSigned, ResolvedAbility, TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
@@ -165,31 +165,32 @@ fn resolve_double_life(
         return Ok(());
     };
 
+    // CR 701.10d: read the exact total, so a 17½ life total doubles to 35.
     let current_life = state
         .players
         .iter()
         .find(|p| p.id == player_id)
         .ok_or(EffectError::PlayerNotFound)?
-        .life;
+        .exact_life();
 
-    if current_life > 0 {
+    if current_life > HalfSigned::ZERO {
         // CR 701.10d: Gain life equal to current total.
-        if crate::game::effects::life::apply_life_gain(
+        if crate::game::effects::life::apply_life_gain_exact(
             state,
             player_id,
-            current_life as u32,
+            current_life.clamp_non_negative(),
             events,
         )
         .is_err()
         {
             return Ok(());
         }
-    } else if current_life < 0 {
+    } else if current_life < HalfSigned::ZERO {
         // CR 701.10d: Lose |current_life| additional life so the new total is 2x.
-        if crate::game::effects::life::apply_life_loss(
+        if crate::game::effects::life::apply_life_loss_exact(
             state,
             player_id,
-            (-current_life) as u32,
+            HalfSigned(-current_life.0).clamp_non_negative(),
             events,
         )
         .is_err()

@@ -2014,16 +2014,30 @@ fn matching_damage_received_whole_event_events(
     groups
         .into_iter()
         .filter(|(_, events)| {
+            // CR 120.1: sum the exact amounts so half-point damage counts.
             let sum = events
                 .iter()
                 .map(|(_, event)| match event {
-                    GameEvent::DamageDealt { amount, .. } => *amount,
-                    _ => 0,
+                    GameEvent::DamageDealt {
+                        amount,
+                        amount_fraction,
+                        ..
+                    } => crate::types::ability::HalfMagnitude::from_whole_and_fraction(
+                        *amount,
+                        *amount_fraction,
+                    ),
+                    _ => crate::types::ability::HalfMagnitude::ZERO,
                 })
-                .fold(0u32, u32::saturating_add);
-            threshold
-                .comparator
-                .evaluate(sum as i32, threshold.threshold as i32)
+                .fold(
+                    crate::types::ability::HalfMagnitude::ZERO,
+                    crate::types::ability::HalfMagnitude::saturating_add,
+                );
+            threshold.comparator.evaluate_half_signed(
+                sum.as_signed(),
+                crate::types::ability::HalfSigned::from_whole(
+                    i32::try_from(threshold.threshold).unwrap_or(i32::MAX),
+                ),
+            )
         })
         .map(|(_, events)| events)
         .collect()

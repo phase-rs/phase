@@ -2,6 +2,7 @@ use std::cell::OnceCell;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, HashSet};
 
+use crate::game::arithmetic::u32_to_i32_saturating;
 use crate::game::casting;
 use crate::game::combat::AttackTarget;
 use crate::game::deck_loading::DeckEntry;
@@ -10,8 +11,8 @@ use crate::game::keywords;
 use crate::game::mana_sources;
 use crate::game::mulligan;
 use crate::types::ability::{
-    ChoiceType, CounterCostSelection, ObjectSelectionCardinality, TapCreaturesSelectionMode,
-    TargetRef,
+    ChoiceType, CounterCostSelection, HalfSigned, ObjectSelectionCardinality,
+    TapCreaturesSelectionMode, TargetRef,
 };
 use crate::types::actions::{
     CastChoice, GameAction, LearnOption, MulliganChoice, OutsideGameSelection,
@@ -2495,8 +2496,12 @@ pub fn candidate_actions_broad_with_probe(
             state,
             *player,
             choices,
-            |total| aggregate.satisfied_by(total),
-            crate::game::casting_costs::tap_creature_power_contribution,
+            |total| aggregate.satisfied_by(total.whole_floor()),
+            |state, id| {
+                HalfSigned::from_whole(crate::game::casting_costs::tap_creature_power_contribution(
+                    state, id,
+                ))
+            },
             |cards| GameAction::SelectCards { cards },
         ),
         // CR 107.3a + CR 118.3: mirror the Sacrifice/ExileFromZone arm above — the
@@ -2553,14 +2558,14 @@ pub fn candidate_actions_broad_with_probe(
                 state,
                 *player,
                 choices,
-                |total| comparator.evaluate(total, *value),
+                |total| comparator.evaluate(total.whole_floor(), *value),
                 move |state, id| {
-                    crate::game::quantity::aggregate_property_over(
+                    HalfSigned::from_whole(crate::game::quantity::aggregate_property_over(
                         state,
                         &[id],
                         crate::types::ability::AggregateFunction::Sum,
                         property,
-                    )
+                    ))
                 },
                 |cards| GameAction::SelectCards { cards },
             )
@@ -6378,9 +6383,9 @@ fn crew_vehicle_candidates(
         state,
         player,
         eligible_creatures,
-        |total| total >= crew_power as i32,
+        |total| total >= HalfSigned::from_whole(u32_to_i32_saturating(crew_power)),
         |state, id| {
-            crate::game::static_abilities::object_crew_power_contribution(
+            crate::game::static_abilities::object_crew_power_contribution_exact(
                 state,
                 id,
                 crate::types::statics::CrewAction::Crew,
@@ -6407,9 +6412,9 @@ fn saddle_mount_candidates(
         state,
         player,
         eligible_creatures,
-        |total| total >= saddle_power as i32,
+        |total| total >= HalfSigned::from_whole(u32_to_i32_saturating(saddle_power)),
         |state, id| {
-            crate::game::static_abilities::object_crew_power_contribution(
+            crate::game::static_abilities::object_crew_power_contribution_exact(
                 state,
                 id,
                 crate::types::statics::CrewAction::Saddle,
@@ -6451,13 +6456,13 @@ fn minimal_power_subset_candidates<S, P, F>(
     wrap: F,
 ) -> Vec<CandidateAction>
 where
-    S: Fn(i32) -> bool,
-    P: Fn(&GameState, crate::types::identifiers::ObjectId) -> i32,
+    S: Fn(HalfSigned) -> bool,
+    P: Fn(&GameState, crate::types::identifiers::ObjectId) -> HalfSigned,
     F: Fn(Vec<crate::types::identifiers::ObjectId>) -> GameAction,
 {
     const MAX_CANDIDATES: usize = 20;
 
-    let mut creatures_with_power: Vec<(crate::types::identifiers::ObjectId, i32)> =
+    let mut creatures_with_power: Vec<(crate::types::identifiers::ObjectId, HalfSigned)> =
         eligible_creatures
             .iter()
             .filter(|&&id| state.objects.contains_key(&id))
@@ -6473,7 +6478,8 @@ where
     let mut actions = Vec::new();
     for size in 1..=creatures_with_power.len() {
         for combo in combinations_generic(&ids, size) {
-            let total: i32 = combo
+            // CR 208.1: sum exact powers, so two ½-power creatures total 1.
+            let total = combo
                 .iter()
                 .filter_map(|id| {
                     creatures_with_power
@@ -6481,7 +6487,7 @@ where
                         .find(|(cid, _)| cid == id)
                         .map(|(_, p)| *p)
                 })
-                .sum();
+                .fold(HalfSigned::ZERO, HalfSigned::saturating_add);
             if satisfies(total) {
                 actions.push(candidate(wrap(combo), TacticalClass::Utility, Some(player)));
                 if actions.len() >= MAX_CANDIDATES {

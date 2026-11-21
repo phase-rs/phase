@@ -3250,15 +3250,14 @@ fn clear_cleanup_damage(state: &mut GameState, events: &mut Vec<GameEvent>) {
             state
                 .objects
                 .get(id)
-                .map(|obj| obj.damage_marked > 0)
+                .map(|obj| !obj.exact_damage_marked().is_zero())
                 .unwrap_or(false)
         })
         .collect();
 
     for id in to_clear {
         if let Some(obj) = state.objects.get_mut(&id) {
-            obj.damage_marked = 0;
-            obj.dealt_deathtouch_damage = false;
+            crate::game::effects::remove_all_damage::heal_marked_damage(obj);
             events.push(GameEvent::DamageCleared { object_id: id });
         }
     }

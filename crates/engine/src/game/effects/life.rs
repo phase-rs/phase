@@ -1525,7 +1525,7 @@ pub fn resolve_set_life_total(
         // extremum) are unaffected — they carry no `ScopedPlayer` ref to vary.
         let mut scoped_ability = ability.clone();
         scoped_ability.set_scoped_player_recursive(target_player_id);
-        let amount = crate::game::quantity::resolve_quantity_with_targets(
+        let amount = crate::game::quantity::resolve_quantity_with_targets_exact(
             state,
             amount_expr,
             &scoped_ability,
@@ -1540,8 +1540,10 @@ pub fn resolve_set_life_total(
         if !state.players.iter().any(|p| p.id == target_player_id) {
             return Err(EffectError::PlayerNotFound);
         }
-        let current_life = crate::game::players::team_life_total(state, target_player_id);
-        let Some(diff) = life_total_difference(
+        // CR 119.5: the difference is measured exactly, so a 17½ life total
+        // set to 10 loses 7½ and ends at 10.
+        let current_life = crate::game::players::exact_team_life_total(state, target_player_id);
+        let Some(diff) = exact_life_total_difference(
             state,
             target_player_id,
             amount,
@@ -1553,10 +1555,16 @@ pub fn resolve_set_life_total(
             return Ok(());
         };
 
-        let deferred = match diff.signum() {
-            1 => apply_life_gain(state, target_player_id, diff as u32, events).err(),
-            // `unsigned_abs`: the difference may be `i32::MIN`.
-            -1 => apply_life_loss(state, target_player_id, diff.unsigned_abs(), events).err(),
+        let deferred = match diff.0.signum() {
+            1 => apply_life_gain_exact(state, target_player_id, diff.clamp_non_negative(), events)
+                .err(),
+            -1 => apply_life_loss_exact(
+                state,
+                target_player_id,
+                HalfSigned(diff.0.saturating_neg()).clamp_non_negative(),
+                events,
+            )
+            .err(),
             _ => None,
         };
         if deferred.is_some() {

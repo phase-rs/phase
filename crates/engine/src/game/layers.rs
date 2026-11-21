@@ -12696,7 +12696,9 @@ fn apply_continuous_effect_filtered(
         (Some(value), false) if !affected_ids.is_empty() => {
             #[cfg(test)]
             record_shared_dynamic_quantity_resolution();
-            Some(crate::game::quantity::resolve_quantity_with_ctx(
+            // CR 208.1: keep the exact value (an Unhinged ½ life total or
+            // power) until it is written into the P/T fields.
+            Some(crate::game::quantity::resolve_quantity_with_ctx_exact(
                 state,
                 value,
                 effect_controller,
@@ -12789,7 +12791,7 @@ fn apply_continuous_effect_filtered(
         // The immutable read finishes before the mutable borrow of `obj` below.
         let dynamic_pt = if dynamic_uses_recipient {
             dynamic_pt_expr.map(|value| {
-                crate::game::quantity::resolve_quantity_with_ctx(
+                crate::game::quantity::resolve_quantity_with_ctx_exact(
                     state,
                     value,
                     effect_controller,
@@ -13140,61 +13142,55 @@ fn apply_continuous_effect_filtered(
                 );
                 debug_assert_eq!(applied, TypeColorModification::Applied);
             }
+            // CR 613.4a: Serra Avatar's "power and toughness are each equal to
+            // your life total" reads an Unhinged 17½ life total as 17½/17½.
             ContinuousModification::SetDynamicPower { .. } => {
                 if let Some(val) = dynamic_pt {
-                    obj.power = Some(val);
-                    obj.power_fraction = crate::types::ability::HalfFraction::Zero;
+                    obj.set_exact_power(Some(val));
                     // CR 613.4a: a characteristic-defining power sets the
                     // current base power before layer-7b set effects run.
-                    obj.layer_base_power = Some(val);
-                    obj.layer_base_power_fraction = crate::types::ability::HalfFraction::Zero;
+                    obj.set_exact_layer_base_power(Some(val));
                 }
             }
             ContinuousModification::SetDynamicToughness { .. } => {
                 if let Some(val) = dynamic_pt {
-                    obj.toughness = Some(val);
-                    obj.toughness_fraction = crate::types::ability::HalfFraction::Zero;
+                    obj.set_exact_toughness(Some(val));
                     // CR 613.4a: a dynamic characteristic-defining toughness sets
                     // the current base toughness before layer-7b effects.
-                    obj.layer_base_toughness = Some(val);
-                    obj.layer_base_toughness_fraction = crate::types::ability::HalfFraction::Zero;
+                    obj.set_exact_layer_base_toughness(Some(val));
                 }
             }
             // CR 613.4b: Layer 7b — set base power to dynamic value (e.g., Biomass Mutation).
             ContinuousModification::SetPowerDynamic { .. } => {
                 if let Some(val) = dynamic_pt {
-                    obj.power = Some(val);
-                    obj.power_fraction = crate::types::ability::HalfFraction::Zero;
+                    obj.set_exact_power(Some(val));
                     // CR 613.4b: dynamic layer-7b setters share the same
                     // authoritative current-base carrier as fixed setters.
-                    obj.layer_base_power = Some(val);
-                    obj.layer_base_power_fraction = crate::types::ability::HalfFraction::Zero;
+                    obj.set_exact_layer_base_power(Some(val));
                 }
             }
             // CR 613.4b: Layer 7b — set base toughness to dynamic value.
             ContinuousModification::SetToughnessDynamic { .. } => {
                 if let Some(val) = dynamic_pt {
-                    obj.toughness = Some(val);
-                    obj.toughness_fraction = crate::types::ability::HalfFraction::Zero;
+                    obj.set_exact_toughness(Some(val));
                     // CR 613.4b: dynamic layer-7b setters update the authoritative
                     // current-base carrier just like fixed setters.
-                    obj.layer_base_toughness = Some(val);
-                    obj.layer_base_toughness_fraction = crate::types::ability::HalfFraction::Zero;
+                    obj.set_exact_layer_base_toughness(Some(val));
                 }
             }
             // CR 613.4c: Additive dynamic P/T modification (layer 7c).
             ContinuousModification::AddDynamicPower { .. } => {
-                if let (Some(ref mut p), Some(val)) = (&mut obj.power, dynamic_pt) {
-                    *p += val;
+                if let (Some(p), Some(val)) = (obj.exact_power(), dynamic_pt) {
+                    obj.set_exact_power(Some(p.saturating_add(val)));
                 }
             }
             ContinuousModification::AddDynamicToughness { .. } => {
-                if let (Some(ref mut t), Some(val)) = (&mut obj.toughness, dynamic_pt) {
-                    *t += val;
+                if let (Some(t), Some(val)) = (obj.exact_toughness(), dynamic_pt) {
+                    obj.set_exact_toughness(Some(t.saturating_add(val)));
                 }
             }
             ContinuousModification::AddDynamicKeyword { kind, .. } => {
-                if let Some(val) = dynamic_pt {
+                if let Some(val) = dynamic_pt.map(crate::types::ability::HalfSigned::whole_floor) {
                     let keyword = kind.with_value(val.max(0) as u32);
                     if !obj
                         .keywords

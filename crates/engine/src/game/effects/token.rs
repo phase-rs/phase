@@ -5008,8 +5008,10 @@ fn resolve_pt_exact(value: &PtValue, state: &GameState, ability: &ResolvedAbilit
         PtValue::Fixed(n) => HalfSigned::from_whole(*n),
         PtValue::HalfPoints(halves) => HalfSigned::from_halves(*halves),
         PtValue::Variable(_) => HalfSigned::ZERO,
+        // CR 208.1: a token whose P/T is "equal to" a dynamic amount
+        // keeps an Unhinged half-point value exactly.
         PtValue::Quantity(expr) => {
-            HalfSigned::from_whole(resolve_quantity_with_targets(state, expr, ability))
+            crate::game::quantity::resolve_quantity_with_targets_exact(state, expr, ability)
         }
     }
 }
