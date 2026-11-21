@@ -8840,9 +8840,43 @@ fn teferis_response_destroy_rider_absorbed_draw_chains() {
         );
 
     let ability = &result.abilities[0];
-    let Effect::Counter { source_rider, .. } = &*ability.effect else {
+    let Effect::Counter {
+        target,
+        source_rider,
+        ..
+    } = &*ability.effect
+    else {
         panic!("expected Counter effect, got {:?}", ability.effect);
     };
+    let qualifier = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![],
+        controller: Some(ControllerRef::Opponent),
+        properties: vec![FilterProp::Targets {
+            filter: Box::new(TargetFilter::Typed(
+                TypedFilter::land().controller(ControllerRef::You),
+            )),
+        }],
+    });
+    assert_eq!(
+        *target,
+        TargetFilter::Or {
+            filters: vec![
+                TargetFilter::And {
+                    filters: vec![TargetFilter::StackSpell, qualifier.clone()],
+                },
+                TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackAbility {
+                            controller: None,
+                            tag: None,
+                            kind: None,
+                        },
+                        qualifier,
+                    ],
+                },
+            ],
+        }
+    );
     assert!(
         matches!(source_rider, Some(CounterSourceRider::Destroy)),
         "destroy should be absorbed into source_rider, got {source_rider:?}"
@@ -25589,6 +25623,58 @@ fn strip_temporal_suffix_player_next_step_shapes() {
     );
 }
 
+/// CR 608.2c + CR 108.3: "their next <step>" after an owner control clause
+/// names that owner (Phytotitan: "return it to the battlefield tapped under its
+/// owner's control at the beginning of their next upkeep"). The control clause
+/// is the pronoun's antecedent and stays in the instruction; every other
+/// antecedent, and a bare "their", keeps today's undelayed reading.
+#[test]
+fn strip_temporal_suffix_their_next_step_names_owner_antecedent() {
+    use crate::types::ability::{DelayedTriggerPlayerBinding as B, TurnGate as G};
+    for (step_text, phase) in [
+        ("upkeep", Phase::Upkeep),
+        ("upkeep step", Phase::Upkeep),
+        ("end step", Phase::End),
+        ("draw step", Phase::Draw),
+        ("declare attackers step", Phase::DeclareAttackers),
+    ] {
+        for possessor in ["its owner's", "their owner's", "its owner\u{2019}s"] {
+            let text = format!(
+                "Return it to the battlefield tapped under {possessor} control at the beginning of their next {step_text}"
+            );
+            let (rest, cond) = strip_temporal_suffix(&text);
+            assert_eq!(
+                rest,
+                format!("Return it to the battlefield tapped under {possessor} control"),
+                "{text}"
+            );
+            assert_eq!(
+                cond,
+                Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase,
+                    player: crate::types::player::PlayerId(0),
+                    gate: G::None,
+                    binding: B::ParentTargetOwner,
+                }),
+                "{text}"
+            );
+        }
+    }
+
+    // Declined: "their" is accepted only with an owner antecedent.
+    for declined in [
+        // Plague Reaver's return clause (verbatim): "their" is the chosen opponent.
+        "Return this creature to the battlefield under that player's control at the beginning of their next upkeep",
+        "Return it to the battlefield under your control at the beginning of their next upkeep",
+        "Return it to the battlefield under their control at the beginning of their next upkeep",
+        // Glass Asp's effect clause (verbatim).
+        "that player loses 2 life at the beginning of their next draw step unless they pay {2} before that step",
+        "you draw a card at the beginning of their next upkeep",
+    ] {
+        assert_eq!(strip_temporal_suffix(declined).1, None, "{declined}");
+    }
+}
+
 /// CR 506.1 + CR 608.2c: Noctis's "that combat" rider rides the delayed
 /// declare-attackers return; "this combat" names the current combat and stays
 /// a sibling.
@@ -36235,21 +36321,69 @@ fn change_targets_spell_or_ability_with_single_target() {
     };
     assert!(matches!(scope, RetargetScope::Single));
     assert!(forced_to.is_none());
-    // Should be Or(StackSpell+HasSingleTarget, StackAbility+HasSingleTarget)
-    let TargetFilter::Or { filters } = &target else {
-        panic!("Expected Or filter, got {0:?}", target);
+    let single = || {
+        TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::HasSingleTarget],
+            ..TypedFilter::default()
+        })
     };
-    assert_eq!(filters.len(), 2);
-    for f in filters {
-        let TargetFilter::And { filters: inner } = f else {
-            panic!("Expected And filter inside Or, got {f:?}");
-        };
-        assert!(inner.iter().any(|f| matches!(
-            f,
-            TargetFilter::Typed(TypedFilter { properties, .. })
-                if properties.contains(&FilterProp::HasSingleTarget)
-        )));
-    }
+    assert_eq!(
+        target,
+        TargetFilter::Or {
+            filters: vec![
+                TargetFilter::And {
+                    filters: vec![TargetFilter::StackSpell, single()],
+                },
+                TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackAbility {
+                            controller: None,
+                            tag: None,
+                            kind: None,
+                        },
+                        single(),
+                    ],
+                },
+            ],
+        }
+    );
+}
+
+/// CR 115.9c: Silver Wyvern — the "that targets only" qualifier reaches both legs.
+#[test]
+fn change_targets_spell_or_ability_that_targets_only_self() {
+    let e = parse_effect("change the target of target spell or ability that targets only ~");
+    let Effect::ChangeTargets { target, .. } = e else {
+        panic!("Expected ChangeTargets, got {e:?}");
+    };
+    let only_self = || {
+        TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::TargetsOnly {
+                filter: Box::new(TargetFilter::SelfRef),
+            }],
+            ..TypedFilter::default()
+        })
+    };
+    assert_eq!(
+        target,
+        TargetFilter::Or {
+            filters: vec![
+                TargetFilter::And {
+                    filters: vec![TargetFilter::StackSpell, only_self()],
+                },
+                TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackAbility {
+                            controller: None,
+                            tag: None,
+                            kind: None,
+                        },
+                        only_self(),
+                    ],
+                },
+            ],
+        }
+    );
 }
 
 #[test]
