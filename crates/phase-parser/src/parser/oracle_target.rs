@@ -2217,9 +2217,10 @@ pub fn parse_target_with_syntax<'a>(
         // the tracked set as `TrackedSetFiltered{Not(AttackedThisTurn)}` — the
         // frozen "those creatures" population INTERSECTED with the did-not-attack
         // predicate. Parse the whole typed phrase first; if it carries any
-        // predicate PROPERTY beyond the head type noun, wrap it. A bare noun
-        // ("creatures"/"permanents"/"cards") with no trailing predicate yields
-        // only a head `type_filter` and no properties → the plain `TrackedSet`.
+        // predicate PROPERTY or a controller scope beyond the head type noun
+        // ("each of those creatures you don't control", Lost in the Maze), wrap
+        // it. A bare noun ("creatures"/"permanents"/"cards") with no trailing
+        // qualifier yields only a head `type_filter` → the plain `TrackedSet`.
         let (filter, remainder) = parse_type_phrase_folding_with_ctx(phrase, ctx);
         if target_filter_carries_predicate_property(&filter) {
             return (
@@ -5718,15 +5719,14 @@ mod declared_damage_source_target_tests {
     }
 }
 
-/// CR 608.2c: True when a typed filter carries a `FilterProp` PREDICATE beyond
-/// the bare head type noun (e.g. `Not(AttackedThisTurn)`, `Untapped`, a
-/// controller-scoping property). Used by the "each of those <noun> that
-/// <predicate>" anaphor to decide whether the trailing predicate must fold into
-/// a `TrackedSetFiltered` (frozen set ∩ predicate) rather than collapsing to a
-/// bare `TrackedSet` that would drop the predicate.
+/// CR 608.2c: True when a typed filter carries a qualifier beyond its bare head
+/// type noun, such as a `FilterProp` predicate or controller scope. Used by the
+/// "each of those <noun> that <predicate>" anaphor to decide whether the
+/// trailing qualifier must fold into a `TrackedSetFiltered` (frozen set ∩
+/// qualifier) rather than collapsing to a bare `TrackedSet` that would drop it.
 fn target_filter_carries_predicate_property(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(tf) => !tf.properties.is_empty(),
+        TargetFilter::Typed(tf) => !tf.properties.is_empty() || tf.controller.is_some(),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(target_filter_carries_predicate_property)
         }
@@ -17248,6 +17248,37 @@ mod tests {
             }
         ));
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn each_of_those_creatures_filters_the_tracked_set_by_controller() {
+        for (text, controller) in [
+            ("each of those creatures you control", ControllerRef::You),
+            (
+                "each of those creatures you don't control",
+                ControllerRef::Opponent,
+            ),
+        ] {
+            let (filter, rest) = parse_target(text);
+            assert_eq!(rest, "", "{text}");
+            match filter {
+                TargetFilter::TrackedSetFiltered {
+                    id,
+                    filter,
+                    caused_by: None,
+                } => {
+                    assert_eq!(id, TrackedSetId(0), "{text}");
+                    assert_eq!(
+                        *filter,
+                        TargetFilter::Typed(TypedFilter::creature().controller(controller)),
+                        "{text}"
+                    );
+                }
+                other => {
+                    panic!("expected a controller-filtered tracked set for {text}, got {other:?}")
+                }
+            }
+        }
     }
 
     /// CR 601.2c: "each of <count> target <type>" must route through "target"
