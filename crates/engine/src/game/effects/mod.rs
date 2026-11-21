@@ -4163,21 +4163,25 @@ fn damaged_object_context_from_events(
     damaged.next().is_none().then_some(first)
 }
 
-/// CR 608.2c + CR 614.6 + CR 614.9: the object a referent-less chain's anaphor
-/// names — the single object an earlier instruction of this resolution actually
-/// acted on, published by [`parent_referent_context_from_events`] as
-/// `effect_context_object`. For a damage instruction that is the recipient of
-/// the damage as dealt: a redirected event never happened to the original
-/// recipient, so Marauding Raptor's "deals 2 damage to it. If a Dinosaur is
-/// dealt damage this way" reads the creature Harm's Way chose, not the
-/// entering creature. Damage that reached only players, or was fully
-/// prevented (CR 615.1a), publishes no object, so the result is `None` — the
-/// trigger subject is never borrowed in its place.
+/// CR 608.2c + CR 614.6 + CR 614.9: the object a referent-less chain's damage
+/// rider names — the single object the immediately preceding damage instruction
+/// actually dealt damage to (`SpellContext::direct_damage_recipient`). A
+/// redirected event never happened to the original recipient, so Marauding
+/// Raptor's "deals 2 damage to it. If a Dinosaur is dealt damage this way" reads
+/// the creature Harm's Way chose, not the entering creature. Damage that reached
+/// only players, or was fully prevented (CR 615.1a), records no object, so the
+/// result is `None` — the trigger subject is never borrowed in its place.
+///
+/// Only a damage instruction records this, for its direct child alone. Any other
+/// object an earlier instruction published — a land tapped for a resolution-time
+/// mana payment (CR 605.3a), a sacrificed or revealed card — is not a damage
+/// result and never replaces the trigger subject: Emiel the Blessed's "If it's a
+/// Unicorn" still reads the creature that entered.
 ///
 /// `None` as well when the chain names a referent of its own
 /// (`parent_chain_referents` is `Some`: a declared slot, even one left empty),
-/// or when the published object has since changed zones (CR 400.7).
-fn referentless_chain_instruction_object(
+/// or when the recipient has since changed zones (CR 400.7).
+fn referentless_chain_damage_recipient(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Option<ObjectIncarnationRef> {
@@ -4185,10 +4189,9 @@ fn referentless_chain_instruction_object(
         return None;
     }
     ability
-        .effect_context_object
-        .as_ref()
-        .filter(|snapshot| snapshot.is_current(state))
-        .map(|snapshot| ObjectIncarnationRef::of(snapshot.object_id, snapshot.incarnation))
+        .context
+        .direct_damage_recipient
+        .filter(|recipient| recipient.is_current(state))
 }
 
 /// CR 608.2c: capture a single creature tapped by the parent instruction as the
@@ -5689,6 +5692,11 @@ pub(crate) fn apply_parent_chain_context(
         Effect::Discard { .. } | Effect::DiscardCard { .. }
     ) {
         child.context.direct_discard_result = None;
+    }
+    // CR 608.2c + CR 614.9: likewise a damage recipient is visible only to the
+    // damage instruction's direct child; every other hand-off clears it.
+    if !deal_damage::is_multi_event_damage_instruction(&parent.effect) {
+        child.context.direct_damage_recipient = None;
     }
     // CR 608.2c + CR 609.3: The transient relay names a Dig/ChooseFromZone/
     // RevealHand reveal-choice/ExileTop/RevealUntil/library search coming up
@@ -28850,6 +28858,16 @@ fn resolve_chain_body(
     // move's last-known controller/owner metadata, without treating the hidden
     // object itself as an available parent referent.
     let event_context_object = parent_referent_context_from_events(state, effect_events);
+    // CR 608.2c + CR 614.9: a damage instruction's own result, the object its damage
+    // was actually dealt to (after any redirection), for its direct child's "dealt
+    // damage this way" rider. Taken from this instruction's `DamageDealt` events
+    // alone, never from another published referent.
+    let damage_recipient = deal_damage::is_multi_event_damage_instruction(&ability.effect)
+        .then(|| damaged_object_context_from_events(state, effect_events))
+        .map(|snapshot| {
+            snapshot
+                .map(|snapshot| ObjectIncarnationRef::of(snapshot.object_id, snapshot.incarnation))
+        });
     // CR 608.2c + CR 609.3: an instruction that left no referent event still names
     // the object its root instruction announced (`announced_object_context`), for
     // the next instruction only. A later "that card" names what some other
@@ -28985,6 +29003,17 @@ fn resolve_chain_body(
         })
     });
     let ability = effect_context_owned.as_deref().unwrap_or(ability);
+    // Overwritten on every damage instruction, so an earlier damage instruction's
+    // recipient never stands in for this one's (`apply_parent_chain_context`
+    // hands it to the direct child only).
+    let damage_recipient_owned = damage_recipient
+        .filter(|recipient| *recipient != ability.context.direct_damage_recipient)
+        .map(|recipient| {
+            rebound_ability(ability, |owned| {
+                owned.context.direct_damage_recipient = recipient;
+            })
+        });
+    let ability = damage_recipient_owned.as_deref().unwrap_or(ability);
     let announced_owned;
     let ability = match &announced_object {
         Some(snapshot) if ability.sub_ability.is_some() => {
@@ -32161,8 +32190,8 @@ fn spell_event_incarnation(state: &GameState, id: ObjectId) -> Option<ObjectInca
 /// `ObjectScope::Target` (the default) is, in order: an explicit declared `subject_slot`;
 /// the node's own resolution-bound attachment-host recipient; the ability's first object
 /// target (with its announced pin); else, in a chain that declares no referent, the object
-/// the preceding instruction actually acted on (`referentless_chain_instruction_object`);
-/// else, for subject-based triggers that carry no chosen target, the triggering event's
+/// the immediately preceding damage instruction actually dealt damage to
+/// (`referentless_chain_damage_recipient`); else, for subject-based triggers that carry no chosen target, the triggering event's
 /// subject. `ObjectScope::EventSource` is the object the
 /// current trigger event names even when the node also declares a target. Every other
 /// scope has no referent here (the parser never writes one): the condition is false.
@@ -32265,9 +32294,10 @@ fn resolve_condition_referent(
                 });
             }
             // CR 608.2c + CR 614.9: in a chain that declares no referent, the object
-            // the preceding instruction actually acted on — Marauding Raptor's damage
-            // recipient after any redirection, not the creature the damage was aimed at.
-            if let Some(pin) = referentless_chain_instruction_object(state, ability) {
+            // the immediately preceding damage instruction dealt damage to — Marauding
+            // Raptor's damage recipient after any redirection, not the creature the
+            // damage was aimed at. No other instruction's object is read here.
+            if let Some(pin) = referentless_chain_damage_recipient(state, ability) {
                 return Some(ConditionReferent {
                     id: pin.object_id,
                     pin: Some(pin),
@@ -33279,8 +33309,8 @@ pub(crate) fn evaluate_condition(
         // variable-count target (CR 601.2c: zero targets announced) is not.
         // A chain that declares no target slots at all ("~ deals 2 damage to
         // it" on a subject-triggered rider) has the object its preceding
-        // instruction actually acted on as antecedent
-        // (`referentless_chain_instruction_object`) — never the trigger
+        // damage instruction actually dealt damage to as antecedent
+        // (`referentless_chain_damage_recipient`) — never the trigger
         // subject merely because the instruction was aimed at it: a
         // redirection replaced that event, so the damage was dealt to the
         // other recipient instead (CR 614.6 + CR 614.9). A chain whose
@@ -33292,7 +33322,7 @@ pub(crate) fn evaluate_condition(
                 .targets
                 .iter()
                 .any(|t| matches!(t, TargetRef::Object(_)))
-                || referentless_chain_instruction_object(state, ability).is_some()
+                || referentless_chain_damage_recipient(state, ability).is_some()
         }
         // CR 608.2c: Compound condition — all inner conditions must be true.
         AbilityCondition::And { conditions } => conditions

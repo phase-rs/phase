@@ -2076,6 +2076,16 @@ pub struct SpellContext {
     /// frame, so inline it widened every recursive frame by its size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_discard_result: Option<Box<DiscardedCardResult>>,
+    /// CR 608.2c + CR 614.9: The single object the immediately preceding damage
+    /// instruction actually dealt damage to, after any redirection — the result
+    /// a slotless "if a [type] is dealt damage this way" rider reads. Stamped
+    /// only by a damage instruction (`None` when its damage reached only
+    /// players, was fully prevented, or reached several objects);
+    /// `apply_parent_chain_context` copies it only to that instruction's direct
+    /// child and clears it on every other hand-off, so an earlier instruction's
+    /// incidental object (a land tapped for a mana payment) never reaches it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_damage_recipient: Option<ObjectIncarnationRef>,
     /// CR 701.20e + CR 608.2c: Exact parent-produced cards forwarded to one
     /// immediate "for each" child. The child uses this snapshot as its
     /// iteration universe instead of an unqualified battlefield census.
