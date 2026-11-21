@@ -16,7 +16,8 @@
 //! and reconciliation with a departure. While a poll collects it holds its
 //! resolution open (`holds_resolution`): the resolving ability does not settle
 //! and what it triggered waits in the deferred queue (CR 608.2c + CR 117.2e).
-//! It owns only the counted form, where one seat answers several instances. A
+//! It owns only the counted for-each form, where each seat answers every
+//! instance of the count (one or more). A
 //! single scoped unless instruction (Hag of Ceaseless Torment, Bellowing
 //! Mauler) is polled by `game::scoped_unless_poll`, which admits a chain at the
 //! `player_scope` driver; this coordinator admits at the counted repeat above
@@ -563,9 +564,9 @@ fn discard_pin_is_live(state: &GameState, seat: PlayerId, pin: &ObjectIncarnatio
 /// flat at constant depth. Every effect that exists when the simultaneous action
 /// happens applies to all of it, including the effects of permanents sacrificed in
 /// it: a replacement effect such as Rest in Peace's (CR 614.1) and a "can't" effect
-/// such as Platinum Emperion's (CR 101.2). Inside the sacrifice batch itself,
-/// members are still sacrificed one at a time, so a Rest in Peace sacrificed
-/// before another member of the same batch misses it (#11158). The events of
+/// such as Platinum Emperion's (CR 101.2). Inside the sacrifice batch, every
+/// member's replacements are consulted before any member moves
+/// (`perform_player_scope_sacrifices`). The events of
 /// completed steps are held until the whole delivery is done (CR 603.10).
 ///
 /// CR 118.12 + CR 118.12a: "unless" reads the choice, not the event. A pick
