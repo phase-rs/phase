@@ -2,24 +2,29 @@
 //! though they resolve as printed: Plea for Power and Path of the Ghosthunter
 //! (threshold-vote conditionals), Goblin Traprunner, Mirror March and Crazed
 //! Firecat (per-win coin-flip quantifier), Twice Upon a Time (a dynamic word in
-//! the card's own name). Oracle text is verbatim from MTGJSON 5.3.0+20261115.
+//! the card's own name). Each card is loaded as printed from the committed
+//! integration fixture (`add_real_card`, MTGJSON 5.3.0+20261115), so the witness
+//! drives the parse the shipped card data carries, not text typed into the test.
+//! The gameplay modules show that the printed cards resolve as printed; only
+//! the `parse_warnings` module reads the detector's verdict.
 
+use engine::database::CardDatabase;
 use engine::game::scenario::{GameRunner, P0};
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameRng, RandomDraw, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{ManaType, ManaUnit};
 use rand::Rng;
 
-/// A printed mana cost: `shards` are the colored (or X) symbols, `generic` the
-/// generic part.
-fn printed_cost(shards: &[ManaCostShard], generic: u32) -> ManaCost {
-    ManaCost::Cost {
-        shards: shards.to_vec(),
-        generic,
-    }
+use crate::support::shared_card_db;
+
+/// The committed integration fixture, which carries every printed card the
+/// witnesses place. Failing loudly (not skipping) keeps a missing fixture from
+/// turning the witnesses into vacuous passes.
+fn printed_cards() -> &'static CardDatabase {
+    shared_card_db().expect("the committed integration fixture is present")
 }
 
 fn mana_units(color: ManaType, count: usize) -> Vec<ManaUnit> {
@@ -89,14 +94,15 @@ fn settle(runner: &mut GameRunner) -> Vec<GameEvent> {
 }
 
 mod votes {
-    use super::{mana_units, printed_cost, settle};
+    use super::{mana_units, printed_cards, settle};
     use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use engine::game::scenario_db::GameScenarioDbExt;
     use engine::types::ability::EffectKind;
     use engine::types::actions::GameAction;
     use engine::types::events::GameEvent;
     use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::ObjectId;
-    use engine::types::mana::{ManaCostShard, ManaType};
+    use engine::types::mana::ManaType;
     use engine::types::phase::Phase;
     use engine::types::player::PlayerId;
     use engine::types::zones::Zone;
@@ -167,10 +173,7 @@ mod votes {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         scenario.with_mana_pool(P0, mana_units(ManaType::Blue, 4));
-        let plea = scenario
-            .add_spell_to_hand_from_oracle(P0, "Plea for Power", false, PLEA_FOR_POWER)
-            .with_mana_cost(printed_cost(&[ManaCostShard::Blue], 3))
-            .id();
+        let plea = scenario.add_real_card(P0, "Plea for Power", Zone::Hand, printed_cards());
         for _ in 0..6 {
             scenario.add_land_to_library_top(P0, "Plains");
         }
@@ -181,15 +184,8 @@ mod votes {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         scenario.with_mana_pool(P0, mana_units(ManaType::White, 4));
-        let path = scenario
-            .add_spell_to_hand_from_oracle(
-                P0,
-                "Path of the Ghosthunter",
-                false,
-                PATH_OF_THE_GHOSTHUNTER,
-            )
-            .with_mana_cost(printed_cost(&[ManaCostShard::X, ManaCostShard::White], 1))
-            .id();
+        let path =
+            scenario.add_real_card(P0, "Path of the Ghosthunter", Zone::Hand, printed_cards());
         (scenario.build(), path)
     }
 
@@ -283,16 +279,18 @@ mod votes {
 }
 
 mod coin_flip_wins {
-    use super::{coin_flips, mana_units, pin_outcomes, printed_cost, settle};
+    use super::{coin_flips, mana_units, pin_outcomes, printed_cards, settle};
     use engine::game::combat::AttackTarget;
     use engine::game::keywords::object_has_effective_keyword_kind;
     use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use engine::game::scenario_db::GameScenarioDbExt;
     use engine::types::counter::CounterType;
     use engine::types::events::GameEvent;
     use engine::types::identifiers::ObjectId;
     use engine::types::keywords::KeywordKind;
-    use engine::types::mana::{ManaCostShard, ManaType};
+    use engine::types::mana::ManaType;
     use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
 
     pub(super) const GOBLIN_TRAPRUNNER: &str = "Whenever this creature attacks, flip three coins. For each flip you win, create a 1/1 red Goblin creature token that's tapped and attacking.";
     pub(super) const MIRROR_MARCH: &str = "Whenever a nontoken creature you control enters, flip a coin until you lose a flip. For each flip you won, create a token that's a copy of that creature. Those tokens gain haste. Exile them at the beginning of the next end step.";
@@ -303,12 +301,8 @@ mod coin_flip_wins {
     fn traprunner_attack(pinned: &[bool]) -> (GameRunner, Vec<GameEvent>) {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
-        let traprunner = scenario
-            .add_creature(P0, "Goblin Traprunner", 4, 2)
-            .with_subtypes(vec!["Goblin"])
-            .with_mana_cost(printed_cost(&[ManaCostShard::Red], 3))
-            .from_oracle_text(GOBLIN_TRAPRUNNER)
-            .id();
+        let traprunner =
+            scenario.add_real_card(P0, "Goblin Traprunner", Zone::Battlefield, printed_cards());
         let mut runner = scenario.build();
         runner.advance_to_combat();
         runner
@@ -385,14 +379,8 @@ mod coin_flip_wins {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PostCombatMain);
         scenario.with_mana_pool(P0, mana_units(ManaType::Green, 2));
-        scenario
-            .add_enchantment_from_oracle(P0, "Mirror March", MIRROR_MARCH)
-            .with_mana_cost(printed_cost(&[ManaCostShard::Red], 5));
-        let bear = scenario
-            .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
-            .with_subtypes(vec!["Bear"])
-            .with_mana_cost(printed_cost(&[ManaCostShard::Green], 1))
-            .id();
+        scenario.add_real_card(P0, "Mirror March", Zone::Battlefield, printed_cards());
+        let bear = scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, printed_cards());
         let mut runner = scenario.build();
         pin_outcomes(&mut runner, pinned);
         let mut events = runner.cast(bear).resolve().events().to_vec();
@@ -448,11 +436,7 @@ mod coin_flip_wins {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         scenario.with_mana_pool(P0, mana_units(ManaType::Red, 7));
-        let firecat = scenario
-            .add_creature_to_hand_from_oracle(P0, "Crazed Firecat", 4, 4, CRAZED_FIRECAT)
-            .with_subtypes(vec!["Elemental", "Cat"])
-            .with_mana_cost(printed_cost(&[ManaCostShard::Red, ManaCostShard::Red], 5))
-            .id();
+        let firecat = scenario.add_real_card(P0, "Crazed Firecat", Zone::Hand, printed_cards());
         let mut runner = scenario.build();
         pin_outcomes(&mut runner, pinned);
         let mut events = runner.cast(firecat).resolve().events().to_vec();
@@ -481,16 +465,15 @@ mod coin_flip_wins {
 }
 
 mod twice_upon_a_time {
-    use super::{mana_units, printed_cost};
+    use super::{mana_units, printed_cards};
     use engine::game::scenario::{GameRunner, GameScenario, P0};
+    use engine::game::scenario_db::GameScenarioDbExt;
     use engine::types::ability::CastingRestriction;
     use engine::types::identifiers::ObjectId;
-    use engine::types::mana::{ManaCostShard, ManaType};
+    use engine::types::mana::ManaType;
     use engine::types::phase::Phase;
     use engine::types::zones::Zone;
 
-    const BEVERLY_CRUSHER: &str = "Seek out — Whenever you draw your second card each turn, put a +1/+1 counter on each of up to three target creatures.";
-    const CHEKOV_AND_MCCOY: &str = "Whenever you put one or more +1/+1 counters on Chekov and McCoy, you may draw that many cards. Do this only once each turn.";
     pub(super) const TWICE_UPON_A_TIME: &str = "Cast this spell only if you control two or more Doctors.\nTake an extra turn after this one. Exile Twice Upon a Time.";
 
     /// P0 with `doctors` of the two printed Doctors on the battlefield and the
@@ -498,33 +481,13 @@ mod twice_upon_a_time {
     fn board(doctors: usize) -> (GameRunner, ObjectId) {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
-        if doctors >= 1 {
-            scenario
-                .add_creature_from_oracle(
-                    P0,
-                    "Beverly Crusher, Ship's Doctor",
-                    2,
-                    2,
-                    BEVERLY_CRUSHER,
-                )
-                .with_mana_cost(printed_cost(&[ManaCostShard::White], 2))
-                .as_legendary()
-                .with_subtypes(vec!["Human", "Doctor"]);
+        for doctor in ["Beverly Crusher, Ship's Doctor", "Chekov and McCoy"]
+            .into_iter()
+            .take(doctors)
+        {
+            scenario.add_real_card(P0, doctor, Zone::Battlefield, printed_cards());
         }
-        if doctors >= 2 {
-            scenario
-                .add_creature_from_oracle(P0, "Chekov and McCoy", 3, 3, CHEKOV_AND_MCCOY)
-                .with_mana_cost(printed_cost(
-                    &[ManaCostShard::Green, ManaCostShard::Blue],
-                    3,
-                ))
-                .as_legendary()
-                .with_subtypes(vec!["Human", "Pilot", "Doctor"]);
-        }
-        let twice = scenario
-            .add_spell_to_hand_from_oracle(P0, "Twice Upon a Time", false, TWICE_UPON_A_TIME)
-            .with_mana_cost(printed_cost(&[ManaCostShard::Blue, ManaCostShard::Blue], 4))
-            .id();
+        let twice = scenario.add_real_card(P0, "Twice Upon a Time", Zone::Hand, printed_cards());
         let mut pool = mana_units(ManaType::Blue, 2);
         pool.extend(mana_units(ManaType::Colorless, 4));
         scenario.with_mana_pool(P0, pool);
@@ -569,7 +532,10 @@ mod twice_upon_a_time {
 }
 
 /// The printed cards the witnesses above run raise no swallowed-clause warning:
-/// the detector's verdict matches what the gameplay shows.
+/// the detector's verdict matches what the gameplay shows. These parse the
+/// printed text with the current parser (not the fixture's stored parse), so
+/// they are the tests that fail when the detector change is reverted; the
+/// gameplay modules above resolve the same cards and do not depend on it.
 mod parse_warnings {
     use engine::parser::oracle::{parse_oracle_text, ParsedAbilities};
     use engine::types::ability::Effect;
@@ -606,6 +572,14 @@ mod parse_warnings {
         carrier: impl Fn(&Effect) -> bool,
     ) {
         let (types, subtypes, keywords) = printed;
+        let face = super::printed_cards()
+            .get_face_by_name(name)
+            .unwrap_or_else(|| panic!("{name} is in the integration fixture"));
+        assert_eq!(
+            face.oracle_text.as_deref(),
+            Some(text),
+            "{name}: the text parsed here is the printed text the gameplay modules load"
+        );
         let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let parsed = parse_oracle_text(
             text,

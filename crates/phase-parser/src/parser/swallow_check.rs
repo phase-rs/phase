@@ -242,7 +242,7 @@ pub(crate) fn check_swallowed_clauses(
         );
         detect_dynamic_qty(
             &cleaned,
-            &name_normalized,
+            NameNormalized(&name_normalized),
             fragment,
             &scoped,
             &evidence,
@@ -3241,7 +3241,11 @@ fn def_tree_flip_win_effect_count(def: &AbilityDefinition) -> usize {
 
 /// CR 705.2: a sentence that starts a run the parser gives a `win_effect`: "flip
 /// a coin until you lose a flip" or "flip three coins". A single "flip a coin"
-/// never absorbs the clause after it, so it is not one.
+/// never absorbs the clause after it, so it is not one. The test is textual: it
+/// accepts any sentence that contains "coins" (so "flip three coins" and also, for
+/// example, a sentence about "two coins"); that is safe only because the caller
+/// also requires the next sentence to be a per-flip-win quantifier and the parse
+/// to hold a `FlipCoins` with a `win_effect` for each one.
 fn is_coin_flip_head(sentence: &str) -> bool {
     scan_contains(sentence, "flip a coin until") || scan_contains(sentence, "coins")
 }
@@ -3318,6 +3322,12 @@ fn for_each_card_type_constraints_cover_all_for_each_markers(
     raised > 0 && represented >= raised
 }
 
+/// A unit's text with the card's own name collapsed to its self-reference
+/// (CR 201.5), lowercased and parenthetical-free. A distinct type so it cannot be
+/// passed where [`detect_dynamic_qty`] expects the cleaned or the original text.
+#[derive(Clone, Copy)]
+struct NameNormalized<'a>(&'a str);
+
 /// Oracle text contains dynamic-quantity grammar ("equal to", "for each",
 /// "twice", "where x is", "the number of", "half [poss]") but the parsed
 /// AST contains no dynamic carrier (Ref, Multiply, DivideRounded, Offset,
@@ -3327,7 +3337,7 @@ fn for_each_card_type_constraints_cover_all_for_each_markers(
 /// `QuantityExpr` carriers — never silently substituted with `Fixed`.
 fn detect_dynamic_qty(
     cleaned: &str,
-    name_normalized: &str,
+    name_normalized: NameNormalized<'_>,
     original: &str,
     scoped: &ParsedAbilities,
     evidence: &UnitEvidence,
@@ -3336,7 +3346,7 @@ fn detect_dynamic_qty(
     // CR 201.5: markers are read from the name-normalized text so a dynamic
     // word inside the card's own name is not rules text. The probes below and
     // the reported gap keep reading `cleaned`.
-    let markers = active_dynamic_markers(name_normalized, evidence);
+    let markers = active_dynamic_markers(name_normalized.0, evidence);
     if markers.is_empty() {
         return;
     }
@@ -13254,7 +13264,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             &cleaned,
-            &cleaned,
+            NameNormalized(&cleaned),
             &cleaned,
             &granted,
             &evidence,
@@ -13289,7 +13299,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut control_diagnostics = Vec::new();
         super::detect_dynamic_qty(
             &cleaned,
-            &cleaned,
+            NameNormalized(&cleaned),
             &cleaned,
             &control,
             &control_evidence,
@@ -13336,7 +13346,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             cleaned,
-            cleaned,
+            NameNormalized(cleaned),
             cleaned,
             &parsed,
             &evidence,
@@ -13396,7 +13406,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             cleaned,
-            cleaned,
+            NameNormalized(cleaned),
             cleaned,
             &per_counter,
             &per_counter_evidence,
@@ -13410,7 +13420,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut flat_diagnostics = Vec::new();
         super::detect_dynamic_qty(
             cleaned,
-            cleaned,
+            NameNormalized(cleaned),
             cleaned,
             &flat,
             &flat_evidence,
@@ -13538,7 +13548,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             cleaned,
-            cleaned,
+            NameNormalized(cleaned),
             cleaned,
             &parsed,
             &evidence,
@@ -13585,7 +13595,14 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         // leave `represented = 0 < raised = 1`), and only the occurrence count
         // keeps the sibling clause reported.
         let mut diagnostics = Vec::new();
-        super::detect_dynamic_qty(single, single, single, &parsed, &evidence, &mut diagnostics);
+        super::detect_dynamic_qty(
+            single,
+            NameNormalized(single),
+            single,
+            &parsed,
+            &evidence,
+            &mut diagnostics,
+        );
         assert_eq!(
             dynamic_qty_descriptions(&diagnostics).len(),
             0,
@@ -14034,7 +14051,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             cleaned,
-            cleaned,
+            NameNormalized(cleaned),
             cleaned,
             &compound,
             &evidence,
@@ -14056,7 +14073,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut bare_diagnostics = Vec::new();
         super::detect_dynamic_qty(
             cleaned,
-            cleaned,
+            NameNormalized(cleaned),
             cleaned,
             &parsed_with_keywords(vec![Keyword::Ward(WardCost::PayLifeEqualToPower)]),
             &bare,
