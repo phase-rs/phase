@@ -686,7 +686,9 @@ fn parses_wayta_damage_caused_doubler() {
     assert_eq!(
         def.mode,
         StaticMode::DoubleTriggers {
-            cause: TriggerCause::ControlledCreatureDealtDamage
+            cause: TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealtDamage,
+            }
         }
     );
     let Some(TargetFilter::Typed(filter)) = def.affected.as_ref() else {
@@ -908,6 +910,105 @@ fn gandalf_the_white_doubler_static() {
     assert_eq!(filter.controller, Some(ControllerRef::You));
 }
 
+/// CR 603.2d: a creature you control becoming the target (Valiant Emberkin,
+/// CR 115.1) or dealing combat damage to a player (Felix Five-Boots, CR 510.2)
+/// is a typed cause, not `Any`.
+#[test]
+fn controlled_creature_event_doubler_causes() {
+    for (text, event) in [
+        (
+            "If a creature you control becoming the target of a spell or ability causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+            ControlledCreatureEvent::BecameTarget,
+        ),
+        (
+            "If a creature you control dealing combat damage to a player causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+            ControlledCreatureEvent::DealsCombatDamageToPlayer,
+        ),
+    ] {
+        let def = parse_static_line(text).expect("expected DoubleTriggers static");
+        assert_eq!(
+            def.mode,
+            StaticMode::DoubleTriggers {
+                cause: TriggerCause::ControlledCreature { event }
+            },
+            "{text}"
+        );
+    }
+}
+
+/// CR 603.2d + CR 119.3 + CR 121.1 + CR 116.2b: a doubler whose cause is a
+/// player's action or turning a permanent face up keeps that cause, instead of
+/// the unrestricted `Any` (Dr. Beverly Crusher, Krang, the All-Powerful,
+/// Panoptic Projektor).
+#[test]
+fn player_action_and_face_up_doubler_causes() {
+    for (text, cause) in [
+        (
+            "If you gaining life causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+            TriggerCause::PlayerAction {
+                player: PlayerRelation::Controller,
+                action: PlayerCauseAction::GainedLife,
+            },
+        ),
+        (
+            "If a player drawing a card causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+            TriggerCause::PlayerAction {
+                player: PlayerRelation::All,
+                action: PlayerCauseAction::DrewCard,
+            },
+        ),
+        (
+            "If turning a face-down permanent face up causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+            TriggerCause::TurnedFaceUp,
+        ),
+    ] {
+        let def = parse_static_line(text).expect("expected DoubleTriggers static");
+        assert_eq!(def.mode, StaticMode::DoubleTriggers { cause }, "{text}");
+    }
+}
+
+/// CR 603.2d: a cause clause the parser can't type declines rather than
+/// becoming the unrestricted `Any` cause.
+#[test]
+fn untyped_doubler_cause_clause_declines() {
+    let text = "If a player sacrificing a permanent causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.";
+    assert!(
+        !matches!(
+            parse_static_line(text).map(|def| def.mode),
+            Some(StaticMode::DoubleTriggers { .. })
+        ),
+        "an untyped cause must not lower to a doubler"
+    );
+}
+
+/// CR 603.2d: "another permanent entering" (The Fish Brewer) excludes the
+/// doubler's own entering; "a permanent entering" (Yarok) does not.
+#[test]
+fn another_permanent_entering_doubler_cause_excludes_the_doubler() {
+    for (text, entrant) in [
+        (
+            "If another permanent entering the battlefield causes a triggered ability of a permanent you control to trigger, tap any number of Fish you control. That ability triggers an additional time for each Fish tapped this way.",
+            CausingObject::OtherThanDoubler,
+        ),
+        (
+            "If a permanent entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+            CausingObject::Any,
+        ),
+    ] {
+        let def = parse_static_line(text).expect("expected DoubleTriggers static");
+        assert_eq!(
+            def.mode,
+            StaticMode::DoubleTriggers {
+                cause: TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant,
+                }
+            },
+            "{text}"
+        );
+    }
+}
+
 #[test]
 fn hama_pashar_room_ability_doubler_static() {
     let def = parse_static_line("Room abilities of dungeons you own trigger an additional time.")
@@ -945,22 +1046,33 @@ fn echoes_of_eternity_colorless_disjunctive_doubler() {
         );
     };
     assert_eq!(filters.len(), 2, "expected two disjuncts, got {filters:?}");
-    let mut any_branch_is_another = false;
-    for branch in filters {
-        let TargetFilter::Typed(tf) = branch else {
-            panic!("expected Typed disjunct, got {branch:?}");
-        };
+    // CR 112.1: the "colorless spell" disjunct is scoped to the stack, so it
+    // never matches a colorless permanent (Echoes itself included).
+    let TargetFilter::And { filters: spell } = &filters[0] else {
+        panic!(
+            "the spell disjunct must be stack-scoped, got {:?}",
+            filters[0]
+        );
+    };
+    assert_eq!(spell[0], TargetFilter::StackSpell);
+    let TargetFilter::Typed(spell_tf) = &spell[1] else {
+        panic!(
+            "expected the spell's typed characteristics, got {:?}",
+            spell[1]
+        );
+    };
+    let TargetFilter::Typed(permanent_tf) = &filters[1] else {
+        panic!("expected Typed permanent disjunct, got {:?}", filters[1]);
+    };
+    for tf in [spell_tf, permanent_tf] {
         assert_eq!(
             tf.controller,
             Some(ControllerRef::You),
             "each disjunct must keep the shared `you control` scope, got {tf:?}"
         );
-        if tf.properties.contains(&FilterProp::Another) {
-            any_branch_is_another = true;
-        }
     }
     assert!(
-        any_branch_is_another,
+        permanent_tf.properties.contains(&FilterProp::Another),
         "the `another colorless permanent` branch must carry FilterProp::Another"
     );
 }
