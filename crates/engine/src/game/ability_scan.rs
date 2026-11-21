@@ -6327,7 +6327,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
             that_player: false,
         },
         StaticCondition::SourceExertedThisTurn => Axes::CONSERVATIVE,
-        StaticCondition::SourceHasDealtDamage => Axes {
+        StaticCondition::SourceHasDealtDamage { kind: _ } => Axes {
             event: false,
             sibling: SiblingReads::None,
             projected: true,
@@ -7631,6 +7631,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes<'_> 
         // and no runtime path reaches such a tree. See
         // `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        linked_exile_return: _,
         face_down_in_exile: _,
         granting_object: _,
         // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
