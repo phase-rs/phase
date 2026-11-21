@@ -73,6 +73,7 @@ fn dynamic_power_value(modification: &ContinuousModification) -> Option<&Quantit
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -6544,7 +6545,7 @@ fn static_hearth_elemental_cost_reduction_includes_adventures() {
     );
 }
 
-/// CR 601.2f + CR 301.5 + CR 611.3a: Glamdring — "Instant and
+/// CR 601.2f + CR 301.5 + CR 611.3a: Glamdring, Foe-hammer — "Instant and
 /// sorcery spells you cast cost {X} less to cast, where X is equipped
 /// creature's power." Unlike the self-spell "This spell costs {X} less ..."
 /// family above, this is a BOARD-WIDE reduction the Equipment grants to OTHER
@@ -6558,7 +6559,7 @@ fn static_glamdring_foe_hammer_cost_reduction_is_live_equipped_power() {
     let def = parse_static_line(
         "Instant and sorcery spells you cast cost {X} less to cast, where X is equipped creature's power.",
     )
-    .expect("Glamdring's cost reduction should parse");
+    .expect("Glamdring, Foe-hammer's cost reduction should parse");
     let StaticMode::ModifyCost {
         mode: CostModifyMode::Reduce,
         amount: ManaCost::Cost { generic: 1, .. },
