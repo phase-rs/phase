@@ -9,7 +9,7 @@ use crate::types::ability::{
     TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, ZoneChangeAnnouncement};
 use crate::types::identifiers::ObjectId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
@@ -208,6 +208,44 @@ pub fn resolve(
             ..
         }
     );
+    // CR 701.8a: two or more determined objects are one announced
+    // simultaneous destruction; stage the whole guarded population so a
+    // replacement pause cannot drop the unprocessed suffix or its completion.
+    let mut unique_targets: Vec<ObjectId> = Vec::new();
+    for target in destroyed_targets(state, ability) {
+        if let TargetRef::Object(obj_id) = target {
+            if !unique_targets.contains(&obj_id) {
+                unique_targets.push(obj_id);
+            }
+        }
+    }
+    if unique_targets.len() >= 2 {
+        let logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+            state,
+            &ZoneChangeAnnouncement::all(&unique_targets, Zone::Graveyard),
+        );
+        let requests = unique_targets
+            .iter()
+            .map(|&object_id| {
+                crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                    object_id,
+                    Zone::Graveyard,
+                    ability.source_id,
+                )
+            })
+            .collect();
+        let _ = zone_pipeline::deliver_staged_destroy_batch(
+            state,
+            requests,
+            logical_zone_change_group,
+            ability,
+            ability.source_id,
+            cant_regenerate,
+            events,
+        );
+        return Ok(());
+    }
+
     let instruction_start = destroy_group_start(state, ability, events.len());
     for target in destroyed_targets(state, ability) {
         if let TargetRef::Object(obj_id) = target {
@@ -387,6 +425,37 @@ pub fn resolve_all(
         })
         .copied()
         .collect();
+
+    // CR 701.8a: the whole guarded mass population is one announced
+    // simultaneous destruction. A pause must not lose the unprocessed suffix.
+    // CR 101.4 + CR 616.1: its replacement decisions are asked in APNAP order
+    // by the staged batch's scheduler (`zone_pipeline::drive_staged_approval`).
+    if matching.len() >= 2 {
+        let logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+            state,
+            &ZoneChangeAnnouncement::all(&matching, Zone::Graveyard),
+        );
+        let requests = matching
+            .iter()
+            .map(|&object_id| {
+                crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                    object_id,
+                    Zone::Graveyard,
+                    ability.source_id,
+                )
+            })
+            .collect();
+        let _ = zone_pipeline::deliver_staged_destroy_batch(
+            state,
+            requests,
+            logical_zone_change_group,
+            ability,
+            ability.source_id,
+            cant_regenerate,
+            events,
+        );
+        return Ok(());
+    }
 
     let instruction_start = destroy_group_start(state, ability, events.len());
     for &obj_id in &matching {

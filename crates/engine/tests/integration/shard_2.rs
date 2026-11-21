@@ -5,6 +5,8 @@
 //! hold modules from this range. `no_top_level_test_binaries` enforces that each file here is
 //! registered in exactly one shard root.
 
+#![recursion_limit = "512"]
+
 pub mod support;
 
 mod anzrag_must_be_blocked;

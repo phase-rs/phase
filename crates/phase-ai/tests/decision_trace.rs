@@ -16,6 +16,10 @@
 //! we are exercising the exact formatter and registry call that runs inside
 //! `choose_action` — no reimplementation in the test.
 
+// The auto-trait proof for the im-backed game states an `AiSession` caches and
+// shares across threads exceeds the default limit of 128.
+#![recursion_limit = "256"]
+
 use std::sync::{Arc, Mutex};
 
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
