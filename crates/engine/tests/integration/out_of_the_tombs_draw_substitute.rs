@@ -10,7 +10,13 @@
 //! walked past the `ChangeZone` head as if it were a zone-redirect modifier of
 //! the draw, so only the loss ran. A proposed draw has no destination for a
 //! `ChangeZone` to redirect: when the draw is substituted away (CR 614.6), the
-//! whole chain is the substitute.
+//! whole chain is the substitute. Its continuation also bound the replacing
+//! enchantment itself as the move's object, so the "a creature card from your
+//! graveyard" pick found nothing; a replaced draw affects a player, not an
+//! object, so the pick now chooses from the graveyard (CR 608.2d).
+//!
+//! Forbidden Crypt carries the same shape ("return a card from your graveyard
+//! to your hand instead. If you can't, you lose the game") and is covered too.
 //!
 //! CR 614.6: the replaced draw never happens; the modified event happens
 //! instead. CR 614.11: a draw replacement applies even with an empty library.
@@ -38,7 +44,8 @@ const OUT_OF_THE_TOMBS: &str = "At the beginning of your upkeep, put two eon cou
 
 struct Board {
     runner: GameRunner,
-    tombs: ObjectId,
+    /// The permanent whose draw replacement is under test.
+    substitute: ObjectId,
     island: ObjectId,
     mists: ObjectId,
     /// P1's Soul Warden: an independent witness that a creature entered.
@@ -69,7 +76,7 @@ fn board(db: &CardDatabase, library: &[&str], graveyard: &[&str]) -> (Board, Vec
     (
         Board {
             runner,
-            tombs,
+            substitute: tombs,
             island,
             mists,
             warden,
@@ -78,12 +85,12 @@ fn board(db: &CardDatabase, library: &[&str], graveyard: &[&str]) -> (Board, Vec
     )
 }
 
-fn tombs_replaced_a_draw(events: &[GameEvent], tombs: ObjectId) -> bool {
+fn replaced_a_draw(events: &[GameEvent], source: ObjectId) -> bool {
     events.iter().any(|e| {
         matches!(
             e,
             GameEvent::ReplacementApplied { source_id, event_type }
-                if *source_id == tombs && event_type == "Draw"
+                if *source_id == source && event_type == "Draw"
         )
     })
 }
@@ -149,7 +156,7 @@ fn assert_returned_without_loss(
     warden_life_before: i32,
 ) {
     let runner = &board.runner;
-    assert!(tombs_replaced_a_draw(events, board.tombs));
+    assert!(replaced_a_draw(events, board.substitute));
     assert!(
         !drew_a_card(events),
         "CR 614.6: the replaced draw never happens"
@@ -213,7 +220,7 @@ fn empty_library_draw_returns_the_chosen_creature_instead() {
     let mut expected = vec![zellix, bear];
     expected.sort();
     assert_eq!(offered, expected, "both creature cards are eligible");
-    assert!(tombs_replaced_a_draw(&events, board.tombs));
+    assert!(replaced_a_draw(&events, board.substitute));
     assert!(!lost(&events), "no loss before the return is chosen");
 
     // The prompt lists Runeclaw Bear first; choose the other card.
@@ -284,13 +291,13 @@ fn empty_library_draw_without_a_creature_loses() {
 
     let events = cast_mists(&mut board);
 
-    assert!(tombs_replaced_a_draw(&events, board.tombs));
+    assert!(replaced_a_draw(&events, board.substitute));
     assert!(!drew_a_card(&events));
     assert!(lost(&events), "nothing could be returned, so P0 loses");
     assert!(events.iter().any(|e| matches!(
         e,
         GameEvent::EffectResolved { kind: engine::types::ability::EffectKind::LoseTheGame, source_id, .. }
-            if *source_id == board.tombs
+            if *source_id == board.substitute
     )));
     assert!(matches!(
         board.runner.state().waiting_for,
@@ -316,7 +323,7 @@ fn nonempty_library_draws_normally() {
 
     let events = cast_mists(&mut board);
 
-    assert!(!tombs_replaced_a_draw(&events, board.tombs));
+    assert!(!replaced_a_draw(&events, board.substitute));
     assert!(drew_a_card(&events));
     assert_eq!(hand_len(&board.runner), hand_before + 1);
     assert_eq!(board.runner.state().objects[&zellix].zone, Zone::Graveyard);
@@ -394,7 +401,7 @@ fn swans_prevention_draw_is_replaced_by_the_return() {
         GameEvent::ReplacementApplied { source_id, event_type }
             if *source_id == swans && event_type == "DamageDone"
     )));
-    assert!(tombs_replaced_a_draw(&events, tombs));
+    assert!(replaced_a_draw(&events, tombs));
     assert!(!drew_a_card(&events));
     assert_eq!(hand_len(&runner), hand_before);
     assert!(!lost(&events));
@@ -404,5 +411,137 @@ fn swans_prevention_draw_is_replaced_by_the_return() {
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
+    ));
+}
+
+/// Forbidden Crypt (MIR) Oracle text, verbatim from Scryfall / MTGJSON — the
+/// same draw-substitute shape: a graveyard pick with an "If you can't" loss.
+const FORBIDDEN_CRYPT: &str = "If you would draw a card, return a card from your graveyard to \
+     your hand instead. If you can't, you lose the game.\n\
+     If a card would be put into your graveyard from anywhere, exile that card instead.";
+
+/// P0 controls Forbidden Crypt and an Island, holds Reach Through Mists, and
+/// has one card in its library and `graveyard` in its graveyard.
+fn crypt_board(db: &CardDatabase, graveyard: &[&str]) -> (Board, ObjectId, Vec<ObjectId>) {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let crypt = scenario
+        .add_enchantment_from_oracle(P0, "Forbidden Crypt", FORBIDDEN_CRYPT)
+        .id();
+    let island = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+    let mists = scenario.add_real_card(P0, "Reach Through Mists", Zone::Hand, db);
+    let warden = scenario.add_real_card(P1, "Soul Warden", Zone::Battlefield, db);
+    let library_card = scenario.add_card_to_library_top(P0, "Library Card");
+    scenario.with_library_top(P1, &["P1 Card A", "P1 Card B"]);
+    let graveyard = graveyard
+        .iter()
+        .map(|name| scenario.add_real_card(P0, name, Zone::Graveyard, db))
+        .collect();
+    let board = Board {
+        runner: scenario.build(),
+        substitute: crypt,
+        island,
+        mists,
+        warden,
+    };
+    (board, library_card, graveyard)
+}
+
+/// CR 614.6 + CR 608.2d: Forbidden Crypt replaces every draw (its library is
+/// not empty here) with returning a card of P0's choice — any card, not only a
+/// creature — from the graveyard to hand.
+#[test]
+fn forbidden_crypt_returns_the_chosen_card_to_hand_instead() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let (mut board, library_card, graveyard) =
+        crypt_board(db, &["Island", "Zellix, Sanity Flayer"]);
+    let [island_card, zellix] = graveyard[..] else {
+        unreachable!()
+    };
+    let hand_before = hand_len(&board.runner) - 1;
+
+    let mut events = cast_mists(&mut board);
+
+    let WaitingFor::EffectZoneChoice {
+        player,
+        ref cards,
+        zone,
+        destination,
+        ..
+    } = board.runner.state().waiting_for
+    else {
+        panic!(
+            "Forbidden Crypt must ask which card returns, got {:?}",
+            board.runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0);
+    assert_eq!(zone, Zone::Graveyard);
+    assert_eq!(destination, Some(Zone::Hand));
+    let mut offered = cards.clone();
+    offered.sort();
+    let mut expected = vec![island_card, zellix];
+    expected.sort();
+    assert_eq!(offered, expected, "any card in the graveyard is eligible");
+
+    events.extend(
+        board
+            .runner
+            .act(GameAction::SelectCards {
+                cards: vec![island_card],
+            })
+            .expect("P0 chooses the Island card")
+            .events,
+    );
+    settle(&mut board.runner, &mut events);
+
+    let state = board.runner.state();
+    assert!(replaced_a_draw(&events, board.substitute));
+    assert!(
+        !drew_a_card(&events),
+        "CR 614.6: the replaced draw never happens"
+    );
+    assert!(!lost(&events), "a card was returned, so P0 does not lose");
+    assert_eq!(state.objects[&island_card].zone, Zone::Hand);
+    assert_eq!(state.objects[&zellix].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&library_card].zone, Zone::Library);
+    assert_eq!(hand_len(&board.runner), hand_before + 1);
+    assert_eq!(
+        state.objects[&board.mists].zone,
+        Zone::Exile,
+        "Forbidden Crypt's second ability exiles the resolved instant"
+    );
+    assert!(state.stack.is_empty());
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+}
+
+/// "If you can't, you lose the game": an empty graveyard leaves nothing to
+/// return, so the replaced draw costs P0 the game even with a library.
+#[test]
+fn forbidden_crypt_with_an_empty_graveyard_loses() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let (mut board, library_card, _) = crypt_board(db, &[]);
+
+    let events = cast_mists(&mut board);
+
+    assert!(replaced_a_draw(&events, board.substitute));
+    assert!(!drew_a_card(&events));
+    assert!(lost(&events), "nothing could be returned, so P0 loses");
+    // CR 800.4a: P0's cards leave the game with it, so check the library
+    // card was never drawn rather than where elimination left it.
+    assert!(!events.iter().any(|e| matches!(
+        e,
+        GameEvent::ZoneChanged { object_id, to: Zone::Hand, .. } if *object_id == library_card
+    )));
+    assert!(matches!(
+        board.runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(winner) } if winner == P1
     ));
 }
