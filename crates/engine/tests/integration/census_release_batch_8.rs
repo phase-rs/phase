@@ -414,7 +414,7 @@ fn fetch_quest_puts_one_milled_creature_enchantment_or_land_onto_the_battlefield
     assert_eq!(
         zone_of(&r, familiar),
         Zone::Exile,
-        "the adventure card is exiled on an adventure (CR 715.4)"
+        "the adventure card is exiled on an adventure (CR 715.3d)"
     );
 }
 
