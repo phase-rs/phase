@@ -51,7 +51,30 @@ function createCard(name: string, zone: "Hand" | "Battlefield"): number {
   return matches[0];
 }
 
-it.each(["legacy", "pinned"] as const)("restores a %s pending equip after saving a trusted checkpoint", async (shape) => {
+it("refuses the pre-pin writer's pending Equip before replacing the installed game", async () => {
+  // Unmodified export_game_state_json() from 7e2a53879, after Lightning Greaves'
+  // public Equip targeted Grizzly Bears and before either player passed priority.
+  const fixture = await readFile(resolve(__dirname, "legacyPendingEquip.json.gz"));
+  const legacy = JSON.parse(gunzipSync(fixture).toString("utf8")) as TrustedGameStateEnvelope;
+  const [greaves, bears] = legacy.state.battlefield;
+  expect(legacy.state.objects[greaves].name).toBe("Lightning Greaves");
+  expect(legacy.state.objects[bears].name).toBe("Grizzly Bears");
+  expect(legacy.state.stack[0].kind).toEqual({ type: "KeywordAction", data: { action: {
+    type: "Equip", data: { equipment_id: greaves, target_creature_id: bears },
+  } } });
+  await saveResumableGameStrict("legacy", legacy);
+  const saved = await loadGameStrict("legacy");
+  if (!saved) throw new Error("Expected the IndexedDB save");
+
+  initialize_game(null, 13, null, null, 2, 0);
+  const installed = snapshot();
+  await expect(adapter.restoreState(saved)).rejects.toContain(
+    "unsupported stack object: pending Equip is missing the Equipment or target creature incarnation",
+  );
+  expect(snapshot()).toEqual(installed);
+}, 60_000);
+
+it("restores a pinned pending Equip from a trusted checkpoint and attaches its Equipment", async () => {
   initialize_game(null, 7, null, null, 2, 0);
   act({ type: "Debug", data: { type: "SetPhase", data: { phase: "PreCombatMain", active_player: 0 } } });
   const greaves = createCard("Lightning Greaves", "Battlefield");
@@ -60,25 +83,19 @@ it.each(["legacy", "pinned"] as const)("restores a %s pending equip after saving
   act({ type: "Debug", data: { type: "AddMana", data: { player_id: 0, mana: Array(7).fill("Colorless") } } });
   act({ type: "Equip", data: { equipment_id: greaves, target_id: bears } });
 
-  const imported = snapshot();
-  expect(imported.state.stack).toHaveLength(1);
-  const kind = imported.state.stack[0].kind;
+  const announced = snapshot();
+  expect(announced.state.stack).toHaveLength(1);
+  const kind = announced.state.stack[0].kind;
   if (kind.type !== "KeywordAction" || kind.data.action.type !== "Equip") throw new Error("Expected pending Equip");
   const pins = kind.data.action.data;
   expect(pins).toEqual({
     equipment: { object_id: greaves, incarnation: expect.any(Number) },
     target_creature: { object_id: bears, incarnation: expect.any(Number) },
   });
-  if (shape === "legacy") {
-    // Only the historical save payload differs. Both games announced this equip through the engine.
-    Object.assign(kind.data.action, { data: { equipment_id: greaves, target_creature_id: bears } });
-  }
-  await adapter.restoreState(imported);
-
   const checkpoint = await captureTrustedCheckpoint(adapter);
   if (!checkpoint) throw new Error("Expected the local engine's trusted checkpoint");
-  await saveResumableGameStrict(shape, checkpoint);
-  const saved = await loadGameStrict(shape);
+  await saveResumableGameStrict("pinned", checkpoint);
+  const saved = await loadGameStrict("pinned");
   if (!saved) throw new Error("Expected the IndexedDB save");
   clear_game_state();
   await adapter.restoreState(saved);
@@ -86,14 +103,14 @@ it.each(["legacy", "pinned"] as const)("restores a %s pending equip after saving
   const restored = snapshot().state;
   expect(restored.stack).toHaveLength(1);
   expect(restored.stack[0].kind).toEqual({ type: "KeywordAction", data: { action: {
-    type: "Equip", data: shape === "legacy" ? { equipment: greaves, target_creature: bears } : pins,
+    type: "Equip", data: pins,
   } } });
   // Not of This World needs a spell or ability that targets a permanent we control.
   const { actions } = get_legal_actions_js() as { actions: GameAction[] };
-  expect(actions.some((a) => a.type === "CastSpell" && Number(a.data.object_id) === counterspell)).toBe(shape === "pinned");
+  expect(actions.some((a) => a.type === "CastSpell" && Number(a.data.object_id) === counterspell)).toBe(true);
   act({ type: "PassPriority" });
   act({ type: "PassPriority" }, 1);
   const finished = snapshot().state;
   expect(finished.stack).toHaveLength(0);
-  expect(finished.objects[greaves].attached_to).toEqual(shape === "pinned" ? { type: "Object", data: bears } : null);
+  expect(finished.objects[greaves].attached_to).toEqual({ type: "Object", data: bears });
 }, 60_000);

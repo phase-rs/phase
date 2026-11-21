@@ -19,8 +19,11 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{EffectKind, KeywordAction, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, ShardChoice, StackEntryKind, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::game_state::{
+    CastPaymentMode, PersistedGameState, PersistedRestoreError, ShardChoice, StackEntryKind,
+    WaitingFor,
+};
+use engine::types::identifiers::{ObjectId, LEGACY_INCARNATION};
 use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -108,6 +111,69 @@ fn equip(runner: &mut GameRunner, equipment: ObjectId, target: ObjectId) -> Obje
         "the equip is on the stack"
     );
     runner.state().stack.back().expect("stack entry").id
+}
+
+#[test]
+fn persisted_equip_requires_both_incarnations_on_the_stack_and_in_resolution() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let greaves = scenario
+        .add_artifact_from_oracle(P0, "Lightning Greaves", LIGHTNING_GREAVES)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::Equip {
+            equipment_id: greaves,
+            target_id: bears,
+        })
+        .expect("the only legal target is selected");
+    assert_eq!(runner.state().stack.len(), 1);
+
+    for resolving in [false, true] {
+        for missing_source in [false, true] {
+            let mut state = runner.state().clone();
+            let mut entry = state.stack.pop_back().unwrap();
+            let StackEntryKind::KeywordAction {
+                action:
+                    KeywordAction::Equip {
+                        equipment,
+                        target_creature,
+                    },
+            } = &mut entry.kind
+            else {
+                panic!("expected the announced Equip")
+            };
+            assert_eq!(equipment.incarnation, state.objects[&greaves].incarnation);
+            assert_eq!(
+                target_creature.incarnation,
+                state.objects[&bears].incarnation
+            );
+            let missing = if missing_source {
+                equipment
+            } else {
+                target_creature
+            };
+            missing.incarnation = LEGACY_INCARNATION;
+            if resolving {
+                // Exercise the saved resolving slot independently of the live stack.
+                state.resolving_stack_entry = Some(entry);
+            } else {
+                state.stack.push_back(entry);
+            }
+            let error = PersistedGameState::capture(state)
+                .into_game_state()
+                .unwrap_err();
+            assert_eq!(
+                error,
+                PersistedRestoreError::UnsupportedStackObject(
+                    "pending Equip is missing the Equipment or target creature incarnation"
+                ),
+                "resolving={resolving}, missing_source={missing_source}"
+            );
+        }
+    }
 }
 
 fn cast(runner: &mut GameRunner, spell: ObjectId, targets: &[ObjectId]) -> ObjectId {
@@ -396,6 +462,15 @@ fn equip_then(change: EquipChange) -> EquipOutcome {
                 "reach guard: no zone change, so the pin still names the Bears"
             );
         }
+    }
+    if matches!(
+        change,
+        EquipChange::Flickered | EquipChange::EquipmentFlickered
+    ) {
+        let restored = PersistedGameState::capture(runner.state().clone())
+            .into_game_state()
+            .expect("a known pin still restores after the permanent leaves and returns");
+        assert_eq!(restored.stack, runner.state().stack);
     }
     assert_eq!(
         stack_ids(&runner),

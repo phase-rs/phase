@@ -1462,59 +1462,82 @@ mod tests {
     }
 
     #[test]
-    fn persisted_recovery_checkpoint_rejects_combat_damage_on_its_stack() {
-        let mut state = GameState::new_two_player(7);
-        let mut checkpoint_state = GameState::new_two_player(7);
-        checkpoint_state.waiting_for = WaitingFor::Priority {
-            player: PlayerId(0),
+    fn persisted_recovery_checkpoint_rejects_unsupported_stack_objects() {
+        use crate::types::ability::KeywordAction;
+        use crate::types::game_state::{
+            CombatDamageSubStep, PersistedRestoreError, StackEntry, StackEntryKind,
         };
-        state.waiting_for = WaitingFor::Priority {
-            player: PlayerId(0),
-        };
-        checkpoint_state
-            .stack
-            .push_back(crate::types::game_state::StackEntry {
-                id: crate::types::identifiers::ObjectId(1),
-                source_id: crate::types::identifiers::ObjectId(2),
-                controller: PlayerId(0),
-                kind: crate::types::game_state::StackEntryKind::CombatDamage {
-                    sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+        use crate::types::identifiers::{ObjectIncarnationRef, LEGACY_INCARNATION};
+
+        for (kind, reason) in [
+            (
+                StackEntryKind::CombatDamage {
+                    sub_step: CombatDamageSubStep::Regular,
                     assignments: Vec::new(),
                 },
-            });
-        state.payment_transaction = Some(Box::new(ResolutionPaymentTransaction {
-            wire_version: 1,
-            owner: PlayerId(0),
-            root: Box::new(crate::types::ability::ResolvedAbility::new(
-                crate::types::ability::Effect::NoOp,
-                vec![],
-                ObjectId(1),
-                PlayerId(0),
-            )),
-            transcript: Vec::new(),
-            base_waiting_for: WaitingFor::Priority {
+                "combat damage on the stack is not resolvable in this build",
+            ),
+            (
+                StackEntryKind::KeywordAction {
+                    action: KeywordAction::Equip {
+                        equipment: ObjectIncarnationRef::of(ObjectId(2), 0),
+                        target_creature: ObjectIncarnationRef::of(ObjectId(3), LEGACY_INCARNATION),
+                    },
+                },
+                "pending Equip is missing the Equipment or target creature incarnation",
+            ),
+        ] {
+            let mut state = GameState::new_two_player(7);
+            let mut checkpoint_state = GameState::new_two_player(7);
+            checkpoint_state.waiting_for = WaitingFor::Priority {
                 player: PlayerId(0),
-            },
-            resolving_trigger_context: None,
-            recovered: Some(Box::new(PaymentRecoveryCheckpoint {
-                state: Box::new(checkpoint_state),
-                events: Vec::new(),
-                log_entries: Vec::new(),
-                consumed: 0,
-            })),
-        }));
-        let restored = serde_json::from_value::<PersistedGameState>(
-            serde_json::to_value(PersistedGameState::capture(state))
-                .expect("the trusted shape serializes"),
-        )
-        .expect("the wire shape remains decodable");
-        let error = restored
-            .into_game_state()
-            .expect_err("restore must reject combat damage in the checkpoint");
-        assert!(
-            error.to_string().contains("combat damage"),
-            "unexpected error: {error}"
-        );
+            };
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+            checkpoint_state.stack.push_back(StackEntry {
+                id: ObjectId(1),
+                source_id: ObjectId(2),
+                controller: PlayerId(0),
+                kind,
+            });
+            state.payment_transaction = Some(Box::new(ResolutionPaymentTransaction {
+                wire_version: 1,
+                owner: PlayerId(0),
+                root: Box::new(crate::types::ability::ResolvedAbility::new(
+                    crate::types::ability::Effect::NoOp,
+                    vec![],
+                    ObjectId(1),
+                    PlayerId(0),
+                )),
+                transcript: Vec::new(),
+                base_waiting_for: WaitingFor::Priority {
+                    player: PlayerId(0),
+                },
+                resolving_trigger_context: None,
+                recovered: Some(Box::new(PaymentRecoveryCheckpoint {
+                    state: Box::new(checkpoint_state),
+                    events: Vec::new(),
+                    log_entries: Vec::new(),
+                    consumed: 0,
+                })),
+            }));
+            let restored = serde_json::from_value::<PersistedGameState>(
+                serde_json::to_value(PersistedGameState::capture(state))
+                    .expect("the trusted shape serializes"),
+            )
+            .expect("the wire shape remains decodable");
+            let error = restored
+                .into_game_state()
+                .expect_err("restore must reject the unsupported entry in the checkpoint");
+            assert_eq!(
+                error,
+                PersistedRestoreError::InvalidPaymentTransaction(format!(
+                    "recovery checkpoint: {}",
+                    PersistedRestoreError::UnsupportedStackObject(reason)
+                ))
+            );
+        }
     }
 
     #[test]

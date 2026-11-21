@@ -19268,18 +19268,30 @@ impl GameState {
         Ok(())
     }
 
-    /// Combat damage on the stack is serde-decodable but not resolvable in this
-    /// build; a persisted state carrying it is refused.
+    /// Validate entries that can still resolve. Historical stack entries in the
+    /// rules journal can be decoded without either Equip incarnation.
     fn refuse_unresolvable_persisted_stack(&self) -> Result<(), PersistedRestoreError> {
-        if self
-            .stack
-            .iter()
-            .chain(self.resolving_stack_entry.iter())
-            .any(|entry| matches!(entry.kind, StackEntryKind::CombatDamage { .. }))
-        {
-            return Err(PersistedRestoreError::UnsupportedStackObject(
-                "combat damage on the stack is not resolvable in this build",
-            ));
+        use super::identifiers::LEGACY_INCARNATION;
+
+        for entry in self.stack.iter().chain(&self.resolving_stack_entry) {
+            let reason = match &entry.kind {
+                StackEntryKind::CombatDamage { .. } => {
+                    "combat damage on the stack is not resolvable in this build"
+                }
+                StackEntryKind::KeywordAction {
+                    action:
+                        KeywordAction::Equip {
+                            equipment,
+                            target_creature,
+                        },
+                } if equipment.incarnation == LEGACY_INCARNATION
+                    || target_creature.incarnation == LEGACY_INCARNATION =>
+                {
+                    "pending Equip is missing the Equipment or target creature incarnation"
+                }
+                _ => continue,
+            };
+            return Err(PersistedRestoreError::UnsupportedStackObject(reason));
         }
         Ok(())
     }
@@ -19810,17 +19822,8 @@ impl PersistedGameState {
             .format_config
             .reject_unimplemented_range_of_influence()
             .map_err(PersistedRestoreError::UnsupportedFormat)?;
+        // Check pending work before terminal-rest recovery can consume it.
         state.refuse_unresolvable_persisted_stack()?;
-        // Decoding a type and admitting it as a PLAYABLE persisted game are
-        // separate contracts. `StackEntryKind::CombatDamage` is serde-decodable
-        // so later phases can round-trip it, but no phase before the pushing
-        // one can resolve its assignments — so a restored state carrying one
-        // has pending damage this build cannot deal. Admitting it would either
-        // crash resolution or silently drop that damage; both are worse than
-        // refusing the load. Rejected here, at the single chokepoint every
-        // production restore funnels through (WASM `prepare_restored_game_state`,
-        // `server-core`'s `from_persisted`, and offline tooling), rather than at
-        // each caller.
         let recovered_terminal_rest =
             crate::game::engine::recover_terminal_resolution_rest_on_restore(&mut state)?;
         // Priority-time recovery gets first chance to retire the exact terminal

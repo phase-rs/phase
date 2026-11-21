@@ -2483,7 +2483,7 @@ export interface ResolvedAbility {
 
 // ── Stack ────────────────────────────────────────────────────────────────
 
-/** A bare id preserves the unknown incarnation of an equip imported from a legacy save. */
+/** A legacy journal entry may retain a bare id. Restoring a pending Equip requires both pins. */
 type EquipPin = ObjectIncarnationRef | ObjectId;
 
 export type KeywordAction =

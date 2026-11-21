@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "KeywordAction::Equip pins the Equipment and targeted creature at activation (equipment and target_creature replace the bare equipment_id and target_creature_id). This preserves object identity across zone changes for targeting, protection and attachment. An unknown incarnation from a legacy save is written as a bare id so it survives browser persistence and cannot identify a current object."
+  "reason": "KeywordAction::Equip pins the Equipment and targeted creature at activation (equipment and target_creature replace the bare equipment_id and target_creature_id). This preserves object identity across zone changes for targeting, protection and attachment. Restore refuses a pending Equip when either incarnation is unknown. Historical Equip entries retain unknown incarnations as bare ids across browser saves."
 }

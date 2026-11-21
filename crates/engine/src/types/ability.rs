@@ -2630,11 +2630,10 @@ pub enum KeywordAction {
         /// CR 702.6a + CR 601.2c + CR 400.7: the creature chosen as the target,
         /// pinned to the incarnation it had when it was chosen. A creature that
         /// leaves the battlefield, even one that returns, is a new object, so
-        /// the pin no longer names it (CR 115.9b, CR 608.2b). A payload saved
-        /// before the pin existed (`target_creature_id`, a bare id) decodes
-        /// with `LEGACY_INCARNATION`, which names no live object: such an equip
-        /// does not resolve, and no "that targets" reader counts its target
-        /// (fail-closed).
+        /// the pin no longer names it (CR 115.9b, CR 608.2b). A legacy bare id
+        /// decodes to `LEGACY_INCARNATION` in either field. Checked restore
+        /// refuses a pending Equip with either incarnation unknown. Completed
+        /// actions may retain these ids in the rules journal.
         #[serde(alias = "target_creature_id", serialize_with = "serialize_equip_pin")]
         target_creature: ObjectIncarnationRef,
     },
@@ -2661,8 +2660,8 @@ pub enum KeywordAction {
     },
 }
 
-// A legacy id carries no incarnation. Keep it bare across browser checkpoint
-// saves, where JSON.parse would round the u64::MAX sentinel past the u64 range.
+// Keep historical Equip ids bare when re-exporting a checkpoint. JavaScript
+// would round the u64::MAX sentinel past the u64 range.
 fn serialize_equip_pin<S: Serializer>(
     pin: &ObjectIncarnationRef,
     serializer: S,
