@@ -14759,6 +14759,125 @@ fn split_multi_target_player_chain(
     (per_target, tail)
 }
 
+/// CR 608.2e: Resolve each coordinated action for the announced population
+/// before advancing to the next action. Park that next action with its intact
+/// population whenever a choice or replacement suspends the current action.
+#[inline(never)]
+fn resolve_coordinated_target_player_action(
+    state: &mut GameState,
+    announcement: &ResolvedAbility,
+    chosen_players: &[PlayerId],
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    child_stack_start: ChildStackDepth,
+) -> Result<ResolutionProgress, EffectError> {
+    let mut action = Box::new(announcement.clone());
+    let mut tail = action.sub_ability.take();
+    let target = effect_target_filter(&announcement.effect)
+        .expect("coordinated action has a player announcement");
+    if matches!(action.effect, Effect::TargetOnly { .. }) {
+        action = tail.take().expect("announcement has a coordinated action");
+        tail = action.sub_ability.take();
+    }
+    if let Some(next) = tail.as_mut().filter(|next| {
+        next.sub_link == SubAbilityLink::ContinuationStep && node_references_scoped_player(next)
+    }) {
+        let mut resume = Box::new(announcement.clone());
+        resume.effect = Effect::TargetOnly {
+            target: target.clone(),
+        };
+        resume.sub_ability = Some(next.clone());
+        tail = Some(resume);
+    }
+    action.multi_target = None;
+    action.set_unpinned_targets(Vec::new());
+
+    let players: Vec<_> = crate::game::players::apnap_order(state)
+        .into_iter()
+        .filter(|player| chosen_players.contains(player))
+        .collect();
+    if should_collect_player_scope_sacrifice_choices(&action) {
+        return start_player_scope_sacrifice_choices(
+            state,
+            &action,
+            announcement.controller,
+            &players,
+            tail,
+            events,
+            depth,
+        );
+    }
+
+    action.multi_target.clone_from(&announcement.multi_target);
+    let progress = if scoped_discard::should_collect_player_scope_choices(&action) {
+        scoped_discard::start_player_scope_choices(
+            state,
+            &action,
+            announcement.controller,
+            &players,
+            events,
+            depth,
+        )?
+    } else {
+        action.multi_target = None;
+        let seats: Vec<_> = players
+            .iter()
+            .map(|&player| {
+                let mut bound = action.clone();
+                bound.set_scoped_player_recursive(player);
+                bound.set_unpinned_targets(vec![TargetRef::Player(player)]);
+                (player, *bound)
+            })
+            .collect();
+        if let Some(dealer) = draw::plan_coordinated_draw(state, &seats) {
+            let before = events.len();
+            match draw::start_simultaneous_draw(state, dealer, events) {
+                draw::SimultaneousDraw::Parked => {
+                    if let Some(tail) = tail {
+                        state
+                            .insert_ability_continuation_parent_at_child_boundary(
+                                PendingContinuation::new(tail, state),
+                                child_stack_start,
+                            )
+                            .expect("dealer's frames sit above the tail's boundary");
+                    }
+                    return Ok(ResolutionProgress::Waiting);
+                }
+                draw::SimultaneousDraw::Completed => {
+                    for _ in &players {
+                        events.push(GameEvent::EffectResolved {
+                            kind: EffectKind::from(&action.effect),
+                            source_id: action.source_id,
+                            subject: None,
+                        });
+                    }
+                    record_player_actions_performed(state, &events[before..]);
+                }
+            }
+        } else {
+            let mut seats = seats.into_iter();
+            while let Some((_, seat)) = seats.next() {
+                let progress = resolve_ability_chain_step(state, &seat, events, depth + 1)?;
+                if progress.is_pending() {
+                    for (_, mut remaining) in seats.rev() {
+                        remaining.sub_ability = tail;
+                        tail = Some(Box::new(remaining));
+                    }
+                    append_to_pending_continuation(state, tail);
+                    return Ok(progress);
+                }
+            }
+        }
+        ResolutionProgress::Complete
+    };
+    if progress.is_pending() {
+        append_to_pending_continuation(state, tail);
+    } else if let Some(tail) = tail {
+        return resolve_ability_chain_step(state, &tail, events, depth + 1);
+    }
+    Ok(progress)
+}
+
 /// CR 608.2c: Retain `ContinuationStep` clauses under the current "each target
 /// player" subject, but detach the first independently sequenced instruction.
 fn detach_after_multi_target_player_local_chain(
@@ -23402,13 +23521,11 @@ fn player_scope_sacrifice_step(
                     && crate::game::filter::matches_target_filter(state, *id, target, &ctx)
                     // CR 608.2d: same candidate legality as the ordinary
                     // sacrifice-effect pool — a permanent its chooser is
-                    // barred from sacrificing is not offered.
-                    && !crate::game::static_abilities::object_cant_be_sacrificed_by(
-                        state, player, *id,
-                    )
-                    && !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
-                        state, &scoped, *id, player,
-                    )
+                    // barred from sacrificing is not offered. CR 109.5: the
+                    // template keeps the ability's real controller, so the
+                    // forced-action and triggered-cause bars read who is
+                    // forcing the sacrifice.
+                    && sacrifice::can_sacrifice_for_ability(state, template, *id, player)
             })
         })
         .collect();
@@ -26172,6 +26289,21 @@ fn resolve_chain_body(
                 TargetRef::Object(_) => None,
             })
             .collect();
+        if !chosen_players.is_empty()
+            && ability.sub_ability.as_ref().is_some_and(|next| {
+                next.sub_link == SubAbilityLink::ContinuationStep
+                    && node_references_scoped_player(next)
+            })
+        {
+            return resolve_coordinated_target_player_action(
+                state,
+                ability,
+                &chosen_players,
+                events,
+                depth,
+                child_stack_start,
+            );
+        }
         if chosen_players.len() != 1 {
             // A sentence boundary begins an instruction that is not qualified
             // by the preceding "each target player" subject. Keep that tail

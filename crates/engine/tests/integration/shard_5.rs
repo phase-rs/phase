@@ -446,6 +446,7 @@ mod wickerfolk_indomitable_composite_gerund_cost;
 mod wilhelt_decayed_intervening_if_5937;
 mod will_cycle_delivery;
 mod will_cycle_duration_seam_b1;
+mod will_of_the_abzan_target_opponents_each;
 mod willie_lumpkin_cant_attack;
 mod windfall_greatest_discard_aggregate;
 mod winding_way_reveal_partition_2931;
