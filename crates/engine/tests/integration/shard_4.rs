@@ -559,6 +559,7 @@ mod predators_hour_quoted_duration;
 mod prepared_effect_condition_exact_source;
 mod prepared_linked_copy_sba;
 mod prepared_state_serde;
+mod priest_of_forgotten_gods_each_target_player;
 mod priest_of_the_crossing_died_under_control;
 mod printed_ability_order;
 mod printed_alternative_cost_from_exile;

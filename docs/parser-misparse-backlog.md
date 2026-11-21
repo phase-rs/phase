@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4460
-- **Total card appearances across root causes:** 4492 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4458
+- **Total card appearances across root causes:** 4490 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > **Staleness warning.** This list is pruned one card at a time and has not been
 > regenerated from current parser state. A measurement at `bd1f78ed0` (#8907)
@@ -60,7 +60,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 | 2 | Dropped intervening-if / gating condition (condition: null) | 558 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 395 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 377 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
-| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 322 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
+| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 321 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 223 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 204 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 207 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
@@ -71,7 +71,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 | 13 | State/game-state condition → StaticCondition::Unrecognized | 125 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
 | 14 | Granted/quoted ability or continuous modification dropped | 92 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
 | 15 | Multi-target / 'up to N' optionality or count dropped | 79 | parser/oracle_effect/lower.rs `apply_optional_target_fixup` + `imperative.rs` Attach host capture — preserve MultiTargetSpec / optional_targeting; lift the detector exclusions (DealDamage, Transform, Any-target, Token, Counter, MoveCounters, BecomeCopy, CopySpell) as each resolver grows a declined-target no-op |
-| 16 | Keyword payload / multiplicity / mis-tokenization | 81 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
+| 16 | Keyword payload / multiplicity / mis-tokenization | 80 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
 | 17 | Copy 'except' / additional-modification clause dropped | 80 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
 | 18 | Subtype / type-change modification malformed or dropped | 78 | oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set |
 | 20 | Damage subject/recipient set incomplete | 70 | Effect::DealDamage handling — capture all damage subjects/recipients per CR 120 |
@@ -80,13 +80,13 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 | 23 | Effect modeled with structurally wrong variant / ability class | 49 | add-engine-effect: select the correct Effect/ability variant for the clause class |
 | 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 35 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
 | 25 | Wrong / dropped effect duration | 19 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
-| 26 | Delayed / future-phase trigger flattened to immediate effect | 20 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
+| 26 | Delayed / future-phase trigger flattened to immediate effect | 19 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
 | 27 | Cross-target group / shared-quality constraint dropped | 12 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
 | 28 | Trigger/activation timing or ordinal restriction dropped | 11 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2368/4492 ≈ 52.7% of all misparse appearances; the top 10 cover 3341/4492 ≈ 74.4%. Fix these first. Row order is the original ranking; row 7 has since dropped below row 8 (204 and 207 cards) as cards were fixed.
+> The top **5** root causes cover 2367/4490 ≈ 52.7% of all misparse appearances; the top 10 cover 3339/4490 ≈ 74.4%. Fix these first. Row order is the original ranking; row 7 has since dropped below row 8 (204 and 207 cards) as cards were fixed.
 
 ## Full card lists per root cause
 
@@ -2178,7 +2178,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 </details>
 
-### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (322 cards)
+### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (321 cards)
 
 **Signature.** Effect quantity (count/amount/P-T) parses as Fixed(1)/constant instead of a dynamic QuantityExpr::Ref over a 'for each X' / 'that many' / 'equal to' clause; the multiplier is dropped.
 
@@ -2195,7 +2195,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Agrus Kos, Eternal Soldier
 - Aim for the Head
 - Ajani's Presence
-- Algorithmic Ferocity
 - Alien Invasion
 - Alisaie Leveilleur
 - Altered Ego
@@ -4204,7 +4203,7 @@ are outside the detector's class.
 
 </details>
 
-### 16. Keyword payload / multiplicity / mis-tokenization  (81 cards)
+### 16. Keyword payload / multiplicity / mis-tokenization  (80 cards)
 
 **Signature.** A keyword cost or discriminant is wrong (ward life cost as {0}, devour type hardcoded, multi-kicker merged, protection color stored on CardType axis), a keyword is deduped, or a flavor ability-word label is read as a keyword.
 
@@ -4231,7 +4230,6 @@ are outside the detector's class.
 - Benevolent Bodyguard
 - Bold Biochemist
 - Brineborn Cutthroat
-- Burden of Proof
 - Cactus Preserve
 - Caprichrome
 - Cartel Aristocrat
@@ -4822,7 +4820,7 @@ are outside the detector's class.
 
 </details>
 
-### 26. Delayed / future-phase trigger flattened to immediate effect  (20 cards)
+### 26. Delayed / future-phase trigger flattened to immediate effect  (19 cards)
 
 **Signature.** An effect that should be a delayed triggered ability (next combat/end/draw step) is emitted as an immediate effect with no CreateDelayedTrigger wrapper (CR 603.7).
 
@@ -4849,7 +4847,6 @@ are outside the detector's class.
 - Nafs Asp
 - Okoye, Mighty and Adored
 - Perilous Iteration
-- Phytotitan
 
 </details>
 
