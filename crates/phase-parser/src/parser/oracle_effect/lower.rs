@@ -10702,6 +10702,7 @@ pub(super) fn try_parse_distribute_damage(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::DealDamage {
             amount,
             target,
@@ -10792,6 +10793,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::PutCounter {
             counter_type,
             count: count_expr,
@@ -10856,6 +10858,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::PreventDamage {
             amount,
             amount_dynamic,
@@ -10985,6 +10988,7 @@ pub(super) fn try_parse_bidirectional_prevent(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: to_effect,
         duration: None,
         sub_ability: Some(Box::new(by_ability)),

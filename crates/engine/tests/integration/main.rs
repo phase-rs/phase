@@ -47,6 +47,7 @@ mod bracket_fixture_signals;
 mod bracket_lists_data;
 mod bracket_tier_reconciliation;
 mod bring_to_light_free_cast_2880;
+mod bringer_of_the_last_gift;
 mod call_for_aid_phase2;
 mod candidate_pairs;
 mod cartographers_hawk_relative_damage_recipient;
