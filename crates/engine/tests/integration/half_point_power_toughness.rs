@@ -17,7 +17,9 @@
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{HalfFraction, HalfMagnitude, HalfSigned, PtValue, TargetRef};
+use engine::types::ability::{
+    EffectKind, HalfFraction, HalfMagnitude, HalfSigned, PtValue, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -953,4 +955,237 @@ fn skulk_compares_exact_half_point_power() {
     runner
         .declare_blockers(&[(girl, nightmare)])
         .expect("½ power is not greater than 1: Little Girl can block");
+}
+
+/// Every exact `DamagePrevented` amount in `events`, by recipient.
+fn prevented_exact(events: &[GameEvent]) -> Vec<(TargetRef, HalfMagnitude)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamagePrevented {
+                target,
+                amount,
+                amount_fraction,
+                ..
+            } => Some((
+                target.clone(),
+                HalfMagnitude::from_whole_and_fraction(*amount, *amount_fraction),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Awe Strike ({W}): "The next time target creature would deal damage this
+/// turn, prevent that damage. You gain life equal to the damage prevented this
+/// way." P0 casts it on its own `attacker_name`, which then attacks P1
+/// unblocked. Returns P0's and P1's exact life and the prevention events.
+fn awe_strike_on_unblocked_attacker(
+    attacker_name: &str,
+) -> Option<(HalfSigned, HalfSigned, Vec<(TargetRef, HalfMagnitude)>)> {
+    let db = load_db()?;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_real_card(P0, attacker_name, Zone::Battlefield, db);
+    let awe = scenario.add_real_card(P0, "Awe Strike", Zone::Hand, db);
+    let plains = scenario.add_basic_land(P0, ManaColor::White);
+    let mut runner = scenario.build();
+
+    runner.cast(awe).target_object(attacker).resolve();
+    assert!(
+        runner.state().objects[&plains].tapped,
+        "Awe Strike's {{W}} was paid"
+    );
+    assert_eq!(runner.state().objects[&awe].zone, Zone::Graveyard);
+
+    let outcome = attack_into(&mut runner, attacker, &[]);
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    Some((
+        exact_life(&runner, P0),
+        exact_life(&runner, P1),
+        prevented_exact(outcome.events()),
+    ))
+}
+
+/// Round-4 F2 (CR 615.5, combat batch): Awe Strike on an attacking, unblocked
+/// Vile Bile prevents its 2½ combat damage, and the rider gains exactly 2½ —
+/// not the whole part, 2. The rider resolves after the CR 510.2 batch from the
+/// aggregate prevention publisher.
+#[test]
+fn awe_strike_gains_the_exact_two_and_a_half_it_prevented_from_vile_bile() {
+    let Some((p0, p1, prevented)) = awe_strike_on_unblocked_attacker("Vile Bile") else {
+        return;
+    };
+    assert_eq!(
+        prevented,
+        vec![(TargetRef::Player(P1), HalfMagnitude::from_halves(5))],
+        "Awe Strike prevented all 2½ damage to P1"
+    );
+    assert_eq!(p1, HalfSigned::from_whole(20), "P1 was dealt nothing");
+    assert_eq!(
+        p0,
+        HalfSigned::from_halves(45),
+        "you gain life equal to the damage prevented: 20 + 2½ = 22½"
+    );
+}
+
+/// Round-4 F2 (CR 615.5): a half-only prevention still owns its ½. Awe Strike
+/// on Little Girl (½/½) prevents ½ and gains exactly ½.
+#[test]
+fn awe_strike_gains_the_exact_half_it_prevented_from_little_girl() {
+    let Some((p0, p1, prevented)) = awe_strike_on_unblocked_attacker("Little Girl") else {
+        return;
+    };
+    assert_eq!(
+        prevented,
+        vec![(TargetRef::Player(P1), HalfMagnitude::HALF)],
+        "Awe Strike prevented Little Girl's ½ damage to P1"
+    );
+    assert_eq!(p1, HalfSigned::from_whole(20));
+    assert_eq!(p0, HalfSigned::from_halves(41), "20 + ½ = 20½");
+}
+
+/// Round-4 F2 (CR 615.5, single noncombat event): the per-event prevention
+/// path latches the same exact amount. Awe Strike on Vile Bile, then Bite Down
+/// ({1}{G}: "Target creature you control deals damage equal to its power to
+/// target creature or planeswalker you don't control.") — Vile Bile's 2½ is
+/// prevented and Awe Strike's controller gains exactly 2½.
+#[test]
+fn awe_strike_gains_the_exact_half_points_prevented_from_a_single_noncombat_event() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bile = scenario.add_real_card(P0, "Vile Bile", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let awe = scenario.add_real_card(P0, "Awe Strike", Zone::Hand, db);
+    let bite = scenario.add_real_card(P0, "Bite Down", Zone::Hand, db);
+    scenario.add_basic_land(P0, ManaColor::White);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let mut runner = scenario.build();
+
+    runner.cast(awe).target_object(bile).resolve();
+    let outcome = runner.cast(bite).target_objects(&[bile, bears]).resolve();
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        prevented_exact(outcome.events()),
+        vec![(TargetRef::Object(bears), HalfMagnitude::from_halves(5))],
+        "Vile Bile's 2½ to the Bears was prevented"
+    );
+    assert_eq!(
+        runner.state().objects[&bears].exact_damage_marked(),
+        HalfMagnitude::ZERO,
+        "the Bears were dealt nothing"
+    );
+    assert_eq!(
+        exact_life(&runner, P0),
+        HalfSigned::from_halves(45),
+        "20 + 2½ = 22½"
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// Round-4 F3 (CR 615.13): a prevention of only ½ damage is a prevention.
+/// Little Girl attacks unblocked; P1 flashes in Selfless Squire ("When this
+/// creature enters, prevent all damage that would be dealt to you this turn.
+/// Whenever damage that would be dealt to you is prevented, put that many
+/// +1/+1 counters on this creature."). The ½ is prevented, publishes one
+/// `(0, Half)` prevention event, and the Squire's trigger fires exactly once.
+#[test]
+fn a_half_only_prevention_reaches_selfless_squires_trigger() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let girl = scenario.add_real_card(P0, "Little Girl", Zone::Battlefield, db);
+    let squire = scenario.add_real_card(P1, "Selfless Squire", Zone::Hand, db);
+    for _ in 0..4 {
+        scenario.add_basic_land(P1, ManaColor::White);
+    }
+    let mut runner = scenario.build();
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(girl, AttackTarget::Player(P1))])
+        .expect("Little Girl attacks");
+    // CR 615.4: P1 flashes the Squire in before damage, in its first priority
+    // window after attackers are declared.
+    for _ in 0..8 {
+        if runner.state().priority_player == P1
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass to P1's priority");
+    }
+    assert_eq!(runner.state().priority_player, P1, "P1 holds priority");
+    runner.cast(squire).resolve();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&squire].zone,
+        Zone::Battlefield,
+        "the flashed Squire entered and its shield is up"
+    );
+
+    pass_to_declare_blockers(&mut runner);
+    if runner.waiting_for_kind() == "DeclareBlockers" {
+        runner.declare_blockers(&[]).expect("no blockers");
+    }
+    let outcome = runner.combat_damage();
+
+    let prevented: Vec<_> = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamagePrevented {
+                target,
+                amount,
+                amount_fraction,
+                ..
+            } => Some((target.clone(), *amount, *amount_fraction)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        prevented,
+        vec![(TargetRef::Player(P1), 0, HalfFraction::Half)],
+        "the ½ prevented for P1 publishes as (0, Half)"
+    );
+    assert_eq!(exact_life(&runner, P1), HalfSigned::from_whole(20));
+    // The trigger went on the stack and resolved its "put that many +1/+1
+    // counters" instruction once during the combat-damage step.
+    let squire_resolutions = outcome
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::PutCounter,
+                    source_id,
+                    ..
+                } if *source_id == squire
+            )
+        })
+        .count();
+    assert_eq!(
+        squire_resolutions, 1,
+        "the Squire's prevention trigger fires exactly once"
+    );
+    assert!(runner.state().stack.is_empty());
 }
