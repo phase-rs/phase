@@ -609,16 +609,7 @@ pub fn apply_resolved_stack_entry_finalize(
         );
     }
     if let Some(occurrence) = command.resulting_cast_occurrence {
-        let matching_record = usize::try_from(occurrence.turn_journal_index)
-            .ok()
-            .and_then(|index| {
-                state
-                    .spells_cast_this_turn_by_player
-                    .get(&occurrence.caster)
-                    .and_then(|records| records.get(index))
-            })
-            .is_some_and(|record| record.spell_object_id == Some(command.object));
-        if !matching_record {
+        if !crate::game::ledger::cast_occurrence_is_current(state, occurrence, command.object) {
             return Err(
                 ResolvedStackEntryFinalizeReplayInvariantError::CastOccurrenceMismatch(
                     command.object,
@@ -1128,6 +1119,19 @@ pub(crate) fn effective_stack_ability<'a>(
         ability: None,
         is_pending: false,
     }
+}
+
+/// CR 608.2b + CR 608.2h: countered or fizzled spells restore their normal
+/// face before zone delivery. Preserve their stack face first, before the
+/// replacement pipeline can park the move. Successful resolutions capture
+/// at exit, then restore the face in `finish_spell_stack_exit`.
+pub(super) fn restore_alternative_spell_face_before_zone_delivery(
+    state: &mut GameState,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+) {
+    super::zones::capture_exit_lki(state, object_id, Vec::new());
+    restore_alternative_spell_normal_face(state, object_id, casting_variant);
 }
 
 pub(crate) fn restore_alternative_spell_normal_face(
@@ -2860,7 +2864,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                         Zone::Graveyard
                     };
                     if casting_variant.restores_front_face_after_stack_exit() {
-                        restore_alternative_spell_normal_face(state, entry.id, casting_variant);
+                        restore_alternative_spell_face_before_zone_delivery(
+                            state,
+                            entry.id,
+                            casting_variant,
+                        );
                     }
                     // CR 608.2n + CR 614.6: route the stack → graveyard/exile
                     // move through the pipeline so self-scoped `Moved` redirects
@@ -11971,10 +11979,9 @@ mod tests {
             use triggers::TriggerCollectionRequester::Ordinary;
 
             fn printing(set_code: &str) -> DisplayOnly<Option<SharedPrinting>> {
-                DisplayOnly::new(Some(SharedPrinting::new(CardPrinting {
-                    set_code: set_code.to_string(),
-                    collector_number: "1".to_string(),
-                })))
+                DisplayOnly::new(Some(SharedPrinting::new(CardPrinting::owner(
+                    set_code, "1",
+                ))))
             }
 
             /// A battlefield object carrying `printing`, and its public look-back.

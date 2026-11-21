@@ -602,11 +602,24 @@ pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
     discard_scheduled_units(state);
     // CR 724.1d + CR 511.3: if the turn ends during combat, all creatures are
     // removed from combat and the combat phase is over. Clear any active
-    // additional-combat attacker restriction (Last Night Together / Bumi) — the
-    // normal cleanup path via Phase::EndCombat or end_combat_phase_to_postcombat
-    // is skipped, so we must expire the restriction here.
+    // additional-combat attacker restriction (Last Night Together / Bumi) --
+    // the normal cleanup path via Phase::EndCombat or
+    // end_combat_phase_to_postcombat is skipped, so we must expire the
+    // restriction here even when the turn ends outside combat.
     state.current_combat_attacker_restriction = None;
     state.current_combat_attacker_restriction_source = None;
+    // CR 724.1d + CR 511.2/511.3: if the turn ends during a combat phase, the
+    // combat phase is over even though it is skipped, not completed -- run the
+    // same end-of-combat teardown the normal EndCombat transition uses, so
+    // "until end of combat" effects, replacements, and game restrictions
+    // (Champions of Minas Tirith's decline ban) expire instead of leaking
+    // into a later combat. Guard on the PHASE, not on combat presence:
+    // EndTheTurn already cleared `state.combat` before calling here. The
+    // teardown re-clears the attacker restriction and marks layers dirty
+    // (CR 611.3a: live static conditions observe the removal).
+    if state.phase.is_combat() {
+        complete_end_combat_teardown(state);
+    }
     enter_phase(state, Phase::Cleanup, events, None);
 }
 
@@ -638,6 +651,21 @@ fn complete_end_combat_teardown(state: &mut GameState) {
     state
         .pending_damage_replacements
         .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+    // CR 511.2: "this combat" game restrictions expire with every other
+    // combat-scoped effect (unit 3b: Champions of Minas Tirith's decline
+    // restriction is the first producer). One line covers both end-of-combat
+    // callers (the EndCombat step arm and `end_combat_phase_to_postcombat`)
+    // through this single teardown authority.
+    state.restrictions.retain(|r| {
+        use crate::types::ability::{GameRestriction, RestrictionExpiry};
+        match r {
+            GameRestriction::DamagePreventionDisabled { expiry, .. }
+            | GameRestriction::ProhibitActivity { expiry, .. }
+            | GameRestriction::CantEnterBattlefieldFrom { expiry, .. } => {
+                !matches!(expiry, RestrictionExpiry::EndOfCombat)
+            }
+        }
+    });
 }
 
 /// Removes, from every object's live `replacement_definitions`, each definition
@@ -2135,6 +2163,7 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.players_attacked_this_turn.clear();
     state.attacking_creatures_this_turn.clear();
     state.attacked_defenders_this_turn.clear();
+    state.attacked_players_directly_this_turn.clear();
     state.creature_attacked_defenders_this_turn.clear();
     state.steps_started_this_turn.clear();
     // CR 614.10 + CR 614.10a + CR 500.11: A turn-scoped combat skip that was
@@ -3654,7 +3683,12 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // refusal is inert — the stack does not grow, this returns `None`, and
     // cleanup advances exactly as it does today.
     let stack_before = state.stack.len();
-    if let Some(prompt) = super::triggers::drain_deferred_trigger_queue(state, events) {
+    // CR 603.2c: the drain's windows run on the action buffer; claim them.
+    if let Some(prompt) = super::triggers::drain_on_action_buffer(
+        state,
+        events,
+        super::triggers::drain_deferred_trigger_queue,
+    ) {
         return Some(prompt);
     }
     if state.stack.len() > stack_before {
@@ -4214,12 +4248,18 @@ fn process_phase_triggers(
         return (false, Some(prompt));
     }
     let (normal_pending, delayed_events) = step_entry_trigger_batch(state, events);
-    let outcome = super::triggers::process_collected_triggers_with_delayed_phase_events(
-        state,
-        normal_pending,
-        &delayed_events,
-        events_out,
-    );
+    // CR 603.2c: the batch dispatches its windows on the action buffer (the one
+    // `hold_turn_based_action_triggers` claims on), so their collected ranges are
+    // claimed and the post-action ordinary scan does not collect them again.
+    let outcome =
+        super::triggers::drain_on_action_buffer(state, events_out, |state, events_out| {
+            super::triggers::process_collected_triggers_with_delayed_phase_events(
+                state,
+                normal_pending,
+                &delayed_events,
+                events_out,
+            )
+        });
     // CR 117.3a + CR 117.5 + CR 603.3: reaching this point in a phase/step arm
     // IS the moment "a player would receive priority", so abilities already
     // waiting in `deferred_triggers` must be PUT ON THE STACK here, not merely
@@ -4266,7 +4306,11 @@ fn process_phase_triggers(
     // lose its effect by reaching this path.
     let prompt = match outcome.prompt {
         Some(prompt) => Some(prompt),
-        None => super::triggers::drain_deferred_trigger_queue(state, events_out),
+        None => super::triggers::drain_on_action_buffer(
+            state,
+            events_out,
+            super::triggers::drain_deferred_trigger_queue,
+        ),
     };
     (outcome.fired, prompt)
 }
@@ -4704,7 +4748,8 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             // resolve_combat_damage returns — too late without this pre-flush.
             super::layers::flush_layers(state);
             // CR 510.1 / CR 510.2: Combat damage assigned and dealt as a turn-based action.
-            // resolve_combat_damage may pause for interactive assignment (2+ blockers).
+            // resolve_combat_damage may pause for interactive assignment (2+ blockers)
+            // or for a CR 616.1 replacement-ordering choice (parked batch).
             if let Some(waiting) = combat_damage::resolve_combat_damage(state, events) {
                 state.waiting_for = waiting.clone();
                 return AutoAdvanceStep::waiting(waiting);

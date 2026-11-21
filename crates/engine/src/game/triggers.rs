@@ -239,15 +239,26 @@ pub enum ConsumedTriggerEventScope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TriggerCollectionRequester {
     Ordinary,
+    /// The combat batch itself: its ordinary-only claims fence off the generic
+    /// scan while it is parked, not the batch that will settle those events.
+    CombatDamageBatch,
     Delayed,
 }
 
 impl ConsumedTriggerEventScope {
     pub(crate) fn consumes(self, requester: TriggerCollectionRequester) -> bool {
         match (self, requester) {
-            (Self::AllCollectors, _)
+            (
+                Self::AllCollectors,
+                TriggerCollectionRequester::Ordinary
+                | TriggerCollectionRequester::CombatDamageBatch
+                | TriggerCollectionRequester::Delayed,
+            )
             | (Self::OrdinaryCollectorsOnly, TriggerCollectionRequester::Ordinary) => true,
-            (Self::OrdinaryCollectorsOnly, TriggerCollectionRequester::Delayed) => false,
+            (
+                Self::OrdinaryCollectorsOnly,
+                TriggerCollectionRequester::CombatDamageBatch | TriggerCollectionRequester::Delayed,
+            ) => false,
         }
     }
 }
@@ -1392,6 +1403,26 @@ pub(crate) fn claim_events_for_ordinary_collection(
         ResolvedTriggerCollection::ConsumeBeforePriority { occurrences },
     )
     .expect("an ordinary-collection claim must have a live journal cause");
+}
+
+/// CR 603.2 + CR 603.2c: run a deferred-trigger drain (or a batch dispatch) on
+/// the reducer action's own event buffer, then claim, for the ordinary
+/// collectors, every event it appended. A drain appends only inside its
+/// dispatch windows' ranges, and each window has already collected its range,
+/// so the post-action pipeline (and a live announcement's staging) must not
+/// collect those occurrences a second time.
+///
+/// `events` must be the whole action buffer: claims are occurrence identities
+/// in it (`trigger_event_occurrence`). A local buffer never goes through here.
+pub(crate) fn drain_on_action_buffer<R>(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    drain: impl FnOnce(&mut GameState, &mut Vec<GameEvent>) -> R,
+) -> R {
+    let start = events.len();
+    let produced = drain(state, events);
+    claim_events_for_ordinary_collection(state, events, start);
+    produced
 }
 
 /// Resolves, applies, and journals one non-empty trigger/LKI collection append.
@@ -6256,7 +6287,7 @@ fn apnap_rank(order: &[PlayerId], controller: PlayerId) -> usize {
         .unwrap_or(order.len())
 }
 
-fn trigger_apnap_rank(state: &GameState, controller: PlayerId) -> usize {
+pub(crate) fn trigger_apnap_rank(state: &GameState, controller: PlayerId) -> usize {
     if state.format_config.topology().has_shared_team_turns() {
         super::topology::apnap_team_rank(state, controller)
     } else {
@@ -10124,11 +10155,72 @@ pub(crate) fn process_triggers_observing(
 /// Collects one dispatched context's side effects into `deferred_triggers`: its
 /// target-lock events (`BecomesTarget`, `CrimeCommitted`) and the CR 603.2
 /// `AbilityTriggered` occurrence its push or removal emitted.
+///
+/// CR 603.2c: each target-lock span has exactly one owner. This window owns
+/// the span its dispatched context emits, including an in-window construction
+/// finisher's (`ConstructionSpanOwner::EnclosingWindow`). An action-seam
+/// finisher owns its own span through [`hold_construction_span`]; a synthetic
+/// dispatch's span (a dungeon room) is owned by the `ChooseDungeonRoom` arm's
+/// range collection. When this window runs on the reducer action's own buffer,
+/// the drain that ran it claims the range through [`drain_on_action_buffer`],
+/// so the post-action pipeline does not collect it again.
 fn collect_target_lock_side_effects(state: &mut GameState, events_out: &[GameEvent], from: usize) {
     if from >= events_out.len() {
         return;
     }
     collect_dispatch_side_effects_into_deferred(state, &events_out[from..]);
+}
+
+/// CR 601.2c + CR 603.3d + CR 700.13: which collector owns the target-lock span
+/// (`BecomesTarget`, `CrimeCommitted`) a triggered ability's construction finisher
+/// emits. Each caller of the finisher passes it statically; it is never stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConstructionSpanOwner {
+    /// The finisher runs at an action seam (`SelectTargets`, `ChooseTarget`,
+    /// `SelectModes`); no dispatch window contains its span, so it collects it,
+    /// and its own drain places the queue.
+    Finisher,
+    /// The finisher runs inside a dispatch window (the random-mode re-entry);
+    /// the window's range collection owns the span, and the enclosing
+    /// dispatcher's end-of-batch drain places the queue (CR 603.3b).
+    EnclosingWindow,
+}
+
+/// The abilities a finisher's own span triggered, matched at emission and not
+/// yet queued (CR 603.2e: a "becomes" trigger is decided when the event happens).
+#[must_use]
+pub(crate) struct HeldConstructionSpan {
+    contexts: Vec<PendingTriggerContext>,
+}
+
+/// CR 603.2 + CR 603.2c + CR 603.2e: match `events[start..]` against the game
+/// as it is now and claim the span for ordinary collectors, so the post-action
+/// pipeline (or a live announcement's staging) does not collect it again.
+/// `None` when the enclosing window owns the span.
+#[must_use = "release the held span after the finisher's drain"]
+pub(crate) fn hold_construction_span(
+    state: &mut GameState,
+    events: &[GameEvent],
+    start: usize,
+    owner: ConstructionSpanOwner,
+) -> Option<HeldConstructionSpan> {
+    match owner {
+        ConstructionSpanOwner::EnclosingWindow => None,
+        ConstructionSpanOwner::Finisher => {
+            let contexts = collect_pending_triggers(state, &events[start.min(events.len())..]);
+            claim_events_for_ordinary_collection(state, events, start);
+            Some(HeldConstructionSpan { contexts })
+        }
+    }
+}
+
+/// CR 603.3 + CR 603.3b: queue the held abilities after the finisher's own
+/// drain, so none joins the process it triggered during; they wait with that
+/// process's remaining queued siblings.
+pub(crate) fn release_construction_span(state: &mut GameState, held: Option<HeldConstructionSpan>) {
+    if let Some(HeldConstructionSpan { contexts }) = held {
+        queue_parked_trigger_contexts(state, contexts, DeferredTriggerBatchOrigin::Ordinary);
+    }
 }
 
 /// CR 603.2 + CR 603.2c: the one collection that admits
@@ -12351,7 +12443,8 @@ pub(crate) fn collect_and_drain_entry_observer_triggers_if_settled(
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && !state.deferred_triggers.is_empty()
     {
-        let _ = drain_deferred_trigger_queue(state, events);
+        // CR 603.2c: the drain's windows run on the action buffer; claim them.
+        let _ = drain_on_action_buffer(state, events, drain_deferred_trigger_queue);
     }
 }
 
@@ -13030,7 +13123,8 @@ pub(crate) fn collect_and_drain_observer_triggers_if_settled(
     let candidates = paused_observer_trigger_events(state, candidates);
     collect_action_end_triggers_into_deferred(state, &candidates);
     if !state.deferred_triggers.is_empty() {
-        let _ = drain_deferred_trigger_queue(state, events);
+        // CR 603.2c: the drain's windows run on the action buffer; claim them.
+        let _ = drain_on_action_buffer(state, events, drain_deferred_trigger_queue);
     }
 }
 
@@ -15534,9 +15628,13 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
     // the construction finisher's drain, and every deferred-sibling drain in the
     // same batch — deadlocking the batch with its own recipient. What protects
     // an in-flight construction batch instead is unchanged baseline ownership:
-    // `is_pending_trigger_construction_active` above, the empty deferred queue
-    // while `OrderTriggers` is open, and the reducer dispatching on the
-    // `(waiting_for, action)` pair. The only waiting-state-agnostic entries are
+    // `is_pending_trigger_construction_active` above,
+    // `elimination::drain_or_clear_deferred_triggers_after_elimination`'s
+    // `pending_trigger_order.is_some()` guard, and the reducer dispatching on
+    // the `(waiting_for, action)` pair. The deferred queue is not always empty while
+    // `OrderTriggers` is open: an action-seam construction finisher
+    // queues the abilities its own target choice triggered after its drain
+    // returned on that prompt (CR 603.3b). The only waiting-state-agnostic entries are
     // concession/elimination and debug actions, which is why `elimination.rs`
     // clears that recipient alongside the construction cursors it already
     // clears.
@@ -15800,7 +15898,9 @@ fn stack_object_announcement_is_settled(state: &GameState) -> bool {
 /// post-announcement drain so cast-triggered abilities (e.g. Dragon's Rage
 /// Channeler on a flashback cast) go on the stack while the triggering spell
 /// remains there (issue #2872). During resolution, use the resolution-boundary
-/// drain instead (issue #1793).
+/// drain instead (issue #1793). A finisher that runs inside a dispatch window
+/// (`ConstructionSpanOwner::EnclosingWindow`) does not call it: the enclosing
+/// dispatcher's end-of-batch drain places the queue (CR 603.3b).
 pub(crate) fn drain_deferred_triggers_after_trigger_construction(
     state: &mut GameState,
     events_out: &mut Vec<GameEvent>,
@@ -15944,8 +16044,13 @@ pub(crate) fn finish_trigger_construction_action(
         && state.pending_trigger_order.is_none()
     {
         let queued_before = state.deferred_triggers.len();
-        if let Some(waiting_for) = drain_deferred_triggers_after_trigger_construction(state, events)
-        {
+        // CR 603.2c: the drain's windows run on the action buffer, so their
+        // collected ranges are claimed for the post-action pipeline.
+        if let Some(waiting_for) = drain_on_action_buffer(
+            state,
+            events,
+            drain_deferred_triggers_after_trigger_construction,
+        ) {
             debug_assert!(
                 is_trigger_construction_prompt(&waiting_for),
                 "the construction drain surfaced a wait outside the closed census: {waiting_for:?}",
@@ -16468,6 +16573,7 @@ fn latched_property_kind(
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -17499,18 +17605,29 @@ pub(crate) fn uncollected_trigger_events_from(
     event_start: usize,
     consumed: &[ConsumedTriggerEventOccurrence],
 ) -> UnclaimedTriggerEvents {
+    uncollected_trigger_events_for(
+        state,
+        events,
+        event_start,
+        consumed,
+        TriggerCollectionRequester::Ordinary,
+    )
+}
+
+fn uncollected_trigger_events_for(
+    state: &GameState,
+    events: &[GameEvent],
+    event_start: usize,
+    consumed: &[ConsumedTriggerEventOccurrence],
+    requester: TriggerCollectionRequester,
+) -> UnclaimedTriggerEvents {
     let mut queued_occurrence_witnesses: Vec<&GameEvent> = state
         .deferred_triggers
         .iter()
         .flat_map(|context| context.trigger_events.iter())
         .filter(|event| has_queued_occurrence_witness(event))
         .collect();
-    let mut unclaimed = unclaimed_trigger_events_from(
-        events,
-        event_start,
-        TriggerCollectionRequester::Ordinary,
-        consumed,
-    );
+    let mut unclaimed = unclaimed_trigger_events_from(events, event_start, requester, consumed);
     unclaimed.retain(|event| {
         if !matches!(event, GameEvent::ZoneChanged { .. }) {
             return true;
@@ -17695,6 +17812,11 @@ fn gate_binding_diverges_at_fire_time(condition: &AbilityCondition) -> bool {
         // CR 115.10: the per-iteration player of the RESOLVING ability, which the
         // fire-time context derives from the matched event instead.
         | AbilityCondition::ScopedPlayerMatches { .. }
+        // CR 115.1 + CR 608.2c: reads the resolving ability's declared
+        // targets via a `Target` endpoint (the stamped chosen player);
+        // empty at fire time -- same resolution-scoped class as
+        // `ScopedPlayerMatches` above.
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         // CR 615.5: the post-replacement window, populated only while a
         // prevention replacement is being applied.
         | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
@@ -18413,7 +18535,8 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
 
         // ---- Nested player predicates and controller scopes: recurse. ----
         FilterProp::ControllerMatches { player } => player_filter_binding_diverges(player),
-        FilterProp::Owned { controller } | FilterProp::ProtectorMatches { controller } => {
+        FilterProp::CastThisTurn { caster: controller }
+        | FilterProp::Owned { controller } | FilterProp::ProtectorMatches { controller } => {
             controller_ref_binding_diverges(controller)
         }
         // CR 303.4 + CR 301.5: the player referent is a `ControllerRef` like
@@ -19752,6 +19875,48 @@ pub(crate) fn collect_triggers_for_batch(
     events: &[GameEvent],
 ) -> Vec<PendingTriggerContext> {
     collect_pending_triggers(state, events)
+}
+
+/// CR 603.2c + CR 603.3b + CR 510.3a: a damage replacement can perform a
+/// logical zone change (such as a mill) before combat settles. Its delivery
+/// owner has already observed those occurrences. Move its contexts into the
+/// combat batch, rather than rescanning the moves or placing them separately.
+/// The caller keeps the unfiltered batch for delayed triggers (CR 603.7b).
+pub(super) fn collect_combat_damage_batch_triggers(
+    state: &mut GameState,
+    events: &[GameEvent],
+) -> Vec<PendingTriggerContext> {
+    if !events.iter().any(has_queued_occurrence_witness) {
+        return collect_triggers_for_batch(state, events);
+    }
+    let unclaimed = uncollected_trigger_events_for(
+        state,
+        events,
+        0,
+        &state.consumed_before_priority_trigger_events,
+        TriggerCollectionRequester::CombatDamageBatch,
+    );
+    // An exact ZoneChanged record identifies a single occurrence in this
+    // turn. Keep unrelated queued work and every independent observer.
+    let mut pending: Vec<_> = state
+        .deferred_triggers
+        .extract_if(.., |context| {
+            context.batch_origin == DeferredTriggerBatchOrigin::Ordinary
+                && context
+                    .trigger_events
+                    .iter()
+                    .any(|event| has_queued_occurrence_witness(event) && events.contains(event))
+        })
+        .collect();
+    // CR 603.10 + CR 608.2c: a claimed battlefield departure is no longer a
+    // trigger input, but it still determines which earlier events its object saw.
+    let departures = ActionDepartures::from_positions(events, 0, unclaimed.positions(), 0);
+    pending.extend(collect_pending_triggers_observing(
+        state,
+        &unclaimed.events,
+        Some(departures),
+    ));
+    pending
 }
 
 /// CR 603.3b + CR 603.7: Combine an already-observed normal seed with every
@@ -51893,6 +52058,7 @@ pub mod tests {
                 scope: ConsumedTriggerEventScope::AllCollectors,
             }];
 
+            let events_before_helper = events.len();
             if settled {
                 collect_and_drain_observer_triggers_if_settled(&mut state, &mut events, 0);
             } else {
@@ -51904,15 +52070,51 @@ pub mod tests {
                 collected, 1,
                 "settled={settled}: exactly the unclaimed second occurrence is collected"
             );
-            // The settled helper borrows the journal. The paused exit claims
-            // exactly the occurrence it collected, so no later collector over
-            // the same buffer repeats it.
+            // Neither exit takes the journal: the prior claim stays first. The
+            // paused exit claims exactly the occurrence it collected, so no later
+            // collector over the same buffer repeats it. The settled exit queues
+            // the trigger and drains the queue on this (action) buffer; the
+            // drain's dispatch window already ran the ordinary collection over
+            // what it appended (`collect_target_lock_side_effects`), so CR 603.2c
+            // (an event triggers an ability once) + CR 603.3b (what triggers
+            // while the queue is placed waits for the next placement, not a
+            // second scan) require that range to be claimed for ordinary
+            // collectors: the post-action pipelines that rescan this buffer later
+            // in the same action (`run_post_action_pipeline_from_settled_priority`,
+            // `run_boundary_convergence_pipeline`) must not collect it again.
             let mut expected = vec![ConsumedTriggerEventOccurrence {
                 event: repeated.clone(),
                 occurrence: trigger_event_occurrence(&events, 0),
                 scope: ConsumedTriggerEventScope::AllCollectors,
             }];
-            if !settled {
+            if settled {
+                assert!(
+                    events.len() > events_before_helper,
+                    "reach guard: the settled drain placed the trigger and appended its events"
+                );
+                expected.extend((events_before_helper..events.len()).map(|index| {
+                    ConsumedTriggerEventOccurrence {
+                        event: events[index].clone(),
+                        occurrence: trigger_event_occurrence(&events, index),
+                        scope: ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+                    }
+                }));
+                // A later ordinary rescan of the whole buffer sees nothing the
+                // drain appended, so it cannot collect those events a second time.
+                let rescan = unclaimed_trigger_events_from(
+                    &events,
+                    0,
+                    TriggerCollectionRequester::Ordinary,
+                    &state.consumed_before_priority_trigger_events,
+                );
+                assert!(
+                    rescan
+                        .events
+                        .iter()
+                        .all(|event| !events[events_before_helper..].contains(event)),
+                    "settled: a later ordinary scan of the action buffer skips the drained range"
+                );
+            } else {
                 expected.push(ConsumedTriggerEventOccurrence {
                     event: repeated.clone(),
                     occurrence: trigger_event_occurrence(&events, events.len() - 1),
@@ -51921,7 +52123,7 @@ pub mod tests {
             }
             assert_eq!(
                 state.consumed_before_priority_trigger_events, expected,
-                "settled={settled}: the journal holds the prior claim and only what this exit collected"
+                "settled={settled}: the journal holds the prior claim and only what this exit claimed"
             );
         }
     }
@@ -53657,6 +53859,7 @@ pub mod tests {
             granting_object: None,
             duration_event_source: None,
             source_name: "Jhoira".to_string(),
+            bound_actor: None,
         };
         state.transient_continuous_effects.push_back(grant.clone());
 
@@ -54751,6 +54954,7 @@ pub mod tests {
             granting_object: None,
             duration_event_source: None,
             source_name: "Keyword Granter".to_string(),
+            bound_actor: None,
         }
     }
 
@@ -54872,6 +55076,7 @@ pub mod tests {
                 granting_object: None,
                 duration_event_source: None,
                 source_name: "Grant source".to_string(),
+                bound_actor: None,
             });
 
         // This is the ordinary production trigger entry point: it flushes
@@ -55019,6 +55224,7 @@ pub mod tests {
                     granting_object: None,
                     duration_event_source: None,
                     source_name: "Jhoira of the Ghitu".to_string(),
+                    bound_actor: None,
                 },
             );
             suspended.push(card);

@@ -715,6 +715,9 @@ pub struct UnblockedAttackPreview {
 /// otherwise have to compute game logic (a CLAUDE.md violation).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DerivedViews {
+    /// Chooser-private ranking for an unrestricted creature-type prompt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub named_choice_suggestions: Vec<String>,
     /// The sole player currently authorized to answer the live prompt. Omitted
     /// when there is no actor or multiple distinct authorized submitters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1832,7 +1835,8 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // O(battlefield size); the BTreeMap stays empty (and `skip_serializing_if`
     // omits the field) when no Auras are enchanting any player, which is the
     // dominant case.
-    let block_restrictions = crate::game::combat::collect_block_restriction_statics(state);
+    let block_restrictions =
+        crate::game::combat::collect_functioning_block_restriction_statics(state);
     for &obj_id in &state.battlefield {
         let Some(obj) = state.objects.get(&obj_id) else {
             continue;
@@ -2441,6 +2445,35 @@ pub fn derive_filtered_views(
     viewer: Option<PlayerId>,
 ) -> DerivedViews {
     let mut views = derive_views(filtered_state, viewer);
+    // CR 400.2: deck composition includes hidden library and hand information.
+    // Derive only from authority, and disclose only to the prompt owner while
+    // they submit their own choice. CR 723.4: under turn control, information
+    // about cards outside the game stays visible only to the controlled
+    // player, so a controller submitting for them gets no pool suggestions.
+    views.named_choice_suggestions = match (&authoritative_state.waiting_for, viewer) {
+        (
+            WaitingFor::NamedChoice {
+                player,
+                choice_type: crate::types::ability::ChoiceType::CreatureType { options },
+                options: legal_options,
+                ..
+            },
+            Some(viewer),
+        ) if options.is_empty()
+            && *player == viewer
+            && crate::game::interaction::interaction_submitter_for_owner(
+                authoritative_state,
+                *player,
+            ) == viewer =>
+        {
+            crate::game::effects::choose::suggested_creature_types(
+                authoritative_state,
+                *player,
+                legal_options,
+            )
+        }
+        _ => Vec::new(),
+    };
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
     // CR 702.24a: whether the prompt continues a payment already begun is read
     // from the payment's parked owner, which the viewer projection drops.
@@ -3655,10 +3688,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn emblem_printing(collector: &str) -> SharedPrinting {
-        SharedPrinting::new(CardPrinting {
-            set_code: "owner".into(),
-            collector_number: collector.into(),
-        })
+        SharedPrinting::new(CardPrinting::owner("owner", collector))
     }
 
     /// A synthetic emblem row fixture. No printed emblem carries an activated ability or empty
@@ -8218,6 +8248,7 @@ mod tests {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }]
             .into();
         }

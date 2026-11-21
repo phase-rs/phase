@@ -43,6 +43,7 @@ use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::event_kinds::PlayerActionKind;
 use crate::types::game_state_kinds::DayNight;
 use crate::types::keywords::Keyword;
+use crate::types::player::PlayerCounterKind;
 use crate::types::zones::Zone;
 
 // =========================================================================
@@ -4548,6 +4549,25 @@ fn parse_you_have_typed_cards_in_your_graveyard(input: &str) -> OracleResult<'_,
     Ok((rest, type_filters))
 }
 
+/// CR 122.1: Recognize a named player-counter absence predicate. The caller
+/// must establish the antecedent before binding this resolution-time read.
+pub(crate) fn parse_anaphoric_player_counter_absence(
+    input: &str,
+) -> OracleResult<'_, (&str, PlayerCounterKind)> {
+    let (rest, subject) = alt((
+        terminated(tag("they"), (tag(" "), parse_dont)),
+        terminated(tag("that player"), (tag(" "), parse_doesnt)),
+    ))
+    .parse(input)?;
+    let (rest, kind) = delimited(
+        tag(" have any "),
+        nom_quantity::parse_player_counter_kind,
+        tag(" counters"),
+    )
+    .parse(rest)?;
+    Ok((rest, (subject, kind)))
+}
+
 /// Parse "they have exactly N [or exactly M ...] cards in hand" and
 /// "they control N or more [type]" for scoped-player unless/if gates
 /// (Skullcage, Furnace Punisher class). "They" binds to
@@ -6226,6 +6246,14 @@ fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
 /// the whole class of "a/an <permanent> <controller-clause> has <keyword>"
 /// conditions, not one card.
 fn parse_creature_has_keyword(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((
+        parse_shared_subject_has_keyword,
+        parse_single_subject_has_keyword,
+    ))
+    .parse(input)
+}
+
+fn parse_single_subject_has_keyword(input: &str) -> OracleResult<'_, StaticCondition> {
     // Optional leading article — `parse_type_phrase_folding` also strips it, but the
     // article may precede a non-type word, so guard it explicitly first.
     let (rest, _) = opt(parse_article).parse(input)?;
@@ -6247,6 +6275,46 @@ fn parse_creature_has_keyword(input: &str) -> OracleResult<'_, StaticCondition> 
     let filter = add_filter_property(filter, FilterProp::WithKeyword { value: keyword });
     Ok((
         after_kw,
+        StaticCondition::IsPresent {
+            filter: Some(filter),
+        },
+    ))
+}
+
+/// CR 702.1d + CR 608.2c: Parse a shared-predicate disjunction such as
+/// "a creature you control or a card in your hand has flying". The `or`
+/// joins the subjects before the single `has <keyword>` predicate; it is not a
+/// condition connective between two independently written predicates. Parse
+/// both subject phrases first, then apply the common keyword property to every
+/// branch through `add_filter_property`.
+fn parse_shared_subject_has_keyword(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = opt(parse_article).parse(input)?;
+    let (first, rest) = parse_type_phrase_folding(rest);
+    if matches!(first, TargetFilter::Any) {
+        return Err(oracle_err(input));
+    }
+    let (rest, _) = tag(" or ").parse(rest)?;
+    let (rest, _) = opt(parse_article).parse(rest)?;
+    let (second, rest) = parse_type_phrase_folding(rest);
+    if matches!(second, TargetFilter::Any) {
+        return Err(oracle_err(input));
+    }
+    let (rest, _) = preceded(opt(tag(" ")), tag("has ")).parse(rest)?;
+    let (rest, keyword_name) = parse_keyword_name(rest)?;
+    let keyword: Keyword = keyword_name
+        .parse()
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail)))?;
+    let filter = add_filter_property(
+        TargetFilter::Or {
+            filters: vec![
+                inject_battlefield_presence(first),
+                inject_battlefield_presence(second),
+            ],
+        },
+        FilterProp::WithKeyword { value: keyword },
+    );
+    Ok((
+        rest,
         StaticCondition::IsPresent {
             filter: Some(filter),
         },
@@ -8416,8 +8484,64 @@ fn parse_combat_history_condition(input: &str) -> OracleResult<'_, StaticConditi
                 tag(" attacked you during their last turn"),
             ),
         ),
+        // CR 508.6: "<subject> didn't/did not attack you that turn" -- the
+        // retrospective this-turn player-pair test, negated (Faramir's "if
+        // that player didn't attack you that turn, ... Otherwise, ..." and
+        // its verbatim "they" consequent). Factored by
+        // subject/polarity/endpoint components; defender is the controller
+        // ("you", CR 109.5).
+        parse_pair_attack_condition,
     ))
     .parse(input)
+}
+
+/// CR 508.6: subject component of the retrospective pair-attack grammar —
+/// "that player" (the V1 anaphor) mapping to the `ChosenPlayer { index: 0 }`
+/// placeholder (the chain rewrite binds the true chosen player and the bridge
+/// maps it to the stamped target). The pronoun "they" is deliberately NOT a
+/// subject here: it binds per-context (the choice in the dispatcher's scope),
+/// and the chain drives scope enrichment across multiple passes — an early
+/// scopeless pass must FAIL here (as before) so the scoped passes re-resolve
+/// through the dispatcher's scope-gated arm, which matches the pronoun itself
+/// and delegates the predicate below. Letting nom match "they" context-free
+/// collapses the passes and drops the condition even for honest Choose
+/// antecedents.
+fn parse_pair_attack_subject(input: &str) -> OracleResult<'_, ControllerRef> {
+    value(ControllerRef::ChosenPlayer { index: 0 }, tag("that player")).parse(input)
+}
+
+/// CR 508.6: polarity + endpoint of the retrospective pair-attack grammar —
+/// "didn't/did not attack you that turn" (negated only; the retrospective
+/// test has no positive surface). The contraction reuses `parse_didnt`
+/// (both apostrophes). `pub(crate)`: the effect dispatcher composes this
+/// shared predicate after its own scope-gated "they " pronoun match, so the
+/// attack shape lives here once instead of as complete sentences there.
+pub(crate) fn parse_pair_attack_predicate(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag(" "),
+            alt((parse_didnt, tag("did not"))),
+            tag(" attack you that turn"),
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 508.6: the composed retrospective pair-attack condition (negated) —
+/// subject + polarity/endpoint above, defender "you".
+fn parse_pair_attack_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, attacker) = parse_pair_attack_subject(input)?;
+    let (rest, _) = parse_pair_attack_predicate(rest)?;
+    Ok((
+        rest,
+        StaticCondition::Not {
+            condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                attacker,
+                defender: ControllerRef::You,
+            }),
+        },
+    ))
 }
 
 /// CR 508.1a: "you attacked with [N | N or more] creatures this turn" (the
@@ -13278,6 +13402,58 @@ mod tests {
         "controlled by that player",
         "the chosen player controls",
     ];
+
+    /// CR 508.6: the factored pair-attack grammar accepts the "that player"
+    /// subject with both "didn't"/"did not" spellings (plus the curly
+    /// apostrophe), consumes fully, and emits the negated player-pair test
+    /// with the V1 anaphor placeholder. The pronoun "they" is declined here
+    /// by design (it binds per-context in the dispatcher, which delegates
+    /// the shared predicate).
+    #[test]
+    fn pair_attack_condition_factored_surfaces() {
+        for text in [
+            "that player didn't attack you that turn",
+            "that player did not attack you that turn",
+            "that player didn\u{2019}t attack you that turn",
+        ] {
+            let (rest, condition) = parse_pair_attack_condition(text).unwrap();
+            assert_eq!(rest, "", "{text:?} must consume fully");
+            assert_eq!(
+                condition,
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                        attacker: ControllerRef::ChosenPlayer { index: 0 },
+                        defender: ControllerRef::You,
+                    }),
+                },
+                "{text:?}"
+            );
+        }
+        // The shared predicate (polarity via parse_didnt plus endpoint)
+        // consumes fully on its own, independent of subject.
+        for predicate in [
+            " didn't attack you that turn",
+            " did not attack you that turn",
+            " didn\u{2019}t attack you that turn",
+        ] {
+            let (rest, _) = parse_pair_attack_predicate(predicate).unwrap();
+            assert_eq!(rest, "", "{predicate:?} must consume fully");
+        }
+        // No positive surface; no pronoun subject here; no other endpoint.
+        for declined in [
+            "they didn't attack you that turn",
+            "they did not attack you that turn",
+            "that player attacked you that turn",
+            "you didn't attack you that turn",
+            "that player didn't attack them that turn",
+            "that player didn't attack you last turn",
+        ] {
+            assert!(
+                parse_pair_attack_condition(declined).is_err(),
+                "{declined:?} must not parse"
+            );
+        }
+    }
 
     #[test]
     fn source_exert_history_grammar_preserves_polarity_and_boundaries() {
@@ -26883,6 +27059,57 @@ mod tests {
             "the this-turn near-miss must not lower to the last-turn revenge gate"
         );
     }
+    /// CR 508.6: "that player didn't/did not attack you that turn" parses
+    /// to the negated retrospective this-turn player-pair test with the V1
+    /// anaphor placeholder (Faramir; the chain rewrite binds the true chosen
+    /// player, the bridge maps it to the stamped target).
+    #[test]
+    fn parse_inner_condition_that_player_didnt_attack_you_this_turn() {
+        for text in [
+            "that player didn't attack you that turn",
+            "that player did not attack you that turn",
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "must fully consume {text:?}");
+            assert_eq!(
+                c,
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                        attacker: ControllerRef::ChosenPlayer { index: 0 },
+                        defender: ControllerRef::You,
+                    }),
+                },
+                "{text}"
+            );
+        }
+
+        // Sibling non-shadow: the last-turn revenge gate in the same
+        // `parse_combat_history_condition` combinator keeps its own variant.
+        let (_, last) =
+            parse_inner_condition("a player attacked you during their last turn").unwrap();
+        assert!(matches!(
+            last,
+            StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        ));
+
+        // Negative: a pronoun subject is NOT the V1 anaphor -- it binds a
+        // different referent with no producer yet, so it must not lower to
+        // the chosen-player placeholder.
+        assert!(
+            !matches!(
+                parse_inner_condition("they didn't attack you that turn"),
+                Ok((_, StaticCondition::Not { condition }))
+                    if matches!(
+                        *condition,
+                        StaticCondition::PlayerAttackedPlayer {
+                            attacker: ControllerRef::ChosenPlayer { .. },
+                            ..
+                        }
+                    )
+            ),
+            "pronoun subject must not take the V1 anaphor"
+        );
+    }
 
     /// CR 608.2c + CR 702.185c: Plasma Bolt's Void clause — a two-sided
     /// disjunction "<zone-history> or a spell was warped this turn" parses to
@@ -27419,6 +27646,103 @@ mod tests {
             }
             other => panic!("expected IsPresent(Typed), got {other:?}"),
         }
+    }
+
+    /// CR 702.1d: one shared `has` predicate can qualify more than one subject.
+    /// The keyword property must be copied to both branches of the subject
+    /// disjunction rather than parsed as two independent conditions.
+    #[test]
+    fn parse_inner_condition_shared_subjects_have_keyword() {
+        let (rest, condition) =
+            parse_inner_condition("a creature you control or a card in your hand has flying")
+                .unwrap();
+        assert!(rest.is_empty());
+        let StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Or { filters }),
+        } = condition
+        else {
+            panic!("expected a disjunctive presence condition, got {condition:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert!(filters.iter().all(|filter| match filter {
+            TargetFilter::Typed(typed) => typed.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::WithKeyword {
+                    value: Keyword::Flying
+                }
+            ),),
+            TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Opponent
+            | TargetFilter::SelfRef
+            | TargetFilter::GrantingObject { .. }
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::Not { .. }
+            | TargetFilter::Or { .. }
+            | TargetFilter::And { .. }
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastCreated
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
+            | TargetFilter::ChosenCard
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ChoiceAssignment { .. }
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::AttackedPlayerOrPlaneswalker
+            | TargetFilter::EventTarget
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::AffectedObjectOwner
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::OriginalSource
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::HasChosenName
+            | TargetFilter::ChosenDamageSource { .. }
+            | TargetFilter::Named { .. }
+            | TargetFilter::Owner
+            | TargetFilter::AllPlayers => false,
+        }));
+    }
+
+    /// The shared-predicate recognizer must fail at its typed keyword tail;
+    /// accepting the subject prefix alone would silently drop the predicate.
+    #[test]
+    fn parse_shared_subject_has_keyword_rejects_unknown_keyword() {
+        assert!(parse_shared_subject_has_keyword(
+            "a creature you control or a card in your hand has counters"
+        )
+        .is_err());
     }
 
     /// No controller suffix — the bare "a creature has trample" form still

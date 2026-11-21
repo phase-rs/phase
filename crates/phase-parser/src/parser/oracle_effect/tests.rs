@@ -11589,6 +11589,74 @@ fn effect_token_for_each_this_way_produces_graveyard_destination_card_count() {
     }
 }
 
+/// CR 608.2c: "<N> … tokens for each X" creates N per X (Fertile Imagination);
+/// an "a … token" head stays the bare for-each count (Waste Management).
+#[test]
+fn effect_token_for_each_keeps_fixed_count_multiplier() {
+    let token_count = |text: &str| match parse_effect(text) {
+        Effect::Token { count, .. } => count,
+        other => panic!("expected Token, got {other:?}"),
+    };
+    assert_eq!(
+        token_count(
+            "Create two 1/1 green Saproling creature tokens for each card of the chosen type revealed this way."
+        ),
+        QuantityExpr::Multiply {
+            factor: 2,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::card().properties(vec![FilterProp::IsChosenCardType])
+                    )),
+                    caused_by: None,
+                    destination: None,
+                }
+            }),
+        }
+    );
+    assert_eq!(
+        token_count(
+            "Create a 2/2 black Rogue creature token for each creature card exiled this way."
+        ),
+        QuantityExpr::Ref {
+            qty: QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                caused_by: Some(ThisWayCause::Exiled),
+                destination: None,
+            }
+        }
+    );
+}
+
+/// CR 608.2c: the token parser's own "for each" rider multiplies a numeric
+/// count head rather than replacing it.
+#[test]
+fn token_rider_count_keeps_fixed_count_multiplier() {
+    let rider_count = |text: &str| match try_parse_token(
+        &text.to_lowercase(),
+        text,
+        &mut ParseContext::default(),
+    ) {
+        Some(Effect::Token { count, .. }) => count,
+        other => panic!("expected Token, got {other:?}"),
+    };
+    let fertile = rider_count(
+        "Create two 1/1 green Saproling creature tokens for each card of the chosen type revealed this way.",
+    );
+    assert!(
+        matches!(fertile, QuantityExpr::Multiply { factor: 2, .. }),
+        "{fertile:?}"
+    );
+    assert_eq!(
+        rider_count("create a Treasure token for each opponent dealt damage"),
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextPlayerCount {
+                filter: PlayerFilter::Opponent,
+            }
+        }
+    );
+}
+
 #[test]
 fn full_pump_parser_declines_a_discarded_for_each_color_chooser() {
     // Synthetic grammar control, not an authenticated printed-card claim.
@@ -20144,6 +20212,7 @@ fn it_doesnt_have_keyword_lowers_to_target_matches_filter() {
             filter: without_keyword_kind_filter(KeywordKind::Suspend),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "the anaphor must bind the ability's object subject, not its source"
     );
@@ -20183,6 +20252,7 @@ fn it_doesnt_have_keyword_lowers_to_target_matches_filter() {
             filter: without_keyword_kind_filter(KeywordKind::Suspend),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "\"does not have\" must lower identically to \"doesn't have\""
     );
@@ -20199,6 +20269,7 @@ fn it_doesnt_have_keyword_lowers_to_target_matches_filter() {
             filter: without_keyword_kind_filter(KeywordKind::FirstStrike),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "the arm must cover the whole keyword class, not just Suspend"
     );
@@ -20278,6 +20349,7 @@ fn it_has_keyword_lowers_to_the_same_kind_level_prop_as_its_negative_twin() {
             filter: has_keyword_kind_filter(KeywordKind::FirstStrike),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "the affirmative arm must emit the kind-level HasKeywordKind prop"
     );
@@ -20403,6 +20475,7 @@ fn keyword_anaphor_strict_fails_when_kind_does_not_identify_the_ability() {
             filter: without_keyword_kind_filter(crate::types::keywords::KeywordKind::Suspend),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "the guard must narrow the arm, not disable it"
     );
@@ -20467,6 +20540,7 @@ fn keyword_anaphor_rebinds_to_cost_paid_object_after_cost_paid_parent() {
             filter: without_keyword_kind_filter(KeywordKind::Suspend),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "an effect-introduced referent must keep the target-scoped reading"
     );
@@ -20580,6 +20654,7 @@ fn keyword_anaphor_after_resolution_time_pick_strict_fails_to_unimplemented() {
             filter: without_keyword_kind_filter(crate::types::keywords::KeywordKind::Suspend),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "a deterministic context-ref parent must not be mistaken for a player pick"
     );
@@ -20632,6 +20707,7 @@ fn rewrite_ability_condition_keyword_swaps_subject_filter_keyword_props() {
         filter: without_keyword_kind_filter(KeywordKind::Suspend),
         use_lki: false,
         subject_slot: None,
+        subject: ObjectScope::Target,
     };
     rewrite_ability_condition_keyword(&mut target_seam, &Keyword::Flying);
     assert_eq!(
@@ -20640,6 +20716,7 @@ fn rewrite_ability_condition_keyword_swaps_subject_filter_keyword_props() {
             filter: without_keyword_kind_filter(KeywordKind::Flying),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }
     );
 
@@ -20666,6 +20743,7 @@ fn rewrite_ability_condition_keyword_swaps_subject_filter_keyword_props() {
         }),
         use_lki: false,
         subject_slot: None,
+        subject: ObjectScope::Target,
     };
     rewrite_ability_condition_keyword(&mut has_kind, &Keyword::Flying);
     assert_eq!(
@@ -20679,6 +20757,7 @@ fn rewrite_ability_condition_keyword_swaps_subject_filter_keyword_props() {
             }),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }
     );
 
@@ -22266,6 +22345,107 @@ fn compound_tap_and_put_counter_lowercase_trigger_context() {
         "sub should stay ParentTarget through effect-chain parsing, got {:?}",
         sub.effect
     );
+}
+
+/// CR 608.2c: in a targeted compound's anaphoric continuation, a bare "it"
+/// names the object the primary instruction announced (CR 115.1d), not the
+/// trigger subject or the ability's source. Grappling Kraken (landfall, a typed
+/// land subject), Fear of Sleep Paralysis (eerie, an `Or{SelfRef, Typed}`
+/// subject) and Mjölnir, Storm Hammer ("equipped creature", `AttachedTo`) all
+/// print this clause under a typed trigger subject. Reverting the typed-referent
+/// continuation pin in `try_split_targeted_compound` makes the sub `SelfRef`.
+#[test]
+fn compound_tap_and_put_counter_binds_parent_target_under_typed_trigger_subject() {
+    for subject in [
+        TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+        TargetFilter::AttachedTo,
+    ] {
+        let clause = parse_effect_clause(
+            "tap target creature an opponent controls and put a stun counter on it",
+            &mut ParseContext {
+                subject: Some(subject.clone()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::SetTapState {
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "primary should tap the announced typed target under subject {subject:?}, got {:?}",
+            clause.effect
+        );
+        let sub = clause.sub_ability.expect("should have sub_ability");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Stun,
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "stun counter should go on the tapped target under subject {subject:?}, got {:?}",
+            sub.effect
+        );
+    }
+}
+
+/// Synthetic boundary probe: no printed card has this targeted compound under
+/// a typed trigger subject. The nearest printed card is Defiant Vanguard:
+/// "When this creature blocks, at end of combat, destroy it and all creatures
+/// it blocked this turn." This probe checks preservation of the existing
+/// fail-closed boundary.
+///
+/// CR 509.1g + CR 608.2i: the typed-referent continuation pin never reaches a
+/// block-history clause. "it" in "all creatures it blocked this turn" names this
+/// same instruction's target, not an earlier instruction's, so the clause
+/// declines and the continuation fails closed under a typed trigger subject
+/// exactly as it does without one (where the post-parse anaphor rewrite, not
+/// the pin, handles the continuation). Reverting the history-clause guard on
+/// the pin in `try_split_targeted_compound` binds the clause instead and the
+/// typed-subject row's sub becomes a `DestroyAll`.
+#[test]
+fn compound_typed_referent_pin_does_not_bind_block_history_clause() {
+    for subject in [
+        None,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        )),
+    ] {
+        let clause = parse_effect_clause(
+            "destroy target creature and all creatures it blocked this turn",
+            &mut ParseContext {
+                subject: subject.clone(),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "reach guard: the primary destroys the announced target under subject {subject:?}, got {:?}",
+            clause.effect
+        );
+        let sub = clause.sub_ability.expect("should have sub_ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::Unimplemented { name, .. } if name == "block_history_partner"
+            ),
+            "the history continuation must fail closed under subject {subject:?}, got {:?}",
+            sub.effect
+        );
+    }
 }
 
 #[test]
@@ -30419,11 +30599,19 @@ fn suffix_power_equality_condition_preserves_pump_duration() {
     assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
     assert!(matches!(
         def.condition,
-        Some(AbilityCondition::QuantityCheck {
-            comparator: Comparator::EQ,
-            rhs: QuantityExpr::Fixed { value: 2 },
-            ..
-        })
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(ref typed),
+            use_lki: false,
+            subject_slot: None,
+            subject: ObjectScope::Target,
+        }) if matches!(
+            typed.properties.as_slice(),
+            [crate::types::ability::FilterProp::PtComparison {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Fixed { value: 2 },
+                ..
+            }]
+        )
     ));
 }
 
@@ -40550,6 +40738,7 @@ fn second_doctor_subject_only_who_does_lowers_cross_scope_restriction() {
                 ProhibitedActivity::Attack {
                     defended: AttackTargetFilter::PlayerOrPermanents,
                     protected_player: None,
+                    protected_scope: None,
                 },
                 "\"you or permanents you control\" defends player + permanents"
             );
@@ -40611,6 +40800,7 @@ fn city_hall_subject_only_who_does_lowers_same_scope_restriction() {
                 ProhibitedActivity::Attack {
                     defended: AttackTargetFilter::Player,
                     protected_player: None,
+                    protected_scope: None,
                 },
                 "bare \"you\" defends the player only"
             );
@@ -43674,6 +43864,7 @@ fn that_player_cant_attack_branches_on_duration_phrase() {
                     activity: ProhibitedActivity::Attack {
                         defended: AttackTargetFilter::PlayerOrPlaneswalker,
                         protected_player: None,
+                        protected_scope: None,
                     },
                     ..
                 }
@@ -43716,6 +43907,7 @@ fn public_attack_prohibition_parser_preserves_legacy_anaphora_and_connector() {
                     activity: ProhibitedActivity::Attack {
                         defended: crate::types::triggers::AttackTargetFilter::Player,
                         protected_player: None,
+                        protected_scope: None,
                     },
                     ..
                 }
@@ -43740,6 +43932,7 @@ fn public_attack_prohibition_parser_preserves_legacy_anaphora_and_connector() {
                 activity: ProhibitedActivity::Attack {
                     defended: crate::types::triggers::AttackTargetFilter::Player,
                     protected_player: None,
+                    protected_scope: None,
                 },
                 ..
             }
@@ -43760,6 +43953,7 @@ fn public_attack_prohibition_parser_preserves_legacy_anaphora_and_connector() {
                         subtype: None,
                     },
                     protected_player: None,
+                    protected_scope: None,
                 },
                 ..
             },
@@ -43801,6 +43995,7 @@ fn scoped_cant_attack_prohibition_supports_both_verbs_and_all_defended_scopes() 
                             activity: ProhibitedActivity::Attack {
                                 defended,
                                 protected_player: None,
+                                protected_scope: None,
                             },
                             ..
                         }
@@ -43831,6 +44026,576 @@ fn scoped_cant_attack_prohibition_fails_closed_without_its_complete_grammar() {
             "the bounded scoped form must reject {text:?}"
         );
     }
+}
+
+/// T6 SHAPE: a bare "can't attack" with NO defended scope is a blanket ban,
+/// not a player-only ban — the recognizer must fail closed (None) instead of
+/// emitting a narrowed `ProhibitActivity::Attack`.
+///
+/// Printed witness — Peace in Our Time (Star Trek, TRK; verbatim Oracle text
+/// checked against `data/mtgjson/AtomicCards.json`): "At the beginning of
+/// combat on each player's turn, that player may draw a card. If they do,
+/// they can't attack this turn and you put a peace counter on this
+/// enchantment." The "may draw" sentence and the bare-scope "they can't
+/// attack this turn" consequence both route through the guarded arm and
+/// decline it; the full card lowers the consequence to a blanket CantAttack
+/// static, never a defended-Player-only AddRestriction. (The old comment
+/// claiming no printed card reaches this branch was falsified by this card.)
+const PEACE_IN_OUR_TIME_ORACLE: &str = "At the beginning of combat on each player's turn, that player may draw a card. If they do, they can't attack this turn and you put a peace counter on this enchantment.\nAt the beginning of your upkeep, if this enchantment has twelve or more peace counters on it, you win the game.";
+
+#[test]
+fn that_player_cant_attack_bare_scope_fails_closed() {
+    use crate::types::statics::StaticMode;
+    use crate::types::triggers::AttackTargetFilter;
+    // Arm level: the verbatim Peace sentences decline the guarded arm, so no
+    // player-only attack ban (and no unless-pay) is installed for them.
+    for text in [
+        "At the beginning of combat on each player's turn, that player may draw a card.",
+        "they can't attack this turn",
+    ] {
+        let lower = text.to_ascii_lowercase();
+        assert!(
+            try_parse_that_player_cant_attack_prohibition(TextPair::new(text, &lower)).is_none(),
+            "bare-shape {text:?} must not parse (revert-flip: the old \
+             unwrap_or(Player) default emitted a player-only ban)"
+        );
+    }
+    // Full-pipeline level on the verbatim card: no defended-Player-only attack
+    // ban and no unless-pay anywhere, and the consequence carries the blanket
+    // CantAttack static.
+    let parsed = parse_oracle_text(
+        PEACE_IN_OUR_TIME_ORACLE,
+        "Peace in Our Time",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    fn chain_nodes(root: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+        let mut out = Vec::new();
+        let mut node = Some(root);
+        while let Some(d) = node {
+            out.push(d);
+            node = d.sub_ability.as_deref();
+        }
+        out
+    }
+    let mut roots: Vec<&AbilityDefinition> = parsed.abilities.iter().collect();
+    roots.extend(
+        parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref()),
+    );
+    assert!(
+        !roots.is_empty(),
+        "the verbatim card must parse to at least one ability chain"
+    );
+    for root in &roots {
+        for d in chain_nodes(root) {
+            assert!(
+                d.unless_pay.is_none(),
+                "Peace in Our Time must not install an unless-pay, got {:?}",
+                d.unless_pay
+            );
+            if let Effect::AddRestriction {
+                restriction:
+                    GameRestriction::ProhibitActivity {
+                        activity:
+                            ProhibitedActivity::Attack {
+                                defended: AttackTargetFilter::Player,
+                                ..
+                            },
+                        ..
+                    },
+                ..
+            } = d.effect.as_ref()
+            {
+                panic!("Peace in Our Time must not emit a player-only attack ban");
+            }
+        }
+    }
+    // The combat trigger is the optional-draw root; its consequence must be the
+    // blanket prohibition, not the narrowed AddRestriction ruled out above.
+    let combat = parsed
+        .triggers
+        .iter()
+        .find(|trigger| {
+            trigger
+                .execute
+                .as_deref()
+                .is_some_and(|exec| matches!(*exec.effect, Effect::Draw { .. }) && exec.optional)
+        })
+        .expect("Peace's combat trigger must parse to the optional-draw root");
+    let exec = combat.execute.as_deref().expect("combat trigger executes");
+    let mut saw_blanket = false;
+    for d in chain_nodes(exec) {
+        if let Effect::GenericEffect {
+            static_abilities, ..
+        } = d.effect.as_ref()
+        {
+            if static_abilities.iter().any(|s| {
+                s.mode == StaticMode::CantAttack && s.affected == Some(TargetFilter::ScopedPlayer)
+            }) {
+                assert_eq!(
+                    d.duration,
+                    Some(Duration::UntilEndOfTurn),
+                    "the blanket ban lapses at end of turn, got {:?}",
+                    d.duration
+                );
+                saw_blanket = true;
+            }
+        }
+    }
+    assert!(
+        saw_blanket,
+        "Peace's consequence must carry the blanket CantAttack static, got {:?}",
+        exec
+    );
+}
+
+/// T6: Willie Lumpkin's verbatim predicate shape keeps its explicit defended
+/// scope through the legacy anaphor arm — the fail-closed fix must not narrow
+/// or drop scoped prohibitions. (Full Oracle text: "Whenever Willie Lumpkin
+/// deals combat damage to an opponent, you draw a card and that player may
+/// draw a card. If they do, that player can't attack you or permanents you
+/// control during their next turn.")
+#[test]
+fn willie_lumpkin_verbatim_scope_parses() {
+    use crate::types::triggers::AttackTargetFilter;
+    let text = "that player can't attack you or permanents you control during their next turn.";
+    let parsed = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        matches!(
+            parsed.effect.as_ref(),
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::Attack {
+                        defended: AttackTargetFilter::PlayerOrPermanents,
+                        protected_player: None,
+                        protected_scope: None,
+                    },
+                    ..
+                }
+            }
+        ),
+        "Willie predicate must keep the you-or-permanents scope, got {parsed:?}"
+    );
+    assert!(
+        matches!(parsed.duration, Some(Duration::UntilEndOfNextTurnOf { .. })),
+        "Willie predicate must carry the next-turn duration (got {:?})",
+        parsed.duration
+    );
+}
+
+/// T6: Sandswirl Wanderglyph's verbatim predicate shape keeps its explicit
+/// defended scope on the "this turn" branch. (Full Oracle text: "Whenever an
+/// opponent casts a spell during their turn, they can't attack you or
+/// planeswalkers you control this turn.")
+#[test]
+fn sandswirl_wanderglyph_verbatim_scope_parses() {
+    use crate::types::triggers::AttackTargetFilter;
+    let text = "they can't attack you or planeswalkers you control this turn.";
+    let parsed = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        matches!(
+            parsed.effect.as_ref(),
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    affected_players: RestrictionPlayerScope::ParentTargetedPlayer,
+                    expiry: RestrictionExpiry::EndOfTurn,
+                    activity: ProhibitedActivity::Attack {
+                        defended: AttackTargetFilter::PlayerOrPlaneswalker,
+                        protected_player: None,
+                        protected_scope: None,
+                    },
+                    ..
+                }
+            }
+        ),
+        "Sandswirl predicate must keep the you-or-planeswalkers scope, got {parsed:?}"
+    );
+    assert!(
+        parsed.duration.is_none(),
+        "Sandswirl predicate must not carry a next-turn duration (got {:?})",
+        parsed.duration
+    );
+}
+
+/// CR 508.1c + CR 109.5 + CR 608.2c: Call for Aid's inverse-voice rider
+/// emits a scope-SELECTING restriction — the restricted player is the source's
+/// controller while the protected player is the already-chosen target.
+#[test]
+fn you_cant_attack_that_player_emits_targeted_protected_scope() {
+    use crate::types::triggers::AttackTargetFilter;
+    for verb in ["can't", "cannot"] {
+        let text = format!("you {verb} attack that player this turn");
+        let clause =
+            try_parse_you_cant_attack_targeted_player_prohibition(TextPair::new(&text, &text))
+                .unwrap_or_else(|| panic!("{text:?} must parse"));
+        assert!(
+            clause.duration.is_none(),
+            "'this turn' must not carry a next-turn duration (got {:?})",
+            clause.duration
+        );
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::AddRestriction {
+                    restriction: GameRestriction::ProhibitActivity {
+                        affected_players: RestrictionPlayerScope::SourceController,
+                        expiry: RestrictionExpiry::EndOfTurn,
+                        activity: ProhibitedActivity::Attack {
+                            defended: AttackTargetFilter::Player,
+                            protected_player: None,
+                            protected_scope: Some(RestrictionPlayerScope::ParentTargetedPlayer),
+                        },
+                        ..
+                    },
+                }
+            ),
+            "got {:?}",
+            clause.effect
+        );
+    }
+}
+
+#[test]
+fn you_cant_attack_that_player_dispatches_through_public_chain() {
+    // Verbatim Call for Aid rider (capital + terminal period): proves the
+    // pre-shell probe routes it, not just the direct arm above.
+    let parsed = parse_effect_chain(
+        "You can't attack that player this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            parsed.effect.as_ref(),
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    activity: ProhibitedActivity::Attack {
+                        protected_scope: Some(RestrictionPlayerScope::ParentTargetedPlayer),
+                        ..
+                    },
+                    ..
+                }
+            }
+        ),
+        "got {:?}",
+        parsed.effect
+    );
+}
+
+/// CR 701.21 + CR 101.2 + CR 611.2c: Call for Aid's sacrifice rider emits the
+/// shape-C grant (`Continuous` + `AddStaticMode`, the Stilt-Man shape) over
+/// the V0-mandated `TrackedSet{0}` broadcast scope. 701.21 names the
+/// sacrificed action; 101.2 is the "can't beats can" precedence the grant
+/// enforces; 611.2c freezes the affected set at resolution.
+#[test]
+fn you_cant_sacrifice_those_creatures_emits_shape_c_grant() {
+    use crate::types::identifiers::TrackedSetId;
+    for verb in ["can't", "cannot"] {
+        let text = format!("you {verb} sacrifice those creatures this turn");
+        let clause = try_parse_you_cant_sacrifice_those_creatures(TextPair::new(&text, &text))
+            .unwrap_or_else(|| panic!("{text:?} must parse"));
+        assert_eq!(
+            clause.duration,
+            Some(Duration::UntilEndOfTurn),
+            "the grant must lapse at end of turn"
+        );
+        assert!(
+            matches!(
+                &clause.effect,
+                Effect::GenericEffect {
+                    static_abilities,
+                    duration: Some(Duration::UntilEndOfTurn),
+                    target: None,
+                    ..
+                } if static_abilities.len() == 1
+                    && matches!(
+                        &static_abilities[0],
+                        crate::types::ability::StaticDefinition {
+                            mode: crate::types::statics::StaticMode::Continuous,
+                            affected: Some(TargetFilter::TrackedSet { id }),
+                            modifications,
+                            bound_actor: Some(
+                                crate::types::ability::ControllerRef::You
+                            ),
+                            ..
+                        } if *id == TrackedSetId(0)
+                            && matches!(
+                                modifications.as_slice(),
+                                [ContinuousModification::AddStaticMode {
+                                    mode: crate::types::statics::StaticMode::Other(name),
+                                }] if name == "CantBeSacrificed"
+                            )
+                    )
+            ),
+            "got {:?}",
+            clause.effect
+        );
+    }
+}
+
+#[test]
+fn you_cant_sacrifice_those_creatures_dispatches_through_public_chain() {
+    // Verbatim Call for Aid rider: proves the pre-shell probe routes it.
+    let parsed = parse_effect_chain(
+        "You can't sacrifice those creatures this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            parsed.effect.as_ref(),
+            Effect::GenericEffect {
+                static_abilities,
+                ..
+            } if static_abilities.iter().any(|def| matches!(
+                &def.modifications.as_slice(),
+                [ContinuousModification::AddStaticMode {
+                    mode: crate::types::statics::StaticMode::Other(name),
+                }] if name == "CantBeSacrificed"
+            ))
+        ),
+        "got {:?}",
+        parsed.effect
+    );
+}
+
+/// Walk a parsed ability chain (effect + sub_ability spine) for Call-for-Aid
+/// shapes. Used by the fail-closed negatives below.
+fn chain_has_call_for_aid_shape(def: &AbilityDefinition) -> bool {
+    let mut current = Some(def);
+    while let Some(ability) = current {
+        let is_aid_shape = matches!(
+            ability.effect.as_ref(),
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    activity: ProhibitedActivity::Attack {
+                        protected_scope: Some(_),
+                        ..
+                    },
+                    ..
+                }
+            }
+        ) || matches!(
+            ability.effect.as_ref(),
+            Effect::GenericEffect { static_abilities, .. }
+                if static_abilities.iter().any(|def| def.modifications.iter().any(
+                    |m| matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: crate::types::statics::StaticMode::Other(name),
+                        } if name == "CantBeSacrificed"
+                    )
+                ))
+        );
+        if is_aid_shape {
+            return true;
+        }
+        current = ability.sub_ability.as_deref();
+    }
+    false
+}
+
+/// Hostile grammar negatives: partial prefixes and adjacent voices must not
+/// route through the new arms — arm-level `None` plus chain-level absence of
+/// both Call-for-Aid shapes.
+#[test]
+fn call_for_aid_riders_fail_closed_on_partial_grammar() {
+    for text in [
+        "you can't attack",
+        "you can't attack that player",
+        "you can't attack that player during their next turn",
+        "can't sacrifice those creatures this turn",
+        "you can't sacrifice",
+        "you can't sacrifice a creature this turn",
+    ] {
+        assert!(
+            try_parse_you_cant_attack_targeted_player_prohibition(TextPair::new(text, text))
+                .is_none(),
+            "attack arm must reject {text:?}"
+        );
+        assert!(
+            try_parse_you_cant_sacrifice_those_creatures(TextPair::new(text, text)).is_none(),
+            "sacrifice arm must reject {text:?}"
+        );
+        assert!(
+            !chain_has_call_for_aid_shape(&parse_effect_chain(text, AbilityKind::Spell)),
+            "chain must not carry a Call-for-Aid shape for {text:?}"
+        );
+    }
+    // Adjacent voice, different scope ("your opponents" ≠ "you … those
+    // creatures"): must stay on its existing path, never the new arms.
+    for text in [
+        "your opponents can't sacrifice creatures this turn",
+        "your opponents can't attack you this turn",
+    ] {
+        assert!(
+            try_parse_you_cant_attack_targeted_player_prohibition(TextPair::new(text, text))
+                .is_none(),
+            "attack arm must reject {text:?}"
+        );
+        assert!(
+            try_parse_you_cant_sacrifice_those_creatures(TextPair::new(text, text)).is_none(),
+            "sacrifice arm must reject {text:?}"
+        );
+        assert!(
+            !chain_has_call_for_aid_shape(&parse_effect_chain(text, AbilityKind::Spell)),
+            "chain must not carry a Call-for-Aid shape for {text:?}"
+        );
+    }
+}
+
+/// V8c-negative: Slicer's "it can't be sacrificed this turn" (shape B,
+/// unenforced at base) must NOT route through the shape-C arm. Paired with
+/// the positive reach-guard in the same test: Call for Aid's own rider DOES
+/// produce the grant, so the negative cannot pass on a dead arm.
+#[test]
+fn slicer_clause_does_not_route_through_shape_c_arm() {
+    assert!(
+        try_parse_you_cant_sacrifice_those_creatures(TextPair::new(
+            "it can't be sacrificed this turn",
+            "it can't be sacrificed this turn",
+        ))
+        .is_none(),
+        "the shape-C arm requires the 'you … those creatures' head"
+    );
+    assert!(
+        !chain_has_call_for_aid_shape(&parse_effect_chain(
+            "it can't be sacrificed this turn",
+            AbilityKind::Spell
+        )),
+        "Slicer's clause must not gain a shape-C grant"
+    );
+    // Positive reach-guard: the arm is live for its own voice.
+    assert!(
+        chain_has_call_for_aid_shape(&parse_effect_chain(
+            "You can't sacrifice those creatures this turn.",
+            AbilityKind::Spell
+        )),
+        "Call for Aid's rider must produce the shape-C grant"
+    );
+}
+
+/// Coverage: Call for Aid's verbatim Oracle parses with zero `Unimplemented`
+/// nodes — the two trailing clauses flip to supported — carrying exactly one
+/// scope-selecting attack restriction and one shape-C sacrifice grant.
+#[test]
+fn call_for_aid_verbatim_oracle_parses_fully_supported() {
+    let parsed = parse_oracle_text(
+        "Gain control of all creatures target opponent controls until end of turn. \
+         Untap those creatures. They gain haste until end of turn. You can't attack \
+         that player this turn. You can't sacrifice those creatures this turn.",
+        "Call for Aid",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed.abilities.len(),
+        1,
+        "one spell ability, got {parsed:#?}"
+    );
+    let mut current = Some(&parsed.abilities[0]);
+    let mut attack_scopes = 0;
+    let mut sacrifice_grants = 0;
+    while let Some(ability) = current {
+        assert!(
+            !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. }),
+            "every Call for Aid clause must parse: {parsed:#?}"
+        );
+        if matches!(
+            ability.effect.as_ref(),
+            Effect::AddRestriction {
+                restriction: GameRestriction::ProhibitActivity {
+                    activity: ProhibitedActivity::Attack {
+                        protected_scope: Some(_),
+                        ..
+                    },
+                    ..
+                }
+            }
+        ) {
+            attack_scopes += 1;
+        }
+        if matches!(
+            ability.effect.as_ref(),
+            Effect::GenericEffect { static_abilities, .. }
+                if static_abilities.iter().any(|def| def.modifications.iter().any(
+                    |m| matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: crate::types::statics::StaticMode::Other(name),
+                        } if name == "CantBeSacrificed"
+                    )
+                ))
+        ) {
+            sacrifice_grants += 1;
+        }
+        current = ability.sub_ability.as_deref();
+    }
+    assert_eq!(
+        attack_scopes, 1,
+        "exactly one scope-selecting ban: {parsed:#?}"
+    );
+    assert_eq!(
+        sacrifice_grants, 1,
+        "exactly one sacrifice grant: {parsed:#?}"
+    );
+}
+
+/// CR 608.2c (M6): Call for Aid's "They gain haste" binds the frozen stolen
+/// set — the same `TrackedSet(0)` the "those creatures" untap/sacrifice
+/// siblings carry — via the single-mass-antecedent assembly arm, not the
+/// inherited player target (which the runtime would lower to an inert
+/// `SpecificPlayer` grant).
+#[test]
+fn call_for_aid_they_gain_haste_binds_stolen_set() {
+    let parsed = parse_oracle_text(
+        "Gain control of all creatures target opponent controls until end of turn. \
+         Untap those creatures. They gain haste until end of turn.",
+        "Call for Aid",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let mut current = Some(&parsed.abilities[0]);
+    let mut haste_grants = 0;
+    while let Some(ability) = current {
+        if let Effect::GenericEffect {
+            static_abilities, ..
+        } = ability.effect.as_ref()
+        {
+            let grants_haste = static_abilities.iter().any(|def| {
+                def.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        crate::types::ability::ContinuousModification::AddKeyword {
+                            keyword: crate::types::keywords::Keyword::Haste,
+                        }
+                    )
+                })
+            });
+            if grants_haste {
+                haste_grants += 1;
+                let affected: Vec<_> = static_abilities
+                    .iter()
+                    .filter_map(|def| def.affected.clone())
+                    .collect();
+                assert!(
+                    affected.iter().any(|filter| matches!(
+                        filter,
+                        crate::types::ability::TargetFilter::TrackedSet { .. }
+                    )),
+                    "the haste grant must bind the frozen stolen set, got {affected:#?}"
+                );
+            }
+        }
+        current = ability.sub_ability.as_deref();
+    }
+    assert_eq!(haste_grants, 1, "exactly one haste grant: {parsed:#?}");
 }
 
 #[test]
@@ -60048,16 +60813,26 @@ fn veil_of_summer_effect_chain_parses_supported_clauses() {
             cant_counter.effect
         );
     };
+    // CR 611.2c + CR 109.5: the rule effect covers spells on the stack that
+    // the caster of Veil controls, read live at counter time.
     assert!(static_abilities
         .iter()
         .any(|sd| sd.mode == StaticMode::CantBeCountered
-            && matches!(
-                sd.affected,
-                Some(TargetFilter::Typed(TypedFilter {
-                    controller: Some(ControllerRef::You),
-                    ..
-                }))
-            )));
+            && sd.affected
+                == Some(TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackSpell,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![],
+                            controller: Some(ControllerRef::You),
+                            properties: vec![],
+                        }),
+                    ],
+                })
+            && sd.modifications
+                == vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBeCountered,
+                }]));
 
     let hexproof = cant_counter
         .sub_ability
@@ -67514,14 +68289,15 @@ fn amalia_lifegain_destroy_all_is_source_power_eq_20() {
     }
 }
 
-/// Non-regression (issue #735): Tribute to the World Tree keeps
-/// `ObjectScope::CostPaidObject` for its "if its power is 3 or greater" clause —
-/// the "its" binds the ENTERING creature, not the enchantment source. Its
-/// trigger subject is a typed object ("a creature you control"), which is not
-/// one of the Controller/Player/Any player-subject arms Edit B flips to Source.
+/// Non-regression (issue #735): Tribute to the World Tree's "if its power is 3 or greater"
+/// binds the ENTERING creature (an event object), not the enchantment source: it is a referent
+/// predicate on the node's own referent (`TargetMatchesFilter`, resolved at runtime against the
+/// triggering event's subject), never a quantity on the source. Its trigger subject is a typed
+/// object ("a creature you control"), which is not one of the Controller/Player/Any
+/// player-subject arms that bind "its" to the source.
 #[test]
-fn tribute_world_tree_keeps_cost_paid_object_scope() {
-    use crate::types::ability::{ObjectScope, QuantityRef};
+fn tribute_world_tree_binds_its_to_the_entering_creature_as_a_referent_predicate() {
+    use crate::types::ability::{FilterProp, PtStat, PtValueScope};
 
     let parsed = parse_oracle_text(
         "Whenever a creature you control enters, draw a card if its power is 3 or greater. \
@@ -67535,32 +68311,34 @@ fn tribute_world_tree_keeps_cost_paid_object_scope() {
         .triggers
         .iter()
         .find_map(|t| t.execute.as_deref().and_then(|e| e.condition.clone()))
-        .expect("Tribute trigger must carry a QuantityCheck condition");
+        .expect("Tribute trigger must carry a referent condition");
 
-    assert!(
-        matches!(
-            condition,
-            AbilityCondition::QuantityCheck {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::Power {
-                        scope: ObjectScope::CostPaidObject
-                    }
-                },
-                comparator: Comparator::GE,
-                rhs: QuantityExpr::Fixed { value: 3 },
-            }
-        ),
-        "Tribute must keep Power{{CostPaidObject}} GE 3, got {condition:?}"
+    assert_eq!(
+        condition,
+        AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }
+            ])),
+            use_lki: false,
+            subject_slot: None,
+            subject: crate::types::ability::ObjectScope::Target,
+        },
+        "Tribute must read the entering creature's power through the referent predicate"
     );
 }
 
 /// CR 115.1 + CR 608.2c + CR 208.1: Ent's Fury's "if its power is 4 or greater"
-/// condition reads the object targeted by the gated counter instruction. A
-/// generic cost-paid-object fallback would read no object for this spell and
-/// incorrectly skip the counter.
+/// condition reads the object targeted by the gated counter instruction: a referent predicate
+/// on the node's own referent (its first declared object target). A generic cost-paid-object
+/// fallback would read no object for this spell and incorrectly skip the counter.
 #[test]
 fn ents_fury_power_gate_binds_to_the_gated_target() {
-    use crate::types::ability::{ObjectScope, QuantityRef};
+    use crate::types::ability::{FilterProp, PtStat, PtValueScope};
 
     let parsed = parse_oracle_text(
         "Put a +1/+1 counter on target creature you control if its power is 4 or greater. \
@@ -67575,22 +68353,24 @@ fn ents_fury_power_gate_binds_to_the_gated_target() {
         .abilities
         .iter()
         .find_map(|a| a.condition.clone())
-        .expect("Ent's Fury must carry a QuantityCheck condition");
+        .expect("Ent's Fury must carry a referent condition");
 
-    assert!(
-        matches!(
-            condition,
-            AbilityCondition::QuantityCheck {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::Power {
-                        scope: ObjectScope::Target
-                    }
-                },
-                comparator: Comparator::GE,
-                rhs: QuantityExpr::Fixed { value: 4 },
-            }
-        ),
-        "Ent's Fury must bind the power gate to its announced target, got {condition:?}"
+    assert_eq!(
+        condition,
+        AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 4 },
+                }
+            ])),
+            use_lki: false,
+            subject_slot: None,
+            subject: crate::types::ability::ObjectScope::Target,
+        },
+        "Ent's Fury must bind the power gate to its announced target"
     );
 }
 
@@ -72496,6 +73276,7 @@ fn prop_has_chosen_color(p: &FilterProp) -> bool {
         | FilterProp::RepresentedByCard
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -85268,12 +86049,22 @@ fn keeper_dispose_sentence_two_requires_a_bare_defended_scope() {
 /// creature set stays live (per-pairing `attacker_controller` read at
 /// `combat.rs:5566`, compared at `:5591-5612`), enforced through the
 /// bare-`Player` defended arm (`restrictions.rs:2476`).
-/// "Fixing" either remaining decline by widening the subject match of the
-/// sentence-two branch is the failure this row exists to catch: each of those
-/// cards must keep the `Effect::Unimplemented` gap it carries at BASE_SHA, so
+/// "Fixing" the remaining decline (Chronomantic Escape) by widening the subject
+/// match of the sentence-two branch is the failure this row exists to catch: the
+/// card must keep the `Effect::Unimplemented` gap it carries at BASE_SHA, so
 /// coverage stays honestly red. Paired positives: Promise of Loyalty's
 /// anaphoric subject IS claimed, and so is Inertia's, in the same test, so a
 /// blanket decline cannot green this row.
+///
+/// Champions of Minas Tirith is NOT a third deferral: its "If they don't, they
+/// can't attack you this combat" is claimed by the may-pay-decline path
+/// (`try_parse_may_pay_decline_consequence`, payer-scoped `unless_pay`), which
+/// postdates the #9164 pin. Adjudication (PR #9867, option A): the claim is
+/// exact (payer = TriggeringPlayer, "you" = Player defended scope, "this
+/// combat" = EndOfCombat) and proven at runtime by
+/// `crates/engine/tests/integration/champions_of_minas_tirith.rs` V1-V8, so
+/// the pin below asserts the claimed shape instead of a gap. If that
+/// integration proof ever goes red, this row must revert to a gap.
 #[test]
 fn sentence_two_broadcast_and_player_subjects_stay_declined_while_anaphoric_claims_hold() {
     fn has_cant_attack_gap(def: &AbilityDefinition) -> bool {
@@ -85385,6 +86176,7 @@ fn sentence_two_broadcast_and_player_subjects_stay_declined_while_anaphoric_clai
                     ProhibitedActivity::Attack {
                         defended: AttackTargetFilter::Player,
                         protected_player: None,
+                        protected_scope: None,
                     },
                     "bare \"you\" defends the controller only"
                 );
@@ -85400,7 +86192,10 @@ fn sentence_two_broadcast_and_player_subjects_stay_declined_while_anaphoric_clai
         }
     }
 
-    // Champions of Minas Tirith, verbatim second triggered ability.
+    // Champions of Minas Tirith, verbatim second triggered ability. CLAIMED by
+    // the may-pay-decline path (see the doc comment above for the #9164
+    // adjudication): the pin asserts the claimed restriction shape plus the
+    // payer-scoped prompt, so a regression to a gap fails here.
     let champions = parse_oracle_text(
         "At the beginning of combat on each opponent's turn, if you're the monarch, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat.",
         "Champions of Minas Tirith",
@@ -85408,13 +86203,52 @@ fn sentence_two_broadcast_and_player_subjects_stay_declined_while_anaphoric_clai
         &["Creature".to_string()],
         &[],
     );
+    let champions_trigger = champions
+        .triggers
+        .iter()
+        .find(|trigger| {
+            trigger.execute.as_deref().is_some_and(|body| {
+                matches!(
+                    body.effect.as_ref(),
+                    Effect::AddRestriction {
+                        restriction: GameRestriction::ProhibitActivity {
+                            affected_players: RestrictionPlayerScope::ScopedPlayer,
+                            expiry: RestrictionExpiry::EndOfCombat,
+                            activity: ProhibitedActivity::Attack { defended, .. },
+                            ..
+                        }
+                    } if *defended == crate::types::triggers::AttackTargetFilter::Player
+                )
+            })
+        })
+        .expect(
+            "Champions of Minas Tirith's decline consequence must lower to a \
+             payer-scoped EndOfCombat attack restriction",
+        );
     assert!(
-        champions
+        !champions
             .triggers
             .iter()
             .any(|trigger| trigger.execute.as_deref().is_some_and(has_cant_attack_gap)),
-        "Champions of Minas Tirith's player-scoped restriction must stay an honest gap: {:?}",
+        "the claimed Champions restriction must carry no honest gap: {:?}",
         champions.triggers
+    );
+    assert!(
+        matches!(
+            champions_trigger.unless_pay,
+            Some(UnlessPayModifier {
+                cost: AbilityCost::ManaDynamic {
+                    quantity: QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        },
+                    },
+                },
+                payer: TargetFilter::TriggeringPlayer,
+            })
+        ),
+        "the opponent must be prompted to pay X = their own hand count: {:?}",
+        champions_trigger.unless_pay
     );
 
     // Paired positive, same seam: the anaphorically-fixed subject IS claimed,
@@ -104363,6 +105197,125 @@ fn unless_damage_that_much_binds_to_primary_damage_amount() {
     );
 }
 
+// SHAPE: synthetic qualifier combinations exercise the grammar class represented
+// by Domri, Anarch of Bolas, Determined, and Veil of Summer.
+#[test]
+fn counter_prohibition_spell_subject_grammar() {
+    let rows: [(&str, Vec<TypeFilter>, Vec<FilterProp>); 5] = [
+        ("", vec![], vec![]),
+        ("Creature ", vec![TypeFilter::Creature], vec![]),
+        (
+            "Green ",
+            vec![],
+            vec![FilterProp::HasColor {
+                color: ManaColor::Green,
+            }],
+        ),
+        (
+            "Green creature ",
+            vec![TypeFilter::Creature],
+            vec![FilterProp::HasColor {
+                color: ManaColor::Green,
+            }],
+        ),
+        ("Artifact ", vec![TypeFilter::Artifact], vec![]),
+    ];
+    for (qualifier, type_filters, qualifier_props) in rows {
+        for other in ["", "Other "] {
+            for cast in [false, true] {
+                let relative = if cast { "cast this turn" } else { "control" };
+                let suffix = if cast { "" } else { " this turn" };
+                let text =
+                    format!("{other}{qualifier}spells you {relative} can't be countered{suffix}.");
+                let def = parse_effect_chain(&text, AbilityKind::Spell);
+                assert!(!ability_chain_has_unimplemented(&def), "{text}: {def:#?}");
+                let Effect::GenericEffect {
+                    static_abilities,
+                    duration,
+                    target,
+                    ..
+                } = &*def.effect
+                else {
+                    panic!("{text}: expected a rule effect, got {def:#?}");
+                };
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn), "{text}");
+                assert!(
+                    target.is_none(),
+                    "broadcast subjects do not declare a target"
+                );
+                // CR 109.5 + CR 601.2i: "you control" reads the current
+                // controller; "you cast this turn" reads the cast journal.
+                let mut properties = qualifier_props.clone();
+                if !other.is_empty() {
+                    properties.push(FilterProp::Another);
+                }
+                if cast {
+                    properties.push(FilterProp::CastThisTurn {
+                        caster: ControllerRef::You,
+                    });
+                }
+                let expected = TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackSpell,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: type_filters.clone(),
+                            controller: (!cast).then_some(ControllerRef::You),
+                            properties,
+                        }),
+                    ],
+                };
+                assert_eq!(static_abilities.len(), 1, "{text}");
+                assert_eq!(
+                    static_abilities[0].affected.as_ref(),
+                    Some(&expected),
+                    "{text}"
+                );
+                assert_eq!(
+                    static_abilities[0].modifications,
+                    vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantBeCountered
+                    }],
+                    "{text}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn counter_prohibition_rejects_unrepresented_restrictions() {
+    // The positive sibling proves this reached the spell-subject grammar.
+    assert!(!ability_chain_has_unimplemented(&parse_effect_chain(
+        "Creature spells you cast this turn can't be countered.",
+        AbilityKind::Spell,
+    )));
+    for text in [
+        "Creature spells you cast this turn yesterday can't be countered.",
+        "Spells you control can't be countered by blue or black spells this turn.",
+        "Spells you control can't be countered by blue or black spells this turn, and creatures you control can't be the targets of blue or black spells this turn.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(ability_chain_has_unimplemented(&def), "{text}: {def:#?}");
+    }
+}
+
+#[test]
+fn domri_full_oracle_plus_one_has_mana_and_counter_prohibition() {
+    let parsed = parse_oracle_text(
+        "Creatures you control get +1/+0.\n[+1]: Add {R} or {G}. Creature spells you cast this turn can't be countered.\n[−2]: Target creature you control fights target creature you don't control.",
+        "Domri, Anarch of Bolas", &[], &["Planeswalker".to_string()], &["Domri".to_string()],
+    );
+    let plus = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(&*ability.effect, Effect::Mana { .. }))
+        .expect("Domri's +1 starts with mana");
+    assert!(!ability_chain_has_unimplemented(plus), "{plus:#?}");
+    assert!(collect_chain_effects(plus)
+        .iter()
+        .any(|effect| matches!(effect, Effect::GenericEffect { .. })));
+}
+
 /// CR 500: the player-scope rebind of "the life they lost" (`Target` -> `ScopedPlayer`) rebuilds
 /// the quantity, and the rebuilt value must carry the window across; a literal `ThisTurn` would
 /// silently reset a last-turn payload to this turn. The this-turn row is the paired control that
@@ -104805,4 +105758,103 @@ fn otherwise_one_of_those_tokens_clones_the_then_branch_token() {
         "{:?}",
         otherwise.effect
     );
+}
+
+/// CR 603.2b + CR 608.2c + CR 611.2a + CR 702.1d: the shared-predicate
+/// condition and the "same is true" continuation must remain typed all the way
+/// through the real card parser. The class census was generated with:
+/// `jq -c '[.data | to_entries[] | .value[] | select((.text // "") | ascii_downcase |
+/// test("(gains|gain) [^\\n.]* until end of turn if [^\\n.]*\\. the same is true for")) |
+/// {name:.name,text:.text}] | sort_by(.name)' data/mtgjson/AtomicCards.json`
+/// against MTGJSON 5.3.0+20261118; the normalized output SHA-256 is
+/// `5369ed6bbd8d9efc01435743bb7a94268060fd547cbf6feff8734e974a4bdf6d6`.
+#[test]
+fn sproutwatch_dryad_preserves_per_keyword_conditions_and_duration() {
+    let parsed = parse_oracle_text(
+        "At the beginning of each combat, Sproutwatch Dryad gains flying until end of turn if a creature you control or a card in your hand has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance.",
+        "Sproutwatch Dryad",
+        &[],
+        &["Creature".to_string()],
+        &["Dryad".to_string()],
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    let execute = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("begin-combat trigger must have an effect");
+    assert_eq!(parsed.triggers[0].phase, Some(Phase::BeginCombat));
+
+    let Effect::GenericEffect {
+        duration,
+        static_abilities,
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected GenericEffect, got {:?}", execute.effect);
+    };
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(static_abilities.len(), 12);
+
+    let expected_keywords = [
+        Keyword::Flying,
+        Keyword::FirstStrike,
+        Keyword::DoubleStrike,
+        Keyword::Deathtouch,
+        Keyword::Haste,
+        Keyword::Hexproof,
+        Keyword::Indestructible,
+        Keyword::Lifelink,
+        Keyword::Menace,
+        Keyword::Reach,
+        Keyword::Trample,
+        Keyword::Vigilance,
+    ];
+    for (static_ability, expected_keyword) in static_abilities.iter().zip(expected_keywords.iter())
+    {
+        assert_eq!(
+            static_ability.modifications,
+            vec![ContinuousModification::AddKeyword {
+                keyword: expected_keyword.clone(),
+            }]
+        );
+        assert_eq!(
+            static_ability.condition.as_ref(),
+            Some(&StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .properties(vec![
+                                    FilterProp::InZone {
+                                        zone: Zone::Battlefield,
+                                    },
+                                    FilterProp::WithKeyword {
+                                        value: expected_keyword.clone(),
+                                    },
+                                ]),
+                        ),
+                        TargetFilter::Typed(
+                            TypedFilter::card()
+                                .controller(ControllerRef::You)
+                                .properties(vec![
+                                    FilterProp::InZone { zone: Zone::Hand },
+                                    FilterProp::WithKeyword {
+                                        value: expected_keyword.clone(),
+                                    },
+                                ]),
+                        ),
+                    ],
+                }),
+            })
+        );
+        assert!(static_ability
+            .description
+            .as_deref()
+            .is_none_or(|description| !description.contains(" if ")));
+    }
 }

@@ -310,6 +310,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -537,6 +538,14 @@ pub(crate) fn attachment_relation_rejects(
 /// See [`CharacteristicKinds`] for why these are two questions, not one.
 pub(crate) fn target_filter_characteristic_reads(filter: &TargetFilter) -> CharacteristicKinds {
     target_filter_characteristic_reads_at(filter, CHARACTERISTIC_READ_DEPTH)
+}
+
+/// CR 202.3 + CR 707.9b: whether a single filter property reads the mana-cost characteristic and
+/// nothing else (`Cmc` with a fixed threshold, `ManaValueParity`, `ManaCostIn`, ...). It reuses the
+/// exhaustive per-property classification, so a new property variant is decided at that one seam.
+pub(crate) fn filter_prop_reads_only_mana_cost(prop: &FilterProp) -> bool {
+    filter_prop_characteristic_reads_at(prop, CHARACTERISTIC_READ_DEPTH)
+        == CharacteristicKinds::MANA_COST
 }
 
 pub(crate) fn target_filter_characteristic_reads_at(
@@ -873,6 +882,7 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         // (CR 109.5 — "you" on a static ability is the current controller of the
         // object it is on), and layer 2 rewrites that (CR 613.1b). An immutable
         // right operand does not make the relation immutable.
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Owned { .. }
         // CR 302.6: reads the `summoning_sick` continuity flag, which layer 2
         // re-arms for every permanent whose controller changed (CR 613.1b).
@@ -1151,6 +1161,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -3064,6 +3075,7 @@ fn filter_prop_contains_input(
             | FilterProp::RepresentedByCard
             | FilterProp::ControllerChoseLabel { .. }
             | FilterProp::WasPlayed
+            | FilterProp::CastThisTurn { .. }
             | FilterProp::Attacking { .. }
             | FilterProp::Blocking
             | FilterProp::BlockingSource
@@ -3827,7 +3839,8 @@ impl DeclaredGroupBinder<'_> {
 /// new `ControllerRef`-bearing property must be classified here.
 fn declared_group_controller(prop: &mut FilterProp) -> Option<&mut ControllerRef> {
     match prop {
-        FilterProp::Owned { controller }
+        FilterProp::CastThisTurn { caster: controller }
+        | FilterProp::Owned { controller }
         | FilterProp::AttachedTo {
             to: AttachmentReferent::Player { player: controller },
         }
@@ -4161,7 +4174,9 @@ pub(crate) fn rebind_declared_groups_in_condition(
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::ChosenLabelIs { .. }
-        | AbilityCondition::SourceLacksKeyword { .. } => {}
+        | AbilityCondition::SourceLacksKeyword { .. }
+        // `PlayerScope` endpoints name no declared groups (no rebind target).
+        | AbilityCondition::PlayerAttackedPlayer { .. } => {}
     }
 }
 
@@ -4441,6 +4456,7 @@ fn absent_search_property_truth(prop: &FilterProp) -> Option<bool> {
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -6533,6 +6549,72 @@ fn entry_filter_matches_staged(
     )
 }
 
+/// CR 614.12: an entry replacement of ANOTHER source (Hallowed Moonlight, Containment
+/// Priest) applies according to the entrant as it would exist on the battlefield, with the
+/// continuous effects that already exist applied (Opalescence makes an Enchantment token a
+/// creature). The single authority for that reading of a token entry: a liminal `TokenEntry`
+/// is projected on the board without the tokens entering in the same event, and a `CreateToken`
+/// batch view on the board as it is. Every other entry, a reference to the replacement's own
+/// source, and every entry replacement of the entrant's own (whose retention is checked through
+/// the same projection) read [`matches_target_filter_on_battlefield_entry`] unchanged.
+pub(crate) fn matches_target_filter_on_projected_battlefield_entry(
+    state: &GameState,
+    event: &ProposedEvent,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    if matches!(filter, TargetFilter::SelfRef) {
+        return matches_target_filter_on_battlefield_entry(state, event, filter, ctx);
+    }
+    match event {
+        // CR 614.12 + CR 614.4: every token entering in the same event is absent from the board
+        // (Clone Legion ruling: the tokens enter at the same time), the resolution's earlier
+        // batches included — the same authority the entrant's own-replacement retention reads.
+        ProposedEvent::TokenEntry { entry_ref, .. }
+            if state.liminal_entries.contains_key(entry_ref) =>
+        {
+            let co_entrants =
+                crate::game::effects::token_copy::entering_token_co_entrants(state, *entry_ref);
+            if let Some(projection) =
+                BattlefieldEntrantProjection::for_liminal_token(state, *entry_ref, &co_entrants)
+            {
+                return projection.matches(filter, ctx);
+            }
+        }
+        ProposedEvent::CreateToken {
+            owner,
+            spec,
+            copy,
+            enter_tapped,
+            ..
+        } => {
+            // CR 707.2 + CR 614.12: a copy batch's entrant is its complete copy body — the
+            // copied statics and mana cost included — not the flattened characteristics of
+            // the replacement-matching spec.
+            let obj = match copy.as_deref() {
+                Some(copy) => {
+                    build_battlefield_entry_copy_object(state, *owner, copy, *enter_tapped)
+                }
+                None => build_battlefield_entry_token_object(*owner, spec, *enter_tapped),
+            };
+            // CR 614.12 + CR 614.4: the resolution's earlier batches enter in the same event.
+            let co_entrants = crate::game::effects::token_copy::copy_token_co_entrants(
+                state,
+                ObjectId(u64::MAX),
+                &[],
+            );
+            if let Some(projection) = BattlefieldEntrantProjection::token_on_pre_entry_board(
+                pre_entry_board(state, &co_entrants),
+                &obj,
+            ) {
+                return projection.matches(filter, ctx);
+            }
+        }
+        _ => {}
+    }
+    matches_target_filter_on_battlefield_entry(state, event, filter, ctx)
+}
+
 pub fn matches_target_filter_on_battlefield_entry(
     state: &GameState,
     event: &ProposedEvent,
@@ -8285,6 +8367,42 @@ fn is_stamped_granter(obj: &GameObject, granting_object: Option<ObjectIncarnatio
     granting_object.is_some_and(|granter| ObjectIncarnationRef::from_object(obj) == granter)
 }
 
+/// CR 707.2 + CR 707.9b: the body of a copy-token batch's entrant, built by the single
+/// copy-body authority (`token::materialize_token_copy_body`), as the batch's entrants will
+/// exist before any continuous effect applies.
+fn build_battlefield_entry_copy_object(
+    state: &GameState,
+    owner: PlayerId,
+    copy: &crate::types::proposed_event::CopyTokenSpec,
+    enter_tapped: EtbTapState,
+) -> GameObject {
+    let mut obj = GameObject::new(
+        ObjectId(u64::MAX),
+        CardId(0),
+        owner,
+        copy.values.name.clone(),
+        Zone::Battlefield,
+    );
+    obj.controller = owner;
+    let modifications = if copy.additional_modifications.is_empty() {
+        crate::types::resolved_commands::ResolvedCopyBodyModifications::NoExceptions
+    } else {
+        crate::types::resolved_commands::ResolvedCopyBodyModifications::Folded {
+            modifications: copy.additional_modifications.clone(),
+            all_creature_types: state.all_creature_types.clone(),
+        }
+    };
+    crate::game::effects::token::materialize_token_copy_body(
+        &mut obj,
+        copy,
+        &modifications,
+        state.turn_number,
+        0,
+        enter_tapped.resolve(copy.tapped),
+    );
+    obj
+}
+
 /// Build a synthetic `GameObject` from a `TokenSpec` for filter evaluation
 /// against `CreateToken` events (tokens that don't yet exist in `state.objects`).
 ///
@@ -9742,6 +9860,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // SpellCastRecord does not retain the copy/representation bit. Fail
         // closed rather than treating every cast spell as card-represented.
         FilterProp::RepresentedByCard => false,
+        FilterProp::CastThisTurn { .. } => false,
         FilterProp::WasPlayed => true,
         // CR 601.2a + CR 400.11: see the live-spell arm; outside the game is no zone.
         FilterProp::InZone { zone: required } => {
@@ -10995,6 +11114,13 @@ fn matches_filter_prop(
         ),
         // CR 305.1 + CR 601.2a: "played by" entry replacements (Uphill Battle).
         FilterProp::WasPlayed => obj.played_from_zone.is_some() || obj.cast_from_zone.is_some(),
+        // CR 601.2i + CR 707.10: cast provenance, not current control or origin
+        // zone, identifies a cast; copies have no occurrence. The current-turn
+        // journal lookup also rejects coordinates left over from earlier turns.
+        FilterProp::CastThisTurn { caster } => obj.cast_occurrence.is_some_and(|occurrence| {
+            owned_axis_admits(state, source, caster, occurrence.caster)
+                && crate::game::ledger::cast_occurrence_is_current(state, occurrence, object_id)
+        }),
         // CR 508.1b: Attacking creatures may be scoped by defending player
         // relation ("attacking", "attacking you", "attacking your opponents").
         FilterProp::Attacking { defender } => state.combat.as_ref().is_some_and(|combat| {
@@ -12156,6 +12282,7 @@ fn zone_change_record_matches_property(
         FilterProp::RepresentedByCard => false,
         // CR 305.1 + CR 601.2a: zone-change snapshots carry cast/play provenance
         // when the object was cast or played — not mere zone moves (reanimate).
+        FilterProp::CastThisTurn { .. } => false,
         FilterProp::WasPlayed => {
             record.played_from_zone.is_some() || record.cast_from_zone.is_some()
         }
@@ -28140,7 +28267,8 @@ mod characteristic_read_classification_tests {
             // across any scope these name (CR 613.1b), so
             // `filter_prop_characteristic_reads_at` must report CONTROLLER for
             // every one of them.
-            FilterProp::Attacking { .. }
+            FilterProp::CastThisTurn { .. }
+            | FilterProp::Attacking { .. }
             | FilterProp::ProtectorMatches { .. }
             | FilterProp::Owned { .. }
             | FilterProp::HasAttachment { .. }
@@ -28348,6 +28476,9 @@ mod characteristic_read_classification_tests {
     #[test]
     fn every_controller_ref_carrying_prop_reads_the_controller_kind() {
         let props = [
+            FilterProp::CastThisTurn {
+                caster: ControllerRef::You,
+            },
             FilterProp::Attacking {
                 defender: Some(ControllerRef::You),
             },
@@ -28539,6 +28670,9 @@ mod declared_group_binder_tests {
             },
             FilterProp::AttackedThisTurn {
                 defender: Some(with.clone()),
+            },
+            FilterProp::CastThisTurn {
+                caster: with.clone(),
             },
             FilterProp::NameMatchesAnyPermanent {
                 controller: Some(with),
@@ -31230,5 +31364,28 @@ mod parser_oracle_trigger_tests {
             "Clone"
         ));
         assert!(!super::source_has_chosen_name(None, None, "Toil"));
+    }
+}
+
+#[cfg(test)]
+mod cast_this_turn_face_tests {
+    use super::*;
+
+    #[test]
+    fn cast_provenance_is_unknown_for_bare_faces_even_under_negation() {
+        let face = CardFace::default();
+        let prop = FilterProp::CastThisTurn {
+            caster: ControllerRef::You,
+        };
+        assert_eq!(context_free_prop_matches_face(&face, &prop), None);
+        assert_eq!(
+            context_free_prop_matches_face(
+                &face,
+                &FilterProp::Not {
+                    prop: Box::new(prop)
+                }
+            ),
+            None
+        );
     }
 }

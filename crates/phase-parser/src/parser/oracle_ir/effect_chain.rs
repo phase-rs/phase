@@ -968,6 +968,8 @@ pub(crate) struct ClauseIr {
     /// it: the text says what to count, this says whose. Empty (the default)
     /// means no antecedent was in scope, which fails closed to `oracle_target`'s
     /// documented legacy seeds — the behavior before this field existed.
+    /// The set's characteristic rung carries, the same way, the object a
+    /// possessive pronoun in the count ("where X is its power") names (CR 608.2k).
     ///
     /// Skipped from `ClauseIr`'s `Serialize` (the parser trace surface) rather
     /// than given a `Serialize` impl of its own: this is a lowering-time

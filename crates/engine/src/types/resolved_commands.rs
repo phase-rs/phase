@@ -3,7 +3,7 @@
 //! P1 established provenance and ordering. P2 makes mana insert and exact
 //! spend commands executable through their owning authority appliers.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -873,6 +873,12 @@ pub struct ResolvedTokenCreationCommand {
     /// The `next_object_id` high-water after this token's id was drawn, so a
     /// replay resuming from a shorter prefix cannot hand the same id out twice.
     pub resulting_next_object_id: u64,
+    /// CR 614.6: the zone the token was created in when a replacement sent its
+    /// entry elsewhere (Hallowed Moonlight's exile); `None` is the ordinary
+    /// battlefield birth. `default` keeps pre-change journals parsing and
+    /// `skip_serializing_if` keeps the ordinary case byte-identical on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_zone: Option<Zone>,
     pub cause: RulesExecutionNodeRef,
 }
 
@@ -1629,6 +1635,60 @@ pub enum ResolvedRulesCommand {
     StackRemoval(Box<ResolvedStackRemovalCommand>),
 }
 
+/// How long a journal entry is read after the action that recorded it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalRetention {
+    /// Read only inside the recording action, by the cast-scoped `entries_since`
+    /// classifications a live `SpellCastReversal` anchors (CR 601.2 + CR 733.1).
+    Action,
+    /// Read after the recording action: by a keyed journal index, by the load validator's
+    /// cross-checks, by a reader at the action boundary, or by a restore migration.
+    Turn,
+}
+
+impl ResolvedRulesCommand {
+    /// The retention of this command, decided by every reader of its kind.
+    pub fn retention(&self) -> JournalRetention {
+        match self {
+            // The load validator checks both against the produced and spent mana
+            // records, which `has_produced_pip` and `latest_mana_producer_for_source` key.
+            Self::ManaInsert(_) | Self::ManaSpend(_) => JournalRetention::Turn,
+            // CR 603.7: `delayed_install_origins_sharing` keys these, and the delayed-trigger
+            // provenance validator walks them.
+            Self::DelayedTriggerInstall(_) => JournalRetention::Turn,
+            // CR 800.4: a leave is kept with its node (see `ResolvedCommandJournalEntry::retention`).
+            Self::PlayerLeave(_) => JournalRetention::Turn,
+            // CR 701.20a: `remember_public_reveals` reads the controller reveals since the action's
+            // start at the action boundary, after a shortcut's repetitions have committed.
+            Self::Information(_) => JournalRetention::Turn,
+            // CR 601.2i: a stack-entry finalize's load check names its earlier spell-cast edit.
+            Self::LedgerEdit(_) => JournalRetention::Turn,
+            // CR 509.1a: `migrate_restored_entering_block_history` reads this turn's blocks.
+            Self::CombatMembership(_) => JournalRetention::Turn,
+            // Read only by the cast-scoped classifications. A zone change a player's leave
+            // caused (CR 800.4a) belongs to that leave's node and is kept with it.
+            Self::PlayerEdit(_)
+            | Self::ObjectStatus(_)
+            | Self::ObjectCounter(_)
+            | Self::ObjectTransform(_)
+            | Self::Attachment(_)
+            | Self::ContinuousEffect(_)
+            | Self::ControllerOverride(_)
+            | Self::EntryProvenance(_)
+            | Self::ObjectCease(_)
+            | Self::TokenCreation(_)
+            | Self::LibraryShuffle(_)
+            | Self::ZoneChange(_)
+            | Self::FrameTransition(_)
+            | Self::TriggerCollection(_)
+            | Self::StackPush(_)
+            | Self::StackEntryFinalize(_)
+            | Self::UncommittedTriggerRemoval(_)
+            | Self::StackRemoval(_) => JournalRetention::Action,
+        }
+    }
+}
+
 /// An append-only trigger collection command has no replay-time precondition.
 ///
 /// The uninhabited type keeps the uniform resolved-command applier signature
@@ -2147,6 +2207,24 @@ impl Clone for ResolvedCommandJournalEntry {
     }
 }
 
+impl ResolvedCommandJournalEntry {
+    /// The retention of this entry. A node's opening slot is kept for as long as the node,
+    /// and CR 800.4a: every command of a player's leave is kept, so the sweep stays one causal
+    /// unit and `records_player_leave_move` still finds its zone changes.
+    pub fn retention(&self) -> JournalRetention {
+        match (&self.command, self.node) {
+            (None, _) | (Some(_), RulesExecutionNodeRef::PlayerLeave(_)) => JournalRetention::Turn,
+            (
+                Some(command),
+                RulesExecutionNodeRef::Proposal(_)
+                | RulesExecutionNodeRef::ActivatedMana(_)
+                | RulesExecutionNodeRef::TriggeredMana(_)
+                | RulesExecutionNodeRef::Payment(_),
+            ) => command.retention(),
+        }
+    }
+}
+
 /// Exact stamped mana created by one node.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(not(feature = "test-support"), derive(Clone))]
@@ -2300,6 +2378,18 @@ impl JournalIndex {
         }
     }
 
+    /// Forgets the delayed-install positions at and after `start`, which `entries` held.
+    fn forget_delayed_installs_from(
+        &mut self,
+        start: usize,
+        entries: &im::Vector<ResolvedCommandJournalEntry>,
+    ) {
+        for origin in entries.iter().filter_map(delayed_install_origin) {
+            forget_positions_from(&mut self.delayed_by_token, origin.token, start);
+            forget_positions_from(&mut self.delayed_by_instance, origin.instance, start);
+        }
+    }
+
     fn record_delayed_install(&mut self, position: usize, entry: &ResolvedCommandJournalEntry) {
         if let Some(origin) = delayed_install_origin(entry) {
             self.delayed_by_token
@@ -2311,6 +2401,24 @@ impl JournalIndex {
                 .or_default()
                 .push_back(position);
         }
+    }
+}
+
+/// Drops `key`'s positions at and after `start`, and the key once it has none, so the index
+/// stays the one `rebuild_index` derives.
+fn forget_positions_from<K: std::hash::Hash + Eq + Clone>(
+    map: &mut im::HashMap<K, im::Vector<usize>>,
+    key: K,
+    start: usize,
+) {
+    let Some(positions) = map.get_mut(&key) else {
+        return;
+    };
+    while positions.back().is_some_and(|&position| position >= start) {
+        positions.pop_back();
+    }
+    if positions.is_empty() {
+        map.remove(&key);
     }
 }
 
@@ -2952,6 +3060,48 @@ impl ResolvedRulesJournal {
         )
     }
 
+    /// CR 732.1b: retires the [`JournalRetention::Action`] entries at and after `start`.
+    ///
+    /// The shortcut rules settle how many times a loop's actions repeat without the players
+    /// performing each one, so each committed repetition of a taken shortcut keeps only the
+    /// entries read after its action; the board it leaves is its result. Kept entries keep their
+    /// ordinals and nodes, so the ordinals from `start` on may skip, and each retired ordinal
+    /// leaves its node's metadata with it.
+    pub fn retire_action_scoped_since(&mut self, start: usize) {
+        if start >= self.entries.len() {
+            return;
+        }
+        let tail = self.entries.split_off(start);
+        self.index.forget_delayed_installs_from(start, &tail);
+        let mut retired: HashMap<RulesExecutionNodeRef, Vec<ResolvedCommandOrdinal>> =
+            HashMap::new();
+        for entry in tail {
+            match entry.retention() {
+                JournalRetention::Turn => {
+                    self.index.record_entry(self.entries.len(), &entry);
+                    self.entries.push_back(entry);
+                }
+                JournalRetention::Action => {
+                    retired.entry(entry.node).or_default().push(entry.ordinal);
+                }
+            }
+        }
+        for (node, ordinals) in retired {
+            let node_index = self
+                .node_index(node)
+                .expect("a recorded entry's node is recorded");
+            // Ordinals ascend in both lists, so only the node's tail from the first retired
+            // ordinal can hold one.
+            let journal_ordinals = &mut self.nodes[node_index].journal_ordinals;
+            let first = journal_ordinals.partition_point(|ordinal| *ordinal < ordinals[0]);
+            let kept: Vec<_> = journal_ordinals
+                .drain(first..)
+                .filter(|ordinal| ordinals.binary_search(ordinal).is_err())
+                .collect();
+            journal_ordinals.extend(kept);
+        }
+    }
+
     fn begin_settlement(
         &mut self,
         identity_for: impl FnOnce(SettlementNodeOrdinal) -> RulesExecutionNodeRef,
@@ -3096,19 +3246,32 @@ impl ResolvedRulesJournal {
     }
 
     fn validate_serialized_authority(&self) -> Result<(), ResolvedRulesJournalError> {
-        if self.next_command_ordinal != self.entries.len() as u64
-            || self.next_settlement_node_ordinal != self.nodes.len() as u64
-        {
+        // CR 732.1b: command ordinals ascend below their allocator but may skip, where a taken
+        // shortcut's repetition retired an action-scoped entry (`retire_action_scoped_since`).
+        // Nodes are never retired, so their ordinals stay contiguous with their allocator.
+        if self.next_settlement_node_ordinal != self.nodes.len() as u64 {
             return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
-                "allocator is not contiguous with its records".to_string(),
+                "node allocator is not contiguous with its nodes".to_string(),
             ));
         }
-        for (expected, entry) in self.entries.iter().enumerate() {
-            if entry.ordinal != ResolvedCommandOrdinal(expected as u64) {
-                return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
-                    "command entries are duplicate or nonmonotonic".to_string(),
-                ));
-            }
+        if self
+            .entries
+            .back()
+            .is_some_and(|entry| entry.ordinal.0 >= self.next_command_ordinal)
+        {
+            return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                "command allocator is behind its entries".to_string(),
+            ));
+        }
+        if self
+            .entries
+            .iter()
+            .zip(self.entries.iter().skip(1))
+            .any(|(earlier, later)| earlier.ordinal >= later.ordinal)
+        {
+            return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                "command entries are duplicate or nonmonotonic".to_string(),
+            ));
         }
         for (expected, node) in self.nodes.iter().enumerate() {
             if node.ordinal != SettlementNodeOrdinal(expected as u64)
@@ -4832,5 +4995,136 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&journal).unwrap()).unwrap();
         assert_leave_only("reloaded", &reloaded);
         assert!(!ResolvedRulesJournal::default().records_player_leave_move(&key(0)));
+    }
+
+    /// Each node's metadata names exactly the entries recorded under it, in order.
+    fn assert_nodes_name_their_entries(label: &str, journal: &ResolvedRulesJournal) {
+        for node in journal.nodes() {
+            let recorded: Vec<_> = journal
+                .entries()
+                .iter()
+                .filter(|entry| entry.node == node.identity)
+                .map(|entry| entry.ordinal)
+                .collect();
+            assert_eq!(
+                node.journal_ordinals, recorded,
+                "{label}: {:?}",
+                node.identity
+            );
+        }
+    }
+
+    /// CR 732.1b: retiring the action-scoped entries from a position keeps every entry read after
+    /// its action — node slots, mana, a delayed install, a player leave's sweep — and the
+    /// earlier entries untouched, prunes each retired ordinal from its node, keeps the index the
+    /// one a reload derives, and reloads through the load validator with its ordinal gaps.
+    #[test]
+    fn retiring_action_scoped_entries_keeps_the_turn_record() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
+
+        let db = crate::test_support::shared_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let strike = scenario.add_real_card(P0, "Distortion Strike", Zone::Hand, db);
+        scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+        let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        runner.cast(strike).target_object(bears).resolve();
+        let mut journal = runner.state().resolved_rules_journal.clone();
+        let leave = journal.begin_player_leave().unwrap();
+        journal.record_zone_change(sweep_move(leave, 1, 0)).unwrap();
+        let proposal = journal.begin_proposal().unwrap();
+        journal
+            .record_zone_change(sweep_move(proposal, 2, 1))
+            .unwrap();
+
+        const START: usize = 1;
+        let before = journal.clone();
+        let tail = before.entries().skip(START);
+        let retired = tail
+            .iter()
+            .filter(|entry| entry.retention() == JournalRetention::Action)
+            .count();
+        assert!(
+            retired > 0
+                && tail
+                    .iter()
+                    .any(|entry| delayed_install_origin(entry).is_some())
+                && tail.iter().any(|entry| {
+                    matches!(
+                        entry.command,
+                        Some(
+                            ResolvedRulesCommand::StackPush(_)
+                                | ResolvedRulesCommand::StackRemoval(_)
+                        )
+                    )
+                }),
+            "reach: the tail holds stack commands to retire and a delayed install that moves \
+             down past them"
+        );
+
+        journal.retire_action_scoped_since(START);
+
+        assert_eq!(
+            journal.entries().take(START),
+            before.entries().take(START),
+            "entries before the start are untouched"
+        );
+        assert_eq!(
+            journal.entries().skip(START),
+            tail.iter()
+                .filter(|entry| entry.retention() == JournalRetention::Turn)
+                .cloned()
+                .collect::<im::Vector<_>>(),
+            "the tail keeps exactly its turn-retained entries, in order"
+        );
+        assert_eq!(journal.entries().len(), before.entries().len() - retired);
+        assert_eq!(
+            journal.next_command_ordinal(),
+            before.next_command_ordinal()
+        );
+        assert_eq!(journal.nodes().len(), before.nodes().len());
+        assert_eq!(journal.produced_mana(), before.produced_mana());
+        assert_eq!(journal.spent_mana(), before.spent_mana());
+        assert_nodes_name_their_entries("retired", &journal);
+        assert_index_answers_as_the_scan("retired", &journal);
+        let key = |turn_zone_change_index| PlayerLeaveMove {
+            object_id: ObjectId(5),
+            from: Zone::Library,
+            to: Zone::Exile,
+            turn_zone_change_index,
+        };
+        assert!(
+            journal.records_player_leave_move(&key(0)),
+            "CR 800.4a: the leave's sweep is kept"
+        );
+        assert!(
+            !journal.entries().iter().any(|entry| entry.node == proposal
+                && matches!(entry.command, Some(ResolvedRulesCommand::ZoneChange(_)))),
+            "the proposal's zone change is retired"
+        );
+
+        let serialized = serde_json::to_value(&journal).unwrap();
+        let reloaded: ResolvedRulesJournal = serde_json::from_value(serialized.clone())
+            .expect("the load validator admits the retired ordinals' gaps");
+        assert_eq!(reloaded, journal, "a reload derives the same index");
+
+        let mut behind = serialized.clone();
+        behind["next_command_ordinal"] = serde_json::json!(journal.entries().len() - 1);
+        assert!(
+            serde_json::from_value::<ResolvedRulesJournal>(behind).is_err(),
+            "an allocator behind its last entry is still refused"
+        );
+        let mut nonmonotonic = serialized;
+        let last = journal.entries().len() - 1;
+        nonmonotonic["entries"][last]["ordinal"] =
+            serde_json::json!(journal.entries()[last - 1].ordinal.0);
+        assert!(
+            serde_json::from_value::<ResolvedRulesJournal>(nonmonotonic).is_err(),
+            "a repeated ordinal is still refused"
+        );
     }
 }

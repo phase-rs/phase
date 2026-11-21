@@ -231,6 +231,10 @@ pub(crate) fn answer_branch(
             pending_effect,
             remaining: 1,
             min_total_power: None,
+            // A poll pick is answered by `answer_pick`, never by the Ward
+            // shortfall settle that reads this snapshot: an unpaid instance
+            // is recorded on the poll, not countered.
+            trigger_event: None,
         },
         SingleChoicePayment::DiscardOneChosen => WaitingFor::WardDiscardChoice {
             player: seat,

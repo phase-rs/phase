@@ -106,13 +106,14 @@ use super::oracle_quantity::{
     parse_for_each_object_filter_clause_with_context,
 };
 use super::oracle_target::{
-    history_clause_subject, parse_anaphoric_target_ref, parse_definite_anaphor,
-    parse_definite_parent_reference, parse_event_context_ref, parse_fight_target,
-    parse_parent_target_controller_population, parse_target, parse_target_with_ctx,
-    parse_target_with_disjunctive_restriction, parse_target_with_syntax, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx, population_drops_block_history_clause,
-    resolve_singular_exiled_card_target, strip_block_history_clauses, unique_slot_for_anaphor,
-    AnaphorNoun, AnaphorZoneClass, DefiniteAnaphor, TargetSyntax,
+    history_clause_subject, parse_anaphoric_target_ref, parse_block_history_clause,
+    parse_definite_anaphor, parse_definite_parent_reference, parse_event_context_ref,
+    parse_fight_target, parse_parent_target_controller_population, parse_target,
+    parse_target_with_ctx, parse_target_with_disjunctive_restriction, parse_target_with_syntax,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
+    population_drops_block_history_clause, resolve_singular_exiled_card_target,
+    strip_block_history_clauses, unique_slot_for_anaphor, AnaphorNoun, AnaphorZoneClass,
+    DefiniteAnaphor, TargetSyntax,
 };
 use super::oracle_util::{
     contains_possessive, first_sentence, has_unconsumed_conditional, parse_count_expr,
@@ -134,23 +135,23 @@ use crate::types::ability::{
     Comparator, ConjureCard, ConjureSource, ContinuousEffectOnset, ContinuousModification,
     ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission, CopyScale,
     DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
-    DieResultBranch, DigRestOrder, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
-    EffectScope, ExtraPhaseRecipient, FilterProp, GameRestriction, GuardReading, GuessSubject,
-    InstructionJoin, IntensityScope, IterationKindBinding, KeeperConstraint, KeeperCounterMark,
-    LibraryPosition, LibraryShuffleMode, ManaProduction, ManaSpendPermission, ManaTargetRole,
-    MultiTargetSpec, NameStickerSet, NumberDistinctness, ObjectProperty, ObjectScope,
-    OriginConstraint, PerPlayerScope, PerpetualModification, PlayPermissionInvalidation,
-    PlayerChoiceDistinctness, PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount,
-    PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
-    ReciprocalZoneChoiceRole, RepeatForTiming, ReplacementCondition, ReplacementDefinition,
-    ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
-    RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition, SkipScope,
-    SpellStackToGraveyardReplacement, SpellbookSelection, StaticCondition, StaticDefinition,
-    StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter, TargetReadOrigin,
-    TargetSelectionMode, ThisWayCause, TokenAttackDestination, TrackedAnaphorSource,
-    TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier,
-    UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry, ZoneChoiceCandidateSource,
-    ZoneChoiceChooser, ZoneChoiceGatherRole, ZoneOwner,
+    DelayedTriggerPlayerBinding, DieResultBranch, DigRestOrder, Duration, EachDamageRecipient,
+    Effect, EffectOutcomeSignal, EffectScope, ExtraPhaseRecipient, FilterProp, GameRestriction,
+    GuardReading, GuessSubject, InstructionJoin, IntensityScope, IterationKindBinding,
+    KeeperConstraint, KeeperCounterMark, LibraryPosition, LibraryShuffleMode, ManaProduction,
+    ManaSpendPermission, ManaTargetRole, MultiTargetSpec, NameStickerSet, NumberDistinctness,
+    ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope, PerpetualModification,
+    PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter, PlayerRelation,
+    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue,
+    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatForTiming, ReplacementCondition,
+    ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope,
+    RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition,
+    SkipScope, SpellStackToGraveyardReplacement, SpellbookSelection, StaticCondition,
+    StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter,
+    TargetReadOrigin, TargetSelectionMode, ThisWayCause, TokenAttackDestination,
+    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
+    UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry,
+    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneChoiceGatherRole, ZoneOwner,
 };
 // Imported on its own line rather than folded into the block above: that block
 // is the busiest merge point in this file, and a one-name addition inside it
@@ -749,6 +750,7 @@ fn condition_compares_only_event_amount(condition: &AbilityCondition) -> bool {
         | AbilityCondition::CoinFlipOutcome { .. }
         | AbilityCondition::ChosenLabelIs { .. }
         | AbilityCondition::WhenYouDo
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::WasCast { .. }
         | AbilityCondition::CastDuringPhase { .. }
         | AbilityCondition::CurrentPhaseIs { .. }
@@ -872,6 +874,9 @@ fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
         | AbilityCondition::FirstEndStepOfTurn
         | AbilityCondition::ZoneChangedThisWay { .. }
         | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+        // Endpoints are player scopes resolved via the layer controller and
+        // targets, never the source object.
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::DayNightIsNeither
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
@@ -957,7 +962,8 @@ fn rebind_source_counter_condition(condition: &mut AbilityCondition, to: ObjectS
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::SourceLacksKeyword { .. }
         | AbilityCondition::ChosenLabelIs { .. }
-        | AbilityCondition::ScopedPlayerMatches { .. } => {}
+        | AbilityCondition::ScopedPlayerMatches { .. }
+        | AbilityCondition::PlayerAttackedPlayer { .. } => {}
     }
 }
 
@@ -1957,6 +1963,7 @@ fn rewrite_keyword_anaphor_for_cost_paid_parent(
         filter,
         use_lki: false,
         subject_slot: None,
+        subject: ObjectScope::Target,
     }) = &condition
     else {
         return condition;
@@ -2023,6 +2030,7 @@ fn keyword_anaphor_referent_is_unpublished_resolution_pick(
         filter,
         use_lki: false,
         subject_slot: None,
+        subject: ObjectScope::Target,
     }) = condition
     else {
         return false;
@@ -3025,6 +3033,8 @@ fn condition_reads_the_event_subject(condition: &AbilityCondition) -> bool {
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::SourceLacksKeyword { .. }
+        // A player-pair attack-ledger test, not the triggering event's subject.
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::ChosenLabelIs { .. }
         | AbilityCondition::ScopedPlayerMatches { .. } => false,
     }
@@ -7483,7 +7493,6 @@ fn try_parse_during_that_turn_powerup_prohibition(tp: TextPair<'_>) -> Option<Pa
 /// single `AttackTargetFilter` authority, shared with static `CantAttack`.
 fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     use crate::parser::oracle_static::parse_cant_attack_defended_scope_nom;
-    use crate::types::triggers::AttackTargetFilter;
 
     // Orzhov Advokist: this bounded form must precede the legacy anaphor branch.
     // Unlike the latter, its "creatures that player controls" subject carries
@@ -7526,6 +7535,7 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
                     activity: ProhibitedActivity::Attack {
                         defended,
                         protected_player: None,
+                        protected_scope: None,
                     },
                 },
             },
@@ -7560,8 +7570,13 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
         let (input, _) =
             preceded(alt((tag("can't"), tag("cannot"))), tag(" attack")).parse(input)?;
         let (input, defended) = parse_cant_attack_defended_scope_nom(input)?;
-        // A bare "can't attack" with no scope defends the player only.
-        Ok((input, defended.unwrap_or(AttackTargetFilter::Player)))
+        // A bare "can't attack" with no defended scope is a blanket ban, not
+        // a player-only ban — fail closed like the Advokist arm above so a
+        // missing scope never narrows the prohibition.
+        let Some(defended) = defended else {
+            return Err(oracle_err(input));
+        };
+        Ok((input, defended))
     })?;
     let rest_lower = &rest_lower[rest_lower.len() - rest_orig.len()..];
 
@@ -7613,6 +7628,7 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
                 activity: ProhibitedActivity::Attack {
                     defended,
                     protected_player: None,
+                    protected_scope: None,
                 },
             },
         },
@@ -7625,6 +7641,126 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
+}
+
+/// CR 508.1c + CR 109.5 + CR 608.2c: inverse-voice temporary attack
+/// prohibition — "you can't attack that player this turn" (Call for Aid).
+/// Unlike the legacy `try_parse_that_player_cant_attack_prohibition` voice
+/// ("that player can't attack you"), the RESTRICTED player is the source's
+/// controller (`affected_players: SourceController`, lowered to the resolving
+/// controller at creation) while the PROTECTED player is the spell's
+/// already-chosen player target (the "that player" anaphor,
+/// `protected_scope: ParentTargetedPlayer`, snapshotted by
+/// `add_restriction::fill_runtime_fields`). The defended scope is bare (the
+/// player only) — the sole instance carries no extended "or planeswalkers"
+/// scope. Nom-only; full-consumption guard so partial prefixes stay
+/// `Unimplemented`.
+fn try_parse_you_cant_attack_targeted_player_prohibition(
+    tp: TextPair<'_>,
+) -> Option<ParsedEffectClause> {
+    use crate::types::triggers::AttackTargetFilter;
+
+    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
+        let (input, _) = tag("you ").parse(input)?;
+        let (input, _) =
+            preceded(alt((tag("can't"), tag("cannot"))), tag(" attack")).parse(input)?;
+        let (input, _) = tag(" that player").parse(input)?;
+        let (input, _) = tag(" this turn").parse(input)?;
+        Ok((input, ()))
+    })?;
+    if !rest_orig.trim_matches(['.', ' ']).is_empty() {
+        return None;
+    }
+
+    Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
+        effect: Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                source: ObjectId(0),
+                affected_players: RestrictionPlayerScope::SourceController,
+                // CR 514.2: end-of-current-turn cleanup for "this turn".
+                expiry: RestrictionExpiry::EndOfTurn,
+                activity: ProhibitedActivity::Attack {
+                    defended: AttackTargetFilter::Player,
+                    protected_player: None,
+                    protected_scope: Some(RestrictionPlayerScope::ParentTargetedPlayer),
+                },
+            },
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+        // Merge-forward: upstream added the Attach "up to one target" flag;
+        // a prohibition clause carries no targeting.
+        optional_targeting: false,
+        // A prohibition clause, not an ownership-candidate guard.
+        unlowered_guard: None,
+        // A prohibition clause, not a continuous "is/has" effect.
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
+    })
+}
+
+/// CR 701.21 + CR 101.2 + CR 611.2c: duration-bound multi-object sacrifice
+/// prohibition over a snapshotted set — "you can't sacrifice those creatures
+/// this turn"
+/// (Call for Aid). Shape-C construction (`Continuous` + `AddStaticMode`, the
+/// Stilt-Man shape): the TCE pins each member as `SpecificObject` and the
+/// pre-existing sacrifice chokepoint in `game::sacrifice` reads the grant.
+///
+/// This arm constructs shape C directly and must NOT route through
+/// `build_restriction_clause` / `try_parse_subjectless_cant` — both gate
+/// `AddStaticMode` on `static_mode_needs_grant_propagation`, which returns
+/// false for `CantBeSacrificed` and would emit dead shape B.
+///
+/// V0 verdict (measured at base, phase-fit Entry 22): the haste sibling
+/// misbinds to an inert `SpecificPlayer{P1}` via positional fan-out
+/// (`generic_effect_affected_uses_inherited_targets(ParentTarget)` is true
+/// while only the player target propagates), so mirroring the sibling with
+/// `affected: ParentTarget` is UNSOUND here. DEFAULT branch: `affected:
+/// TrackedSet{0}` via the broadcast arm (`effect.rs` broadcast scan after
+/// `resolve_tracked_set_sentinel`; the gain-control head publishes the set),
+/// which carries the committed multi-object fan-out proof. Nom-only;
+/// full-consumption guard so partial prefixes stay `Unimplemented`.
+fn try_parse_you_cant_sacrifice_those_creatures(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
+        let (input, _) = tag("you ").parse(input)?;
+        let (input, _) =
+            preceded(alt((tag("can't"), tag("cannot"))), tag(" sacrifice")).parse(input)?;
+        let (input, _) = tag(" those creatures").parse(input)?;
+        let (input, _) = tag(" this turn").parse(input)?;
+        Ok((input, ()))
+    })?;
+    if !rest_orig.trim_matches(['.', ' ']).is_empty() {
+        return None;
+    }
+
+    let mode = StaticMode::Other("CantBeSacrificed".to_string());
+    let def = StaticDefinition::new(StaticMode::Continuous)
+        .affected(TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        })
+        .modifications(vec![ContinuousModification::AddStaticMode { mode }])
+        // CR 109.5: "you" is the resolving caster — the bar binds the
+        // installer, not whoever later holds the object. Install resolves
+        // this role; the query exempts exactly this actor-bound graft for
+        // other actors while object-wide grants keep barring everyone.
+        .bound_actor(ControllerRef::You);
+    let mut clause = parsed_clause(Effect::GenericEffect {
+        static_abilities: vec![def],
+        duration: Some(Duration::UntilEndOfTurn),
+        target: None,
+        end_cost: None,
+    });
+    // The grant lapses at end of turn — set the clause duration so
+    // `register_transient_effect` builds an UntilEndOfTurn transient
+    // continuous effect (mirrors the Pardic Miner restriction idiom).
+    clause.duration = Some(Duration::UntilEndOfTurn);
+    Some(clause)
 }
 
 /// CR 508.1c: "creatures [they/that player] control(s) can't attack
@@ -7681,6 +7817,7 @@ fn try_parse_controlled_creatures_cant_attack_prohibition(
                 activity: ProhibitedActivity::Attack {
                     defended,
                     protected_player: None,
+                    protected_scope: None,
                 },
             },
         }));
@@ -10630,6 +10767,22 @@ fn parse_effect_clause_with_damage_context_inner(
     )) {
         return attach_unless_slots(clause, unless_condition, unless_pay_deferred);
     }
+    // Call for Aid's inverse-voice riders own their "this turn" duration like
+    // the legacy prohibition above, so they dispatch from the same pre-shell
+    // probe. Disjoint heads ("you can't attack that player …" / "you can't
+    // sacrifice those creatures …") — neither shadows the legacy arm.
+    if let Some(clause) = try_parse_you_cant_attack_targeted_player_prohibition(TextPair::new(
+        prohibition_probe,
+        &prohibition_probe_lower,
+    )) {
+        return attach_unless_slots(clause, unless_condition, unless_pay_deferred);
+    }
+    if let Some(clause) = try_parse_you_cant_sacrifice_those_creatures(TextPair::new(
+        prohibition_probe,
+        &prohibition_probe_lower,
+    )) {
+        return attach_unless_slots(clause, unless_condition, unless_pay_deferred);
+    }
     // CR 508.1c: the controlled-creatures sibling ("creatures they control
     // can't attack [scope] this turn") shares this pre-peel probe — the clause
     // shell would otherwise peel "this turn" before the recognizer runs.
@@ -13513,6 +13666,22 @@ fn parse_effect_clause_inner_with_damage_context(
     // "shuffle them into their libraries" never collapses into a bare
     // `Effect::Shuffle`.
     if let Some(effect) = parse_enter_from_zone_redirect_replacement(&lower) {
+        return parsed_clause(effect);
+    }
+
+    // CR 611.2a + CR 614.1a + CR 514.2: floating turn-bound "if a [nontoken]
+    // creature would enter and it wasn't cast, exile it instead" (Mistcaller,
+    // Hallowed Moonlight). Dispatched after `strip_leading_duration` for the same
+    // reason as the Don't Blink lift above: the duration-stripped recursive call
+    // reaches it and the window is re-attached as `AbilityDefinition.duration`.
+    // This front door supports only clauses with a stated duration; durationless
+    // clauses remain unsupported here (CR 611.2a permits resolution-generated
+    // continuous effects without a stated duration) and keep their honest guard gap.
+    if let Some(effect) = super::oracle_replacement::parse_windowed_enter_wasnt_cast_exile_install(
+        &lower,
+        text,
+        ctx.stated_clause_duration.as_ref(),
+    ) {
         return parsed_clause(effect);
     }
 
@@ -21656,9 +21825,10 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
         return Some(parsed_clause(effect));
     }
 
-    // CR 111.11: "create [token description] for each X" → Token with dynamic count.
+    // CR 701.7a: "create [token description] for each X" → Token with dynamic count.
     // Delegates to try_parse_token, which handles token description parsing (name, P/T,
-    // types, colors, keywords). Replace the embedded count with the for-each quantity.
+    // types, colors, keywords). The embedded count multiplies the for-each quantity, as in the
+    // numeric and damage arms.
     //
     // The base may carry a subject ("You create a Treasure token …" — You've Been
     // Caught Stealing). Try the raw base first (preserves subject-bearing forms
@@ -21666,7 +21836,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
     // the correct owner), then fall back to the subject-stripped imperative so a
     // leading "you " no longer strands the for-each quantity.
     //
-    // CR 109.5 + CR 111.11: the stripped fallback is CONTROLLER-only. This arm
+    // CR 109.5 + CR 111.2: the stripped fallback is CONTROLLER-only. This arm
     // early-returns from `try_parse_for_each_effect` and so never runs the
     // subject→owner rebinding used by the numeric/targeted arms, and
     // `try_parse_token` defaults `Effect::Token.owner` to
@@ -21702,7 +21872,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 supertypes,
                 static_abilities,
                 enter_with_counters,
-                count: _,
+                count: base_count,
             } => {
                 // CR 109.4: a "their <zone>" possessive in the for-each clause
                 // binds to the player creating the token. Stamp ScopedPlayer
@@ -21714,8 +21884,8 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 // base (name/P/T/types) from `base_tp` — the text BEFORE "for
                 // each" — so `try_parse_token`'s own "this way" dispatch never
                 // sees the "for each" clause here; `scoped_count` above, from
-                // this function's OWN `quantity`, is the only count this path
-                // ever produces. A bare "card put into a graveyard this way"
+                // this function's OWN `quantity`, is the only for-each count this
+                // path ever produces. A bare "card put into a graveyard this way"
                 // counts only tracked cards delivered to Graveyard (CR 614.6);
                 // this is the normal path for Pinnacle Starcage's one-pile move.
                 // When a preceding Dig puts the rest into Graveyard, re-resolve
@@ -21754,7 +21924,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                     supertypes,
                     static_abilities,
                     enter_with_counters,
-                    count,
+                    count: replace_fixed_quantity(base_count, count),
                 }
             }
             other => other,
@@ -24874,8 +25044,34 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // continuation context is otherwise blank, and a blank context is not evidence
     // of any antecedent. Same pin the chunk loop applies when a continued
     // instruction named the source (`parsed_clause_targets_self_ref`).
+    // CR 608.2c: when the primary instruction instead introduced a typed object
+    // referent — an announced "target creature …" (CR 115.1d) or a typed chosen
+    // object — that object is the pronoun's antecedent: "tap target creature an
+    // opponent controls and put a stun counter on it" (Grappling Kraken). Pin
+    // `ParentTarget`, the same rung the chunk loop applies across sentences
+    // (`chain_has_prior_typed_referent`). Without it the blank context sends
+    // `resolve_it_pronoun` to its `SelfRef` fallback, and under a typed trigger
+    // subject the anaphor rewrite below never repairs that.
+    //
+    // The pin substitutes for that skipped rewrite and nothing more, so it is
+    // installed only where the rewrite is skipped (a typed trigger subject) and
+    // never where it would reach a block-history clause. The rewrite only
+    // retargets the effect after parsing; a pin installed before parsing would
+    // also bind the clause's bare "it" as an earlier instruction's target
+    // (`resolve_relation_subject`). CR 509.1g + CR 608.2i: the partner of
+    // "all creatures it blocked this turn" is this same instruction's target,
+    // not an earlier instruction's, so the clause declines and the continuation
+    // fails closed (`instruction_drops_block_partner`), exactly as it does on
+    // the rewrite path ("destroy target creature and all creatures it blocked
+    // this turn").
     if uses_parent_target_reference && effect_targets_self_ref(&primary_effect) {
         continuation_ctx.object_pronoun_ref = Some(TargetFilter::SelfRef);
+    } else if uses_parent_target_reference
+        && ctx_has_typed_trigger_subject(ctx)
+        && has_typed_target_widened(&primary_effect)
+        && nom_primitives::scan_at_word_boundaries(&sub_lower, parse_block_history_clause).is_none()
+    {
+        continuation_ctx.object_pronoun_ref = Some(TargetFilter::ParentTarget);
     }
 
     // CR 608.2c: when the primary instruction announced an OBJECT target, a
@@ -25223,9 +25419,12 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
 
     // If the remainder contains anaphoric references ("it", "that creature", "them"),
     // replace the sub_effect's target with ParentTarget so it inherits the parent's targets.
-    // CR 608.2k carve-out (issue #319): in typed-trigger-subject context the
-    // pronoun has already been correctly resolved to TriggeringSource by
-    // `resolve_pronoun_target` — preserve that binding instead of clobbering.
+    // Issue #319 carve-out: under a typed trigger subject the continuation keeps
+    // the binding it was parsed with instead of being rewritten to
+    // `ParentTarget` here. The blank continuation context never carries the
+    // trigger subject, so no CR 608.2k `TriggeringSource` binding reaches this
+    // point; a typed primary referent is pinned to `ParentTarget` above instead,
+    // unless the continuation holds a block-history clause (see the pin's guard).
     if uses_parent_target_reference && !ctx_has_typed_trigger_subject(ctx) {
         // CR 608.2c: same fail-closed refusal as the chunk-loop arms —
         // see `anaphor_rewrite_would_drop_this_way_binding`.
@@ -32242,9 +32441,10 @@ fn effect_reads_announced_root_slots(
         || matches!(
             condition,
             Some(AbilityCondition::TargetMatchesFilter {
+                filter: _,
                 use_lki: false,
                 subject_slot: None,
-                ..
+                subject: ObjectScope::Target,
             })
         )
     {
@@ -32750,6 +32950,76 @@ fn chain_declared_object_target_clause(clauses: &[ClauseIr]) -> Option<(usize, &
     None
 }
 
+/// CR 608.2c + CR 109.4: ordinal of the most-recent finalized
+/// `Choose(Player|Opponent)` clause in this chain, for the "that player's
+/// next [phase]" delayed-trigger rebind (Faramir). Walks back like
+/// `chain_declared_object_target`: a conditional clause bails (later text
+/// may redirect the referent, CR 608.2c); a `Choose` with player or
+/// opponent choice type answers its ordinal among finalized PLAYER chooses
+/// (0-based: 0 = the first player choose, matching the runtime
+/// `chosen_players` append order, CR 109.4). Every other clause is SKIPPED,
+/// not terminal: only `Player`/`Opponent` choices append to the runtime
+/// `chosen_players` table (`game/effects/choose.rs` gates the append on
+/// exactly those two choice types), so an unrelated clause — including a
+/// non-player `Choose` — neither appends nor redirects, and the walk
+/// preserves the antecedent past it instead of dropping to the table's
+/// `ParentTargetOwner` binding (Wanderer path). `None` keeps coverage honest
+/// for chains with no player choose at all.
+fn chain_chosen_player_antecedent(clauses: &[ClauseIr]) -> Option<u8> {
+    let mut ordinal: u8 = 0;
+    let mut seen_choose = false;
+    for prev in clauses.iter().rev() {
+        if prev.condition.is_some() {
+            return None;
+        }
+        if let Effect::Choose {
+            choice_type: ChoiceType::Player { .. } | ChoiceType::Opponent { .. },
+            ..
+        } = &prev.parsed.effect
+        {
+            if seen_choose {
+                ordinal = ordinal.saturating_add(1);
+            } else {
+                seen_choose = true;
+            }
+        }
+    }
+    seen_choose.then_some(ordinal)
+}
+
+/// CR 608.2c + CR 109.4: table-first precedence for the "that player's
+/// next [phase]" surface. Both temporal tables match it dumb
+/// (`ParentTargetOwner`, Wanderer path); when the chain carries a finalized
+/// Choose(Player|Opponent) antecedent, "that player" is the chosen player
+/// (Faramir) and the binding is rebound to the V1 `ChosenPlayer`
+/// placeholder (creation resolves `chosen_players[index]`; fail-closed on
+/// missing). `None`, non-`ParentTargetOwner` bindings, and all other
+/// conditions pass through untouched. Shared by the prefix and suffix
+/// call sites below.
+fn rebind_temporal_to_chosen_player(
+    delayed: Option<DelayedTriggerCondition>,
+    clauses: &[ClauseIr],
+) -> Option<DelayedTriggerCondition> {
+    match delayed {
+        Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+            phase,
+            player,
+            gate,
+            binding: DelayedTriggerPlayerBinding::ParentTargetOwner,
+        }) => {
+            let binding = chain_chosen_player_antecedent(clauses)
+                .map(|index| DelayedTriggerPlayerBinding::ChosenPlayer { index })
+                .unwrap_or(DelayedTriggerPlayerBinding::ParentTargetOwner);
+            Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase,
+                player,
+                gate,
+                binding,
+            })
+        }
+        other => other,
+    }
+}
 /// CR 608.2c: Is the chain's MOST-RECENT object referent a just-created token
 /// (`Token`/`CopyTokenOf`/`Populate`)? A bare "it" anaphor in a following clause
 /// then binds to that token — Esper Terra: "Create a token that's a copy of
@@ -43002,7 +43272,7 @@ fn clause_ir_mass_population(clause: &ClauseIr) -> Option<TargetFilter> {
     mass_population_filter(&clause.parsed.effect).cloned()
 }
 
-/// CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): If this clause is a
+/// CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): If an effect is a
 /// `GenericEffect` Continuous-mode static grant over a BROADCAST population (a
 /// keyword/P-T/ability "gain(s)"/"have"/"has" grant, not a chosen-target
 /// application), return the population filter it establishes. Feeds
@@ -43017,12 +43287,12 @@ fn clause_ir_mass_population(clause: &ClauseIr) -> Option<TargetFilter> {
 /// a broadcast population qualifies. Only a single static definition is
 /// accepted: a `GenericEffect` carrying two or more static defs has no single
 /// population to name without risking a wrong-antecedent guess.
-fn clause_ir_continuous_grant_population(clause: &ClauseIr) -> Option<TargetFilter> {
+pub(crate) fn continuous_grant_population(effect: &Effect) -> Option<&TargetFilter> {
     let Effect::GenericEffect {
         static_abilities,
         target: None,
         ..
-    } = &clause.parsed.effect
+    } = effect
     else {
         return None;
     };
@@ -43033,7 +43303,11 @@ fn clause_ir_continuous_grant_population(clause: &ClauseIr) -> Option<TargetFilt
         return None;
     }
     let filter = static_def.affected.as_ref()?;
-    is_broadcast_population_filter(filter).then(|| filter.clone())
+    is_broadcast_population_filter(filter).then_some(filter)
+}
+
+fn clause_ir_continuous_grant_population(clause: &ClauseIr) -> Option<TargetFilter> {
+    continuous_grant_population(&clause.parsed.effect).cloned()
 }
 
 /// CR 400.1/400.2 + CR 601.2a: Map a possessive-hand player reference (as
@@ -43588,6 +43862,26 @@ fn contains_explicit_tracked_set_pronoun(lower: &str) -> bool {
         || scan_contains_phrase(lower, "the exiled creature")
 }
 
+/// CR 608.2c: Detect a plural mass-population anaphor in a document paragraph.
+/// The caller supplies the producer's typed mass-population proof; this helper
+/// only recognizes the printed noun axis with the shared nom boundary scanner.
+pub(crate) fn contains_mass_population_anaphor(lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(lower, |input| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("those creatures"),
+                tag("those permanents"),
+                tag("those tokens"),
+                tag("those auras"),
+                tag("those enchantments"),
+            )),
+        )
+        .parse(input)
+    })
+    .is_some()
+}
+
 /// CR 608.2c: a clause led by a plural subject anaphor ("They are 5/5 …",
 /// "Those permanents gain …") names the set the earlier instructions published.
 fn starts_with_plural_subject_anaphor(lower: &str) -> bool {
@@ -43928,6 +44222,45 @@ pub(super) fn rewrite_grant_parent_to_filter(effect: &mut Effect, replacement: &
     }
 }
 
+/// CR 608.2c: Re-anchor only the `ParentTarget` grant proven to be conditional
+/// on this ability path. A whole-tree rewrite is unsound here: a consumer can
+/// contain a singular or sibling `ParentTarget` grant that has no relationship
+/// to the preceding mass population.
+pub(super) fn rewrite_conditional_grant_parent_to_filter(
+    effect: &mut Effect,
+    replacement: &TargetFilter,
+    condition_in_scope: bool,
+) {
+    let Effect::GenericEffect {
+        target,
+        static_abilities,
+        ..
+    } = effect
+    else {
+        return;
+    };
+
+    if condition_in_scope {
+        if let Some(target) = target {
+            if matches!(target, TargetFilter::ParentTarget) {
+                rewrite_filter_parent_to(target, replacement);
+            }
+        }
+    }
+    for static_def in static_abilities {
+        if static_def
+            .affected
+            .as_ref()
+            .is_some_and(|affected| matches!(affected, TargetFilter::ParentTarget))
+            && (condition_in_scope || static_def.condition.is_some())
+        {
+            if let Some(affected) = &mut static_def.affected {
+                rewrite_filter_parent_to(affected, replacement);
+            }
+        }
+    }
+}
+
 fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
     let mut index = 0;
     while index + 1 < defs.len() {
@@ -44239,7 +44572,7 @@ fn stamp_inside_delayed(effect: &mut Effect, expected: Zone) {
     }
 }
 
-fn append_to_deepest_sub_ability(
+pub(super) fn append_to_deepest_sub_ability(
     ability: &mut AbilityDefinition,
     tail: Option<Box<AbilityDefinition>>,
 ) {
@@ -49777,6 +50110,15 @@ fn parse_effect_chain_ir_body(
     // consumes or clears this single-shot scope before generic player-scope
     // peeling, so an owner-relative "other" reading cannot leak further.
     let mut chain_parent_target_owner_scope: Option<PlayerFilter> = None;
+    // CR 603.7a + CR 608.2c: chunk indices swallowed into a preceding delayed
+    // payload. When a temporal-prefix clause's inner instruction is itself
+    // conditional ("you draw a card if they didn't attack you that turn",
+    // Faramir) and the next chunk opens an Otherwise branch, the branch is
+    // parsed as part of the inner chain (where it binds `Bound` to the inner
+    // condition) instead of as an outer sibling (where no outer conditional
+    // exists and it would fall back to `Unimplemented`). Skipped at the top
+    // of the loop before any per-iteration state is touched.
+    let mut swallowed_chunk_indices: Vec<usize> = Vec::new();
     let mut compound_owner_seed: Option<(ControllerRef, TargetFilter)> = None;
     // CR 611.2a: carried across iterations — (clause count when the stamp was set, the
     // stamping chunk's text). The residual this closes is a chunk that carries a
@@ -49815,6 +50157,13 @@ fn parse_effect_chain_ir_body(
             pending_trailing_guard.take(),
             &mut trailing_guard_released,
         );
+        // CR 603.7a: skip chunks already consumed into a delayed payload (see
+        // `swallowed_chunk_indices`). Ahead of the stamp gate below so it never
+        // observes a chunk that emits no clause; the antecedent publication
+        // below stays path-independent (pure recompute).
+        if swallowed_chunk_indices.contains(&chunk_idx) {
+            continue;
+        }
         // CR 601.2c + CR 608.2c: FIRST statement of the body, so the antecedent
         // is published PATH-INDEPENDENTLY — ahead of `try_parse_generic_instead_clause`
         // (the producer for the "If <cond>, instead <body>" rider that carries
@@ -52672,7 +53021,9 @@ fn parse_effect_chain_ir_body(
             // first. A referent established by an EARLIER CLAUSE OF THIS CHAIN wins
             // ("exile target creature. If you do, ... it"), as does the member of the
             // per-member iteration this clause runs under — that is the
-            // `ParentTarget` rung (`chunk_object_referent`). Only when the chain has
+            // `ParentTarget` rung (`chunk_object_referent`). Next comes a source the
+            // previous instruction named via `~` (CR 608.2c; the seed block below
+            // writes it into this slot). Only when the chain has
             // introduced no typed referent of its own does the anaphor reach back to
             // the antecedent the
             // TRIGGER CONDITION introduced (`ParseContext::object_pronoun_ref`, set
@@ -52764,6 +53115,12 @@ fn parse_effect_chain_ir_body(
                         .is_some()
                         .then_some(ControllerRef::ScopedPlayer)
                 }),
+            // CR 603.7a + CR 109.4 (Matt R7-F5): a chunk parsed as part of a
+            // stamped delayed-trigger body inherits the stamp index, so a
+            // leading "if" inside the body resolves against the same stamp
+            // as a trailing guard. `None` for ordinary chunks (the temporal
+            // sites restore the chain context after the body parse).
+            stamped_delayed_chosen_player: ctx.stamped_delayed_chosen_player,
             // CR 608.2c + CR 109.4: chain-spanning count of `Choose(Player)`
             // clauses already finalized — supplies the next `ChosenPlayer`
             // index.
@@ -53067,16 +53424,25 @@ fn parse_effect_chain_ir_body(
         } else if !continues_elided_subject {
             carried_player = carried_player.filter(CarriedPlayerSubject::persists_across_sentences);
         }
-        // CR 608.2c: when a carried player subject continues an immediately
-        // preceding instruction that named the source (`~`), its bare object
-        // pronoun refers to that source rather than to an absent parent target
-        // ("that player untaps Karona and gains control of it"). Same antecedent
-        // test as the named-`~` pronoun rewrite below.
-        if inherited_player_subject.is_some()
-            && builder
-                .clauses()
-                .last()
-                .is_some_and(|previous| parsed_clause_targets_self_ref(&previous.parsed))
+        // CR 608.2c + CR 201.5: an instruction that names the source (`~`) makes
+        // it the nearest antecedent of the next instruction's bare object
+        // pronoun. Two outer antecedents would otherwise capture it: the parent
+        // target a carried player subject implies (Karona), and an object the
+        // trigger condition introduced (CR 608.2k pin; the cast spell,
+        // CR 109.2b) or a non-source trigger subject (Norin, Gwenna, Prize Pig,
+        // Mogg Bombers). Chain-local referents (`chunk_object_referent`) and the
+        // compound-owner seed are nearer and keep precedence; when the pronoun
+        // already binds the source the seed is a no-op so the `ParentTarget`
+        // self-recall authority (assembly) keeps its chains.
+        let previous_instruction_named_source = builder
+            .clauses()
+            .last()
+            .is_some_and(|previous| parsed_clause_targets_self_ref(&previous.parsed));
+        let outer_antecedent_is_another_object = chunk_object_referent.is_none()
+            && inherited_compound_owner_seed.is_none()
+            && !matches!(resolve_it_pronoun(ctx), TargetFilter::SelfRef);
+        if previous_instruction_named_source
+            && (inherited_player_subject.is_some() || outer_antecedent_is_another_object)
         {
             ctx.object_pronoun_ref = Some(TargetFilter::SelfRef);
         }
@@ -53114,6 +53480,9 @@ fn parse_effect_chain_ir_body(
         // CR 603.7a: Check for temporal prefix before suffix. When present, parse the
         // inner effect through the full pipeline and wrap in CreateDelayedTrigger.
         let (text_after_prefix, prefix_delayed) = strip_temporal_prefix(&text);
+        // CR 608.2c + CR 109.4: same Choose-antecedent rebind as the suffix
+        // path (Faramir's clause sits in prefix position).
+        let prefix_delayed = rebind_temporal_to_chosen_player(prefix_delayed, builder.clauses());
         // CR 601.2 vs CR 603.7 (issue #8721): the cast-permission back-reference
         // ("if you cast a spell this way, …" / "when you cast that spell, …") is
         // recognized HERE rather than inside `strip_temporal_prefix`, because
@@ -53231,6 +53600,19 @@ fn parse_effect_chain_ir_body(
                 .and_then(|expr| expr.clone())
         });
         if let Some(prefix_condition) = prefix_delayed {
+            // CR 603.7a + CR 109.4 (Matt R7-F5): publish the stamp index
+            // while the inner body parses, so the attack-endpoint bridge
+            // resolves `ChosenPlayer` endpoints against the target creation
+            // will stamp. Save/set/restore: siblings after this chunk (and
+            // any outer body, when delayed triggers nest) must not see it.
+            let saved_stamp = ctx.stamped_delayed_chosen_player;
+            ctx.stamped_delayed_chosen_player = match &prefix_condition {
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    binding: DelayedTriggerPlayerBinding::ChosenPlayer { index },
+                    ..
+                } => Some(*index),
+                _ => None,
+            };
             let (inner_text, inner_multi_target) =
                 if imperative::aggregate_return_choice_cardinality(text_after_prefix, ctx).is_some()
                 {
@@ -53241,13 +53623,71 @@ fn parse_effect_chain_ir_body(
             // CR 603.7: the inner chain is the body of a delayed triggered
             // ability that resolves later, on its own trigger event.
             ctx.enter_delayed_trigger_body();
-            let inner_ir = parse_effect_chain_ir_with_damage_context(
-                &inner_text,
-                kind,
-                ctx,
-                0,
-                Some(damage_context),
-            );
+            // CR 603.7a + CR 608.2c: a conditional delayed instruction followed
+            // by an Otherwise sentence (Faramir) parses the branch INSIDE the
+            // payload, where the inner Otherwise site binds it `Bound` to the
+            // inner condition. Without this the branch parses as an outer
+            // sibling, finds no outer conditional, and falls back to
+            // `Unimplemented`. Probed with a throwaway ctx so a failed
+            // widening leaves no diagnostics behind; only a widening that
+            // keeps the inner condition consumes the next chunk.
+            let widened_text = chunks.get(chunk_idx + 1).and_then(|next| {
+                let next_text = strip_leading_sequence_connector(&next.text).trim();
+                let next_lower = next_text.to_lowercase();
+                let matched = nom_on_lower(next_text, &next_lower, |i| {
+                    crate::parser::oracle_nom::condition::parse_otherwise_branch_connector(i)
+                });
+                matched.map(|_| {
+                    // Chunks arrive with the sentence delimiter stripped, so
+                    // rejoin with ". " (idempotent when the head keeps its
+                    // period) — without the boundary the branch glues onto the
+                    // condition text and neither arm recognizes it.
+                    format!(
+                        "{}. {}",
+                        inner_text.trim_end_matches('.').trim_end(),
+                        strip_leading_sequence_connector(&next.text).trim(),
+                    )
+                })
+            });
+            let inner_ir = match widened_text {
+                Some(ref wide) => {
+                    let mut probe_ctx = ctx.clone_throwaway();
+                    let probe_def =
+                        lower_effect_chain_ir(&parse_effect_chain_ir_with_damage_context(
+                            wide,
+                            kind,
+                            &mut probe_ctx,
+                            0,
+                            Some(damage_context),
+                        ));
+                    if probe_def.condition.is_some() {
+                        swallowed_chunk_indices.push(chunk_idx + 1);
+                        parse_effect_chain_ir_with_damage_context(
+                            wide,
+                            kind,
+                            ctx,
+                            0,
+                            Some(damage_context),
+                        )
+                    } else {
+                        parse_effect_chain_ir_with_damage_context(
+                            &inner_text,
+                            kind,
+                            ctx,
+                            0,
+                            Some(damage_context),
+                        )
+                    }
+                }
+                None => parse_effect_chain_ir_with_damage_context(
+                    &inner_text,
+                    kind,
+                    ctx,
+                    0,
+                    Some(damage_context),
+                ),
+            };
+            ctx.stamped_delayed_chosen_player = saved_stamp;
             let inner_lowered = lower::lower_effect_chain_ir_with_provenance(&inner_ir);
             let mut inner_def = inner_lowered.value;
             let inner_history = inner_lowered.history;
@@ -53436,6 +53876,10 @@ fn parse_effect_chain_ir_body(
         }
 
         let (text_no_temporal, delayed_condition) = strip_temporal_suffix(&text);
+        // CR 608.2c + CR 109.4: table-first precedence -- rebind via the
+        // shared helper (see its doc); table default preserved otherwise.
+        let delayed_condition =
+            rebind_temporal_to_chosen_player(delayed_condition, builder.clauses());
         // CR 608.2c: "that turn" only anaphorically names a turn this chain
         // granted; without one the phrase stays unrecognized (unsupported)
         // rather than binding to a guessed referent.
@@ -53444,6 +53888,19 @@ fn parse_effect_chain_ir_body(
                 (text.as_str(), None)
             }
             other => (text_no_temporal, other),
+        };
+        // CR 603.7a + CR 109.4 (Matt R7-F5): the suffix twin of the prefix
+        // stamp publication above — the body parses inline below, so the
+        // window covers the clause alternatives and restores right after
+        // (tight on purpose: the `continue` exits further down must never
+        // leak the index into a sibling chunk).
+        let saved_suffix_stamp = ctx.stamped_delayed_chosen_player;
+        ctx.stamped_delayed_chosen_player = match &delayed_condition {
+            Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+                binding: DelayedTriggerPlayerBinding::ChosenPlayer { index },
+                ..
+            }) => Some(*index),
+            _ => None,
         };
         if delayed_condition.is_some() {
             // CR 603.7: assembly wraps this clause in `CreateDelayedTrigger`, so
@@ -53627,6 +54084,7 @@ fn parse_effect_chain_ir_body(
                 )
             }
         };
+        ctx.stamped_delayed_chosen_player = saved_suffix_stamp;
         let mut clause = clause;
         bind_unless_pay_damage_event_context_amount(&clause.effect, unless_pay.as_mut());
         if inherited_compound_owner_seed.is_some() {
@@ -58774,6 +59232,7 @@ pub mod test_helpers {
             filter: TargetFilter::Typed(TypedFilter::creature()),
             use_lki: true,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }
     }
 
@@ -63859,5 +64318,24 @@ mod population_walk_destination_tests {
             vec![Some(TargetFilter::ParentTarget)],
             "a declined producer's grant keeps the bare anaphor"
         );
+    }
+
+    /// CR 608.2c: every plural object noun in the mass-population anaphor axis
+    /// is recognized by the same boundary-safe nom combinator. Singular
+    /// references do not enter this cross-item relation.
+    #[test]
+    fn mass_population_anaphor_covers_plural_object_vocabulary() {
+        for phrase in [
+            "those creatures gain flying",
+            "those permanents gain flying",
+            "those tokens gain flying",
+            "those auras gain flying",
+            "those enchantments gain flying",
+        ] {
+            assert!(contains_mass_population_anaphor(phrase), "{phrase}");
+        }
+        assert!(!contains_mass_population_anaphor(
+            "that creature gains flying"
+        ));
     }
 }
