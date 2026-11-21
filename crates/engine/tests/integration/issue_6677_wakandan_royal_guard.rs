@@ -203,19 +203,24 @@ fn emiel_the_blessed_keeps_one_counter_on_a_nonunicorn() {
 const MESA_UNICORN_ORACLE: &str =
     "Lifelink (Damage dealt by this creature also causes you to gain that much life.)";
 
-/// Cast `entering` (paid from exactly its {1}{W} cost in floating white mana)
-/// with Emiel the Blessed and one untapped Forest on the battlefield, accept
-/// Emiel's "you may pay {G/W}", and return the outcome with the Forest and
-/// Emiel. No mana is floating when the trigger resolves, so the payment must
-/// tap the Forest mid-resolution (CR 605.3a).
-fn cast_under_emiel_paying_with_a_forest(
-    entering_is_unicorn: bool,
-) -> Option<(
-    engine::game::scenario::CastOutcome,
-    ObjectId,
-    ObjectId,
-    ObjectId,
-)> {
+/// A land-paid Emiel resolution: the cast's outcome, the events of the
+/// resolution alone (after the spell was committed to the stack), and the
+/// entering creature, Emiel and the Forest.
+struct LandPaidEmiel {
+    outcome: engine::game::scenario::CastOutcome,
+    resolution_events: Vec<engine::types::events::GameEvent>,
+    entering: ObjectId,
+    emiel: ObjectId,
+    forest: ObjectId,
+}
+
+/// Cast `entering` with Emiel the Blessed and one untapped Forest on the
+/// battlefield, its printed cost (Mesa Unicorn {1}{W}, Grizzly Bears {1}{G})
+/// paid exactly from floating mana, then accept Emiel's "you may pay {G/W}".
+/// The cast is committed first and checked to have left the Forest untapped and
+/// nothing floating, so Emiel's payment can only tap the Forest while the
+/// trigger resolves (CR 605.3a), never while the creature spell is cast.
+fn cast_under_emiel_paying_with_a_forest(entering_is_unicorn: bool) -> Option<LandPaidEmiel> {
     use engine::game::scenario_db::GameScenarioDbExt;
     use engine::types::zones::Zone;
 
@@ -236,17 +241,45 @@ fn cast_under_emiel_paying_with_a_forest(
     } else {
         scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db)
     };
+    let colored = if entering_is_unicorn {
+        ManaType::White
+    } else {
+        ManaType::Green
+    };
     scenario.with_mana_pool(
         P0,
         vec![
-            ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
-            ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
+            ManaUnit::new(colored, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
         ],
     );
 
     let mut runner = scenario.build();
-    let outcome = runner.cast(entering).accept_optional().resolve();
-    Some((outcome, entering, emiel, forest))
+    let commit = runner.cast(entering).accept_optional().commit();
+    // Reach guard: casting the creature paid its printed cost from the pool alone.
+    assert_eq!(
+        commit.state().stack.len(),
+        1,
+        "the creature spell is on the stack"
+    );
+    assert!(
+        !commit.state().objects[&forest].tapped,
+        "casting the creature must not tap the Forest"
+    );
+    assert!(
+        commit.state().players[P0.0 as usize].mana_pool.is_empty(),
+        "nothing may float into Emiel's payment"
+    );
+    let committed = commit.events().len();
+    let outcome = commit.resolve();
+    let resolution_events = outcome.events()[committed..].to_vec();
+    Some(LandPaidEmiel {
+        outcome,
+        resolution_events,
+        entering,
+        emiel,
+        forest,
+    })
 }
 
 /// CR 605.3a + CR 608.2c: Emiel's {G/W} is paid by tapping a Forest while the
@@ -255,54 +288,55 @@ fn cast_under_emiel_paying_with_a_forest(
 /// +1/+1 counters.
 #[test]
 fn emiel_the_blessed_doubles_counters_on_mesa_unicorn_when_a_land_pays() {
-    let Some((outcome, mesa, emiel, forest)) = cast_under_emiel_paying_with_a_forest(true) else {
+    let Some(paid) = cast_under_emiel_paying_with_a_forest(true) else {
         eprintln!("skipping: card database absent");
         return;
     };
-    assert_emiel_payment_tapped_the_forest(&outcome, forest);
+    assert_emiel_payment_tapped_the_forest(&paid);
+    let state = paid.outcome.state();
     assert_eq!(
-        p1p1_counters(outcome.state(), mesa),
+        p1p1_counters(state, paid.entering),
         2,
         "Mesa Unicorn (a Unicorn) must receive Emiel's two +1/+1 counters"
     );
-    assert_eq!(p1p1_counters(outcome.state(), emiel), 0);
-    assert_eq!(p1p1_counters(outcome.state(), forest), 0);
+    assert_eq!(p1p1_counters(state, paid.emiel), 0);
+    assert_eq!(p1p1_counters(state, paid.forest), 0);
 }
 
 /// Control for the test above: the same land-paid resolution on a non-Unicorn
 /// keeps the one-counter continuation.
 #[test]
 fn emiel_the_blessed_keeps_one_counter_on_a_nonunicorn_when_a_land_pays() {
-    let Some((outcome, bears, emiel, forest)) = cast_under_emiel_paying_with_a_forest(false) else {
+    let Some(paid) = cast_under_emiel_paying_with_a_forest(false) else {
         eprintln!("skipping: card database absent");
         return;
     };
-    assert_emiel_payment_tapped_the_forest(&outcome, forest);
+    assert_emiel_payment_tapped_the_forest(&paid);
+    let state = paid.outcome.state();
     assert_eq!(
-        p1p1_counters(outcome.state(), bears),
+        p1p1_counters(state, paid.entering),
         1,
-        "Grizzly Bears must receive the paid continuation's one counter"
+        "Grizzly Bears must receive exactly the paid continuation's one counter"
     );
-    assert_eq!(p1p1_counters(outcome.state(), emiel), 0);
+    assert_eq!(p1p1_counters(state, paid.emiel), 0);
+    assert_eq!(p1p1_counters(state, paid.forest), 0);
 }
 
 /// Reach guard: the payment happened by tapping the Forest during resolution,
 /// with nothing left floating, and the resolution completed.
-fn assert_emiel_payment_tapped_the_forest(
-    outcome: &engine::game::scenario::CastOutcome,
-    forest: ObjectId,
-) {
-    let state = outcome.state();
+fn assert_emiel_payment_tapped_the_forest(paid: &LandPaidEmiel) {
+    let state = paid.outcome.state();
     assert!(
-        state.objects[&forest].tapped,
+        state.objects[&paid.forest].tapped,
         "Emiel's {{G/W}} must be paid by tapping the Forest"
     );
     assert!(
-        outcome.events().iter().any(|event| matches!(
+        paid.resolution_events.iter().any(|event| matches!(
             event,
-            engine::types::events::GameEvent::PermanentTapped { object_id, .. } if *object_id == forest
+            engine::types::events::GameEvent::PermanentTapped { object_id, .. }
+                if *object_id == paid.forest
         )),
-        "the Forest must be tapped by this cast's resolution"
+        "the Forest must be tapped while Emiel's trigger resolves"
     );
     assert!(state.players[P0.0 as usize].mana_pool.is_empty());
     assert!(state.stack.is_empty(), "Emiel's trigger must have resolved");
