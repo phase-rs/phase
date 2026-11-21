@@ -13620,6 +13620,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn phase2_v11_resource_comparison_projects_completed_cycles() {
+        use crate::types::game_state::{CyclingRecord, WaitingFor};
+
+        let mut before = GameState::new_two_player(7);
+        assert!(matches!(before.waiting_for, WaitingFor::Priority { .. }));
+        let permanent = battlefield_creature(&mut before, 500, 0);
+        assert!(loop_states_equal_modulo_resources(&before, &before.clone()));
+        let mut with_cycle = before.clone();
+        let record = CyclingRecord {
+            name: "Street Wraith".to_owned(),
+            turn: before.turn_number,
+        };
+        with_cycle
+            .cycles_completed_this_game_by_player
+            .entry(PlayerId(0))
+            .or_default()
+            .push_back(record.clone());
+
+        assert!(before.cycles_completed_this_game_by_player.is_empty());
+        assert_eq!(
+            with_cycle.cycles_completed_this_game_by_player[&PlayerId(0)][0],
+            record
+        );
+        assert_ne!(before, with_cycle);
+        assert!(loop_states_equal_modulo_resources(&before, &with_cycle));
+        assert_eq!(
+            with_cycle.cycles_completed_this_game_by_player[&PlayerId(0)][0],
+            record
+        );
+
+        let mut tapped = with_cycle.clone();
+        tapped.objects.get_mut(&permanent).unwrap().tapped = true;
+        assert!(!loop_states_equal_modulo_resources(&with_cycle, &tapped));
+    }
+
     /// THE KEY DISCRIMINATOR (CR 732.2a vs CR 104.4b): same board but different
     /// life, mana, and counters must be **modulo-resources equal** (a beneficial
     /// loop point) yet **strictly unequal** (not a mandatory-draw loop). This is

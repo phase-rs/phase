@@ -6,21 +6,24 @@ use engine::game::keywords::object_has_effective_keyword_kind;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{AbilityTag, TargetFilter, TargetRef};
+use engine::types::ability::{AbilityTag, Effect, ResolvedAbility, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, ManaChoice, ManaChoicePrompt, StackEntryKind, WaitingFor,
+    CastPaymentMode, CyclingOccurrence, CyclingRecord, GameState, ManaChoice, ManaChoicePrompt,
+    StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::{ManaColor, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::resolved_commands::{
+    ResolvedLedgerEdit, ResolvedRulesCommand, ResolvedRulesJournal,
+    ResolvedStackEntryFinalizeCommand,
+};
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
-
-const STREET_WRAITH: &str = "Swampwalk (This creature can't be blocked as long as defending player controls a Swamp.)\nCycling—Pay 2 life. (Pay 2 life, Discard this card: Draw a card.)";
 
 fn main_phase() -> GameScenario {
     let mut scenario = GameScenario::new();
@@ -38,17 +41,7 @@ fn printed(scenario: &mut GameScenario, player: PlayerId, name: &str, zone: Zone
 }
 
 fn street_wraith(scenario: &mut GameScenario) -> ObjectId {
-    scenario
-        .add_creature_to_hand(P0, "Street Wraith", 3, 4)
-        .with_subtypes(vec!["Wraith"])
-        .with_color(vec![ManaColor::Black])
-        .with_mana_cost(
-            engine::parser::oracle_util::parse_mana_symbols("{3}{B}{B}")
-                .unwrap()
-                .0,
-        )
-        .from_oracle_text_with_keywords(&["Cycling", "Landwalk", "Swampwalk"], STREET_WRAITH)
-        .id()
+    printed(scenario, P0, "Street Wraith", Zone::Hand)
 }
 
 fn activation(
@@ -198,46 +191,61 @@ fn activation_entry(runner: &GameRunner, source: ObjectId) -> ObjectId {
 // CR 119.4: A player with one life cannot pay two life.
 #[test]
 fn v1_direct_ordinary_cycle() {
-    for life in [20, 1] {
-        let mut scenario = main_phase();
-        scenario.with_life(P0, life);
-        let card = street_wraith(&mut scenario);
-        let draw = scenario.add_card_to_library_top(P0, "Island");
-        let mut runner = scenario.build();
-        let index = runner.state().objects[&card]
-            .abilities
-            .iter()
-            .position(|def| def.ability_tag == Some(AbilityTag::Cycling))
-            .expect("printed cycling");
-        let result = runner.act(activation(card, index, CastPaymentMode::Auto));
-        priority(&runner);
-        if life == 1 {
-            assert!(matches!(
-                result,
-                Err(EngineError::ActionNotAllowed(reason)) if reason == "Cannot pay activation cost"
-            ));
-            assert!(runner.state().stack.is_empty());
-            assert!(runner
-                .state()
-                .abilities_activated_this_turn_by_player
-                .is_empty());
-            assert_eq!(zone(&runner, card), Zone::Hand);
-            assert_eq!(runner.state().players[0].life, 1);
-        } else {
-            let events = result.expect("funded life payment").events;
-            assert_eq!(runner.state().players[0].life, 18);
-            assert_eq!(zone(&runner, card), Zone::Graveyard);
-            activation_entry(&runner, card);
-            assert_eq!(runner.state().stack.len(), 1);
-            journaled_cycle(&runner, card);
-            assert_cycle(&events, card);
-            assert_eq!(zone(&runner, draw), Zone::Library);
-            assert!(cycle_events(&passes(&mut runner)).is_empty());
-            priority(&runner);
-            assert!(runner.state().stack.is_empty());
-            assert_eq!(zone(&runner, draw), Zone::Hand);
-        }
+    let mut scenario = main_phase();
+    let first = street_wraith(&mut scenario);
+    let second = street_wraith(&mut scenario);
+    printed(&mut scenario, P1, "Island", Zone::Library);
+    let second_draw = scenario.add_card_to_library_top(P0, "Mountain");
+    let first_draw = scenario.add_card_to_library_top(P0, "Island");
+    let mut runner = scenario.build();
+    let first_entry = cycle_wraith(&mut runner, first);
+    let first_turn = runner.state().turn_number;
+    let first_record = cycle_record("Street Wraith", first_turn);
+    assert_placement(runner.state(), first_entry, &first_record, 0);
+    assert_history(runner.state(), std::slice::from_ref(&first_record));
+    resolve_cycle_draw(&mut runner, first_draw);
+    assert_history(runner.state(), std::slice::from_ref(&first_record));
+    assert_eq!(cycle_command_counts(runner.state()), (1, 1));
+
+    advance_turn(&mut runner);
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ) {
+        act(&mut runner, GameAction::PassPriority);
     }
+    let second_turn = runner.state().turn_number;
+    assert!(second_turn > first_turn);
+    priority(&runner);
+    let second_entry = cycle_wraith(&mut runner, second);
+    assert_ne!(first_entry, second_entry);
+    let second_record = cycle_record("Street Wraith", second_turn);
+    assert_placement(runner.state(), second_entry, &second_record, 1);
+    let expected = [first_record, second_record];
+    assert_history(runner.state(), &expected);
+    resolve_cycle_draw(&mut runner, second_draw);
+    assert_history(runner.state(), &expected);
+
+    let mut scenario = main_phase();
+    scenario.with_life(P0, 1);
+    let card = street_wraith(&mut scenario);
+    let mut runner = scenario.build();
+    let index = wraith_index(&runner, card);
+    let result = runner.act(activation(card, index, CastPaymentMode::Auto));
+    assert!(matches!(
+        result,
+        Err(EngineError::ActionNotAllowed(reason)) if reason == "Cannot pay activation cost"
+    ));
+    priority(&runner);
+    assert!(runner.state().stack.is_empty());
+    assert!(runner
+        .state()
+        .abilities_activated_this_turn_by_player
+        .is_empty());
+    assert_eq!(zone(&runner, card), Zone::Hand);
+    assert_eq!(runner.state().players[0].life, 1);
+    assert_history(runner.state(), &[]);
+    assert_eq!(cycle_command_counts(runner.state()), (0, 0));
 }
 
 // CR 702.29e + CR 702.29f: The hand grant pays for a search and counts as cycling.
@@ -311,6 +319,10 @@ fn v2_granted_slivercycling_after_discard() {
             );
             assert_eq!(zone(&runner, card), Zone::Hand);
             assert!(cycle_events(&events).is_empty());
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            assert!(lands
+                .iter()
+                .all(|land| !runner.state().objects[land].tapped));
             if cancel && attempt == 0 {
                 events.extend(act(&mut runner, GameAction::CancelCast));
                 priority(&runner);
@@ -322,6 +334,8 @@ fn v2_granted_slivercycling_after_discard() {
                 assert!(cycle_events(&events).is_empty());
                 assert!(events.iter().all(|event| discard_subject(event).is_none()));
                 assert_eq!(zone(&runner, card), Zone::Hand);
+                assert_history(runner.state(), &[]);
+                assert_eq!(cycle_command_counts(runner.state()), (0, 0));
             }
         }
         for land in lands {
@@ -332,6 +346,16 @@ fn v2_granted_slivercycling_after_discard() {
         assert_eq!(runner.state().players[0].mana_pool.total(), 0);
         assert_eq!(zone(&runner, card), Zone::Graveyard);
         let search = activation_entry(&runner, card);
+        let expected = [cycle_record(
+            "Sidewinder Sliver",
+            runner.state().turn_number,
+        )];
+        let (_, _, finalize) = assert_placement(runner.state(), search, &expected[0], 0);
+        assert_history(runner.state(), &expected);
+        assert_eq!(cycle_command_counts(runner.state()), (1, 1));
+        if second_grant {
+            assert_granted_replay_contract(runner.state(), finalize);
+        }
         assert!(!object_has_effective_keyword_kind(
             runner.state(),
             card,
@@ -418,6 +442,7 @@ fn v2_granted_slivercycling_after_discard() {
         );
         assert_eq!(zone(&runner, non_sliver), Zone::Library);
         assert_cycle(&events, card);
+        assert_history(runner.state(), &expected);
     }
 }
 
@@ -833,4 +858,957 @@ fn v6_history_clauses_remain_strict_failures() {
         &serde_json::to_value(end).unwrap(),
         "unparsed_condition"
     ));
+}
+
+fn cycle_record(name: &str, turn: u32) -> CyclingRecord {
+    CyclingRecord {
+        name: name.to_owned(),
+        turn,
+    }
+}
+
+fn assert_history(state: &GameState, expected: &[CyclingRecord]) {
+    let actual: Vec<_> = state
+        .cycles_completed_this_game_by_player
+        .get(&P0)
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
+    assert_eq!(actual, expected);
+}
+
+fn wraith_index(runner: &GameRunner, card: ObjectId) -> usize {
+    runner.state().objects[&card]
+        .abilities
+        .iter()
+        .position(|def| def.ability_tag == Some(AbilityTag::Cycling))
+        .expect("printed cycling")
+}
+
+fn cycle_wraith(runner: &mut GameRunner, card: ObjectId) -> ObjectId {
+    let life = runner.state().players[0].life;
+    let index = wraith_index(runner, card);
+    let events = act(runner, activation(card, index, CastPaymentMode::Auto));
+    assert_eq!(runner.state().players[0].life, life - 2);
+    assert_eq!(zone(runner, card), Zone::Graveyard);
+    journaled_cycle(runner, card);
+    assert_cycle(&events, card);
+    activation_entry(runner, card)
+}
+
+fn resolve_cycle_draw(runner: &mut GameRunner, card: ObjectId) {
+    assert_eq!(zone(runner, card), Zone::Library);
+    let size = runner.state().players[0].hand.len();
+    let events = passes(runner);
+    assert!(cycle_events(&events).is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(zone(runner, card), Zone::Hand);
+    assert_eq!(runner.state().players[0].hand.len(), size + 1);
+}
+
+fn next_turn_action(state: &GameState) -> (PlayerId, GameAction) {
+    match state.waiting_for {
+        WaitingFor::Priority { player } => (player, GameAction::PassPriority),
+        WaitingFor::DeclareAttackers { player, .. } => (
+            player,
+            GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+        ),
+        WaitingFor::DeclareBlockers { player, .. } => (
+            player,
+            GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+        ),
+        ref other => panic!("unexpected turn transition prompt {other:?}"),
+    }
+}
+
+fn advance_turn(runner: &mut GameRunner) {
+    let turn = runner.state().turn_number;
+    for _ in 0..48 {
+        if runner.state().turn_number > turn {
+            return;
+        }
+        let (_, action) = next_turn_action(runner.state());
+        act(runner, action);
+    }
+    panic!("expected the next turn");
+}
+
+fn completed_cycle(command: &ResolvedRulesCommand) -> Option<&ResolvedLedgerEdit> {
+    match command {
+        ResolvedRulesCommand::LedgerEdit(command)
+            if matches!(command.edit, ResolvedLedgerEdit::CompletedCycle { .. }) =>
+        {
+            Some(&command.edit)
+        }
+        _ => None,
+    }
+}
+
+fn cycling_finalize(command: &ResolvedRulesCommand) -> Option<&ResolvedStackEntryFinalizeCommand> {
+    match command {
+        ResolvedRulesCommand::StackEntryFinalize(command)
+            if command.resulting_cycling_occurrence.is_some() =>
+        {
+            Some(command)
+        }
+        _ => None,
+    }
+}
+
+fn cycle_command_counts(state: &GameState) -> (usize, usize) {
+    let commands = || {
+        state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .filter_map(|e| e.command.as_ref())
+    };
+    (
+        commands().filter_map(completed_cycle).count(),
+        commands().filter_map(cycling_finalize).count(),
+    )
+}
+
+fn assert_placement<'a>(
+    state: &'a GameState,
+    entry: ObjectId,
+    record: &CyclingRecord,
+    index: usize,
+) -> (usize, usize, &'a ResolvedStackEntryFinalizeCommand) {
+    let journal = state.resolved_rules_journal.entries();
+    let mut edits = journal.iter().enumerate().filter_map(|(position, row)| {
+        let edit = completed_cycle(row.command.as_ref()?)?;
+        matches!(edit, ResolvedLedgerEdit::CompletedCycle { stack_entry, .. } if *stack_entry == entry)
+            .then_some((position, edit))
+    });
+    let (edit_position, edit) = edits.next().expect("completed cycle edit for this entry");
+    assert!(edits.next().is_none());
+    assert_eq!(
+        edit,
+        &ResolvedLedgerEdit::CompletedCycle {
+            player: P0,
+            record: record.clone(),
+            expected_history_len: index,
+            stack_entry: entry,
+        },
+    );
+    let mut finalizers = journal.iter().enumerate().filter_map(|(position, row)| {
+        let finalize = cycling_finalize(row.command.as_ref()?)?;
+        (finalize.object == entry).then_some((position, finalize))
+    });
+    let (finalize_position, finalize) =
+        finalizers.next().expect("cycling finalizer for this entry");
+    assert!(finalizers.next().is_none());
+    assert!(edit_position < finalize_position);
+    let push = journal.iter().position(|row| matches!(
+        &row.command, Some(ResolvedRulesCommand::StackPush(command)) if command.entry.id == entry
+    )).expect("the exact entry was pushed");
+    assert!(push < edit_position);
+    let occurrence = CyclingOccurrence {
+        activator: P0,
+        journal_index: index,
+    };
+    assert_eq!(finalize.resulting_cycling_occurrence, Some(occurrence));
+    let live = &state.stack[finalize.entry_position];
+    assert_eq!(live.id, entry);
+    assert_eq!(&live.kind, finalize.resulting_kind.as_ref());
+    assert_eq!(live.ability().unwrap().cycling_occurrence, Some(occurrence));
+    if let Some(collection) =
+        journal
+            .iter()
+            .enumerate()
+            .skip(push + 1)
+            .find_map(|(position, row)| {
+                matches!(
+                    row.command,
+                    Some(ResolvedRulesCommand::TriggerCollection(_))
+                )
+                .then_some(position)
+            })
+    {
+        assert!(finalize_position < collection);
+    }
+    (edit_position, finalize_position, finalize)
+}
+
+#[test]
+fn phase2_v3_cycle_survives_resolution_turn_cleanup_and_departure() {
+    let mut scenario = main_phase();
+    let card = street_wraith(&mut scenario);
+    let draw = scenario.add_card_to_library_top(P0, "Island");
+    printed(&mut scenario, P1, "Island", Zone::Library);
+    let mut runner = scenario.build();
+    let turn = runner.state().turn_number;
+    let expected = [cycle_record("Street Wraith", turn)];
+    cycle_wraith(&mut runner, card);
+    assert_history(runner.state(), &expected);
+    resolve_cycle_draw(&mut runner, draw);
+    assert_history(runner.state(), &expected);
+    advance_turn(&mut runner);
+    assert!(runner.state().turn_number > turn);
+    assert!(runner
+        .state()
+        .abilities_activated_this_turn_by_player
+        .is_empty());
+    assert_history(runner.state(), &expected);
+    act(&mut runner, GameAction::Concede { player_id: P0 });
+    assert!(runner.state().players[0].is_eliminated);
+    assert_history(runner.state(), &expected);
+}
+
+// CR 701.6a: Countering the exact cycling entry prevents its draw.
+#[test]
+fn phase2_v3_stifle_counters_cycling_without_erasing_history() {
+    let mut scenario = main_phase();
+    let card = street_wraith(&mut scenario);
+    let stifle = printed(&mut scenario, P0, "Stifle", Zone::Hand);
+    scenario.with_mana_pool(P0, mana(ManaType::Blue, 1));
+    let draw = scenario.add_card_to_library_top(P0, "Island");
+    let mut runner = scenario.build();
+    let cycling = cycle_wraith(&mut runner, card);
+    let expected = [cycle_record("Street Wraith", runner.state().turn_number)];
+    assert_history(runner.state(), &expected);
+    let cast = runner.cast(stifle).target_object(cycling).commit();
+    let stack = &cast.state().stack;
+    assert_eq!(stack.len(), 2);
+    assert_eq!(stack[0].id, cycling);
+    assert_eq!(stack[1].source_id, stifle);
+    assert_eq!(
+        stack[1].ability().unwrap().targets,
+        [TargetRef::Object(cycling)]
+    );
+    cast.resolve();
+    priority(&runner);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(zone(&runner, stifle), Zone::Graveyard);
+    assert_eq!(zone(&runner, draw), Zone::Library);
+    assert_eq!(runner.state().players[0].life, 18);
+    assert_history(runner.state(), &expected);
+}
+
+// CR 701.9a and CR 702.29c distinguish Looting's discard from the cycling cost.
+#[test]
+fn phase2_v4_looting_retains_the_prior_cycle_only() {
+    let mut scenario = main_phase();
+    let prior = street_wraith(&mut scenario);
+    let discard = street_wraith(&mut scenario);
+    let other = printed(&mut scenario, P0, "Sidewinder Sliver", Zone::Hand);
+    let looting = printed(&mut scenario, P0, "Faithless Looting", Zone::Hand);
+    scenario.with_mana_pool(P0, mana(ManaType::Red, 1));
+    let draws = ["Island", "Mountain"].map(|name| scenario.add_card_to_library_top(P0, name));
+    let cycle_draw = scenario.add_card_to_library_top(P0, "Forest");
+    let mut runner = scenario.build();
+    cycle_wraith(&mut runner, prior);
+    resolve_cycle_draw(&mut runner, cycle_draw);
+    let expected = [cycle_record("Street Wraith", runner.state().turn_number)];
+    assert_history(runner.state(), &expected);
+    assert_eq!(cycle_command_counts(runner.state()), (1, 1));
+    runner.cast(looting).commit();
+    let mut events = passes(&mut runner);
+    assert!(draws.iter().all(|id| zone(&runner, *id) == Zone::Hand));
+    let WaitingFor::DiscardChoice {
+        player,
+        source_id,
+        count,
+        cards,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("expected Looting to ask for two cards")
+    };
+    assert_eq!((*player, *source_id, *count), (P0, looting, 2));
+    assert!(cards.contains(&discard) && cards.contains(&other));
+    events.extend(act(
+        &mut runner,
+        GameAction::SelectCards {
+            cards: vec![discard, other],
+        },
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(discard_subject)
+            .collect::<Vec<_>>(),
+        [(P0, discard), (P0, other)]
+    );
+    assert!(cycle_events(&events).is_empty());
+    assert_eq!(zone(&runner, discard), Zone::Graveyard);
+    assert_eq!(zone(&runner, other), Zone::Graveyard);
+    assert_eq!(zone(&runner, looting), Zone::Graveyard);
+    priority(&runner);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(cycle_command_counts(runner.state()), (1, 1));
+    assert_history(runner.state(), &expected);
+}
+
+#[test]
+fn phase2_v6_action_replay_seeks_across_cycle_placements() {
+    use engine::database::{CardDatabase, ComboTable};
+    use engine::game::deck_loading::{DeckList, PlayerDeckList};
+    use engine::game::engine::apply;
+    use engine::game::replay::{reconstruct_initial_state, ReplayPlayer};
+    use engine::types::actions::MulliganChoice;
+    use engine::types::format::FormatConfig;
+    use engine::types::replay::{ReplayHeader, ReplayLog};
+    use flate2::read::GzDecoder;
+    use std::sync::Arc;
+
+    let db = Arc::new(
+        CardDatabase::from_compressed_export_cached(
+            &include_bytes!("../fixtures/integration_cards.json.gz")[..],
+            |gz| std::io::read_to_string(GzDecoder::new(gz)),
+        )
+        .expect("shared printed fixture"),
+    );
+    // A seven-card opening hand from this nine-card deck always holds two Wraiths.
+    let mut main_deck = vec!["Street Wraith".to_owned(); 4];
+    main_deck.extend(vec!["Island".to_owned(); 5]);
+    let header = ReplayHeader {
+        format_config: FormatConfig::freeform(),
+        match_config: Default::default(),
+        player_count: 2,
+        first_player: Some(0),
+        seed: 257,
+        deck_data: Some(DeckList {
+            player: PlayerDeckList {
+                main_deck,
+                ..Default::default()
+            },
+            opponent: PlayerDeckList {
+                main_deck: vec!["Island".to_owned(); 10],
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+    };
+    let combos = ComboTable::default();
+    let mut live = reconstruct_initial_state(&header, Some(&db), &combos).unwrap();
+    let mut log = ReplayLog::new(header);
+    let submit = |live: &mut GameState, log: &mut ReplayLog, actor, action: GameAction| {
+        let result = apply(live, actor, action.clone()).expect("legal recorded action");
+        assert_eq!(
+            result.disposition,
+            engine::types::game_state::ActionDisposition::Applied
+        );
+        log.push_action(actor, action);
+        result.events
+    };
+    for actor in [P0, P1] {
+        assert!(
+            matches!(&live.waiting_for, WaitingFor::MulliganDecision { pending, .. }
+            if pending.iter().any(|entry| entry.player == actor))
+        );
+        submit(
+            &mut live,
+            &mut log,
+            actor,
+            GameAction::MulliganDecision {
+                choice: MulliganChoice::Keep,
+            },
+        );
+    }
+    assert!(matches!(
+        live.waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    let cards: Vec<_> = live.players[0]
+        .hand
+        .iter()
+        .copied()
+        .filter(|id| live.objects[id].name == "Street Wraith")
+        .take(2)
+        .collect();
+    assert_eq!(cards.len(), 2);
+    let before = log.actions.len() as u32;
+    let first_turn = live.turn_number;
+    let mut placements = Vec::new();
+    let mut expected = Vec::new();
+    for (index, card) in cards.into_iter().enumerate() {
+        let ability_index = live.objects[&card]
+            .abilities
+            .iter()
+            .position(|ability| ability.ability_tag == Some(AbilityTag::Cycling))
+            .unwrap();
+        let events = submit(
+            &mut live,
+            &mut log,
+            P0,
+            activation(card, ability_index, CastPaymentMode::Auto),
+        );
+        assert_cycle(&events, card);
+        let entry = live.stack.back().expect("cycling reached the stack").id;
+        expected.push(cycle_record("Street Wraith", live.turn_number));
+        assert_history(&live, &expected);
+        assert_placement(&live, entry, &expected[index], index);
+        assert_eq!(live.objects[&card].zone, Zone::Graveyard);
+        assert_eq!(live.players[0].life, 18 - 2 * index as i32);
+        placements.push((log.actions.len() as u32, entry, card, live.players[0].life));
+        if index == 0 {
+            let draw = live.players[0].library[0];
+            for actor in [P0, P1] {
+                submit(&mut live, &mut log, actor, GameAction::PassPriority);
+            }
+            assert!(live.stack.is_empty());
+            assert_eq!(live.objects[&draw].zone, Zone::Hand);
+            for _ in 0..48 {
+                if live.turn_number > first_turn
+                    && matches!(live.waiting_for, WaitingFor::Priority { player: P0 })
+                {
+                    break;
+                }
+                let (actor, action) = next_turn_action(&live);
+                submit(&mut live, &mut log, actor, action);
+            }
+            assert!(live.turn_number > first_turn);
+            assert!(matches!(
+                live.waiting_for,
+                WaitingFor::Priority { player: P0 }
+            ));
+        }
+    }
+    assert_ne!(placements[0].1, placements[1].1);
+    let log = serde_json::from_slice(&serde_json::to_vec(&log).unwrap()).unwrap();
+    let mut replay = ReplayPlayer::load(log, Some(&db), &combos).unwrap();
+    for _ in 0..2 {
+        assert_history(replay.seek(before).unwrap(), &[]);
+        for (index, &(action_count, entry, card, life)) in placements.iter().enumerate() {
+            let state = replay.seek(action_count).unwrap();
+            assert_history(state, &expected[..=index]);
+            assert_placement(state, entry, &expected[index], index);
+            assert_eq!(state.players[0].life, life);
+            assert_eq!(state.objects[&card].zone, Zone::Graveyard);
+        }
+    }
+}
+
+fn apply_cycle_journal_command(state: &mut GameState, command: &ResolvedRulesCommand) {
+    use engine::game::{ledger, stack, triggers, zones};
+    match command {
+        ResolvedRulesCommand::PlayerEdit(command) => {
+            state.apply_resolved_player_edit(command).unwrap();
+        }
+        ResolvedRulesCommand::ZoneChange(command) => {
+            zones::apply_resolved_zone_change(state, command).unwrap();
+        }
+        ResolvedRulesCommand::LedgerEdit(command) => {
+            ledger::apply_resolved_ledger_edit(state, command).unwrap();
+        }
+        ResolvedRulesCommand::Information(command) => {
+            state.apply_resolved_information(command).unwrap();
+        }
+        ResolvedRulesCommand::TriggerCollection(command) => {
+            triggers::apply_resolved_trigger_collection(state, command).unwrap();
+        }
+        ResolvedRulesCommand::StackPush(command) => {
+            stack::apply_resolved_stack_push(state, command).unwrap();
+        }
+        ResolvedRulesCommand::StackRemoval(command) => {
+            stack::apply_resolved_stack_removal(state, command).unwrap();
+        }
+        ResolvedRulesCommand::StackEntryFinalize(command) => {
+            stack::apply_resolved_stack_entry_finalize(state, command).unwrap();
+        }
+        ResolvedRulesCommand::FrameTransition(command) => {
+            state.apply_resolved_frame_transition(command).unwrap();
+        }
+        other => panic!("unexpected command in Street Wraith journal: {other:?}"),
+    }
+}
+
+fn activated_graph(kind: &mut StackEntryKind) -> &mut ResolvedAbility {
+    let StackEntryKind::ActivatedAbility { ability, .. } = kind else {
+        panic!("expected an activated graph");
+    };
+    ability
+}
+
+fn assert_no_cycle_replay_mutation(before: &GameState, after: &GameState) {
+    assert_eq!(
+        after.cycles_completed_this_game_by_player,
+        before.cycles_completed_this_game_by_player
+    );
+    assert_eq!(after.stack, before.stack);
+    assert_eq!(after.stack_paid_facts, before.stack_paid_facts);
+}
+
+#[test]
+fn phase2_v7_v8_resolved_journal_replays_both_cycles_and_rejects_corruption() {
+    let mut scenario = main_phase();
+    let sources = [street_wraith(&mut scenario), street_wraith(&mut scenario)];
+    let draw = scenario.add_card_to_library_top(P0, "Island");
+    let mut runner = scenario.build();
+    let start = runner.state().clone();
+    assert_history(&start, &[]);
+    let from = start.resolved_rules_journal.entries().len();
+    let turn = start.turn_number;
+    let record = cycle_record("Street Wraith", turn);
+    let first = cycle_wraith(&mut runner, sources[0]);
+    let (first_edit, first_finalize, first_command) =
+        assert_placement(runner.state(), first, &record, 0);
+    let first_kind = first_command.resulting_kind.clone();
+    resolve_cycle_draw(&mut runner, draw);
+    let second = cycle_wraith(&mut runner, sources[1]);
+    assert_ne!(first, second);
+    assert_eq!(runner.state().turn_number, turn);
+    let (second_edit, second_finalize, second_command) =
+        assert_placement(runner.state(), second, &record, 1);
+    assert!(first_edit < first_finalize && first_finalize < second_edit);
+    let expected = [record.clone(), record];
+    assert_history(runner.state(), &expected);
+    assert_eq!(cycle_command_counts(runner.state()), (2, 2));
+    let wire = serde_json::to_value(&runner.state().resolved_rules_journal).unwrap();
+    let journal: ResolvedRulesJournal = serde_json::from_value(wire.clone()).unwrap();
+    let mut replay = start.clone();
+    for (position, row) in journal.entries().iter().enumerate().skip(from) {
+        let Some(command) = &row.command else {
+            continue;
+        };
+        apply_cycle_journal_command(&mut replay, command);
+        match position {
+            p if p == first_finalize => {
+                assert_history(&replay, &expected[..1]);
+                assert_eq!(replay.stack[0].id, first);
+                assert_eq!(&replay.stack[0].kind, first_kind.as_ref());
+            }
+            p if p == second_finalize => {
+                assert_history(&replay, &expected);
+                assert_eq!(replay.stack[0].id, second);
+                assert_eq!(
+                    &replay.stack[0].kind,
+                    second_command.resulting_kind.as_ref()
+                );
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(replay.players[0].life, 16);
+    assert_eq!(replay.objects[&draw].zone, Zone::Hand);
+    assert_history(&replay, &expected);
+
+    assert_cycle_apply_rejections(&start, &journal, from, second_edit, second_finalize);
+    assert_cycle_decode_rejections(&wire, &journal, first_edit, second_edit, second_finalize);
+
+    let mut snapshot = serde_json::to_value(runner.state()).unwrap();
+    let current: GameState = serde_json::from_value(snapshot.clone()).unwrap();
+    assert_history(&current, &expected);
+    assert_eq!(current.stack, runner.state().stack);
+    snapshot
+        .as_object_mut()
+        .unwrap()
+        .remove("cycles_completed_this_game_by_player")
+        .expect("the current snapshot contains the completed history");
+    let legacy: GameState = serde_json::from_value(snapshot).unwrap();
+    assert_history(&legacy, &[]);
+}
+
+fn assert_cycle_apply_rejections(
+    start: &GameState,
+    journal: &ResolvedRulesJournal,
+    from: usize,
+    second_edit: usize,
+    second_finalize: usize,
+) {
+    use engine::game::{
+        ledger::apply_resolved_ledger_edit, stack::apply_resolved_stack_entry_finalize,
+    };
+    use engine::types::resolved_commands::{
+        ResolvedLedgerEditReplayInvariantError as LedgerError,
+        ResolvedStackEntryFinalizeReplayInvariantError as FinalizeError,
+    };
+
+    let entries = journal.entries();
+    let Some(ResolvedRulesCommand::LedgerEdit(edit)) = &entries[second_edit].command else {
+        panic!("second cycle ledger command");
+    };
+    let Some(ResolvedRulesCommand::StackEntryFinalize(finalize)) =
+        &entries[second_finalize].command
+    else {
+        panic!("second cycle finalizer");
+    };
+    let mut prefix = start.clone();
+    for row in entries.iter().skip(from).take(second_edit - from) {
+        if let Some(command) = &row.command {
+            apply_cycle_journal_command(&mut prefix, command);
+        }
+    }
+    assert_eq!(prefix.stack[finalize.entry_position].id, finalize.object);
+    assert_eq!(
+        &prefix.stack[finalize.entry_position].kind,
+        finalize.expected_old_kind.as_ref()
+    );
+    assert_eq!(prefix.cycles_completed_this_game_by_player[&P0].len(), 1);
+
+    for (label, expected) in [
+        (
+            "wrong prefix",
+            LedgerError::CompletedCyclePreconditionMismatch,
+        ),
+        ("unknown seat", LedgerError::UnknownPlayer(PlayerId(99))),
+        (
+            "empty name",
+            LedgerError::CompletedCyclePreconditionMismatch,
+        ),
+        ("duplicate", LedgerError::CompletedCyclePreconditionMismatch),
+    ] {
+        let mut state = prefix.clone();
+        let mut forged = edit.clone();
+        let ResolvedLedgerEdit::CompletedCycle {
+            player,
+            expected_history_len,
+            record,
+            ..
+        } = &mut forged.edit
+        else {
+            unreachable!()
+        };
+        match label {
+            "wrong prefix" => *expected_history_len += 1,
+            "unknown seat" => *player = PlayerId(99),
+            "empty name" => record.name.clear(),
+            "duplicate" => apply_resolved_ledger_edit(&mut state, edit).unwrap(),
+            _ => unreachable!(),
+        }
+        let before = state.clone();
+        assert_eq!(
+            apply_resolved_ledger_edit(&mut state, &forged),
+            Err(expected),
+            "{label}"
+        );
+        assert_no_cycle_replay_mutation(&before, &state);
+    }
+
+    for label in [
+        "divergent predecessor",
+        "graph mismatch",
+        "missing coordinate",
+    ] {
+        let mut state = prefix.clone();
+        for (position, row) in entries
+            .iter()
+            .enumerate()
+            .skip(second_edit)
+            .take(second_finalize - second_edit)
+        {
+            if position == second_edit && label == "missing coordinate" {
+                continue;
+            }
+            if let Some(command) = &row.command {
+                apply_cycle_journal_command(&mut state, command);
+            }
+        }
+        let mut forged = finalize.as_ref().clone();
+        let expected = match label {
+            "divergent predecessor" => {
+                let kind = &mut state.stack.get_mut(finalize.entry_position).unwrap().kind;
+                *kind = finalize.resulting_kind.as_ref().clone();
+                FinalizeError::EntryKindMismatch(finalize.entry_position)
+            }
+            "graph mismatch" => {
+                activated_graph(&mut forged.resulting_kind).cycling_occurrence = None;
+                FinalizeError::CyclingOccurrenceMismatch(finalize.object)
+            }
+            "missing coordinate" => FinalizeError::CyclingOccurrenceMismatch(finalize.object),
+            _ => unreachable!(),
+        };
+        let before = state.clone();
+        assert_eq!(
+            apply_resolved_stack_entry_finalize(&mut state, &forged),
+            Err(expected),
+            "{label}"
+        );
+        assert_no_cycle_replay_mutation(&before, &state);
+    }
+}
+
+fn assert_journal_decode_error(wire: serde_json::Value, expected: &str, specimen: &str) {
+    let error = serde_json::from_value::<ResolvedRulesJournal>(wire)
+        .expect_err(specimen)
+        .to_string();
+    assert!(error.contains(expected), "{specimen}: {error}");
+}
+
+fn assert_cycle_decode_rejections(
+    wire: &serde_json::Value,
+    journal: &ResolvedRulesJournal,
+    first_edit: usize,
+    second_edit: usize,
+    second_finalize: usize,
+) {
+    const PRIOR_EDIT: &str =
+        "cycling provenance requires exactly one matching prior completed-cycle ledger edit";
+    let cycle_edit = |wire: &serde_json::Value, i: usize| {
+        wire["entries"][i]["command"]["LedgerEdit"]["edit"]["CompletedCycle"].clone()
+    };
+    let first = cycle_edit(wire, first_edit);
+    let second = cycle_edit(wire, second_edit);
+    assert_ne!(first["stack_entry"], second["stack_entry"]);
+    for (field, value) in [
+        ("player", serde_json::to_value(P1).unwrap()),
+        (
+            "expected_history_len",
+            first["expected_history_len"].clone(),
+        ),
+        ("stack_entry", first["stack_entry"].clone()),
+    ] {
+        let mut forged = wire.clone();
+        forged["entries"][second_edit]["command"]["LedgerEdit"]["edit"]["CompletedCycle"][field] =
+            value;
+        assert_journal_decode_error(forged, PRIOR_EDIT, field);
+    }
+
+    let mut missing = wire.clone();
+    missing["entries"][second_edit]
+        .as_object_mut()
+        .unwrap()
+        .remove("command");
+    assert_journal_decode_error(missing.clone(), PRIOR_EDIT, "missing edit");
+
+    let mut late = missing;
+    let ordinal = late["next_command_ordinal"].as_u64().unwrap();
+    let mut entry = wire["entries"][second_edit].clone();
+    entry["ordinal"] = ordinal.into();
+    let node = &entry["node"];
+    let owner = late["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|candidate| candidate["identity"] == *node)
+        .expect("the copied edit's cause owns the new ordinal");
+    owner["journal_ordinals"]
+        .as_array_mut()
+        .unwrap()
+        .push(ordinal.into());
+    late["entries"].as_array_mut().unwrap().push(entry);
+    late["next_command_ordinal"] = (ordinal + 1).into();
+    assert_journal_decode_error(late, PRIOR_EDIT, "later edit");
+
+    let mut crossed = wire.clone();
+    crossed["entries"][second_edit]["command"]["LedgerEdit"]["edit"]["CompletedCycle"]["player"] =
+        serde_json::to_value(P1).unwrap();
+    // Keep both pushes and the first pair intact. Reuse the second activation's
+    // usage-ledger slot, preserving its ordinal and causal node.
+    let finalizer =
+        cycling_finalize(journal.entries()[second_finalize].command.as_ref().unwrap()).unwrap();
+    let usage_edit = journal
+        .entries()
+        .iter()
+        .enumerate()
+        .take(second_edit)
+        .rev()
+        .find_map(|(position, row)| match &row.command {
+            Some(ResolvedRulesCommand::LedgerEdit(command))
+                if matches!(command.edit, ResolvedLedgerEdit::AbilityActivated { .. }) =>
+            {
+                Some(position)
+            }
+            _ => None,
+        })
+        .expect("the second activation recorded its usage before completing");
+    assert!(first_edit < usage_edit && usage_edit < second_finalize);
+    let mut candidate = wire["entries"][first_edit]["command"].clone();
+    candidate["LedgerEdit"]["edit"]["CompletedCycle"]["expected_history_len"] =
+        second["expected_history_len"].clone();
+    candidate["LedgerEdit"]["cause"] = wire["entries"][usage_edit]["node"].clone();
+    crossed["entries"][usage_edit]["command"] = candidate;
+    assert_journal_decode_error(crossed, PRIOR_EDIT, "crossed candidates");
+
+    let mut forged = finalizer.clone();
+    let reused = CyclingOccurrence {
+        activator: P0,
+        journal_index: 0,
+    };
+    forged.resulting_cycling_occurrence = Some(reused);
+    let root = activated_graph(&mut forged.resulting_kind);
+    assert!(
+        root.sub_ability.is_none(),
+        "Street Wraith has a single draw node"
+    );
+    root.cycling_occurrence = Some(reused);
+    let mut reused_first = wire.clone();
+    reused_first["entries"][second_finalize]["command"]["StackEntryFinalize"] =
+        serde_json::to_value(forged).unwrap();
+    assert_journal_decode_error(
+        reused_first,
+        PRIOR_EDIT,
+        "first occurrence on the second entry",
+    );
+
+    let mut duplicate = wire.clone();
+    let mut copy = wire["entries"][second_edit]["command"].clone();
+    copy["LedgerEdit"]["cause"] = wire["entries"][usage_edit]["node"].clone();
+    duplicate["entries"][usage_edit]["command"] = copy;
+    assert_journal_decode_error(duplicate, PRIOR_EDIT, "two matching earlier edits");
+}
+
+fn assert_granted_replay_contract(state: &GameState, finalize: &ResolvedStackEntryFinalizeCommand) {
+    use engine::game::stack::apply_resolved_stack_entry_finalize;
+    use engine::types::game_state::StackPaidSnapshot;
+    use engine::types::resolved_commands::ResolvedStackEntryFinalizeReplayInvariantError as Error;
+
+    let wire = serde_json::to_value(&state.resolved_rules_journal).unwrap();
+    let decoded: ResolvedRulesJournal = serde_json::from_value(wire.clone()).unwrap();
+    let position = decoded
+        .entries()
+        .iter()
+        .position(|row| row.command.as_ref().and_then(cycling_finalize) == Some(finalize))
+        .expect("granted graph survives journal decode");
+    let StackEntryKind::ActivatedAbility { ability: root, .. } = finalize.resulting_kind.as_ref()
+    else {
+        panic!("granted cycling finalizes an activated ability");
+    };
+    let movement = root.sub_ability.as_deref().expect("slivercycling move");
+    let shuffle = movement
+        .sub_ability
+        .as_deref()
+        .expect("slivercycling shuffle");
+    assert!(matches!(root.effect, Effect::SearchLibrary { .. }));
+    assert!(matches!(movement.effect, Effect::ChangeZone { .. }));
+    assert!(matches!(shuffle.effect, Effect::Shuffle { .. }));
+    assert!(shuffle.sub_ability.is_none());
+    let occurrence = CyclingOccurrence {
+        activator: P0,
+        journal_index: 0,
+    };
+    for node in [root.as_ref(), movement, shuffle] {
+        assert_eq!(node.cycling_occurrence, Some(occurrence));
+    }
+
+    for (label, stamp) in [
+        ("missing root", None),
+        (
+            "wrong root",
+            Some(CyclingOccurrence {
+                journal_index: 1,
+                ..occurrence
+            }),
+        ),
+        ("missing descendant", None),
+        (
+            "wrong descendant",
+            Some(CyclingOccurrence {
+                journal_index: 1,
+                ..occurrence
+            }),
+        ),
+    ] {
+        let mut bad = finalize.clone();
+        let graph = activated_graph(&mut bad.resulting_kind);
+        let node = if label.ends_with("root") {
+            graph
+        } else {
+            graph.sub_ability.as_deref_mut().unwrap()
+        };
+        node.cycling_occurrence = stamp;
+        let mut forged = wire.clone();
+        forged["entries"][position]["command"]["StackEntryFinalize"] =
+            serde_json::to_value(bad).unwrap();
+        assert_journal_decode_error(forged, "cycling provenance disagrees", label);
+    }
+
+    let mut bad_kind = wire.clone();
+    bad_kind["entries"][position]["command"]["StackEntryFinalize"]["resulting_kind"] = serde_json::json!({"type": "Spell", "data": {"card_id": state.objects[&state.stack[0].source_id].card_id}});
+    assert_journal_decode_error(
+        bad_kind,
+        "different pre-finalize entry",
+        "wrong cycling result kind",
+    );
+    let mut missing_kind = wire.clone();
+    missing_kind["entries"][position]["command"]["StackEntryFinalize"]
+        .as_object_mut()
+        .unwrap()
+        .remove("resulting_kind");
+    assert_journal_decode_error(
+        missing_kind,
+        "missing field `resulting_kind`",
+        "missing cycling result kind",
+    );
+
+    let mut predecessor = state.clone();
+    predecessor
+        .stack
+        .get_mut(finalize.entry_position)
+        .unwrap()
+        .kind = finalize.expected_old_kind.as_ref().clone();
+    assert_eq!(finalize.expected_old_paid_facts, None);
+    assert!(!predecessor.stack_paid_facts.contains_key(&finalize.object));
+    let mut positive = predecessor.clone();
+    apply_resolved_stack_entry_finalize(&mut positive, finalize).unwrap();
+    assert_eq!(positive.stack, state.stack);
+
+    let mut conflicting = predecessor.clone();
+    conflicting
+        .stack_paid_facts
+        .insert(finalize.object, StackPaidSnapshot::default());
+    let before = conflicting.clone();
+    assert_eq!(
+        apply_resolved_stack_entry_finalize(&mut conflicting, finalize),
+        Err(Error::PaidFactsMismatch(finalize.object))
+    );
+    assert_no_cycle_replay_mutation(&before, &conflicting);
+    assert_eq!(
+        serde_json::to_value(&conflicting.objects).unwrap(),
+        serde_json::to_value(&before.objects).unwrap()
+    );
+
+    let mut legacy = finalize.clone();
+    legacy.resulting_cycling_occurrence = None;
+    legacy.resulting_kind = legacy.expected_old_kind.clone();
+    let edit_position = decoded
+        .entries()
+        .iter()
+        .position(|row| row.command.as_ref().and_then(completed_cycle).is_some())
+        .unwrap();
+    for omit_occurrence in [false, true] {
+        let mut old = wire.clone();
+        old["entries"][edit_position]
+            .as_object_mut()
+            .unwrap()
+            .remove("command");
+        let mut result = serde_json::to_value(&legacy).unwrap();
+        if omit_occurrence {
+            result
+                .as_object_mut()
+                .unwrap()
+                .remove("resulting_cycling_occurrence");
+        } else {
+            result["resulting_cycling_occurrence"] = serde_json::Value::Null;
+        }
+        old["entries"][position]["command"]["StackEntryFinalize"] = result;
+        let old: ResolvedRulesJournal = serde_json::from_value(old).unwrap();
+        assert!(old.entries().iter().all(|row| row
+            .command
+            .as_ref()
+            .and_then(completed_cycle)
+            .is_none()));
+        let Some(ResolvedRulesCommand::StackEntryFinalize(decoded)) =
+            &old.entries()[position].command
+        else {
+            panic!("legacy command is still a finalizer");
+        };
+        let mut restored = predecessor.clone();
+        restored.cycles_completed_this_game_by_player.clear();
+        apply_resolved_stack_entry_finalize(&mut restored, decoded).unwrap();
+        assert_eq!(
+            restored.stack[decoded.entry_position].kind,
+            *legacy.resulting_kind
+        );
+        assert!(restored.stack_paid_facts.is_empty());
+        let root = restored.stack[decoded.entry_position].ability().unwrap();
+        let movement = root.sub_ability.as_deref().unwrap();
+        let shuffle = movement.sub_ability.as_deref().unwrap();
+        assert!([root, movement, shuffle]
+            .iter()
+            .all(|node| node.cycling_occurrence.is_none()));
+        assert_history(&restored, &[]);
+    }
 }

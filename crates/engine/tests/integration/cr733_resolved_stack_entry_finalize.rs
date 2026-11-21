@@ -486,3 +486,75 @@ fn a_recorded_prior_snapshot_is_required_to_match_before_install() {
         "and the rejected replay installs neither half"
     );
 }
+
+#[test]
+fn phase2_v9_spell_finalize_requires_the_paid_result_on_decode_and_apply() {
+    use crate::support::shared_card_db;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::resolved_commands::ResolvedRulesJournal;
+    use engine::types::zones::Zone;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario.add_real_card(
+        P0,
+        "Faithless Looting",
+        Zone::Hand,
+        shared_card_db().unwrap(),
+    );
+    scenario.with_mana_pool(P0, vec![ManaUnit::new(ManaType::Red, spell, false, vec![])]);
+    let mut runner = scenario.build();
+    runner.cast(spell).commit();
+    let state = runner.state();
+    let entry = state.stack.back().expect("Looting is on the stack");
+    assert_eq!(entry.source_id, spell);
+    let mut wire = serde_json::to_value(&state.resolved_rules_journal).unwrap();
+    let decoded: ResolvedRulesJournal = serde_json::from_value(wire.clone()).unwrap();
+    let (position, genuine) = decoded
+        .entries()
+        .iter()
+        .enumerate()
+        .find_map(|(position, row)| match row.command.as_ref()? {
+            ResolvedRulesCommand::StackEntryFinalize(command) if command.object == entry.id => {
+                Some((position, command.as_ref()))
+            }
+            _ => None,
+        })
+        .expect("real spell finalizer");
+    assert_eq!(
+        genuine.resulting_paid_facts.as_deref(),
+        state.stack_paid_facts.get(&entry.id)
+    );
+    assert!(genuine.resulting_paid_facts.is_some());
+
+    let mut predecessor = pre_finalize_state(state, genuine);
+    let mut positive = predecessor.clone();
+    apply_resolved_stack_entry_finalize(&mut positive, genuine).unwrap();
+    assert_eq!(positive.stack, state.stack);
+    assert_eq!(positive.stack_paid_facts, state.stack_paid_facts);
+
+    let payload = &mut wire["entries"][position]["command"]["StackEntryFinalize"];
+    payload
+        .as_object_mut()
+        .unwrap()
+        .remove("resulting_paid_facts")
+        .unwrap();
+    let error = serde_json::from_value::<ResolvedRulesJournal>(wire)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("requires a resulting paid-facts snapshot"),
+        "{error}"
+    );
+
+    let mut malformed = genuine.clone();
+    malformed.resulting_paid_facts = None;
+    let before = predecessor.clone();
+    assert_eq!(
+        apply_resolved_stack_entry_finalize(&mut predecessor, &malformed),
+        Err(ResolvedStackEntryFinalizeReplayInvariantError::MissingResultPaidFacts(entry.id))
+    );
+    assert_eq!(predecessor.stack, before.stack);
+    assert_eq!(predecessor.stack_paid_facts, before.stack_paid_facts);
+    assert_eq!(predecessor.objects[&spell], before.objects[&spell]);
+}
