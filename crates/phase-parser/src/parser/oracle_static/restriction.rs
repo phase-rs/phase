@@ -3509,6 +3509,22 @@ pub(crate) fn try_parse_persistent_exile_play_permission(
     text: &str,
     lower: &str,
 ) -> Option<StaticDefinition> {
+    // CR 611.3a: A trailing "as long as <condition>" clause gates the
+    // standing permission rather than belonging to the exile-pool reference.
+    // Reuse the shared body-preserving splitter so the static classifier and
+    // this permission parser agree on the condition boundary.
+    let text_pair = TextPair::new(text, lower);
+    let trailing_split = text_pair
+        .split_around(" as long as ")
+        .and_then(|_| split_trailing_gate_condition_with_body(&text_pair))
+        .and_then(|(body, condition_text)| {
+            parse_static_condition(condition_text).map(|condition| (body, condition))
+        });
+    let (permission_text, trailing_condition) =
+        trailing_split.map_or((text, None), |(body, condition)| (body, Some(condition)));
+    let permission_lower = permission_text.to_lowercase();
+    let lower = permission_lower.as_str();
+
     // Optional leading timing qualifier. CR 117.1c: "during your turn, " gates
     // the permission to the source controller's turn.
     let (rest, timing) = match nom_tag_lower(lower, lower, "during your turn, ") {
@@ -3516,9 +3532,16 @@ pub(crate) fn try_parse_persistent_exile_play_permission(
         None => (lower, ExileCastTiming::AnyTime),
     };
 
-    let (rest, condition) = match strip_leading_permission_condition(rest) {
+    let (rest, leading_condition) = match strip_leading_permission_condition(rest) {
         Some((rest, condition)) => (rest, Some(condition)),
         None => (rest, None),
+    };
+    let condition = match (leading_condition, trailing_condition) {
+        (Some(leading), Some(trailing)) => Some(StaticCondition::And {
+            conditions: vec![leading, trailing],
+        }),
+        (Some(condition), None) | (None, Some(condition)) => Some(condition),
+        (None, None) => None,
     };
 
     // Optional "you may look at cards exiled with <self>, and " preamble
