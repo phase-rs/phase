@@ -882,6 +882,7 @@ fn direct_dig_action_preserves_own_target_and_binds_current_conditional_result()
                     filter: TargetFilter::Typed(TypedFilter::creature()),
                     use_lki: false,
                     subject_slot: None,
+                    subject: engine::types::ability::ObjectScope::Target,
                 })
             }
             .sub_ability(tail);
@@ -899,6 +900,7 @@ fn direct_dig_action_preserves_own_target_and_binds_current_conditional_result()
                 selectable_cards: vec![chosen],
                 kept_destination: None,
                 rest_destination: Some(Zone::Library),
+                rest_remainder: engine::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 source_id: Some(source),
@@ -916,7 +918,8 @@ fn direct_dig_action_preserves_own_target_and_binds_current_conditional_result()
                 }
             ));
             assert!(
-                matches!(&runner.state().waiting_for, WaitingFor::DigChoice { kept_destination: None, selectable_cards, .. } if selectable_cards == &vec![chosen])
+                matches!(&runner.state().waiting_for, WaitingFor::DigChoice { kept_destination: None, selectable_cards, ..
+} if selectable_cards == &vec![chosen])
             );
             let mut events = runner
                 .act(GameAction::SelectCards {
@@ -994,6 +997,7 @@ fn paused_dig_action_preserves_own_target_and_binds_settled_result() {
                     filter: TargetFilter::Typed(TypedFilter::creature()),
                     use_lki: false,
                     subject_slot: None,
+                    subject: engine::types::ability::ObjectScope::Target,
                 })
             };
             head.capture_target_incarnations_recursive(runner.state());
@@ -1010,6 +1014,7 @@ fn paused_dig_action_preserves_own_target_and_binds_settled_result() {
                 selectable_cards: vec![image],
                 kept_destination: Some(Zone::Battlefield),
                 rest_destination: Some(Zone::Library),
+                rest_remainder: engine::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 source_id: Some(source),

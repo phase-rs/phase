@@ -68,11 +68,7 @@ expression: "&ir"
       "node": {
         "Static": {
           "definition": {
-            "mode": {
-              "CastWithKeyword": {
-                "keyword": "Flash"
-              }
-            },
+            "mode": "CastWithFlash",
             "affected": {
               "type": "Typed",
               "type_filters": [

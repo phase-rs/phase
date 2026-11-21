@@ -31,7 +31,6 @@
     "accept": "Accept",
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
-    "untilLethal": "Repeat until the game ends.",
     "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
@@ -51,16 +50,13 @@
     "allocationSum": "{{allocated}} de {{total}} repeticiones asignadas.",
     "evenSplit": "Restablecer el reparto equitativo",
     "customDistribution": "Distribución personalizada: el motor no ha previsualizado este reparto.",
-    "announceTitle": "Elige el objetivo que se anuncia en cada repetición:",
-    "announce": "Anunciar",
-    "announceAria": "Anunciar {{subject}}",
     "mayTitle": "Habilidad opcional {{group}}: ¿repetir esta elección en cada iteración?",
     "mayTake": "Aceptarla",
     "mayDecline": "Rechazarla",
     "mayTakeAria": "Aceptar la habilidad opcional {{group}}",
     "mayDeclineAria": "Rechazar la habilidad opcional {{group}}",
     "winKind": {
-      "LethalDamage": "This loop deals lethal damage.",
+      "LethalDamage": "This loop reduces an opponent's life total to 0 or less.",
       "PoisonLoss": "This loop gives lethal poison counters.",
       "Decking": "This loop decks an opponent.",
       "ImmediateWin": "This loop wins the game.",
@@ -70,6 +66,7 @@
     "respondDeclaredTitle": "Declaración propuesta:",
     "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. Efecto de reemplazo de {{subject}}",
     "respondDecision": {
       "take": "{{subject}} — se acepta en cada iteración",
       "decline": "{{subject}} — se rechaza en cada iteración"
@@ -155,7 +152,8 @@
     "loading": "Cargando {{name}}",
     "unimplemented": "Sin implementar: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Girada"
+    "tapped": "Girada",
+    "reloadArt": "Toca para recargar la ilustración"
   },
   "preview": {
     "holdCtrlBack": "Mantén Ctrl para la cara trasera",
@@ -164,6 +162,8 @@
     "flip": "Girar",
     "report": "Informar de un problema",
     "reported": "Informado ✓",
+    "reportNotSent": "No enviado",
+    "reloadArt": "Recargar ilustración",
     "altParsedAbilities": "Alt: habilidades analizadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análisis del motor",
@@ -204,6 +204,14 @@
         "label": "Etiqueta",
         "fallback": "Elección"
       }
+    },
+    "attacking": {
+      "you": "Te está atacando",
+      "player": "Atacando a {{player}}",
+      "yourPlaneswalker": "Atacando a tu planeswalker {{name}}",
+      "planeswalker": "Atacando al planeswalker {{name}} de {{player}}",
+      "battle": "Atacando a la batalla {{name}}",
+      "nothing": "Atacando, pero no a ningún jugador, planeswalker ni batalla"
     }
   },
   "actionButton": {
@@ -346,7 +354,6 @@
     "pickNone": "Ninguna",
     "underAttack_one": "Atacado por {{count}} criatura",
     "underAttack_other": "Atacado por {{count}} criaturas",
-    "target": "Objetivo",
     "token": "Ficha",
     "tokenTooltip": "Ficha que es una copia de una carta real",
     "copy": "Copia",
@@ -436,7 +443,12 @@
     "assignRemaining_other": "Asignar {{count}} más",
     "confirmDistribute_one": "Declarar {{count}} atacante",
     "confirmDistribute_other": "Declarar {{count}} atacantes",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Totales de ataque",
+    "targetTotal_few": "{{count}} atacantes · {{damage}} de daño",
+    "targetTotal_many": "{{count}} atacantes · {{damage}} de daño",
+    "targetTotal_one": "{{count}} atacante · {{damage}} de daño",
+    "targetTotal_other": "{{count}} atacantes · {{damage}} de daño"
   },
   "fullControl": {
     "label": "Control",
@@ -449,7 +461,9 @@
     "done": "Listo"
   },
   "lifeTotal": {
-    "playerLabel": "J{{seat}}"
+    "playerLabel": "J{{seat}}",
+    "libraryLabel": "CARTAS",
+    "libraryTooltip": "La Horda no tiene total de vidas. El daño y la pérdida de vidas la hacen descartar cartas de su biblioteca en su lugar: es derrotada cuando su biblioteca se agota, así que este número es su verdadero reloj."
   },
   "phaseStop": {
     "untapLabel": "Paso de enderezar",
@@ -540,6 +554,7 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Reglas del mazo de la Horda",
     "monarch": "Monarca",
     "monarchTooltip": "El Monarca — roba una carta extra al final del turno",
     "initiative": "Iniciativa",
@@ -559,7 +574,9 @@
     "dungeonTooltip": "Aventurándose en {{name}}",
     "poisonAriaLabel_one": "{{count}} contador de veneno",
     "poisonAriaLabel_other": "{{count}} contadores de veneno",
-    "poisonTooltip": "Contadores de veneno: {{count}}\nUn jugador con diez o más contadores de veneno pierde la partida.",
+    "poisonTooltip": "Contadores de veneno: {{count}}",
+    "poisonLossPlayer": "Un jugador con {{threshold}} o más contadores de veneno pierde la partida.",
+    "poisonLossTeam": "Un equipo con {{threshold}} o más contadores de veneno pierde la partida.",
     "energyAriaLabel_one": "{{count}} contador de energía",
     "energyAriaLabel_other": "{{count}} contadores de energía",
     "energyTooltip": "Contadores de energía: {{count}}\nLos contadores de energía son un recurso del jugador que las habilidades de cartas pueden gastar.",
@@ -656,6 +673,8 @@
     "commander": "Comandante",
     "commanderTitle": "Comandante: {{name}}",
     "commanderTitleTax": "Comandante: {{name}} (Impuesto: +{{tax}})",
+    "boss": "Jefe",
+    "bossTitle": "Jefe: {{name}}",
     "castCommander": "Lanza {{name}} — haz doble clic o arrastra para jugar",
     "castCommanderTax": "Lanza {{name}} (Impuesto: +{{tax}}) — haz doble clic o arrastra para jugar",
     "ninjutsuCommander": "Ninjutsu de comandante: {{name}} — haz clic para devolver un atacante no bloqueado a la mano y poner a este comandante en el campo de batalla girado y atacando",
@@ -819,7 +838,12 @@
     "lethalBadge": "Letal",
     "planeswalkerLoyalty": "Planeswalker (lealtad: {{loyalty}})",
     "defendingPlayerTrample": "Jugador defensor (Arrollar)",
-    "pwControllerTrample": "Controlador del PW (Arrollar sobre el PW)"
+    "pwControllerTrample": "Controlador del PW (Arrollar sobre el PW)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Asignar los {{count}} de daño restantes a {{target}}",
+    "assignRemainingTo_many": "Asignar los {{count}} de daño restantes a {{target}}",
+    "assignRemainingTo_one": "Asignar el {{count}} de daño restante a {{target}}",
+    "assignRemainingTo_other": "Asignar los {{count}} de daño restantes a {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",
@@ -1164,6 +1188,11 @@
       "drawFirst": "Robar primero",
       "drawFirstDescription": "Toma el robo extra en tu primer turno"
     },
+    "startingPlayer": {
+      "title": "Elige quién juega primero",
+      "playerPlaysFirst": "{{name}} juega primero",
+      "opponentChoosing": "{{name}} está eligiendo quién juega primero…"
+    },
     "mulligan": {
       "opponentDeciding": "El oponente está decidiendo su mano inicial…",
       "londonTitle": "Mulligan de Londres ({{count}} tomados)",
@@ -1186,7 +1215,10 @@
       "subtitleKeepWithBottom": "Conserva esta mano (pondrás {{count}} en el fondo) o haz mulligan de nuevo para 7 cartas nuevas.",
       "subtitleKeepFree": "Conserva esta mano (mulligan gratis — sin cartas al fondo de la biblioteca) o haz mulligan de nuevo para 7 cartas nuevas.",
       "subtitleOpeningFree": "Conserva esta mano o haz un mulligan gratis (sin cartas al fondo de la biblioteca).",
-      "subtitleOpeningOne": "Conserva esta mano o haz mulligan para 7 cartas nuevas (pondrás 1 en el fondo de la biblioteca tras quedarte con la mano)."
+      "subtitleOpeningOne": "Conserva esta mano o haz mulligan para 7 cartas nuevas (pondrás 1 en el fondo de la biblioteca tras quedarte con la mano).",
+      "onThePlay": "Juegas primero",
+      "onTheDraw": "Robas primero",
+      "takeTurn": "Juegas el turno {{turn}}"
     },
     "companion": {
       "eyebrow": "Antes de la partida",
@@ -1211,6 +1243,7 @@
       "draw": "EMPATE",
       "victory": "VICTORIA",
       "defeat": "DERROTA",
+      "complete": "FIN DE LA PARTIDA",
       "lifeSummary": "Tú: <player>{{playerLife}}</player> <sep>/</sep> Oponente: <opponent>{{opponentLife}}</opponent>",
       "turns": "Turnos: {{count}}",
       "duration": "Duración: {{time}}",
@@ -1307,7 +1340,10 @@
         "Ticket": "ticket"
       },
       "generic": "un coste",
-      "pay": "Pagar {{cost}}"
+      "pay": "Pagar {{cost}}",
+      "draw": "roba una carta",
+      "drawCount_one": "roba {{count}} carta",
+      "drawCount_other": "roba {{count}} cartas"
     },
     "unlessPayment": {
       "defaultEffect": "Contrarrestar a menos que pagues",
@@ -1315,7 +1351,8 @@
       "title": "{{effect}} a menos que pagues",
       "titleChooseOne": "{{effect}} a menos que pagues uno",
       "dontPay": "No pagar",
-      "takeEffect": "Aceptar el efecto"
+      "takeEffect": "Aceptar el efecto",
+      "priorChoice": "Jugador {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "¿Empalmar con arcano?",
@@ -1398,6 +1435,8 @@
     },
     "config": {
       "startingLife": "Vida inicial",
+      "commanderDamage": "Daño de comandante",
+      "poisonCounters": "Contadores de veneno",
       "players": "Jugadores",
       "whoGoesFirst": "Quién empieza",
       "firstPlayer": {
@@ -1409,6 +1448,11 @@
     "noLegalAiDecks": {
       "withFormat": "Añade o importa un mazo legal en {{format}} para que lo use la IA.",
       "generic": "Añade o importa un mazo legal en este formato para que lo use la IA."
+    },
+    "hordeDeck": {
+      "title": "Mazo de la Horda",
+      "subtitle": "El mazo autónomo al que se enfrenta tu equipo. Lo proporciona el motor: no necesitas un mazo de IA.",
+      "selected": "Seleccionado"
     }
   },
   "cardChoice": {
@@ -1442,7 +1486,8 @@
       "cast": "Lanzar",
       "crew": "Tripular ({{power}})",
       "saddle": "Ensillar ({{power}})",
-      "station": "Estación (+{{power}})"
+      "station": "Estación (+{{power}})",
+      "destroy": "Destroy"
     },
     "buttons": {
       "confirm": "Confirmar",
@@ -1505,7 +1550,9 @@
       "titleReveal": "Revelar de la mano",
       "titleOpponentHand": "Mano del oponente",
       "subtitleReveal": "Elige una carta para revelar, o rechaza",
-      "subtitleChoose": "Elige una carta"
+      "subtitleChoose": "Elige una carta",
+      "subtitleRevealAnyNumber": "Elige cualquier cantidad de cartas para revelar",
+      "subtitleChooseCount": "Elige {{count}} cartas"
     },
     "search": {
       "title": "Buscar en la biblioteca",
@@ -1769,6 +1816,10 @@
       "title": "Ordenar las copias",
       "subtitle": "Elige el hechizo cuya copia se pone a continuación en la pila"
     },
+    "memberOrder": {
+      "title": "Ordena las cartas",
+      "subtitle": "Elige qué carta se procesa a continuación"
+    },
     "collectEvidence": {
       "title": "Recabar pruebas",
       "subtitle": "Exilia cartas de tu cementerio con un valor de maná total de {{minimum}} o mayor"
@@ -1796,7 +1847,8 @@
       "counterDiscard": "Descartar {{selected}} de {{cap}}",
       "counterKeep": "Conservar {{selected}} de {{cap}}",
       "keepInstead": "Conservar en su lugar",
-      "discardInstead": "Descartar en su lugar"
+      "discardInstead": "Descartar en su lugar",
+      "counterChoose": "Choose {{selected}} of {{cap}}"
     },
     "discard": {
       "title": "Descartar",
@@ -1808,6 +1860,13 @@
       "titleExact_one": "Descarta una carta",
       "titleExact_other": "Descarta {{count}} cartas",
       "titleWard": "Guarda — Descarta una carta",
+      "instructionWithReason": "{{reason}}: {{instruction}}",
+      "reason": {
+        "ward": "Guarda",
+        "connive": "Conspirar",
+        "additionalCost": "Coste adicional",
+        "manaAbility": "Habilidad de maná"
+      },
       "subtitleUpTo_one": "Elige hasta {{count}} carta para descartar",
       "subtitleUpTo_other": "Elige hasta {{count}} cartas para descartar",
       "subtitleUnless": "Elige {{count}} cartas o 1 carta que coincida para descartar",
@@ -1895,6 +1954,42 @@
       "hint": "Arrastra para reordenar · la posición 1 queda arriba de este montón",
       "moveLeft": "Mover a la izquierda",
       "moveRight": "Mover a la derecha"
+    },
+    "heroEvent": {
+      "chromeOverload": {
+        "title": "Chrome Dome's Overload",
+        "subtitle": "Choose a tapped creature you control to sacrifice"
+      },
+      "krangStratagem": {
+        "title": "Krang's Stratagem",
+        "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleExact_one": "Choose {{count}} card to discard",
+        "subtitleExact_other": "Choose {{count}} cards to discard"
+      },
+      "smackdown": {
+        "title": "Leatherhead's Smackdown",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "ratKingRevolution": {
+        "title": "Rat King's Revolution",
+        "subtitle": "Choose a creature you control to tap and stun"
+      },
+      "savantiCurse": {
+        "title": "Savanti Romero's Curse",
+        "subtitle_one": "Choose {{count}} creature you control to return to its owner's hand",
+        "subtitle_other": "Choose {{count}} creatures you control to return to their owners' hands"
+      },
+      "infiltration": {
+        "title": "Villain Infiltration",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "villainMayhem": {
+        "title": "Villain Mayhem!",
+        "subtitle": "As a team, choose {{count}} creatures to spare — every other creature is destroyed"
+      }
     }
   },
   "specializeColor": {
@@ -1931,7 +2026,8 @@
     "scrollLeft": "Desplazar a la izquierda",
     "scrollRight": "Desplazar a la derecha",
     "confirm": "Confirmar",
-    "cancel": "Cancelar"
+    "cancel": "Cancelar",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Aventura",
@@ -2054,6 +2150,10 @@
   "giftRecipient": {
     "title": "Elegir destinatario del regalo",
     "subtitle": "Elige qué oponente recibe el regalo prometido."
+  },
+  "costRecipient": {
+    "title": "Elige un oponente",
+    "subtitle": "Elige el oponente para este coste: {{cost}}."
   },
   "entryController": {
     "title": "Elegir controlador al entrar",
@@ -2353,6 +2453,9 @@
     "optionalTriggers": "Habilidades disparadas opcionales ({{count, number}})",
     "replacementChoices": "Decisiones de reemplazo ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Mantén pulsado para ver la carta completa"
+  },
   "optionalEffect": {
     "sourceFallback": "Efecto",
     "title": "{{name}} - Efecto opcional",
@@ -2409,6 +2512,8 @@
       "zoneHand": "tu mano",
       "discard": "Descarta {{count}} {{cards}}",
       "exile": "Exilia {{count}} {{cards}} de {{zone}}",
+      "haveOpponentGainLife": "Haz que un oponente gane {{amount}} vidas",
+      "haveEachOtherPlayerGainLife": "Haz que cada otro jugador gane {{amount}} vidas",
       "reveal": "Muestra {{count}} {{cards}} de {{zone}}"
     }
   },
@@ -2465,7 +2570,7 @@
     "appliedLast": "Aplicado el último: este prevalece",
     "resultLabel": "Resultado: {{outcome}}",
     "confirmOrder": "Confirmar orden",
-    "dragHint": "Arrastra para reordenar o usa las flechas.",
+    "dragHint": "Arrastra desde el tirador <grip>⠿</grip> para reordenar o usa las flechas.",
     "chooseSubtitle": "Elige qué efecto de reemplazo aplicar.",
     "candidateFallback": "Efecto de reemplazo {{number}}",
     "orderSubtitleComposing": "Todos estos efectos cambian cómo ocurre este evento. Arrastra para fijar el orden en que se aplican: todos se aplican, así que el orden cambia el resultado (CR 616.1).",
@@ -2474,6 +2579,7 @@
     "composesNote": "Todos los efectos se aplican: el orden cambia cómo se combinan.",
     "moveUpNamed": "Mover {{name}} antes",
     "moveDownNamed": "Mover {{name}} después",
+    "dragHandleNamed": "Arrastra {{name}} para reordenar",
     "positionAnnounce": "Posición {{position}} de {{total}}"
   },
   "retargetChoice": {
@@ -2493,6 +2599,9 @@
     "partitionSubtitle": "Separa tus criaturas en dos montones. {{chooser}} elegirá uno.",
     "partitionSubtitleRemaining_one": "Separa tus criaturas en dos montones. {{chooser}} elegirá uno. ({{count}} jugador más después de ti)",
     "partitionSubtitleRemaining_other": "Separa tus criaturas en dos montones. {{chooser}} elegirá uno. ({{count}} jugadores más después de ti)",
+    "partitionInstruction": "{{chooser}} elige uno",
+    "partitionInstructionRemaining_one": "{{chooser}} elige uno ({{count}} jugador más después de ti)",
+    "partitionInstructionRemaining_other": "{{chooser}} elige uno ({{count}} jugadores más después de ti)",
     "pileALabel": "Montón A:",
     "pileBLabel": "Montón B:",
     "pileAria": "{{name}} — montón {{pile}}",
@@ -2574,6 +2683,7 @@
   },
   "outsideGame": {
     "fromExile": "Desde el exilio",
+    "fromCompanion": "Desde el compañero",
     "fromSideboard": "Desde el banquillo",
     "fromBoosterPack": "De un sobre de {{setCode}}",
     "fromCubeBoosterPack": "De un sobre del cube"
@@ -2598,6 +2708,20 @@
     "EndCombat": "Fin del combate",
     "PostCombatMain": "Fase principal 2",
     "End": "Paso final",
+    "Cleanup": "Limpieza"
+  },
+  "phaseShortName": {
+    "Untap": "Enderezar",
+    "Upkeep": "Mantenimiento",
+    "Draw": "Robar",
+    "PreCombatMain": "Principal 1",
+    "BeginCombat": "Combate",
+    "DeclareAttackers": "Atacantes",
+    "DeclareBlockers": "Bloqueadores",
+    "CombatDamage": "Daño",
+    "EndCombat": "Fin combate",
+    "PostCombatMain": "Principal 2",
+    "End": "Final",
     "Cleanup": "Limpieza"
   },
   "counterMoveDistribution": {

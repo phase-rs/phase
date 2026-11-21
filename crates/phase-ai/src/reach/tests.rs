@@ -3,14 +3,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engine::ai_support::flat_priority_actions;
+use engine::game::casting::{
+    base_auto_cast_option, current_casting_variant_choice_options, default_cast_election,
+    effective_spell_cost,
+};
 use engine::game::deck_loading::DeckEntry;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
-use engine::types::game_state::{GameState, PlayerDeckPool, StackEntryKind, WaitingFor};
+use engine::types::game_state::{
+    CastingVariant, GameState, PlayerDeckPool, StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use engine::types::keywords::{FlashbackCost, Keyword};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -1516,4 +1523,404 @@ fn a_target_prompt_with_no_surviving_response_declines() {
         None
     );
     assert!(!ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+// ── Several instances of one alternative-cost keyword (CR 113.2c + CR 601.2b) ──
+//
+// Reach prices each object's baseline cast first, exactly as before casts
+// announced a keyword instance, and only then the object's other instances
+// (`ReachSource::priced` / `ReachSource::alternatives`).
+
+const LIER: &str = "Spells can't be countered.\n\
+    Each instant and sorcery card in your graveyard has flashback. The flashback cost is equal to that card's mana cost.";
+const LAVA_DART: &str = "Lava Dart deals 1 damage to any target.\n\
+    Flashback—Sacrifice a Mountain. (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+const UNDERWORLD_BREACH: &str = "Each nonland card in your graveyard has escape. The escape cost is equal to the card's mana cost plus exile three other cards from your graveyard. (You may cast cards from your graveyard for their escape cost.)\n\
+    At the beginning of the end step, sacrifice this enchantment.";
+const FUGITIVE_DOCTOR: &str = "When The Fugitive Doctor enters, investigate.\n\
+    Whenever The Fugitive Doctor attacks, you may sacrifice a Clue. When you do, target instant or sorcery card in your graveyard gains flashback {2}{R}{G} until end of turn. (You may cast that card from your graveyard for its flashback cost. Then exile it.)";
+const ARCHMAGES_NEWT: &str = "Whenever this creature deals combat damage to a player, target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost. That card gains flashback {0} until end of turn instead if this creature is saddled. (You may cast that card from your graveyard for its flashback cost. Then exile it.)\n\
+    Saddle 3";
+const DEVILS_PLAY: &str = "Devil's Play deals X damage to any target.\n\
+    Flashback {X}{R}{R}{R} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+/// CR 111.10f: the Clue token the Doctor's "investigate" creates.
+const CLUE: &str = "{2}, Sacrifice this token: Draw a card.";
+fn lier(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature(P0, "Lier, Disciple of the Drowned", 3, 4)
+        .as_legendary()
+        .with_subtypes(vec!["Human", "Wizard"])
+        .from_oracle_text(LIER)
+        .id()
+}
+
+fn lava_dart(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_spell_to_graveyard(P0, "Lava Dart", true)
+        .with_mana_cost(red(0, 1))
+        .from_oracle_text(LAVA_DART)
+        .id()
+}
+
+fn float(scenario: &mut GameScenario, colors: &[ManaType]) {
+    scenario.with_mana_pool(
+        P0,
+        colors
+            .iter()
+            .map(|&color| ManaUnit::new(color, ObjectId(9_999), false, vec![]))
+            .collect(),
+    );
+}
+
+fn tap_the_mountain(runner: &mut GameRunner) {
+    let state = runner.state_mut();
+    let mut lands = state.battlefield.iter().copied();
+    let mountain = lands.find(|id| state.objects[id].name == "Mountain");
+    let mountain = mountain.expect("the Mountain");
+    state.objects.get_mut(&mountain).expect("object").tapped = true;
+}
+
+fn lier_flashback() -> Keyword {
+    Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost))
+}
+
+fn elected(step: &LineStep) -> Option<Keyword> {
+    step.casting_option
+        .as_ref()
+        .and_then(|option| option.alternative_cost_keyword.clone())
+}
+
+/// The native "Sacrifice a Mountain" route needs a cost prompt the reach
+/// driver does not answer: casting it reaches `PayCost`.
+fn native_dart_cast_reaches_pay_cost(state: &GameState, dart: ObjectId) -> bool {
+    let mut probe = GameRunner::from_state(state.clone());
+    probe
+        .act(cast_spell(dart, state))
+        .expect("the Dart is castable");
+    let WaitingFor::CastingVariantChoice { options, .. } = &probe.state().waiting_for else {
+        return false;
+    };
+    let index = options
+        .iter()
+        .position(|option| option.additional_cost.is_some())
+        .expect("the native sacrifice option");
+    probe
+        .act(GameAction::ChooseCastingVariant { index })
+        .expect("the option is chosen");
+    for _ in 0..4 {
+        let answer = match probe.state().waiting_for {
+            WaitingFor::PayCost { .. } => return true,
+            WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P1)),
+            },
+            _ => return false,
+        };
+        probe.act(answer).expect("the target is legal");
+    }
+    false
+}
+
+/// P2-A: Lier's {R} Dart is lethal; the Dart's cheaper native route (MV 0,
+/// "Sacrifice a Mountain") doesn't displace it.
+#[test]
+fn a_cheaper_native_flashback_does_not_displace_the_granted_line() {
+    let mut scenario = scenario(2, 1);
+    lier(&mut scenario);
+    let dart = lava_dart(&mut scenario);
+    float(&mut scenario, &[ManaType::Red]);
+    let mut runner = scenario.build();
+    let state = runner.state().clone();
+    let options = current_casting_variant_choice_options(&state, P0, dart);
+    assert_eq!(
+        options.len(),
+        2,
+        "native sacrifice and Lier's {{R}}: {options:?}"
+    );
+    assert!(native_dart_cast_reaches_pay_cost(&state, dart));
+
+    let admitted = admitted_actions(&state);
+    let line = find_lethal_line(&state, P0, &admitted, &production_admission)
+        .expect("Lier's {R} Dart is lethal");
+    assert_eq!(casts(&line.steps), vec![dart]);
+    assert_eq!(elected(&line.steps[0]), Some(lier_flashback()));
+    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+/// P3-A: three Darts, each with a native route and Lier's {R}. The all-Lier
+/// line is the baseline and is certified before any native combination.
+#[test]
+fn baseline_routes_are_certified_before_alternatives() {
+    let mut scenario = scenario(3, 3);
+    lier(&mut scenario);
+    let darts = [
+        lava_dart(&mut scenario),
+        lava_dart(&mut scenario),
+        lava_dart(&mut scenario),
+    ];
+    float(&mut scenario, &[ManaType::Red; 3]);
+    let mut runner = scenario.build();
+    let state = runner.state().clone();
+    for dart in darts {
+        assert_eq!(
+            current_casting_variant_choice_options(&state, P0, dart).len(),
+            2
+        );
+        let default = default_cast_election(&state, P0, dart).expect("castable");
+        assert_eq!(default.alternative_cost_keyword, Some(lier_flashback()));
+    }
+    assert!(native_dart_cast_reaches_pay_cost(&state, darts[0]));
+
+    let admitted = admitted_actions(&state);
+    let line = find_lethal_line(&state, P0, &admitted, &production_admission)
+        .expect("three Lier Darts are lethal");
+    let mut cast = casts(&line.steps);
+    cast.sort();
+    assert_eq!(cast, darts.to_vec());
+    assert!(line
+        .steps
+        .iter()
+        .all(|step| elected(step) == Some(lier_flashback())));
+    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+}
+
+/// Answers the attack's prompts, aiming every trigger at `card`, and stops
+/// in the postcombat main phase with an empty stack.
+fn attack_into_postcombat(runner: &mut GameRunner, card: ObjectId, clue: ObjectId) {
+    for _ in 0..60 {
+        let state = runner.state();
+        let action = match &state.waiting_for {
+            WaitingFor::Priority { .. }
+                if state.phase == Phase::PostCombatMain && state.stack.is_empty() =>
+            {
+                return
+            }
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::OptionalEffectChoice { .. } => {
+                GameAction::DecideOptionalEffect { accept: true }
+            }
+            WaitingFor::PayCost { .. } => GameAction::SelectCards { cards: vec![clue] },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            WaitingFor::TriggerTargetSelection { .. } => GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(card)),
+            },
+            other => panic!("unexpected prompt {other:?}"),
+        };
+        runner.act(action).expect("the attack step is accepted");
+    }
+    panic!("the attack never reached the postcombat main phase");
+}
+
+/// The grants on [`newt_dart_board`]'s Lava Dart, in timestamp order. Each
+/// variant names the latest grant, the auto route.
+#[derive(Clone, Copy, PartialEq)]
+enum DartBoard {
+    /// One combat: the Doctor's grant as it attacks, then the Newt's {0} as it
+    /// deals damage, the latest grant and so the auto route.
+    Newt,
+    /// `Newt` plus Underworld Breach's Escape, which no card can pay.
+    BreachNewt,
+    /// Underworld Breach; Relentless Assault's added combat lets the Newt hit
+    /// before the Doctor attacks, so the Doctor's {2}{R}{G} is the auto route.
+    BreachDoctor,
+}
+
+const RELENTLESS_ASSAULT: &str = "Untap all creatures that attacked this turn. After this main phase, there is an additional combat phase followed by an additional main phase.";
+
+/// Lier, the Fugitive Doctor and a saddled Archmage's Newt give Lava Dart four
+/// flashback instances (native sacrifice, Lier {R}, the Doctor's {2}{R}{G},
+/// the Newt's {0}); Devil's Play is in the graveyard. Postcombat: P1 at 4 and
+/// exactly {R}{R}{R}{G} floating beside one tapped Mountain.
+fn newt_dart_board(board: DartBoard) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = scenario(1, 10);
+    let lier = lier(&mut scenario);
+    if board != DartBoard::Newt {
+        scenario.add_enchantment_from_oracle(P0, "Underworld Breach", UNDERWORLD_BREACH);
+    }
+    let assault = (board == DartBoard::BreachDoctor).then(|| {
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Relentless Assault", false, RELENTLESS_ASSAULT)
+            .with_mana_cost(red(2, 2))
+            .id()
+    });
+    let doctor = scenario
+        .add_creature(P0, "The Fugitive Doctor", 4, 4)
+        .as_legendary()
+        .with_subtypes(vec!["Time Lord", "Doctor"])
+        .from_oracle_text(FUGITIVE_DOCTOR)
+        .id();
+    let newt = scenario
+        .add_creature(P0, "Archmage's Newt", 2, 2)
+        .with_subtypes(vec!["Salamander", "Mount"])
+        .from_oracle_text_with_keywords(&["Saddle"], ARCHMAGES_NEWT)
+        .id();
+    let clue = scenario
+        .add_artifact_from_oracle(P0, "Clue", CLUE)
+        .with_subtypes(vec!["Clue"])
+        .id();
+    let dart = lava_dart(&mut scenario);
+    let devils_play = scenario
+        .add_spell_to_graveyard(P0, "Devil's Play", false)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red],
+            generic: 0,
+        })
+        .from_oracle_text(DEVILS_PLAY)
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&clue)
+        .expect("clue")
+        .is_token = true;
+    tap_the_mountain(&mut runner);
+
+    // CR 702.171a: Saddle 3, paid by tapping Lier (power 3).
+    runner
+        .act(GameAction::SaddleMount {
+            mount_id: newt,
+            creature_ids: vec![],
+        })
+        .expect("saddling is announced");
+    runner
+        .act(GameAction::SaddleMount {
+            mount_id: newt,
+            creature_ids: vec![lier],
+        })
+        .expect("Lier saddles the Newt");
+    runner.advance_until_stack_empty();
+    assert!(runner.state().objects[&newt].is_saddled);
+    let combats: &[&[ObjectId]] = if let Some(assault) = assault {
+        for color in [ManaType::Red; 4] {
+            let unit = ManaUnit::new(color, ObjectId(9_999), false, vec![]);
+            let _ = runner.state_mut().add_mana_to_pool(P0, unit);
+        }
+        runner.cast(assault).resolve();
+        &[&[newt], &[doctor]]
+    } else {
+        &[&[doctor, newt]]
+    };
+    for attackers in combats {
+        runner.advance_to_combat();
+        let attacks: Vec<_> = attackers
+            .iter()
+            .map(|&id| (id, engine::game::combat::AttackTarget::Player(P1)))
+            .collect();
+        runner.declare_attackers(&attacks).expect("they attack");
+        attack_into_postcombat(&mut runner, dart, clue);
+    }
+    assert_eq!(runner.life(P1), 4);
+    for color in [ManaType::Red, ManaType::Red, ManaType::Red, ManaType::Green] {
+        let _ = runner
+            .state_mut()
+            .add_mana_to_pool(P0, ManaUnit::new(color, ObjectId(9_999), false, vec![]));
+    }
+
+    (runner, dart, devils_play)
+}
+
+fn assert_newt_dart_lethal(runner: &mut GameRunner, dart: ObjectId, devils_play: ObjectId) {
+    let state = runner.state().clone();
+    let admitted = admitted_actions(&state);
+    let line = find_lethal_line(&state, P0, &admitted, &production_admission)
+        .expect("Dart {0} + Devil's Play X = 3 is lethal");
+    let mut cast = casts(&line.steps);
+    cast.sort();
+    let mut expected = vec![dart, devils_play];
+    expected.sort();
+    assert_eq!(cast, expected);
+    assert!(ai_wins_this_turn(runner, AiDifficulty::Medium));
+}
+
+/// P3-B: the Newt's {0} is the baseline (the latest grant), so Dart {0} +
+/// Devil's Play (Lier {X}{R}, X = 3) reaches the opponent's 4.
+#[test]
+fn a_fourth_instance_baseline_is_priced() {
+    let (mut runner, dart, devils_play) = newt_dart_board(DartBoard::Newt);
+    let state = runner.state().clone();
+    let options = current_casting_variant_choice_options(&state, P0, dart);
+    assert_eq!(options.len(), 4, "{options:?}");
+    let default = default_cast_election(&state, P0, dart).expect("castable");
+    assert_eq!(default.mana_cost.mana_value(), 0, "the Newt's {{0}}");
+    assert!(default.alternative_cost_keyword.is_some());
+    assert_newt_dart_lethal(&mut runner, dart, devils_play);
+}
+
+/// CR 118.9a: with Underworld Breach, the preparation default is an unpayable
+/// Escape at {R}, while the cast goes ahead as the Newt's {0} flashback. Reach
+/// must still price that route at {0}.
+#[test]
+fn a_route_priced_at_another_methods_cost_is_repriced() {
+    let (mut runner, dart, devils_play) = newt_dart_board(DartBoard::BreachNewt);
+    let state = runner.state().clone();
+    let options = current_casting_variant_choice_options(&state, P0, dart);
+    assert_eq!(options.len(), 4, "{options:?}");
+    assert!(options
+        .iter()
+        .all(|o| o.variant == CastingVariant::Flashback));
+    let default = default_cast_election(&state, P0, dart).expect("castable");
+    assert_eq!(default.variant, CastingVariant::Escape);
+    assert_eq!(default.mana_cost.mana_value(), 1, "Escape's {{R}}");
+    assert_newt_dart_lethal(&mut runner, dart, devils_play);
+}
+
+/// The repriced route is added beyond the alternatives' cap: with the Doctor's
+/// {2}{R}{G} as the auto route, the Newt's {0} is still searched.
+#[test]
+fn a_repriced_route_displaces_no_alternative() {
+    let (mut runner, dart, devils_play) = newt_dart_board(DartBoard::BreachDoctor);
+    let state = runner.state().clone();
+    let options = current_casting_variant_choice_options(&state, P0, dart);
+    let values: Vec<_> = options.iter().map(|o| o.mana_cost.mana_value()).collect();
+    assert_eq!(values, [0, 1, 0, 4], "native, Lier, the Newt, the Doctor");
+    let route = base_auto_cast_option(&state, P0, dart).expect("an auto route");
+    assert_eq!(
+        route.mana_cost.mana_value(),
+        4,
+        "the Doctor's {{2}}{{R}}{{G}}"
+    );
+    let default = default_cast_election(&state, P0, dart).expect("castable");
+    assert_eq!(default.variant, CastingVariant::Escape, "unpayable Escape");
+    assert_eq!(
+        state.players[0].graveyard.len(),
+        3,
+        "two others: no exile three"
+    );
+    assert_eq!(
+        state.players[0].mana_pool.total(),
+        4,
+        "{{R}}{{R}}{{R}}{{G}}"
+    );
+    assert_newt_dart_lethal(&mut runner, dart, devils_play);
+}
+
+/// P4-A: Underworld Breach makes Escape the preparation default, so the
+/// Dart's single cost is known (`effective_spell_cost` is `Some`), yet its two
+/// Flashback options still open a menu. The baseline route is the option base
+/// auto-selected (Lier's {R}); Escape's exile-three is unpayable.
+#[test]
+fn a_known_single_cost_still_carries_its_menu_route() {
+    let mut scenario = scenario(1, 1);
+    lier(&mut scenario);
+    scenario.add_enchantment_from_oracle(P0, "Underworld Breach", UNDERWORLD_BREACH);
+    let dart = lava_dart(&mut scenario);
+    float(&mut scenario, &[ManaType::Red]);
+    let mut runner = scenario.build();
+    tap_the_mountain(&mut runner);
+    let state = runner.state().clone();
+    let options = current_casting_variant_choice_options(&state, P0, dart);
+    assert_eq!(options.len(), 2, "{options:?}");
+    assert!(options
+        .iter()
+        .all(|option| option.variant == CastingVariant::Flashback));
+    assert!(effective_spell_cost(&state, P0, dart).is_some());
+
+    let admitted = admitted_actions(&state);
+    let line = find_lethal_line(&state, P0, &admitted, &production_admission)
+        .expect("Lier's {R} Dart is lethal");
+    assert_eq!(casts(&line.steps), vec![dart]);
+    assert_eq!(elected(&line.steps[0]), Some(lier_flashback()));
+    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
 }

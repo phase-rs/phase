@@ -28,6 +28,7 @@ use engine::types::counter::CounterType;
 use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::triggers::TriggerMode;
@@ -120,9 +121,13 @@ fn fire_next_chapter(runner: &mut GameRunner) {
 }
 
 /// Declare `attackers` at P0's declare-attackers step and resolve the attack
-/// triggers.
+/// triggers. The step is reached by passing priority from the main phase:
+/// `advance_to_combat` would first re-run the precombat main phase's turn-based
+/// actions in place, putting a second lore counter on the Saga (CR 714.3c).
 fn attack(runner: &mut GameRunner, attackers: &[ObjectId]) {
-    runner.advance_to_combat();
+    drive_until(runner, |r| {
+        matches!(r.state().waiting_for, WaitingFor::DeclareAttackers { .. })
+    });
     let attacks: Vec<_> = attackers
         .iter()
         .map(|&id| (id, AttackTarget::Player(P1)))
@@ -1300,6 +1305,166 @@ fn vernal_bloom_pays_the_controller_of_a_stolen_forest() {
     let pool = |p: PlayerId| runner.state().players[p.0 as usize].mana_pool.total();
     assert_eq!(pool(P0), 2, "P0 tapped it: {{G}} plus the additional {{G}}");
     assert_eq!(pool(P1), 0);
+}
+
+const TINDER_FARM: &str =
+    "This land enters tapped.\n{T}: Add {G}.\n{T}, Sacrifice this land: Add {R}{W}.";
+const YAVIMAYA: &str = "Each land is a Forest in addition to its other land types.";
+
+/// Tinder Farm's "{T}, Sacrifice this land: Add {R}{W}." carrying ability: the
+/// one printed ability whose cost composes a tap with a sacrifice.
+fn tinder_farm_sacrifice_ability_idx(runner: &GameRunner, tinder_farm: ObjectId) -> usize {
+    runner.state().objects[&tinder_farm]
+        .abilities
+        .iter()
+        .position(|a| {
+            engine::types::ability::cost_has_component(&a.cost, |c| {
+                matches!(c, engine::types::ability::AbilityCost::Sacrifice { .. })
+            })
+        })
+        .expect("Tinder Farm sacrifice mana ability")
+}
+
+/// Issue #9690: A "whenever a Forest is tapped for mana" trigger must fire
+/// when the mana ability resolves and produces mana (CR 106.12a), even though
+/// the Forest was sacrificed as part of its cost (CR 701.21a), reading the
+/// departed land's characteristics from last-known information (CR 608.2h).
+/// With Yavimaya, Cradle of Growth making all lands Forests and Vernal Bloom
+/// on the battlefield, activating Tinder Farm's "{T}, Sacrifice this land:
+/// Add {R}{W}." must add {R}{W} plus the additional {G} from Vernal Bloom,
+/// giving {R}{W}{G}.
+#[test]
+fn vernal_bloom_triggers_on_forest_sacrificed_as_part_of_mana_cost() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Vernal Bloom", VERNAL_BLOOM);
+    scenario.add_land_from_oracle(P0, "Yavimaya, Cradle of Growth", YAVIMAYA);
+    let tinder_farm = scenario
+        .add_land_from_oracle(P0, "Tinder Farm", TINDER_FARM)
+        .id();
+    let mut runner = scenario.build();
+    // Untap Tinder Farm (it entered tapped per oracle text).
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&tinder_farm)
+        .unwrap()
+        .tapped = false;
+    engine::game::layers::evaluate_layers(runner.state_mut());
+
+    let sac_ability_idx = tinder_farm_sacrifice_ability_idx(&runner, tinder_farm);
+
+    runner.activate(tinder_farm, sac_ability_idx).resolve();
+
+    let pool = &runner.state().players[P0.0 as usize].mana_pool;
+    assert_eq!(
+        pool.count_color(ManaType::Red),
+        1,
+        "Tinder Farm contributed {{R}}"
+    );
+    assert_eq!(
+        pool.count_color(ManaType::White),
+        1,
+        "Tinder Farm contributed {{W}}"
+    );
+    assert_eq!(
+        pool.count_color(ManaType::Green),
+        1,
+        "Vernal Bloom contributed additional {{G}}"
+    );
+    assert_eq!(pool.total(), 3, "Total mana should be {{R}}{{W}}{{G}}");
+    assert_eq!(
+        runner.state().objects[&tinder_farm].zone,
+        Zone::Graveyard,
+        "Tinder Farm was sacrificed to the graveyard"
+    );
+}
+
+/// Issue #9690: Stolen land edge: P1 controls Vernal Bloom so the test
+/// distinguishes the land's controller from the enchantment's controller.
+/// P0 controls Yavimaya, steals P1's Tinder Farm, and activates
+/// "{T}, Sacrifice this land: Add {R}{W}." P0 — the land's controller when it
+/// was tapped (CR 106.12a, read through LKI per CR 608.2h) — receives
+/// {R}{W}{G} while the Bloom's controller P1 receives nothing, and Tinder Farm
+/// ends in its owner P1's graveyard (CR 701.21a).
+#[test]
+fn vernal_bloom_triggers_on_stolen_forest_sacrificed_as_part_of_mana_cost() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P1, "Vernal Bloom", VERNAL_BLOOM);
+    scenario.add_land_from_oracle(P0, "Yavimaya, Cradle of Growth", YAVIMAYA);
+    let tinder_farm = scenario
+        .add_land_from_oracle(P1, "Tinder Farm", TINDER_FARM)
+        .id();
+    let steal_land = free_spell(
+        &mut scenario,
+        P0,
+        "Steal Land",
+        false,
+        "Gain control of target land until end of turn.",
+    );
+    let mut runner = scenario.build();
+    // Untap Tinder Farm.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&tinder_farm)
+        .unwrap()
+        .tapped = false;
+    engine::game::layers::evaluate_layers(runner.state_mut());
+
+    runner.cast(steal_land).target_object(tinder_farm).resolve();
+    assert_eq!(
+        runner.state().objects[&tinder_farm].controller,
+        P0,
+        "reach guard: P0 controls the stolen Tinder Farm"
+    );
+
+    let sac_ability_idx = tinder_farm_sacrifice_ability_idx(&runner, tinder_farm);
+
+    runner.activate(tinder_farm, sac_ability_idx).resolve();
+
+    let p0_pool = &runner.state().players[P0.0 as usize].mana_pool;
+    assert_eq!(p0_pool.count_color(ManaType::Red), 1, "P0 received {{R}}");
+    assert_eq!(p0_pool.count_color(ManaType::White), 1, "P0 received {{W}}");
+    assert_eq!(
+        p0_pool.count_color(ManaType::Green),
+        1,
+        "P0 received additional {{G}} from Vernal Bloom"
+    );
+    assert_eq!(
+        p0_pool.total(),
+        3,
+        "P0 total mana should be {{R}}{{W}}{{G}}"
+    );
+
+    let p1_pool = &runner.state().players[P1.0 as usize].mana_pool;
+    assert_eq!(p1_pool.total(), 0, "P1 received no mana");
+
+    assert_eq!(
+        runner.state().objects[&tinder_farm].zone,
+        Zone::Graveyard,
+        "Tinder Farm was sacrificed to the graveyard"
+    );
+    // CR 701.21a: it went to its OWNER's graveyard — assert the destination
+    // zone list, not just the owner stamp.
+    assert!(
+        runner.state().players[P1.0 as usize]
+            .graveyard
+            .contains(&tinder_farm),
+        "Tinder Farm must be in owner P1's graveyard"
+    );
+    assert!(
+        !runner.state().players[P0.0 as usize]
+            .graveyard
+            .contains(&tinder_farm),
+        "P0's graveyard must not hold the stolen land"
+    );
+    assert_eq!(
+        runner.state().objects[&tinder_farm].owner,
+        P1,
+        "Tinder Farm's owner is P1"
+    );
 }
 
 const FORSAKEN_WASTES: &str = "Players can't gain life.\nAt the beginning of each player's upkeep, that player loses 1 life.\nWhenever this enchantment becomes the target of a spell, that spell's controller loses 5 life.";

@@ -171,7 +171,7 @@ fn rottenmouth_viper_sacrifice_two_reduces_cost_by_two() {
     );
 
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept optional sacrifice cost");
 
     assert!(

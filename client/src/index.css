@@ -732,22 +732,69 @@ select.select-dark option {
   --art-crop-h: calc(var(--art-crop-w) * 0.75);
 }
 
-/* Horizontal card strip: cards sized by viewport height for Arena-style horizontal scroll.
-   Cards get an explicit height derived from viewport so they're large and readable.
-   Width follows from the 5:7 aspect ratio. */
-.zone-viewer-strip [role="img"],
-.zone-viewer-strip .animate-pulse,
-.card-choice-strip [role="img"],
-.card-choice-strip .animate-pulse {
-  --strip-card-h: clamp(240px, 64vh, 560px);
-  width: auto !important;
-  height: var(--strip-card-h) !important;
-  aspect-ratio: 5 / 7;
+/* Horizontal card strips (card choices, zone viewers). Never size strip cards
+   with a selector on the card's element or role: it goes dead silently when
+   that markup changes. Strip cards read the --card-w/--card-h pair every
+   CardImage state reads (art, loading pulse, text fallback, card back).
+
+   From lg up the overlay takes its height from its content, and the cards keep
+   the board size .card-scale-reset gives them, which testing confirmed reads
+   well on desktop. No sizing rule here applies there.
+
+   Below lg the overlay fills the screen, and board-size cards are too small to
+   read on a phone. There the frame ScrollableCardStrip renders grows into the
+   overlay body and is a size container, so 100cqh resolves at each card to the
+   frame's height. A card takes that height less the strip's chrome, is never
+   wider than the frame nor taller than 560px, and its width follows the 5:7
+   card. The frame's min-height is the floor: where the body is very short (a
+   landscape phone around 320px tall, with a filter, slot bar or two-button
+   footer taking room) the cards stop shrinking and the body overflows instead. */
+@media (width < 64rem) {
+  .card-strip-frame {
+    /* The strip's 1rem of vertical padding, its scrollbar (up to 18px) and some room for the hover lift. */
+    --card-strip-chrome-h: 2.75rem;
+    --card-h: min(100cqh - var(--card-strip-chrome-h), (100cqw - 2rem) * 7 / 5, 560px);
+    --card-w: calc(var(--card-h) * 5 / 7);
+    display: flex;
+    flex: 1 1 0%;
+    flex-direction: column;
+    min-height: 9rem;
+    container-type: size;
+  }
 }
+/* Card choices on a phone. Below lg, where the overlay fills the screen and a
+   sideways strip leaves the cards small, ChoiceCardGrid draws a choice's cards
+   (Search Library, the effect-zone prompts, separating into piles) in this grid,
+   which fills the width and scrolls down. React picks the grid only below lg, so
+   these rules need no media query, and a grid that is drawn is always sized.
+
+   Columns are at least 10rem, a width at which a card's rules text still reads
+   on a phone, but never so wide that fewer than two fit: every phone held
+   upright shows two (a little under 10rem each on the narrowest), and phones
+   turned sideways show three to five.
+   Each card sits in a cell ChoiceCardGrid renders, an inline-size container, so
+   100cqw resolves at the card to its cell's width: the card fills its column
+   and its height follows the 5:7 card. The cell is the grid's own element, so
+   the sizing never reaches into a card's markup. */
+.card-choice-grid {
+  display: grid;
+  grid-auto-rows: min-content;
+  grid-template-columns: repeat(auto-fill, minmax(min(10rem, calc(50% - 0.25rem)), 1fr));
+  gap: 0.5rem;
+}
+.card-choice-grid-cell {
+  --card-w: 100cqw;
+  --card-h: calc(var(--card-w) * 7 / 5);
+  display: flex;
+  container-type: inline-size;
+}
+/* CardImage's wrapper is inline-block (w-fit); as a block it drops the line-box
+   gap an inline box leaves under the card. This selects the card's markup, so it
+   only sets display: a markup change brings the gap back, never a wrong size. */
 .zone-viewer-strip .inline-block,
-.card-choice-strip .inline-block {
+.card-choice-strip .inline-block,
+.card-choice-grid-cell .inline-block {
   display: block;
-  width: fit-content;
 }
 .zone-viewer-strip > *,
 .card-choice-strip > * {
@@ -1043,6 +1090,40 @@ select.select-dark option {
 
 @media (prefers-reduced-motion: reduce) {
   .priority-attention-glow::after {
+    animation: none;
+  }
+}
+
+/* The pill's own-decision border marks the decision as the viewer's for as
+   long as it is. It is static by itself; the pulse modifier animates it and is
+   applied only while the Glow priority-alert preference is on. It sits on
+   ::before so the timed attention glow keeps ::after. */
+.priority-turn-border::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  border: 2px solid rgba(110, 231, 183, 0.9);
+  pointer-events: none;
+}
+
+.priority-turn-border-pulse::before {
+  animation: priority-turn-border-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes priority-turn-border-pulse {
+  0%,
+  100% {
+    border-color: rgba(52, 211, 153, 0.45);
+  }
+
+  50% {
+    border-color: rgba(167, 243, 208, 1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .priority-turn-border-pulse::before {
     animation: none;
   }
 }

@@ -183,7 +183,10 @@ fn parse_hyphenated_english_number(input: &str) -> OracleResult<'_, u32> {
 /// Prevents false matches where "a" greedily consumes the start of words like
 /// "another", "anyone", "among". The boundary check requires the next character
 /// to be non-alphanumeric (whitespace, punctuation) or end-of-input.
-fn parse_article_number(input: &str) -> OracleResult<'_, u32> {
+///
+/// Public so a caller that must exclude the article reading of [`parse_number`]
+/// (a number-list leg) rejects exactly what `parse_number` would read as 1.
+pub fn parse_article_number(input: &str) -> OracleResult<'_, u32> {
     // Try "an" before "a" (longest match first).
     let (rest, _) = alt((tag("an"), tag("a"))).parse(input)?;
     match rest.chars().next() {
@@ -769,6 +772,17 @@ pub fn starts_with_type_phrase_lead(text: &str) -> bool {
         || parse_color_prefix(text).is_some()
         || parse_color_quality_prefix(text).is_some()
         || parse_combat_status_prefix(text).is_some()
+        // CR 406.3: "face-up "/"face-down "/"exiled " are the exile-visibility
+        // adjective run consumed by `parse_type_phrase_folding_unbound`'s
+        // modifier loop. Recursing lets an article-led generic phrase
+        // ("a face-up exiled card", "an exiled card") pass the indefinite
+        // article guard and reach that loop. Without this arm the article is
+        // never stripped, so the run is unreachable and the phrase collapses to
+        // a match-anything filter (Binding Negotiation's "a face-up exiled card
+        // they own").
+        || parse_exile_visibility_prefix(text).is_ok_and(|(rest, _)| {
+            rest.len() < text.len() && starts_with_type_phrase_lead(rest)
+        })
         // CR 208.1 (#2912): "1/1 creature" leads a type phrase (the P/T
         // designation is followed by a type word).
         || parse_leading_pt_designation(text).is_some()
@@ -930,23 +944,36 @@ pub fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usize)> {
     None
 }
 
-/// A keyword-list separator followed by something other than a keyword, where
-/// that something opens another leg of the enclosing list — a type word ("creature
-/// with disturb, or enchantment") or a determiner-led leg ("each creature without
-/// flying and each planeswalker", "target creature with flying and all Equipment
-/// attached to that creature") — belongs to the enclosing list and stays
-/// unconsumed.
-pub fn separator_continues_enclosing_list(after_separator: &str) -> bool {
+/// CR 406.3: The exile-visibility adjective run that leads a type phrase naming
+/// a card in exile: "face-up " (not face down), "face-down ", and the "exiled "
+/// zone qualifier. Returns the property plus the remainder.
+///
+/// Single authority for these three adjectives: `starts_with_type_phrase_lead`
+/// (the indefinite-article guard) and `parse_type_phrase_folding_unbound`'s
+/// modifier loop both compose it, so an article-led generic phrase
+/// ("a face-up exiled card they own", "an exiled card") can never be admitted
+/// by one and dropped by the other.
+pub fn parse_exile_visibility_prefix(input: &str) -> OracleResult<'_, FilterProp> {
+    alt((
+        value(
+            FilterProp::Not {
+                prop: Box::new(FilterProp::FaceDown),
+            },
+            tag::<_, _, OracleError<'_>>("face-up "),
+        ),
+        value(FilterProp::FaceDown, tag("face-down ")),
+        value(FilterProp::InZone { zone: Zone::Exile }, tag("exiled ")),
+    ))
+    .parse(input)
+}
+
+/// A keyword-list separator can continue the suffix only when another keyword
+/// follows it. Otherwise the separator belongs to the enclosing type list —
+/// "creature with disturb, or enchantment" — or opens the following clause —
+/// "creature with decayed, create a token" — and must stay unconsumed for the
+/// caller.
+pub fn separator_stops_keyword_list(after_separator: &str) -> bool {
     parse_leading_keyword_match(after_separator).is_none()
-        && (starts_with_type_word(after_separator)
-            || alt((
-                tag::<_, _, OracleError<'_>>("each "),
-                tag("all "),
-                tag("target "),
-                tag("up to "),
-            ))
-            .parse(after_separator)
-            .is_ok())
 }
 
 /// Parse "without [keyword]" suffix — negated keyword filter.
@@ -978,7 +1005,7 @@ pub fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usiz
         let mut found_sep = false;
         for sep in &[", and ", ", or ", " and ", " or ", ", "] {
             if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*sep).parse(remaining) {
-                if separator_continues_enclosing_list(rest) {
+                if separator_stops_keyword_list(rest) {
                     break;
                 }
                 consumed += sep.len();

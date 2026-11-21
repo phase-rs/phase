@@ -31,6 +31,8 @@ use engine::game::quantity::{
     static_definition_is_cast_stable_for_pre_cast, trigger_definition_is_cast_stable_for_pre_cast,
     try_resolve_quantity_in_source_context,
 };
+#[cfg(test)]
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::stack::stack_object_controller;
 use engine::game::targeting::find_legal_targets;
 use engine::game::triggers::{
@@ -74,7 +76,7 @@ use crate::policies::stack_awareness::{
     is_creature_permanent_controlled_by, node_damage, removal_steps_acting_on, removes_or_damages,
     will_target_die_from_stack, RemovalStep,
 };
-use crate::policies::strategy_helpers::can_pay_ward_cost;
+use crate::policies::strategy_helpers::{can_pay_ward_cost, ward_cost_against_ai};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GateDecision {
@@ -166,6 +168,7 @@ pub fn gate_candidates(
             candidate,
             payment_successor: None,
             payment_step: None,
+            payment_trace: None,
         })
         .collect();
     gate_prepared_candidates(state, decision, prepared, ai_player, config, context)
@@ -470,7 +473,9 @@ fn zero_direct_spell_is_safe_to_reject(ctx: &PolicyContext<'_>) -> bool {
     if game_active_statics(ctx.state).any(|(_, definition)| {
         matches!(
             definition.mode,
-            StaticMode::CastWithAlternativeCost { .. } | StaticMode::CastWithKeyword { .. }
+            StaticMode::CastWithAlternativeCost { .. }
+                | StaticMode::CastWithKeyword { .. }
+                | StaticMode::CastWithFlash
         )
     }) || game_functioning_statics(ctx.state).any(|(_, definition)| {
         matches!(
@@ -492,7 +497,10 @@ fn zero_direct_spell_is_safe_to_reject(ctx: &PolicyContext<'_>) -> bool {
                 matches!(
                     modification,
                     ContinuousModification::GrantStaticAbility { definition }
-                        if matches!(definition.mode, StaticMode::CastWithKeyword { .. })
+                        if matches!(
+                            definition.mode,
+                            StaticMode::CastWithKeyword { .. } | StaticMode::CastWithFlash
+                        )
                 )
             })
         })
@@ -545,10 +553,11 @@ fn cast_has_relevant_payoff(
         .get(&caster)
         .map_or(0, |spells| spells.len());
 
-    // CR 502.2a: Day/Night counts the active TEAM's spells. The day/night
-    // transition reducer currently keys this on `active_player`, so do not
-    // treat any shared-team boundary as proven until that separate authority
-    // becomes team-aware.
+    // CR 502.2a + CR 731.2a + CR 731.2b: with shared team turns, Day/Night reads the most
+    // spells any one member of the active team cast (`day_night::record_previous_turn`).
+    // Whether this cast moves that across a threshold depends on the caster's team and the
+    // teammates' own counts, which this narrow check does not model, so a cast by a player
+    // with a teammate is never treated as proven unchanged.
     let caster_has_teammate = !engine::game::players::teammates(state, caster).is_empty();
     if state.day_night.is_some() && caster_has_teammate {
         return true;
@@ -1211,15 +1220,12 @@ fn reject_futile_target(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<G
         return Some(GateDecision::Reject);
     }
 
-    // CR 702.21a: targeting a warded permanent triggers ward; if the AI can't
-    // pay the cost, the spell is simply countered — a strict card-down. Never
-    // choose such a target.
-    for keyword in &object.keywords {
-        if let Keyword::Ward(ward) = keyword {
-            if !can_pay_ward_cost(ctx, ward, object) {
-                return Some(GateDecision::Reject);
-            }
-            break;
+    // CR 702.21a: targeting a warded permanent an opponent controls triggers
+    // ward; if the AI can't pay the cost, the spell is simply countered — a
+    // strict card-down. Never choose such a target.
+    if let Some(ward) = ward_cost_against_ai(ctx, object) {
+        if !can_pay_ward_cost(ctx, ward, object) {
+            return Some(GateDecision::Reject);
         }
     }
 
@@ -2248,6 +2254,7 @@ mod tests {
     use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use engine::types::ability::TurnWindow;
     use engine::types::ability::{
         AbilityCondition, AbilityCost, AdditionalCost, BounceSelection, CardTypeSetSource,
         CastPermissionConstraint, CastingPermission, CastingRestriction, Comparator, CountScope,
@@ -2342,9 +2349,10 @@ mod tests {
 
     fn spells_cast_this_turn() -> QuantityExpr {
         QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         }
     }
@@ -2986,7 +2994,7 @@ mod tests {
 
             assert!(
                 cast_has_relevant_payoff(&state, PlayerId(1), None),
-                "a nonactive teammate's {day_night:?} boundary is retained until the transition authority is team-aware"
+                "a nonactive teammate's {day_night:?} boundary is retained: this check does not model the team's counts"
             );
 
             state.day_night = None;
@@ -3115,9 +3123,10 @@ mod tests {
     fn zero_cast_dynamic_object_option_and_permission_consumers_are_paired() {
         let (mut state, congregate) = funded_zero_congregate_state();
         let history = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         };
         let option_spell = create_object(
@@ -3729,9 +3738,10 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Draw {
                     count: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: None,
+                            window: TurnWindow::ThisTurn,
                         },
                     },
                     target: TargetFilter::Controller,
@@ -3758,9 +3768,10 @@ mod tests {
     fn spell_count_after_this_cast() -> QuantityExpr {
         QuantityExpr::Difference {
             left: Box::new(QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: None,
+                    window: TurnWindow::ThisTurn,
                 },
             }),
             right: Box::new(QuantityExpr::Fixed { value: 1 }),
@@ -4261,9 +4272,10 @@ mod tests {
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 target: TargetFilter::Controller,
@@ -4417,9 +4429,10 @@ mod tests {
             .push(CastingRestriction::RequiresCondition {
                 condition: Some(ParsedCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: None,
+                            window: TurnWindow::ThisTurn,
                         },
                     },
                     comparator: Comparator::GE,
@@ -4582,9 +4595,10 @@ mod tests {
 
         let hook = add_battlefield_trigger(state, 91_004, TriggerMode::Attacks);
         let cast_count = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         };
         {
@@ -4840,9 +4854,10 @@ mod tests {
         state.priority_player = P0;
         state.waiting_for = WaitingFor::Priority { player: P0 };
         let spell_count = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery))),
+                window: TurnWindow::ThisTurn,
             },
         };
         let object = state
@@ -5436,7 +5451,7 @@ mod tests {
         let mut static_definition = StaticDefinition::new(StaticMode::CantBeBlocked);
         static_definition.condition = Some(StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: Some(TargetFilter::Or {
                         filters: vec![
@@ -5444,6 +5459,7 @@ mod tests {
                             TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
                         ],
                     }),
+                    window: TurnWindow::ThisTurn,
                 },
             },
             comparator: Comparator::GE,
@@ -5505,9 +5521,10 @@ mod tests {
                 .condition(
                     engine::types::ability::ReplacementCondition::OnlyIfQuantity {
                         lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::SpellsCastThisTurn {
+                            qty: QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: None,
+                                window: TurnWindow::ThisTurn,
                             },
                         },
                         comparator: Comparator::GE,
@@ -5571,9 +5588,10 @@ mod tests {
             AbilityKind::Spell,
             Effect::DealDamage {
                 amount: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 target: TargetFilter::Typed(TypedFilter::creature()),
@@ -5614,7 +5632,7 @@ mod tests {
                 shards: vec![ManaCostShard::Blue],
             },
             spell_filter: None,
-            dynamic_count: Some(QuantityRef::SpellsCastThisTurn {
+            dynamic_count: Some(QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(TargetFilter::Or {
                     filters: vec![
@@ -5622,6 +5640,7 @@ mod tests {
                         TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
                     ],
                 }),
+                window: TurnWindow::ThisTurn,
             }),
             reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
         })
@@ -5783,6 +5802,8 @@ mod tests {
         let mut redirect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -6932,9 +6953,10 @@ mod tests {
             },
         };
         let spell_ledger = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         };
         for amount in [nested_filter_x, spell_ledger] {
@@ -7291,13 +7313,14 @@ mod tests {
             StaticMode::CastWithKeyword {
                 keyword: Keyword::Flash,
             },
+            StaticMode::CastWithFlash,
         ];
         for (index, mode) in cases.into_iter().enumerate() {
             let (mut state, congregate) = funded_zero_congregate_state();
             let producer = add_battlefield_static(&mut state, 91_300 + index as u64, mode);
             assert!(
                 zero_cast_is_retained(&state, congregate),
-                "a live external static changes cost or keyword semantics"
+                "a live external static changes cost, keyword, or timing semantics"
             );
             state
                 .objects
@@ -7448,6 +7471,26 @@ mod tests {
         assert!(
             !zero_cast_is_retained(&state, congregate),
             "removing only the transient grant restores rejection"
+        );
+
+        state.add_transient_continuous_effect(
+            congregate,
+            P0,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: congregate },
+            vec![ContinuousModification::GrantStaticAbility {
+                definition: Box::new(StaticDefinition::new(StaticMode::CastWithFlash)),
+            }],
+            None,
+        );
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a transient as-though-flash grant invalidates the zero-cast proof"
+        );
+        state.transient_continuous_effects.clear();
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "removing only the transient timing grant restores rejection"
         );
     }
 
@@ -10075,6 +10118,263 @@ mod tests {
         assert_ne!(assess_candidate(&ctx), GateDecision::Reject);
     }
 
+    /// The gate's verdict when the AI targets The Serpent Society (controlled by
+    /// `controller`) with 4 damage, lethal to its 3/4 body, so only its poison
+    /// Ward can reject.
+    fn serpent_society_ward_gate(
+        format: engine::types::format::FormatConfig,
+        players: u8,
+        controller: PlayerId,
+        poison: &[(PlayerId, u32)],
+    ) -> GateDecision {
+        use engine::game::scenario_db::GameScenarioDbExt;
+        let mut scenario = GameScenario::new_with_format(format, players, 42);
+        let creature = scenario.add_real_card(
+            controller,
+            "The Serpent Society",
+            Zone::Battlefield,
+            crate::test_support::shared_integration_card_db(),
+        );
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        for &(seat, count) in poison {
+            state.players[seat.0 as usize].poison_counters = count;
+        }
+        let decision = damage_target_decision(creature, 4);
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assess_candidate(&ctx)
+    }
+
+    /// CR 702.21a + CR 704.5c: a poison Ward payment is lethal only against the
+    /// configured threshold.
+    #[test]
+    fn poison_ward_reads_the_configured_threshold() {
+        use engine::types::format::FormatConfig;
+        let threshold = |t| FormatConfig {
+            poison_counter_threshold: Some(t),
+            ..FormatConfig::standard()
+        };
+        assert_ne!(
+            serpent_society_ward_gate(threshold(15), 2, P1, &[(P0, 5)]),
+            GateDecision::Reject
+        );
+        assert_eq!(
+            serpent_society_ward_gate(threshold(5), 2, P1, &[]),
+            GateDecision::Reject
+        );
+        assert_eq!(
+            serpent_society_ward_gate(threshold(10), 2, P1, &[(P0, 5)]),
+            GateDecision::Reject
+        );
+        assert_ne!(
+            serpent_society_ward_gate(threshold(10), 2, P1, &[(P0, 4)]),
+            GateDecision::Reject
+        );
+    }
+
+    /// CR 702.21a + CR 704.6b: in Two-Headed Giant the Ward payment is weighed
+    /// against the AI team's shared total and fifteen.
+    #[test]
+    fn poison_ward_reads_the_team_total() {
+        let two_hg = engine::types::format::FormatConfig::two_headed_giant;
+        let opponent = PlayerId(2);
+        assert_eq!(
+            serpent_society_ward_gate(two_hg(), 4, opponent, &[(P0, 3), (P1, 7)]),
+            GateDecision::Reject
+        );
+        assert_ne!(
+            serpent_society_ward_gate(two_hg(), 4, opponent, &[(P0, 3), (P1, 6)]),
+            GateDecision::Reject
+        );
+    }
+
+    const LIGHTNING_BLAST: &str = "Lightning Blast deals 4 damage to any target.";
+
+    /// The AI at 3 poison in Two-Headed Giant casts Lightning Blast with The Serpent Society and a
+    /// Leyline of Sanctity per head opposing, and its teammate at 7, controlling Platinum Angel
+    /// when `angel`; returns the runner at target selection, the gate's verdict on The Serpent
+    /// Society, its id, and the Angel's.
+    fn blast_at_serpent_society(angel: bool) -> (GameRunner, bool, ObjectId, Option<ObjectId>) {
+        use engine::game::scenario_db::GameScenarioDbExt;
+        let db = crate::test_support::shared_integration_card_db();
+        let format = engine::types::format::FormatConfig::two_headed_giant();
+        let mut scenario = GameScenario::new_with_format(format, 4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let serpent =
+            scenario.add_real_card(PlayerId(2), "The Serpent Society", Zone::Battlefield, db);
+        for head in [PlayerId(2), PlayerId(3)] {
+            scenario.add_real_card(head, "Leyline of Sanctity", Zone::Battlefield, db);
+        }
+        let angel =
+            angel.then(|| scenario.add_real_card(P1, "Platinum Angel", Zone::Battlefield, db));
+        let blast = scenario
+            .add_spell_to_hand_from_oracle(P0, "Lightning Blast", true, LIGHTNING_BLAST)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::Red],
+            })
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 3));
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Red, 1));
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.players[0].poison_counters = 3;
+            state.players[1].poison_counters = 7;
+            state.active_player = P0;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        let card_id = runner.state().objects[&blast].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: blast,
+                card_id,
+                targets: vec![],
+                payment_mode: Default::default(),
+            })
+            .unwrap();
+        let state = runner.state();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+        let serpent_action = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(serpent)),
+        };
+        let issued = candidate_actions(state);
+        assert!(issued.iter().any(|c| c.action == serpent_action));
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: issued.clone(),
+        };
+        let kept = gate_candidates(
+            state,
+            &decision,
+            issued,
+            P0,
+            &config,
+            &AiContext::empty(&config.weights),
+        )
+        .iter()
+        .any(|g| g.candidate.action == serpent_action);
+        (runner, kept, serpent, angel)
+    }
+
+    /// CR 702.21a + CR 704.6b + CR 810.8a: a teammate's Platinum Angel keeps the AI's team in the
+    /// game at fifteen shared poison, so the AI targets The Serpent Society, pays its Ward, and
+    /// Lightning Blast resolves; without the Angel the payment stays rejected.
+    #[test]
+    fn a_team_that_cannot_lose_pays_a_poison_ward_past_its_threshold() {
+        let (_, kept_without_angel, _, _) = blast_at_serpent_society(false);
+        assert!(!kept_without_angel);
+
+        let (mut runner, kept, serpent, _) = blast_at_serpent_society(true);
+        assert!(kept);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let mut rng = ChaCha20Rng::seed_from_u64(0);
+        let target = crate::search::choose_action(runner.state(), P0, &config, &mut rng);
+        assert_eq!(
+            target,
+            Some(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(serpent)),
+            })
+        );
+        runner.act(target.unwrap()).unwrap();
+        let mut paid = false;
+        while !runner.state().stack.is_empty() {
+            let state = runner.state();
+            let action = match &state.waiting_for {
+                WaitingFor::UnlessPayment { player, .. } if *player == P0 => {
+                    let action = crate::search::choose_action(state, P0, &config, &mut rng)
+                        .expect("the AI answers its Ward payment");
+                    paid |= action == GameAction::PayUnlessCost { pay: true };
+                    action
+                }
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                other => panic!("unexpected decision {other:?}"),
+            };
+            runner.act(action).expect("the game advances");
+        }
+        let state = runner.state();
+        assert!(paid);
+        assert_eq!(state.objects[&serpent].zone, Zone::Graveyard);
+        assert_eq!(engine::game::players::team_poison_total(state, P0), 15);
+        assert!(engine::game::players::is_alive(state, P0));
+        assert!(engine::game::players::is_alive(state, P1));
+    }
+
+    /// CR 102.3: a Two-Headed Giant teammate is not an opponent, so Lightning Blast at the
+    /// teammate's Platinum Angel or face is refused as at the AI's own, while The Serpent Society
+    /// is scored.
+    #[test]
+    fn a_teammates_permanent_is_not_an_enemy_target() {
+        use crate::policies::registry::{PolicyId, PolicyRegistry, PolicyVerdict};
+        let (runner, _, serpent, angel) = blast_at_serpent_society(true);
+        let state = runner.state();
+        let issued = candidate_actions(state);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: issued.clone(),
+        };
+        let anti_self_harm = |target: TargetRef| {
+            let candidate = issued
+                .iter()
+                .find(|c| {
+                    c.action
+                        == GameAction::ChooseTarget {
+                            target: Some(target.clone()),
+                        }
+                })
+                .expect("an issued target");
+            let ctx = PolicyContext {
+                state,
+                decision: &decision,
+                candidate,
+                ai_player: P0,
+                config: &config,
+                context: &AiContext::empty(&config.weights),
+                cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
+            };
+            PolicyRegistry::shared()
+                .verdicts(&ctx)
+                .into_iter()
+                .find_map(|(id, verdict)| (id == PolicyId::AntiSelfHarm).then_some(verdict))
+                .expect("AntiSelfHarm judges a target choice")
+        };
+        let rejected = |verdict: PolicyVerdict| match verdict {
+            PolicyVerdict::Reject { reason } => Some(reason.kind),
+            PolicyVerdict::Score { .. } => None,
+        };
+        assert_eq!(
+            rejected(anti_self_harm(TargetRef::Object(angel.unwrap()))),
+            Some("anti_self_harm_own_permanent_with_opponent_target")
+        );
+        assert_eq!(
+            rejected(anti_self_harm(TargetRef::Player(P1))),
+            Some("anti_self_harm_wrong_player_target")
+        );
+        assert_eq!(
+            rejected(anti_self_harm(TargetRef::Player(P0))),
+            Some("anti_self_harm_wrong_player_target")
+        );
+        assert_eq!(rejected(anti_self_harm(TargetRef::Object(serpent))), None);
+    }
+
     /// CR 702.21a + CR 104.3d: two individually-nonlethal poison sub-costs in
     /// a `Compound` Ward can be jointly lethal — the aggregate across every
     /// sub-cost must be checked, not each sub-cost against the same
@@ -10287,6 +10587,149 @@ mod tests {
             search_depth: crate::policies::context::SearchDepth::Root,
         };
         assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// P0 casts a real Giant Growth with Gev, Scaled Scorch ("Ward—Pay 2 life.")
+    /// and Grizzly Bears on the battlefield, with `life` as both its seat's and
+    /// its team's life total. Returns whether the gate keeps each target and
+    /// whether the chooser picks Gev on seeds 0..4.
+    fn ward_pump_target_verdict(
+        format: Option<engine::types::format::FormatConfig>,
+        life: i32,
+        gev_controller: PlayerId,
+        bears_controller: PlayerId,
+    ) -> (bool, bool, Vec<bool>) {
+        let db = crate::test_support::shared_integration_card_db();
+        let mut scenario = match format {
+            Some(format) => GameScenario::new_with_format(format, 4, 7),
+            None => GameScenario::new(),
+        };
+        scenario.at_phase(Phase::PreCombatMain);
+        let gev =
+            scenario.add_real_card(gev_controller, "Gev, Scaled Scorch", Zone::Battlefield, db);
+        let bears =
+            scenario.add_real_card(bears_controller, "Grizzly Bears", Zone::Battlefield, db);
+        let growth = scenario.add_real_card(P0, "Giant Growth", Zone::Hand, db);
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Green, 1));
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            // Zero every teammate seat so the team's shared life equals P0's seat.
+            for mate in engine::game::players::teammates(state, P0) {
+                state.players[mate.0 as usize].life = 0;
+            }
+            state.players[0].life = life;
+            state.active_player = P0;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        let card_id = runner.state().objects[&growth].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: growth,
+                card_id,
+                targets: vec![],
+                payment_mode: Default::default(),
+            })
+            .unwrap();
+        let state = runner.state().clone();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+        assert_eq!(state.players[0].life, life);
+        assert_eq!(engine::game::players::team_life_total(&state, P0), life);
+        assert!(state.objects[&gev]
+            .keywords
+            .contains(&Keyword::Ward(WardCost::PayLife(2))));
+        let gev_action = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(gev)),
+        };
+        let bears_action = GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bears)),
+        };
+        let issued = candidate_actions(&state);
+        assert!(issued.iter().any(|c| c.action == gev_action));
+        assert!(issued.iter().any(|c| c.action == bears_action));
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: issued.clone(),
+        };
+        let gated = gate_candidates(
+            &state,
+            &decision,
+            issued,
+            P0,
+            &config,
+            &AiContext::empty(&config.weights),
+        );
+        let retained = |action: &GameAction| gated.iter().any(|g| &g.candidate.action == action);
+        let choices = (0..4)
+            .map(|seed| {
+                let mut rng = ChaCha20Rng::seed_from_u64(seed);
+                crate::search::choose_action(&state, P0, &config, &mut rng)
+            })
+            .collect::<Vec<_>>();
+        let gev_choice = Some(gev_action.clone());
+        let bears_choice = Some(bears_action.clone());
+        assert!(choices
+            .iter()
+            .all(|c| *c == gev_choice || *c == bears_choice));
+        (
+            retained(&gev_action),
+            retained(&bears_action),
+            choices.iter().map(|c| *c == gev_choice).collect(),
+        )
+    }
+
+    /// CR 702.21a: ward triggers only for an opponent's spell, so the AI's own
+    /// warded creature is a free pump target even when it cannot pay the cost.
+    #[test]
+    fn keeps_own_warded_target_it_cannot_pay_for() {
+        let (gev_kept, bears_kept, gev_picks) = ward_pump_target_verdict(None, 2, P0, P1);
+        assert!(gev_kept);
+        assert!(bears_kept);
+        assert_eq!(gev_picks, [true; 4]);
+    }
+
+    /// CR 702.21a + CR 102.3: a 2HG teammate is not an opponent, so the
+    /// teammate's warded creature is a free pump target even though the team's
+    /// shared life (CR 119.4a) cannot pay 2.
+    #[test]
+    fn keeps_teammates_warded_target_it_cannot_pay_for() {
+        let format = engine::types::format::FormatConfig::two_headed_giant();
+        let table = GameState::new(format.clone(), 4, 7);
+        assert!(!engine::game::players::is_opponent(&table, PlayerId(1), P0));
+        let (gev_kept, bears_kept, gev_picks) =
+            ward_pump_target_verdict(Some(format), 1, PlayerId(1), PlayerId(2));
+        assert!(gev_kept);
+        assert!(bears_kept);
+        assert_eq!(gev_picks, [true; 4]);
+    }
+
+    /// CR 702.21a + CR 119.4a: an opposing 2HG team's ward still rejects the
+    /// target when the AI's team's shared life cannot pay 2.
+    #[test]
+    fn rejects_opposing_teams_warded_target_its_team_cannot_pay_for() {
+        let format = engine::types::format::FormatConfig::two_headed_giant();
+        let table = GameState::new(format.clone(), 4, 7);
+        assert!(engine::game::players::is_opponent(&table, PlayerId(2), P0));
+        let (gev_kept, bears_kept, gev_picks) =
+            ward_pump_target_verdict(Some(format), 1, PlayerId(2), PlayerId(3));
+        assert!(!gev_kept);
+        assert!(bears_kept);
+        assert_eq!(gev_picks, [false; 4]);
+    }
+
+    /// CR 702.21a: an opponent's unpayable ward still rejects the target.
+    #[test]
+    fn still_rejects_opponents_warded_target_it_cannot_pay_for() {
+        let (gev_kept, bears_kept, gev_picks) = ward_pump_target_verdict(None, 2, P1, P0);
+        assert!(!gev_kept);
+        assert!(bears_kept);
+        assert_eq!(gev_picks, [false; 4]);
     }
     /// Build an Improvise `ManaPayment` decision context: a `TapForConvoke`
     /// Colorless candidate for `object_id`, plus whatever sibling candidates
@@ -11418,12 +11861,33 @@ mod tests {
             let mut state = scenario.build().state().clone();
             activate_first_ability(&mut state, entity, P1, vec![TargetRef::Player(P0)]);
             let entry = state.stack.back().expect("Psionic Entity's ability");
-            assert!(
-                engine::game::effects::stack_reach::stack_entry_node_reach(&state, entry)
-                    .iter()
-                    .any(|reach| reach.acted_on == vec![TargetRef::Object(entity)]),
-                "reach guard: the 3-damage node acts on the Entity"
-            );
+            let reaches = engine::game::effects::stack_reach::stack_entry_node_reach(&state, entry);
+            if protected {
+                // CR 702.16e via the candidate authority (Matt R15): the
+                // Entity's own protection proposes into the replacement
+                // pipeline, so the stack_reach replacement query claims the
+                // 3-damage node and it acts on nothing — while the
+                // 2-to-player node still reaches P0.
+                assert!(
+                    reaches
+                        .iter()
+                        .any(|reach| reach.acted_on == vec![TargetRef::Player(P0)]),
+                    "protected: reach is intact for the 2-to-player node"
+                );
+                assert!(
+                    reaches
+                        .iter()
+                        .all(|reach| reach.acted_on != vec![TargetRef::Object(entity)]),
+                    "protected: the 3-damage node is claimed by protection"
+                );
+            } else {
+                assert!(
+                    reaches
+                        .iter()
+                        .any(|reach| reach.acted_on == vec![TargetRef::Object(entity)]),
+                    "reach guard: the 3-damage node acts on the Entity"
+                );
+            }
             assert_eq!(will_target_die_from_stack(&state, entity), !protected);
             assert_eq!(pump_can_save_from_hostile_stack(&state, P1, 2), !protected);
         }

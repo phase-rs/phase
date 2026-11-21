@@ -504,6 +504,7 @@ fn open_private_zone_cast_selection(
     // live, so the resume's finalize-time re-evaluation is correct.
     crate::game::effects::append_to_pending_continuation(state, Some(Box::new(stash)));
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: ability.controller,
         cards: eligible,
         count: 1,
@@ -522,14 +523,17 @@ fn open_private_zone_cast_selection(
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         // CR 708.2a: cast-from-zone selection is not a face-down entry.
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
     Ok(())
 }
@@ -638,6 +642,7 @@ fn open_linked_exile_cast_selection(
     }
     crate::game::effects::append_to_pending_continuation(state, Some(Box::new(stash)));
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: ability.controller,
         cards: pool,
         count: 1,
@@ -656,14 +661,17 @@ fn open_linked_exile_cast_selection(
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         // CR 708.2a: cast-from-zone selection is not a face-down entry.
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
     Ok(())
 }
@@ -1751,6 +1759,7 @@ fn resolve_cast_slot_group(
     };
     window.sub_ability = None;
     window.targets = pool.into_iter().map(TargetRef::Object).collect();
+    window.declared_player_target_slots.clear();
     super::free_cast_from_zones::resolve_with_face_policy(
         state,
         &window,
@@ -2193,6 +2202,7 @@ pub(crate) fn freeze_resolution_cast_filter(
         | TargetFilter::LastCreated
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -5923,6 +5933,8 @@ mod tests {
         );
         ability.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -5962,6 +5974,8 @@ mod tests {
 
     fn parent_target_move(destination: Zone) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: None,
             destination,
             target: TargetFilter::ParentTarget,
@@ -6284,6 +6298,8 @@ mod tests {
         let mut grant = paid_during_resolution_grant(source, target);
         let mut destination_rider = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -6404,6 +6420,8 @@ mod tests {
         let mut grant = paid_during_resolution_grant(source, ObjectId(9212));
         let mut destination_rider = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,

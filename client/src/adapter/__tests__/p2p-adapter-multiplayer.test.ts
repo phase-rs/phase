@@ -22,6 +22,7 @@ import { PROTOCOL_VERSION, type WsAdapterEvent } from "../ws-adapter";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 import { PEER_CONNECT_OPTIONS } from "../../network/connection";
 import { WIRE_PROTOCOL_VERSION, encodeWireMessage, type P2PMessage } from "../../network/protocol";
+import { buildGameObject } from "../../test/factories/gameObjectFactory";
 import { p2pFinalStateCommitment, type P2PTerminalResult } from "../../services/p2pTerminalResult";
 import type { FullTerminalDelivery } from "../../services/fullTerminalResult";
 import { claimP2PHostLease, ownsP2PHostLease } from "../../services/p2pSession";
@@ -845,6 +846,7 @@ function twoHeadedGiantConfig(): FormatConfig {
     singleton: false,
     command_zone: false,
     commander_damage_threshold: null,
+    poison_counter_threshold: null,
     range_of_influence: null,
     team_based: true,
     sideboard_policy: { type: "Unlimited" },
@@ -871,6 +873,7 @@ function customFormatConfig(): FormatConfig {
     singleton: false,
     command_zone: false,
     commander_damage_threshold: null,
+    poison_counter_threshold: 10,
     range_of_influence: null,
     team_based: false,
     sideboard_policy: { type: "Limited", data: 15 },
@@ -917,6 +920,7 @@ function commanderConfig(): FormatConfig {
     singleton: true,
     command_zone: true,
     commander_damage_threshold: 21,
+    poison_counter_threshold: 10,
     range_of_influence: null,
     team_based: false,
     sideboard_policy: { type: "Forbidden" },
@@ -3802,6 +3806,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       commander: [],
       companion: [],
       signature_spell: [],
+      min_deck_size: 60,
       selected_format: "Custom:0",
     });
     expect(mockCheckDeckCompatibility).not.toHaveBeenCalled();
@@ -3824,6 +3829,34 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       "WaitingHuman",
     ]);
     expect(mockInitializeHostGame).not.toHaveBeenCalled();
+  });
+
+  // CR 100.2b + CR 702.139b: a draft match is hosted under its Cube's own
+  // minimum deck size, and the guest's companion is judged against that.
+  it("gates a guest deck against the room's own minimum deck size", async () => {
+    mockEvaluateDeckFormatGate.mockResolvedValueOnce({ compatible: true, reasons: [] });
+    const { adapter, emitConnection } = makeHost(2, 5_000, {
+      ...customFormatConfig(),
+      format: "Limited",
+      deck_size: { type: "Minimum", data: 50 },
+    });
+    await adapter.initialize();
+
+    await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: {
+        player: { main_deck: ["Plains"], sideboard: [], companion: ["Yorion, Sky Nomad"] },
+      },
+    });
+    await flushPromises(20);
+
+    expect(mockEvaluateDeckFormatGate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        companion: ["Yorion, Sky Nomad"],
+        min_deck_size: 50,
+        selected_format: "Limited",
+      }),
+    );
   });
 
   it("projects team metadata from wire SeatView into player slots", () => {
@@ -6446,7 +6479,11 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     return { adapter, conn };
   }
 
-  async function terminalReadyGuest(): Promise<{
+  const terminalPrinting = {
+    set_code: "m21", collector_number: "272", automatic_art_catalog_version: 1,
+  };
+
+  async function terminalReadyGuest(stripProvenance = false): Promise<{
     adapter: P2PGuestAdapter;
     conn: FakeDataConnection;
     result: P2PTerminalResult;
@@ -6465,6 +6502,11 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       ...remoteState("guest durable terminal"),
       waiting_for: { type: "GameOver", data: { winner: 0 } },
     } as unknown as GameState;
+    finalState.objects[271] = buildGameObject({
+      id: 271, name: "Forest", zone: "Battlefield", printing: { ...terminalPrinting },
+    });
+    const commitment = await p2pFinalStateCommitment(finalState);
+    if (stripProvenance) delete finalState.objects[271].printing!.automatic_art_catalog_version;
     await adapter.initialize();
     await conn.simulateData({
       type: "game_setup",
@@ -6486,7 +6528,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       recipient: 1,
       revision: 7,
       terminalId: "host-terminal:recipient:1",
-      finalStateCommitment: await p2pFinalStateCommitment(finalState),
+      finalStateCommitment: commitment,
       display: { winner: 0, reason: "Game complete" },
     };
     return { adapter, conn, result, authority };
@@ -6611,6 +6653,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
 
   it("waits for a successful durable commit before sending a terminal receipt", async () => {
     const { adapter, conn, result, authority } = await terminalReadyGuest();
+    expect((await adapter.getState()).objects[271].printing).toEqual(terminalPrinting);
     const commit = deferred<boolean>();
     terminalMocks.commitP2PTerminalResult.mockReturnValueOnce(commit.promise);
 
@@ -6634,6 +6677,24 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     });
     expect((adapter as unknown as { terminated: boolean }).terminated).toBe(true);
     adapter.dispose();
+  });
+
+  it("rejects the marked terminal commitment if only the marker was removed from delivery", async () => {
+    const { adapter, conn, result, authority } = await terminalReadyGuest(true);
+    try {
+      expect((await adapter.getState()).objects[271].printing).toEqual({
+        set_code: "m21", collector_number: "272",
+      });
+      const events = vi.fn();
+      adapter.onEvent(events);
+      await conn.simulateData({ type: "terminal_result", result, authority });
+      await vi.waitFor(() => expect(events).toHaveBeenCalledWith({
+        type: "terminalUnavailable", message: "P2P terminal result did not match the final state",
+      }));
+      expect(terminalMocks.commitP2PTerminalResult).not.toHaveBeenCalled();
+    } finally {
+      adapter.dispose();
+    }
   });
 
   it("keeps the guest session alive when receipt send fails and retries on terminal redelivery", async () => {
@@ -7695,17 +7756,24 @@ describe("P2P wire-protocol version gate", () => {
     expect(oldJoin.open).toBe(false);
     expect(await sentOfType(oldJoin, "game_setup")).toBeUndefined();
 
+    const printing = { set_code: "m21", collector_number: "272", automatic_art_catalog_version: 1 };
+    const forest = buildGameObject({ id: 271, name: "Forest", zone: "Battlefield", printing });
+    mockGetViewerSnapshot.mockImplementation(async (pid: number) => ({
+      state: { ...remoteState("current setup"), filteredFor: pid, players: [], objects: { [forest.id]: forest } },
+      actions: [], autoPassRecommended: false,
+    }));
     const current = await joinGuest(emitConnection, {
       type: "guest_deck", deckData: { player: { main_deck: [], sideboard: [] } },
       wireProtocolVersion: WIRE_PROTOCOL_VERSION,
     });
     await adapter.initializeGame();
     const setup = (await current.getSentMessages()).find(
-      (message): message is { type: "game_setup"; playerToken: string; assignedPlayerId: number } =>
+      (message): message is Extract<P2PMessage, { type: "game_setup" }> =>
         typeof message === "object" && message !== null && (message as { type?: string }).type === "game_setup",
     );
     expect(setup).toBeDefined();
     expect(setup!.assignedPlayerId).toBe(1);
+    expect(setup!.state.objects[forest.id].printing).toEqual(printing);
     expect(await sentOfType(current, "reconnect_rejected")).toBeUndefined();
     current.simulateClose();
     const oldReconnect = await joinGuest(emitConnection, {
@@ -8831,6 +8899,13 @@ describe("P2PHostAdapter — native withheld delivery", () => {
     const token = (pid: number) => `withheld-native-${pid}`;
     const finalView = (pid: number) => ({
       ...remoteState(`final view ${pid}`),
+      players: [
+        { id: 0, life: 20 },
+        { id: 1, life: 20 },
+      ],
+      battlefield: [],
+      stack: [],
+      exile: [],
       waiting_for: { type: "GameOver", data: { winner: 0 } },
       filteredFor: pid,
     }) as unknown as GameState;

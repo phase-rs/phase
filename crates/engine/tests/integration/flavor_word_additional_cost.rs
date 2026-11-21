@@ -176,7 +176,7 @@ fn declining_fallen_warrior_exiles_nothing() {
     announce_cast(&mut runner, dreadnought);
 
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("decline the optional cost");
     resolve_stack(&mut runner);
 
@@ -201,7 +201,7 @@ fn fallen_warrior_offers_only_creature_cards_from_your_graveyard() {
     announce_cast(&mut runner, dreadnought);
 
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("pay the optional cost");
 
     assert!(
@@ -263,7 +263,7 @@ fn declined_fallen_warrior_gives_no_attack_pump() {
     let mut runner = scenario.build();
     announce_cast(&mut runner, dreadnought);
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("decline the optional cost");
     resolve_stack(&mut runner);
     assert_eq!(runner.state().objects[&giant].zone, Zone::Graveyard);

@@ -409,7 +409,8 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::StartingLifeTotal { .. }
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::StartingDeckSize { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::LifeGainedThisTurn { .. }
@@ -443,7 +444,7 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         QuantityRef::ControlledByEachPlayer { .. }
         | QuantityRef::ZoneChangeCountThisTurn { .. }
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::TargetObjectManaValue { .. }
@@ -460,6 +461,7 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -471,12 +473,12 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::DungeonsCompleted
         | QuantityRef::TimesCostPaidThisResolution
@@ -574,6 +576,11 @@ fn replacement_targets(
     ability: &ResolvedAbility,
     target: &TargetFilter,
 ) -> Vec<TargetRef> {
+    // CR 608.2b: a bound ParentTarget, including authoritative emptiness,
+    // precedes event and attached-host fallback.
+    if matches!(target, TargetFilter::ParentTarget) {
+        return crate::game::targeting::resolved_targets(ability, target, state);
+    }
     if matches!(target, TargetFilter::Any) {
         if let Some(context) = &ability.context.forwarded_result_context {
             // CR 608.2c + CR 400.7: a forward-result reanimation rider binds to
@@ -620,6 +627,25 @@ fn replacement_targets(
             .filter(|referent| referent.pin.is_current(state))
             .map(|referent| vec![TargetRef::Object(referent.id)])
             .unwrap_or_default();
+    }
+
+    // CR 608.2c + CR 400.7: "[noun] dealt damage this way" (and "those Auras")
+    // names the set the preceding instruction published; only members still on
+    // the battlefield can carry the rider, since a changed zone is a new object.
+    // No gate on `ability.targets` or the forwarded-result context: the set path
+    // never reads either, and a fused spell's other half may declare targets in
+    // the same chain without changing which objects the damage reached.
+    if let TargetFilter::TrackedSet { id } = target {
+        return crate::game::quantity::tracked_set_object_ids(state, *id)
+            .into_iter()
+            .filter(|object_id| {
+                state
+                    .objects
+                    .get(object_id)
+                    .is_some_and(|obj| obj.zone == Zone::Battlefield)
+            })
+            .map(TargetRef::Object)
+            .collect();
     }
 
     resolve_event_context_target(state, target, ability.source_id)
@@ -710,17 +736,17 @@ pub fn resolve(
                     // precedent, and this is the only additive-runtime base push in
                     // the tree, so the exception is documented here.
                     //
-                    // Everything that is NOT one of these three classes now goes
+                    // Everything that is NOT one of these base-resident classes goes
                     // through `GameObject::install_resolution_replacement` instead
                     // (CR 611.2a) — the typed-provenance authority that survives the
                     // CR 613.1 reset via the carried set rather than via a base copy.
-                    // The trio deliberately stays OUTSIDE it: a def that is both
+                    // These gated classes deliberately stay OUTSIDE it: a def that is both
                     // base-resident and `Resolution`-stamped would be reseeded from
                     // base AND carried from live, i.e. applied twice.
-                    // A turn-bound die-exile rider must also survive a layer
-                    // reset: a damaged creature can gain/lose characteristics
-                    // or enter combat before it dies. Cleanup prunes this
-                    // narrowly scoped base copy at end of turn.
+                    // CR 614.1a + CR 614.3 + CR 611.2a + CR 514.2: a turn-bound
+                    // die-exile rider is a resolution-created replacement with an
+                    // explicit cleanup deadline, so it uses the carried live store
+                    // and remains attached through every characteristic rebaseline.
                     // A host-lifetime rider (CR 702.84a "if it would leave the
                     // battlefield, exile it instead", stamped
                     // `UntilHostLeavesPlay`) is the same class: it must survive
@@ -738,25 +764,20 @@ pub fn resolve(
                     // base+live replacement defs, CR 708.2a) would end the lock
                     // early — an under-prune, strictly safer than a revival; rare
                     // corner, out of scope.
-                    let durable_die_exile =
-                        crate::game::printed_cards::is_runtime_target_die_exile_replacement(
-                            &replacement,
-                        );
                     let host_lifetime =
                         crate::game::printed_cards::is_runtime_host_lifetime_replacement(
                             &replacement,
                         );
-                    let install_to_base = durable_die_exile
-                        || host_lifetime
+                    let install_to_base = host_lifetime
                         || matches!(
                             replacement.condition,
                             Some(ReplacementCondition::ControllerControlsSource { .. })
                         );
                     if let Some(obj) = state.objects.get_mut(&obj_id) {
                         if install_to_base {
-                            // CR 611.2b / CR 702.84a: the three hand-audited durable
-                            // classes stay BASE-resident and are reseeded into live
-                            // by every CR 613.1 pass. They must NOT be stamped
+                            // CR 611.2b / CR 702.84a: the hand-audited source/control
+                            // gated classes stay BASE-resident and are reseeded into
+                            // live by every CR 613.1 pass. They must NOT be stamped
                             // `Resolution`: that would place them in base AND in the
                             // carried set, and apply them twice.
                             std::sync::Arc::make_mut(&mut obj.base_replacement_definitions)
@@ -818,7 +839,7 @@ mod tests {
         ForwardedResultContext, ReplacementDefinition, RestrictionExpiry, SourceExclusion,
         TargetFilter, TypeFilter, TypedFilter,
     };
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::player::PlayerId;
     use crate::types::proposed_event::ProposedEvent;
     use crate::types::replacements::ReplacementEvent;
@@ -830,6 +851,8 @@ mod tests {
             target,
             amount,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: Default::default(),
         }
     }
@@ -1104,6 +1127,168 @@ mod tests {
             .any(|replacement| replacement.event == ReplacementEvent::Moved));
     }
 
+    /// Board for the `TrackedSet` rows: a source, three battlefield creatures
+    /// `a`, `b`, `c`, and an `AddTargetReplacement` ability bound to `target`
+    /// carrying no declared targets (an each-creature spell declares none).
+    fn tracked_set_rider_fixture(
+        target: TargetFilter,
+    ) -> (GameState, ResolvedAbility, [ObjectId; 3]) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mass Damage Spell".to_string(),
+            Zone::Battlefield,
+        );
+        let mut creature = |card: u64, name: &str| {
+            create_object(
+                &mut state,
+                CardId(card),
+                PlayerId(1),
+                name.to_string(),
+                Zone::Battlefield,
+            )
+        };
+        let a = creature(2, "Creature A");
+        let b = creature(3, "Creature B");
+        let c = creature(4, "Creature C");
+        let rider = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Graveyard)
+            .expiry(RestrictionExpiry::EndOfTurn);
+        let ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(rider),
+                target,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        (state, ability, [a, b, c])
+    }
+
+    fn carries_rider(state: &GameState, id: ObjectId) -> bool {
+        state.objects[&id]
+            .replacement_definitions
+            .as_slice()
+            .iter()
+            .any(|replacement| replacement.event == ReplacementEvent::Moved)
+    }
+
+    fn sentinel() -> TargetFilter {
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        }
+    }
+
+    /// CR 608.2c + CR 400.7: the `TrackedSet` sentinel installs the carried
+    /// replacement on exactly the chain set's live members, with no declared
+    /// targets, leaving an older non-empty set untouched.
+    #[test]
+    fn tracked_set_rider_installs_on_the_chain_sets_live_members_only() {
+        let (mut state, ability, [a, b, c]) = tracked_set_rider_fixture(sentinel());
+        state.tracked_object_sets.insert(TrackedSetId(1), vec![c]);
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(2), vec![a, b]);
+        state.chain_tracked_set_id = Some(TrackedSetId(2));
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(carries_rider(&state, a) && carries_rider(&state, b));
+        assert!(
+            !carries_rider(&state, c),
+            "a member of an older set is not named by this resolution's anaphor"
+        );
+    }
+
+    /// CR 400.7: a member that left the battlefield is a new object the rider can
+    /// never name; the remaining member still receives it (reach-guard).
+    #[test]
+    fn tracked_set_rider_skips_a_member_that_left_the_battlefield() {
+        let (mut state, ability, [a, b, _]) = tracked_set_rider_fixture(sentinel());
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![a, b]);
+        state.chain_tracked_set_id = Some(TrackedSetId(1));
+        state.objects.get_mut(&b).unwrap().zone = Zone::Graveyard;
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(
+            carries_rider(&state, a),
+            "reach-guard: the live member installs"
+        );
+        assert!(!carries_rider(&state, b));
+    }
+
+    /// CR 608.2c: an EMPTY chain set is authoritative. A stale older non-empty
+    /// set must not shadow it. The first resolution in the same test proves the
+    /// arm is live (reach-guard).
+    #[test]
+    fn tracked_set_rider_with_an_empty_chain_set_ignores_an_older_set() {
+        let (mut state, ability, [a, b, c]) = tracked_set_rider_fixture(sentinel());
+        state.tracked_object_sets.insert(TrackedSetId(1), vec![c]);
+        state.tracked_object_sets.insert(TrackedSetId(2), vec![a]);
+        state.chain_tracked_set_id = Some(TrackedSetId(2));
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert!(carries_rider(&state, a), "reach-guard: the arm is live");
+
+        state.tracked_object_sets.insert(TrackedSetId(3), vec![]);
+        state.chain_tracked_set_id = Some(TrackedSetId(3));
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(!carries_rider(&state, c));
+        assert!(!carries_rider(&state, b));
+    }
+
+    /// Pins the shared sentinel ladder's current behavior: with no chain set the
+    /// latest NON-EMPTY set binds (`targeting::resolve_tracked_set_id`), the same
+    /// ladder every other sentinel consumer uses. Not derivable from a printed
+    /// card: no mass-damage face reaches this branch. With no non-empty set at
+    /// all, nothing installs.
+    #[test]
+    fn tracked_set_rider_without_a_chain_set_uses_the_latest_non_empty_set() {
+        let (mut state, ability, [a, b, c]) = tracked_set_rider_fixture(sentinel());
+        state.tracked_object_sets.insert(TrackedSetId(1), vec![c]);
+        state.tracked_object_sets.insert(TrackedSetId(2), vec![]);
+        state.chain_tracked_set_id = None;
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(carries_rider(&state, c));
+        assert!(!carries_rider(&state, a) && !carries_rider(&state, b));
+
+        let (mut empty_state, empty_ability, [a, b, c]) = tracked_set_rider_fixture(sentinel());
+        empty_state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![]);
+        resolve(&mut empty_state, &empty_ability, &mut Vec::new()).unwrap();
+        assert!(!carries_rider(&empty_state, a));
+        assert!(!carries_rider(&empty_state, b));
+        assert!(!carries_rider(&empty_state, c));
+    }
+
+    /// A concrete non-zero id binds exactly that set, whatever the chain id is.
+    #[test]
+    fn tracked_set_rider_with_a_concrete_id_binds_exactly_that_set() {
+        let (mut state, ability, [a, b, c]) = tracked_set_rider_fixture(TargetFilter::TrackedSet {
+            id: TrackedSetId(1),
+        });
+        state.tracked_object_sets.insert(TrackedSetId(1), vec![c]);
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(2), vec![a, b]);
+        state.chain_tracked_set_id = Some(TrackedSetId(2));
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(carries_rider(&state, c));
+        assert!(!carries_rider(&state, a) && !carries_rider(&state, b));
+    }
+
     /// CR 611.2a: a stated duration this seam cannot represent must not be
     /// shortened to the end-of-turn fallback — and the refusal must be LOUD.
     ///
@@ -1186,6 +1371,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Battlefield),
                     destination: Zone::Exile,
                     target: TargetFilter::SelfRef,
@@ -1699,6 +1886,8 @@ mod tests {
             target: TargetRef::Object(victim),
             amount: 2,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: Default::default(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -1716,6 +1905,8 @@ mod tests {
             target: TargetRef::Object(victim),
             amount: 2,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: Default::default(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -1809,6 +2000,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             spec: Box::new(token_spec),
             copy: None,
@@ -1906,6 +2098,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             spec: Box::new(token_spec),
             copy: None,
@@ -1998,6 +2191,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(token_spec),
             copy: None,

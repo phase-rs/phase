@@ -1003,15 +1003,15 @@ fn every_from_none_battlefield_entry_construction_lives_in_the_authority() {
 
     assert_eq!(
         (production.len(), test_scoped.len()),
-        (3, 11),
+        (3, 13),
         "the no-origin-zone battlefield-entry construction surface moved. Expected 3 production \
          constructions — the authority plus two adjudicated survivors:{ADJUDICATED_SURVIVORS}\
          A NEW production hit means a SEVENTH clone of the record/emit split was written: route it \
          through `zones::record_and_emit_entry_from_no_zone` instead. A REMOVED hit means the \
-         authority or a survivor moved. The 11 test-scoped hits include \
-         the Saga entry-boundary regression, 7 other constructions spelled `from: None`, \
-         and 3 written in field-init shorthand \
-         (`analysis/sim.rs`, `trigger_matchers.rs`, `targeting.rs`), which the shorthand branch of \
+         authority or a survivor moved. The 13 test-scoped hits include \
+         the Saga entry-boundary regression, 8 other constructions spelled `from: None`, \
+         and 4 written in field-init shorthand \
+         (`analysis/sim.rs`, `trigger_matchers.rs`, `targeting.rs`, `game_state.rs`), which the shorthand branch of \
          `classify` is what sees. \
          Production hits = {production:#?}"
     );
@@ -1061,12 +1061,16 @@ fn every_from_none_battlefield_entry_construction_lives_in_the_authority() {
         .map(|hit| hit.file.as_str())
         .collect();
     battlefield_files.sort_unstable();
+    // The authority derives its destination from the zone the entrant was CREATED in (the
+    // battlefield, or the zone an applied replacement sent a token to instead — CR 614.6), so
+    // it no longer spells the literal. A window that does spell `to: Zone::Battlefield` is
+    // therefore a hard-coded battlefield-entry writer written beside the authority.
     assert_eq!(
         battlefield_files,
-        vec!["engine/src/game/zones.rs"],
-        "exactly one production window may name `to: Zone::Battlefield` literally — the \
-         authority. `log.rs` binds a bare `to,` in a \
-         pattern, and `merge.rs` uses the variable `dest`; either production survivor gaining the \
+        Vec::<&str>::new(),
+        "no production window may name `to: Zone::Battlefield` literally — the authority \
+         reads the entrant's creation zone. `log.rs` binds a bare `to,` in a \
+         pattern, and `merge.rs` uses the variable `dest`; a window gaining the \
          literal is a new battlefield-entry writer.{ADJUDICATED_SURVIVORS}"
     );
 }
@@ -1220,7 +1224,7 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
             ambiguous_production.len(),
             ambiguous.len() - ambiguous_production.len()
         ),
-        (5, 0),
+        (6, 0),
         "the argument-ambiguous mutator surface on the two anaphora containers moved. These are \
          the calls whose SINGLE-ID-ness this census cannot read, so they are pinned instead of \
          classified. If the new call's argument is a bulk source (a `Vec`, a \
@@ -1244,17 +1248,42 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
     // `frame.created_ids.extend(ids)`. A bulk argument (a `Vec`): the event's ordered ids at
     // completion, or the ledger at a copy batch's pause, handed to the CopyToken owner the
     // delivery detached. It is the ONE hand-over site for every re-park of that owner, so the
-    // pause and completion paths cannot pick different ids.
+    // pause and completion paths cannot pick different ids. Since #10762 r3 the single-batch copy
+    // branch of `apply_create_token_batch` uses it too: it detaches the owner for the batch, so the
+    // delivery's raw `pending.created_ids.extend(status.created_ids)`, which appended a batch the
+    // liminal terminal had already merged, is gone.
+    //
+    // The copy batch ledger's re-sync onto the CopyToken owner added one more, in `token.rs`:
+    // `token::record_copy_batch_ledger_on_active_copy_token`'s `pending.created_ids.extend(
+    // unlisted)`. A bulk argument (a `Vec`): the ids of the guarded ledger 3 the owner does not
+    // list yet. It replaced four assignments of ledger 3 onto the owner, which dropped the
+    // earlier batches' tokens once a paused batch resumed (CR 608.2c), so it publishes nothing
+    // the ledger's own guard withheld.
+    //
+    // The as-enters dice continuation reuses these bulk handoffs. Parked rolls
+    // and parked entry occurrences carry events, not token-id publishes, so they
+    // add no production classification to either anaphora container.
+    //
+    // #10762's substituted-batch custody added one more, in `token_copy.rs`: the resumed
+    // owner's adoption of a substituted batch, `drain_copy_token_resolution`'s first
+    // `.extend(state.last_created_token_ids.clone())`. A bulk argument (a clone of ledger 3):
+    // the tokens the creation that replaced the owner's offered batch published (CR 614.6),
+    // read once when the owner resumes with that batch still marked
+    // (`OfferedBatchCustody::AtReplacementPrompt`). No delivery handed that batch's ids to the
+    // owner, so it lists none of them yet.
     assert_eq!(
         production_multiset(&ambiguous_production),
         vec![
             ("engine/src/game/effects/token.rs".to_string(), 2),
-            ("engine/src/game/effects/token_copy.rs".to_string(), 3),
+            ("engine/src/game/effects/token_copy.rs".to_string(), 4),
         ],
-        "per-file argument-ambiguous mutator multiset moved. All five of these are bulk \
-         republishes today — `.extend(status.created_ids)`, `.extend(state.\
-         last_created_token_ids.clone())` and `repark_event_copy_frame`'s `.extend(ids)` — and \
-         the pin exists so that a SIXTH cannot arrive without someone reading its argument"
+        "per-file argument-ambiguous mutator multiset moved. All six of these are bulk \
+         republishes today — `resume_copy_token_batch_remainder`'s `.extend(status.created_ids)`, \
+         the batch loop's `.extend(state.last_created_token_ids.clone())` pair, \
+         `repark_event_copy_frame`'s `.extend(ids)`, the ledger re-sync's `.extend(unlisted)` and \
+         the resumed owner's adoption of a substituted batch (`drain_copy_token_resolution`'s \
+         first `.extend(state.last_created_token_ids.clone())`) — and the pin exists so that a \
+         SEVENTH cannot arrive without someone reading its argument"
     );
 }
 

@@ -342,7 +342,7 @@ pub fn is_combat_pump(face: &CardFace) -> bool {
 /// True if the static's `modifications` include `AddKeyword { keyword }` AND
 /// the `affected` filter is a self-reference (SelfRef or None — both indicate
 /// the ability's source as the affected object). CR 613.1f.
-fn static_grants_self_keyword(s: &StaticDefinition, keyword: &Keyword) -> bool {
+pub(crate) fn static_grants_self_keyword(s: &StaticDefinition, keyword: &Keyword) -> bool {
     let is_self_scoped = matches!(s.affected, None | Some(TargetFilter::SelfRef));
     is_self_scoped
         && s.modifications
@@ -508,6 +508,7 @@ mod tests {
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         };
         let mut face = creature_face(2);
         face.static_abilities.push(static_haste);
@@ -604,6 +605,7 @@ mod tests {
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         };
         let face = CardFace {
             mana_cost: ManaCost::generic(3),

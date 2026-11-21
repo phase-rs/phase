@@ -220,7 +220,7 @@ fn team_tactics_without_teamwork_grants_double_strike_only() {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("declining teamwork must be accepted");
 
     // Choose the spell target.
@@ -261,7 +261,7 @@ fn team_tactics_with_teamwork_grants_double_strike_and_trample() {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("paying teamwork must be accepted");
 
     // Tap the 3/3 (total power 3 >= Teamwork 1) to pay the aggregate cost.
@@ -382,7 +382,7 @@ fn drive_cast_paying_teamwork(runner: &mut GameRunner, tappers: &[ObjectId], tar
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("paying teamwork must be accepted");
             }
             WaitingFor::PayCost {
@@ -532,7 +532,7 @@ fn cruel_alliance_paying_teamwork_broad_filter_includes_high_mv() {
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("paying teamwork must be accepted");
             }
             WaitingFor::PayCost {
@@ -940,7 +940,9 @@ fn helicarrier_damage_after_cast(pay_teamwork: bool) -> u32 {
         }
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => runner
-                .act(GameAction::DecideOptionalCost { pay: pay_teamwork })
+                .act(GameAction::DecideOptionalCost {
+                    index: if pay_teamwork { 0 } else { 1 },
+                })
                 .expect("choosing whether to pay Teamwork must succeed"),
             WaitingFor::PayCost {
                 kind: PayCostKind::TapCreatures { .. },
@@ -1045,7 +1047,9 @@ fn we_say_thee_nay_unless_costs(pay_teamwork: bool) -> Vec<u32> {
         }
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => runner
-                .act(GameAction::DecideOptionalCost { pay: pay_teamwork })
+                .act(GameAction::DecideOptionalCost {
+                    index: if pay_teamwork { 0 } else { 1 },
+                })
                 .expect("choosing whether to pay Teamwork must succeed"),
             WaitingFor::PayCost {
                 kind: PayCostKind::TapCreatures { .. },
@@ -1180,7 +1184,7 @@ fn beast_mode_without_teamwork_no_counter() {
         })
         .expect("casting Beast Mode must be accepted");
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("declining teamwork must be accepted");
     drive_single_target(&mut runner, target);
     resolve_stack(&mut runner);
@@ -1255,7 +1259,9 @@ fn drive_emh_keep_count(runner: &mut GameRunner, pay_teamwork: bool, tapper: Obj
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: pay_teamwork })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay_teamwork { 0 } else { 1 },
+                    })
                     .expect("deciding teamwork must be accepted");
             }
             WaitingFor::PayCost {

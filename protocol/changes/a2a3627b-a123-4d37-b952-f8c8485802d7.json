@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "TouchObject and touchable carry ObjectIncarnationRef (CR 400.7)"
+}

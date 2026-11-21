@@ -924,15 +924,16 @@ fn make_enchantment_aura(runner: &mut GameRunner, aura: ObjectId) {
     obj.base_keywords.push(enchant);
 }
 
-/// CR 603.10d + CR 613.1b: a layer-2 control change publishes no
-/// `ControllerChanged` (Control Magic leaving), so "no event for Zidane" is no
-/// proof that its controller held. P1's Control Magic gives P1 Zidane (owned by
-/// P0). P1 then steals P0's bear and destroys Control Magic in one resolution:
-/// when the bear changed hands P1 controlled Zidane, so nothing fires for P0,
-/// although Zidane is back with P0 when triggers are collected. Paired control:
-/// Control Magic on another P0 creature, Zidane with P0 throughout → 1.
+/// CR 603.10d + CR 613.1b: Zidane's return from a layer-2 steal is a published
+/// control change, judged on the board immediately before it. P1's Control
+/// Magic gives P1 Zidane (owned by P0). P1 then steals P0's bear and destroys
+/// Control Magic in one resolution. When the bear changed hands P1 controlled
+/// Zidane, so nothing fires for P0. When Zidane returned, P0 gained control of
+/// it from P1, who controlled it immediately before, so P1 gets the Treasure.
+/// Paired control: Control Magic on another P0 creature, Zidane with P0
+/// throughout, so only the bear fires (for P0) and Zidane publishes nothing.
 #[test]
-fn silent_layer_two_return_of_zidane_never_fires_for_the_wrong_player() {
+fn layer_two_return_of_zidane_fires_for_the_player_who_lost_it() {
     for magic_on_zidane in [true, false] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
@@ -980,16 +981,16 @@ fn silent_layer_two_return_of_zidane_never_fires_for_the_wrong_player() {
         );
         assert_eq!(controller(&runner, zidane), P0, "REACH: Zidane is with P0");
         assert_eq!(
-            zidane_events, 0,
-            "REACH: Zidane's return published no ControllerChanged"
+            zidane_events,
+            usize::from(magic_on_zidane),
+            "Zidane's return publishes exactly when Control Magic held it"
         );
-        let expected = if magic_on_zidane { 0 } else { 1 };
+        let (p0_expected, p1_expected) = if magic_on_zidane { (0, 1) } else { (1, 0) };
         assert_eq!(
-            treasures(&runner, P0) - p0_before,
-            expected,
-            "magic_on_zidane {magic_on_zidane}: Zidane's controller when the bear moved decides"
+            (treasures(&runner, P0) - p0_before, treasures(&runner, P1)),
+            (p0_expected, p1_expected),
+            "magic_on_zidane {magic_on_zidane}: Zidane's controller immediately before each change decides"
         );
-        assert_eq!(treasures(&runner, P1), 0);
     }
 }
 
@@ -2254,6 +2255,7 @@ fn r8_1_return_then_hand_back(scenario: &mut GameScenario, owner: PlayerId) -> O
     let root = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZoneAll {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
             target: TargetFilter::Typed(TypedFilter::creature()),
@@ -3162,8 +3164,8 @@ fn a_latched_doubler_is_judged_with_its_power_then() {
 ///   Zidane).
 ///
 /// A doubler naming itself by id (`SpecificObject`) isn't printed (the parser
-/// emits `SelfRef` for "~"); the shared self-exclusion
-/// (`filter_references_self`) leaves it undoubled on every path.
+/// emits `SelfRef` for "~"); like every doubler scope, the filter alone decides
+/// whether the doubler's own triggers qualify (CR 603.2d).
 #[test]
 fn a_self_scoped_doubler_is_judged_by_identity() {
     for (doubler_on_zidane, steal_zidane, expected) in

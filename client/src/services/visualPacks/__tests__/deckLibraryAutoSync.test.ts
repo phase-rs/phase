@@ -127,6 +127,7 @@ function plannerFixture(): void {
     name: "Fresh",
     source: { type: "saved" },
     deck: { main: [{ count: 1, name: "Fresh Art" }], sideboard: [] } as ParsedDeck,
+    comboDeclaration: { kind: "undeclared" },
   }];
 }
 

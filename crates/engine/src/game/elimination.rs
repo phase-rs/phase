@@ -1,16 +1,17 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::game::game_object::ObjectIncarnationRefExt;
-use crate::types::events::GameEvent;
+use crate::types::ability::{Effect, EventOutcomes};
+use crate::types::events::{GameEvent, LossReason};
 use crate::types::game_state::{
-    ActiveSearchDecisionAuthority, CostResume, GameEnd, GameState, LeavingGameDeparture,
-    PayCostKind, PendingCast, PendingCostMoveResume, PendingSacrificeCostCompletion, WaitingFor,
-    ZoneDeparture,
+    ActiveSearchDecisionAuthority, CostResume, EventLosses, GameEnd, GameState,
+    LeavingGameDeparture, PayCostKind, PendingCast, PendingCostMoveResume,
+    PendingSacrificeCostCompletion, WaitingFor, ZoneDeparture,
 };
 use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::match_config::MatchPhase;
 use crate::types::player::PlayerId;
-use crate::types::resolution::OptionalEffectFrame;
+use crate::types::resolution::{OptionalEffectFrame, ZoneChangeOwnerMut};
 use crate::types::resolved_commands::{
     ResolvedPlayerLeaveCommand, ResolvedPlayerLeaveReplayInvariantError, RulesExecutionNodeRef,
 };
@@ -136,11 +137,136 @@ fn stage_resolution_optional_sacrifice_decline_for_departing_payer(
 /// - Marks the player as eliminated
 /// - Removes their spells from the stack
 /// - Exiles all objects they own (all zones)
-/// - Emits PlayerEliminated event
+/// - Emits `PlayerLost` (with the reason) and `PlayerEliminated`
 /// - For team-based formats (2HG): also eliminates all teammates
 /// - Checks if the game is over (1 or fewer living players/teams remain)
-pub fn eliminate_player(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
-    eliminate_players_simultaneously(state, &[player], events);
+pub fn eliminate_player(
+    state: &mut GameState,
+    player: PlayerId,
+    reason: LossReason,
+    events: &mut Vec<GameEvent>,
+) {
+    eliminate_players_simultaneously(state, &[player], reason, events);
+}
+
+/// CR 104.3e + CR 104.4a + CR 614.6: players lose the game to an effect ("you lose the game").
+/// Inside a two-phase damage batch's simultaneous event (its damage and substitution actions:
+/// Nefarious Lich's "If you can't, you lose the game") the loss is recorded and settles with the
+/// event's other outcomes (`settle_event_outcomes`); anywhere else the players are eliminated at
+/// once.
+pub(crate) fn lose_by_effect(
+    state: &mut GameState,
+    losers: &[PlayerId],
+    events: &mut Vec<GameEvent>,
+) {
+    match event_outcomes(state) {
+        Some(outcomes) => {
+            for loser in losers {
+                if !outcomes.losers.contains(loser) {
+                    outcomes.losers.push(*loser);
+                }
+            }
+        }
+        None => {
+            eliminate_players_simultaneously(state, losers, LossReason::EffectStatedLoss, events)
+        }
+    }
+}
+
+/// CR 104.2b + CR 104.3e: a player wins the game by an effect, so the opponents still in the game
+/// lose. Inside a batch's simultaneous event (a lifelink gain drawn into Laboratory Maniac's win)
+/// the win is recorded and settles with the event's other outcomes, where CR 104.3f can still
+/// make the winner lose.
+pub(crate) fn win_by_effect(state: &mut GameState, winner: PlayerId, events: &mut Vec<GameEvent>) {
+    match event_outcomes(state) {
+        Some(outcomes) => {
+            if !outcomes.winners.contains(&winner) {
+                outcomes.winners.push(winner);
+            }
+        }
+        None => {
+            let opponents = living_opponents(state, winner);
+            eliminate_players_simultaneously(state, &opponents, LossReason::OpponentWon, events);
+        }
+    }
+}
+
+/// CR 104.3e + CR 104.2b + CR 104.3f + CR 104.4a + CR 810.8a: a simultaneous event's
+/// effect-stated outcomes settle together. A player who would both win and lose loses; each
+/// remaining winner's opponents lose; then every loser is eliminated at once, so players who all
+/// lose draw. Each effect loser, and each shared-life teammate added for one, loses with
+/// `EffectStatedLoss`. For each winner who is not an effect loser, insert `OpponentWon` for every
+/// living opponent, including opponents already carrying `EffectStatedLoss`; union both reasons
+/// in the same set.
+pub(crate) fn settle_event_outcomes(
+    state: &mut GameState,
+    outcomes: EventOutcomes,
+    events: &mut Vec<GameEvent>,
+) {
+    let EventOutcomes {
+        mut losers,
+        winners,
+    } = outcomes;
+    // CR 810.8a: "If either player on a team loses the game, the team loses the game": a
+    // shared-life teammate of a loser loses too, before any win is weighed against the losses.
+    for loser in losers.clone() {
+        if super::topology::has_shared_life(state, loser) {
+            for teammate in players::teammates(state, loser) {
+                if players::is_alive(state, teammate) && !losers.contains(&teammate) {
+                    losers.push(teammate);
+                }
+            }
+        }
+    }
+    // CR 104.3e: each effect loser loses because an effect states it.
+    let mut losses: BTreeMap<PlayerId, BTreeSet<LossReason>> = losers
+        .iter()
+        .map(|&player| (player, BTreeSet::from([LossReason::EffectStatedLoss])))
+        .collect();
+    // CR 104.3f: a winner who also lost to an effect in the event loses instead of winning.
+    // CR 104.2b: every other winner's living opponents lose, an effect loser among them for both
+    // reasons.
+    for winner in winners.iter().filter(|winner| !losers.contains(winner)) {
+        for opponent in living_opponents(state, *winner) {
+            losses
+                .entry(opponent)
+                .or_default()
+                .insert(LossReason::OpponentWon);
+        }
+    }
+    if !losses.is_empty() {
+        eliminate_with_reasons(state, &losses, events);
+    }
+}
+
+fn living_opponents(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
+    players::opponents(state, player)
+        .into_iter()
+        .filter(|&opponent| players::is_alive(state, opponent))
+        .collect()
+}
+
+/// CR 104.4a + CR 614.6: the outcomes of the damage batch event under way, if an effect-stated
+/// win or loss now belongs to one. The running batch says so (`GameState::damage_event_losses`);
+/// with none running (an answer while a batch is parked), the nearest parked batch's
+/// continuation owns the answer.
+fn event_outcomes(state: &mut GameState) -> Option<&mut EventOutcomes> {
+    match state.damage_event_losses.as_mut() {
+        Some(EventLosses::Recording(outcomes)) => Some(outcomes),
+        Some(EventLosses::Immediate) => None,
+        None => state
+            .resolution_stack
+            .ability_continuations_from_top_mut()
+            .find(|pending| matches!(pending.chain.effect, Effect::ResumeDamageBatch { .. }))
+            .and_then(|pending| {
+                pending
+                    .chain
+                    .context
+                    .parked_damage_batch
+                    .as_mut()
+                    .and_then(|parked| parked.outcomes.as_mut())
+            }),
+    }
 }
 
 /// CR 704.3 + CR 104.4a: Eliminate a set of players who lost in the SAME
@@ -155,14 +281,36 @@ pub fn eliminate_player(state: &mut GameState, player: PlayerId, events: &mut Ve
 pub fn eliminate_players_simultaneously(
     state: &mut GameState,
     players_to_eliminate: &[PlayerId],
+    reason: LossReason,
     events: &mut Vec<GameEvent>,
 ) {
-    eliminate_players(
-        state,
-        players_to_eliminate,
-        DepartureTriggers::ScannedByCaller,
-        events,
-    );
+    let losses = players_to_eliminate
+        .iter()
+        .map(|&player| (player, BTreeSet::from([reason])))
+        .collect();
+    eliminate_with_reasons(state, &losses, events);
+}
+
+/// CR 104.4a + CR 800.4a: eliminate players who lose in one event, each with its own reasons,
+/// and collect what their departure triggers. The one tail behind
+/// [`eliminate_players_simultaneously`] and an effect-stated event's settlement
+/// (`settle_event_outcomes`).
+fn eliminate_with_reasons(
+    state: &mut GameState,
+    losses: &BTreeMap<PlayerId, BTreeSet<LossReason>>,
+    events: &mut Vec<GameEvent>,
+) {
+    // CR 104.3e / CR 704.5a callers lose players outside a paused zone-change
+    // pause (none is live while an effect or an ordinary SBA pass runs), so no
+    // resume is owed here; the CR 704.5a safety net uses
+    // `sba::check_state_based_actions_reporting_departure` instead.
+    let outcome = eliminate_players(state, losses, DepartureTriggers::ScannedByCaller, events);
+    // CR 603.2: an effect's loss is no state-based-action batch, so nothing
+    // stamps the departure after it: collect it now.
+    if let Some(looked_back) = outcome.looked_back {
+        let departure_end = looked_back.departure_end();
+        let _queued = looked_back.collect(state, events, departure_end);
+    }
 }
 
 /// CR 104.3a + CR 800.4a: A player concedes and leaves the game.
@@ -172,63 +320,170 @@ pub fn eliminate_players_simultaneously(
 /// produces. The departure collects the abilities they trigger itself (CR 603.2):
 /// a leaves-the-battlefield observer sees the conceding player's permanents leave
 /// the game (CR 603.6c).
-pub fn concede(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
+pub(crate) fn concede(
+    state: &mut GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> DepartureOutcome {
     eliminate_players(
         state,
-        &[player],
+        &BTreeMap::from([(player, BTreeSet::from([LossReason::Conceded]))]),
         DepartureTriggers::CollectedByDeparture,
         events,
-    );
+    )
+}
+
+/// CR 117.2e + CR 608.2c: what a departure leaves owed to the action that
+/// caused it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum DepartureResume {
+    /// Nothing of a resolution is left for the caller to finish.
+    Settled,
+    /// The departure canceled the current replacement-choice pause of a parked
+    /// zone-change owner. Its surviving tail is still owed: the caller resumes
+    /// it and settles the action before any player receives priority, and the
+    /// departure left its queued triggers for that settlement to place.
+    ParkedZoneChangeTail,
 }
 
 /// CR 603.2 + CR 603.6c: who collects the triggered abilities a departure's own
-/// events trigger.
+/// events trigger. Every route collects them exactly once, through the same
+/// look-back authority (CR 603.10a): the departure latches the observers as
+/// they were immediately before it, and the collection matches its look-back
+/// events against them.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DepartureTriggers {
-    /// The caller's post-action pipeline scans its event buffer: a loss by
-    /// state-based action (CR 704.5a) or by an effect (CR 104.3e).
+    /// The caller collects once its own batch is complete: a loss by
+    /// state-based action (CR 704.5a), after the whole state-based-action event
+    /// is stamped as one simultaneous event (CR 704.3), or by an effect
+    /// (CR 104.3e). The departure hands back the latched observers
+    /// ([`DepartureOutcome::looked_back`]) and the caller's later scans find the
+    /// departure's events claimed.
     ScannedByCaller,
-    /// A post-action pass in progress scans the events and places the waiting queue at its
-    /// own settle (CR 117.5).
+    /// [`Self::ScannedByCaller`] inside a post-action pass in progress, which
+    /// places the waiting queue at its own settle (CR 117.5).
     PlacedByPass,
     /// Nothing scans the departure's events after it returns (a concession,
     /// CR 104.3a), so the departure queues their triggers itself.
     CollectedByDeparture,
 }
 
+/// What a departure leaves owed to its caller: the surviving resolution's tail
+/// (CR 117.2e), and, on a route where the caller collects, the look-back
+/// collection of the departure's own triggers.
+#[must_use]
+pub(crate) struct DepartureOutcome {
+    pub(crate) resume: DepartureResume,
+    pub(crate) looked_back: Option<LookedBackDeparture>,
+}
+
+/// CR 603.10a + CR 603.2c: a departure's look-back collection, held by a caller
+/// that collects once its batch is complete.
+pub(crate) struct LookedBackDeparture {
+    observers: super::triggers::ImmediatelyBeforeObservers,
+    first_event: usize,
+    departure_end: usize,
+}
+
+impl LookedBackDeparture {
+    /// Where the departure's own events end in the action buffer.
+    pub(crate) fn departure_end(&self) -> usize {
+        self.departure_end
+    }
+
+    /// CR 603.10a + CR 603.3a: queue the triggers the departure's events
+    /// trigger, matching its look-back events against the observers latched
+    /// before it, and claim the occurrences (CR 603.2c) so no later scan of the
+    /// buffer collects the departure again under its live controllers. The
+    /// triggers wait in `deferred_triggers` for the caller's normal settlement
+    /// (CR 603.3b). CR 104.1: nothing triggers once the game is over, and
+    /// CR 800.4d: a trigger whose controller left is retired. Returns how many
+    /// contexts it queued, which are the last that many of `deferred_triggers`.
+    ///
+    /// `batch_end` ends the simultaneous event the departure belongs to: for a
+    /// state-based-action loss, the end of that check's iteration, whose other
+    /// departures from the battlefield happened with it (CR 704.3) and are
+    /// collected and claimed in this same pass; for an effect's loss, the
+    /// departure's own end ([`Self::departure_end`]).
+    pub(crate) fn collect(
+        self,
+        state: &mut GameState,
+        events: &[GameEvent],
+        batch_end: usize,
+    ) -> usize {
+        let batch_end = batch_end.clamp(self.departure_end, events.len());
+        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+            return 0;
+        }
+        // CR 800.4d: what was already waiting for a player who left is retired first,
+        // so the contexts queued below are exactly the tail.
+        prune_deferred_triggers_for_eliminated_players(state);
+        let queued_before = state.deferred_triggers.len();
+        super::triggers::collect_departure_triggers_into_deferred(
+            state,
+            &events[..batch_end],
+            self.first_event,
+            Some((self.observers, self.departure_end, batch_end)),
+        );
+        state.deferred_triggers.len() - queued_before
+    }
+}
+
 pub(crate) fn eliminate_players(
     state: &mut GameState,
-    players_to_eliminate: &[PlayerId],
+    losses: &BTreeMap<PlayerId, BTreeSet<LossReason>>,
     departure_triggers: DepartureTriggers,
     events: &mut Vec<GameEvent>,
-) {
+) -> DepartureOutcome {
+    let mut resume = DepartureResume::Settled;
     let first_event = events.len();
     let first_record = state.zone_changes_this_turn.len();
-    let mut eliminated_any = false;
-    let mut leaving_set = HashSet::new();
     // CR 733: the CR 800.4a stack step is batch-scoped over the whole
     // `leaving_set` (below), so each player's own leave node is collected here
     // — in elimination order, never via the `HashSet` — for
     // `remove_stack_objects_controlled_by_leaving_players` to re-install around
     // that player's own sweep.
     let mut leave_nodes: Vec<(PlayerId, RulesExecutionNodeRef)> = Vec::new();
+    // Departure order: each listed living player in seat order, then the
+    // teammates it folds in.
+    let mut leaving: Vec<(PlayerId, BTreeSet<LossReason>)> = Vec::new();
+    let mut record = |player: PlayerId, reasons: &BTreeSet<LossReason>| match leaving
+        .iter_mut()
+        .find(|(seat, _)| *seat == player)
+    {
+        Some((_, recorded)) => recorded.extend(reasons),
+        None => leaving.push((player, reasons.clone())),
+    };
 
-    for &player in players_to_eliminate {
+    for (&player, reasons) in losses {
         if !players::is_alive(state, player) {
             continue;
         }
-        leaving_set.insert(player);
-        // Team loss rides with shared life: CR 810.8a in 2HG, and
-        // CR 810.8a-via-904.13b for Archenemy Commander heroes (the
-        // archenemy has no teammates, so the fold is a no-op there).
+        record(player, reasons);
+        // Team loss rides with shared life: CR 810.8a in 2HG (CR 810.8b for a
+        // concession), and CR 810.8a-via-904.13b for Archenemy Commander heroes
+        // (the archenemy has no teammates, so the fold is a no-op there).
         if super::topology::has_shared_life(state, player) {
             for teammate in players::teammates(state, player) {
                 if players::is_alive(state, teammate) {
-                    leaving_set.insert(teammate);
+                    record(teammate, reasons);
                 }
             }
         }
     }
+    let leaving_set: HashSet<PlayerId> = leaving.iter().map(|&(player, _)| player).collect();
+    // CR 104.3: every leaving player loses the game. Emitted inside
+    // `events[first_event..]`, which a concession's own trigger collection
+    // scans (CR 603.2).
+    events.extend(
+        leaving
+            .iter()
+            .map(|(player_id, reasons)| GameEvent::PlayerLost {
+                player_id: *player_id,
+                reasons: reasons.clone(),
+            }),
+    );
 
     // CR 800.4a: a staged resolution-payment descriptor is a continuation
     // owned by its payer/root owner. Retire it before the leave sweep when that
@@ -248,6 +503,21 @@ pub(crate) fn eliminate_players(
     } else {
         None
     };
+
+    // CR 800.4a: a parked unless payment leaves with the players leaving: with
+    // the controller of the ability it settles, or with the payer of the legs
+    // or instructions still owed.
+    super::engine_payment_choices::retire_parked_unless_payment_of_departing_players(
+        state,
+        &leaving_set,
+    );
+    // CR 800.4a + CR 400.7: so does an accepted entry payment parked behind a
+    // leg's replacement choice, with the player who accepted it or the owner
+    // of the entering object.
+    super::engine_payment_choices::retire_parked_entry_payment_of_departing_players(
+        state,
+        &leaving_set,
+    );
 
     // CR 800.4a: elimination can remove frozen stack entries and a session's
     // canonical representative. Restore the pre-overlay preferences before
@@ -278,6 +548,15 @@ pub(crate) fn eliminate_players(
             super::stack::stack_object_controller(state, entry),
         )
     });
+
+    // CR 800.4a + CR 117.2e: the member a parked zone-change owner's
+    // replacement choice is paused on, when that choice is the current
+    // operation as the departures begin.
+    let live_zone_change_pause = state
+        .pending_replacement
+        .is_some()
+        .then(|| state.resolution_stack.active_zone_change_owner_pause())
+        .flatten();
 
     let interrupted_ordinary_search = state
         .pending_scoped_library_search
@@ -313,41 +592,38 @@ pub(crate) fn eliminate_players(
         })
         .flatten();
 
+    // CR 800.4a + CR 725.4 (Matt R7-F3): the designation holder AT DEPARTURE,
+    // captured before any `do_eliminate` runs succession. The control-effect
+    // prune below judges a designation-anchored transient by the recipient it
+    // was actually giving control to — reading the live designation after
+    // succession would see the successor and wrongly keep an effect that was
+    // giving the leaver control.
+    let pre_elimination_monarch = state.monarch;
     // CR 603.10a + CR 603.3a: the observers of the departure as they were
     // immediately before it. The leaving players' objects leave the game in the
     // same event that ends their control effects (CR 800.4a); a look-back
     // ability reads its source as it was immediately before that event, so an
     // observer a leaving player stole triggers under that player and is retired
     // with them (CR 800.4d) rather than handed to its owner.
-    let looked_back_observers = (departure_triggers == DepartureTriggers::CollectedByDeparture
-        && !leaving_set.is_empty())
-    .then(|| super::triggers::ImmediatelyBeforeObservers::latch(state));
+    // CR 603.10a + CR 603.3a: a merged permanent's component child still holds
+    // departures its announcing owner has not collected. They happened before
+    // these players leave, so their abilities trigger now, under the observers
+    // and controllers the game has before the departure.
+    if !leaving_set.is_empty() {
+        super::triggers::collect_delegated_departures_before_a_player_leaves(state);
+    }
+    let mut looked_back_observers = (!leaving_set.is_empty())
+        .then(|| super::triggers::ImmediatelyBeforeObservers::latch(state));
 
-    for &player in players_to_eliminate {
-        // Skip if already eliminated (e.g. a teammate eliminated alongside an
-        // earlier loser in this same batch).
-        if !players::is_alive(state, player) {
-            continue;
-        }
-
+    for &(player, _) in &leaving {
         leave_nodes.push((player, do_eliminate(state, player, &leaving_set, events)));
-        eliminated_any = true;
-
-        // Twin of the leaving-set cascade above: teammates depart together.
-        if super::topology::has_shared_life(state, player) {
-            for teammate in players::teammates(state, player) {
-                if players::is_alive(state, teammate) {
-                    leave_nodes.push((
-                        teammate,
-                        do_eliminate(state, teammate, &leaving_set, events),
-                    ));
-                }
-            }
-        }
     }
 
-    if !eliminated_any {
-        return;
+    if leaving.is_empty() {
+        return DepartureOutcome {
+            resume,
+            looked_back: None,
+        };
     }
     mark_left_game_departures_simultaneous(state, events, first_event, first_record);
     let departure_end = events.len();
@@ -356,7 +632,7 @@ pub(crate) fn eliminate_players(
     // control and exile anything still under a leaver's control. Runs ONCE over
     // the full `leaving_set` — the retain+sweep scope is what makes a co-leaver's
     // steal of a survivor's object revert instead of being over-exiled.
-    end_control_effects_for_leaving_players(state, &leaving_set, events);
+    end_control_effects_for_leaving_players(state, &leaving_set, pre_elimination_monarch, events);
 
     // CR 800.4a, third and fourth steps, in the rule's own order: "Then, if that
     // player controlled any objects on the stack not represented by cards, those
@@ -365,78 +641,76 @@ pub(crate) fn eliminate_players(
     // — the owned-object exiles inside `do_eliminate` and the control-effect end
     // directly above — which is why this cannot live in `do_eliminate`.
     remove_stack_objects_controlled_by_leaving_players(state, &leave_nodes, events);
+    retire_suppressors_of_controlled_sources_that_left(state, &leaving_set);
 
     // CR 800.4a + CR 101.4: A player that leaves during an APNAP unless poll
     // neither answers nor remains an eligible future chooser. Preserve the
     // aggregate for the surviving seats, advancing past a departed current
     // prompt instead of leaving a serialized choice owned by a non-player.
-    if let Some(mut pending) = state.pending_player_scope_unless_payment.take() {
-        let original_controller = pending
-            .pending_effect
-            .original_controller
-            .unwrap_or(pending.pending_effect.controller);
-        if leaving_set.contains(&original_controller) {
-            // CR 800.4a: The resolving instruction leaves with its original
-            // controller. A previously-recorded decline cannot create tokens
-            // for a player no longer in the game, and its per-payer prompt
-            // must not outlive the abandoned aggregate.
-            let aggregate_prompt_is_live = match &state.waiting_for {
-                WaitingFor::UnlessPayment { pending_effect, .. }
-                | WaitingFor::WardSacrificeChoice { pending_effect, .. } => {
-                    pending_effect.source_id == pending.pending_effect.source_id
-                }
-                WaitingFor::ReplacementChoice { .. } => state
-                    .pending_replacement
-                    .as_ref()
-                    .and_then(|replacement| replacement.sacrifice_provenance.as_ref())
-                    .is_some_and(|provenance| provenance.player_id == pending.current_player),
-                _ => false,
-            };
-            if aggregate_prompt_is_live {
-                // The only parked replacement at this point belongs to the
-                // aggregate's current payer. Once its controller leaves, the
-                // aggregate cannot resume through that payer's choice.
-                state.pending_replacement = None;
-                state.replacement_may_cost_paused = false;
-                super::replacement::abandon_post_replacement_continuation(state);
-                state.waiting_for = WaitingFor::Priority {
-                    player: players::next_player(state, original_controller),
-                };
-            }
-        } else {
+    // CR 608.2m: the source's controller leaving does not end the poll — the
+    // instruction has started to resolve and continues fully; the surviving
+    // payers still answer and their recorded sacrifices are made, and the
+    // tokens owed to a departed controller are not created (CR 800.4b).
+    let token_unless_poll = match state.pending_player_scope_unless_payment.take() {
+        Some(mut pending) => {
             pending
                 .remaining_players
                 .retain(|player| !leaving_set.contains(player));
-            if leaving_set.contains(&pending.current_player) {
-                if let Some((next, rest)) = pending.remaining_players.split_first() {
-                    pending.current_player = *next;
-                    pending.remaining_players = rest.to_vec();
-                    state.waiting_for = WaitingFor::UnlessPayment {
-                        player: pending.current_player,
-                        cost: pending.cost.clone(),
-                        pending_effect: pending.pending_effect.clone(),
-                        trigger_event: None,
-                        effect_description: None,
-                        remaining: Vec::new(),
-                    };
-                    state.pending_player_scope_unless_payment = Some(pending);
-                } else {
-                    // The departed prompt contributes no new decline, but earlier
-                    // surviving decliners still owe the source controller one
-                    // aggregate token batch. Reinstall then settle through the
-                    // regular terminal-payment authority so `waiting_for` cannot
-                    // retain this eliminated player's stale prompt.
-                    state.pending_player_scope_unless_payment = Some(pending);
-                    crate::game::engine_payment_choices::settle_eliminated_player_scope_token_unless_payment(
-                        state, events,
-                    )
-                    .expect("eliminated final payer must settle a token-unless aggregate");
-                }
-            } else {
+            if !leaving_set.contains(&pending.current_player) {
                 state.pending_player_scope_unless_payment = Some(pending);
+                super::engine_resolution_choices::DepartureSettlement::NotSettled
+            } else if let Some((next, rest)) = pending.remaining_players.split_first() {
+                pending.current_player = *next;
+                pending.remaining_players = rest.to_vec();
+                state.waiting_for = WaitingFor::UnlessPayment {
+                    player: pending.current_player,
+                    cost: pending.cost.clone(),
+                    pending_effect: pending.pending_effect.clone(),
+                    trigger_event: None,
+                    effect_description: None,
+                    remaining: Vec::new(),
+                    affected_object: None,
+                    repeat: None,
+                };
+                state.pending_player_scope_unless_payment = Some(pending);
+                super::engine_resolution_choices::DepartureSettlement::NotSettled
+            } else {
+                // The departed prompt contributes no new decline, but earlier
+                // surviving decliners still owe the source controller one
+                // aggregate token batch. Reinstall then settle through the
+                // regular terminal-payment authority so `waiting_for` cannot
+                // retain this eliminated player's stale prompt.
+                state.pending_player_scope_unless_payment = Some(pending);
+                crate::game::engine_payment_choices::settle_eliminated_player_scope_token_unless_payment(
+                    state, events,
+                )
+                .expect("eliminated final payer must settle a token-unless aggregate");
+                super::engine_resolution_choices::DepartureSettlement::Settled
             }
         }
-    }
+        None => super::engine_resolution_choices::DepartureSettlement::NotSettled,
+    };
+
+    // CR 800.4a + CR 101.4 + CR 608.2m: reconcile an open player-scope unless
+    // poll before the generic dead-actor repoint below: a departed seat makes
+    // no further choice and pays nothing, the surviving seats' answers stand,
+    // and the next surviving seat is asked (or the poll settles). A departed
+    // controller's instruction has started to resolve and goes on resolving.
+    let scoped_unless_poll = match crate::game::scoped_unless_poll::reconcile_departures(
+        state,
+        &leaving_set,
+        events,
+    ) {
+        Ok(settlement) => settlement,
+        Err(error) => {
+            tracing::error!(%error, "player-scope unless poll was not reconciled after a departure");
+            debug_assert!(
+                false,
+                "player-scope unless poll was not reconciled after a departure: {error}"
+            );
+            super::engine_resolution_choices::DepartureSettlement::NotSettled
+        }
+    };
 
     // CR 704.3 + CR 104.4a: a SINGLE game-over check after all simultaneous
     // eliminations — so a finish where every remaining player lost at once
@@ -453,11 +727,17 @@ pub(crate) fn eliminate_players(
     // left (CR 800.4d) and the drain puts the rest on the stack together. CR 104.1:
     // once the game is over, nothing triggered goes on the stack.
     if departure_triggers == DepartureTriggers::CollectedByDeparture && game_over_winner.is_none() {
+        // CR 800.4a + CR 603.2: the control changes this departure's layer
+        // passes derived (a "for as long as" control duration that ended with
+        // its departed source) are part of what it collects.
+        super::layers::publish_layer_control_changes(state, events);
         super::triggers::collect_unclaimed_triggers_into_deferred(
             state,
             events,
             first_event,
-            looked_back_observers.map(|observers| (observers, departure_end)),
+            looked_back_observers
+                .take()
+                .map(|observers| (observers, departure_end, departure_end)),
         );
     }
 
@@ -483,40 +763,16 @@ pub(crate) fn eliminate_players(
                 crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
             );
         }
-        // Terminal: drop trigger scaffolding the client would otherwise show as
-        // a stuck stack / ordering prompt.
-        let mut terminal_firings = state
-            .pending_trigger_order
-            .take()
-            .into_iter()
-            .flat_map(|order| order.groups)
-            .flat_map(|group| group.triggers)
-            .map(|context| context.firing())
-            .collect::<Vec<_>>();
-        terminal_firings.extend(
-            std::mem::take(&mut state.deferred_triggers)
-                .into_iter()
-                .map(|context| context.firing()),
-        );
-        terminal_firings.extend(state.pending_trigger_firing.take());
-        crate::game::triggers::release_pending_trigger_construction(state);
-        // CR 117.3c: The construction priority recipient is scheduling state for
-        // a batch that no longer exists. Leaving it installed would durably
-        // serialize a departed player into a terminal `GameOver` snapshot — the
-        // exact leak the surrounding comment already calls out for the reused
-        // singleton engine. The terminal arm needs no re-point, because there is
-        // no later construction to route.
-        state.pending_trigger_construction_priority_recipient = None;
-        for firing in terminal_firings {
-            crate::game::lifecycle::record_delayed_terminal(
-                firing,
-                crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
-            );
-        }
+        retire_finished_game_triggers(state);
         // CR 104.1: the game is over; no owner arrangement is owed to a finished game.
         state.pending_mass_library_order_choice = None;
         // CR 104.1: the game is over; no player-scope sacrifice is owed to a finished game.
         state.pending_player_scope_sacrifice_choice = None;
+        // CR 104.1: nor is a player-scope return owed to a finished game.
+        state.pending_player_scope_choice = None;
+        // CR 104.1: nor is a player-scope unless poll.
+        state.pending_player_scope_unless_punishment = None;
+        super::turns::abandon_phase_begin_choice(state);
         state.waiting_for = WaitingFor::GameOver { winner };
     } else {
         // CR 800.4a + CR 608.2m + CR 800.4g/800.4h: once every departure,
@@ -586,16 +842,113 @@ pub(crate) fn eliminate_players(
                 }
             };
 
+        // CR 800.4a + CR 101.4 + CR 608.2m: an open player-scope return ("each
+        // player returns a permanent they control…") or discard ("each opponent
+        // discards a card") is reconciled the same way: a departed player chooses
+        // and moves nothing, a collected pick that left its zone is not moved,
+        // and the walk goes on or the collected batch is delivered.
+        let player_scope_choice =
+            match super::engine_resolution_choices::settle_player_scope_choice_after_departure(
+                state, events,
+            ) {
+                Ok(settlement) => settlement,
+                Err(error) => {
+                    tracing::error!(%error, "player-scope return was not reconciled after a departure");
+                    debug_assert!(
+                        false,
+                        "player-scope return was not reconciled after a departure: {error}"
+                    );
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                }
+            };
+
+        // CR 800.4a + CR 608.2d + CR 608.2m: an open resolution-time object choice
+        // ("choose a creature you control") stored its candidates when it was
+        // raised. The departure removed the leaving player's objects and ended
+        // their control effects, so the choice is re-offered against the objects
+        // eligible now, put to the controller a reverted spell has now
+        // (CR 109.5), or settled (one or no candidate left, or the chooser
+        // left) and the resolution's remaining instructions run. Runs before
+        // `drain_or_clear_deferred_triggers_after_elimination`, which places the
+        // triggers those instructions queued (CR 603.3), and before the generic
+        // dead-actor repoint, which would otherwise give priority while the
+        // resolution is unfinished (CR 117.2e).
+        let resolution_object_choice =
+            match super::engine_resolution_choices::settle_resolution_object_choice_after_departure(
+                state, events,
+            ) {
+                Ok(settlement) => settlement,
+                Err(error) => {
+                    tracing::error!(%error, "resolution object choice was not reconciled after a departure");
+                    debug_assert!(
+                        false,
+                        "resolution object choice was not reconciled after a departure: {error}"
+                    );
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                }
+            };
+
+        // CR 800.4a + CR 608.2d + CR 609.3: an open resolution-time player choice
+        // ("choose a different opponent") stored its options when it was raised.
+        // The departed player is no longer one that can be chosen: the prompt is
+        // re-offered without them, or, when none remains, the impossible choice
+        // does nothing and the resolution's remaining instructions run. Placed
+        // with the object-choice reconciliation above, for the same reasons.
+        let resolution_player_choice =
+            match super::engine_resolution_choices::settle_player_choice_after_departure(
+                state, events,
+            ) {
+                Ok(settlement) => settlement,
+                Err(error) => {
+                    tracing::error!(%error, "resolution player choice was not reconciled after a departure");
+                    debug_assert!(
+                        false,
+                        "resolution player choice was not reconciled after a departure: {error}"
+                    );
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                }
+            };
+
+        // CR 800.4a + CR 117.2e + CR 608.2c: a departure that canceled the
+        // current replacement-choice pause of a parked zone-change owner (a
+        // batch delivery or a ChangeZone iteration, or a merged permanent's
+        // component child and the owner that announced it) leaves that owner's
+        // surviving tail owed. No player has priority while it resolves, so
+        // the departure reports it — a concession to its action, a player-loss
+        // safety net to its caller — which finishes the resolution and then
+        // settles it like any action that completed one: final part, state-based
+        // actions, then the queue below (CR 608.2n, CR 117.5).
+        // Only when the departure itself took that pause (its member left the
+        // game): a prompt cleared while its member stays in the game leaves the
+        // owner paused, as at base.
+        if live_zone_change_pause.is_some()
+            && state.pending_replacement.is_none()
+            && matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && state.resolution_stack.active_zone_change_owner_is_parked()
+            && state
+                .resolution_stack
+                .active_zone_change_owner_pause()
+                .is_none()
+        {
+            resume = DepartureResume::ParkedZoneChangeTail;
+        }
+
         if let Some(frame) = staged_optional_sacrifice_decline {
             state.push_optional_effect_frame(frame);
             super::engine_payment_choices::handle_optional_effect_choice(state, false, events)
                 .expect("departed optional sacrifice payer must follow the canonical decline path");
         }
 
+        // CR 800.4j: a phase transition held on a departed player's choice is resumed for
+        // the players still in the game before the triggers below are put on the stack.
+        super::turns::resume_abandoned_phase_transition(state, events);
+
         // CR 603.3b: If prune collapsed an ordering pass into
         // `deferred_triggers` while `waiting_for` is Priority, dispatch now so
         // combat auto-advance does not skip them (issue #1350).
-        drain_or_clear_deferred_triggers_after_elimination(state, departure_triggers, events);
+        if resume == DepartureResume::Settled {
+            drain_or_clear_deferred_triggers_after_elimination(state, departure_triggers, events);
+        }
 
         // CR 800.4a: If the active `WaitingFor` was waiting on any
         // newly-eliminated player, advance to `Priority` for the next living
@@ -699,7 +1052,37 @@ pub(crate) fn eliminate_players(
         if let Some(waiting_pid) = state.waiting_for.acting_player() {
             if !players::is_alive(state, waiting_pid) {
                 let next = players::next_player(state, waiting_pid);
-                state.waiting_for = WaitingFor::Priority { player: next };
+                let owed = match state.waiting_for {
+                    // CR 805.10b: the active team's attack is declared by its remaining active
+                    // player.
+                    WaitingFor::DeclareAttackers { .. }
+                        if players::teammates(state, waiting_pid)
+                            .contains(&state.active_player) =>
+                    {
+                        Some(super::combat::build_declare_attackers_waiting_for(state))
+                    }
+                    // CR 509.1 + CR 805.10d + CR 509.2a: the remaining defending players still
+                    // declare blockers, and once none remains the declaration completes.
+                    WaitingFor::DeclareBlockers { .. } => {
+                        super::engine_combat::next_blocker_or_finish_declaration(state, events)
+                            .map(Some)
+                            .unwrap_or_else(|error| {
+                                debug_assert!(
+                                    false,
+                                    "blocker declaration completion failed after a departure: {error}"
+                                );
+                                None
+                            })
+                    }
+                    // CR 510.2 + CR 805.10f: the remaining assignments are announced before
+                    // combat damage is dealt, with no priority in between.
+                    WaitingFor::AssignCombatDamage { .. }
+                    | WaitingFor::AssignBlockerDamage { .. } => {
+                        super::combat_damage::resolve_combat_damage(state, events)
+                    }
+                    _ => None,
+                };
+                state.waiting_for = owed.unwrap_or(WaitingFor::Priority { player: next });
             }
         }
 
@@ -731,6 +1114,29 @@ pub(crate) fn eliminate_players(
                     player_scope_sacrifice,
                     super::engine_resolution_choices::DepartureSettlement::NotSettled
                 )
+                && matches!(
+                    player_scope_choice,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
+                && matches!(
+                    resolution_object_choice,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
+                && matches!(
+                    resolution_player_choice,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
+                && matches!(
+                    scoped_unless_poll,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
+                && matches!(
+                    token_unless_poll,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
+                // CR 608.2m: a surviving player still owes a poll an answer.
+                && state.pending_player_scope_unless_punishment.is_none()
+                && state.pending_player_scope_unless_payment.is_none()
                 && state
                     .resolving_stack_entry
                     .as_ref()
@@ -783,6 +1189,29 @@ pub(crate) fn eliminate_players(
     // CR 800.4a: the departure's events belong to the departure, not to a
     // surviving player's paused announcement.
     super::announcement_triggers::disown_events_through(state, events.len());
+
+    // CR 616.1 + CR 800.4a: the elimination transaction is complete. A
+    // component-delivery handoff stays the announcing owner's resume obligation
+    // even when that owner retired the delegated member; only a handoff whose
+    // owner frame is gone is cleared.
+    state
+        .resolution_stack
+        .retire_orphaned_component_delivery_parent();
+    // CR 603.10a: the observers latched before the departure go to the caller
+    // that collects (`ScannedByCaller`, `PlacedByPass`); `CollectedByDeparture`
+    // consumed them above. A finished game triggers nothing (CR 104.1).
+    let looked_back = looked_back_observers
+        .take()
+        .filter(|_| game_over_winner.is_none())
+        .map(|observers| LookedBackDeparture {
+            observers,
+            first_event,
+            departure_end,
+        });
+    DepartureOutcome {
+        resume,
+        looked_back,
+    }
 }
 
 /// CR 103.5 + CR 800.4a: Prune eliminated players from the in-flight
@@ -794,7 +1223,8 @@ pub(crate) fn eliminate_players(
 /// This is also the pregame-reconciliation seam for the prompts that precede
 /// mulligans: a departed companion chooser (CR 103.2b) is resumed at the walk
 /// cursor by `advance_companion_reveal`, and a departed agenda chooser (CR
-/// 103.2e) resumes at the agenda step.
+/// 103.2e) resumes at the agenda step. A departed CR 103.1 chooser passes the
+/// choice on (CR 800.4h), and a departed seat leaves the candidates.
 fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let alive: HashSet<PlayerId> = state
         .prepaid_mulligan_bottoms
@@ -852,6 +1282,22 @@ fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // CR 103.2b precedes the CR 103.2e agenda step, so a departure here
             // resumes at the agenda step; the companion walk is already done.
             state.waiting_for = super::conspiracy::agenda_choices_or_mulligan(state, events);
+        }
+        // CR 800.4a + CR 103.1a: a departed seat is no longer a candidate to take
+        // the first turn. The candidates are re-derived from the living side
+        // representatives, so a shared-turn side whose representative left is
+        // still offered through a living member.
+        // CR 800.4h: a departed chooser's choice passes to the next player in turn order.
+        WaitingFor::ChooseStartingPlayer { player, .. } => {
+            let player = if players::is_alive(state, player) {
+                player
+            } else {
+                players::next_player_in_turn_order(state, player)
+            };
+            state.waiting_for = WaitingFor::ChooseStartingPlayer {
+                player,
+                candidates: super::topology::turn_representatives(state),
+            };
         }
         WaitingFor::OpeningHandBottomCards { pending, reason } => {
             let alive: Vec<_> = pending
@@ -956,7 +1402,7 @@ fn prune_deferred_triggers_for_eliminated_players(state: &mut GameState) {
 /// CR 603.3b: If prune collapsed an ordering pass into `deferred_triggers`
 /// while `waiting_for` is Priority, dispatch now so phase auto-advance does
 /// not skip them (issue #1350).
-fn drain_or_clear_deferred_triggers_after_elimination(
+pub(crate) fn drain_or_clear_deferred_triggers_after_elimination(
     state: &mut GameState,
     departure_triggers: DepartureTriggers,
     events: &mut Vec<GameEvent>,
@@ -979,10 +1425,21 @@ fn drain_or_clear_deferred_triggers_after_elimination(
         // keeps the resolution-safe drain (issue #1793).
         let resolution_live =
             state.resolving_stack_entry.is_some() || !state.resolution_stack.is_empty();
+        // CR 603.2c: every route hands down the reducer action's own buffer, and
+        // an effect's loss (CR 104.3e) is scanned by the post-action pipeline
+        // afterwards, so the drain's window ranges are claimed.
         let settled = if resolution_live {
-            super::triggers::drain_deferred_trigger_queue(state, events)
+            super::triggers::drain_on_action_buffer(
+                state,
+                events,
+                super::triggers::drain_deferred_trigger_queue,
+            )
         } else {
-            super::triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
+            super::triggers::drain_on_action_buffer(
+                state,
+                events,
+                super::triggers::drain_deferred_triggers_after_stack_object_announcement,
+            )
         };
         if let Some(wf) = settled {
             state.waiting_for = wf;
@@ -1017,6 +1474,22 @@ fn exile_owned_objects_on_player_left_game(
     // graveyard.
     let resolving_spell =
         super::stack::resolving_instant_or_sorcery_on_stack(state).map(|entry| entry.id);
+    // CR 730.3: a merged permanent's absorbed components still held by the
+    // active component batch (whether or not a frame announced the move) are on
+    // no zone list until delivered: still "on the battlefield" as a component,
+    // but not a battlefield permanent.
+    let held_components: Vec<_> = state
+        .resolution_stack
+        .active_batch_held_objects()
+        .into_iter()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.zone == Zone::Battlefield)
+                && !state.battlefield.contains(id)
+        })
+        .collect();
     let mut to_exile: Vec<_> = state
         .battlefield
         .iter()
@@ -1027,6 +1500,7 @@ fn exile_owned_objects_on_player_left_game(
                 .flat_map(|zone| super::targeting::zone_object_ids(state, zone)),
         )
         .chain(resolving_spell)
+        .chain(held_components)
         .filter(|id| state.objects.get(id).is_some_and(|obj| obj.owner == player))
         .collect();
     to_exile.sort_by_key(|id| id.0);
@@ -1102,20 +1576,42 @@ fn mark_left_game_departures_simultaneous(
 fn end_control_effects_for_leaving_players(
     state: &mut GameState,
     leaving_set: &HashSet<PlayerId>,
+    pre_elimination_monarch: Option<PlayerId>,
     events: &mut Vec<GameEvent>,
 ) {
-    use crate::types::ability::ContinuousModification;
+    use crate::types::ability::{ContinuousModification, Designation};
     use crate::types::identifiers::ObjectId;
 
-    // CR 800.4a: any effect giving a LEAVING player control of an object ends.
-    // Prune every single-mod ChangeController TCE controlled by any leaver, over
-    // the FULL leaving_set (symmetric with the sweep below), so a co-leaver's
-    // steal of a survivor's object reverts rather than being over-exiled.
+    // CR 800.4a: any effect giving a LEAVING player control of an object ends,
+    // over the FULL leaving_set (symmetric with the sweep below), so a
+    // co-leaver's steal of a survivor's object reverts rather than being
+    // over-exiled.
     state.transient_continuous_effects.retain(|e| {
-        !(leaving_set.contains(&e.controller)
+        // Plain steal: the recipient IS the installer, so a leaver-controlled
+        // ChangeController TCE ends with its controller.
+        let plain_steal_gives_leaver_control = leaving_set.contains(&e.controller)
             && e.modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::ChangeController)))
+                .any(|m| matches!(m, ContinuousModification::ChangeController));
+        // CR 800.4a + CR 611.2a + CR 725.5 (Matt R7-F3): a
+        // designation-anchored TCE gives control to the LIVE holder (the layer
+        // arm reads the designation, never `e.controller`), so departure
+        // treatment keys on the holder AT DEPARTURE (captured before
+        // succession), not the installer. A surviving holder — or a vacant
+        // throne, which gives nobody control — keeps the transient for its
+        // stated duration; a leaving holder ends it. Whole-TCE prune, matching
+        // the plain-steal half: one effect, one lifetime. Exhaustive over
+        // `Designation`: a future leaf breaks the build here by design.
+        let designation_gives_leaver_control = e.modifications.iter().any(|m| match m {
+            ContinuousModification::ChangeControllerToDesignation { designation } => {
+                let holder = match designation {
+                    Designation::Monarch => pre_elimination_monarch,
+                };
+                holder.is_some_and(|h| leaving_set.contains(&h))
+            }
+            _ => false,
+        });
+        !(plain_steal_gives_leaver_control || designation_gives_leaver_control)
     });
 
     // CR 611.2c + CR 614.1a: a resolved token-controller redirect ("each token
@@ -1197,54 +1693,46 @@ fn abandon_pending_zone_change_member_for_player_left(
     leaving_player: PlayerId,
 ) {
     let mut canceled_pauses = Vec::new();
-    if let Some(pending) = state
-        .active_change_zone_frame_mut()
-        .and_then(|frame| frame.pending.as_mut())
-    {
-        pending
-            .logical_zone_change_group
-            .record_abandoned_by_player_left(identity)
-            .expect("pending change-zone iteration owns a coherent logical group");
-        pending
-            .remaining
-            .retain(|member| member.object_id != identity.object_id);
-        if pending
-            .paused_current
-            .as_ref()
-            .is_some_and(|paused| paused.member == identity && paused.terminal_completion.is_none())
-        {
-            canceled_pauses.push(
-                pending
-                    .paused_current
-                    .take()
-                    .expect("checked paused delivery is present")
-                    .expected_event,
-            );
-        }
-    }
-    if let Some(pending) = state.active_batch_delivery_mut() {
-        pending
-            .logical_zone_change_group
-            .record_abandoned_by_player_left(identity)
-            .expect("pending batch owns a coherent logical group");
-        pending.remaining.retain(|id| *id != identity.object_id);
-        pending
-            .requests
-            .retain(|request| request.object_id != identity.object_id);
-        if pending
-            .paused_current
-            .as_ref()
-            .is_some_and(|paused| paused.member == identity && paused.terminal_completion.is_none())
-        {
-            canceled_pauses.push(
-                pending
-                    .paused_current
-                    .take()
-                    .expect("checked paused delivery is present")
-                    .expected_event,
-            );
-        }
-    }
+    // CR 730.3: under a merged permanent's component child this visits the
+    // child and the batch or ChangeZone owner that announced the departure.
+    state
+        .resolution_stack
+        .visit_active_zone_change_owners_mut(|owner| {
+            let (group, paused_current) = match owner {
+                ZoneChangeOwnerMut::Batch(pending) => {
+                    pending.remaining.retain(|id| *id != identity.object_id);
+                    pending
+                        .requests
+                        .retain(|request| request.object_id != identity.object_id);
+                    (
+                        &mut pending.logical_zone_change_group,
+                        &mut pending.paused_current,
+                    )
+                }
+                ZoneChangeOwnerMut::ChangeZone(pending) => {
+                    pending
+                        .remaining
+                        .retain(|member| member.object_id != identity.object_id);
+                    (
+                        &mut pending.logical_zone_change_group,
+                        &mut pending.paused_current,
+                    )
+                }
+            };
+            group
+                .record_abandoned_by_player_left(identity)
+                .expect("pending zone-change owner holds a coherent logical group");
+            if paused_current.as_ref().is_some_and(|paused| {
+                paused.member == identity && paused.terminal_completion.is_none()
+            }) {
+                canceled_pauses.push(
+                    paused_current
+                        .take()
+                        .expect("checked paused delivery is present")
+                        .expected_event,
+                );
+            }
+        });
 
     for expected_event in canceled_pauses {
         if state
@@ -1256,9 +1744,16 @@ fn abandon_pending_zone_change_member_for_player_left(
             state.replacement_may_cost_paused = false;
             super::replacement::abandon_post_replacement_continuation(state);
         }
+        if state.pending_replacement.is_some() {
+            // A canceled original obligation does not cancel a surviving
+            // component's independent replacement prompt.
+            continue;
+        }
         // The canceled pause was the sole current resolution operation. Its
-        // surviving carrier tail will resume through the ordinary Priority
-        // drain; no unrelated continuation is cleared here.
+        // surviving carrier tail is owed: the departure reports it as
+        // `DepartureResume`, and the concession or player-loss safety net that
+        // caused it finishes it before priority. No unrelated continuation is
+        // cleared here.
         state.waiting_for = WaitingFor::Priority {
             player: players::next_player(state, leaving_player),
         };
@@ -1410,6 +1905,10 @@ fn do_eliminate(
 ) -> RulesExecutionNodeRef {
     let planar_handoff =
         crate::game::planechase::prepare_player_left_game_handoff(state, player, leaving_set);
+    // CR 603.10 + CR 800.4a: the post-event authority their objects hold, read
+    // while the player is still in the game (a departed owner's sources no
+    // longer function), for the logical owners their departure interrupts.
+    let owned_after = super::triggers::departing_owner_after_authority(state, player);
 
     // CR 733 + CR 800.4: open the leave's own execution node BEFORE the sweep, so
     // every command it settles below — the owned-object exiles, the control
@@ -1432,9 +1931,8 @@ fn do_eliminate(
     // CR 800.4a + CR 616.1: Capture the parked replacement chooser before
     // cast-abandonment teardown can replace its prompt with priority.
     let leaving_is_latched_chooser = state.waiting_for.acting_player() == Some(player);
-
     abandon_source_bound_resolution_prompt(state, player, leaving_set, events);
-    retire_pending_zone_change_contexts_owned_by(state, player);
+    retire_pending_zone_change_contexts_owned_by(state, player, &owned_after);
     abandon_change_zone_family_for_controller(state, player, leaving_set, events);
 
     crate::game::planechase::preserve_phenomenon_stack_abilities_for_handoff(state, planar_handoff);
@@ -1620,16 +2118,13 @@ fn do_eliminate(
     // continuation slots (`replacement_may_cost_paused`, `post_replacement_*`,
     // the stack-owned Connive re-entry). The resume drain also touches OTHER resolution
     // slots on a normal answer (e.g. `pending_phase_transition_progress`,
-    // `pending_team_draw_step`, `pending_continuation`); those are intentionally
-    // NOT cleared here. Stranding some of them is its own PRE-EXISTING soft-lock
-    // (PPT gates `auto_advance`; `pending_continuation` gates the deferred-trigger
-    // drain) that predates this PR and is NOT the reported regression; repairing
-    // them correctly requires resuming the interrupted APNAP queue for the
-    // remaining players (not field-nulling), tracked as a separate follow-up. This
-    // fix deliberately addresses only the CR 704.4 SBA-freeze introduced by the
-    // `pending_replacement` guard. A player-scope sacrifice batch parked on this
-    // choice is the exception: `settle_player_scope_sacrifice_after_departure`
-    // resumes it for the remaining players once every departure has settled.
+    // `pending_team_draw_step`, `pending_continuation`); those are NOT cleared here.
+    // CR 500.5 + CR 117.3a + CR 800.4a: a phase transition parked on this choice must
+    // be resumed, not dropped — left standing, the next step begins without the other
+    // pools emptying, its beginning triggers, or the active player's priority — and
+    // `turns::resume_abandoned_phase_transition` resumes it once every departure has
+    // settled, as `settle_player_scope_sacrifice_after_departure` does a player-scope
+    // sacrifice batch parked on this choice.
     // CR 800.4a: Tear down choices and continuations owned by the leaving player.
     // CR 616.1: SearchFound owns an outer per-card batch, and a replacement-
     // selected zone move may own a nested batch completion. The
@@ -1653,14 +2148,41 @@ fn do_eliminate(
                 .expect("eliminated search batch must own the active frame");
         }
     }
-    if state.pending_replacement.is_some() && leaving_is_latched_chooser {
+    // CR 800.4a + CR 121.6b + CR 614.17c: under a parked draw unless payment
+    // that outlives this departure, the choice the leaver was asked is their
+    // own draw inside the payer's draw sequence (a substitute: Notion Thief's
+    // "you draw a card"). It is kept for the concession's action boundary,
+    // which settles it through the replacement authority as a draw that can no
+    // longer happen (`engine::reconcile_parked_unless_payment_after_departure`):
+    // the sequences above it resume, so the payer's own remaining draws
+    // (Thought Reflection's second card) are not abandoned with the leaver's.
+    let settles_with_parked_payment = leaving_is_latched_chooser
+        && super::engine_payment_choices::departed_draw_settles_with_parked_payment(
+            state,
+            leaving_set,
+        );
+    if state.pending_replacement.is_some()
+        && leaving_is_latched_chooser
+        && !settles_with_parked_payment
+        // CR 800.4a + CR 616.1f: a combat-damage leg's choice is not abandoned
+        // with its chooser: the damaged permanent may survive the departure (a
+        // Control Magic host returns to its owner), so the event is lifted back
+        // into the parked batch and re-proposed to whoever now owes it.
+        && !super::replacement::lift_departed_combat_leg_choice(state)
+    {
         state.pending_replacement = None;
         // CR 800.4a: a paused frameless single-card discard belongs to the
         // abandoned choice of the leaving player; left behind it would go stale.
         state.pending_single_discard = None;
         state.replacement_may_cost_paused = false;
-        super::replacement::abandon_post_replacement_continuation(state);
-        super::turns::abandon_phase_begin_choice(state);
+        // CR 121.6b: under a surviving parked draw payment the abandoned
+        // choice sat inside a substitute for one of the payer's draws, so only
+        // the leaver's part of the draw authority goes with it.
+        if super::engine_payment_choices::draw_payment_is_parked(state) {
+            super::replacement::abandon_departed_substitute_continuation(state, leaving_set);
+        } else {
+            super::replacement::abandon_post_replacement_continuation(state);
+        }
     }
 
     // A leaving player gains no life: they are no longer a player in the game, so
@@ -1683,14 +2205,25 @@ fn do_eliminate(
     // complete so its CR 603.3b triggers fire. Per-entry, mirroring
     // `abandon_pending_casts`, never a blanket null.
     //
-    // CR 800.4j: when the seat that left is the ACTIVE player, the turn still
-    // continues to its completion, so the batch DOES complete — `auto_advance_once`
-    // discharges it through `resume_pending_combat_lifelink` before the CR 800.4
-    // turn skip. (An earlier revision of this comment claimed the batch "can no
-    // longer complete at all" and that `turns::enter_phase` owned that case; both
+    // CR 800.4j: when the seat that left was the active player and no player of its side
+    // remains, the turn continues to its completion without an active player, so the batch
+    // DOES complete — `auto_advance_once` discharges it through
+    // `resume_pending_combat_lifelink`. (An earlier revision of this comment claimed the batch
+    // "can no longer complete at all" and that `turns::enter_phase` owned that case; both
     // halves are false now that the discharge exists.)
     if let Some(record) = state.pending_combat_lifelink.as_mut() {
         record.remaining.retain(|gain| gain.controller != player);
+        // CR 616.1: a batch parked earlier, in its replacement pass, has not
+        // computed its gains yet — Phase C derives them from each entry's
+        // lifelink controller. Drop that seat's the same way, per entry; its
+        // damage itself still applies.
+        if let Some(parked) = record.replacement.as_mut() {
+            for entry in &mut parked.entries {
+                if entry.lifelink_controller == Some(player) {
+                    entry.lifelink_controller = None;
+                }
+            }
+        }
     }
 
     // CR 800.4a: A coupled ETB spell-resolution context can outlive its
@@ -1742,6 +2275,22 @@ fn do_eliminate(
     crate::game::planechase::finish_player_left_game_handoff(state, planar_handoff, events);
 
     state.auto_pass.remove(&player);
+    // CR 805.4a + CR 805.9: the active team's turn keeps an active player while one of its
+    // players remains.
+    if state.active_player == player {
+        let member = super::topology::normalize_shared_turn_recipient(state, player);
+        if players::is_alive(state, member) {
+            state.active_player = member;
+        }
+    }
+    // CR 800.4a + CR 117.4 + CR 805.5b: a player who has left is not among the players who pass
+    // in succession; a side still in the game keeps its pass under its living representative.
+    if state.priority_passes.remove(&player) {
+        let representative = super::topology::priority_pass_representative(state, player);
+        if representative != player && players::is_alive(state, representative) {
+            state.priority_passes.insert(representative);
+        }
+    }
     state.planar_die_actions_this_turn.remove(&player);
 
     // CR 725.4: If the monarch leaves the game, the active player becomes the monarch.
@@ -1767,6 +2316,15 @@ fn do_eliminate(
                 player_id: new_monarch,
             });
         }
+        // CR 611.3a + CR 725.4 + CR 725.5: succession (or vacancy, when nobody
+        // is left) can flip live monarch-reading statics — escalate iff any
+        // such static is live. Covers both the `None` and the succession
+        // branches above; the outer `if` already gates on the leaver having
+        // been the monarch.
+        super::layers::mark_layers_full_if_dimension_read_live(
+            state,
+            super::layers::LayerInvalidationDimension::Monarch,
+        );
     }
 
     // CR 726.4: If the player who has the initiative leaves the game,
@@ -1886,19 +2444,74 @@ pub fn apply_resolved_player_leave(
 /// original simultaneous action. Retire contexts owned by a player who has
 /// left before any remaining member resumes; otherwise a pre-pause latch could
 /// fire from an object that no longer exists in the game.
-fn retire_pending_zone_change_contexts_owned_by(state: &mut GameState, player: PlayerId) {
-    if let Some(pending) = state
-        .active_change_zone_frame_mut()
-        .and_then(|frame| frame.pending.as_mut())
-    {
-        pending
-            .logical_zone_change_group
-            .retire_contexts_owned_by(player);
-    }
-    if let Some(pending) = state.active_batch_delivery_mut() {
-        pending
-            .logical_zone_change_group
-            .retire_contexts_owned_by(player);
+fn retire_pending_zone_change_contexts_owned_by(
+    state: &mut GameState,
+    player: PlayerId,
+    owned_after: &crate::types::game_state::DepartingOwnerAfterAuthority,
+) {
+    let held_by_child = occurrences_held_by_component_child(state);
+    state
+        .resolution_stack
+        .visit_active_zone_change_owners_mut(|owner| match owner {
+            ZoneChangeOwnerMut::Batch(pending) => pending
+                .logical_zone_change_group
+                .retire_contexts_owned_by(player, &held_by_child, owned_after),
+            ZoneChangeOwnerMut::ChangeZone(pending) => pending
+                .logical_zone_change_group
+                .retire_contexts_owned_by(player, &held_by_child, owned_after),
+        });
+}
+
+/// CR 730.3: a linked component child holds occurrences its announcing owner
+/// has completed but not yet been handed.
+fn occurrences_held_by_component_child(
+    state: &GameState,
+) -> Vec<crate::types::game_state::CollectedZoneChange> {
+    state
+        .active_batch_delivery()
+        .filter(|child| child.component_delivery_parent.is_some())
+        .map(|child| {
+            child
+                .logical_zone_change_group
+                .all_origin_occurrences
+                .iter()
+                .filter_map(|occurrence| {
+                    crate::types::game_state::CollectedZoneChange::of(&occurrence.event)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// CR 800.4a: once the sweep has exiled what a leaving player still controlled,
+/// a paused owner's suppressor latch of such a source (one the leaver controlled
+/// but did not own) is limited to the occurrences already completed. A source
+/// whose control reverted survives and is left alone.
+fn retire_suppressors_of_controlled_sources_that_left(
+    state: &mut GameState,
+    leaving_set: &HashSet<PlayerId>,
+) {
+    let held_by_child = occurrences_held_by_component_child(state);
+    let objects = &state.objects;
+    let source_left = |context: &crate::types::game_state::TriggerSourceContext| {
+        objects
+            .get(&context.identity.reference.object_id)
+            .is_none_or(|object| {
+                ObjectIncarnationRef::from_object(object) != context.identity.reference
+                    || object.zone != Zone::Battlefield
+            })
+    };
+    for &player in leaving_set {
+        state
+            .resolution_stack
+            .visit_active_zone_change_owners_mut(|owner| match owner {
+                ZoneChangeOwnerMut::Batch(pending) => pending
+                    .logical_zone_change_group
+                    .retire_suppressors_of_sources_that_left(player, &held_by_child, &source_left),
+                ZoneChangeOwnerMut::ChangeZone(pending) => pending
+                    .logical_zone_change_group
+                    .retire_suppressors_of_sources_that_left(player, &held_by_child, &source_left),
+            });
     }
 }
 
@@ -1972,6 +2585,35 @@ fn abandon_source_bound_resolution_prompt(
         };
     if !abandon {
         return;
+    }
+
+    // CR 800.4a + CR 121.6b + CR 117.2e: under a parked draw unless payment that outlives
+    // this departure, the leaver's prompt is a choice inside a substitute for
+    // one of the payment's draws (Abundance's land-or-nonland, after Notion
+    // Thief made that draw the leaver's). Only the leaver's part of that
+    // substitute is abandoned: their draw instructions, the continuations
+    // they control and the one their choice deferred. The payer's own draw
+    // sequence and the resolution the payment settles are not the leaver's to
+    // abandon; they stay, and resume at the concession's action boundary
+    // (`engine::reconcile_parked_unless_payment_after_departure`).
+    if super::engine_payment_choices::draw_payment_is_parked(state)
+        && !selecting_resolution_sacrifice
+        && !parked_resolution_sacrifice
+    {
+        super::replacement::abandon_departed_substitute_continuation(state, leaving_set);
+        state.waiting_for = WaitingFor::Priority {
+            player: players::next_player(state, player),
+        };
+        return;
+    }
+
+    // CR 800.4a: the family is abandoned in dependency order. A draw still in
+    // flight above the abandoned choice (an interactive substitute asked it:
+    // the leaver's own Abundance, on a draw of a payment that left with them)
+    // is torn down before the continuation beneath it, which the carrier's
+    // abandonment expects on top.
+    if state.active_multi_draw_frame().is_some() {
+        super::replacement::abandon_post_replacement_continuation(state);
     }
 
     if selecting_resolution_sacrifice {
@@ -2094,11 +2736,33 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .collect();
 
     if let Some(archenemy) = super::topology::archenemy(state) {
-        let archenemy_alive = living.contains(&archenemy);
+        // CR 104.2a win check. Horde Magic (casual variant): the Horde seat has
+        // no life total and can never be eliminated by the ordinary
+        // life/poison SBAs, so "archenemy alive" is replaced by the Horde-loss
+        // condition — the Horde is defeated when its library is empty AND it
+        // controls no creature. All other formats keep the generic living-set
+        // check.
+        let archenemy_alive =
+            if state.format_config.format == crate::types::format::GameFormat::Horde {
+                !super::horde::horde_is_defeated(state)
+            } else {
+                living.contains(&archenemy)
+            };
+        // CR 104.2a heroes = the living non-Horde seats. For a two-Horde-force
+        // Horde game (LOTR Two Towers) BOTH Horde seats must be excluded, not just
+        // the one archenemy — a second Horde seat has no life total and is never
+        // eliminated, so counting it as a living hero would keep the survivors from
+        // ever winning. Single-Horde and Archenemy reduce to `pid != archenemy`.
         let living_heroes: Vec<PlayerId> = living
             .iter()
             .copied()
-            .filter(|&pid| pid != archenemy)
+            .filter(|&pid| {
+                if state.format_config.format == crate::types::format::GameFormat::Horde {
+                    !super::horde::is_horde_seat(state, pid)
+                } else {
+                    pid != archenemy
+                }
+            })
             .collect();
         let winner = if archenemy_alive && living_heroes.is_empty() {
             Some(archenemy)
@@ -2111,6 +2775,12 @@ fn check_game_over(state: &mut GameState, events: &mut Vec<GameEvent>) {
         };
         end_game(state, winner, events);
     } else if super::topology::has_two_headed_giant_shared_resources(state) {
+        // Horde note: a Horde game never reaches this `else if` — the
+        // `if let Some(archenemy)` branch above evaluates FIRST and always
+        // matches (Horde maps to `OneVsMany`, so `topology::archenemy`
+        // returns the Horde seat). This branch therefore stays the pure
+        // Two-Headed Giant team-win path; Horde win/loss is fully handled on
+        // the archenemy path above.
         let mut living_teams = std::collections::BTreeSet::new();
         for &pid in &living {
             living_teams.insert(super::topology::team_dedup_key(state, pid));
@@ -2172,6 +2842,163 @@ pub(super) fn ensure_game_over_if_terminal(state: &mut GameState, events: &mut V
     check_game_over(state, events);
 }
 
+/// CR 104.1 + CR 117.2e: while a resolution's carrier is installed no player has priority, so
+/// everything parked outside the resolution stack at that moment was, by rule, started by that
+/// resolution: its own instructions and payments (CR 608.2c), a spell it instructed a player to
+/// cast (CR 608.2g) with that cast's cost roots, payment prompt and reversal record, mana abilities
+/// activated while paying (CR 605.3a) and the triggered mana abilities they raised (CR 605.4a), the
+/// CR 616.1 replacement choices any of those moves raised, and the sessions it opened (a library
+/// search, CR 701.23a; a private look, CR 701.20e; a reveal, CR 701.20a). None of it is resumed in
+/// a finished game, so it is dropped with the resolution. Nothing is settled, published or
+/// reversed: the completed part of a paused cost already happened, the abilities it triggered would
+/// only be put on the stack the next time a player would receive priority (CR 603.3), which a
+/// finished game never reaches, and nothing moves (an instructed spell's announcement stays on the
+/// stack with its card where it was, as every other spell of a finished game stays where it is).
+/// Where the engine keeps a provisional priority window under a live carrier (a departure from
+/// CR 502.4 / CR 514.3, or a Resolve All session), a root a player opened from that window is
+/// dropped too: CR 104.1 owes it nothing either.
+///
+/// Without a carrier there is no resolution to own the parked work: a carrier-less frame
+/// (a triggered mana ability, CR 605.4a; a beginning-of-game action, CR 103.6) belongs to the
+/// process around it, so nothing is dropped here.
+fn retire_parked_resolution_work(state: &mut GameState) {
+    if state.resolving_stack_entry.is_none() {
+        return;
+    }
+    state.pending_cast = None;
+    state.pending_cost_move_resume = None;
+    state.pending_deferred_life_cost_resume = None;
+    state.pending_discard_for_cost = None;
+    state.pending_triggered_mana_resume = None;
+    state.spell_cast_reversal = None;
+    state.pending_replacement = None;
+    state.replacement_may_cost_paused = false;
+    super::replacement::abandon_post_replacement_continuation(state);
+    state.pending_liminal_entry_resume = None;
+    // CR 104.1 + CR 614.12a: abandon the uncommitted projections and their
+    // remaining batches; already-entered objects stay in their actual zones.
+    state.liminal_entries.clear();
+    state.payment_transaction = None;
+    state.payment_transaction_replay = false;
+    state.payment_transaction_just_handled = false;
+    state.pending_player_scope_unless_payment = None;
+    state.pending_player_scope_unless_punishment = None;
+    state.pending_player_scope_sacrifice_choice = None;
+    state.pending_player_scope_choice = None;
+    state.pending_mass_library_order_choice = None;
+    state.pending_discard_batch = None;
+    state.pending_single_discard = None;
+    state.pending_damage_post_loss = None;
+    state.pending_damage_post_counter = None;
+    state.pending_exile_from_top_until = None;
+    state.pending_scoped_library_search = None;
+    state.pending_library_search_delivery = None;
+    state.pending_search_found_batch = None;
+    state.pending_die_roll_instruction = None;
+    state.pending_resolution_completion = None;
+    state.entering_aura_authority = None;
+    // The sessions the resolution opened end with it: a library search and the
+    // control of its decision (CR 701.23a), a private look (CR 701.20e), and a
+    // reveal (CR 701.20a). Static reveals are re-derived on the next derive pass.
+    state.active_library_searches = Default::default();
+    state.active_search_decision_controls = Default::default();
+    state.private_look_ids.clear();
+    state.private_look_player = None;
+    state.revealed_cards.clear();
+}
+
+/// CR 104.1 + CR 603.3: a finished game never gives priority to publish queued
+/// triggers. Retire their existing firing identities through the same authority
+/// whether the game ended through elimination or during a resolution.
+fn retire_finished_game_triggers(state: &mut GameState) {
+    // Terminal: drop trigger scaffolding the client would otherwise show as
+    // a stuck stack / ordering prompt.
+    let mut terminal_firings = state
+        .pending_trigger_order
+        .take()
+        .into_iter()
+        .flat_map(|order| order.groups)
+        .flat_map(|group| group.triggers)
+        .map(|context| context.firing())
+        .collect::<Vec<_>>();
+    terminal_firings.extend(
+        std::mem::take(&mut state.deferred_triggers)
+            .into_iter()
+            .map(|context| context.firing()),
+    );
+    terminal_firings.extend(state.pending_trigger_firing.take());
+    crate::game::triggers::release_pending_trigger_construction(state);
+    // CR 117.3c: The construction priority recipient is scheduling state for
+    // a batch that no longer exists. Leaving it installed would durably
+    // serialize a departed player into a terminal `GameOver` snapshot — the
+    // terminal snapshot. No re-point is needed: there is no later construction
+    // to route.
+    state.pending_trigger_construction_priority_recipient = None;
+    for firing in terminal_firings {
+        crate::game::lifecycle::record_delayed_terminal(
+            firing,
+            crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+        );
+    }
+}
+
+/// CR 104.1: a game ends immediately, so a resolution still under way when it ended —
+/// paused on a player's choice (a "you may", a cipher offer, a keep choice ...) — owes
+/// nothing more: every frame it parked and its carrier are retired, the carrier with the
+/// `Eliminated` disposition the game-over arm of `eliminate_players` gives the rest of a
+/// finished game's scaffolding (CR 104.1: the CR 608.2n final part a spell still owes is not
+/// performed either). Work the resolution parked outside the stack
+/// (`retire_parked_resolution_work`) goes first, then its frames, then its carrier.
+///
+/// Ordinary game ends enter at the action boundary (`engine::settle_finished_game`), after
+/// every resolver has unwound, with `game_end` as their authority. CR 117.2e: a resolver
+/// still owns its choices and frames while it runs. `end_game` is not the place: a resolution
+/// reaches it mid-chain (CR 104.2b effects, the CR 104.4b draw inside a repeat), and the same
+/// chain can park a further prompt after it. A best-of-three match may already have replaced
+/// `GameOver` with its sideboarding prompt; the wait is not the terminal authority.
+///
+/// An admitted trusted match forfeit enters at `match_flow::apply_trusted_match_forfeit`'s
+/// own synchronous terminal boundary, outside any active resolver. Its authority is
+/// `MatchPhase::Completed` together with `match_forfeit_result`: application-policy match
+/// completion, not a CR game loss, so it needs no manufactured `game_end`. Neither a wait
+/// nor a completed match phase alone authorizes this additional retirement path.
+pub(super) fn retire_finished_game_resolution(state: &mut GameState) {
+    if state.game_end.is_none()
+        && !(state.match_phase == MatchPhase::Completed && state.match_forfeit_result.is_some())
+    {
+        return;
+    }
+    // A resolving spell may already have completed its final part. Its queued
+    // triggers still belong to the ended game even after that carrier is gone.
+    retire_finished_game_triggers(state);
+    // CR 104.1: no later priority window can present queued miracle reveals,
+    // remaining paradigm offers, or Gotcha offers, even without a live carrier.
+    state.pending_miracle_offers.clear();
+    state.pending_paradigm_remaining_offers = None;
+    state.un_actions.pending_offers.clear();
+    state.un_actions.gotcha_offers.clear();
+    let resolution_live =
+        state.resolving_stack_entry.is_some() || !state.resolution_stack.is_empty();
+    if !resolution_live {
+        return;
+    }
+    // The parked work goes with its carrier: a parked frame can name a return-result
+    // occurrence that the carrier's retirement clears, so neither may outlive the other.
+    retire_parked_resolution_work(state);
+    // Frames first, so the carrier abandonment below finds no continuation left to clear
+    // instead of a direct-choice frame it cannot address.
+    state.resolution_stack.abandon_all_frames();
+    crate::game::stack::abandon_active_resolution_carrier(
+        state,
+        crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+    );
+    // CR 104.1: the abandonment keeps an owed spell's carrier; a finished game retires it too.
+    crate::game::stack::finish_resolving_stack_entry(
+        state,
+        crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2186,17 +3013,20 @@ mod tests {
     use crate::types::game_state::{
         ActivePlayerControl, CastingVariant, ExtraTurn, NamedChoiceSource,
         NamedChoiceSourceBinding, OpponentGuessOwner, OpponentGuessSource, PendingCast,
-        PendingConniveReentry, PendingContinuation, PendingReplacement, PendingSpellResolution,
-        PendingZoneChangeDelivery, PromptSourceBinding, ResolutionSourceRelatch,
-        ScheduledTurnControl, StackEntry, StackEntryKind,
+        PendingComponentDeliveryParent, PendingConniveReentry, PendingContinuation,
+        PendingReplacement, PendingSpellResolution, PendingZoneChangeDelivery, PromptSourceBinding,
+        ResolutionSourceRelatch, ScheduledTurnControl, StackEntry, StackEntryKind,
     };
+    use crate::types::identifiers::ExtraTurnId;
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
         ObjectIncarnationRef, TriggerFiring,
     };
     use crate::types::mana::ManaCost;
     use crate::types::match_config::MatchType;
-    use crate::types::proposed_event::{CounterPlacement, DrawEventStage, ProposedEvent};
+    use crate::types::proposed_event::{
+        CounterCause, CounterPlacement, DrawEventStage, ProposedEvent,
+    };
     use crate::types::replacements::ReplacementEvent;
 
     fn setup_two_player() -> GameState {
@@ -2289,11 +3119,13 @@ mod tests {
         );
         state.park_ability_continuation(continuation);
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(ability),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::PayCost {
             player: payer,
@@ -2330,11 +3162,14 @@ mod tests {
         let mut logical_zone_change_group = crate::types::game_state::LogicalZoneChangeGroup::new(
             crate::types::identifiers::LogicalZoneChangeGroupId(1),
             Vec::new(),
+            Vec::new(),
         );
         logical_zone_change_group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("test batch owner has explicit pre-delivery authority");
         crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
+            component_delivery_parent: None,
             logical_zone_change_group,
             paused_current: None,
             remaining: Vec::new(),
@@ -2354,19 +3189,21 @@ mod tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         }
     }
 
     fn pending_replacement_for(expected_event: ProposedEvent) -> PendingReplacement {
         PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: expected_event,
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -2394,6 +3231,33 @@ mod tests {
         )
     }
 
+    fn pending_batch_request(
+        object_id: ObjectId,
+    ) -> crate::types::game_state::PendingBatchZoneMoveRequest {
+        crate::types::game_state::PendingBatchZoneMoveRequest {
+            object_id,
+            destination: Zone::Graveyard,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
+            cause: crate::types::game_state::PendingBatchZoneChangeCause::StateBasedAction,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_transformed: false,
+            controller_override: None,
+            enter_with_counters: Vec::new(),
+            face_down_profile: None,
+            chain_referent: crate::types::zones::ChainReferentIntent::Silent,
+            attach_to: None,
+            performed_by: None,
+            ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
+            library_placement: None,
+            exile_duration: None,
+            exile_controller: None,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+            replacement_applied: HashSet::new(),
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+        }
+    }
+
     fn pending_change_zone_iteration(
         group: crate::types::game_state::LogicalZoneChangeGroup,
         paused_current: Option<PendingZoneChangeDelivery>,
@@ -2402,6 +3266,7 @@ mod tests {
         controller: PlayerId,
     ) -> crate::types::game_state::PendingChangeZoneIteration {
         crate::types::game_state::PendingChangeZoneIteration {
+            library_reorder: None,
             pending_return_result_producer: None,
             logical_zone_change_group: group,
             paused_current,
@@ -2418,6 +3283,7 @@ mod tests {
                 .collect(),
             source_id,
             controller,
+            performed_by: controller,
             origin: Some(Zone::Battlefield),
             destination: Zone::Graveyard,
             enter_transformed: false,
@@ -2427,7 +3293,9 @@ mod tests {
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             moved_count: None,
             face_down_profile: None,
+            with_entry_effect: None,
             library_placement: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             enter_attached_to: None,
             effect_kind: EffectKind::ChangeZone,
         }
@@ -2454,7 +3322,12 @@ mod tests {
             "Surviving batch member".to_string(),
             Zone::Battlefield,
         );
-        let mut group = state.allocate_logical_zone_change_group(&[leaving, surviving]);
+        let mut group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                &[leaving, surviving],
+                Zone::Graveyard,
+            ),
+        );
         group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parked batch has its pre-delivery authority");
@@ -2464,9 +3337,12 @@ mod tests {
                 source_filter: crate::types::ability::TargetFilter::Any,
                 trigger_source_filter: None,
                 events: vec![crate::types::statics::SuppressedTriggerEvent::Dies],
+                completed_occurrences_only: None,
             },
         );
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
+            component_delivery_parent: None,
             logical_zone_change_group: group,
             paused_current: None,
             remaining: vec![leaving, surviving],
@@ -2491,7 +3367,9 @@ mod tests {
                     chain_referent: crate::types::zones::ChainReferentIntent::Silent,
                     attach_to: None,
                     performed_by: None,
+                    ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
                     library_placement: None,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     exile_duration: None,
                     exile_controller: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -2511,7 +3389,9 @@ mod tests {
                     chain_referent: crate::types::zones::ChainReferentIntent::Silent,
                     attach_to: None,
                     performed_by: None,
+                    ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
                     library_placement: None,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     exile_duration: None,
                     exile_controller: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -2522,10 +3402,11 @@ mod tests {
             attempted: vec![leaving, surviving],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         let batch = state
             .active_batch_delivery()
@@ -2609,7 +3490,12 @@ mod tests {
             "Surviving batch tail".to_string(),
             Zone::Battlefield,
         );
-        let mut group = state.allocate_logical_zone_change_group(&[leaving, surviving]);
+        let mut group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                &[leaving, surviving],
+                Zone::Graveyard,
+            ),
+        );
         group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parked batch has its pre-delivery authority");
@@ -2624,6 +3510,8 @@ mod tests {
             remember_identity: None,
         };
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
+            component_delivery_parent: None,
             logical_zone_change_group: group,
             paused_current: Some(paused),
             remaining: vec![surviving],
@@ -2638,10 +3526,11 @@ mod tests {
             attempted: vec![leaving, surviving],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         let batch = state
             .active_batch_delivery()
@@ -2654,6 +3543,302 @@ mod tests {
         crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut state, &mut events);
         assert!(state.active_batch_delivery().is_none());
         assert_eq!(state.objects[&leaving].zone, Zone::Exile);
+        assert_eq!(state.objects[&surviving].zone, Zone::Graveyard);
+    }
+
+    /// CR 603.2c + CR 730.3: while a merged permanent's component child is
+    /// active, the announcing owner beneath it still holds the occurrences it
+    /// collected for its own settlement. The retained-occurrence authority that
+    /// the post-action scan and a concession's trigger pass share reaches that
+    /// owner through the child's link, and only through it.
+    #[test]
+    fn retained_occurrences_include_the_announcing_owner_beneath_a_component_child() {
+        let mut state = setup_three_player();
+        let original = create_object(
+            &mut state,
+            CardId(719),
+            PlayerId(1),
+            "Merged original member".to_string(),
+            Zone::Battlefield,
+        );
+        let departed = create_object(
+            &mut state,
+            CardId(720),
+            PlayerId(0),
+            "Owner's earlier member".to_string(),
+            Zone::Battlefield,
+        );
+        let mut delivery = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, departed, Zone::Graveyard, &mut delivery);
+        let collected = delivery
+            .iter()
+            .find(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+            .cloned()
+            .expect("the earlier member's departure is recorded");
+        let mut owner_group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[original], Zone::Graveyard),
+        );
+        owner_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("owner group latches");
+        owner_group
+            .append_delivery_events(std::slice::from_ref(&collected))
+            .expect("owner retains its collected occurrence");
+        let owner_group_id = owner_group.logical_group_id;
+        let mut child_group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[original], Zone::Graveyard),
+        );
+        child_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("child group latches");
+        let paused = paused_zone_change_delivery(&state, original, ObjectId(901));
+        state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
+            component_delivery_parent: None,
+            logical_zone_change_group: owner_group,
+            paused_current: Some(paused.clone()),
+            remaining: Vec::new(),
+            destination: Zone::Graveyard,
+            source_id: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: vec![original],
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
+        });
+        state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
+            component_delivery_parent: Some(PendingComponentDeliveryParent {
+                parent_group_id: owner_group_id,
+                member: paused.member,
+                expected_event: paused.expected_event.clone(),
+            }),
+            logical_zone_change_group: child_group,
+            paused_current: None,
+            remaining: Vec::new(),
+            destination: Zone::Graveyard,
+            source_id: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: vec![original],
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
+        });
+
+        assert!(
+            crate::game::engine_priority::retained_logical_zone_events(&state).contains(&collected),
+            "the linked child exposes its announcing owner's retained occurrence"
+        );
+        state
+            .active_batch_delivery_mut()
+            .expect("child is active")
+            .component_delivery_parent = None;
+        assert!(
+            !crate::game::engine_priority::retained_logical_zone_events(&state)
+                .contains(&collected),
+            "an unlinked batch never reaches a frame beneath it"
+        );
+    }
+
+    /// CR 800.4a + CR 616.1: an eliminated original member cancels only its
+    /// exact paused obligation in a linked component pair. Both logical groups
+    /// retire that identity, and the relation is retained for the whole sweep so
+    /// a second leaver-owned parent-tail member still retires from the original
+    /// owner's remaining/requests. The relation then stays as the owner's resume
+    /// obligation: one drain settles the child and resumes the surviving tail.
+    #[test]
+    fn leaving_original_member_retires_linked_component_pair_obligation() {
+        let mut state = setup_three_player();
+        let leaving = create_object(
+            &mut state,
+            CardId(716),
+            PlayerId(1),
+            "Leaving original member".to_string(),
+            Zone::Battlefield,
+        );
+        // A second leaver-owned parent-tail member. The first visit cancels the
+        // original pause; the relation must survive so this later member still
+        // retires from the original owner's remaining/requests.
+        let leaving_tail = create_object(
+            &mut state,
+            CardId(717),
+            PlayerId(1),
+            "Second leaving original tail".to_string(),
+            Zone::Battlefield,
+        );
+        let surviving = create_object(
+            &mut state,
+            CardId(718),
+            PlayerId(0),
+            "Surviving original tail".to_string(),
+            Zone::Battlefield,
+        );
+        let mut parent_group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                &[leaving, leaving_tail, surviving],
+                Zone::Graveyard,
+            ),
+        );
+        parent_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("parent group latches");
+        let parent_group_id = parent_group.logical_group_id;
+        let mut child_group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[leaving], Zone::Graveyard),
+        );
+        child_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("child group latches");
+        let paused = paused_zone_change_delivery(&state, leaving, ObjectId(901));
+        state.pending_replacement = Some(pending_replacement_for(paused.expected_event.clone()));
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(0),
+            candidate_count: 1,
+            candidates: Vec::new(),
+            kind: Default::default(),
+            last_applied_decides: false,
+            remember_identity: None,
+        };
+        state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
+            component_delivery_parent: None,
+            logical_zone_change_group: parent_group,
+            paused_current: Some(paused.clone()),
+            remaining: vec![leaving_tail, surviving],
+            destination: Zone::Graveyard,
+            source_id: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: vec![
+                pending_batch_request(leaving_tail),
+                pending_batch_request(surviving),
+            ],
+            attempted: vec![leaving, leaving_tail, surviving],
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
+        });
+        state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
+            library_reorder: None,
+            component_delivery_parent: Some(PendingComponentDeliveryParent {
+                parent_group_id,
+                member: paused.member,
+                expected_event: paused.expected_event.clone(),
+            }),
+            logical_zone_change_group: child_group,
+            paused_current: None,
+            remaining: Vec::new(),
+            destination: Zone::Graveyard,
+            source_id: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: vec![leaving],
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
+        });
+        state
+            .resolution_stack
+            .batch_delivery_owner_mut(parent_group_id)
+            .expect("the linked pair validates before elimination");
+
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
+
+        let child = state
+            .active_batch_delivery()
+            .expect("the child remains the active owner");
+        assert_eq!(
+            child
+                .component_delivery_parent
+                .as_ref()
+                .map(|link| link.parent_group_id),
+            Some(parent_group_id),
+            "the owner's resume obligation survives the retired member"
+        );
+        assert!(child.remaining.is_empty());
+        assert_eq!(
+            child.logical_zone_change_group.terminal_outcomes,
+            vec![crate::types::game_state::LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft]
+        );
+        assert!(state.pending_replacement.is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+
+        let wire = serde_json::to_value(&state).expect("linked pair serializes");
+        let frames = wire["resolution_stack"]["frames"]
+            .as_array()
+            .expect("frames serialize");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(
+            frames[0]["data"]["paused_current"],
+            serde_json::Value::Null,
+            "the original obligation is discharged rather than left paused"
+        );
+        assert_eq!(
+            frames[0]["data"]["remaining"],
+            serde_json::to_value(vec![surviving]).expect("surviving id serializes")
+        );
+        let requests = frames[0]["data"]["requests"]
+            .as_array()
+            .expect("the original tail retains its requests");
+        assert_eq!(
+            requests.len(),
+            1,
+            "both leaver-owned tail requests retire from the original owner"
+        );
+        assert_eq!(
+            requests[0]["object_id"],
+            serde_json::to_value(surviving).expect("surviving id serializes")
+        );
+        let abandoned = serde_json::to_value(
+            crate::types::game_state::LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft,
+        )
+        .expect("abandoned outcome serializes");
+        let pending = serde_json::to_value(
+            crate::types::game_state::LogicalZoneChangeTerminalOutcome::Pending,
+        )
+        .expect("pending outcome serializes");
+        assert_eq!(
+            frames[0]["data"]["logical_zone_change_group"]["terminal_outcomes"],
+            serde_json::json!([abandoned.clone(), abandoned.clone(), pending]),
+            "the original group retires both leaving members and keeps its surviving tail"
+        );
+        assert_eq!(
+            frames[1]["data"]["logical_zone_change_group"]["terminal_outcomes"],
+            serde_json::json!([abandoned]),
+            "the child group retires the same leaving member"
+        );
+
+        let restored: GameState =
+            serde_json::from_value(wire).expect("the retained obligation restores");
+        assert!(restored
+            .active_batch_delivery()
+            .is_some_and(|child| child.component_delivery_parent.is_some()));
+
+        crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut state, &mut events);
+        assert!(
+            state.resolution_stack.is_empty(),
+            "the settled child resumes its owner's surviving tail in the same drain"
+        );
+        assert_eq!(state.objects[&leaving].zone, Zone::Exile);
+        assert_eq!(state.objects[&leaving_tail].zone, Zone::Exile);
         assert_eq!(state.objects[&surviving].zone, Zone::Graveyard);
     }
 
@@ -2677,7 +3862,12 @@ mod tests {
             "Surviving change-zone tail".to_string(),
             Zone::Battlefield,
         );
-        let mut group = state.allocate_logical_zone_change_group(&[leaving, surviving]);
+        let mut group = state.allocate_logical_zone_change_group(
+            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                &[leaving, surviving],
+                Zone::Graveyard,
+            ),
+        );
         group
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parked iteration has its pre-delivery authority");
@@ -2700,7 +3890,7 @@ mod tests {
         ));
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         let iteration = state
             .active_change_zone_frame()
@@ -2736,6 +3926,7 @@ mod tests {
         );
         let context = source_context(&state, source);
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: crate::types::ability::ChoiceType::Labeled {
@@ -2759,7 +3950,12 @@ mod tests {
             current_incarnation: state.objects[&source].incarnation,
         });
 
-        eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        eliminate_player(
+            &mut state,
+            PlayerId(1),
+            LossReason::Conceded,
+            &mut Vec::new(),
+        );
 
         assert!(state.active_ability_continuation().is_none());
         assert!(state.resolving_stack_entry.is_none());
@@ -2797,7 +3993,12 @@ mod tests {
         );
 
         let lifecycle = crate::game::lifecycle::enter_action_frame();
-        eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
+        eliminate_player(
+            &mut state,
+            PlayerId(0),
+            LossReason::Conceded,
+            &mut Vec::new(),
+        );
         let facts = lifecycle
             .take_outer_facts()
             .expect("outer elimination owns lifecycle facts");
@@ -2835,7 +4036,12 @@ mod tests {
         );
 
         let lifecycle = crate::game::lifecycle::enter_action_frame();
-        eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        eliminate_player(
+            &mut state,
+            PlayerId(1),
+            LossReason::Conceded,
+            &mut Vec::new(),
+        );
         let facts = lifecycle
             .take_outer_facts()
             .expect("outer elimination owns lifecycle facts");
@@ -2858,6 +4064,7 @@ mod tests {
     fn leaving_persisted_named_choice_player_abandons_the_whole_family() {
         let mut state = setup_three_player();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type: crate::types::ability::ChoiceType::Labeled {
@@ -2873,7 +4080,12 @@ mod tests {
             PlayerId(0),
         ));
 
-        eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        eliminate_player(
+            &mut state,
+            PlayerId(1),
+            LossReason::Conceded,
+            &mut Vec::new(),
+        );
 
         assert!(state.active_ability_continuation().is_none());
         assert!(matches!(
@@ -2916,7 +4128,12 @@ mod tests {
             PlayerId(0),
         ));
 
-        eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
+        eliminate_player(
+            &mut state,
+            PlayerId(0),
+            LossReason::Conceded,
+            &mut Vec::new(),
+        );
 
         assert!(state.active_ability_continuation().is_none());
         assert!(state.resolving_stack_entry.is_none());
@@ -2982,7 +4199,7 @@ mod tests {
         ));
         events.clear();
 
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         assert!(state.active_library_searches.get(&PlayerId(0)).is_none());
         assert!(state.active_search_decision_controls.is_empty());
@@ -3058,7 +4275,7 @@ mod tests {
                     controller: PlayerId(2)
                 }
             ));
-            eliminate_player(&mut state, PlayerId(2), &mut events);
+            eliminate_player(&mut state, PlayerId(2), LossReason::Conceded, &mut events);
             assert!(matches!(
                 state
                     .active_search_decision_controls
@@ -3073,7 +4290,7 @@ mod tests {
                 };
             }
 
-            eliminate_player(&mut state, PlayerId(1), &mut events);
+            eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
             assert!(state.active_library_searches.get(&PlayerId(0)).is_none());
             assert!(state.active_search_decision_controls.is_empty());
@@ -3118,7 +4335,12 @@ mod tests {
         );
         state.push_batch_delivery(batch);
 
-        eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        eliminate_player(
+            &mut state,
+            PlayerId(1),
+            LossReason::Conceded,
+            &mut Vec::new(),
+        );
 
         let phase_keys = match &state.pending_scoped_library_search.as_ref().unwrap().phase {
             crate::types::game_state::ScopedLibrarySearchPhase::Delivering { search_keys } => {
@@ -3150,7 +4372,7 @@ mod tests {
         let mut state = setup_two_player();
         let mut events = Vec::new();
 
-        eliminate_player(&mut state, PlayerId(0), &mut events);
+        eliminate_player(&mut state, PlayerId(0), LossReason::Conceded, &mut events);
 
         assert!(state.players[0].is_eliminated);
         assert!(matches!(
@@ -3465,6 +4687,7 @@ mod tests {
         state.extra_turns = vec![ExtraTurn {
             player: PlayerId(2),
             anchor: PlayerId(2),
+            id: ExtraTurnId(1),
         }];
         let queued_before = state.extra_turns.clone();
         let mut events = Vec::new();
@@ -3485,7 +4708,7 @@ mod tests {
         let mut state = setup_three_player();
         let mut events = Vec::new();
 
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         assert!(state.players[1].is_eliminated);
         assert!(events.iter().any(|e| matches!(
@@ -3503,8 +4726,8 @@ mod tests {
         let mut state = setup_three_player();
         let mut events = Vec::new();
 
-        eliminate_player(&mut state, PlayerId(1), &mut events);
-        eliminate_player(&mut state, PlayerId(2), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
+        eliminate_player(&mut state, PlayerId(2), LossReason::Conceded, &mut events);
 
         // Now only P0 remains — game over
         assert!(matches!(
@@ -3525,7 +4748,12 @@ mod tests {
         let mut state = setup_two_player();
         let mut events = Vec::new();
 
-        eliminate_players_simultaneously(&mut state, &[PlayerId(0), PlayerId(1)], &mut events);
+        eliminate_players_simultaneously(
+            &mut state,
+            &[PlayerId(0), PlayerId(1)],
+            LossReason::Conceded,
+            &mut events,
+        );
 
         assert!(
             matches!(state.waiting_for, WaitingFor::GameOver { winner: None }),
@@ -3540,7 +4768,12 @@ mod tests {
         let mut state = setup_two_player();
         let mut events = Vec::new();
 
-        eliminate_players_simultaneously(&mut state, &[PlayerId(1)], &mut events);
+        eliminate_players_simultaneously(
+            &mut state,
+            &[PlayerId(1)],
+            LossReason::Conceded,
+            &mut events,
+        );
 
         assert!(
             matches!(
@@ -3560,7 +4793,12 @@ mod tests {
         let mut state = setup_three_player();
         let mut events = Vec::new();
 
-        eliminate_players_simultaneously(&mut state, &[PlayerId(1), PlayerId(2)], &mut events);
+        eliminate_players_simultaneously(
+            &mut state,
+            &[PlayerId(1), PlayerId(2)],
+            LossReason::Conceded,
+            &mut events,
+        );
 
         assert!(
             matches!(
@@ -3582,6 +4820,7 @@ mod tests {
         eliminate_players_simultaneously(
             &mut state,
             &[PlayerId(0), PlayerId(1), PlayerId(2)],
+            LossReason::Conceded,
             &mut events,
         );
 
@@ -3617,7 +4856,7 @@ mod tests {
         });
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(0), &mut events);
+        eliminate_player(&mut state, PlayerId(0), LossReason::Conceded, &mut events);
 
         assert!(state.stack.is_empty());
     }
@@ -3634,7 +4873,7 @@ mod tests {
         );
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         // Permanent should be exiled, not on battlefield
         assert!(!state.battlefield.contains(&id));
@@ -3660,7 +4899,7 @@ mod tests {
         );
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         assert!(
             !state.players[1].graveyard.contains(&graveyard_id),
@@ -3718,7 +4957,7 @@ mod tests {
         assert!(state.pending_cast.is_some());
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         assert!(
             state.pending_cast.is_none(),
@@ -3734,7 +4973,7 @@ mod tests {
         stash_pending_cast(&mut state, PlayerId(0));
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         assert!(
             state.pending_cast.is_some(),
@@ -3873,11 +5112,13 @@ mod tests {
 
         // Parked OBJECT-REFERENTIAL replacement: affected_player reads O's controller.
         state.pending_replacement = Some(PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::AddCounter {
                 placement: CounterPlacement::Object {
                     actor: PlayerId(2),
                     object_id: o,
                     counter_type: CounterType::Plus1Plus1,
+                    cause: CounterCause::Other,
                 },
                 count: 1,
                 applied: HashSet::new(),
@@ -3885,10 +5126,10 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -3968,7 +5209,12 @@ mod tests {
         let mut events = Vec::new();
         // Real path: X (P1) and C (P2) leave in the SAME simultaneous SBA event
         // (losers sorted by id -> [P1, P2] -> do_eliminate(P1) then do_eliminate(P2)).
-        eliminate_players_simultaneously(&mut state, &[PlayerId(1), PlayerId(2)], &mut events);
+        eliminate_players_simultaneously(
+            &mut state,
+            &[PlayerId(1), PlayerId(2)],
+            LossReason::Conceded,
+            &mut events,
+        );
 
         assert!(state.players[1].is_eliminated && state.players[2].is_eliminated);
         // Gap 1 core (revert-failing vs the affected_player key): the parked choice
@@ -4021,6 +5267,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.pending_replacement = Some(PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
@@ -4030,10 +5277,10 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -4060,7 +5307,12 @@ mod tests {
             applied: HashSet::new(),
         });
 
-        eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
+        eliminate_player(
+            &mut state,
+            PlayerId(0),
+            LossReason::Conceded,
+            &mut Vec::new(),
+        );
 
         assert!(state.active_connive_reentry().is_none());
     }
@@ -4077,6 +5329,7 @@ mod tests {
         );
         state.pending_search_found_batch = Some(pending_search_found_batch(PlayerId(0), found));
         state.pending_replacement = Some(PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::SearchFound {
                 searcher: PlayerId(0),
                 library_owner: Some(PlayerId(0)),
@@ -4087,10 +5340,10 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -4112,7 +5365,12 @@ mod tests {
         state.push_batch_delivery(pending_search_found_zone_delivery(found));
         assert!(state.active_batch_delivery().is_some());
 
-        eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
+        eliminate_player(
+            &mut state,
+            PlayerId(0),
+            LossReason::Conceded,
+            &mut Vec::new(),
+        );
 
         assert!(state.pending_replacement.is_none());
         assert!(state.pending_search_found_batch.is_none());
@@ -4127,6 +5385,7 @@ mod tests {
 
         // Chooser C = P0 (survivor). Player-keyed parked Draw.
         state.pending_replacement = Some(PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
@@ -4136,10 +5395,10 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -4164,7 +5423,12 @@ mod tests {
         state.push_batch_delivery(pending_search_found_zone_delivery(parked_found));
 
         let mut events = Vec::new();
-        eliminate_players_simultaneously(&mut state, &[PlayerId(1)], &mut events);
+        eliminate_players_simultaneously(
+            &mut state,
+            &[PlayerId(1)],
+            LossReason::Conceded,
+            &mut events,
+        );
 
         assert!(state.players[1].is_eliminated);
         assert!(!state.players[0].is_eliminated);
@@ -4206,6 +5470,7 @@ mod tests {
     fn opponent_leaving_preserves_living_choosers_draw_replacement() {
         let mut state = setup_three_player();
         state.pending_replacement = Some(PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
                 count: 1,
@@ -4215,10 +5480,10 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -4272,7 +5537,12 @@ mod tests {
         let paired_stack_before = serde_json::to_value(&state.resolution_stack)
             .expect("the paired resolution stack serializes");
 
-        eliminate_players_simultaneously(&mut state, &[PlayerId(1)], &mut Vec::new());
+        eliminate_players_simultaneously(
+            &mut state,
+            &[PlayerId(1)],
+            LossReason::Conceded,
+            &mut Vec::new(),
+        );
 
         assert!(state.pending_replacement.is_some());
         let survivor = state
@@ -4324,13 +5594,23 @@ mod tests {
             convoked_creatures: vec![],
         });
 
-        eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        eliminate_player(
+            &mut state,
+            PlayerId(1),
+            LossReason::Conceded,
+            &mut Vec::new(),
+        );
         assert!(
             state.active_spell_resolution().is_some(),
             "an opponent leaving must not tear down the living player's active spell frame"
         );
 
-        eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
+        eliminate_player(
+            &mut state,
+            PlayerId(0),
+            LossReason::Conceded,
+            &mut Vec::new(),
+        );
         assert!(
             state.active_spell_resolution().is_none(),
             "the leaving controller's active spell frame must be torn down"
@@ -4381,14 +5661,14 @@ mod tests {
             convoked_creatures: vec![],
         });
 
-        eliminate_player(&mut state, thief, &mut Vec::new());
+        eliminate_player(&mut state, thief, LossReason::Conceded, &mut Vec::new());
         assert!(
             state.active_spell_resolution().is_some(),
             "the THIEF leaving must not tear down the frame — CR 800.4a ends the control \
              effect and the spell reverts to its caster and keeps resolving"
         );
 
-        eliminate_player(&mut state, caster, &mut Vec::new());
+        eliminate_player(&mut state, caster, LossReason::Conceded, &mut Vec::new());
         assert!(
             state.active_spell_resolution().is_none(),
             "the CASTER leaving must tear the frame down, or it dangles past the object"
@@ -4400,11 +5680,11 @@ mod tests {
         let mut state = setup_three_player();
         let mut events = Vec::new();
 
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
         let event_count = events.len();
 
         // Try to eliminate again
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         // No new events should be emitted
         assert_eq!(events.len(), event_count);
@@ -4418,10 +5698,10 @@ mod tests {
         let mut events = Vec::new();
 
         // Eliminate P1 and P2 simultaneously
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
         // After P1 eliminated, game still goes (P0 and P2 alive)
         // Now eliminate P2
-        eliminate_player(&mut state, PlayerId(2), &mut events);
+        eliminate_player(&mut state, PlayerId(2), LossReason::Conceded, &mut events);
 
         assert!(state.players[1].is_eliminated);
         assert!(state.players[2].is_eliminated);
@@ -4438,7 +5718,7 @@ mod tests {
         let mut state = setup_archenemy();
         let mut events = Vec::new();
 
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         assert!(state.players[1].is_eliminated);
         assert!(!state.players[2].is_eliminated);
@@ -4451,9 +5731,9 @@ mod tests {
         let mut state = setup_archenemy();
         let mut events = Vec::new();
 
-        eliminate_player(&mut state, PlayerId(1), &mut events);
-        eliminate_player(&mut state, PlayerId(2), &mut events);
-        eliminate_player(&mut state, PlayerId(3), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
+        eliminate_player(&mut state, PlayerId(2), LossReason::Conceded, &mut events);
+        eliminate_player(&mut state, PlayerId(3), LossReason::Conceded, &mut events);
 
         assert!(matches!(
             state.waiting_for,
@@ -4469,7 +5749,7 @@ mod tests {
         state.archenemy = None;
         let mut events = Vec::new();
 
-        eliminate_player(&mut state, PlayerId(0), &mut events);
+        eliminate_player(&mut state, PlayerId(0), LossReason::Conceded, &mut events);
 
         assert!(matches!(
             state.waiting_for,
@@ -4487,7 +5767,7 @@ mod tests {
         let mut events = Vec::new();
 
         // Eliminate P0 (team A)
-        eliminate_player(&mut state, PlayerId(0), &mut events);
+        eliminate_player(&mut state, PlayerId(0), LossReason::Conceded, &mut events);
 
         // Both P0 and P1 (team A) should be eliminated
         assert!(state.players[0].is_eliminated);
@@ -4506,7 +5786,7 @@ mod tests {
         let mut events = Vec::new();
 
         // Eliminate P2 (team B)
-        eliminate_player(&mut state, PlayerId(2), &mut events);
+        eliminate_player(&mut state, PlayerId(2), LossReason::Conceded, &mut events);
 
         // Both P2 and P3 (team B) should be eliminated
         assert!(state.players[2].is_eliminated);
@@ -4521,12 +5801,127 @@ mod tests {
         ));
     }
 
+    fn player_losses_in(events: &[GameEvent]) -> Vec<(PlayerId, BTreeSet<LossReason>)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PlayerLost { player_id, reasons } => Some((*player_id, reasons.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 104.3 + CR 800.4: only a player still in the game leaves it, so only
+    /// they are recorded as losing.
+    #[test]
+    fn departure_records_only_living_players() {
+        let mut state = setup_three_player();
+        eliminate_player(
+            &mut state,
+            PlayerId(1),
+            LossReason::Conceded,
+            &mut Vec::new(),
+        );
+        let mut events = Vec::new();
+
+        let _ = eliminate_players(
+            &mut state,
+            &BTreeMap::from([
+                (PlayerId(1), BTreeSet::from([LossReason::LifeTotal])),
+                (PlayerId(2), BTreeSet::from([LossReason::Conceded])),
+            ]),
+            DepartureTriggers::ScannedByCaller,
+            &mut events,
+        );
+
+        assert_eq!(
+            player_losses_in(&events),
+            [(PlayerId(2), BTreeSet::from([LossReason::Conceded]))]
+        );
+    }
+
+    /// CR 810.8a: a Two-Headed Giant head leaves with its teammate, carrying the
+    /// teammate's reasons; a head met by both carries the union.
+    #[test]
+    fn departure_fold_unions_teammate_reasons() {
+        let mut state = setup_2hg();
+        let mut events = Vec::new();
+
+        let _ = eliminate_players(
+            &mut state,
+            &BTreeMap::from([
+                (PlayerId(2), BTreeSet::from([LossReason::Poison])),
+                (PlayerId(3), BTreeSet::from([LossReason::CommanderDamage])),
+            ]),
+            DepartureTriggers::ScannedByCaller,
+            &mut events,
+        );
+
+        let both = BTreeSet::from([LossReason::Poison, LossReason::CommanderDamage]);
+        assert_eq!(
+            player_losses_in(&events),
+            [(PlayerId(2), both.clone()), (PlayerId(3), both)]
+        );
+    }
+
+    /// CR 104.3e + CR 104.2b + CR 104.3f + CR 104.4a: an event's effect-stated outcomes settle
+    /// with every reason each loser has. A player an effect makes lose, whose opponent wins in
+    /// the same event, loses for both reasons; a winner who also lost to an effect loses
+    /// instead (CR 104.3f), and so gives no opponent an `OpponentWon` loss.
+    #[test]
+    fn settle_event_outcomes_unions_an_effect_loss_with_an_opponents_win() {
+        let mut state = setup_two_player();
+        let mut events = Vec::new();
+        settle_event_outcomes(
+            &mut state,
+            EventOutcomes {
+                losers: vec![PlayerId(1)],
+                winners: vec![PlayerId(0)],
+            },
+            &mut events,
+        );
+        // Reach-guard: the loser left the game.
+        assert!(state.players[1].is_eliminated);
+        assert!(!state.players[0].is_eliminated);
+        assert_eq!(
+            player_losses_in(&events),
+            [(
+                PlayerId(1),
+                BTreeSet::from([LossReason::EffectStatedLoss, LossReason::OpponentWon])
+            )]
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+
+        // CR 104.3f: a winner who is also an effect loser loses, and nobody loses to that win.
+        let mut state = setup_two_player();
+        let mut events = Vec::new();
+        settle_event_outcomes(
+            &mut state,
+            EventOutcomes {
+                losers: vec![PlayerId(0)],
+                winners: vec![PlayerId(0)],
+            },
+            &mut events,
+        );
+        assert!(state.players[0].is_eliminated);
+        assert!(!state.players[1].is_eliminated);
+        assert_eq!(
+            player_losses_in(&events),
+            [(PlayerId(0), BTreeSet::from([LossReason::EffectStatedLoss]))]
+        );
+    }
+
     #[test]
     fn eliminated_player_added_to_eliminated_list() {
         let mut state = setup_three_player();
         let mut events = Vec::new();
 
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         assert!(state.eliminated_players.contains(&PlayerId(1)));
     }
@@ -4541,7 +5936,7 @@ mod tests {
         state.monarch = Some(PlayerId(0));
         let mut events = Vec::new();
 
-        eliminate_player(&mut state, PlayerId(0), &mut events);
+        eliminate_player(&mut state, PlayerId(0), LossReason::Conceded, &mut events);
 
         // CR 725.4 + CR 103.1: active player is leaving, so reversed turn
         // order gives the monarch designation to P2, not physical-next P1.
@@ -4563,7 +5958,7 @@ mod tests {
         state.initiative = Some(PlayerId(1));
         let mut events = Vec::new();
 
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         // CR 726.4: Active player (P0) takes the initiative.
         assert_eq!(state.initiative, Some(PlayerId(0)));
@@ -4587,7 +5982,7 @@ mod tests {
         state.initiative = Some(PlayerId(0));
         let mut events = Vec::new();
 
-        eliminate_player(&mut state, PlayerId(0), &mut events);
+        eliminate_player(&mut state, PlayerId(0), LossReason::Conceded, &mut events);
 
         // CR 726.4: Active player is leaving, so next living player in turn order gets it.
         // P1 is next after P0 in a 3-player game.
@@ -4607,7 +6002,7 @@ mod tests {
         state.initiative = Some(PlayerId(0));
         let mut events = Vec::new();
 
-        eliminate_player(&mut state, PlayerId(0), &mut events);
+        eliminate_player(&mut state, PlayerId(0), LossReason::Conceded, &mut events);
 
         // CR 726.4: P1 is still alive, so they get initiative (game ends immediately after).
         assert_eq!(state.initiative, Some(PlayerId(1)));
@@ -4627,7 +6022,7 @@ mod tests {
         state.initiative = Some(PlayerId(0));
         let mut events = Vec::new();
 
-        eliminate_player(&mut state, PlayerId(0), &mut events);
+        eliminate_player(&mut state, PlayerId(0), LossReason::Conceded, &mut events);
 
         // CR 726.4 + CR 103.1: active player is leaving, so reversed turn
         // order gives the initiative to P2, not physical-next P1.
@@ -4695,7 +6090,7 @@ mod tests {
         assert_eq!(controller_of(&state, o), PlayerId(1));
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         assert!(
             state.battlefield.contains(&o),
@@ -4746,7 +6141,7 @@ mod tests {
         assert_eq!(controller_of(&state, c), PlayerId(1));
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         assert!(state.exile.contains(&aura), "P1's Aura is owned-exiled");
         assert!(
@@ -4771,7 +6166,7 @@ mod tests {
         assert_eq!(controller_of(&state, o2), PlayerId(0));
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         assert!(
             state.exile.contains(&o),
@@ -4818,7 +6213,7 @@ mod tests {
         assert_eq!(controller_of(&state, o), PlayerId(1));
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         assert!(
             state.exile.contains(&o),
@@ -4847,7 +6242,7 @@ mod tests {
         assert!(!state.objects.get(&id).unwrap().is_phased_in());
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         assert!(
             !state.battlefield.contains(&id),
@@ -4872,7 +6267,7 @@ mod tests {
         let tce_count_before = state.transient_continuous_effects.len();
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(2), &mut events);
+        eliminate_player(&mut state, PlayerId(2), LossReason::Conceded, &mut events);
 
         assert!(state.battlefield.contains(&own));
         assert_eq!(controller_of(&state, own), PlayerId(0));
@@ -4905,7 +6300,12 @@ mod tests {
         );
 
         let mut events = Vec::new();
-        eliminate_players_simultaneously(&mut state, &[PlayerId(0), PlayerId(1)], &mut events);
+        eliminate_players_simultaneously(
+            &mut state,
+            &[PlayerId(0), PlayerId(1)],
+            LossReason::Conceded,
+            &mut events,
+        );
 
         assert!(state.exile.contains(&o0));
         assert!(state.exile.contains(&o1));
@@ -4930,7 +6330,12 @@ mod tests {
         assert_eq!(controller_of(&state, s), PlayerId(2));
 
         let mut events = Vec::new();
-        eliminate_players_simultaneously(&mut state, &[PlayerId(1), PlayerId(2)], &mut events);
+        eliminate_players_simultaneously(
+            &mut state,
+            &[PlayerId(1), PlayerId(2)],
+            LossReason::Conceded,
+            &mut events,
+        );
 
         assert!(
             state.battlefield.contains(&s),
@@ -4974,7 +6379,7 @@ mod tests {
         );
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(&mut state, PlayerId(1), LossReason::Conceded, &mut events);
 
         // The survivor-owned, phased-out permanent must NOT be over-exiled by the
         // step-4 sweep: it stays frozen on the battlefield (CR 702.26b) and will
@@ -5029,7 +6434,7 @@ mod tests {
             });
         let mut events = Vec::new();
 
-        eliminate_player(&mut state, controller, &mut events);
+        eliminate_player(&mut state, controller, LossReason::Conceded, &mut events);
 
         assert_eq!(
             state.turn_decision_controller, None,

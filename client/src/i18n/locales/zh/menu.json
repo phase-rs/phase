@@ -26,7 +26,8 @@
   "home": {
     "resume": {
       "title": "继续对局",
-      "description": "从最近保存的对局的当前回合与场面状态继续。"
+      "description": "从最近保存的对局的当前回合与场面状态继续。",
+      "viewResult": "查看结果"
     },
     "setup": {
       "title": "与 AI 对战",
@@ -157,6 +158,7 @@
     "subscribe": "订阅",
     "unsubscribe": "取消订阅",
     "lastRefreshed": "上次刷新：{{date}}",
+    "dataProvidedBy": "数据提供：",
     "addCustomFeed": "添加自定义订阅源",
     "add": "添加",
     "offlineUnavailable": "离线时无法更新订阅源。",

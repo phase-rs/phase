@@ -21,7 +21,7 @@ import {
   resolveSingleActionDispatch,
 } from "../../viewmodel/cardActionChoice.ts";
 import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
-import { commandZoneConspiracies, commandZoneLeaders } from "../../viewmodel/commanderColumn.ts";
+import { commandZoneBosses, commandZoneConspiracies, commandZoneLeaders } from "../../viewmodel/commanderColumn.ts";
 import { CardArtFallback } from "../card/CardArtFallback.tsx";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
@@ -476,6 +476,115 @@ function ConspiracyCard({
       {/* Actionable glow ring */}
       {canTurnFaceUp && (
         <div className={`absolute inset-0 rounded-lg ${CASTABLE_AFFORDANCE_ACTIVE}`} />
+      )}
+    </motion.button>
+  );
+}
+
+interface BossCardZoneProps {
+  playerId: PlayerId;
+  splitOverview?: boolean;
+}
+
+/**
+ * Renders this Horde seat's deployed Bosses in the command zone — the live
+ * stage's Boss cards with their own token art, so every deployed Boss
+ * (including the second and third of a multi-Boss stage) is visible, not
+ * just the seat portrait's representative. The engine selects the set
+ * (`derived.horde.deployed_boss_ids`); the face-down Boss pile never renders.
+ * Display-only: grafted Boss abilities are statics and triggers, and Bosses
+ * cannot be cast, so no action affordances apply.
+ */
+export function BossCardZone({ playerId, splitOverview = false }: BossCardZoneProps) {
+  const gameState = useGameStore((s) => s.gameState);
+
+  const bosses = useMemo(
+    () => (gameState ? commandZoneBosses(gameState, playerId) : []),
+    [gameState, playerId],
+  );
+
+  if (bosses.length === 0) return null;
+
+  return (
+    <div className="flex flex-row items-end gap-1">
+      {bosses.map((boss) => (
+        <BossCard key={boss.id} boss={boss} splitOverview={splitOverview} />
+      ))}
+    </div>
+  );
+}
+
+function BossCard({
+  boss,
+  splitOverview,
+}: {
+  boss: GameObject;
+  splitOverview: boolean;
+}) {
+  const { t } = useTranslation("game");
+  const displayName = useLocalizedCardName(boss.name) ?? boss.name;
+  const inspectObject = useUiStore((s) => s.inspectObject);
+  const imageProps = objectImageProps(boss);
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(imageProps.cardName, {
+    size: "normal",
+    faceIndex: imageProps.faceIndex,
+    isToken: imageProps.isToken,
+    tokenFilters: imageProps.tokenFilters,
+    tokenImageRef: imageProps.tokenImageRef,
+    oracleId: imageProps.oracleId,
+    faceName: imageProps.faceName,
+    ownerPrinting: imageProps.ownerPrinting,
+  });
+  const { handlers: hoverHandlers, firedRef } = useCardHover(boss.id);
+
+  return (
+    <motion.button
+      type="button"
+      {...hoverHandlers}
+      onClick={(e) => {
+        if (firedRef.current) return;
+        if (useUiStore.getState().debugInteractionMode) {
+          e.stopPropagation();
+          useUiStore.getState().openDebugContextMenu({
+            objectId: boss.id,
+            x: e.clientX,
+            y: e.clientY,
+            surface: "game",
+          });
+          return;
+        }
+        inspectObject(boss.id);
+      }}
+      data-object-id={boss.id}
+      className="group relative cursor-default"
+      title={t("zone.bossTitle", { name: displayName })}
+      style={{ width: "var(--card-w)", height: "var(--card-h)" }}
+    >
+      {/* Card image */}
+      <div className="relative h-full w-full overflow-hidden rounded-lg border border-rose-400/60 shadow-md">
+        {isLoading ? (
+          <div className="h-full w-full animate-pulse bg-gray-700" />
+        ) : src ? (
+          <img
+            src={src}
+            {...getCardImageSrcSetProps(src, rungs)}
+            alt={displayName}
+            className="h-full w-full object-cover"
+            draggable={false}
+            onError={() => advanceFailedSource?.(src)}
+          />
+        ) : (
+          <CardArtFallback name={displayName} variant="artCrop" className="h-full w-full" />
+        )}
+
+        <div className="absolute inset-0 bg-gray-900/50 transition-colors" />
+      </div>
+
+      {/* Boss badge */}
+      {!splitOverview && (
+        <div className="absolute -top-1 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-sm bg-rose-800 px-1.5 py-px text-[8px] font-bold text-rose-100 shadow">
+          {t("zone.boss")}
+        </div>
       )}
     </motion.button>
   );

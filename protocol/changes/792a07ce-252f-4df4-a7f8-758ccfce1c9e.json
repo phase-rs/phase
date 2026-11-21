@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CounterAddedRecord gains the optional recipient incarnation (absent on legacy saves) so counters-put-this-turn filters ignore a re-entered object (CR 400.7)"
+}

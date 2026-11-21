@@ -2,11 +2,14 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import type {
+  ChallengeDeck,
   GameFormat,
+  LoopDetectionMode,
   MatchType,
   PhaseStop,
   PriorityPassingMode,
 } from "../adapter/types";
+import { DEFAULT_CHALLENGE_DECK } from "../data/challengeDeckRegistry";
 import type { CommanderBracket } from "../types/bracket";
 import type { SortKey } from "../components/modal/cardChoice/gridSelection";
 import {
@@ -334,6 +337,7 @@ function buildDefaultPreferences(): PreferencesState {
     multiplayerSplitLayoutNudgeDismissed: true,
     aiSeats: [defaultAiSeat()],
     cedhMode: false,
+    hordeChallengeDeck: DEFAULT_CHALLENGE_DECK,
     draftPickEnhancements: false,
     aiArchetypeFilter: "Any",
     aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
@@ -342,6 +346,7 @@ function buildDefaultPreferences(): PreferencesState {
     aiPoolSelection: emptyPoolSelection(),
     lastFormat: null,
     lastMatchType: "Bo1",
+    lastLoopDetection: { type: "Off" },
     lastPlayerCount: 2,
     dismissedFlowHelpNudge: false,
     dismissedSandboxToolsNudge: false,
@@ -379,7 +384,9 @@ interface PreferencesState {
   phaseStops: PhaseStop[];
   priorityPassingMode: PriorityPassingMode;
   /** Glow the turn-status pill and pass button (stronger once unanswered) when
-   *  a meaningful priority window opens after you were waiting on someone else. */
+   *  a meaningful priority window opens after you were waiting on someone else,
+   *  and pulse the pill's border while the decision is yours (the border stays,
+   *  static, when this is off). */
   priorityAlertVisual: boolean;
   /** Play a short cue when a meaningful priority window opens. */
   priorityAlertSound: boolean;
@@ -461,6 +468,10 @@ interface PreferencesState {
    *  pools are restricted to bracket-5 decks. cEDH is a table property, not a
    *  per-seat difficulty — see `effectiveAiDifficulty` in `services/cedhLock`. */
   cedhMode: boolean;
+  /** Which self-piloting Horde deck the survivors face in a `Horde` game. The
+   *  engine's `ChallengeDeck::registry()` (mirrored in `challengeDeckRegistry`)
+   *  is the source of truth for which decks exist; this only remembers the pick. */
+  hordeChallengeDeck: ChallengeDeck;
   /** Draft bots (Medium and above) apply the built-in per-format draft guides
    *  to their picks. Off by default; formats without a guide are unaffected. */
   draftPickEnhancements: boolean;
@@ -475,6 +486,7 @@ interface PreferencesState {
   aiPoolSelection: RandomPoolSelection;
   lastFormat: GameFormat | null;
   lastMatchType: MatchType;
+  lastLoopDetection: LoopDetectionMode;
   lastPlayerCount: number;
   dismissedFlowHelpNudge: boolean;
   dismissedSandboxToolsNudge: boolean;
@@ -560,6 +572,8 @@ interface PreferencesActions {
   ensureAiSeatCount: (count: number) => void;
   /** Toggle the table-wide cEDH mode (all AI play cEDH, deck pools → bracket 5). */
   setCedhMode: (enabled: boolean) => void;
+  /** Remember which Horde challenge deck the survivors face. */
+  setHordeChallengeDeck: (deck: ChallengeDeck) => void;
   setDraftPickEnhancements: (enabled: boolean) => void;
   setAiArchetypeFilter: (filter: AiArchetypeFilter) => void;
   setAiCoverageFloor: (floor: number) => void;
@@ -568,6 +582,7 @@ interface PreferencesActions {
   setAiPoolSelection: (selection: RandomPoolSelection) => void;
   setLastFormat: (format: GameFormat) => void;
   setLastMatchType: (matchType: MatchType) => void;
+  setLastLoopDetection: (mode: LoopDetectionMode) => void;
   setLastPlayerCount: (count: number) => void;
   setDismissedFlowHelpNudge: (dismissed: boolean) => void;
   setDismissedSandboxToolsNudge: (dismissed: boolean) => void;
@@ -763,6 +778,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           return { aiSeats: grown };
         }),
       setCedhMode: (enabled) => set({ cedhMode: enabled }),
+      setHordeChallengeDeck: (deck) => set({ hordeChallengeDeck: deck }),
       setDraftPickEnhancements: (enabled) => set({ draftPickEnhancements: enabled }),
       setAiArchetypeFilter: (filter) => set({ aiArchetypeFilter: filter }),
       setAiCoverageFloor: (floor) => set({ aiCoverageFloor: floor }),
@@ -771,6 +787,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setAiPoolSelection: (selection) => set({ aiPoolSelection: selection }),
       setLastFormat: (format) => set({ lastFormat: format }),
       setLastMatchType: (matchType) => set({ lastMatchType: matchType }),
+      setLastLoopDetection: (mode) => set({ lastLoopDetection: mode }),
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
       setDismissedFlowHelpNudge: (dismissed) => set({ dismissedFlowHelpNudge: dismissed }),
       setDismissedSandboxToolsNudge: (dismissed) => set({ dismissedSandboxToolsNudge: dismissed }),

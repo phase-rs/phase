@@ -119,6 +119,9 @@ pub(super) fn handle_ability_mode_choice(
                 modal,
                 mode_abilities,
                 indices,
+                // CR 603.3c: the `SelectModes` action seam finishes this
+                // construction, so it owns the span it emits (ConstructionSpanOwner::Finisher).
+                span_owner: triggers::ConstructionSpanOwner::Finisher,
             },
             events,
         )?;
@@ -160,8 +163,14 @@ fn remove_modal_trigger_with_no_mode(
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     super::engine::drop_mid_construction_pending_trigger(state);
-    triggers::drain_deferred_triggers_after_trigger_construction(state, events)
-        .unwrap_or(WaitingFor::Priority { player })
+    // CR 603.2c: reached only from the `SelectModes` action arm, so the drain's
+    // windows run on the action buffer and their ranges are claimed.
+    triggers::drain_on_action_buffer(
+        state,
+        events,
+        triggers::drain_deferred_triggers_after_trigger_construction,
+    )
+    .unwrap_or(WaitingFor::Priority { player })
 }
 
 struct ActivatedModeChoice {
@@ -575,6 +584,8 @@ struct TriggeredModeChoice {
     /// labels build from the same state as the slots (Finding 4).
     mode_abilities: Vec<crate::types::ability::AbilityDefinition>,
     indices: Vec<usize>,
+    /// CR 603.2c: who collects the span this construction's finisher emits.
+    span_owner: triggers::ConstructionSpanOwner,
 }
 
 /// CR 700.2b: the controller chooses the mode; "at random" fixes how it is
@@ -638,6 +649,10 @@ pub(super) fn resolve_random_modal_trigger(
             modal,
             mode_abilities,
             indices,
+            // CR 603.3c + CR 700.2b: the random mode is chosen inside the
+            // dispatch window, whose range collection owns the span and whose
+            // dispatcher places the queue (ConstructionSpanOwner::EnclosingWindow).
+            span_owner: triggers::ConstructionSpanOwner::EnclosingWindow,
         },
         events,
     )?;
@@ -674,9 +689,7 @@ fn carry_trigger_provenance(
     if let Some(origin) = &pending.may_trigger_origin {
         chosen.set_may_trigger_origin_recursive(origin.clone());
     }
-    if let Some(player) = pending.scoped_player {
-        chosen.set_scoped_player_recursive(player);
-    }
+    chosen.carry_player_binding_recursive(pending);
     if let Some(x) = pending.chosen_x {
         chosen.set_chosen_x_recursive(x);
     }
@@ -735,6 +748,7 @@ fn handle_triggered_mode_choice(
         modal,
         mode_abilities,
         indices,
+        span_owner,
     } = choice;
 
     let mut trigger = state
@@ -845,12 +859,13 @@ fn handle_triggered_mode_choice(
             // reverted at this call site.
             let mut resolved = trigger.ability.clone();
             assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
-            // CR 113.2c + CR 603.2 + CR 603.3b: `finalize_trigger_target_selection`
-            // already drains the deferred-trigger queue and surfaces the next
-            // WaitingFor if a sibling trigger needs input; use that result
-            // instead of falling through to Priority below.
+            // CR 113.2c + CR 603.2 + CR 603.3b: under `ConstructionSpanOwner::Finisher`,
+            // `finalize_trigger_target_selection` drains the deferred-trigger queue and
+            // surfaces the next WaitingFor if a sibling trigger needs input; under
+            // `EnclosingWindow` it does not drain (the enclosing dispatcher's end-of-batch
+            // drain places the queue). Use its result instead of falling through to Priority below.
             return Ok(engine_stack::finalize_trigger_target_selection(
-                state, trigger, resolved, events,
+                state, trigger, resolved, events, span_owner,
             ));
         } else {
             // CR 601.2c + CR 603.3d: Mode chosen but target choice still
@@ -943,17 +958,28 @@ fn handle_triggered_mode_choice(
             return Ok(WaitingFor::Priority { player });
         }
         priority::clear_priority_passes(state);
-        // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred behind this
-        // modal trigger so each independent instance reaches the stack
-        // (issue #416).
         debug_assert!(
             !triggers::is_pending_trigger_construction_active(state),
             "deferred-trigger drain entered with construction still active",
         );
-        if let Some(waiting_for) =
-            triggers::drain_deferred_triggers_after_trigger_construction(state, events)
-        {
-            return Ok(waiting_for);
+        match span_owner {
+            // CR 113.2c + CR 603.2 + CR 603.3b: Drain siblings deferred behind
+            // this modal trigger so each independent instance reaches the stack
+            // (issue #416). CR 603.2c: the windows of that drain run on the
+            // action buffer, so their ranges are claimed.
+            triggers::ConstructionSpanOwner::Finisher => {
+                if let Some(waiting_for) = triggers::drain_on_action_buffer(
+                    state,
+                    events,
+                    triggers::drain_deferred_triggers_after_trigger_construction,
+                ) {
+                    return Ok(waiting_for);
+                }
+            }
+            // CR 603.3b: inside a dispatch window, the enclosing dispatcher's
+            // end-of-batch drain places the queue after the batch's remaining
+            // siblings; no nested window runs inside this one.
+            triggers::ConstructionSpanOwner::EnclosingWindow => {}
         }
     }
 

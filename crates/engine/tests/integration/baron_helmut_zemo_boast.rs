@@ -122,6 +122,8 @@ fn exile_to_graveyard_redirect() -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 destination: Zone::Graveyard,
                 origin: None,
                 target: TargetFilter::SelfRef,

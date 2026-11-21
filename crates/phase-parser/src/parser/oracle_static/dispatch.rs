@@ -9,6 +9,7 @@ use super::{
     mana_transform::*, restriction::*, same_is_true::*, type_change::*,
 };
 use crate::parser::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
+use crate::types::ability::Designation;
 use crate::types::statics::ProhibitionScope;
 
 /// CR 201.5: Consume a self-reference subject — `~` (produced by
@@ -245,6 +246,17 @@ fn parse_during_their_untap_step_suffix(input: &str) -> OracleResult<'_, ()> {
         )),
     )
     .parse(input)
+}
+
+/// CR 611.3a: AND a split leading "As long as" gate with any gate the effect
+/// parser already set, so neither is lost.
+fn attach_leading_condition(def: &mut StaticDefinition, leading: StaticCondition) {
+    def.condition = Some(match def.condition.take() {
+        Some(existing) => StaticCondition::And {
+            conditions: vec![leading, existing],
+        },
+        None => leading,
+    });
 }
 
 /// CR 502.3 + CR 611.3a + CR 604.1: "[As long as <condition>, ]players can't
@@ -837,6 +849,37 @@ fn is_enforceable_continuous_static(def: &StaticDefinition) -> bool {
             .is_some_and(StaticCondition::contains_unrecognized)
 }
 
+/// CR 109.2a + CR 115.1: the subject a targeting prohibition ("<subject> can't be
+/// the target of ...") binds to, typed by the shared rule-static subject parser.
+/// `None` when the text before the prohibition is not a subject that parser
+/// types, so callers never default an unread subject to the source.
+fn cant_be_targeted_subject(tp: &TextPair<'_>) -> Option<TargetFilter> {
+    let (before, _, _) = nom_primitives::scan_preceded(tp.lower, |i: &str| {
+        alt((
+            tag("can't be the target"),
+            tag("can’t be the target"),
+            tag("cannot be the target"),
+            tag("can't be targeted"),
+            tag("can’t be targeted"),
+            tag("cannot be targeted"),
+        ))
+        .parse(i)
+    })?;
+    let subject = tp.original.get(..before.len())?.trim();
+    super::shared::parse_rule_static_subject_filter(subject)
+}
+
+/// Inert, coverage-visible gap for a targeting prohibition the engine cannot
+/// model (source-qualified, or a subject no building block types). Never
+/// defaults `affected` to the source for an unread subject.
+fn cant_be_targeted_gap(subject: Option<TargetFilter>, original: &str) -> StaticDefinition {
+    match subject {
+        Some(filter) => super::evasion::source_qualified_cant_be_targeted_gap(filter, original),
+        None => StaticDefinition::new(StaticMode::Other(original.to_string()))
+            .description(original.to_string()),
+    }
+}
+
 pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
@@ -1033,7 +1076,7 @@ pub(crate) fn parse_static_line_inner(
                             text: split.condition_text.clone(),
                         },
                     );
-                    def.condition = Some(condition);
+                    attach_leading_condition(&mut def, condition);
                     def.description = Some(text.to_string());
                     return Some(def);
                 }
@@ -1057,7 +1100,7 @@ pub(crate) fn parse_static_line_inner(
                             text: split.condition_text.clone(),
                         },
                     );
-                    def.condition = Some(condition);
+                    attach_leading_condition(&mut def, condition);
                     def.description = Some(text.to_string());
                     return Some(def);
                 }
@@ -1094,7 +1137,7 @@ pub(crate) fn parse_static_line_inner(
                             text: split.condition_text.clone(),
                         },
                     );
-                    def.condition = Some(condition);
+                    attach_leading_condition(&mut def, condition);
                     def.description = Some(text.to_string());
                     return Some(def);
                 }
@@ -1447,6 +1490,38 @@ pub(crate) fn parse_static_line_inner(
                     StaticDefinition::continuous()
                         .affected(TargetFilter::Typed(tf))
                         .modifications(vec![ContinuousModification::ChangeController])
+                        .description(text.to_string()),
+                );
+            }
+        }
+    }
+
+    // --- "The monarch controls enchanted creature" (Fealty to the Realm pattern) ---
+    // CR 303.4e + CR 613.1b + CR 725.5: Aura-based DESIGNATION-anchored
+    // control. Structural twin of the Control Magic arm above — same affected
+    // filter (`parse_type_phrase_folding` + `EnchantedBy`, so any future
+    // "monarch controls enchanted X" printing parses with no new code), but
+    // the controller source is the live monarch
+    // (`ChangeControllerToDesignation`), not the Aura's controller.
+    // Fail-closed: a non-empty remainder (extra clause after the type phrase)
+    // falls through to honest-Unimplemented, never a partial control grant.
+    if let Some(type_word) = nom_tag_lower(
+        tp.lower.trim_end_matches('.'),
+        tp.lower.trim_end_matches('.'),
+        "the monarch controls enchanted ",
+    ) {
+        let (type_filter, remainder) = parse_type_phrase_folding(type_word);
+        if remainder.is_empty() {
+            if let TargetFilter::Typed(mut tf) = type_filter {
+                tf.properties.push(FilterProp::EnchantedBy);
+                return Some(
+                    StaticDefinition::continuous()
+                        .affected(TargetFilter::Typed(tf))
+                        .modifications(vec![
+                            ContinuousModification::ChangeControllerToDesignation {
+                                designation: Designation::Monarch,
+                            },
+                        ])
                         .description(text.to_string()),
                 );
             }
@@ -2854,28 +2929,42 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
-    // --- "~ can't be the target" or "~ can't be targeted" ---
-    // CR 702.18a / 702.11a: these descriptive phrasings ARE Shroud / Hexproof.
-    if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(tp.lower) {
-        return Some(match scope {
-            // CR 702.11a: "... your opponents control" — grant Hexproof so the
-            // permanent's own controller can still target it.
-            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
-                StaticDefinition::continuous()
-                    .affected(TargetFilter::SelfRef)
-                    .modifications(vec![ContinuousModification::AddKeyword {
-                        keyword: Keyword::Hexproof,
-                    }])
-                    .description(text.to_string())
-            }
-            // CR 702.18a: blanket — can't be targeted by any player. Enforced in
-            // `targeting.rs::can_target` via the object's active static definitions.
-            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
-                StaticDefinition::new(StaticMode::CantBeTargeted)
-                    .affected(TargetFilter::SelfRef)
-                    .description(text.to_string())
-            }
-        });
+    // --- "<subject> can't be the target" or "<subject> can't be targeted" ---
+    // CR 109.2a + CR 115.1: the prohibition binds the subject it names, not the
+    // source: `affected` is the parsed subject (`~` / "this creature" -> SelfRef,
+    // "creatures you control" -> its typed filter). A subject no existing
+    // building block types (Tomik's two-zone "lands on the battlefield and land
+    // cards in graveyards") makes the line an explicit, inert coverage gap rather
+    // than a prohibition stamped on the source.
+    if nom_primitives::scan_contains(tp.lower, "be the target")
+        || nom_primitives::scan_contains(tp.lower, "be targeted")
+    {
+        let subject = cant_be_targeted_subject(&tp);
+        // CR 115.1: a source-kind / source-quality qualifier ("of spells", "of black
+        // or red spells your opponents control") is not expressible by
+        // `CantBeTargeted { who }`; fail closed rather than emit a blanket mode.
+        if crate::parser::oracle_keyword::is_source_qualified_cant_be_targeted(tp.lower) {
+            return Some(cant_be_targeted_gap(subject, &text));
+        }
+        // CR 702.18a / CR 702.11b / CR 109.5: Descriptive targeting prohibition.
+        if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(tp.lower) {
+            let Some(affected) = subject else {
+                return Some(cant_be_targeted_gap(None, &text));
+            };
+            let who = match scope {
+                crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+                    crate::types::statics::ProhibitionScope::Opponents
+                }
+                crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+                    crate::types::statics::ProhibitionScope::AllPlayers
+                }
+            };
+            return Some(
+                StaticDefinition::new(StaticMode::CantBeTargeted { who })
+                    .affected(affected)
+                    .description(text.to_string()),
+            );
+        }
     }
 
     // --- "~ can't be sacrificed" (CR 701.21) ---
@@ -3798,9 +3887,8 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // --- "You may cast [type] spells as though they had flash" (CR 601.3b / CR 702.8a) ---
-    // Emits `CastWithKeyword { Flash }` with the spell-type filter — the only
-    // static mode the flash-timing path (granted_spell_keywords) reads, and the
-    // one that preserves the "creature spells" restriction (issue #1957).
+    // Emits `CastWithFlash` with the spell-type filter, a timing permission read
+    // by `spell_has_effective_flash` that preserves the "creature spells" restriction.
     if let Some(def) = parse_cast_as_though_flash_static(&tp, &text) {
         return Some(def);
     }
@@ -3910,8 +3998,13 @@ pub(crate) fn parse_static_line_inner(
     //
     // Cause classification by phrasing:
     // - "being dealt damage causes" / "dealt damage causes" — Wayta, Trainer
-    //   Prodigy (ControlledCreatureDealtDamage).
+    //   Prodigy (ControlledCreature { DealtDamage }); "becoming the target of"
+    //   — Valiant Emberkin (BecameTarget); "dealing combat damage to a player
+    //   causes" — Felix Five-Boots (DealsCombatDamageToPlayer).
     // - "attacking causes" — Isshin, Two Heavens as One (CreatureAttacking).
+    // - "you gaining life causes" / "a player drawing a card causes" — Dr.
+    //   Beverly Crusher, Krang, the All-Powerful (PlayerAction); "turning a
+    //   face-down permanent face up causes" — Panoptic Projektor (TurnedFaceUp).
     // - "entering" / "enters the battlefield" / "enters" — Panharmonicon-class
     //   (EntersBattlefield). Panharmonicon itself names "artifact or creature
     //   entering", so both CoreTypes qualify; narrower wordings ("creature
@@ -3953,14 +4046,40 @@ pub(crate) fn parse_static_line_inner(
             }
             // An unqualified "a spell" leaves core_types empty = any spell.
             TriggerCause::ControllerCastOrCopiedSpell { core_types }
+        } else if nom_primitives::scan_contains(tp.lower, "becoming the target of") {
+            // CR 603.2d + CR 115.1: "a creature you control becoming the target
+            // of a spell or ability causes" (Valiant Emberkin).
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::BecameTarget,
+            }
+        } else if nom_primitives::scan_contains(
+            tp.lower,
+            "a creature you control dealing combat damage to a player causes",
+        ) {
+            // CR 603.2d + CR 510.2: "a creature you control dealing combat
+            // damage to a player causes" (Felix Five-Boots).
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealsCombatDamageToPlayer,
+            }
         } else if nom_primitives::scan_contains(tp.lower, "being dealt damage causes")
             || nom_primitives::scan_contains(tp.lower, "dealt damage causes")
         {
-            TriggerCause::ControlledCreatureDealtDamage
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealtDamage,
+            }
         } else if nom_primitives::scan_contains(tp.lower, "attacking causes") {
             TriggerCause::CreatureAttacking
         } else if nom_primitives::scan_contains(tp.lower, "dying causes") {
             TriggerCause::CreatureDying
+        } else if let Some(cause) = parse_player_action_cause(tp.lower) {
+            cause
+        } else if nom_primitives::scan_preceded(tp.lower, |i| {
+            tag::<_, _, OracleError<'_>>("turning a face-down permanent face up causes ").parse(i)
+        })
+        .is_some()
+        {
+            // CR 116.2b + CR 708.8: Panoptic Projektor.
+            TriggerCause::TurnedFaceUp
         } else if let Some(cause) = parse_battlefield_transition_cause(tp.lower) {
             cause
         } else if nom_primitives::scan_contains(tp.lower, "entering")
@@ -3987,7 +4106,30 @@ pub(crate) fn parse_static_line_inner(
                 core_types.push(CoreType::Planeswalker);
             }
             // Empty core_types (e.g. "a permanent entering") means any type.
-            TriggerCause::EntersBattlefield { core_types }
+            // CR 603.2d: "another permanent entering" (The Fish Brewer) is not
+            // caused by the doubler's own entering.
+            let entrant = if tag::<_, _, OracleError<'_>>("if another ")
+                .parse(tp.lower)
+                .is_ok()
+            {
+                CausingObject::OtherThanDoubler
+            } else {
+                CausingObject::Any
+            };
+            TriggerCause::EntersBattlefield {
+                core_types,
+                entrant,
+            }
+        } else if nom_primitives::scan_preceded(tp.lower, |i| {
+            tag::<_, _, OracleError<'_>>("causes a triggered ability").parse(i)
+        })
+        .is_some()
+        {
+            // CR 603.2d: a printed cause clause no arm above types must not
+            // degrade to the unrestricted `Any`, which would double triggers
+            // the clause excludes (the doubler's own included). Decline so the
+            // line stays a flagged gap.
+            return None;
         } else {
             TriggerCause::Any
         };
@@ -4110,6 +4252,36 @@ fn parse_zone_change_qualifiers(lower: &str) -> Vec<ZoneChangeQualifier> {
         qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Planeswalker));
     }
     qualifiers
+}
+
+/// CR 603.2d: "<player> <action> causes" — a doubler's player-action cause:
+/// "you gaining life causes" (Dr. Beverly Crusher, CR 119.3) or "a player
+/// drawing a card causes" (Krang, the All-Powerful, CR 121.1). The player and
+/// the action are independent axes.
+fn parse_player_action_cause(lower: &str) -> Option<TriggerCause> {
+    let (_, (player, action), _) = nom_primitives::scan_preceded(lower, |i| {
+        terminated(
+            (
+                terminated(
+                    alt((
+                        value(
+                            PlayerRelation::Controller,
+                            tag::<_, _, OracleError<'_>>("you"),
+                        ),
+                        value(PlayerRelation::All, tag("a player")),
+                    )),
+                    tag(" "),
+                ),
+                alt((
+                    value(PlayerCauseAction::GainedLife, tag("gaining life")),
+                    value(PlayerCauseAction::DrewCard, tag("drawing a card")),
+                )),
+            ),
+            tag(" causes "),
+        )
+        .parse(i)
+    })?;
+    Some(TriggerCause::PlayerAction { player, action })
 }
 
 /// CR 603.6a + CR 603.6c: Parse Gandalf-class battlefield transition causes.

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Combat-damage batches that park mid-replacement now record each leg's progress (not yet proposed, settled, awaiting its chooser, or awaiting a continuation) so replacement choices surface in APNAP order of the actual chooser; the parked PendingCombatDamageReplacement shape changed (the separate unstarted queue is now the Unstarted leg state)"
+}

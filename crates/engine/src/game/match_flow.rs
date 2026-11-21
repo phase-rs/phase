@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use crate::game::deck_loading::{
-    hydrate_loaded_game_from_card_db, load_next_game_decks, rebind_retained_printings, DeckEntry,
-    DeckPayload, PlayerDeckPayload,
+    add_deck_copies, hydrate_loaded_game_from_card_db, load_next_game_decks,
+    rebind_retained_printings, DeckEntry, DeckPayload, PlayerDeckPayload,
 };
 use crate::types::events::GameEvent;
-use crate::types::format::SideboardPolicy;
+use crate::types::format::{CompanionSlot, SideboardPolicy};
 use crate::types::game_state::{GameState, PlayerDeckPool, WaitingFor};
 use crate::types::match_config::{
     DeckCardCount, MatchForfeitCause, MatchForfeitResult, MatchPhase, MatchType,
@@ -58,17 +58,29 @@ fn entries_to_count_map(entries: &[DeckEntry]) -> HashMap<String, u32> {
     map
 }
 
-/// Restores the single companion promoted from a normal-format sideboard to
-/// the editable current partition before a BetweenGames sideboard submission.
-/// Registered sideboards remain immutable: legal post-board swaps are kept in
-/// `current_main`/`current_sideboard` and only the revealed companion copy is
-/// returned (CR 400.11a).
+/// Projects every companion copy held outside the editable partitions back into
+/// `current_sideboard` before a BetweenGames sideboard submission, so the
+/// published `current_main` + `current_sideboard` is exactly the registered pool
+/// that `handle_submit_sideboard` checks against. Registered sideboards remain
+/// immutable: legal post-board swaps are kept in `current_main`/`current_sideboard`.
+///
+/// The commander family is untouched: its dedicated companion is an external
+/// slot that never joins a sideboard (CR 903.5e).
 fn restore_revealed_sideboard_companions(state: &mut GameState) {
-    if state.format_config.uses_commander {
-        return;
+    match state.format_config.companion_slot() {
+        CompanionSlot::CommanderFamily => return,
+        CompanionSlot::SideboardOnly | CompanionSlot::LimitedPool => {}
     }
 
+    // CR 100.4b: a Limited designation that was never revealed is a sideboard
+    // card. The reveal window normally released it already; a game conceded
+    // during the window did not get that far.
+    crate::game::companion::close_companion_reveals(state);
+
     for pool in &mut state.deck_pools {
+        // CR 400.11a + CR 100.4b: the revealed companion was one card from
+        // outside the game, either a sideboard card or a Limited designation,
+        // and both are sideboard cards between games.
         let Some(companion) = state
             .players
             .iter()
@@ -77,20 +89,11 @@ fn restore_revealed_sideboard_companions(state: &mut GameState) {
         else {
             continue;
         };
-        let name = &companion.card.card.name;
-        if !pool
-            .registered_sideboard
-            .iter()
-            .any(|entry| entry.card.name == *name)
-        {
-            continue;
-        }
-        let sideboard = std::sync::Arc::make_mut(&mut pool.current_sideboard);
-        if let Some(entry) = sideboard.iter_mut().find(|entry| entry.card.name == *name) {
-            entry.count += 1;
-        } else {
-            sideboard.push(companion.card.clone());
-        }
+        add_deck_copies(
+            std::sync::Arc::make_mut(&mut pool.current_sideboard),
+            &companion.card,
+            1,
+        );
     }
 }
 
@@ -130,6 +133,40 @@ fn build_card_face_map(pool: &PlayerDeckPool) -> HashMap<String, crate::types::c
     faces
 }
 
+fn companion_for_rebuild(pool: &PlayerDeckPool, companion_slot: CompanionSlot) -> Vec<DeckEntry> {
+    if companion_slot != CompanionSlot::LimitedPool {
+        return (*pool.registered_companion).clone();
+    }
+    // CR 100.4b + CR 702.139a/b: In Limited, the dedicated companion represents a physical
+    // card set aside from the pool outside the main deck. Count all copies of the designated
+    // companion across the registered pool (main + sideboard + companion) and subtract those
+    // committed to the current main deck. If no copy remains outside the main deck, suppress
+    // the outside-game companion designation.
+    let mut rebuilt = Vec::new();
+    for comp in pool.registered_companion.iter() {
+        let total_registered: u32 = pool
+            .registered_main
+            .iter()
+            .chain(pool.registered_sideboard.iter())
+            .chain(pool.registered_companion.iter())
+            .filter(|e| e.card.name == comp.card.name)
+            .map(|e| e.count)
+            .sum();
+        let in_current_main: u32 = pool
+            .current_main
+            .iter()
+            .filter(|e| e.card.name == comp.card.name)
+            .map(|e| e.count)
+            .sum();
+        if total_registered > in_current_main {
+            let mut entry = comp.clone();
+            entry.count = 1;
+            rebuilt.push(entry);
+        }
+    }
+    rebuilt
+}
+
 fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, String> {
     let p0 = state
         .deck_pools
@@ -144,8 +181,8 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
 
     // `PlayerDeckPayload`'s deck fields are plain `Vec<DeckEntry>` — deref
     // the Arc then deep-clone so the payload owns its own vec.
-    // Propagate `bracket_tier` so the pool rebuilt by `load_next_game_decks`
-    // in the next game carries the same declared tier as the current game.
+    // Propagate both bracket inputs and the printings record so the pool rebuilt by
+    // `load_next_game_decks` in the next game retains the same reconciled effective tier.
     //
     // Seats >= 2 are AI players (e.g., cEDH 4-player Bo3). Collect their pools
     // so `bracket_tier = Cedh` is not silently dropped between games.
@@ -153,6 +190,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
     // CR 100.4 + CR 203.1 + CR 206.1: each seat's retained printing rows are rebound to
     // the lists it plays next (`rebind_retained_printings`); the record itself is carried
     // by `load_next_game_decks`.
+    let companion_slot = state.format_config.companion_slot();
     let ai_decks = state
         .deck_pools
         .iter()
@@ -164,9 +202,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
                     main_deck: (*p.current_main).clone(),
                     sideboard: (*p.current_sideboard).clone(),
                     commander: (*p.current_commander).clone(),
-                    // Dedicated companions are rebuilt from their registered external
-                    // slot, never from the consumed current offer.
-                    companion: (*p.registered_companion).clone(),
+                    companion: companion_for_rebuild(p, companion_slot),
                     attraction_deck: Vec::new(),
                     planar_deck: Vec::new(),
                     scheme_deck: (*p.registered_scheme_deck).clone(),
@@ -179,6 +215,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
                         .unwrap_or_default(),
                     signature_spell: (*p.current_signature_spell).clone(),
                     bracket_tier: p.bracket_tier,
+                    estimated_bracket_tier: p.estimated_bracket_tier,
                     printings: Vec::new(),
                     printing_entry_names: Vec::new(),
                 },
@@ -193,7 +230,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
                 main_deck: (*p0.current_main).clone(),
                 sideboard: (*p0.current_sideboard).clone(),
                 commander: (*p0.current_commander).clone(),
-                companion: (*p0.registered_companion).clone(),
+                companion: companion_for_rebuild(p0, companion_slot),
                 attraction_deck: Vec::new(),
                 planar_deck: (*p0.registered_planar_deck).clone(),
                 scheme_deck: (*p0.registered_scheme_deck).clone(),
@@ -201,6 +238,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
                 sticker_sheets: state.players[0].sticker_sheets.clone(),
                 signature_spell: (*p0.current_signature_spell).clone(),
                 bracket_tier: p0.bracket_tier,
+                estimated_bracket_tier: p0.estimated_bracket_tier,
                 printings: Vec::new(),
                 printing_entry_names: Vec::new(),
             },
@@ -211,7 +249,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
                 main_deck: (*p1.current_main).clone(),
                 sideboard: (*p1.current_sideboard).clone(),
                 commander: (*p1.current_commander).clone(),
-                companion: (*p1.registered_companion).clone(),
+                companion: companion_for_rebuild(p1, companion_slot),
                 attraction_deck: Vec::new(),
                 planar_deck: Vec::new(),
                 scheme_deck: (*p1.registered_scheme_deck).clone(),
@@ -219,6 +257,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
                 sticker_sheets: state.players[1].sticker_sheets.clone(),
                 signature_spell: (*p1.current_signature_spell).clone(),
                 bracket_tier: p1.bracket_tier,
+                estimated_bracket_tier: p1.estimated_bracket_tier,
                 printings: Vec::new(),
                 printing_entry_names: Vec::new(),
             },
@@ -293,6 +332,25 @@ pub fn handle_game_over_transition(state: &mut GameState) {
     state.waiting_for = between_games_sideboard_prompt(state, PlayerId(0));
 }
 
+/// The game of the match whose position `state` holds: the game in progress,
+/// or, between games, the game that just ended.
+///
+/// `handle_game_over_transition` numbers the next game as soon as one ends,
+/// while the board and the log still hold the game that ended, and the
+/// decisions taken before the restart (the sideboarding, CR 100.4, and the
+/// loser's play/draw choice, CR 103.1) are made on that position. A match a
+/// game's end completes keeps that game's number. One a trusted forfeit
+/// completes between games
+/// (`apply_trusted_match_forfeit`) keeps the number of a game that never
+/// began, but no caller logs its events and a completed match asks no
+/// decision.
+pub fn game_on_board(state: &GameState) -> u8 {
+    match state.match_phase {
+        MatchPhase::InGame | MatchPhase::Completed => state.game_number,
+        MatchPhase::BetweenGames => state.game_number.saturating_sub(1),
+    }
+}
+
 /// Completes an unfinished two-seat best-of-three through a transport-trusted
 /// match forfeit. This is intentionally not a `GameAction`: callers must bind
 /// the forfeiting seat to authenticated transport identity before selecting the
@@ -336,6 +394,11 @@ pub fn apply_trusted_match_forfeit(
     state.waiting_for = WaitingFor::GameOver {
         winner: Some(winner),
     };
+
+    // The admitted, recorded match forfeit is a terminal authority of its own.
+    // Retire the abandoned resolution here, outside any active resolver, without
+    // manufacturing a game result or running the spell's remaining instructions.
+    super::elimination::retire_finished_game_resolution(state);
 
     // CR 104.1 + CR 723.1: a match forfeit does not go through
     // `elimination::end_game`, so it ends player control itself.
@@ -454,6 +517,9 @@ pub fn handle_submit_sideboard(
     let registered_pool_map = {
         let mut map = entries_to_count_map(&pool.registered_main);
         for (name, count) in entries_to_count_map(&pool.registered_sideboard) {
+            *map.entry(name).or_insert(0) += count;
+        }
+        for (name, count) in entries_to_count_map(&pool.registered_companion) {
             *map.entry(name).or_insert(0) += count;
         }
         map
@@ -621,12 +687,32 @@ pub fn handle_choose_play_draw(
     restart_between_games_with_starting_player(state, chooser, starting_player, events)
 }
 
+/// CR 103.1: the chooser decides which candidate takes the first turn. The
+/// chooser is latched as `next_game_chooser` first: if this game is a draw,
+/// the same player chooses again (CR 103.1). Game one runs in place; there is
+/// no between-games rebuild.
+pub fn handle_choose_starting_player(
+    state: &mut GameState,
+    chooser: PlayerId,
+    candidates: &[PlayerId],
+    chosen: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, String> {
+    if !candidates.contains(&chosen) {
+        return Err("Chosen player is not a candidate to take the first turn".to_string());
+    }
+    state.next_game_chooser = Some(chooser);
+    let start = super::engine::start_game_with_starting_player(state, chosen);
+    events.extend(start.events);
+    Ok(start.waiting_for)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::deck_loading::load_deck_into_state;
     use crate::game::deck_loading::PlayerDeckPayload;
-    use crate::game::engine::{apply_as_current, start_game};
+    use crate::game::engine::{apply_as_current, start_game, start_game_winner_plays_first};
     use crate::types::ability::ControlWindow;
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -670,6 +756,7 @@ mod tests {
             is_commander: false,
             is_oathbreaker: false,
             deck_copy_limit: None,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
@@ -1042,7 +1129,7 @@ mod tests {
     }
 
     #[test]
-    fn bo3_game_one_starter_is_randomized() {
+    fn bo3_game_one_chooser_is_randomized() {
         let mut saw_p0 = false;
         let mut saw_p1 = false;
 
@@ -1051,10 +1138,14 @@ mod tests {
             state.match_config.match_type = MatchType::Bo3;
             state.game_number = 1;
             let _ = start_game(&mut state);
-            if state.current_starting_player == PlayerId(0) {
+            // CR 103.1: the contest decides who chooses.
+            let WaitingFor::ChooseStartingPlayer { player, .. } = state.waiting_for else {
+                panic!("the start rests at the CR 103.1 choice");
+            };
+            if player == PlayerId(0) {
                 saw_p0 = true;
             }
-            if state.current_starting_player == PlayerId(1) {
+            if player == PlayerId(1) {
                 saw_p1 = true;
             }
             if saw_p0 && saw_p1 {
@@ -1086,7 +1177,7 @@ mod tests {
             ..Default::default()
         };
         load_deck_into_state(&mut state, &payload);
-        let _ = start_game(&mut state);
+        let _ = start_game_winner_plays_first(&mut state);
 
         state.match_phase = MatchPhase::BetweenGames;
         state.match_score = crate::types::match_config::MatchScore {
@@ -1170,8 +1261,8 @@ mod tests {
     }
 
     /// CR 732.2a opt-in persistence across the ENGINE between-games rebuild. A Bo3 match
-    /// created with the detector On (projected onto `loop_detection` by `set_match_config`)
-    /// must KEEP it On after `restart_between_games_with_starting_player` builds a fresh
+    /// created with the detector Interactive (projected onto `loop_detection` by
+    /// `set_match_config`) must KEEP it Interactive after `restart_between_games_with_starting_player` builds a fresh
     /// `GameState::new` for game 2. This guards the engine `match_flow` rebuild — distinct
     /// from the server-core `rebuild_pregame_state` path — which a raw `match_config = …`
     /// assignment silently drops, because a fresh `GameState::new` defaults the runtime
@@ -1179,7 +1270,7 @@ mod tests {
     ///
     /// REVERT-FAIL: change the rebuild back to `next_state.match_config = state.match_config;`
     /// ⇒ `next_state.loop_detection` stays at the `GameState::new` default Off and the
-    /// post-restart `On` assertion fails (the opt-in vanishes for game 2/3 of the match).
+    /// post-restart `Interactive` assertion fails (the opt-in vanishes for game 2/3 of the match).
     #[test]
     fn bo3_restart_preserves_loop_detection_opt_in() {
         use crate::types::game_state::LoopDetectionMode;
@@ -1188,10 +1279,10 @@ mod tests {
         let mut state = GameState::new_two_player(17);
         state.set_match_config(MatchConfig {
             match_type: MatchType::Bo3,
-            loop_detection: LoopDetectionMode::On,
+            loop_detection: LoopDetectionMode::Interactive,
         });
         // Creation-time projection holds for game 1.
-        assert_eq!(state.loop_detection, LoopDetectionMode::On);
+        assert_eq!(state.loop_detection, LoopDetectionMode::Interactive);
 
         let payload = DeckPayload {
             player: PlayerDeckPayload {
@@ -1209,7 +1300,7 @@ mod tests {
             ..Default::default()
         };
         load_deck_into_state(&mut state, &payload);
-        let _ = start_game(&mut state);
+        let _ = start_game_winner_plays_first(&mut state);
 
         // Drive to the between-games rebuild for game 2.
         state.match_phase = MatchPhase::BetweenGames;
@@ -1265,10 +1356,13 @@ mod tests {
         // ...and the detector opt-in survived the fresh-state rebuild.
         assert_eq!(
             state.loop_detection,
-            LoopDetectionMode::On,
+            LoopDetectionMode::Interactive,
             "detector opt-in must persist across the engine between-games rebuild"
         );
-        assert_eq!(state.match_config.loop_detection, LoopDetectionMode::On);
+        assert_eq!(
+            state.match_config.loop_detection,
+            LoopDetectionMode::Interactive
+        );
     }
 
     /// Debug capability must survive the ENGINE between-games rebuild, exactly
@@ -1315,7 +1409,7 @@ mod tests {
             ..Default::default()
         };
         load_deck_into_state(&mut state, &payload);
-        let _ = start_game(&mut state);
+        let _ = start_game_winner_plays_first(&mut state);
 
         state.match_phase = MatchPhase::BetweenGames;
         state.match_score = crate::types::match_config::MatchScore {
@@ -1405,7 +1499,7 @@ mod tests {
             ..Default::default()
         };
         load_deck_into_state(&mut state, &payload);
-        let _ = start_game(&mut state);
+        let _ = start_game_winner_plays_first(&mut state);
 
         state.match_phase = MatchPhase::BetweenGames;
         state.match_score = crate::types::match_config::MatchScore {
@@ -1482,19 +1576,19 @@ mod tests {
         state.deck_pools = vec![
             PlayerDeckPool {
                 player: PlayerId(0),
-                bracket_tier: CommanderBracketTier::Core,
+                bracket_tier: Some(CommanderBracketTier::Core),
                 current_main: std::sync::Arc::new(vec![entry("P0", 1)]),
                 ..Default::default()
             },
             PlayerDeckPool {
                 player: PlayerId(1),
-                bracket_tier: CommanderBracketTier::Optimized,
+                bracket_tier: Some(CommanderBracketTier::Optimized),
                 current_main: std::sync::Arc::new(vec![entry("P1", 1)]),
                 ..Default::default()
             },
             PlayerDeckPool {
                 player: PlayerId(2),
-                bracket_tier: CommanderBracketTier::Cedh,
+                bracket_tier: Some(CommanderBracketTier::Cedh),
                 current_main: std::sync::Arc::new(vec![entry("AI", 1)]),
                 ..Default::default()
             },
@@ -1505,7 +1599,7 @@ mod tests {
 
         assert_eq!(
             payload.player.bracket_tier,
-            CommanderBracketTier::Core,
+            Some(CommanderBracketTier::Core),
             "player seat bracket_tier must round-trip"
         );
         assert!(
@@ -1514,7 +1608,7 @@ mod tests {
         );
         assert_eq!(
             payload.opponent.bracket_tier,
-            CommanderBracketTier::Optimized,
+            Some(CommanderBracketTier::Optimized),
             "opponent seat bracket_tier must round-trip"
         );
         assert_eq!(
@@ -1524,8 +1618,49 @@ mod tests {
         );
         assert_eq!(
             payload.ai_decks[0].bracket_tier,
-            CommanderBracketTier::Cedh,
+            Some(CommanderBracketTier::Cedh),
             "AI seat bracket_tier (Cedh) must be propagated — not silently dropped"
+        );
+    }
+
+    #[test]
+    fn deck_payload_from_current_pools_propagates_estimated_bracket_tier() {
+        use crate::game::bracket_estimate::CommanderBracketTier;
+        use crate::types::game_state::PlayerDeckPool;
+
+        let mut state = GameState::new_two_player(42);
+        state.deck_pools = vec![
+            PlayerDeckPool {
+                player: PlayerId(0),
+                estimated_bracket_tier: Some(CommanderBracketTier::Upgraded),
+                ..Default::default()
+            },
+            PlayerDeckPool {
+                player: PlayerId(1),
+                estimated_bracket_tier: Some(CommanderBracketTier::Optimized),
+                ..Default::default()
+            },
+            PlayerDeckPool {
+                player: PlayerId(2),
+                estimated_bracket_tier: Some(CommanderBracketTier::Core),
+                ..Default::default()
+            },
+        ];
+
+        let payload = deck_payload_from_current_pools(&state)
+            .expect("deck_payload_from_current_pools must succeed with three pools");
+
+        assert_eq!(
+            payload.player.estimated_bracket_tier,
+            Some(CommanderBracketTier::Upgraded)
+        );
+        assert_eq!(
+            payload.opponent.estimated_bracket_tier,
+            Some(CommanderBracketTier::Optimized)
+        );
+        assert_eq!(
+            payload.ai_decks[0].estimated_bracket_tier,
+            Some(CommanderBracketTier::Core)
         );
     }
 
@@ -1546,10 +1681,7 @@ mod tests {
                     section: DeckSection::MainDeck,
                     name: name.clone(),
                     count: 2,
-                    printing: CardPrinting {
-                        set_code: format!("seat-{seat}"),
-                        collector_number: "1".to_string(),
-                    },
+                    printing: CardPrinting::owner(format!("seat-{seat}"), "1"),
                 };
                 let lookup =
                     DeckFaceLookupName::of(DeckSection::MainDeck, &basic_land(&name), name.clone());
@@ -1723,6 +1855,14 @@ mod tests {
         assert!(
             result.log_entries.iter().all(|entry| entry.turn <= 1),
             "a fresh game must not inherit the previous game's turn 73 context"
+        );
+        assert!(
+            !result.log_entries.is_empty()
+                && result
+                    .log_entries
+                    .iter()
+                    .all(|entry| entry.game_number == 2),
+            "the action that starts game two logs it in game two"
         );
     }
 }

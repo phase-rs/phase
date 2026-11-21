@@ -147,6 +147,7 @@ fn affinity_mirror_deck_activates_artifact_synergy() {
     let names = resolve_deck_ref(&spec.p0).expect("affinity-mirror p0 snapshot must resolve");
     let payload = resolve_player_deck_list(
         &db,
+        &engine::database::ComboTable::default(),
         &PlayerDeckList {
             main_deck: names,
             ..Default::default()
@@ -205,6 +206,7 @@ fn enchantress_mirror_deck_activates_enchantments_payoff() {
     let names = resolve_deck_ref(&spec.p0).expect("enchantress-mirror p0 snapshot must resolve");
     let payload = resolve_player_deck_list(
         &db,
+        &engine::database::ComboTable::default(),
         &PlayerDeckList {
             main_deck: names,
             ..Default::default()
@@ -263,6 +265,7 @@ fn greasefang_mirror_deck_activates_reanimator_payoff() {
     let names = resolve_deck_ref(&spec.p0).expect("greasefang-mirror p0 snapshot must resolve");
     let payload = resolve_player_deck_list(
         &db,
+        &engine::database::ComboTable::default(),
         &PlayerDeckList {
             main_deck: names,
             ..Default::default()
@@ -322,6 +325,7 @@ fn equipment_mirror_deck_activates_equipment_payoff() {
     let names = resolve_deck_ref(&spec.p0).expect("equipment-mirror p0 snapshot must resolve");
     let payload = resolve_player_deck_list(
         &db,
+        &engine::database::ComboTable::default(),
         &PlayerDeckList {
             main_deck: names,
             ..Default::default()
@@ -380,6 +384,7 @@ fn blink_mirror_deck_activates_blink_payoff() {
     let names = resolve_deck_ref(&spec.p0).expect("blink-mirror p0 snapshot must resolve");
     let payload = resolve_player_deck_list(
         &db,
+        &engine::database::ComboTable::default(),
         &PlayerDeckList {
             main_deck: names,
             ..Default::default()
@@ -438,6 +443,7 @@ fn mill_mirror_deck_activates_mill_payoff() {
     let names = resolve_deck_ref(&spec.p0).expect("mill-mirror p0 snapshot must resolve");
     let payload = resolve_player_deck_list(
         &db,
+        &engine::database::ComboTable::default(),
         &PlayerDeckList {
             main_deck: names,
             ..Default::default()
@@ -494,6 +500,7 @@ fn kaladesh_energy_deck_activates_energy_payoff() {
         resolve_deck_ref(&spec.p0).expect("kaladesh-energy-mirror p0 snapshot must resolve");
     let payload = resolve_player_deck_list(
         &db,
+        &engine::database::ComboTable::default(),
         &PlayerDeckList {
             main_deck: names,
             ..Default::default()

@@ -1,21 +1,101 @@
 {
   "bracket": {
+    "card": {
+      "estimatedLabel": "估算分级",
+      "tierName": "B{{tier}} {{label}}",
+      "tierShort": "B{{tier}}",
+      "declaredNone": "已声明：无",
+      "declared": "已声明：B{{tier}} {{label}}",
+      "youMarker": "你",
+      "belowFloor": "你声明了 B{{declared}}，但此套牌不能低于 B{{floor}}。AI 将按你声明的 B{{declared}} 游玩。",
+      "partialCoverage_one": "有 {{count}} 个卡名未找到；计数可能偏低",
+      "partialCoverage_few": "有 {{count}} 个卡名未找到；计数可能偏低",
+      "partialCoverage_many": "有 {{count}} 个卡名未找到；计数可能偏低",
+      "partialCoverage_other": "有 {{count}} 个卡名未找到；计数可能偏低",
+      "combosUnchecked": "此版本未检查二卡组合技。回答上方的组合技问题即可将其纳入。",
+      "tabsLabel": "分级详情",
+      "tabWhy": "为何是 B{{tier}}",
+      "tabBringDown": "如何降低",
+      "commanderTag": "指挥官",
+      "listComma": "、",
+      "listOr": "或",
+      "why": {
+        "nothingRaises": "此套牌中没有任何内容使其高于 B2，所有估算都从 B2 起步。",
+        "rulesOutB1": "以下原因使其无法声明 B1："
+      },
+      "reason": {
+        "cardRule": "{{axis}}：{{count}}",
+        "comboStandalone": "二卡组合技",
+        "comboEarly": "早期二卡组合技",
+        "ownerAnswer": "你的组合技回答",
+        "ownerIntended": "你表示此套牌有刻意构建的二卡组合技。",
+        "ownerIntendedEarly": "你表示此套牌有早期的二卡组合技。",
+        "ownerIntendedLate": "你表示此套牌有后期才能凑齐的二卡组合技。",
+        "comboFromTable": "（组合技）"
+      },
+      "combo": {
+        "assembles": "花费 {{cost}} 点法术力组装"
+      },
+      "explain": {
+        "cardRule": "B{{tier}} 最多允许 {{allowed}}；此套牌有 {{observed}}。",
+        "cardRuleNone": "B{{tier}} 不允许；此套牌有 {{observed}}。",
+        "comboStandalone": "B1 和 B2 不允许刻意构建的二卡无限组合技。",
+        "comboEarly": "B3 仅允许后期才能凑齐的二卡组合技（超过 {{ceiling}} 点法术力）。",
+        "ownerAnswer": "phase 无法核实此回答，将直接采用你的说法。可在上方的组合技问题中修改。"
+      },
+      "source": "{{document}}，{{published}} ↗",
+      "ladder": {
+        "removeAll_one": "移除它：",
+        "removeAll_few": "移除全部 {{count}} 张：",
+        "removeAll_many": "移除全部 {{count}} 张：",
+        "removeAll_other": "移除全部 {{count}} 张：",
+        "removeSome_one": "从以下牌中移除 {{count}} 张：",
+        "removeSome_few": "从以下牌中移除 {{count}} 张：",
+        "removeSome_many": "从以下牌中移除 {{count}} 张：",
+        "removeSome_other": "从以下牌中移除 {{count}} 张：",
+        "breakCombo": "拆掉组合技",
+        "removeOneOf": "移除以下其中一张：",
+        "removeThis": "移除：",
+        "replaceCommander_one": "要进一步降低，还需要更换指挥官：",
+        "replaceCommander_few": "要进一步降低，还需要更换指挥官（{{count}} 个）：",
+        "replaceCommander_many": "要进一步降低，还需要更换指挥官（{{count}} 个）：",
+        "replaceCommander_other": "要进一步降低，还需要更换指挥官（{{count}} 个）：",
+        "changeComboAnswer": "请在上方的问题中修改你的组合技回答。",
+        "footnote": "B2 是估算的最低值；B1 取决于套牌主题。"
+      }
+    },
     "aboutBrackets": "关于分级 ↗",
     "addCommander": "添加指挥官以查看分级估算。",
     "dataVersion": "数据：{{version}}",
-    "estimated": "估算：B{{tier}} {{label}}",
     "estimatedChip": "估算：B{{tier}}",
     "estimatedChipFull": "估算分级：B{{tier}} {{label}}",
-    "forced": "（强制 B{{tier}}）",
-    "hideBreakdown": "隐藏明细",
-    "hideBreakdownButton": "▲ 隐藏明细",
-    "manual": "手动：B{{tier}} {{label}}",
     "manualChip": "B{{tier}}",
     "manualChipFull": "申报分级：B{{tier}} {{label}}",
-    "mismatch": " ⚠ 不匹配",
-    "showBreakdown": "显示明细",
-    "showBreakdownButton": "▼ 显示明细",
-    "unavailable": "此版本不提供分级估算。"
+    "unavailable": "此版本不提供分级估算。",
+    "axis": {
+      "gameChangers": "改变局势牌",
+      "massLandDenial": "大规模地牌破坏",
+      "extraTurns": "额外回合",
+      "efficientTutors": "高效搜寻"
+    },
+    "combo": {
+      "attribution": "组合技数据：{{attribution}}，快照 {{date}}",
+      "outcome": {
+        "wins": "赢得游戏",
+        "unbounded": "无限{{resource}}"
+      },
+      "resource": {
+        "mana": "法术力",
+        "damage": "伤害",
+        "lifeLoss": "失去生命",
+        "lifegain": "获得生命",
+        "mill": "磨牌",
+        "draw": "抓牌",
+        "tokens": "衍生物",
+        "combat": "战斗阶段",
+        "turns": "回合"
+      }
+    }
   },
   "bracketPicker": {
     "ariaLabel": "套牌分级",
@@ -299,5 +379,36 @@
     "maxCopies": "{{name}}：{{count}}张同名牌（最多4张）",
     "minimumCount": "套牌有{{count}}张牌（至少60张）",
     "singleton": "{{name}}：有多张同名牌（单张赛制）"
+  },
+  "signals": {
+    "title": "套牌指标",
+    "disclaimer": "根据套牌已解析卡牌文字得出的描述性统计。这些不是分级标准，也不会改变估算。",
+    "avgManaValue": "平均法术力值（非地）：{{value}}",
+    "notMeasurable": "无法测量",
+    "noCommander": "添加指挥官以查看套牌指标。",
+    "unavailable": "套牌指标需要卡牌数据，但尚未加载。",
+    "unresolved": "有 {{n}} 个卡名未在卡牌数据中找到。",
+    "kind": {
+      "counterspells": "反击咒语",
+      "spot_removal": "单体移除",
+      "sweepers": "群体移除",
+      "card_advantage": "卡牌优势",
+      "free_interaction": "免费互动",
+      "mana_producers": "法术力来源",
+      "land_fetch": "搜地",
+      "rituals": "仪式",
+      "extra_land_drops": "额外地牌"
+    }
+  },
+  "comboBarometer": {
+    "ariaLabel": "二卡无限组合技",
+    "question": "是否有意使用二卡无限组合技？",
+    "undeclared": "未回答",
+    "noneIntended": "无意使用",
+    "intended": "有意使用",
+    "windowAriaLabel": "何时可以组装？",
+    "windowUnstated": "未说明",
+    "windowEarly": "游戏前期",
+    "windowLate": "仅限游戏后期"
   }
 }

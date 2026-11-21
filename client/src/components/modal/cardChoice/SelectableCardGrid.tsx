@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
@@ -22,6 +22,19 @@ export interface SelectableCardGridProps {
   onConfirm?: () => void;
   canConfirm?: boolean;
   showToolbar?: boolean;
+  /**
+   * "screenReaderOnly" keeps the counter as a live region but draws nothing,
+   * for a prompt whose confirm button already shows the same count. Defaults
+   * to "visible".
+   */
+  counterDisplay?: "visible" | "screenReaderOnly";
+  /**
+   * "touch" gives every control in the toolbar row, including `toolbarStart`
+   * and the sort and group selects, a 44px touch height. Defaults to "standard".
+   */
+  toolbarControlSize?: "standard" | "touch";
+  /** Controls the prompt adds at the start of the toolbar row, such as its own mode toggle. */
+  toolbarStart?: ReactNode;
 }
 
 // Shrunk tile dimensions. ChoiceOverlay applies `.card-scale-reset`, which hard-
@@ -46,6 +59,9 @@ export default function SelectableCardGrid({
   onConfirm,
   canConfirm,
   showToolbar,
+  counterDisplay = "visible",
+  toolbarControlSize = "standard",
+  toolbarStart,
 }: SelectableCardGridProps) {
   const { t } = useTranslation("game");
   // Shared organize mechanism. The grid surfaces sort + group (no hide-filter):
@@ -91,9 +107,11 @@ export default function SelectableCardGrid({
     [ordered, value, cap, onChange],
   );
 
+  // The root is `relative` to contain the screen-reader-only counter, which
+  // `sr-only` positions absolutely, so it never reaches an ancestor's scroll range.
   return (
     <div
-      className="flex min-h-0 flex-1 flex-col gap-2"
+      className="relative flex min-h-0 flex-1 flex-col gap-2"
       tabIndex={0}
       onKeyDown={(e) => {
         if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
@@ -116,12 +134,19 @@ export default function SelectableCardGrid({
       <div
         role="status"
         aria-live="polite"
-        className="px-1 text-sm font-semibold text-slate-200"
+        className={counterDisplay === "screenReaderOnly" ? "sr-only" : "px-1 text-sm font-semibold text-slate-200"}
       >
         {counterText}
       </div>
       {showToolbar !== false && (
-        <div className="flex flex-wrap items-center gap-2 px-1 text-xs">
+        // Touch sizing is set on the row, so it reaches every control in it,
+        // whichever component draws that control.
+        <div
+          className={`flex flex-wrap items-center gap-2 px-1 text-xs${
+            toolbarControlSize === "touch" ? " [&_button]:min-h-11 [&_select]:min-h-11" : ""
+          }`}
+        >
+          {toolbarStart}
           <button type="button" className="rounded-md border border-white/15 bg-black/30 px-2 py-1 hover:bg-white/10" onClick={() => bulk("all")}>{t("cardChoice.bulk.selectAll")}</button>
           <button type="button" className="rounded-md border border-white/15 bg-black/30 px-2 py-1 hover:bg-white/10" onClick={() => bulk("invert")}>{t("cardChoice.bulk.invert")}</button>
           <button type="button" className="rounded-md border border-white/15 bg-black/30 px-2 py-1 hover:bg-white/10" onClick={() => bulk("clear")}>{t("cardChoice.bulk.clear")}</button>

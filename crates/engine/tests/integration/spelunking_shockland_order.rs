@@ -373,6 +373,7 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
                 incarnation: runner.state().objects[&source].incarnation,
             },
             grant: None,
+            actor: Default::default(),
         },
         source_name: "Search Rider".to_string(),
         description: "Exile it instead".to_string(),
@@ -380,6 +381,7 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
     };
     let state = runner.state_mut();
     state.pending_replacement = Some(PendingReplacement {
+        settled_damage_guards: Vec::new(),
         proposed: ProposedEvent::SearchFound {
             searcher: P0,
             library_owner: Some(P0),
@@ -390,10 +392,10 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
         sacrifice_provenance: None,
         candidates: vec![rid],
         search_found_candidates: vec![candidate],
+        ordering_peers: Vec::new(),
         depth: 0,
         is_optional: false,
         choice_player: None,
-        library_placement: None,
         exile_controller: None,
         exile_duration: None,
         exile_tracking: ZoneDeliveryExileTracking::None,

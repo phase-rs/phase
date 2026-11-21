@@ -8,7 +8,20 @@ use crate::game::deck_loading::DeckList;
 
 /// Version 3 adds atomic Resolve All boundaries and verified AI pass markers.
 /// Version 2 recordings remain readable because they contain neither feature.
-pub const REPLAY_FORMAT_VERSION: u32 = 3;
+/// Version 4 records the CR 103.1 game-one choice as an ordinary
+/// `ChooseStartingPlayer` action; versions 2 and 3 predate it, and their
+/// contest winner took the first turn.
+/// Version 5 gives the active player priority between the first-strike and the
+/// regular combat damage step even with an empty stack (CR 510.3 + CR 510.4).
+/// Versions 2 through 4 recorded such a combat, when the first step left the
+/// stack empty, as one action that dealt both steps; `ReplayPlayer` rejects a pre-5 recording that reaches that window
+/// (see `COMBAT_DAMAGE_WINDOW_FORMAT_VERSION`) instead of replaying it into a
+/// different combat state.
+pub const REPLAY_FORMAT_VERSION: u32 = 5;
+
+/// First format version recorded with the CR 510.3 priority window between the
+/// two combat damage steps of a first-strike or double-strike combat.
+pub const COMBAT_DAMAGE_WINDOW_FORMAT_VERSION: u32 = 5;
 
 /// Everything needed to reconstruct a game's starting state, deterministically,
 /// from scratch. Mirrors the inputs `initialize_game` already accepts at the
@@ -16,11 +29,14 @@ pub const REPLAY_FORMAT_VERSION: u32 = 3;
 /// start instead of thrown away.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplayHeader {
+    /// Decoded with the values its game was recorded under, so reconstruction replays those rules.
+    #[serde(deserialize_with = "FormatConfig::deserialize_recorded")]
     pub format_config: FormatConfig,
     pub match_config: MatchConfig,
     pub player_count: u8,
     /// CR 103.1: `Some(0)` / `Some(1)` for an explicit starting player,
-    /// `None` for the engine's own d20 contest.
+    /// `None` for the engine's own d20 contest (the chooser's answer is then a
+    /// recorded action, from version 4).
     pub first_player: Option<u8>,
     pub seed: u64,
     /// `None` when the game was started with empty libraries (no deck data

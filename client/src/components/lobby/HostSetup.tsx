@@ -10,6 +10,7 @@ import type {
   LoopDetectionMode,
   MatchType,
 } from "../../adapter/types";
+import { U8_MAX } from "../../adapter/types";
 import { AI_DIFFICULTIES, isAiDifficulty } from "../../constants/ai";
 import { FORMAT_REGISTRY, formatSuppliesDeck, isPlanechaseFamilyFormat } from "../../data/formatRegistry";
 import {
@@ -29,7 +30,7 @@ import type {
 import { refreshServerDirectory, type DirectorySource } from "../../services/serverDirectory";
 import type { HostSeed } from "../../pages/multiplayerPageState";
 import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
-import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import { submitCandidateSeatDeck, useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import {
   cedhSeatProblem,
   pickAiSeatDecks,
@@ -53,8 +54,7 @@ import {
 } from "../../services/customFormats";
 import { getHostAdapter } from "../../adapter/wasm-adapter";
 import { isFormatConfigShape } from "../../adapter/format-config-shape";
-import { captureSubmissionArtPreferences, submitParsedDeck } from "../../services/deckSubmission";
-import { bracketToEngineTier } from "../../types/bracketEstimate";
+import { captureSubmissionArtPreferences } from "../../services/deckSubmission";
 import { AiDeckPicker } from "../menu/AiDeckPicker";
 import { RandomPoolTree } from "../menu/RandomPoolTree";
 import { menuButtonClass } from "../menu/buttonStyles";
@@ -887,7 +887,7 @@ export function HostSetup({
       deckId: requestedDeckIds[i],
       deck: {
         type: "DeckList" as const,
-        data: { ...await submitParsedDeck(picks[i].deck, snapshot), bracket_tier: bracketToEngineTier(picks[i].bracket) },
+        data: await submitCandidateSeatDeck(picks[i], snapshot),
       },
     })));
   };
@@ -1280,10 +1280,30 @@ export function HostSetup({
                 id="host-setup-cmd-dmg"
                 value={formatConfig.commander_damage_threshold ?? 21}
                 min={1}
+                max={255}
                 onCommit={(threshold) =>
                   setLocalFormatConfig((prev) => ({
                     ...prev,
                     commander_damage_threshold: threshold,
+                  }))
+                }
+                className={inp}
+              />
+            </Field>
+          )}
+
+          {/* Individual poison-loss threshold (CR 704.5c; absent in Two-Headed Giant) */}
+          {formatConfig.poison_counter_threshold != null && (
+            <Field label={t("hostSetup.poisonCounters")} htmlFor="host-setup-poison">
+              <IntegerField
+                id="host-setup-poison"
+                value={formatConfig.poison_counter_threshold}
+                min={1}
+                max={U8_MAX}
+                onCommit={(poison_counter_threshold) =>
+                  setLocalFormatConfig((prev) => ({
+                    ...prev,
+                    poison_counter_threshold,
                   }))
                 }
                 className={inp}

@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 
-use engine::database::CardDatabase;
+use engine::database::{CardDatabase, ComboTable};
+use engine::game::bracket_estimate::estimate_bracket;
 use engine::game::deck_loading::{
     normalize_deck_printings, round_trip_name, DeckEntry, PlayerDeckPayload,
 };
+use engine::game::ComboDeclaration;
 use tracing::warn;
 
 use crate::protocol::DeckData;
@@ -54,7 +56,13 @@ fn resolve_entries(
 /// Resolve a DeckData (card name strings) into a typed PlayerDeckPayload using a CardDatabase.
 /// Groups duplicate names into a single DeckEntry with aggregated count.
 /// Returns Err listing unresolvable card names if any lookup fails.
-pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<PlayerDeckPayload, String> {
+pub fn resolve_deck(
+    db: &CardDatabase,
+    combos: &ComboTable,
+    deck: &DeckData,
+) -> Result<PlayerDeckPayload, String> {
+    let list = engine::game::deck_loading::PlayerDeckList::from(deck.clone());
+    let estimated_bracket_tier = estimate_bracket(&list, db, combos).map(|estimate| estimate.tier);
     let (main_deck, mut missing) = resolve_entries(db, &deck.main_deck, "main");
     let (sideboard, mut sideboard_missing) = resolve_entries(db, &deck.sideboard, "sideboard");
     missing.append(&mut sideboard_missing);
@@ -97,6 +105,7 @@ pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<PlayerDeckPayl
         signature_spell,
         sticker_sheets: deck.sticker_sheets.clone(),
         bracket_tier: deck.bracket_tier,
+        estimated_bracket_tier,
         printings: deck.printings.clone(),
         printing_entry_names: Vec::new(),
     };
@@ -139,6 +148,10 @@ pub fn deck_data_from_payload(db: &CardDatabase, payload: &PlayerDeckPayload) ->
         // Decides `validate_cedh_bracket`, which `start_game` runs whenever an
         // AI seat is at cEDH difficulty.
         bracket_tier: payload.bracket_tier,
+        // `DeckData` is the submitted declaration wire type, not an estimator-result
+        // carrier. A subsequent resolve recomputes the floor from the complete list.
+        // `PlayerDeckPayload` deliberately does not carry this deck-building answer.
+        combo_declaration: ComboDeclaration::Undeclared,
         // Display-only (CR 203.1 + CR 206.1): carried so a restored or re-paired
         // seat keeps the owner's printing choices.
         printings: payload.printings.clone(),
@@ -147,7 +160,14 @@ pub fn deck_data_from_payload(db: &CardDatabase, payload: &PlayerDeckPayload) ->
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
+    use engine::database::{
+        ComboEntry, ComboFilterCounts, ComboOmission, ComboOutcome, ComboPiece, ComboPieceZone,
+        ComboProvenance, ComboRelevance, ComboResource, ComboSetup, ComboTableDoc,
+    };
+    use engine::game::bracket_estimate::CommanderBracketTier;
     use engine::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
     use serde_json::{json, Value};
 
@@ -199,7 +219,7 @@ mod tests {
         ] {
             let mut source = source.clone();
             source.printings = annotations;
-            let resolved = resolve_deck(&db, &source).expect("resolves");
+            let resolved = resolve_deck(&db, &ComboTable::default(), &source).expect("resolves");
             assert_eq!(
                 resolved
                     .main_deck
@@ -275,7 +295,8 @@ mod tests {
                 };
                 let decoded =
                     serde_json::from_str(&serde_json::to_string(&header).unwrap()).unwrap();
-                let replay = reconstruct_initial_state(&decoded, Some(&db)).expect("replay");
+                let replay = reconstruct_initial_state(&decoded, Some(&db), &ComboTable::default())
+                    .expect("replay");
                 assert_eq!(
                     replay
                         .players
@@ -328,7 +349,7 @@ mod tests {
             "Wild Ogre Bupkis".to_string(),
         ];
 
-        let payload = resolve_deck(&db, &deck).expect("deck resolves");
+        let payload = resolve_deck(&db, &ComboTable::default(), &deck).expect("deck resolves");
         assert_eq!(payload.sticker_sheets, deck.sticker_sheets);
     }
 
@@ -340,10 +361,7 @@ mod tests {
             section: DeckSection::MainDeck,
             name: "Forest".to_string(),
             count: 1,
-            printing: CardPrinting {
-                set_code: "lea".to_string(),
-                collector_number: "294".to_string(),
-            },
+            printing: CardPrinting::owner("lea", "294"),
         }
     }
 
@@ -353,7 +371,7 @@ mod tests {
         let mut deck = deck(&["Forest"], &[], &[]);
         deck.printings = vec![forest_printing()];
 
-        let payload = resolve_deck(&db, &deck).expect("deck resolves");
+        let payload = resolve_deck(&db, &ComboTable::default(), &deck).expect("deck resolves");
         // Reach guard: the deck itself resolved, so the carry below is not a
         // by-product of an early return.
         assert_eq!(payload.main_deck.len(), 1);
@@ -386,10 +404,7 @@ mod tests {
     ]"#;
 
     fn mixed_printings_kept() -> Vec<DeckPrinting> {
-        let lea = || CardPrinting {
-            set_code: "lea".to_string(),
-            collector_number: "294".to_string(),
-        };
+        let lea = || CardPrinting::owner("lea", "294");
         vec![
             DeckPrinting {
                 section: DeckSection::MainDeck,
@@ -612,6 +627,7 @@ mod tests {
         let db = db_from(&["Forest", "Lightning Bolt", "Shock"]);
         let payload = resolve_deck(
             &db,
+            &ComboTable::default(),
             &deck(&["Forest", "Lightning Bolt", "Forest", "Shock"], &[], &[]),
         )
         .unwrap();
@@ -630,7 +646,12 @@ mod tests {
     #[test]
     fn resolve_deck_aggregates_missing_across_sections_in_sorted_order() {
         let db = CardDatabase::default();
-        let err = resolve_deck(&db, &deck(&["Zed"], &["Alpha"], &["Mid"])).unwrap_err();
+        let err = resolve_deck(
+            &db,
+            &ComboTable::default(),
+            &deck(&["Zed"], &["Alpha"], &["Mid"]),
+        )
+        .unwrap_err();
 
         let c = err.find("commander:Mid").expect("commander entry present");
         let m = err.find("main:Zed").expect("main entry present");
@@ -644,7 +665,12 @@ mod tests {
     #[test]
     fn resolve_deck_with_unresolved_name_errors() {
         let db = CardDatabase::default();
-        assert!(resolve_deck(&db, &deck(&["Nonexistent Card"], &[], &[])).is_err());
+        assert!(resolve_deck(
+            &db,
+            &ComboTable::default(),
+            &deck(&["Nonexistent Card"], &[], &[])
+        )
+        .is_err());
     }
 
     #[test]
@@ -652,12 +678,13 @@ mod tests {
         let db = db_from(&["Forest"]);
         let mut source = deck(&["Forest"], &[], &[]);
         source.sticker_sheets = vec!["Vampire Champion Fury".to_string()];
-        source.bracket_tier = engine::game::bracket_estimate::CommanderBracketTier::Cedh;
+        source.bracket_tier = Some(engine::game::bracket_estimate::CommanderBracketTier::Cedh);
         source.printings = vec![forest_printing()];
 
-        let payload = resolve_deck(&db, &source).expect("source resolves");
+        let payload = resolve_deck(&db, &ComboTable::default(), &source).expect("source resolves");
         let recovered = deck_data_from_payload(&db, &payload);
-        let round_tripped = resolve_deck(&db, &recovered).expect("recovered list resolves");
+        let round_tripped =
+            resolve_deck(&db, &ComboTable::default(), &recovered).expect("recovered list resolves");
 
         assert_eq!(round_tripped.sticker_sheets, source.sticker_sheets);
         assert_eq!(round_tripped.bracket_tier, source.bracket_tier);
@@ -670,8 +697,12 @@ mod tests {
     #[test]
     fn the_inverse_preserves_the_card_multiset_under_case_folding() {
         let db = db_from(&["Forest"]);
-        let payload = resolve_deck(&db, &deck(&["Forest", "forest", "Forest"], &[], &[]))
-            .expect("case-folded duplicates resolve");
+        let payload = resolve_deck(
+            &db,
+            &ComboTable::default(),
+            &deck(&["Forest", "forest", "Forest"], &[], &[]),
+        )
+        .expect("case-folded duplicates resolve");
         // Reach guard: entries are keyed by the RAW submitted string, so the
         // two spellings really did stay apart on the way in — which is what
         // makes the coalescing below a measured property of the recovery.
@@ -684,7 +715,7 @@ mod tests {
 
         // A fixed point from the first pass on: the canonical names now
         // coalesce into a single entry that expands to the same multiset.
-        let second_pass = resolve_deck(&db, &recovered).unwrap();
+        let second_pass = resolve_deck(&db, &ComboTable::default(), &recovered).unwrap();
         assert_eq!(second_pass.main_deck.len(), 1);
         assert_eq!(
             deck_data_from_payload(&db, &second_pass).main_deck,
@@ -705,7 +736,8 @@ mod tests {
         let alias_key = format!("lightning bolt [{LOSER}]");
         let db = db_from_values(&[("lightning bolt", winner), (alias_key.as_str(), loser)]);
 
-        let payload = resolve_deck(&db, &deck(&[&alias_key], &[], &[])).expect("alias resolves");
+        let payload = resolve_deck(&db, &ComboTable::default(), &deck(&[&alias_key], &[], &[]))
+            .expect("alias resolves");
         // Reach guard: the fixture really produced the loser face, whose bare
         // name belongs to the winner.
         assert_eq!(payload.main_deck[0].card.name, "Lightning Bolt");
@@ -715,7 +747,8 @@ mod tests {
         );
 
         let recovered = deck_data_from_payload(&db, &payload);
-        let round_tripped = resolve_deck(&db, &recovered).expect("recovered list resolves");
+        let round_tripped =
+            resolve_deck(&db, &ComboTable::default(), &recovered).expect("recovered list resolves");
 
         assert_eq!(
             round_tripped.main_deck[0]
@@ -727,7 +760,12 @@ mod tests {
         );
         // Control: the bare name — what a payload-only inverse emits — resolves
         // to a different card entirely.
-        let bare = resolve_deck(&db, &deck(&["Lightning Bolt"], &[], &[])).unwrap();
+        let bare = resolve_deck(
+            &db,
+            &ComboTable::default(),
+            &deck(&["Lightning Bolt"], &[], &[]),
+        )
+        .unwrap();
         assert_eq!(
             bare.main_deck[0].card.scryfall_oracle_id.as_deref(),
             Some(WINNER)
@@ -771,10 +809,10 @@ mod tests {
             3,
             "qualified",
         )];
-        let payload = resolve_deck(&db, &source).unwrap();
+        let payload = resolve_deck(&db, &ComboTable::default(), &source).unwrap();
         assert_eq!(payload.printings, source.printings);
         let inverse = deck_data_from_payload(&db, &payload);
-        let restored = resolve_deck(&db, &inverse).unwrap();
+        let restored = resolve_deck(&db, &ComboTable::default(), &inverse).unwrap();
         assert_eq!(restored.printings, source.printings);
         for resolved in [&payload, &restored] {
             let state = loaded(
@@ -812,10 +850,7 @@ mod tests {
             section,
             name: name.into(),
             count,
-            printing: CardPrinting {
-                set_code: set.into(),
-                collector_number: "1".into(),
-            },
+            printing: CardPrinting::owner(set, "1"),
         }
     }
 
@@ -892,7 +927,7 @@ mod tests {
                 );
                 source.printings =
                     vec![selected(DeckSection::MainDeck, choice, u32::MAX, "chosen")];
-                let resolved = resolve_deck(&db, &source).unwrap();
+                let resolved = resolve_deck(&db, &ComboTable::default(), &source).unwrap();
                 assert_eq!(
                     resolved
                         .main_deck
@@ -910,7 +945,12 @@ mod tests {
                         "chosen"
                     )]
                 );
-                let inverse = resolve_deck(&db, &deck_data_from_payload(&db, &resolved)).unwrap();
+                let inverse = resolve_deck(
+                    &db,
+                    &ComboTable::default(),
+                    &deck_data_from_payload(&db, &resolved),
+                )
+                .unwrap();
                 assert_eq!(inverse.printings, resolved.printings);
                 let decoded: PlayerDeckPayload =
                     serde_json::from_str(&serde_json::to_string(&resolved).unwrap()).unwrap();
@@ -988,11 +1028,11 @@ mod tests {
             selected(DeckSection::MainDeck, "Twin", 5, "winner-art"),
             selected(DeckSection::MainDeck, "twin [loser]", 3, "loser-art"),
         ];
-        let resolved = resolve_deck(&db, &source).unwrap();
+        let resolved = resolve_deck(&db, &ComboTable::default(), &source).unwrap();
         assert_eq!(resolved.printings, expected);
         let inverse = deck_data_from_payload(&db, &resolved);
         assert_eq!(inverse.printings, expected);
-        let restored = resolve_deck(&db, &inverse).unwrap();
+        let restored = resolve_deck(&db, &ComboTable::default(), &inverse).unwrap();
         assert_eq!(restored.printings, expected);
         for payload in [&resolved, &restored] {
             for mode in 0..3 {
@@ -1059,7 +1099,7 @@ mod tests {
                 source.printings.insert(0, row);
             }
         }
-        let resolved = resolve_deck(&db, &source).unwrap();
+        let resolved = resolve_deck(&db, &ComboTable::default(), &source).unwrap();
         assert_eq!(
             resolved.printings,
             [
@@ -1088,15 +1128,63 @@ mod tests {
             assert_eq!(prints, ["first", "first", "second", "second", "second"]);
         }
         source.main_deck.push("Missing".into());
-        assert!(resolve_deck(&db, &source).is_err());
+        assert!(resolve_deck(&db, &ComboTable::default(), &source).is_err());
     }
 
     #[test]
     fn resolve_deck_empty_deck_is_ok() {
         let db = CardDatabase::default();
-        let payload = resolve_deck(&db, &deck(&[], &[], &[])).unwrap();
+        let payload = resolve_deck(&db, &ComboTable::default(), &deck(&[], &[], &[])).unwrap();
         assert!(payload.main_deck.is_empty());
         assert!(payload.sideboard.is_empty());
         assert!(payload.commander.is_empty());
+    }
+
+    #[test]
+    fn resolve_deck_carries_the_combo_floor_into_the_estimated_tier() {
+        let db = db_from(&["Test Commander", "Combo Alpha", "Combo Beta"]);
+        let combo_piece = |name: &str| ComboPiece {
+            key: name.to_lowercase(),
+            display: name.to_string(),
+            zone: ComboPieceZone::Anywhere,
+        };
+        let combos = ComboTable::from_doc(ComboTableDoc {
+            provenance: ComboProvenance {
+                snapshot_date: "2026-09-27".to_string(),
+                table_version: "test-v1".to_string(),
+                attribution: "test fixture".to_string(),
+                card_pool_version: "test-pool".to_string(),
+                filtered: ComboFilterCounts::default(),
+                omitted: vec![
+                    ComboOmission::PrerequisiteText,
+                    ComboOmission::ResultText,
+                    ComboOmission::UnmodeledResultClasses,
+                ],
+            },
+            entries: vec![ComboEntry {
+                pieces: [combo_piece("Combo Alpha"), combo_piece("Combo Beta")],
+                relevance: ComboRelevance::Standalone,
+                setup: ComboSetup::AsPrinted,
+                mana_value_needed: 0,
+                assemble_cost: 7,
+                popularity: 1,
+                outcomes: BTreeSet::from([ComboOutcome::Unbounded(ComboResource::Mana)]),
+                axes: BTreeSet::new(),
+            }],
+        });
+        let deck = deck(&["Combo Alpha", "Combo Beta"], &[], &["Test Commander"]);
+
+        let measured = resolve_deck(&db, &combos, &deck).expect("measured deck resolves");
+        assert_eq!(
+            measured.estimated_bracket_tier,
+            Some(CommanderBracketTier::Upgraded)
+        );
+
+        let unmeasured =
+            resolve_deck(&db, &ComboTable::default(), &deck).expect("unmeasured deck resolves");
+        assert_eq!(
+            unmeasured.estimated_bracket_tier,
+            Some(CommanderBracketTier::Core)
+        );
     }
 }

@@ -20,7 +20,7 @@ use crate::types::triggers::TriggerMode;
 
 use super::oracle::{find_activated_colon, strip_activated_constraints};
 use super::oracle_classifier::has_trigger_prefix;
-use super::oracle_cost::parse_oracle_cost;
+use super::oracle_cost::{parse_oracle_cost, parse_oracle_cost_in};
 #[cfg(test)]
 use super::oracle_effect::lower_ability_ir;
 use super::oracle_effect::{
@@ -44,6 +44,7 @@ use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_at_word_boundaries, scan_preceded,
 };
+use super::oracle_nom::target::CostChannel;
 use super::oracle_quantity::parse_cda_quantity;
 #[cfg(test)]
 use super::oracle_static::parse_static_line;
@@ -1091,8 +1092,17 @@ fn reflexive_modal_connector(
         // CR 115.1 + CR 608.2c: a target P/T threshold guard's
         // `TargetMatchesFilter { subject_slot: None }` reads the gated node's own
         // first object target, and a mode may announce its own target, so the
-        // guard cannot bind the antecedent "that creature" here; refuse it.
-        (Some((_, LeadingConditionRoute::TargetPtThreshold)), _) => {
+        // guard cannot bind the antecedent "that creature" here; refuse it. The
+        // own-target-controller route is produced only by the trailing strip,
+        // never by this leading one; it is refused here too rather than bound.
+        (
+            Some((
+                _,
+                LeadingConditionRoute::TargetPtThreshold
+                | LeadingConditionRoute::OwnTargetController,
+            )),
+            _,
+        ) => {
             return Err(Box::new(Effect::unimplemented(
                 "modal_reflexive_condition",
                 &header.raw,
@@ -1382,9 +1392,17 @@ pub(crate) fn lower_oracle_block_ir(
                 // the trigger parser already produced.
                 let body = match &reflexive_parent {
                     Some(ReflexiveModalParent::MayPay(cost_text)) => {
+                        // CR 118.12 + CR 603.12 + CR 608.2c: "you may <cost>. When
+                        // you do, …" is an optional payment made as the ability
+                        // resolves, not a printed source cost, so a bare "it" in
+                        // it names an object the trigger introduced (Gorbag of
+                        // Minas Morgul's "you may sacrifice it") and the cost
+                        // grammar's sacrifice and self-exile legs do not bind it
+                        // to the source.
+                        let cost = parse_oracle_cost_in(cost_text, CostChannel::ResolutionPayment);
                         TriggerBody::Reflexive(Box::new(ReflexiveParentIr {
                             parent: ReflexiveParent::MayPay {
-                                cost: parse_oracle_cost(cost_text),
+                                cost: cost.clone(),
                                 payment_chain: Some(
                                     parse_ability_ir_with_context(
                                         cost_text,
@@ -1407,7 +1425,7 @@ pub(crate) fn lower_oracle_block_ir(
                                 cost_text,
                                 AbilityKind::Spell,
                                 parsed_clause(Effect::PayCost {
-                                    cost: parse_oracle_cost(cost_text),
+                                    cost,
                                     scale: None,
                                     payer: TargetFilter::Controller,
                                 }),
@@ -1499,6 +1517,7 @@ pub(crate) fn lower_oracle_block_ir(
             // as-enters header. The execute choice is a typed replacement payload,
             // never a document-level pre-lowered node.
             let replacement = ReplacementIr {
+                history: Vec::new(),
                 definition: ReplacementDefinition::new(ReplacementEvent::Moved)
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
@@ -1967,6 +1986,7 @@ fn lower_as_enters_anchor_word_modal(
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         };
         result.statics.push(placeholder);
     }
@@ -2388,12 +2408,15 @@ fn split_inline_modal_parts(effect_body: &str) -> Option<(ModalHeaderAst, Vec<Mo
 /// `ctx` is the caller's body context, threaded to the marker and every mode
 /// exactly as the trigger modal path threads its live trigger-body context, so
 /// a trigger-only clause in a mode lowers with its event referent.
-pub(crate) fn try_parse_inline_modal_ability(
+pub(crate) fn try_parse_inline_modal_ability_with_provenance(
     effect_body: &str,
     ctx: &ParseContext,
-) -> Option<AbilityDefinition> {
+) -> Option<crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition>> {
     let modal = try_parse_inline_modal_ir(effect_body, ctx)?;
-    let mut ability = crate::parser::oracle_effect::lower_effect_chain_ir(&modal.marker);
+    let lowered =
+        crate::parser::oracle_effect::lower::lower_effect_chain_ir_with_provenance(&modal.marker);
+    let mut ability = lowered.value;
+    let mut history = lowered.history;
     crate::parser::oracle_effect::finalize_effect_chain(&mut ability);
     // CR 603.3c + CR 700.2b: "you may choose one —" lets the controller choose
     // no mode, a choice made as the ability is put on the stack. The engine
@@ -2402,16 +2425,26 @@ pub(crate) fn try_parse_inline_modal_ability(
     if matches!(modal.optionality, ModalOptionality::MayDecline) {
         ability.optional = true;
     }
-    Some(
-        ability.with_modal(
-            modal.choice,
-            modal
-                .modes
-                .iter()
-                .map(|mode| crate::parser::oracle_effect::lower_ability_ir(&mode.ability))
-                .collect(),
-        ),
-    )
+    let value = ability.with_modal(
+        modal.choice,
+        modal
+            .modes
+            .iter()
+            .enumerate()
+            .map(|(index, mode)| {
+                let mut lowered =
+                    crate::parser::oracle_effect::lower_ability_ir_with_provenance(&mode.ability);
+                for record in &mut lowered.history {
+                    record.prepend(
+                        crate::parser::oracle_ir::history_provenance::InstructionStep::Mode(index),
+                    );
+                }
+                history.extend(lowered.history);
+                lowered.value
+            })
+            .collect(),
+    );
+    Some(crate::parser::oracle_ir::history_provenance::Lowered { value, history })
 }
 
 pub(crate) fn try_parse_inline_modal_ir(effect_body: &str, ctx: &ParseContext) -> Option<ModalIr> {

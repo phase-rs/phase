@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "PendingManaAbility gains payment_mode and pinned_pool_units; ManaAbilityManaPayment accepts SpendPoolMana/UnspendPoolMana/PassPriority for a manual mana-ability payment; UnlessPayment mana-ability activations honor payment_mode; DerivedViews gains mana_ability_payment"
+}

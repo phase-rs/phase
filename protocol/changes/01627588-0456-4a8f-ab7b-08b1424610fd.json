@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Add live controlled-permanent color-set protection to serialized static definitions and card data"
+}

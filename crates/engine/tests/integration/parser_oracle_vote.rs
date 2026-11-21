@@ -1,7 +1,6 @@
 //! Tests relocated from `src/parser/oracle_vote.rs`'s test module.
 
-use engine::parser::oracle_effect::parse_effect_chain_with_context;
-use engine::parser::oracle_ir::context::ParseContext;
+use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::AbilityKind;
 
 /// Issue #3667 — the opponent half must surface a real player target slot.
@@ -13,10 +12,9 @@ fn you_and_target_opponent_each_draw_surfaces_opponent_target_slot() {
     use engine::types::identifiers::ObjectId;
     use engine::types::player::PlayerId;
 
-    let parsed = parse_effect_chain_with_context(
+    let parsed = parse_effect_chain(
         "you and target opponent each draw two cards",
         AbilityKind::Spell,
-        &mut ParseContext::default(),
     );
     let state = GameState::new_two_player(42);
     let resolved = build_resolved_from_def(&parsed, ObjectId(1), PlayerId(0));

@@ -9,8 +9,9 @@ use crate::types::ability::{
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CollectEvidenceResume, GameState, PendingCast, PendingManaAbility, PlayerDeckPool,
-    SpellCastReversal, SpellCastUndo, WaitingFor,
+    CastTimingRoute, CollectEvidenceResume, GameState, PendingCast, PendingCastStage,
+    PendingManaAbility, PersistedRestoreError, PlayerDeckPool, SpellCastReversal, SpellCastUndo,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
@@ -19,7 +20,7 @@ use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::engine::EngineError;
 use super::game_object::UndecodedObjectRules;
-use super::{casting, casting_costs, mana_abilities};
+use super::{casting, casting_costs, mana_abilities, restrictions};
 use casting_costs::{CostSelection, SpellCostPayment};
 
 // A cast can start after its enclosing action consumed a parent choice. Share
@@ -101,6 +102,7 @@ impl CastUndoAction {
             | GameAction::TurnFaceUp { .. }
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
+            | GameAction::ChooseStartingPlayer { .. }
             | GameAction::ChooseOption { .. }
             | GameAction::SubmitVoteCandidate { .. }
             | GameAction::SubmitSpellbookDraft { .. }
@@ -490,6 +492,14 @@ fn restore_sparse_cast_fields(
             .ok_or_else(|| EngineError::InvalidAction("Missing cast undo rules object".into()))?
             .restore_undecoded_rules(rules);
     }
+    // CR 702.16p: an inverse recorded by an older save names a permanent's
+    // start snapshots by their slot keys. This decode is the second place a
+    // serialized object enters the game (the first is
+    // `PersistedGameState::prepare_for_restore`), so it runs the same
+    // migration before the restored objects are installed and layers flush.
+    // Otherwise the refresh would take a fresh snapshot for an effect that
+    // started long before the canceled cast.
+    crate::game::effects::attach::migrate_legacy_protection_start_snapshots(&mut restored);
     state.restore_cast_fields(restored, &changed);
     state.layers_dirty.mark_full();
     Ok(())
@@ -1568,6 +1578,230 @@ pub(super) fn cancel_pending_cast(
     Ok(WaitingFor::Priority { player })
 }
 
+/// CR 601.2a–d + CR 601.6: gives a pending cast that an old save recorded only as cast "as
+/// though it had flash" a timing route, or reverses it while its proposal is still open.
+pub(crate) fn restore_legacy_cast_timing_routes(
+    state: &mut GameState,
+) -> Result<(), PersistedRestoreError> {
+    let ids = std::mem::take(&mut state.legacy_unrouted_pending_casts);
+    let owners = state.live_pending_cast_owners();
+    let Some(pending) = owners
+        .first()
+        .and_then(|owner| state.pending_cast_at(*owner))
+        .filter(|pending| ids.contains(&pending.object_id))
+        .cloned()
+    else {
+        return Ok(());
+    };
+    // CR 601.2a: the caster, who need not control the card being cast.
+    let player = pending.ability.controller;
+    // A legacy route is recovered from the proposal's own timing authority, and a cast is
+    // reversed only while its proposal (CR 601.2a–d) is still open and that authority finds no
+    // route; after the proposal, CR 601.6 keeps the cast.
+    let proposal_open = state.pending_cast_stage() == Some(PendingCastStage::Proposal);
+    let timing_open_without_flash = state.objects.get(&pending.object_id).is_some_and(|obj| {
+        restrictions::check_spell_timing(
+            state,
+            player,
+            obj,
+            casting::combined_spell_ability_def(obj).as_ref(),
+            false,
+            pending.casting_variant,
+        )
+        .is_ok()
+    });
+    // CR 601.2b + CR 601.3c: an energy debit made during this cast under a timing
+    // alternative-cost grant is that cost's election.
+    let paid_alternative = (matches!(
+        pending.alternative_cost_election,
+        crate::types::game_state::SpellAlternativeCostElection::Undecided
+            | crate::types::game_state::SpellAlternativeCostElection::Offered
+    ) && casting_energy_debited(state, &pending))
+    .then(|| {
+        casting_costs::spell_alternative_cost_for_timing(
+            state,
+            player,
+            pending.object_id,
+            pending.casting_variant,
+            crate::types::ability::CastTimingPermission::AsThoughHadFlash,
+        )
+    })
+    .flatten();
+    let route = restrictions::open_flash_timing_routes(
+        state,
+        player,
+        pending.object_id,
+        pending.casting_variant,
+    )
+    .first()
+    .copied()
+    .or(paid_alternative
+        .as_ref()
+        .map(|_| CastTimingRoute::AlternativeCost));
+    match route {
+        None if proposal_open && !timing_open_without_flash => {
+            // CR 601.3 + CR 733.1: nothing allows this cast to begin now, so the incomplete
+            // proposal is reversed.
+            state.waiting_for = cancel_pending_cast(state, player, &pending, &mut Vec::new())
+                .map_err(|error| {
+                    PersistedRestoreError::LegacyPendingCastNotRestorable(error.to_string())
+                })?;
+            if !state.live_pending_cast_owners().is_empty() {
+                return Err(PersistedRestoreError::LegacyPendingCastNotRestorable(
+                    "a pending cast owner survived the reversal".to_string(),
+                ));
+            }
+        }
+        route => {
+            // `Permission` adds no route-specific cost or target requirement to a kept cast.
+            let route = route.unwrap_or(CastTimingRoute::Permission);
+            for owner in owners.iter().copied() {
+                if let Some(mut live) = state.pending_cast_at(owner).cloned() {
+                    live.cast_timing_permission = Some(route);
+                    if let Some(grant) = &paid_alternative {
+                        casting_costs::record_elected_alternative_cost(
+                            state,
+                            player,
+                            &mut live,
+                            &grant.cost,
+                            grant.once_per_turn_source,
+                        );
+                    }
+                    if let Some(slot) = state.pending_cast_at_mut(owner) {
+                        *slot = live;
+                    }
+                }
+            }
+            if paid_alternative.is_some()
+                && pending.alternative_cost_election
+                    == crate::types::game_state::SpellAlternativeCostElection::Offered
+            {
+                // CR 118.9a + CR 601.2b: the debit already made this cast's one alternative-cost
+                // election, so the release's second offer of it is retired.
+                let accepted = state
+                    .pending_cast_at(owners[0])
+                    .cloned()
+                    .expect("the legacy cast's owner is live");
+                let mut next = state.clone();
+                let mut events = Vec::new();
+                next.waiting_for = casting_costs::finish_pending_cost_or_cast(
+                    &mut next,
+                    player,
+                    accepted.clone(),
+                    &mut events,
+                )
+                .map_err(|error| {
+                    PersistedRestoreError::LegacyPendingCastNotRestorable(error.to_string())
+                })?;
+                if events.is_empty() {
+                    *state = next;
+                } else {
+                    // CR 601.2g: a cast whose next step acts waits at its mana-payment window, so
+                    // that step runs as the player's next action.
+                    state.pending_cast = Some(Box::new(accepted));
+                    state.waiting_for = WaitingFor::ManaPayment {
+                        player,
+                        convoke_mode: None,
+                    };
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// CR 107.3c + CR 601.2b: an old save's pitch prompt recorded no paid cost, so the exile leg of
+/// the elected alternative cost (a permission's, else the spell's own accepted one) is recovered
+/// for the exile handler that reads X from it.
+pub(crate) fn restore_legacy_pitch_cost_resume(state: &mut GameState) {
+    use crate::types::game_state::{
+        CostResume, PayCostKind, SpellAlternativeCostElection, SpellCostSource,
+    };
+    let WaitingFor::PayCost {
+        kind: PayCostKind::ExileFromZone { zone },
+        resume: CostResume::Spell { spell },
+        ..
+    } = &state.waiting_for
+    else {
+        return;
+    };
+    // An announced X is never read from the paid cost, and a fresh prompt stores the leg
+    // unconcretized only while X is unannounced.
+    if spell.activation_ability_index.is_some() || spell.ability.chosen_x.is_some() {
+        return;
+    }
+    let player = spell.ability.controller;
+    let elected = casting_costs::elected_cast_alternative_ability_cost(
+        state,
+        player,
+        spell.object_id,
+        spell.casting_variant,
+        spell.casting_permission_index,
+    )
+    .or_else(|| {
+        if spell.alternative_cost_election != SpellAlternativeCostElection::Accepted {
+            return None;
+        }
+        casting_costs::payable_spell_alternative_cost_details_at_index(
+            state,
+            player,
+            spell.object_id,
+            spell.casting_permission_index,
+        )
+        .map(|alternative| alternative.cost)
+    });
+    let Some(leg) = elected
+        .as_ref()
+        .and_then(casting::find_non_self_exile)
+        .filter(|(_, leg_zone, _)| ExileCostSourceZone::try_from_zone(*leg_zone) == Some(*zone))
+        .map(|(count, leg_zone, filter)| AbilityCost::Exile {
+            count,
+            zone: Some(leg_zone),
+            filter: filter.cloned(),
+        })
+    else {
+        return;
+    };
+    let spell = spell.clone();
+    if let WaitingFor::PayCost { resume, .. } = &mut state.waiting_for {
+        *resume = CostResume::SpellCost {
+            spell,
+            cost: Box::new(leg),
+            source: SpellCostSource::Other,
+        };
+    }
+}
+
+/// Whether the caster lost energy to a cost of `pending` within its reversal window.
+fn casting_energy_debited(state: &GameState, pending: &PendingCast) -> bool {
+    use crate::types::resolved_commands::{
+        ResolvedPlayerEdit, ResolvedPlayerEditCommand, ResolvedRulesCommand as C,
+        RulesExecutionNodeRef as N,
+    };
+    let Some(reversal) = state
+        .spell_cast_reversal
+        .as_ref()
+        .filter(|reversal| reversal.object_id == pending.object_id)
+    else {
+        return false;
+    };
+    state
+        .resolved_rules_journal
+        .entries_since(reversal.journal_start)
+        .iter()
+        .any(|entry| {
+            matches!(entry.node, N::Proposal(_) | N::Payment(_))
+                && matches!(
+                    entry.command,
+                    Some(C::PlayerEdit(ResolvedPlayerEditCommand {
+                        player,
+                        edit: ResolvedPlayerEdit::Energy { delta },
+                        ..
+                    })) if player == pending.ability.controller && delta < 0
+                )
+        })
+}
+
 pub(super) fn handle_target_selection_select_targets(
     state: &mut GameState,
     player: PlayerId,
@@ -1591,10 +1825,10 @@ pub(super) fn handle_optional_cost_choice(
     player: PlayerId,
     pending_cast: PendingCast,
     cost: &AdditionalCost,
-    pay: bool,
+    index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    casting_costs::handle_decide_additional_cost(state, player, pending_cast, cost, pay, events)
+    casting_costs::handle_decide_additional_cost(state, player, pending_cast, cost, index, events)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1605,7 +1839,7 @@ pub(super) fn handle_defiler_payment(
     life_cost: u32,
     mana_reduction: &crate::types::mana::ManaCost,
     reach: crate::types::statics::CostReductionReach,
-    pay: bool,
+    index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     casting_costs::handle_defiler_payment(
@@ -1615,7 +1849,7 @@ pub(super) fn handle_defiler_payment(
         life_cost,
         mana_reduction,
         reach,
-        pay,
+        index == 0,
         events,
     )
 }
@@ -1761,6 +1995,7 @@ pub(super) fn handle_tap_creatures_for_spell_cost(
     mode: TapCreaturesSelectionMode,
     creatures: &[ObjectId],
     chosen: &[ObjectId],
+    paid_cost: Option<casting_costs::SpellCostPayment<'_>>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     casting_costs::handle_tap_creatures_for_spell_cost(
@@ -1772,6 +2007,7 @@ pub(super) fn handle_tap_creatures_for_spell_cost(
         mode,
         creatures,
         chosen,
+        paid_cost,
         events,
     )
 }
@@ -1888,6 +2124,7 @@ pub(super) fn handle_exile_for_cost(
     count: usize,
     legal_cards: &[ObjectId],
     chosen: &[ObjectId],
+    paid_cost: Option<&AbilityCost>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     casting_costs::handle_exile_for_cost(
@@ -1898,6 +2135,7 @@ pub(super) fn handle_exile_for_cost(
         count,
         legal_cards,
         chosen,
+        paid_cost,
         events,
     )
 }
@@ -1992,6 +2230,16 @@ pub(super) fn handle_collect_evidence_cancel(
             .unwrap_or_else(|| pending_cast.clone());
         return cancel_pending_cast(state, player, &pending_cast, events);
     }
+    // CR 608.2d + CR 701.59b + CR 117.2e: an effect's evidence prompt is a
+    // choice made while that ability resolves. The instruction is mandatory or
+    // was accepted as an option, which is offered only while it is payable, so
+    // there is no cast to back out of and no priority to return to: the prompt
+    // stays until evidence is chosen.
+    if matches!(resume, CollectEvidenceResume::Resolution { .. }) {
+        return Err(EngineError::ActionNotAllowed(
+            "Collect evidence was chosen while resolving; choose the evidence to exile".into(),
+        ));
+    }
     Ok(WaitingFor::Priority { player })
 }
 
@@ -2070,10 +2318,7 @@ mod tests {
     use crate::types::object_map::sweep_test_support::state_with_objects;
 
     fn printing(tag: &str) -> SharedPrinting {
-        SharedPrinting::new(CardPrinting {
-            set_code: tag.into(),
-            collector_number: "1".into(),
-        })
+        SharedPrinting::new(CardPrinting::owner(tag, "1"))
     }
 
     fn stamp(state: &mut GameState, id: ObjectId, tag: &str) {

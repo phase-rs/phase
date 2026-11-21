@@ -22,6 +22,7 @@ const NON_VISUAL_EVENTS = new Set([
   "UnTellPerformed",
   "PhraseSaid",
   "GotchaSaid",
+  "ObjectTouched",
   "PriorityPassed",
   "MulliganStarted",
   "GameStarted",
@@ -42,6 +43,9 @@ const NON_VISUAL_EVENTS = new Set([
   // CR 714.2: same class as StackResolved — the chapter ability's own effects
   // are what the player sees; this event exists for meta-triggers.
   "SagaChapterAbilityResolved",
+  // CR 603.2: bookkeeping for observer triggers, same class as
+  // SagaChapterAbilityResolved; the observed ability's stack entry animates.
+  "AbilityTriggered",
   "ReplacementApplied",
   "Regenerated",
   "AttackersDeclared",

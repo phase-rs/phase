@@ -155,6 +155,8 @@ fn activated_shuffle_both_into_owners_libraries() {
     // Build the first ChangeZone (SelfRef) with sub_ability for second (targeted)
     let sub_resolved = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Library,
             target: TargetFilter::Typed(TypedFilter {
@@ -186,6 +188,8 @@ fn activated_shuffle_both_into_owners_libraries() {
 
     let mut primary = ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Library,
             target: TargetFilter::SelfRef,
@@ -328,17 +332,22 @@ fn parser_produces_compound_shuffle_chain() {
         "shuffle ~ and target creature with a stun counter on it into their owners' libraries",
     );
 
-    // Primary effect should be ChangeZone to Library with SelfRef
+    // CR 608.2f: self+target is one grouped Or move so both members share a
+    // single logical zone-change group. CR 115.1c: only the stunned creature is
+    // a declared target; SelfRef is a context branch excluded by targeting.
     match &effect {
         Effect::ChangeZone {
             destination: Zone::Library,
-            target: TargetFilter::SelfRef,
+            target: TargetFilter::Or { filters },
             owner_library: true,
-            enter_transformed: false,
+            library_shuffle: engine::types::ability::LibraryShuffleMode::TerminalShuffle,
             ..
-        } => {} // expected
+        } => assert!(
+            filters.iter().any(|f| matches!(f, TargetFilter::SelfRef)) && filters.len() == 2,
+            "grouped Or pairs the source and the stun-counter target: {filters:?}"
+        ),
         other => panic!(
-            "expected ChangeZone(SelfRef, Library, owner_library=true), got {:?}",
+            "expected grouped ChangeZone(Or(SelfRef, target), Library), got {:?}",
             other
         ),
     }

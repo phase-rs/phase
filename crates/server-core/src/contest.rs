@@ -707,8 +707,7 @@ mod tests {
     /// assertions. Stamping every input (as the transport does in production)
     /// keeps the timeline exact no matter how the test process is scheduled.
     fn start_active_contest(session: &mut GameSession) -> Instant {
-        let now = Instant::now();
-        session.contest.clock.epoch = now - std::time::Duration::from_secs(1);
+        let now = session.contest.clock.epoch + std::time::Duration::from_secs(1);
         session.tick_contest_at(now - std::time::Duration::from_millis(10));
         session.tick_contest_at(now);
         assert_eq!(phase(session), ContestPhase::Active, "countdown completed");
@@ -879,27 +878,25 @@ mod tests {
     fn clicks_resolve_the_sender_from_the_token_and_never_before_go() {
         let mut mgr = session_with_contest(fast_policy());
         let session = only_session(&mut mgr);
+        let pending_at = session.contest.clock.epoch;
         assert_eq!(
-            session.handle_contest_click("nobody", 1, 1),
+            session.handle_contest_click_at("nobody", 1, 1, pending_at),
             ContestClickReceipt::UnknownSeat
         );
         // Pending: not started, so not counted.
         assert_eq!(
-            session.handle_contest_click(HOST, 1, 1),
+            session.handle_contest_click_at(HOST, 1, 1, pending_at),
             ContestClickReceipt::Ignored
         );
 
-        session.tick_contest();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        session.tick_contest();
-        assert_eq!(phase(session), ContestPhase::Active);
+        let now = start_active_contest(session);
 
         assert_eq!(
-            session.handle_contest_click(HOST, 1, 1),
+            session.handle_contest_click_at(HOST, 1, 1, now),
             ContestClickReceipt::Counted
         );
         assert_eq!(
-            session.handle_contest_click(HOST, 1, 1),
+            session.handle_contest_click_at(HOST, 1, 1, now),
             ContestClickReceipt::Ignored,
             "a duplicate delivery is not counted twice"
         );
@@ -1564,18 +1561,15 @@ mod tests {
     fn a_click_addressed_to_another_contest_is_ignored() {
         let mut mgr = session_with_contest(fast_policy());
         let session = only_session(&mut mgr);
-        session.tick_contest();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        session.tick_contest();
-        assert_eq!(phase(session), ContestPhase::Active);
+        let now = start_active_contest(session);
 
         assert_eq!(
-            session.handle_contest_click(HOST, 99, 1),
+            session.handle_contest_click_at(HOST, 99, 1, now),
             ContestClickReceipt::Ignored,
             "a prior contest's frame is not activity in this one"
         );
         assert_eq!(
-            session.handle_contest_click(HOST, 1, 1),
+            session.handle_contest_click_at(HOST, 1, 1, now),
             ContestClickReceipt::Counted,
             "and it did not burn the sequence number the real click needs"
         );
@@ -1620,13 +1614,14 @@ mod tests {
         let session = only_session(&mut mgr);
         session.connected[1] = false;
 
-        session.tick_contest();
+        // The first tick records the absence. The second exceeds the 30 ms grace.
+        let now = session.contest.clock.epoch;
+        session.tick_contest_at(now);
         assert!(
             session.contest_active(),
             "within grace the contest only waits"
         );
-        std::thread::sleep(std::time::Duration::from_millis(60));
-        session.tick_contest();
+        session.tick_contest_at(now + std::time::Duration::from_millis(60));
 
         assert!(
             !session.contest_active(),
@@ -1689,9 +1684,7 @@ mod tests {
         assert!(session.claim_contest_driver());
         assert!(!session.claim_contest_driver(), "one driver per contest");
 
-        session.tick_contest();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        session.tick_contest();
+        start_active_contest(session);
 
         let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
             panic!("contest ended");
@@ -1725,6 +1718,84 @@ mod tests {
         assert!(
             session.drain_contest_outbox().transitions.is_empty(),
             "nobody is attached to receive it"
+        );
+    }
+
+    /// CR 704.3 + CR 704.5a: the server host publishes a contest step with its
+    /// stepped state as both of `resolve_log_entries`' states. A settle that
+    /// ends the game still logs that game's end in that game.
+    #[test]
+    fn a_contest_settle_that_ends_a_game_logs_its_end_in_that_game() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::format::FormatConfig;
+        use engine::types::log::LogSegment;
+        use engine::types::match_config::{MatchConfig, MatchPhase, MatchType};
+        use std::time::Duration;
+
+        const EYE_TO_EYE: &str =
+            "You and target creature's controller have a staring contest. If you win, destroy that creature.";
+        const PLATINUM_ANGEL: &str =
+            "Flying\nYou can't lose the game and your opponents can't win the game.";
+
+        let mut mgr = session_with_contest(fast_policy());
+        let session = only_session(&mut mgr);
+
+        // Platinum Angel keeps P1 in the game at 0 life until Eye to Eye
+        // destroys it, in game 1 of a best-of-three.
+        let mut scenario = GameScenario::new_with_format(FormatConfig::freeform(), 2, 42);
+        scenario.at_phase(Phase::PreCombatMain).with_life(P1, 0);
+        let angel = scenario
+            .add_creature_from_oracle(P1, "Platinum Angel", 4, 4, PLATINUM_ANGEL)
+            .as_artifact_creature()
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Eye to Eye", true, EYE_TO_EYE)
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().set_match_config(MatchConfig {
+            match_type: MatchType::Bo3,
+            ..MatchConfig::default()
+        });
+        crate::session::bind_fresh_interaction_session(runner.state_mut(), &session.game_code);
+        runner.cast(spell).target_objects(&[angel]).resolve();
+        session.state = runner.state().clone();
+        let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
+            panic!(
+                "the cast parks the game on its staring contest: {:?}",
+                session.state.waiting_for
+            );
+        };
+        let contest = contest.id;
+
+        // Under `fast_policy` GO is at or before `now`, so P1's deadline,
+        // GO + 400 ms, has passed by `now` + 450 ms, while P0's click extends
+        // P0's to `now` + 600 ms.
+        let now = start_active_contest(session);
+        assert_eq!(
+            session.handle_contest_click_at(HOST, contest, 1, now + Duration::from_millis(200)),
+            ContestClickReceipt::Counted
+        );
+        session.tick_contest_at(now + Duration::from_millis(450));
+        let drain = session.drain_contest_outbox();
+
+        assert_eq!(session.state.match_phase, MatchPhase::BetweenGames);
+        assert_eq!(session.state.game_number, 2);
+        let entries: Vec<_> = drain
+            .transitions
+            .iter()
+            .flat_map(|transition| &transition.log_entries)
+            .collect();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.segments.iter().any(|segment| {
+                    matches!(segment, LogSegment::Text(text) if text.starts_with("Game over"))
+                })),
+            "the settle ended game 1: {entries:?}"
+        );
+        assert!(
+            entries.iter().all(|entry| entry.game_number == 1),
+            "game 1's end is logged in game 1: {entries:?}"
         );
     }
 

@@ -150,7 +150,7 @@
     "unCardActions": "Un-card actions",
     "unCardActionsToggle": "Play Un-card actions",
     "unCardActionsDescription": "Join in the silly parts of Unglued, Unhinged, Unstable and Unfinity cards: say-it prompts (Rod of Spanking), the Gotcha! button, and a menu of gestures. Off by default. Prompts and menu entries only appear when a card in the game uses them.",
-    "priorityAlertsDescription": "在等待之后优先权回到你手上时通知你。当你在其他标签页或窗口，或对手回合中的窗口{{seconds}}秒内未处理时会响起提示音，此时光效也会增强。",
+    "priorityAlertsDescription": "在等待之后优先权回到你手上时通知你。当你在其他标签页或窗口，或对手回合中的窗口{{seconds}}秒内未处理时会响起提示音，此时光效也会增强。开启“发光”时，轮到你做决定期间“你的优先权”框的边框会闪动；关闭后边框保持常亮。",
     "skipLowUsePriorityWindows": "跳过少用的优先权窗口（实验性）",
     "skipLowUsePriorityWindowsDescription": "自动让过你在堆叠为空时的维持、抓牌和结束步骤优先权窗口。阶段停止点和完全控制仍会暂停。",
     "spellPayment": "咒语支付",
@@ -165,10 +165,15 @@
     "addProvider": "添加提供方",
     "apiKey": "API 密钥",
     "apiKeyGet": "获取密钥",
-    "apiKeyMissing": "请重新输入 API 密钥。密钥不会在重新加载后保留，在此之前该提供方不会用于 AI 座位或轮抽机器人。",
+    "messageThreads": {
+      "label": "记住之前的决策",
+      "hint": "难度为“中等”及以上的 AI 座位在 Anthropic 消息线程中进行对局，让模型延续之前的推理。"
+    },
+    "apiKeyMissing": "请重新输入 API 密钥。除非你主动开启记住选项，否则密钥不会在重新加载后保留，在此之前该提供方不会用于 AI 座位或轮抽机器人。",
     "apiKeyOptional": "本地服务器可留空",
     "apiKeyPlaceholder": "粘贴你的 API 密钥",
-    "apiKeyStorage": "仅保存在本次浏览器会话的内存中。API 密钥绝不会写入磁盘，也不含在备份导出和云同步中，因此重新加载后需要重新输入。除非服务器位于 localhost，否则使用 API 密钥时端点必须为 https://。",
+    "apiKeyStorage": "默认仅保存在内存中，因此重新加载后需要重新输入，除非你启用“为此标签页记住”。启用后，密钥会保存在 sessionStorage 中（同源脚本可读取，且浏览器可能会为会话恢复而将其写入磁盘）直至标签页关闭。API 密钥始终不含在备份导出和云同步中，且除非服务器位于 localhost，否则端点必须为 https://。",
+    "rememberApiKey": "为此标签页记住 (sessionStorage)",
     "customModel": "自定义…",
     "defaultOpponent": {
       "engine": "内置引擎 AI",

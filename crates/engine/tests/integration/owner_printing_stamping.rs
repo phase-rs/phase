@@ -153,7 +153,11 @@ fn prechange_allocation_order_and_rng_reference() {
                 }
             }
             let mut state = GameState::new(format.clone(), 2, 4910);
-            load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+            load_and_hydrate_decks(
+                &mut state,
+                &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+                Some(&db),
+            );
             assert_eq!(
                 state
                     .objects
@@ -209,10 +213,7 @@ fn choice(section: DeckSection, name: &str, count: u32, tag: &str) -> DeckPrinti
         section,
         name: name.into(),
         count,
-        printing: CardPrinting {
-            set_code: tag.into(),
-            collector_number: "1".into(),
-        },
+        printing: CardPrinting::owner(tag, "1"),
     }
 }
 
@@ -271,7 +272,7 @@ fn normalization_is_lenient_section_bound_ordered_and_capped() {
     values.insert(3, json!({"printing": 12}));
     wire["player"]["printings"] = json!(values);
     list = serde_json::from_value(wire).unwrap();
-    let payload = resolve_deck_list(&db, &list);
+    let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
     assert_eq!(
         payload.player.printings,
         [
@@ -365,6 +366,49 @@ fn normalization_is_lenient_section_bound_ordered_and_capped() {
     start(&mut state);
 }
 
+#[test]
+fn typed_owner_rows_bind_without_automatic_provenance() {
+    let db = database();
+    let mut payload = resolve_deck_list(
+        &db,
+        &engine::database::ComboTable::default(),
+        &reference_list(),
+    );
+    let mut first = choice(DeckSection::MainDeck, "Forest", 2, "m21");
+    first.printing.collector_number = "272".into();
+    let mut adjacent = first.clone();
+    adjacent.count = 1;
+    adjacent.printing.collector_number = "273".into();
+    let expected = vec![first.clone(), adjacent.clone()];
+    first.printing.automatic_art_catalog_version = std::num::NonZeroU8::new(1);
+    payload.player.printings = vec![first, adjacent];
+    engine::game::deck_loading::normalize_deck_printings(&db, &mut payload.player);
+    assert_eq!(payload.player.printings, expected);
+    let mut state = GameState::new(FormatConfig::freeform(), 2, 4910);
+    load_and_hydrate_decks(&mut state, &payload, Some(&db));
+    assert_eq!(
+        state.deck_pools[0].printings.get().as_ref().unwrap().rows(),
+        expected.as_slice()
+    );
+    let mut collectors = Vec::new();
+    for object in state
+        .objects
+        .values()
+        .filter(|object| object.owner == PlayerId(0) && object.name == "Forest")
+    {
+        assert_eq!(object.printing.get(), object.base_printing.get());
+        if let Some(printing) = object.printing.get() {
+            assert_eq!(printing.set_code, "m21");
+            assert_eq!(printing.automatic_art_catalog_version, None);
+            collectors.push(printing.collector_number.as_str());
+        } else {
+            collectors.push("");
+        }
+    }
+    collectors.sort_unstable();
+    assert_eq!(collectors, ["", "", "272", "272", "273"]);
+}
+
 fn stamps(
     state: &GameState,
     ids: impl IntoIterator<Item = engine::types::identifiers::ObjectId>,
@@ -446,7 +490,7 @@ fn all_seats_sections_and_netted_prefixes_keep_their_own_streams() {
             ai_decks: seats,
             ..Default::default()
         };
-        let payload = resolve_deck_list(&db, &list);
+        let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
         assert_eq!(payload.player.main_deck[0].count, 4);
         let commander = format.command_zone_holds_decklist_commander();
         let signature = format.format == engine::types::format::GameFormat::Oathbreaker;
@@ -567,7 +611,11 @@ fn shared_piles_use_the_submitting_seat_even_when_stored_face_down() {
             format.archenemy_player = Some(PlayerId(2));
         }
         let mut state = GameState::new(format, 3, 4910);
-        load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+        load_and_hydrate_decks(
+            &mut state,
+            &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+            Some(&db),
+        );
         let ids = if section == DeckSection::PlanarDeck {
             &state.planar_deck
         } else {
@@ -638,7 +686,11 @@ fn printing_sentinels_are_shuffled_with_faces_before_id_allocation() {
         };
         let run = || {
             let mut state = GameState::new(format.clone(), 2, 4910);
-            load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+            load_and_hydrate_decks(
+                &mut state,
+                &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+                Some(&db),
+            );
             let mut objects: Vec<_> = state
                 .objects
                 .values()
@@ -753,10 +805,18 @@ fn engine_replay_preserves_per_id_choices_including_submitted_dandan() {
             list.player.printings
         );
         let mut live = GameState::new(format.clone(), count, 4910);
-        load_and_hydrate_decks(&mut live, &resolve_deck_list(&db, &list), Some(&db));
+        load_and_hydrate_decks(
+            &mut live,
+            &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+            Some(&db),
+        );
         start(&mut live);
-        let replay = engine::game::replay::reconstruct_initial_state(&decoded, Some(&db))
-            .expect("reconstruct");
+        let replay = engine::game::replay::reconstruct_initial_state(
+            &decoded,
+            Some(&db),
+            &engine::database::ComboTable::default(),
+        )
+        .expect("reconstruct");
         let expected_printed = if format.format == engine::types::format::GameFormat::Dandan {
             43
         } else {
@@ -793,8 +853,12 @@ fn engine_replay_preserves_per_id_choices_including_submitted_dandan() {
         let decks = legacy.deck_data.as_mut().unwrap();
         decks.player.printings.clear();
         decks.opponent.printings.clear();
-        let legacy = engine::game::replay::reconstruct_initial_state(&legacy, Some(&db))
-            .expect("legacy reconstruct");
+        let legacy = engine::game::replay::reconstruct_initial_state(
+            &legacy,
+            Some(&db),
+            &engine::database::ComboTable::default(),
+        )
+        .expect("legacy reconstruct");
         assert!(legacy
             .objects
             .values()
@@ -847,7 +911,11 @@ fn synthetic_defaults_and_momir_emblems_never_take_submitted_art() {
             list.opponent.main_deck = names(&[("Island", 8)]);
         }
         let mut state = GameState::new(format.clone(), 2, 4910);
-        load_and_hydrate_decks(&mut state, &resolve_deck_list(db, &list), Some(db));
+        load_and_hydrate_decks(
+            &mut state,
+            &resolve_deck_list(db, &engine::database::ComboTable::default(), &list),
+            Some(db),
+        );
         match format.format {
             engine::types::format::GameFormat::Dandan => assert_eq!(state.objects.len(), 80),
             engine::types::format::GameFormat::Momir => {
@@ -886,23 +954,56 @@ fn synthetic_defaults_and_momir_emblems_never_take_submitted_art() {
             engine::types::format::GameFormat::Archenemy => assert_eq!(state.scheme_deck.len(), 20),
             _ => unreachable!(),
         }
-        // The ordinary Forest in Planechase/Archenemy is submitted and can be stamped;
-        // only synthesized shared-pile cards and Momir/Dandan objects must be empty.
-        let synthetic: Vec<_> = if matches!(
-            format.format,
+        let unprinted: Vec<_> = match format.format {
             engine::types::format::GameFormat::Planechase
-                | engine::types::format::GameFormat::Archenemy
-        ) {
-            state
+            | engine::types::format::GameFormat::Archenemy => state
                 .planar_deck
                 .iter()
                 .chain(state.scheme_deck.iter())
                 .copied()
-                .collect()
-        } else {
-            state.objects.keys().copied().collect()
+                .collect(),
+            engine::types::format::GameFormat::Dandan => {
+                assert_deck_art(
+                    &state,
+                    PlayerId(0),
+                    "Island",
+                    &[
+                        (Some(automatic("m21", "263")), 10),
+                        (Some(automatic("m21", "264")), 10),
+                    ],
+                );
+                state
+                    .objects
+                    .values()
+                    .filter(|o| o.name != "Island")
+                    .map(|o| o.id)
+                    .collect()
+            }
+            engine::types::format::GameFormat::Momir => {
+                for seat in [PlayerId(0), PlayerId(1)] {
+                    for &(name, _, set, first, second) in &COVERED_BASICS[5..10] {
+                        assert_deck_art(
+                            &state,
+                            seat,
+                            name,
+                            &[
+                                (Some(automatic(set, first)), 6),
+                                (Some(automatic(set, second)), 6),
+                            ],
+                        );
+                    }
+                }
+                state
+                    .objects
+                    .values()
+                    .filter(|o| o.emblem_source.is_some())
+                    .map(|o| o.id)
+                    .collect()
+            }
+            _ => unreachable!(),
         };
-        assert!(synthetic
+        assert!(!unprinted.is_empty());
+        assert!(unprinted
             .iter()
             .all(|id| state.objects[id].printing.get().is_none()
                 && state.objects[id].base_printing.get().is_none()));
@@ -951,7 +1052,11 @@ fn loaded_cards_obey_projection_and_creation_only_concealment() {
         }
     }
     let mut state = GameState::new(FormatConfig::freeform(), 2, 4910);
-    load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+    load_and_hydrate_decks(
+        &mut state,
+        &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+        Some(&db),
+    );
     start(&mut state);
     let views = |state: &GameState, viewer: Option<PlayerId>| {
         let filtered = viewer.map_or_else(
@@ -1097,7 +1202,11 @@ fn printing_changes_wire_but_not_rules_or_next_rng_progression() {
     decorated.player.printings = vec![choice(DeckSection::MainDeck, "Forest", 3, "rules-neutral")];
     let run = |list: &DeckList| {
         let mut state = GameState::new(FormatConfig::freeform(), 2, 4910);
-        load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, list), Some(&db));
+        load_and_hydrate_decks(
+            &mut state,
+            &resolve_deck_list(&db, &engine::database::ComboTable::default(), list),
+            Some(&db),
+        );
         start(&mut state);
         state
     };
@@ -1137,7 +1246,7 @@ fn incomplete_annotated_payload_panics_before_mutating_state() {
     let db = database();
     let mut list = reference_list();
     list.player.printings = vec![choice(DeckSection::MainDeck, "Forest", 1, "bound")];
-    let mut payload = resolve_deck_list(&db, &list);
+    let mut payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
     payload.player.printing_entry_names.clear();
     let mut state = GameState::new(FormatConfig::freeform(), 2, 4910);
     let before = serde_json::to_value(&state).unwrap();
@@ -1188,7 +1297,7 @@ fn format_gate_keeps_valid_and_invalid_name_deck_verdicts() {
                 },
                 ..Default::default()
             };
-            let payload = resolve_deck_list(&db, &list);
+            let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
             assert_eq!(payload.player.main_deck[0].count as usize, count);
             let result = validate_name_deck_for_format(
                 &db,
@@ -1265,7 +1374,7 @@ fn engine_qualified_only_printing_is_a_loaded_normalization_fixed_point() {
     };
     let expected = choice(DeckSection::MainDeck, key, 8, "qualified-art");
     for _ in 0..2 {
-        let payload = resolve_deck_list(&db, &list);
+        let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
         for seat in [&payload.player, &payload.opponent] {
             assert_eq!(seat.main_deck.len(), 1);
             assert_eq!(seat.main_deck[0].count, 8);
@@ -1358,7 +1467,11 @@ fn loaded_typed_shared_piles_hide_printings_until_their_reveal_transition() {
             ..Default::default()
         };
         let mut state = GameState::new(format, 3, 4910);
-        load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+        load_and_hydrate_decks(
+            &mut state,
+            &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+            Some(&db),
+        );
         assert_eq!(state.objects.len(), 27);
         let pile = |state: &GameState| match section {
             DeckSection::PlanarDeck => state.planar_deck.iter().copied().collect::<Vec<_>>(),
@@ -1779,7 +1892,7 @@ mod post_load_creators {
             },
             ..Default::default()
         };
-        let payload = resolve_deck_list(&db, &list);
+        let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
         assert_eq!(payload.player.printings, [decoy, companion_row]);
 
         let mut state = GameState::new(FormatConfig::commander(), 2, 4910);
@@ -1867,14 +1980,25 @@ mod post_load_creators {
         };
         assert_eq!(*player, P0);
         assert!(*reveal);
+        // CR 702.139a + CR 400.11: the sideboard entry (`available` copies) and the
+        // revealed, not-yet-used companion (one card outside the game) are the ONLY
+        // sources offered, in that order. An extra or missing source fails here.
         assert!(
             matches!(
                 choices.as_slice(),
-                [entry] if entry.count == available
-                    && matches!(
-                        &entry.source,
-                        OutsideGameChoiceSource::Sideboard { sideboard_index: 0, .. }
-                    )
+                [sideboard, companion]
+                    if sideboard.count == available
+                        && sideboard.name == LURRUS
+                        && matches!(
+                            &sideboard.source,
+                            OutsideGameChoiceSource::Sideboard { sideboard_index: 0, .. }
+                        )
+                        && companion.count == 1
+                        && companion.name == LURRUS
+                        && matches!(
+                            &companion.source,
+                            OutsideGameChoiceSource::Companion { card } if card.name == LURRUS
+                        )
             ),
             "{choices:?}"
         );
@@ -1927,7 +2051,7 @@ mod post_load_creators {
             },
             ..Default::default()
         };
-        let payload = resolve_deck_list(&db, &list);
+        let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
         let mut state = GameState::new(FormatConfig::standard(), 2, 4910);
         state.match_config.match_type = MatchType::Bo3;
         load_and_hydrate_decks(&mut state, &payload, Some(&db));
@@ -2024,7 +2148,10 @@ mod post_load_creators {
         assert!(runner.state().stack.is_empty());
         assert_eq!(runner.state().objects[&wish].zone, Zone::Exile);
         // Positive reveal control for the hidden-information test: the fetch revealed it.
-        assert!(runner.state().revealed_cards.contains(&fetched));
+        // CR 701.20a: the transient reveal ends with the resolution, before the resolved
+        // view is published; the table keeps the card's public identity in hand.
+        assert!(!runner.state().revealed_cards.contains(&fetched));
+        assert!(runner.state().public_revealed_cards.contains(&fetched));
         assert!(first_events.iter().any(|event| matches!(
             event,
             GameEvent::CardsRevealed { card_ids, .. } if card_ids.contains(&fetched)
@@ -2173,7 +2300,7 @@ mod post_load_creators {
         } = companion_and_fetch();
         let state = runner.state();
 
-        // The transient reveal ended: later actions from `Priority` clear `revealed_cards`.
+        // The transient reveal ended with the fetch's resolution (CR 701.20a).
         // (The positive control, that it WAS revealed, is in `companion_and_fetch`.) The
         // fetched card stays publicly identified through retained public identity knowledge
         // under the engine's information policy: `CardsRevealed` publishes
@@ -2438,7 +2565,7 @@ mod post_load_creators {
             },
             ..Default::default()
         };
-        let payload = resolve_deck_list(&db, &list);
+        let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
         let mut state = GameState::new(FormatConfig::standard(), 2, 4910);
         state.match_config.match_type = MatchType::Bo3;
         if handle == DatabaseHandle::Installed {
@@ -2463,11 +2590,28 @@ mod post_load_creators {
                 tally(&[(Some("p1-art"), 20)]),
                 Some("q-first"),
             ),
-            OwnerRows::Omitted => (tally(&[(None, 20)]), tally(&[(None, 20)]), None),
+            OwnerRows::Omitted => (
+                tally(&[(Some("m21"), 20)]),
+                tally(&[(Some("m21"), 20)]),
+                None,
+            ),
         };
         assert_eq!(companion_printing(&runner, P0), expected_companion);
         assert_eq!(printings_of(runner.state(), P0), expected_p0);
         assert_eq!(printings_of(runner.state(), P1), expected_p1);
+        if rows == OwnerRows::Omitted {
+            for seat in [P0, P1] {
+                assert_deck_art(
+                    runner.state(),
+                    seat,
+                    "Plains",
+                    &[
+                        (Some(automatic("m21", "260")), 10),
+                        (Some(automatic("m21", "261")), 10),
+                    ],
+                );
+            }
+        }
         let first_record = runner.state().deck_pools[0].printings.get().clone();
         assert_eq!(first_record.is_some(), rows == OwnerRows::Chosen);
 
@@ -2583,7 +2727,11 @@ mod post_load_creators {
         };
         let mut state = GameState::new(FormatConfig::standard(), 2, 4910);
         state.match_config.match_type = MatchType::Bo3;
-        load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+        load_and_hydrate_decks(
+            &mut state,
+            &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+            Some(&db),
+        );
         start(&mut state);
         let mut runner = GameRunner::from_state(state);
 
@@ -2633,7 +2781,11 @@ mod post_load_creators {
         };
         let mut state = GameState::new(FormatConfig::commander(), 2, 4910);
         state.match_config.match_type = MatchType::Bo3;
-        load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+        load_and_hydrate_decks(
+            &mut state,
+            &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+            Some(&db),
+        );
         start(&mut state);
         let mut runner = GameRunner::from_state(state);
         let expected = tally(&[(Some("forest-art"), 20), (Some("commander-art"), 1)]);
@@ -2681,7 +2833,11 @@ mod post_load_creators {
         };
         let mut state = GameState::new(FormatConfig::standard(), 2, 4910);
         state.match_config.match_type = MatchType::Bo3;
-        load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+        load_and_hydrate_decks(
+            &mut state,
+            &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+            Some(&db),
+        );
         start(&mut state);
         let mut runner = GameRunner::from_state(state);
 
@@ -2735,6 +2891,85 @@ mod post_load_creators {
             tally(&[(Some("f-a"), 10), (Some("f-b"), 6), (Some("i-main"), 4)])
         );
         assert!(Arc::ptr_eq(&record_of(runner.state(), P0), &first));
+    }
+
+    #[test]
+    fn basic_art_reassigns_vacancies_after_accepted_sideboarding() {
+        let db = art_database();
+        let list = DeckList {
+            player: PlayerDeckList {
+                main_deck: names(&[("Forest", 16), ("Island", 4)]),
+                sideboard: names(&[("Island", 4)]),
+                printings: vec![
+                    art_row(DeckSection::MainDeck, "Forest", 1, "m21", "272"),
+                    art_row(DeckSection::Sideboard, "Island", 4, "sideboard", "1"),
+                ],
+                ..Default::default()
+            },
+            opponent: PlayerDeckList {
+                main_deck: names(&[("Forest", 20)]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
+        let mut state = GameState::new(FormatConfig::standard(), 2, 4910);
+        state.match_config.match_type = MatchType::Bo3;
+        load_and_hydrate_decks(&mut state, &payload, Some(&db));
+        start(&mut state);
+        let mut runner = GameRunner::from_state(state);
+        let record = record_of(runner.state(), P0);
+        assert_eq!(record.rows(), payload.player.printings);
+        let owner_stamp = |state: &GameState| {
+            state
+                .objects
+                .values()
+                .find_map(|object| {
+                    let stamp = object.printing.get().as_ref()?;
+                    (object.owner == P0
+                        && object.name == "Forest"
+                        && stamp.automatic_art_catalog_version.is_none())
+                    .then(|| stamp.clone())
+                })
+                .expect("owner-printed Forest")
+        };
+        let first_stamp = owner_stamp(runner.state());
+        let assert_forest = |state: &GameState, first, second| {
+            assert_deck_art(
+                state,
+                P0,
+                "Forest",
+                &[
+                    (Some(CardPrinting::owner("m21", "272")), 1),
+                    (Some(automatic("m21", "272")), first),
+                    (Some(automatic("m21", "273")), second),
+                ],
+            );
+        };
+        assert_forest(runner.state(), 7, 8);
+
+        concede(&mut runner, P1);
+        submit(
+            &mut runner,
+            P0,
+            &[("Forest", 12), ("Island", 8)],
+            &[("Forest", 4)],
+        );
+        submit(&mut runner, P1, &[("Forest", 20)], &[]);
+        choose_play(&mut runner, P1);
+        assert_eq!(runner.state().game_number, 2);
+        assert!(!Arc::ptr_eq(&first_stamp, &owner_stamp(runner.state())));
+        assert_forest(runner.state(), 5, 6);
+        assert_deck_art(
+            runner.state(),
+            P0,
+            "Island",
+            &[
+                (Some(automatic("m21", "263")), 4),
+                (Some(automatic("m21", "264")), 4),
+            ],
+        );
+        assert!(Arc::ptr_eq(&record, &record_of(runner.state(), P0)));
     }
 
     /// Two distinct "Twin Scheme" cards (CR 904.3 allows two cards of one English name in a
@@ -2849,5 +3084,779 @@ mod post_load_creators {
         ));
         assert_eq!(scheme_printings(runner.state()), expected);
         assert!(Arc::ptr_eq(&record_of(runner.state(), P0), &first));
+    }
+}
+
+const FOREST_ORACLE_ID: &str = "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6";
+
+fn art_reference_list(forward: bool, printings: Vec<DeckPrinting>) -> DeckList {
+    DeckList {
+        player: PlayerDeckList {
+            main_deck: if forward {
+                names(&[("Forest", 1), ("Forest Witness", 2), ("Control", 1)])
+            } else {
+                names(&[("Forest", 3), ("Control", 1)])
+            },
+            printings,
+            ..Default::default()
+        },
+        opponent: PlayerDeckList {
+            main_deck: names(&[("Control", 12)]),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn load_art_reference(db: &CardDatabase, list: &DeckList) -> GameState {
+    let decks = resolve_deck_list(db, &engine::database::ComboTable::default(), list);
+    let mut state = GameState::new(FormatConfig::freeform(), 2, 4910);
+    load_and_hydrate_decks(&mut state, &decks, Some(db));
+    let started = engine::game::engine::start_game_with_starting_player(&mut state, PlayerId(0));
+    assert!(matches!(
+        started.disposition,
+        engine::types::game_state::ActionDisposition::Applied
+    ));
+    state
+}
+
+fn assert_art_reference(state: &GameState, expected: &[(u64, &str, Option<CardPrinting>)]) {
+    use engine::types::identifiers::ObjectId;
+
+    assert_eq!(state.players[0].hand.len(), 4);
+    for (id, face, printing) in expected {
+        let id = ObjectId(*id);
+        assert!(state.players[0].hand.contains(&id));
+        let object = &state.objects[&id];
+        assert_eq!(object.card_id.0, id.0);
+        assert_eq!(object.owner, PlayerId(0));
+        assert_eq!(&object.name, face);
+        for carrier in [&object.printing, &object.base_printing] {
+            assert_eq!(carrier.get().as_deref(), printing.as_ref(), "object {id:?}");
+        }
+    }
+}
+
+#[test]
+fn basic_art_fixed_placement_reference() {
+    let db = art_database();
+    for forward in [false, true] {
+        let later = if forward { "Forest Witness" } else { "Forest" };
+        let sentinels = [
+            ("Forest", "snta"),
+            (later, "sntb"),
+            (later, "sntc"),
+            ("Control", "sntd"),
+        ];
+        let list = art_reference_list(
+            forward,
+            sentinels
+                .iter()
+                .map(|(name, tag)| choice(DeckSection::MainDeck, name, 1, tag))
+                .collect(),
+        );
+        let state = load_art_reference(&db, &list);
+        assert_art_reference(
+            &state,
+            &[
+                (4, "Forest", Some(CardPrinting::owner("snta", "1"))),
+                (3, later, Some(CardPrinting::owner("sntb", "1"))),
+                (1, later, Some(CardPrinting::owner("sntc", "1"))),
+                (2, "Control", Some(CardPrinting::owner("sntd", "1"))),
+            ],
+        );
+    }
+}
+
+fn art_row(
+    section: DeckSection,
+    name: &str,
+    count: u32,
+    set: &str,
+    collector: &str,
+) -> DeckPrinting {
+    DeckPrinting {
+        section,
+        name: name.into(),
+        count,
+        printing: CardPrinting::owner(set, collector),
+    }
+}
+
+fn automatic(set: &str, collector: &str) -> CardPrinting {
+    CardPrinting {
+        automatic_art_catalog_version: std::num::NonZeroU8::new(1),
+        ..CardPrinting::owner(set, collector)
+    }
+}
+
+#[test]
+fn basic_art_reserves_later_entries_and_aliases() {
+    let db = art_database();
+    for (set, collector) in [("m21", "272"), ("M12", "247"), ("unknown", "42")] {
+        let list = art_reference_list(
+            false,
+            vec![art_row(DeckSection::MainDeck, "Forest", 1, set, collector)],
+        );
+        let first = if set == "unknown" { "272" } else { "273" };
+        let second = if first == "272" { "273" } else { "272" };
+        assert_art_reference(
+            &load_art_reference(&db, &list),
+            &[
+                (4, "Forest", Some(CardPrinting::owner(set, collector))),
+                (3, "Forest", Some(automatic("m21", first))),
+                (1, "Forest", Some(automatic("m21", second))),
+                (2, "Control", None),
+            ],
+        );
+        let mut pair = list;
+        pair.player.main_deck.remove(2);
+        let decks = resolve_deck_list(&db, &engine::database::ComboTable::default(), &pair);
+        let mut state = GameState::new(FormatConfig::freeform(), 2, 4910);
+        load_and_hydrate_decks(&mut state, &decks, Some(&db));
+        assert_deck_art(
+            &state,
+            PlayerId(0),
+            "Forest",
+            &[
+                (Some(CardPrinting::owner(set, collector)), 1),
+                (Some(automatic("m21", first)), 1),
+            ],
+        );
+    }
+    for with_owner in [false, true] {
+        let rows =
+            with_owner.then(|| art_row(DeckSection::MainDeck, "Forest Witness", 2, "m21", "272"));
+        let list = art_reference_list(true, rows.into_iter().collect());
+        let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
+        let entries = &payload.player.main_deck;
+        assert_eq!(entries[0].card.name, "Forest");
+        assert_eq!(entries[1].card.name, "Forest Witness");
+        for entry in &entries[..2] {
+            assert_eq!(
+                entry.card.scryfall_oracle_id.as_deref(),
+                Some(FOREST_ORACLE_ID)
+            );
+        }
+        assert_eq!(payload.player.printings.len(), usize::from(with_owner));
+        assert!(payload
+            .player
+            .printing_entry_names
+            .iter()
+            .all(|row| row.entry_index == 1));
+        let (first, later1, later2) = if with_owner {
+            (
+                automatic("m21", "273"),
+                CardPrinting::owner("m21", "272"),
+                CardPrinting::owner("m21", "272"),
+            )
+        } else {
+            (
+                automatic("m21", "272"),
+                automatic("m21", "273"),
+                automatic("m21", "272"),
+            )
+        };
+        assert_art_reference(
+            &load_art_reference(&db, &list),
+            &[
+                (4, "Forest", Some(first)),
+                (3, "Forest Witness", Some(later1)),
+                (1, "Forest Witness", Some(later2)),
+                (2, "Control", None),
+            ],
+        );
+    }
+}
+
+#[test]
+fn basic_art_fully_occupied_rotation_starts_in_catalog_order() {
+    let db = art_database();
+    let mut list = art_reference_list(
+        false,
+        vec![
+            art_row(DeckSection::MainDeck, "Forest", 1, "m21", "273"),
+            art_row(DeckSection::MainDeck, "Forest", 1, "m21", "272"),
+        ],
+    );
+    list.player.main_deck = names(&[("Forest", 4)]);
+    // The fixed placement reference maps retained copies to IDs 4, 3, 1, 2.
+    assert_art_reference(
+        &load_art_reference(&db, &list),
+        &[
+            (4, "Forest", Some(CardPrinting::owner("m21", "273"))),
+            (3, "Forest", Some(CardPrinting::owner("m21", "272"))),
+            (1, "Forest", Some(automatic("m21", "272"))),
+            (2, "Forest", Some(automatic("m21", "273"))),
+        ],
+    );
+}
+
+fn assert_deck_art(
+    state: &GameState,
+    owner: PlayerId,
+    name: &str,
+    expected: &[(Option<CardPrinting>, usize)],
+) {
+    let cards: Vec<_> = state
+        .objects
+        .values()
+        .filter(|object| {
+            use engine::types::zones::Zone;
+            object.owner == owner
+                && object.name == name
+                && matches!(object.zone, Zone::Library | Zone::Hand)
+        })
+        .collect();
+    assert_eq!(
+        cards.len(),
+        expected.iter().map(|(_, n)| n).sum::<usize>(),
+        "{name}"
+    );
+    for (printing, count) in expected {
+        assert_eq!(
+            cards
+                .iter()
+                .filter(|object| {
+                    assert_eq!(object.printing.get(), object.base_printing.get());
+                    object.printing.get().as_deref() == printing.as_ref()
+                })
+                .count(),
+            *count,
+            "{name} {printing:?}"
+        );
+    }
+}
+
+#[test]
+fn basic_art_netted_owner_rows_and_other_sections_do_not_reserve_slots() {
+    use engine::types::zones::Zone;
+    let db = art_database();
+    let mut list = art_reference_list(
+        false,
+        vec![
+            art_row(DeckSection::MainDeck, "Forest", 1, "m21", "273"),
+            art_row(DeckSection::MainDeck, "Forest", 2, "m21", "272"),
+            art_row(DeckSection::Commander, "Forest", 1, "command", "1"),
+            art_row(DeckSection::Sideboard, "Forest", 1, "m21", "273"),
+        ],
+    );
+    list.player.main_deck = names(&[("Forest", 4)]);
+    list.player.commander = names(&[("Forest", 1)]);
+    list.player.sideboard = names(&[("Forest", 1)]);
+    list.opponent.main_deck = names(&[("Forest", 2)]);
+    list.opponent.printings = vec![art_row(DeckSection::MainDeck, "Forest", 1, "m21", "273")];
+    let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
+    let mut state = GameState::new(FormatConfig::commander(), 2, 4910);
+    load_and_hydrate_decks(&mut state, &payload, Some(&db));
+    assert_deck_art(
+        &state,
+        PlayerId(0),
+        "Forest",
+        &[
+            (Some(CardPrinting::owner("m21", "272")), 2),
+            (Some(automatic("m21", "273")), 1),
+        ],
+    );
+    assert_deck_art(
+        &state,
+        PlayerId(1),
+        "Forest",
+        &[
+            (Some(CardPrinting::owner("m21", "273")), 1),
+            (Some(automatic("m21", "272")), 1),
+        ],
+    );
+    let command: Vec<_> = state
+        .objects
+        .values()
+        .filter(|object| object.zone == Zone::Command && object.name == "Forest")
+        .collect();
+    assert_eq!(command.len(), 1);
+    assert_eq!(command[0].owner, PlayerId(0));
+    for carrier in [&command[0].printing, &command[0].base_printing] {
+        assert_eq!(
+            carrier.get().as_deref(),
+            Some(&CardPrinting::owner("command", "1"))
+        );
+    }
+    assert_eq!(
+        state.deck_pools[0].printings.get().as_ref().unwrap().rows(),
+        payload.player.printings,
+    );
+}
+
+#[test]
+fn basic_art_replay_preserves_literal_copy_mapping_and_land_action() {
+    use engine::game::{engine::apply, replay::ReplayPlayer};
+    use engine::types::{
+        actions::{GameAction, MulliganChoice},
+        game_state::{ActionDisposition, WaitingFor},
+        identifiers::ObjectId,
+        replay::{ReplayHeader, ReplayLog},
+        zones::Zone,
+    };
+    use std::sync::Arc;
+
+    let db = Arc::new(art_database());
+    let list = art_reference_list(
+        false,
+        vec![art_row(DeckSection::MainDeck, "Forest", 1, "m21", "272")],
+    );
+    let expected = [
+        (1, "Forest", Some(automatic("m21", "272"))),
+        (2, "Control", None),
+        (3, "Forest", Some(automatic("m21", "273"))),
+        (4, "Forest", Some(CardPrinting::owner("m21", "272"))),
+    ];
+    let mut live = load_art_reference(&db, &list);
+    assert_art_reference(&live, &expected);
+    let mut log = ReplayLog::new(ReplayHeader {
+        format_config: FormatConfig::freeform(),
+        match_config: Default::default(),
+        player_count: 2,
+        first_player: Some(0),
+        seed: 4910,
+        deck_data: Some(list),
+    });
+    let id = ObjectId(1);
+    let card_id = live.objects[&id].card_id;
+    let play = GameAction::PlayLand {
+        object_id: id,
+        card_id,
+    };
+    let initial_objects = exact_objects(&live);
+    let mut act = |state: &mut GameState, actor, action: GameAction| {
+        let result = apply(state, actor, action.clone()).expect("recorded action is legal live");
+        assert_eq!(result.disposition, ActionDisposition::Applied);
+        log.push_action(actor, action);
+    };
+    for seat in [PlayerId(0), PlayerId(1)] {
+        act(
+            &mut live,
+            seat,
+            GameAction::MulliganDecision {
+                choice: MulliganChoice::Keep,
+            },
+        );
+    }
+    for _ in 0..8 {
+        if live.phase == engine::types::phase::Phase::PreCombatMain {
+            break;
+        }
+        let WaitingFor::Priority { player } = live.waiting_for else {
+            panic!(
+                "expected priority on the way to main phase: {:?}",
+                live.waiting_for
+            );
+        };
+        act(&mut live, player, GameAction::PassPriority);
+    }
+    act(&mut live, PlayerId(0), play);
+    let assert_public = |state: &GameState| {
+        let object = &state.objects[&id];
+        assert_eq!(object.card_id, card_id);
+        assert_eq!(object.zone, Zone::Battlefield);
+        for carrier in [&object.printing, &object.base_printing] {
+            assert_eq!(carrier.get().as_deref(), expected[0].2.as_ref());
+        }
+    };
+    assert_public(&live);
+    for format_version in [log.format_version, Some(4)] {
+        let mut recorded = log.clone();
+        recorded.format_version = format_version;
+        let decoded = serde_json::from_str(&serde_json::to_string(&recorded).unwrap()).unwrap();
+        let mut player =
+            ReplayPlayer::load(decoded, Some(&db), &engine::database::ComboTable::default())
+                .unwrap();
+        let zero = player.seek(0).unwrap();
+        assert_art_reference(zero, &expected);
+        assert_eq!(exact_objects(zero), initial_objects);
+        let land_action = player.len();
+        assert_public(player.seek(land_action).unwrap());
+        assert_art_reference(player.seek(0).unwrap(), &expected);
+        assert_public(player.seek(land_action).unwrap());
+    }
+}
+
+const COVERED_BASICS: [(&str, &str, &str, &str, &str); 12] = [
+    (
+        "Plains",
+        "bc71ebf6-2056-41f7-be35-b2e5c34afa99",
+        "m21",
+        "260",
+        "261",
+    ),
+    (
+        "Island",
+        "b2c6aa39-2d2a-459c-a555-fb48ba993373",
+        "m21",
+        "263",
+        "264",
+    ),
+    (
+        "Swamp",
+        "56719f6a-1a6c-4c0a-8d21-18f7d7350b68",
+        "m21",
+        "266",
+        "267",
+    ),
+    (
+        "Mountain",
+        "a3fb7228-e76b-4e96-a40e-20b5fed75685",
+        "m21",
+        "269",
+        "270",
+    ),
+    ("Forest", FOREST_ORACLE_ID, "m21", "272", "273"),
+    (
+        "Snow-Covered Plains",
+        "ac8cc74d-e43b-4118-bba0-dfa8b9c04d45",
+        "khm",
+        "276",
+        "277",
+    ),
+    (
+        "Snow-Covered Island",
+        "5b2460a5-6ae5-4cad-ba94-1a9e98e6e4c0",
+        "khm",
+        "278",
+        "279",
+    ),
+    (
+        "Snow-Covered Swamp",
+        "d8239a86-7184-4005-ba1e-2dddcd756c47",
+        "khm",
+        "280",
+        "281",
+    ),
+    (
+        "Snow-Covered Mountain",
+        "ca9f660b-e07d-4f42-a46e-abd0ca72510c",
+        "khm",
+        "282",
+        "283",
+    ),
+    (
+        "Snow-Covered Forest",
+        "5f0d3be8-e63e-4ade-ae58-6b0c14f2ce6d",
+        "khm",
+        "284",
+        "285",
+    ),
+    (
+        "Wastes",
+        "05d24b0c-904a-46b6-b42a-96a4d91a0dd4",
+        "ogw",
+        "183",
+        "184",
+    ),
+    (
+        "Snow-Covered Wastes",
+        "46a07b53-ff58-4bd6-80dd-ded2eb0e29a3",
+        "mh3",
+        "229",
+        "309",
+    ),
+];
+
+fn art_database() -> CardDatabase {
+    use engine::types::card::CardFace;
+    use engine::types::card_type::{CardType, CoreType, Supertype};
+
+    let mut faces = serde_json::Map::new();
+    for (name, oracle, _, _, _) in COVERED_BASICS {
+        let (subtype, supertypes) = match name.strip_prefix("Snow-Covered ") {
+            Some(subtype) => (subtype, vec![Supertype::Basic, Supertype::Snow]),
+            None => (name, vec![Supertype::Basic]),
+        };
+        let subtypes = if subtype == "Wastes" {
+            Vec::new()
+        } else {
+            vec![subtype.into()]
+        };
+        let mut face = CardFace {
+            name: name.into(),
+            scryfall_oracle_id: Some(oracle.into()),
+            card_type: CardType {
+                supertypes,
+                core_types: vec![CoreType::Land],
+                subtypes,
+            },
+            ..Default::default()
+        };
+        if subtype == "Wastes" {
+            let text = "{T}: Add {C}.";
+            face.oracle_text = Some(text.into());
+            face.abilities =
+                engine::parser::oracle::parse_oracle_text(text, name, &[], &["Land".into()], &[])
+                    .abilities;
+        }
+        if matches!(name, "Forest" | "Snow-Covered Forest") {
+            face.oracle_text = Some("({T}: Add {G}.)".into());
+        }
+        if name == "Forest" {
+            // Forest supplies the printed face (CR 305.6). The synthetic
+            // witness isolates distinct deck names with the same Oracle ID.
+            let mut witness = face.clone();
+            witness.name = "Forest Witness".into();
+            faces.insert(
+                "forest witness".into(),
+                serde_json::to_value(witness).unwrap(),
+            );
+            let mut nonbasic = face.clone();
+            nonbasic.name = "Nonbasic Forest".into();
+            nonbasic.card_type.supertypes.clear();
+            faces.insert(
+                "nonbasic forest".into(),
+                serde_json::to_value(nonbasic).unwrap(),
+            );
+            let mut missing = face.clone();
+            missing.name = "Missing Oracle".into();
+            missing.scryfall_oracle_id = None;
+            faces.insert(
+                "missing oracle".into(),
+                serde_json::to_value(missing).unwrap(),
+            );
+            let mut uncovered = face.clone();
+            uncovered.name = "Uncovered Basic".into();
+            uncovered.scryfall_oracle_id = Some("uncovered-basic".into());
+            faces.insert(
+                "uncovered basic".into(),
+                serde_json::to_value(uncovered).unwrap(),
+            );
+        }
+        let mut value = serde_json::to_value(face).unwrap();
+        value["legalities"] = json!({"standard":"legal"});
+        faces.insert(name.to_lowercase(), value);
+    }
+    faces.insert(
+        "control".into(),
+        serde_json::to_value(CardFace {
+            name: "Control".into(),
+            scryfall_oracle_id: Some("uncovered-control".into()),
+            card_type: CardType {
+                core_types: vec![CoreType::Land],
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    CardDatabase::from_json_str(&serde_json::Value::Object(faces).to_string()).unwrap()
+}
+
+#[test]
+fn basic_art_spreads_all_covered_identities_and_momir_decks() {
+    let db = art_database();
+    for count in [1, 2, 5] {
+        let mut rows: Vec<_> = COVERED_BASICS
+            .iter()
+            .map(|(name, ..)| (*name, count))
+            .collect();
+        rows.extend([
+            ("Uncovered Basic", 1),
+            ("Missing Oracle", 1),
+            ("Nonbasic Forest", 1),
+        ]);
+        let player = PlayerDeckList {
+            main_deck: names(&rows),
+            ..Default::default()
+        };
+        let mut opponent = player.clone();
+        opponent.printings = vec![art_row(
+            DeckSection::MainDeck,
+            "Forest",
+            count as u32,
+            "m21",
+            "273",
+        )];
+        let list = DeckList {
+            player,
+            opponent,
+            ..Default::default()
+        };
+        let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
+        let mut state = GameState::new(FormatConfig::freeform(), 2, 4910);
+        load_and_hydrate_decks(&mut state, &payload, Some(&db));
+        for seat in [PlayerId(0), PlayerId(1)] {
+            assert_eq!(
+                state.players[usize::from(seat.0)].library.len(),
+                12 * count + 3
+            );
+            for (name, _, set, first, second) in COVERED_BASICS {
+                if seat == PlayerId(1) && name == "Forest" {
+                    assert_deck_art(
+                        &state,
+                        seat,
+                        name,
+                        &[(Some(CardPrinting::owner(set, second)), count)],
+                    );
+                } else {
+                    assert_deck_art(
+                        &state,
+                        seat,
+                        name,
+                        &[
+                            (Some(automatic(set, first)), count.div_ceil(2)),
+                            (Some(automatic(set, second)), count / 2),
+                        ],
+                    );
+                }
+            }
+            for excluded in ["Uncovered Basic", "Missing Oracle", "Nonbasic Forest"] {
+                assert_deck_art(&state, seat, excluded, &[(None, 1)]);
+            }
+        }
+    }
+
+    let mut state = GameState::new(FormatConfig::momir(), 2, 4910);
+    load_and_hydrate_decks(&mut state, &Default::default(), Some(&db));
+    for seat in [PlayerId(0), PlayerId(1)] {
+        assert_eq!(state.players[usize::from(seat.0)].library.len(), 60);
+        for &(name, _, set, first, second) in &COVERED_BASICS[5..10] {
+            assert_deck_art(
+                &state,
+                seat,
+                name,
+                &[
+                    (Some(automatic(set, first)), 6),
+                    (Some(automatic(set, second)), 6),
+                ],
+            );
+        }
+    }
+}
+
+#[test]
+fn basic_art_preserves_rules_rng_and_real_land_mana() {
+    use engine::ai_support::legal_actions_full;
+    use engine::game::{engine::apply, scenario::GameRunner};
+    use engine::types::{
+        actions::{GameAction, MulliganChoice},
+        display_only::rules_projection,
+        game_state::{ActionDisposition, WaitingFor},
+        mana::{ManaSupertype, ManaType},
+        phase::Phase,
+        zones::Zone,
+    };
+    let db = art_database();
+    // CR 305.6 gives Forests green mana. CR 205.4g identifies snow permanents, and
+    // CR 107.4h describes how mana from a snow source can pay a snow cost. Wastes
+    // produces colorless mana through its printed mana ability, "{T}: Add {C}."
+    for (name, color, snow) in [
+        ("Forest", ManaType::Green, None),
+        (
+            "Snow-Covered Forest",
+            ManaType::Green,
+            Some(ManaSupertype::Snow),
+        ),
+        ("Wastes", ManaType::Colorless, None),
+    ] {
+        let mut plain = art_reference_list(false, vec![]);
+        plain.player.main_deck = names(&[(name, 12)]);
+        let mut decorated = plain.clone();
+        decorated.player.printings = vec![art_row(DeckSection::MainDeck, name, 12, "owner", "1")];
+        let automatic = load_art_reference(&db, &plain);
+        let owner = load_art_reference(&db, &decorated);
+        assert_eq!(
+            automatic
+                .objects
+                .values()
+                .filter(|o| {
+                    o.printing
+                        .get()
+                        .as_ref()
+                        .is_some_and(|p| p.automatic_art_catalog_version.is_some())
+                })
+                .count(),
+            12
+        );
+        assert_ne!(
+            serde_json::to_value(&automatic).unwrap(),
+            serde_json::to_value(&owner).unwrap()
+        );
+        assert_eq!(
+            rules_projection(&automatic).unwrap(),
+            rules_projection(&owner).unwrap()
+        );
+        assert_eq!(
+            allocation_reference(&automatic),
+            allocation_reference(&owner)
+        );
+        for (left, right) in automatic.players.iter().zip(owner.players.iter()) {
+            assert_eq!(left.hand, right.hand);
+        }
+
+        for mut state in [automatic, owner] {
+            for player in [PlayerId(0), PlayerId(1)] {
+                let result = apply(
+                    &mut state,
+                    player,
+                    GameAction::MulliganDecision {
+                        choice: MulliganChoice::Keep,
+                    },
+                )
+                .unwrap();
+                assert_eq!(result.disposition, ActionDisposition::Applied);
+            }
+            let mut runner = GameRunner::from_state(state);
+            runner.advance_to_phase(Phase::PreCombatMain);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority {
+                    player: PlayerId(0)
+                }
+            ));
+            let id = *runner.state().players[0].hand.front().unwrap();
+            let card_id = runner.state().objects[&id].card_id;
+            let stamp = runner.state().objects[&id].printing.clone();
+            let base_stamp = runner.state().objects[&id].base_printing.clone();
+            let result = runner
+                .act(GameAction::PlayLand {
+                    object_id: id,
+                    card_id,
+                })
+                .unwrap();
+            assert_eq!(result.disposition, ActionDisposition::Applied);
+            assert!(matches!(
+                result.waiting_for,
+                WaitingFor::Priority {
+                    player: PlayerId(0)
+                }
+            ));
+            assert!(runner.state().stack.is_empty());
+            let land = &runner.state().objects[&id];
+            assert_eq!(land.name, name);
+            assert_eq!(land.zone, Zone::Battlefield);
+            assert_eq!(land.card_id, card_id);
+            // DisplayOnly equality ignores contents, so compare what each carrier holds.
+            assert_eq!(land.printing.get(), stamp.get());
+            assert_eq!(land.base_printing.get(), base_stamp.get());
+            if name == "Wastes" {
+                assert!(land.card_types.subtypes.is_empty());
+            }
+            let (_, _, by_object) = legal_actions_full(runner.state());
+            let tap = by_object[&id]
+                .iter()
+                .find(|action| matches!(action, GameAction::TapLandForMana { .. }))
+                .unwrap();
+            let result = runner.act(tap.clone()).unwrap();
+            assert_eq!(result.disposition, ActionDisposition::Applied);
+            assert!(matches!(
+                result.waiting_for,
+                WaitingFor::Priority {
+                    player: PlayerId(0)
+                }
+            ));
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().objects[&id].tapped);
+            let pool = &runner.state().players[0].mana_pool;
+            assert_eq!(pool.total(), 1);
+            let unit = pool.units().next().unwrap();
+            assert_eq!(unit.source_id, id);
+            assert_eq!(unit.color, color);
+            assert_eq!(unit.supertype, snow);
+        }
     }
 }

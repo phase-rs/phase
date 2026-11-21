@@ -3,9 +3,14 @@ import type {
   ObjectAction,
   ObjectId,
   PlayerId,
-  TurnOrderSlotView,
 } from "../adapter/types";
-import { DICE_ROLL_DURATION_MS, TURN_BANNER_DURATION_MS } from "../animation/types";
+import {
+  DICE_RESULT_HOLD_MS,
+  DICE_RESULT_MIN_HOLD_MS,
+  DICE_ROLL_LANDING_TIMEOUT_MS,
+  DICE_ROLL_MIN_DURATION_MS,
+  TURN_BANNER_DURATION_MS,
+} from "../animation/types";
 import { usePreferencesStore } from "./preferencesStore";
 import type { FilterKey } from "../components/modal/cardChoice/gridSelection";
 
@@ -47,14 +52,8 @@ export type DiceRollPayload =
        *  shown so players see what the lowest roll was, never a rules roll. */
       rolls: { playerId: PlayerId; value: number; sides?: number; ignored?: boolean }[];
       context: "startingPlayer" | "ability";
-      /** Starting-player contest: the high roller who takes the first turn. */
+      /** Starting-player contest (CR 103.1): the roll-off winner, from the engine's `StartingPlayerContest.winner` — the player who chooses who takes the first turn. */
       winner?: PlayerId;
-      /** Engine-authored opening turn sequence for multiplayer games. The
-       *  overlay renders this directly so every seat can see its first-turn
-       *  position without reconstructing turn order from raw state. */
-      turnOrder?: TurnOrderSlotView[];
-      /** Engine-authored one-based turn position for the current viewer. */
-      viewerTurnNumber?: number;
       /** Starting-player contest only (CR 103.1): the roll-off by round. Round 0
        *  is every seat; each later round is the previous round's tied-max group
        *  that rerolled. Rendered round-by-round so the winner is always the high
@@ -134,6 +133,13 @@ function flushPendingShow(): void {
 // distinct from the board-event step queue (animationStore), which coordinates
 // spatial per-object effects.
 let diceAdvanceTimer: ReturnType<typeof setTimeout> | null = null;
+// The active auto-advancing roll while its dice or coin are still in the air.
+// Its first landing report (`settleDiceRoll`) swaps the landing wait for the
+// read-the-result countdown; any other report is ignored.
+let diceRollAwaitingLanding: DiceRollPayload | null = null;
+// When the active auto-advancing roll showed (`performance.now()`), for its
+// minimum time on screen. Monotonic, so a wall-clock step can't move it.
+let diceRollShownAt = 0;
 let scryOutcomeTimer: ReturnType<typeof setTimeout> | null = null;
 
 // CR 103.1: the starting-player contest determines who's on the play — a moment
@@ -146,31 +152,72 @@ function autoAdvances(payload: DiceRollPayload): boolean {
   return payload.context !== "startingPlayer";
 }
 
-// Arm (or deliberately withhold) the auto-advance timer for the now-active roll.
-// Single authority for the timer lifecycle: both the initial show (`flashDiceRoll`)
-// and each FIFO step (`advanceDiceQueue`) route through here so the
-// hold-for-input rule is applied in exactly one place.
-function scheduleDiceAdvance(payload: DiceRollPayload): void {
+// Cancel whatever the active roll is waiting on: its landing or its countdown.
+// Every path that moves off a roll clears both.
+function cancelDiceAdvance(): void {
   if (diceAdvanceTimer) {
     clearTimeout(diceAdvanceTimer);
     diceAdvanceTimer = null;
   }
+  diceRollAwaitingLanding = null;
+}
+
+// Arm (or deliberately withhold) the auto-advance timer for the now-active roll.
+// Single authority for the timer lifecycle: both the initial show (`flashDiceRoll`)
+// and each FIFO step (`advanceDiceQueue`) route through here so the
+// hold-for-input rule is applied in exactly one place.
+//
+// An ability roll's countdown starts when its dice land (`settleDiceRoll`), not
+// here: the 3D die only starts tumbling once its lazy chunk and WebGL are ready,
+// so a countdown from the show could close the overlay before the result is
+// seen. Until the landing, only the landing wait is armed.
+function scheduleDiceAdvance(payload: DiceRollPayload): void {
+  cancelDiceAdvance();
   if (!autoAdvances(payload)) return;
-  // Re-read speed each step so a live Animation Speed change (incl. switching to
-  // instant) takes effect for the remaining queued rolls.
+  diceRollAwaitingLanding = payload;
+  diceRollShownAt = performance.now();
+  diceAdvanceTimer = setTimeout(stallDiceRoll, DICE_ROLL_LANDING_TIMEOUT_MS);
+}
+
+// The landing never arrived (a 3D chunk that never loads, or a renderer that
+// stops drawing). The overlay shows the result as the static face, as it does
+// for a renderer that throws, and the countdown starts now, so no roll closes
+// without its result having shown.
+function stallDiceRoll(): void {
+  cancelDiceAdvance();
+  useUiStore.setState({ diceRollStalled: true });
+  startDiceResultHold();
+}
+
+// Count down once the active roll's result shows: the read beat, and never
+// sooner than DICE_ROLL_MIN_DURATION_MS × speed after the roll showed, so a
+// result that shows at once (a static face) stays about as long as an animated
+// roll does.
+// Speed is re-read here so a live Animation Speed change (incl. switching to
+// instant, which closes at once) applies to the countdown.
+function startDiceResultHold(): void {
   const speed = usePreferencesStore.getState().animationSpeedMultiplier;
-  diceAdvanceTimer = setTimeout(advanceDiceQueue, DICE_ROLL_DURATION_MS * Math.max(speed, 0));
+  if (speed <= 0) {
+    diceAdvanceTimer = setTimeout(advanceDiceQueue, 0);
+    return;
+  }
+  // The floor keeps the result readable at fast speeds, where the beat would
+  // otherwise shrink to a few frames.
+  const readBeatMs = Math.max(DICE_RESULT_HOLD_MS * speed, DICE_RESULT_MIN_HOLD_MS);
+  const shownForMs = performance.now() - diceRollShownAt;
+  const minimumLeftMs = DICE_ROLL_MIN_DURATION_MS * speed - shownForMs;
+  diceAdvanceTimer = setTimeout(advanceDiceQueue, Math.max(readBeatMs, minimumLeftMs));
 }
 
 function advanceDiceQueue(): void {
   const queue = useUiStore.getState().diceRollQueue;
   if (queue.length === 0) {
-    useUiStore.setState({ diceRoll: null });
-    diceAdvanceTimer = null;
+    cancelDiceAdvance();
+    useUiStore.setState({ diceRoll: null, diceRollStalled: false });
     return;
   }
   const next = queue[0];
-  useUiStore.setState({ diceRoll: next, diceRollQueue: queue.slice(1) });
+  useUiStore.setState({ diceRoll: next, diceRollQueue: queue.slice(1), diceRollStalled: false });
   scheduleDiceAdvance(next);
 }
 
@@ -239,6 +286,9 @@ interface UiStoreState {
   /** Pending dice/coin overlays behind the active one. Simultaneous or
    *  back-to-back rolls play serially instead of clobbering. */
   diceRollQueue: DiceRollPayload[];
+  /** The active roll's landing never arrived in time, so the overlay shows its
+   *  result as the static face (as it does for a renderer that throws). */
+  diceRollStalled: boolean;
   /** Active engine-authored public scry result, temporarily shown on board. */
   scryOutcome: ScryOutcomePayload | null;
   /** Pending public scry notices, shown FIFO after the active outcome. */
@@ -369,8 +419,13 @@ interface UiStoreActions {
   /** Show the dice-roll / coin-flip overlay for the engine's already-known
    *  result. No-ops when animation speed is "instant" (0). */
   flashDiceRoll: (payload: DiceRollPayload) => void;
-  /** Clear the active dice overlay, pending queue, and advance timer. Called on
-   *  DiceRollOverlay unmount so rolls can't leak across games. */
+  /** Report that the active roll's dice or coin have landed, starting its
+   *  close countdown. Counts once per roll; a report for any other payload (a
+   *  skipped or superseded roll, or the contest, which holds for input) is
+   *  ignored. */
+  settleDiceRoll: (payload: DiceRollPayload) => void;
+  /** Clear the active dice overlay, pending queue, and advance timer. Called at
+   *  a game-session boundary (`sessionCleanup`) so rolls can't leak across games. */
   resetDiceRoll: () => void;
   /** Dismiss the current dice/coin overlay immediately (user tap-to-skip),
    *  advancing to the next queued roll if any. */
@@ -451,6 +506,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   turnBannerIsYours: false,
   diceRoll: null,
   diceRollQueue: [],
+  diceRollStalled: false,
   scryOutcome: null,
   scryOutcomeQueue: [],
   focusedOpponent: null,
@@ -778,38 +834,39 @@ export const useUiStore = create<UiStore>()((set, get) => ({
     // Instant speed (0) skips the overlay entirely. When a roll is already
     // showing, queue this one so simultaneous/back-to-back rolls play serially
     // instead of clobbering. `scheduleDiceAdvance` owns how long the active roll
-    // stays up: ability rolls auto-advance on the speed-scaled timer (the 3D
-    // die's tumble+settle scales by the same `speed`, so it settles before the
-    // overlay advances); the starting-player contest holds for player input.
+    // stays up: ability rolls wait for their dice to land, then count down
+    // (`settleDiceRoll`); the starting-player contest holds for player input.
     const speed = usePreferencesStore.getState().animationSpeedMultiplier;
     if (speed <= 0) return;
     if (get().diceRoll === null) {
-      set({ diceRoll: payload });
+      set({ diceRoll: payload, diceRollStalled: false });
       scheduleDiceAdvance(payload);
     } else {
       set({ diceRollQueue: [...get().diceRollQueue, payload] });
     }
   },
+  settleDiceRoll: (payload) => {
+    // Only the active roll's first landing counts. A late report from a roll
+    // that was skipped or superseded would cut the next roll short, and a
+    // repeated one (an effect re-running) would push the countdown back.
+    if (payload !== diceRollAwaitingLanding) return;
+    cancelDiceAdvance();
+    startDiceResultHold();
+  },
   resetDiceRoll: () => {
     // Clears the active overlay, the pending queue, AND the module-level timer.
-    // Called from DiceRollOverlay's unmount cleanup so an in-flight roll can't
-    // leak across games (the store is a module singleton that outlives the
-    // GamePage mount).
-    if (diceAdvanceTimer) {
-      clearTimeout(diceAdvanceTimer);
-      diceAdvanceTimer = null;
-    }
-    set({ diceRoll: null, diceRollQueue: [] });
+    // Called at a game-session boundary (`sessionCleanup`) so an in-flight roll
+    // can't leak across games (the store is a module singleton that outlives
+    // the GamePage mount).
+    cancelDiceAdvance();
+    set({ diceRoll: null, diceRollQueue: [], diceRollStalled: false });
   },
   skipDiceRoll: () => {
-    // User tap-to-skip: cancel the pending auto-advance and advance now, so the
-    // next queued roll plays immediately or the overlay clears. Reuses the same
-    // FIFO drain as the timer, so a skipped roll hands off to the next exactly
-    // as a timed one would (and the GamePage mulligan gate releases on schedule).
-    if (diceAdvanceTimer) {
-      clearTimeout(diceAdvanceTimer);
-      diceAdvanceTimer = null;
-    }
+    // User tap-to-skip: advance now, so the next queued roll plays immediately
+    // or the overlay clears. Reuses the same FIFO drain as the timer, which
+    // cancels whatever the skipped roll was waiting on, so a skipped roll hands
+    // off to the next exactly as a timed one would (and the GamePage mulligan
+    // gate releases on schedule).
     advanceDiceQueue();
   },
   flashScryOutcome: (payload) => {

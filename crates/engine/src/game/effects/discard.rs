@@ -63,6 +63,7 @@ pub(crate) fn complete_discard_to_graveyard(
     // it through the pipeline so `Moved` redirects (Rest in Peace class) get
     // their consult. A plain discard previously moved raw and never saw them.
     let proposed = ProposedEvent::ZoneChange {
+        library_placement: None,
         object_id,
         from: Zone::Hand,
         to: Zone::Graveyard,
@@ -71,15 +72,20 @@ pub(crate) fn complete_discard_to_graveyard(
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
         enter_with_counters: Vec::new(),
+        enter_with_grants: None,
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
+        with_entry_effect: None,
+        co_entrants: None,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
         enter_with_choices: None,
         discard_frame,
         performed_by: None,
+        ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         applied,
     };
     match replacement::replace_event(state, proposed, events) {
@@ -92,8 +98,6 @@ pub(crate) fn complete_discard_to_graveyard(
                 None,
                 false,
                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                // Discard delivers to the graveyard — no library placement.
-                None,
                 events,
             );
         }
@@ -436,7 +440,6 @@ pub fn resolve(
                                 None,
                                 false,
                                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                                None,
                                 events,
                             );
                             if discard_frame.is_none() {
@@ -749,7 +752,7 @@ fn specific_discard_cards(state: &GameState, ability: &ResolvedAbility) -> Optio
 /// CR 701.9a: the cards a player-hand discard can move — the discarding
 /// player's hand, narrowed by the recipient-scoped card filter — or why there
 /// is no pool.
-enum PlayerHandDiscardPool {
+pub(super) enum PlayerHandDiscardPool {
     /// CR 608.2b: no discarding player resolves (an illegal declared player).
     NoPlayer,
     /// CR 701.9a + CR 609.3: an opponent's spell or ability can't force this
@@ -765,7 +768,7 @@ enum PlayerHandDiscardPool {
 
 /// The single authority on which hand cards a player-hand discard can move,
 /// shared by [`resolve`] and [`optional_discard_is_infeasible`].
-fn player_hand_discard_pool(
+pub(super) fn player_hand_discard_pool(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
@@ -1260,7 +1263,6 @@ fn route_discard(
                     None,
                     false,
                     crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                    None,
                     events,
                 );
                 if discard_frame.is_none() {
@@ -1797,13 +1799,13 @@ mod tests {
             .as_mut()
             .expect("test grandchild exists")
             .context
-            .direct_discard_result = Some(result.clone());
+            .direct_discard_result = Some(Box::new(result.clone()));
         direct_child
             .else_ability
             .as_mut()
             .expect("test else branch exists")
             .context
-            .direct_discard_result = Some(result.clone());
+            .direct_discard_result = Some(Box::new(result.clone()));
         let continuation = PendingContinuation::new(Box::new(direct_child), &state);
         state.park_ability_continuation(continuation);
 
@@ -1874,6 +1876,8 @@ mod tests {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SelfRef,
@@ -1905,6 +1909,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::SelfRef,
@@ -2080,6 +2086,8 @@ mod tests {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -2214,6 +2222,8 @@ mod tests {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,

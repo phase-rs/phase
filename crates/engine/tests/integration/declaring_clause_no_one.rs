@@ -305,6 +305,7 @@ fn classes(f: TargetFilter) -> Vec<(&'static str, Effect)> {
                 count: q(2),
                 target: f.clone(),
                 destination: Zone::Graveyard,
+                position: engine::types::ability::LibraryPosition::Top,
             },
         ),
         (
@@ -360,6 +361,7 @@ fn classes(f: TargetFilter) -> Vec<(&'static str, Effect)> {
                 selection: Default::default(),
                 choice_optional: false,
                 reveal: false,
+                cardinality: engine::types::ability::ObjectSelectionCardinality::SINGLE,
             },
         ),
         (

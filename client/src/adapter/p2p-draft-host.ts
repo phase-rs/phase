@@ -88,10 +88,24 @@ function sanitizePublicBackup(
   const publicSnapshot = JSON.parse(JSON.stringify(snapshot)) as PersistedDraftHostSession;
   const rawPublicSnapshot = publicSnapshot as unknown as Record<string, unknown>;
   delete rawPublicSnapshot.booster_pack_pool;
+  // DECK COPIES. Another seat's submitted deck is private until its match
+  // launches it, and the backup row is readable by any pod guest who can derive
+  // the host peer id. `payloadFingerprint` is the submitted card-name/count JSON
+  // itself, not a one-way hash, and a workspace snapshot is the seat's
+  // main/sideboard partition. IndexedDB keeps both for recovery. Mirrors
+  // `P2P_BACKUP_SECRET_KEYS` in `server-core::p2p_backup_guard`.
+  delete rawPublicSnapshot.deckSubmissionReceipts;
+  delete rawPublicSnapshot.perSeatWorkspaceSnapshots;
+  // DIGESTS OF DECK-BEARING PAYLOADS. `draftIntergameDigest` is an unsalted,
+  // deterministic 32-bit checksum: a pod member who already knows a candidate
+  // deck or partition can test guesses against it offline, so a retained digest
+  // is a verification oracle for the very contents removed above.
+  delete rawPublicSnapshot.launchDigests;
 
   redactPoolInputCubeList(publicSnapshot.poolInput);
   redactMatchLaunchPools(rawPublicSnapshot.matchLaunches);
   redactIntergameCommandLaunchPools(rawPublicSnapshot.intergameCommands);
+  redactBo3StateDecks(rawPublicSnapshot.bo3State);
   redactDraftSessionPoolAndChaos(rawPublicSnapshot);
   return publicSnapshot;
 }
@@ -101,23 +115,46 @@ function redactPoolInputCubeList(poolInput: unknown): void {
   delete poolInput.data.cube_list_text;
 }
 
+/** A launch descriptor's decks (`deckPayload` for host/bot launches,
+ * `localDeck` for a guest launch) are another seat's private contents. The whole
+ * payload goes, which also removes the booster pool it carries. */
+function redactLaunchDecks(launch: Record<string, unknown>): void {
+  delete launch.deckPayload;
+  delete launch.localDeck;
+}
+
 function redactMatchLaunchPools(matchLaunches: unknown): void {
   if (!Array.isArray(matchLaunches)) return;
   for (const matchLaunch of matchLaunches) {
     if (!isJsonRecord(matchLaunch) || !isJsonRecord(matchLaunch.launch)) continue;
-    if (!isJsonRecord(matchLaunch.launch.deckPayload)) continue;
-    delete matchLaunch.launch.deckPayload.booster_pack_pool;
+    redactLaunchDecks(matchLaunch.launch);
   }
 }
 
-/** Held Bo3 commands retain their original launch payload for recovery. That
- * payload is just as public in an HTTP backup as an ordinary match launch. */
+/** Bo3 phase data keeps its phase but not each seat's main/sideboard partition. */
+function redactBo3StateDecks(bo3State: unknown): void {
+  if (!Array.isArray(bo3State)) return;
+  for (const match of bo3State) {
+    if (isJsonRecord(match)) delete match.decks;
+  }
+}
+
+/** Held Bo3 commands retain their original launch payload for recovery, and a
+ * `SubmitSideboard` command carries the submitted partition itself. Both are
+ * just as public in an HTTP backup as an ordinary match launch. */
 function redactIntergameCommandLaunchPools(intergameCommands: unknown): void {
   if (!Array.isArray(intergameCommands)) return;
   for (const command of intergameCommands) {
-    if (!isJsonRecord(command) || !isJsonRecord(command.launchPayload)) continue;
-    if (!isJsonRecord(command.launchPayload.deckPayload)) continue;
-    delete command.launchPayload.deckPayload.booster_pack_pool;
+    if (!isJsonRecord(command)) continue;
+    if (isJsonRecord(command.launchPayload)) redactLaunchDecks(command.launchPayload);
+    if (isJsonRecord(command.payload)) {
+      delete command.payload.main;
+      delete command.payload.sideboard;
+    }
+    // Checksums of the launch / sideboard payload just redacted (see the
+    // `launchDigests` note in `sanitizePublicBackup`).
+    delete command.launchDigest;
+    delete command.payloadDigest;
   }
 }
 
@@ -164,6 +201,9 @@ function redactDraftSessionObject(session: Record<string, unknown>): void {
   // knowing every card still to come. Listed last but redacted on the same
   // terms: the mirror above is only true if it is complete.
   delete session.packs_by_seat;
+  // EVERY SEAT'S ACCEPTED DECK. Private until the match launches it to the
+  // opponent. Mirrors `submitted_decks` in `NESTED_DRAFT_SECRET_KEYS`.
+  delete session.submitted_decks;
   if (isJsonRecord(session.config)) {
     // THE SEED IS THE DRAW ORDER. `main_stack`'s order "is the `rng_seed`'s
     // secret" (`draft_core::types`), so shipping the seed while stripping the
@@ -328,6 +368,13 @@ function hostDraftSeed(): number {
   return values[0]!;
 }
 
+// The backup server accepts exactly six uppercase ASCII alphanumerics as a
+// `draft_code` (`is_valid_draft_code`, crates/phase-server/src/admin.rs) and
+// answers 400 to anything else. Reduced modulo 36^6 from one 32-bit draw; the
+// code is a public row key, so the slight modulo bias is not a secrecy concern.
+const DRAFT_CODE_LENGTH = 6;
+const DRAFT_CODE_SPACE = 36 ** DRAFT_CODE_LENGTH;
+
 /**
  * A public draft code, drawn from its OWN randomness.
  *
@@ -347,7 +394,7 @@ function hostDraftSeed(): number {
 function hostDraftCode(): string {
   const values = new Uint32Array(1);
   crypto.getRandomValues(values);
-  return `draft-${values[0]!.toString(16).padStart(8, "0")}`;
+  return (values[0]! % DRAFT_CODE_SPACE).toString(36).toUpperCase().padStart(DRAFT_CODE_LENGTH, "0");
 }
 
 /**
@@ -399,6 +446,7 @@ interface ExportedDraftSession {
        * plural-submission wire landed has none.
        */
       commanders?: string[];
+      companion?: string | null;
     }
   >;
 }
@@ -413,8 +461,10 @@ function deckPayload(
   mainDeck: string[],
   sideboard: string[],
   commander: string[] = [],
+  companion: string[] = [],
 ): DraftDeckPayload {
-  return { main_deck: mainDeck, sideboard, commander };
+  // An absent companion keeps the pre-companion payload shape.
+  return { main_deck: mainDeck, sideboard, commander, ...(companion.length > 0 ? { companion } : {}) };
 }
 
 function deckCardCounts(cards: readonly string[]): DeckCardCount[] {
@@ -1225,7 +1275,7 @@ export class P2PDraftHost {
           await this.handleDeckSubmission(seat, msg.mainDeck, msg.commanders, msg.submissionId, {
             kind: "network",
             deliverySession: originatingSession,
-          });
+          }, msg.companion);
         } finally {
           if (originatingSession && this.pendingDeckSubmissionBySession.get(originatingSession) === msg.submissionId) {
             this.pendingDeckSubmissionBySession.delete(originatingSession);
@@ -1414,7 +1464,12 @@ export class P2PDraftHost {
       // abandoned. Retained, it would sit in `pendingDraftSnapshot` and be
       // flushed AHEAD of newer state by the next persist, writing the
       // abandoned draft to IndexedDB where a reload would restore it.
-      await this.persistSessionStrict({ retainFailedDraftSnapshot: false });
+      //
+      // `forceBackupUpload` makes THIS started snapshot attempt the existing
+      // best-effort backup POST at startup (when persistence and a backup
+      // endpoint are configured) instead of waiting BACKUP_INTERVAL_PICKS
+      // picks. It does not guarantee the server stored the row.
+      await this.persistSessionStrict({ retainFailedDraftSnapshot: false, forceBackupUpload: true });
     } catch (err) {
       this.draftStarted = false;
       this.draftCode = "";
@@ -1474,7 +1529,7 @@ export class P2PDraftHost {
   /**
    * Host submits their own deck (seat 0).
    */
-  async submitHostDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
+  async submitHostDeck(mainDeck: string[], commanders: string[], companion?: string | null): Promise<DraftPlayerView> {
     return this.enqueueAuthoritativeMutation(() => {
       if (!this.draftStarted) throw new Error("Draft not started");
       // CR 903.3: the designation is part of the payload's identity, so it
@@ -1482,16 +1537,27 @@ export class P2PDraftHost {
       // resubmit that changes only the commander reuse the prior receipt and
       // resolve straight to the recovered-receipt branch, never reaching the
       // reducer with the new designation.
-      const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders);
-      const priorSubmission = [...this.deckSubmissionReceipts.entries()].find(
-        ([, receipt]) => receipt.seat === 0 && receipt.payloadFingerprint === payloadFingerprint,
-      )?.[0];
+      //
+      // The receipt is reused only for a retry of seat 0's LATEST accepted
+      // submission (an IDB-failure retry, or serialized concurrent submits).
+      // A revert to an earlier composition (A -> B -> A) is a new submission
+      // and must reach the reducer, or `submitted_decks` keeps B. Receipts are
+      // set only under new ids and persisted/restored in insertion order, so
+      // the last seat-0 entry is the latest accepted one.
+      const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders, companion);
+      const latestReceipt = [...this.deckSubmissionReceipts.entries()]
+        .filter(([, receipt]) => receipt.seat === 0)
+        .pop();
+      const retrySubmission = latestReceipt?.[1].payloadFingerprint === payloadFingerprint
+        ? latestReceipt[0]
+        : undefined;
       return this.handleDeckSubmission(
         0,
         mainDeck,
         commanders,
-        priorSubmission ?? crypto.randomUUID(),
+        retrySubmission ?? crypto.randomUUID(),
         { kind: "hostLocal" },
+        companion,
       );
     });
   }
@@ -1823,11 +1889,12 @@ export class P2PDraftHost {
     commanders: string[],
     submissionId: string,
     origin: DeckSubmissionOrigin = { kind: "legacyDirect" },
+    companion?: string | null,
   ): Promise<DraftPlayerView> {
     let submissionAccepted = false;
     let receiptDurable = false;
     try {
-      const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders);
+      const payloadFingerprint = this.deckPayloadFingerprint(mainDeck, commanders, companion);
       const previous = this.deckSubmissionReceipts.get(submissionId);
       let view: DraftPlayerView;
       if (previous) {
@@ -1842,7 +1909,11 @@ export class P2PDraftHost {
         await this.persistSessionStrict();
         receiptDurable = true;
       } else {
-        view = await this.awaitAdmittedHostView(() => this.adapter.submitDeckForSeat(seat, mainDeck, commanders));
+        view = await this.awaitAdmittedHostView(() =>
+          companion !== undefined
+            ? this.adapter.submitDeckForSeat(seat, mainDeck, commanders, companion)
+            : this.adapter.submitDeckForSeat(seat, mainDeck, commanders),
+        );
         // Record before saving the post-reducer snapshot. A retry after a host
         // reload therefore sees the same result and cannot feed the reducer a
         // second submission.
@@ -1903,8 +1974,11 @@ export class P2PDraftHost {
    * designation. Both call sites must agree, or a receipt lookup and a receipt
    * comparison can disagree about whether two submissions are the same.
    */
-  private deckPayloadFingerprint(mainDeck: string[], commanders: string[]): string {
-    return `${deckSubmissionFingerprint(mainDeck)}|${deckSubmissionFingerprint(commanders)}`;
+  private deckPayloadFingerprint(mainDeck: string[], commanders: string[], companion?: string | null): string {
+    // A companion-free payload keeps the original two-part form, so receipts
+    // persisted before companion designations existed still match a retry.
+    const base = `${deckSubmissionFingerprint(mainDeck)}|${deckSubmissionFingerprint(commanders)}`;
+    return companion ? `${base}|${companion}` : base;
   }
 
   private async publishAcceptedDeckSubmission(
@@ -1932,13 +2006,15 @@ export class P2PDraftHost {
       // admits only Deckbuilding | Pairing | RoundComplete). State what every
       // status does rather than sweeping the rest into a fallback.
       //
-      // `Pairing` is PostDraftPlay::TournamentPairings, the only status this
-      // funnel really reaches besides `Complete`; `generatePairingsInner`
-      // republishes and overwrites it. The other seven are unreachable here —
+      // `Pairing` is PostDraftPlay::TournamentPairings, which this funnel
+      // reaches besides `Complete`; `generatePairingsInner` republishes and
+      // overwrites it. `RoundComplete` is reached by a between-rounds revision
+      // in a Casual pod (MTR 7.3): every seat already submitted, so this
+      // all-submitted branch fires on each revision, and its own arm below
+      // handles it. The remaining six are unreachable here —
       // `apply_submit_deck`'s last-deck arm assigns only Complete or Pairing,
-      // and this branch runs only once every seat has submitted or is a bot —
-      // so they route to the reducer, which refuses whatever it will not
-      // accept.
+      // and a revision leaves the status untouched — so they route to the
+      // reducer, which refuses whatever it will not accept.
       switch (hostView.status) {
         // PostDraftPlay::CompleteImmediately (Quick Draft, Commander Draft).
         // The reducer already assigned Complete and `apply_generate_pairings`
@@ -1960,12 +2036,16 @@ export class P2PDraftHost {
         case "Review":
           await this.broadcastViews();
           break;
+        // A between-rounds revision (MTR 7.3) republishes the pod and never
+        // generates pairings: round advancement stays the host's AdvanceRound.
+        case "RoundComplete":
+          await this.broadcastViews();
+          break;
         case "Lobby":
         case "Drafting":
         case "Paused":
         case "Deckbuilding":
         case "MatchInProgress":
-        case "RoundComplete":
         case "Abandoned":
           await this.generatePairingsInner();
           break;
@@ -3126,6 +3206,7 @@ export class P2PDraftHost {
       submitted.main_deck,
       sideboardFromPool(session, seat, submitted.main_deck),
       submitted.commanders ?? [],
+      submitted.companion ? [submitted.companion] : [],
     );
   }
 
@@ -3748,12 +3829,13 @@ export class P2PDraftHost {
    * retaining its failed engine snapshot for replay.
    */
   private persistSessionStrict(
-    options: { retainFailedDraftSnapshot?: boolean } = {},
+    options: { retainFailedDraftSnapshot?: boolean; forceBackupUpload?: boolean } = {},
   ): Promise<void> {
     if (!this.persistenceId || this.persistenceClosed) return Promise.resolve();
     return this.enqueuePersistSession(
       this.draftStarted ? undefined : this.buildPersistedSnapshot(null),
       options.retainFailedDraftSnapshot,
+      options.forceBackupUpload,
     );
   }
 
@@ -3765,6 +3847,7 @@ export class P2PDraftHost {
   private enqueuePersistSession(
     snapshotAtMutation?: PersistedDraftHostSession,
     retainFailedDraftSnapshot = true,
+    forceBackupUpload = false,
   ): Promise<void> {
     if (!this.persistenceId || this.persistenceClosed) return Promise.resolve();
     const persist = this.persistQueue.then(async () => {
@@ -3791,6 +3874,9 @@ export class P2PDraftHost {
       }
 
       // Server backup upload (D-08, T-60-11: rate-limited to every N picks)
+      // `forceBackupUpload` is bound to this queued snapshot, so an earlier
+      // queued lobby save cannot consume it.
+      if (forceBackupUpload) this.picksSinceLastBackup = P2PDraftHost.BACKUP_INTERVAL_PICKS;
       this.picksSinceLastBackup++;
       if (this.backupEndpoint && this.picksSinceLastBackup >= P2PDraftHost.BACKUP_INTERVAL_PICKS) {
         this.picksSinceLastBackup = 0;

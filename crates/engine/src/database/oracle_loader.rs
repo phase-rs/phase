@@ -5,18 +5,24 @@ use std::path::{Path, PathBuf};
 use crate::database::bracket_lists::BracketSignals;
 use crate::database::card_db::{
     build_name_alias_index, build_search_face_keys, collect_creature_type_vocabulary, CardDatabase,
+    FaceIndex,
 };
 use crate::database::legality::normalize_legalities;
-use crate::database::mtgjson::load_atomic_cards;
+use crate::database::mtgjson::{load_atomic_cards, AtomicCardsFile};
+use crate::database::name_copy_gate::gate_unmaterializable_name_copies;
 use crate::database::synthesis::{
-    build_oracle_face, build_oracle_face_multi, layout_faces, map_layout, LayoutKind,
+    build_oracle_face, build_oracle_face_multi, layout_faces, layout_faces_mut, map_layout,
+    LayoutKind,
 };
 use crate::types::card::{CardFace, CardLayout, CardRules};
 
 /// Load a card database from MTGJSON, running the Oracle text parser on each card.
 pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Error>> {
-    let atomic = load_atomic_cards(mtgjson_path)?;
+    Ok(load_from_atomic_cards(load_atomic_cards(mtgjson_path)?))
+}
 
+/// Build a card database from loaded MTGJSON atomic cards, running the Oracle text parser on each card.
+pub(crate) fn load_from_atomic_cards(atomic: AtomicCardsFile) -> CardDatabase {
     let mut cards: HashMap<String, CardRules> = HashMap::new();
     let mut face_index: HashMap<String, CardFace> = HashMap::new();
     let mut oracle_id_index: HashMap<String, Vec<String>> = HashMap::new();
@@ -133,9 +139,28 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
         }
     }
 
-    let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.values());
+    // CR 707.13 + CR 709.3c: a copy defined by a name the database can only hold
+    // as part of a multi-face card (or not at all) is an honest gap, not a silent
+    // no-op. Both stores of each face are gated so they cannot disagree.
+    let single_faced: std::collections::HashSet<String> = cards
+        .iter()
+        .filter(|(_, rules)| matches!(rules.layout, CardLayout::Single(_)))
+        .map(|(key, _)| key.clone())
+        .collect();
+    let is_single_faced_card = |name: &str| single_faced.contains(&name.to_lowercase());
+    for face in face_index.values_mut() {
+        gate_unmaterializable_name_copies(face, &is_single_faced_card);
+    }
+    for rules in cards.values_mut() {
+        for face in layout_faces_mut(&mut rules.layout) {
+            gate_unmaterializable_name_copies(face, &is_single_faced_card);
+        }
+    }
+
+    let face_index = FaceIndex::from(face_index);
+    let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.card_types());
     let search_face_keys = build_search_face_keys(&face_index, &face_order_index);
-    Ok(CardDatabase {
+    CardDatabase {
         cards,
         name_alias_index: build_name_alias_index(face_index.keys()),
         face_index,
@@ -150,7 +175,8 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
         bracket_lists: Default::default(),
         bracket_signals_by_name,
         creature_type_vocabulary,
-    })
+        valid_subtypes: Default::default(),
+    }
 }
 
 fn runtime_layout_kind(layout_kind: LayoutKind) -> Option<crate::types::card::LayoutKind> {

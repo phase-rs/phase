@@ -477,6 +477,8 @@ where
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // Scalar designation payload: no nested effects to visit.
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -612,9 +614,9 @@ where
     match effect {
         Effect::Intensify { .. } => {}
         Effect::ApplyPerpetual { .. } => {}
-        // CR 614.11: A one-shot draw replacement nests its substitute Effect
-        // (Words of Worship/Wilding). Walk it so any conjure name it carries is
-        // surfaced (GainLife/Token carry none today, but it is a nested carrier).
+        // CR 614.11: A one-shot draw replacement nests its substitute
+        // definition (the Words cycle). Walk it so any conjure name it carries
+        // is surfaced (the Words payloads carry none, but it is a nested carrier).
         //
         // BOUNDARY CARRIER (CR 614.1 primary / CR 614.15 secondary): this
         // registers a replacement that applies to a LATER event. CR 614.1:
@@ -627,7 +629,7 @@ where
         // reach it and the substitute effect is not part of THIS resolution.
         Effect::CreateDrawReplacement { replacement_effect } => {
             if scope == ResolutionScope::IncludeRegisteredLater {
-                visit_effect_scoped(replacement_effect, scope, visit)?
+                visit_ability_def_scoped(replacement_effect, scope, visit)?
             }
         }
         // CR 614.1a: A planeswalk replacement nests its substitute Effect (Fixed
@@ -648,6 +650,10 @@ where
         // static card name to extract, and that extraction now lives in the
         // caller's visitor closure (`printed_cards::collect_conjure_names`).
         Effect::Conjure { .. } => {}
+        // CR 707.13: no nested ability carrier. The literal `name` (and the
+        // closed choice domain that feeds the chosen-name form) is extracted by
+        // the caller's visitor closure (`printed_cards::collect_conjure_names`).
+        Effect::CreateCardCopyByName { .. } => {}
         // CR 701.42 / CR 712.4b: the melded permanent presents the `result`
         // card's characteristics, but `result` is an outside-the-game third card.
         // Its name is extracted by the caller's visitor closure
@@ -823,6 +829,7 @@ where
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         // CR 120.1: leaf effect — the source/recipient filters carry no nested
         // ability or effect to walk.
         | Effect::EachDealsDamageEqualToPower { .. }
@@ -1063,6 +1070,7 @@ where
         | Effect::ChooseCounterKind { .. }
         | Effect::PutChosenCounter { .. }
         | Effect::ReproduceEventCounters { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Unimplemented { .. } => {}
     }
     ControlFlow::Continue(())
@@ -1380,13 +1388,79 @@ pub(crate) fn static_condition(condition: &$($mut_)? StaticCondition, v: &mut im
             quality: _,
         } => quantity(q, v),
         StaticCondition::IsTapped { scope } => object_scope(scope, v),
+        // CR 201.5a: a filter-bearing condition names its granter in its filter, as an object
+        // filter does. Static, trigger-cost and duration conditions reach this walk, and so does
+        // `ReplacementCondition::OnlyIfStatic`, whose carrier admits any `StaticCondition`.
+        StaticCondition::IsPresent { filter: Some(f) }
+        | StaticCondition::DefendingPlayerControls { filter: f }
+        | StaticCondition::SourceMatchesFilter { filter: f }
+        | StaticCondition::TopOfLibraryMatches { filter: f }
+        | StaticCondition::RecipientMatchesFilter { filter: f } => filter(f, v),
         StaticCondition::Not { condition: c } => static_condition(c, v),
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
             for c in conditions {
                 static_condition(c, v);
             }
         }
-        _ => {}
+        // Leaves: no filter, quantity or object scope, so no granter symbol. Listed without a
+        // wildcard so a new variant must decide here.
+        StaticCondition::IsPresent { filter: None }
+        | StaticCondition::DevotionGE { .. }
+        | StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsMonarch { .. }
+        | StaticCondition::HasBoon { .. }
+        | StaticCondition::IsInitiative
+        | StaticCondition::NoMonarch
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::PlayerIsPoisoned { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::Unrecognized { .. }
+        | StaticCondition::DuringYourTurn
+        | StaticCondition::FirstCombatPhaseOfTurn
+        | StaticCondition::DuringOpponentsTurn
+        | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
+        | StaticCondition::WasCast { .. }
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::ControlsCommander { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::SourceIsFaceUp
+        | StaticCondition::SourceIsSaddled
+        | StaticCondition::SourceControllerEquals { .. }
+        | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsEnchanted
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceIsHarnessed
+        | StaticCondition::SourceAttachedToCreature
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::SourceInZone { .. }
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::None => {}
     }
 }
 
@@ -1398,6 +1472,7 @@ fn replacement_condition(condition: &$($mut_)? ReplacementCondition, v: &mut imp
             quantity(rhs, v);
         }
         ReplacementCondition::UnlessControlsCountMatching { filter: f, .. } => filter(f, v),
+        ReplacementCondition::OnlyIfStatic { condition: c } => static_condition(c, v),
         ReplacementCondition::And { conditions } => {
             for c in conditions {
                 replacement_condition(c, v);
@@ -1999,5 +2074,44 @@ mod tests {
                 "binding must not clobber an unrelated stamp"
             );
         }
+    }
+
+    /// CR 201.5a: `ReplacementCondition::OnlyIfStatic` carries any `StaticCondition`, so the
+    /// granter walk reads the filter of every filter-bearing one. The parser admits only the
+    /// filterless monarch (Jared Carthalion, True Heir: "while you're the monarch") and equipped
+    /// (Outfitted Jouster: "while it's equipped") forms today; this is the carrier, not a card.
+    #[test]
+    fn granter_walk_visits_the_filter_of_a_replacement_static_condition() {
+        use crate::types::ability::{ReplacementCondition, ReplacementDefinition, StaticCondition};
+        use crate::types::replacements::ReplacementEvent;
+        let granter = || TargetFilter::GrantingObject { bound: None };
+        let filtered = [
+            StaticCondition::IsPresent {
+                filter: Some(granter()),
+            },
+            StaticCondition::DefendingPlayerControls { filter: granter() },
+            StaticCondition::SourceMatchesFilter { filter: granter() },
+            StaticCondition::TopOfLibraryMatches { filter: granter() },
+            StaticCondition::RecipientMatchesFilter { filter: granter() },
+        ];
+        let symbols = |condition: StaticCondition| {
+            let def = ReplacementDefinition::new(ReplacementEvent::DamageDone).condition(
+                ReplacementCondition::OnlyIfStatic {
+                    condition: Box::new(condition),
+                },
+            );
+            let mut found = 0;
+            each_granter_symbol(DefinitionNode::Replacement(&def), &mut |symbol| {
+                found += usize::from(matches!(symbol, granter_symbols::Symbol::Filter(_)));
+            });
+            found
+        };
+        for condition in filtered {
+            let shown = format!("{condition:?}");
+            assert_eq!(symbols(condition), 1, "{shown}");
+        }
+        // Reach guard: a filterless condition yields no symbol.
+        assert_eq!(symbols(StaticCondition::SourceIsEquipped), 0);
+        assert_eq!(symbols(StaticCondition::IsPresent { filter: None }), 0);
     }
 }

@@ -53,7 +53,10 @@ use std::sync::Arc;
 use crate::game::game_object::{DisplayIdentity, GameObject, ObjectIncarnationRefExt};
 use crate::game::printed_cards::intrinsic_copiable_values;
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
-use crate::types::ability::{ContinuousModification, CopiableValues, Duration, TargetFilter};
+use crate::types::ability::{
+    ContinuousModification, CopiableValues, Duration, Effect, LibraryPosition, LibraryShuffleMode,
+    ResolvedAbility, TargetFilter,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -123,6 +126,10 @@ pub fn merge_object_onto(
     crate::game::zones::absorb_component(state, merging_id, None);
     if let Some(merging) = state.objects.get_mut(&merging_id) {
         merging.mutate_form = None;
+        // CR 730.2b/c + CR 614.1d: a merged component never enters the
+        // battlefield, so a cast-this-way enters-tapped rider has no entry to
+        // modify; it ends with the spell (it is stack-scoped).
+        merging.cast_permission_enter_tapped = crate::types::zones::EtbTapState::Unspecified;
     }
 
     // CR 730.2 multi-instance stacking: extend the existing stack when
@@ -185,6 +192,10 @@ pub fn merge_object_onto(
         // When a face-down permanent becomes face up as a result of merging, other
         // effects don't count it as turned face up, so no `GameEvent::TurnedFaceUp`
         // is pushed here.
+        // CR 730.2e: the survivor keeps its own status as a component.
+        if survivor.component_face_down.is_none() && survivor.face_down != topmost_is_face_down {
+            survivor.component_face_down = Some(survivor.face_down);
+        }
         survivor.face_down = topmost_is_face_down;
     }
 
@@ -221,6 +232,18 @@ fn merged_copiable_values(
     topmost_id: ObjectId,
 ) -> Option<(CopiableValues, DisplayIdentity)> {
     let topmost = state.objects.get(&topmost_id)?;
+    let values = crate::game::layers::compute_current_copiable_values(state, topmost_id)
+        .unwrap_or_else(|| intrinsic_copiable_values(topmost));
+    merged_copiable_values_from(state, ordered, topmost_id, values)
+}
+
+fn merged_copiable_values_from(
+    state: &GameState,
+    ordered: &[ObjectId],
+    topmost_id: ObjectId,
+    mut values: CopiableValues,
+) -> Option<(CopiableValues, DisplayIdentity)> {
+    let topmost = state.objects.get(&topmost_id)?;
     let printed_ref = topmost
         .base_printed_ref
         .clone()
@@ -232,8 +255,6 @@ fn merged_copiable_values(
         printed_ref,
         ..topmost.display_identity()
     };
-    let mut values = crate::game::layers::compute_current_copiable_values(state, topmost_id)
-        .unwrap_or_else(|| intrinsic_copiable_values(topmost));
     let mut abilities = Vec::new();
     let mut triggers = Vec::new();
     let mut trigger_printed_origins = Vec::new();
@@ -302,6 +323,58 @@ fn merged_copiable_values(
     values.replacement_definitions = Arc::new(replacements);
     values.keywords = keywords;
     Some((values, display))
+}
+
+/// CR 730.2i + CR 730.2a + CR 702.140e: a turned component changes the pile's
+/// characteristics and ability union. CR 613.2a + CR 613.7: derive at the merge
+/// effect's own layer position, retaining its merge-time timestamp.
+pub(crate) fn rederive_merge_layer_effect(state: &mut GameState, survivor_id: ObjectId) {
+    use crate::game::game_object::MergeKind;
+
+    let Some(survivor) = state.objects.get(&survivor_id) else {
+        return;
+    };
+    match survivor.merge_kind {
+        Some(MergeKind::Mutate) => {}
+        Some(MergeKind::Meld | MergeKind::Augment) | None => return,
+    }
+    let Some(effect_id) = survivor.merge_layer_effect_id else {
+        return;
+    };
+    let ordered = survivor.merged_components.clone();
+    let Some(&topmost_id) = ordered.first() else {
+        return;
+    };
+    let Some(effect) = state
+        .transient_continuous_effects
+        .iter()
+        .find(|e| e.id == effect_id)
+    else {
+        return;
+    };
+    let Some(values) = crate::game::layers::compute_copiable_values_preceding(
+        state,
+        topmost_id,
+        effect_id,
+        effect.timestamp,
+    ) else {
+        return;
+    };
+    let Some((values, display)) = merged_copiable_values_from(state, &ordered, topmost_id, values)
+    else {
+        return;
+    };
+    if let Some(effect) = state
+        .transient_continuous_effects
+        .iter_mut()
+        .find(|e| e.id == effect_id)
+    {
+        effect.modifications = vec![ContinuousModification::CopyValues {
+            values: Box::new(values),
+            display,
+        }];
+    }
+    crate::game::layers::mark_layers_full(state);
 }
 
 pub(crate) fn remove_merge_layer_effect(state: &mut GameState, target_id: ObjectId) {
@@ -480,11 +553,46 @@ pub fn split_merged_permanent_on_leave(
 /// CR 903.9c: when an individual commander component accepts the CR 903.9b
 /// Hand/Library replacement, only that component's request changes to Command;
 /// noncommander components remain routed to their appropriate zones.
+///
+/// CR 701.24a + CR 730.3: every component inherits the approved library
+/// position. For a terminal-shuffle operation the position is transient and
+/// the chained `Shuffle` randomizes the library once. The owner's CR 730.3a
+/// arrangement of the components is not modeled here.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn move_merged_permanent_on_leave(
     state: &mut GameState,
     merged_id: ObjectId,
     dest: Zone,
+    library_placement: Option<&LibraryPosition>,
+    library_shuffle: LibraryShuffleMode,
     applied: &HashSet<AppliedReplacementKey>,
+    performed_by: Option<crate::types::player::PlayerId>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    move_merged_permanent_for_parent(
+        state,
+        merged_id,
+        dest,
+        library_placement,
+        library_shuffle,
+        applied,
+        performed_by,
+        None,
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // main's placement pair plus the announcing owner link.
+pub(crate) fn move_merged_permanent_for_parent(
+    state: &mut GameState,
+    merged_id: ObjectId,
+    dest: Zone,
+    library_placement: Option<&LibraryPosition>,
+    library_shuffle: LibraryShuffleMode,
+    applied: &HashSet<AppliedReplacementKey>,
+    performed_by: Option<crate::types::player::PlayerId>,
+    parent: Option<crate::types::game_state::PendingComponentDeliveryParent>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
     let Some(survivor) = state.objects.get(&merged_id) else {
@@ -520,12 +628,27 @@ pub(crate) fn move_merged_permanent_on_leave(
                     .expect("merged component exists")
                     .split_from_merge_survivor = Some(survivor_successor);
             }
-            ZoneMoveRequest::merged_component(component_id, dest)
+            // CR 730.3: every component inherits the final approved destination
+            // and position; its own replacement consult may redirect it again.
+            let placement = match (dest, library_placement) {
+                (Zone::Library, Some(position)) => Some(position.clone()),
+                _ => None,
+            };
+            ZoneMoveRequest::merged_component(component_id, dest, placement, library_shuffle)
                 .with_replacement_applied(applied.clone())
+                // CR 608.2c + CR 730.3: every component is moved by the
+                // player who performed the merged permanent's move, so each card
+                // that reaches exile records that player as its exiler. No
+                // ownership input is carried, as before: a component goes to its
+                // own owner's zone.
+                .actors(zone_pipeline::MoveActors {
+                    performed_by,
+                    ownership_actor: None,
+                })
         })
         .collect();
 
-    zone_pipeline::move_objects_simultaneously_then(state, requests, None, events)
+    zone_pipeline::move_component_batch_then(state, requests, None, parent, events)
 }
 
 /// CR 730.2d + CR 400.7 + CR 111.7: restore the survivor's intrinsic token-ness
@@ -557,24 +680,185 @@ pub(crate) fn restore_pre_merge_tokenness_for_leave(state: &mut GameState, merge
 /// merging is not re-established) and their back-links clear on battlefield
 /// entry.
 ///
-/// This is a no-op unless `target_filter` is a continuity reference AND a
-/// resolved object is a former merged survivor with co-located components. In
-/// particular it does NOT fire for a freshly chosen target (e.g. reanimating one
-/// specific card from a graveyard), which must not over-return.
+/// This is a no-op unless the effect references a RECORDED DEPARTURE — the
+/// object a merged permanent became when it left the battlefield — and a
+/// resolved object is a former survivor with co-located components. A freshly
+/// chosen target (Riftsweeper choosing one exiled card; reanimating one specific
+/// card) carries no departure evidence for that object and must not over-return.
 pub(crate) fn expand_returned_merge_components(
     state: &GameState,
+    ability: &ResolvedAbility,
     resolved: Vec<ObjectId>,
     target_filter: &TargetFilter,
 ) -> Vec<ObjectId> {
-    if !references_object_that_left(target_filter) {
-        return resolved;
+    if matches!(target_filter, TargetFilter::SelfRef) {
+        // CR 603.7c + CR 730.3c: a delayed return whose source binding followed
+        // the source to the object it became when it left ("exile ~. Return it
+        // … at the beginning of the next end step") finds every object the
+        // merged permanent became.
+        if let Some(components) = delayed_binding_departure_components(state, ability) {
+            let mut expanded = resolved;
+            for id in components {
+                if !expanded.contains(&id) {
+                    expanded.push(id);
+                }
+            }
+            return expanded;
+        }
+        // CR 701.24a + CR 730.3c: a source's own recorded departure is
+        // followed only by the move component of a terminal-shuffle operation
+        // ("shuffle it into its owner's library"), whose order is randomized.
+        if !is_terminal_shuffle_move(&ability.effect) {
+            return resolved;
+        }
+        let mut expanded = resolved;
+        for id in recorded_departure_components(state, ability) {
+            if !expanded.contains(&id) {
+                expanded.push(id);
+            }
+        }
+        return expanded;
     }
     let mut expanded = resolved.clone();
     for &survivor_id in &resolved {
+        if !referent_records_departure(state, ability, target_filter, survivor_id) {
+            continue;
+        }
         let components = co_split_components(state, survivor_id, &expanded);
         expanded.extend(components);
     }
     expanded
+}
+
+/// CR 603.7c + CR 400.7 + CR 730.3c: the component cards of the merged
+/// permanent this delayed ability's (CR 603.7a) source binding found when it
+/// left the battlefield. The binding followed the source to the new object it
+/// became (`delayed_source_context`), so it records that object's
+/// off-battlefield zone and incarnation, which is exactly the survivor pin each
+/// split component carries. Reading the recorded value, not the survivor's
+/// current location, keeps a survivor that moved again (shuffled out of exile)
+/// from hiding its unmoved components; the effect does as much as possible
+/// (CR 609.3).
+///
+/// `None` when the binding did not follow a departed source, so other `SelfRef`
+/// rules apply. A library destination is excluded: ordering several returned
+/// components there is not implemented (#10759).
+fn delayed_binding_departure_components(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<Vec<ObjectId>> {
+    if ability.delayed_origin.is_none()
+        || matches!(
+            ability.effect,
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                ..
+            }
+        )
+    {
+        return None;
+    }
+    let identity = &ability.trigger_source.as_ref()?.identity;
+    if identity.reference.object_id != ability.source_id
+        || identity.expected_zone == Zone::Battlefield
+    {
+        return None;
+    }
+    let mut components: Vec<ObjectId> = state
+        .objects
+        .iter()
+        .filter(|(_, obj)| {
+            obj.zone == identity.expected_zone
+                && obj.split_from_merge_survivor == Some(identity.reference)
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    components.sort_by_key(|id| id.0);
+    Some(components)
+}
+
+/// CR 701.24a: the effect is the move component of a parser-emitted "shuffle
+/// [set] into [library]" operation, marked by its explicit
+/// `LibraryShuffleMode::TerminalShuffle`.
+fn is_terminal_shuffle_move(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
+            ..
+        } | Effect::ChangeZoneAll {
+            destination: Zone::Library,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
+            ..
+        }
+    )
+}
+
+/// CR 730.3c + CR 400.7e + CR 603.7c: Whether this effect found `referent` as
+/// the object a merged permanent became when it LEFT the battlefield, rather
+/// than an object it merely chose. The filter kind alone cannot answer this: a
+/// fresh `ParentTarget` selection and a flicker continuation carry the same
+/// anaphor. The evidence must name this exact object incarnation:
+///
+/// * `ParentTarget`/`ParentTargetSlot`: the referent's current incarnation is
+///   pinned by an event/delayed binding (`target_incarnations`), is a result
+///   of the immediate producer that moved it (`forwarded_result_context`), or
+///   is exactly one past the incarnation announced for it (`target_pins`: an
+///   earlier instruction of this resolution moved it). A pin or result for any
+///   other object is not evidence for this one.
+/// * `TriggeringSource`: the trigger event is this referent's own departure
+///   from the battlefield.
+/// * `TrackedSet`/`TrackedSetFiltered` and `ExiledBySource` are formed by an
+///   earlier move in the chain; those already record a departure.
+///
+/// `SelfRef` is answered separately by [`recorded_departure_components`],
+/// which requires the trigger's own departure event.
+fn referent_records_departure(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    referent: ObjectId,
+) -> bool {
+    let Some(current) = state
+        .objects
+        .get(&referent)
+        .map(ObjectIncarnationRef::from_object)
+    else {
+        return false;
+    };
+    match target_filter {
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
+            ability.target_incarnations.contains(&current)
+                || ability
+                    .context
+                    .forwarded_result_context
+                    .as_ref()
+                    .is_some_and(|result| result.object_incarnations.contains(&current))
+                // CR 400.7 + CR 601.2c: the incarnation announced for this
+                // referent is exactly one behind its current one: an earlier
+                // instruction of this same resolution moved it ("Exile target
+                // creature you control, then return that card"). A fresh
+                // selection of an already-departed object announced the
+                // incarnation it still has.
+                || ability.target_pins.iter().flatten().any(|pin| {
+                    pin.object_id == current.object_id
+                        && pin.incarnation.checked_add(1) == Some(current.incarnation)
+                })
+        }
+        TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource => true,
+        TargetFilter::TriggeringSource => matches!(
+            state.current_trigger_event.as_ref(),
+            Some(GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                ..
+            }) if *object_id == referent
+        ),
+        _ => false,
+    }
 }
 
 /// CR 730.3c: The component cards that the merged permanent identified by
@@ -626,20 +910,93 @@ fn leave_successor(survivor: &GameObject) -> ObjectIncarnationRef {
     ObjectIncarnationRef::of(survivor.id, survivor.incarnation + 1)
 }
 
-/// CR 730.3c: Target references that denote "the object that just left the
-/// battlefield" — i.e. continuity references that find the object a merged
-/// permanent became — as opposed to a freshly chosen target. Only these expand
-/// to a former merged permanent's component cards.
-fn references_object_that_left(target_filter: &TargetFilter) -> bool {
-    matches!(
-        target_filter,
-        TargetFilter::ParentTarget
-            | TargetFilter::ParentTargetSlot { .. }
-            | TargetFilter::TrackedSet { .. }
-            | TargetFilter::TrackedSetFiltered { .. }
-            | TargetFilter::TriggeringSource
-            | TargetFilter::ExiledBySource
-    )
+/// CR 400.7e + CR 730.3c: the component cards of the merged permanent whose
+/// departure from the battlefield triggered this ability, read once from the
+/// trigger's recorded event: the public zone the source moved to and the
+/// successor incarnation its split components were pinned to. The recorded pin
+/// is a value, so a survivor that moved again (Cremate responding to the dies
+/// trigger) does not hide its sibling; the effect still does as much as
+/// possible (CR 609.3). Empty when the ability was not triggered by its own
+/// source's departure.
+fn recorded_departure_components(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
+    let Some(source) = ability.trigger_source.as_ref() else {
+        return Vec::new();
+    };
+    let Some(event @ GameEvent::ZoneChanged { object_id, .. }) =
+        state.current_trigger_event.as_ref()
+    else {
+        return Vec::new();
+    };
+    if *object_id != ability.source_id {
+        return Vec::new();
+    }
+    // The ability's own capture is the departing identity; the turn ledger
+    // confirms it, so an event copy without source context still answers.
+    departed_identity_components(state, event, source.identity.reference)
+}
+
+/// CR 730.3 + CR 730.3c + CR 400.7e: the component cards a merged permanent split
+/// into when the battlefield departure `event` moved its survivor, read from the
+/// recorded event: the public zone the survivor moved to and the successor
+/// incarnation its split components were pinned to. The pin is a value, so a
+/// survivor that moved again does not hide its sibling (CR 609.3). A component
+/// that left that zone since has lost its back-link (`zones.rs` exit cleanup) and
+/// is not listed. The departing identity is the one the event itself records, so
+/// an event without it, any other event, a non-public destination, or a record
+/// the turn ledger does not confirm gives none. Returned in id order.
+pub(crate) fn departure_event_components(state: &GameState, event: &GameEvent) -> Vec<ObjectId> {
+    let GameEvent::ZoneChanged { record, .. } = event else {
+        return Vec::new();
+    };
+    let Some(departing) = record
+        .trigger_source_context()
+        .map(|context| context.identity.reference)
+    else {
+        return Vec::new();
+    };
+    departed_identity_components(state, event, departing)
+}
+
+/// CR 730.3 + CR 730.3c + CR 400.7e: the single scan behind both callers. The
+/// caller supplies the departing identity it holds (`expected`): the ability's
+/// captured source for a source's own departure, or the identity the event
+/// records. The turn ledger entry at the event's index must carry that identity,
+/// and the components are the objects in the event's public destination whose
+/// back-link names the survivor's successor incarnation.
+fn departed_identity_components(
+    state: &GameState,
+    event: &GameEvent,
+    expected: ObjectIncarnationRef,
+) -> Vec<ObjectId> {
+    let GameEvent::ZoneChanged {
+        from: Some(Zone::Battlefield),
+        to,
+        record,
+        ..
+    } = event
+    else {
+        return Vec::new();
+    };
+    if !to.is_public() {
+        return Vec::new();
+    }
+    let recorded = state
+        .zone_changes_this_turn
+        .get(record.turn_zone_change_index)
+        .and_then(|recorded| recorded.trigger_source_context())
+        .is_some_and(|context| context.identity.reference == expected);
+    if !recorded {
+        return Vec::new();
+    }
+    let successor = ObjectIncarnationRef::of(expected.object_id, expected.incarnation + 1);
+    let mut components: Vec<ObjectId> = state
+        .objects
+        .iter()
+        .filter(|(_, obj)| obj.zone == *to && obj.split_from_merge_survivor == Some(successor))
+        .map(|(id, _)| *id)
+        .collect();
+    components.sort_by_key(|id| id.0);
+    components
 }
 
 /// CR 730.3 + CR 712.21: Put a non-surviving merge component into `dest` as a
@@ -827,6 +1184,149 @@ mod tests {
         Keyword::Ward(WardCost::Mana(ManaCost::generic(2)))
     }
 
+    /// V16 — CR 730.3 + CR 730.3c + CR 400.7e: the components a battlefield
+    /// departure made are read from the recorded event. A co-located component
+    /// of a different split group is not one of them, a component that left the
+    /// zone since is not listed, and an event that is not a departure lists none.
+    #[test]
+    fn departure_event_components_reads_only_the_recorded_split_group() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let mut events = Vec::new();
+
+        // An earlier merged permanent's split leaves its component in the graveyard.
+        let other_host = make_creature(&mut state, 1, player, "Other Host", 2, 2);
+        let other_rider = make_creature(&mut state, 2, player, "Other Rider", 1, 1);
+        merge_object_onto(
+            &mut state,
+            other_rider,
+            other_host,
+            MergeSide::Bottom,
+            &mut events,
+        );
+        crate::game::zones::move_to_zone(&mut state, other_host, Zone::Graveyard, &mut events);
+        assert!(
+            state.objects[&other_rider]
+                .split_from_merge_survivor
+                .is_some(),
+            "reach-guard: the other group's component carries its own back-link"
+        );
+
+        let host = make_creature(&mut state, 3, player, "Host", 7, 2);
+        let rider = make_creature(&mut state, 4, player, "Rider", 4, 4);
+        merge_object_onto(&mut state, rider, host, MergeSide::Bottom, &mut events);
+        let mut departure_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, host, Zone::Graveyard, &mut departure_events);
+        let departure = departure_events
+            .iter()
+            .find(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(Zone::Battlefield),
+                        ..
+                    } if *object_id == host
+                )
+            })
+            .cloned()
+            .expect("the merged permanent's departure is recorded");
+        assert_eq!(state.objects[&other_rider].zone, Zone::Graveyard);
+
+        assert_eq!(
+            departure_event_components(&state, &departure),
+            vec![rider],
+            "only the recorded survivor's split group"
+        );
+
+        let not_a_departure = GameEvent::EffectResolved {
+            kind: crate::types::ability::EffectKind::ChangeZone,
+            source_id: host,
+            subject: None,
+        };
+        assert!(departure_event_components(&state, &not_a_departure).is_empty());
+
+        crate::game::zones::move_to_zone(&mut state, rider, Zone::Exile, &mut events);
+        assert!(
+            departure_event_components(&state, &departure).is_empty(),
+            "a component that left the zone lost its back-link"
+        );
+    }
+
+    /// CR 701.24a + CR 730.3c + CR 400.7e: a source's own terminal-shuffle
+    /// return answers from the ability's captured identity plus the matching
+    /// turn-ledger entry, even when the event copy it reads carries no source
+    /// context (the wire format allows it to be absent). The event-only reader
+    /// used by delayed triggers has no identity to confirm and lists none.
+    #[test]
+    fn terminal_shuffle_return_keeps_components_when_the_event_copy_lacks_context() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let host = make_creature(&mut state, 1, player, "Host", 7, 2);
+        let rider = make_creature(&mut state, 2, player, "Rider", 4, 4);
+        let mut events = Vec::new();
+        merge_object_onto(&mut state, rider, host, MergeSide::Bottom, &mut events);
+        let mut departure_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, host, Zone::Graveyard, &mut departure_events);
+        let mut departure = departure_events
+            .into_iter()
+            .find(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(Zone::Battlefield),
+                        ..
+                    } if *object_id == host
+                )
+            })
+            .expect("the merged permanent's departure is recorded");
+        let GameEvent::ZoneChanged { record, .. } = &mut departure else {
+            unreachable!("matched a zone change above");
+        };
+        let captured = record
+            .trigger_source_context
+            .take()
+            .expect("reach-guard: the live departure records its identity");
+        state.current_trigger_event = Some(departure.clone());
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
+                origin: None,
+                destination: Zone::Library,
+                target: TargetFilter::SelfRef,
+                owner_library: true,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            host,
+            player,
+        );
+        ability.trigger_source = Some(captured);
+
+        let expanded =
+            expand_returned_merge_components(&state, &ability, vec![host], &TargetFilter::SelfRef);
+        assert_eq!(
+            expanded,
+            vec![host, rider],
+            "the captured identity and the ledger still find the component"
+        );
+        assert!(
+            departure_event_components(&state, &departure).is_empty(),
+            "the event-only reader needs the event's own identity"
+        );
+    }
+
     // Plan test 4: a creature mutated UNDER a face-down survivor — the survivor
     // stays a face-down 2/2 with no abilities (topmost is the face-down survivor;
     // CR 730.2e + CR 708.2a, Layer 1b re-seed).
@@ -896,6 +1396,51 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, GameEvent::TurnedFaceUp { .. })),
             "merging is not 'turned face up' (CR 730.2e) — no TurnedFaceUp event"
+        );
+    }
+
+    // CR 730.2b/c + CR 614.1d: a spell cast through Edgar, Master Machinist's
+    // permission carries "that artifact enters tapped" while on the stack. If it
+    // merges instead of entering, there is no entry to modify: the absorbed
+    // component's rider is cleared, the survivor isn't tapped, and no entry
+    // event is created. (No production route casts Mutate from the graveyard
+    // today, so this pins the seam directly.)
+    #[test]
+    fn merge_clears_absorbed_cast_permission_enter_tapped() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let survivor = make_creature(&mut state, 1, player, "Ornithopter", 0, 2);
+        let mutant = make_creature(&mut state, 2, player, "Gemrazer", 4, 4);
+        {
+            let obj = state.objects.get_mut(&mutant).unwrap();
+            obj.zone = Zone::Stack;
+            obj.cast_permission_enter_tapped = crate::types::zones::EtbTapState::Tapped;
+        }
+        state.battlefield.retain(|id| *id != mutant);
+
+        let mut events = Vec::new();
+        merge_object_onto(&mut state, mutant, survivor, MergeSide::Top, &mut events);
+
+        assert_eq!(
+            state.objects[&mutant].cast_permission_enter_tapped,
+            crate::types::zones::EtbTapState::Unspecified,
+            "the absorbed component carries no rider"
+        );
+        assert!(
+            !state.objects[&survivor].tapped,
+            "the survivor isn't tapped"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::Mutated { .. })),
+            "reach guard: the merge happened"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::ZoneChanged { .. })),
+            "CR 730.2c: the merge isn't an entry"
         );
     }
 

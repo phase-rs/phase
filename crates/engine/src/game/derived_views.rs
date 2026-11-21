@@ -19,15 +19,20 @@ use std::num::NonZeroUsize;
 
 use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::{declared_targets_in_chain, flatten_targets_in_chain};
+use crate::game::combat::{active_attack_target, AttackTarget};
+use crate::game::combat_damage::combat_damage_to_defender;
+use crate::game::effects::deal_damage::DamageContext;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{AttachTarget, DisplaySource, GameObject};
+use crate::game::players::{poison_loss_measure, PoisonLossScope};
 use crate::game::stack::{
     effective_stack_ability, stack_display_groups, stack_display_groups_revealing,
     stack_revealed_card_names, StackDisplayGroup,
 };
+use crate::game::topology::Side;
 use crate::types::ability::{
-    ContinuousModification, Duration, GameRestriction, KeywordAction, ProhibitedActivity,
-    RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
+    AbilityCost, ContinuousModification, Duration, Effect, GameRestriction, KeywordAction,
+    ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card::{PrintedCardRef, TokenImageRef};
@@ -36,15 +41,16 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_entries, CounterType};
 use crate::types::display_only::{CanonicalDigest, DisplayOnly};
 use crate::types::events::GameEvent;
+use crate::types::format::{GameFormat, TurnStructure};
 use crate::types::game_state::{
-    CastingVariant, CombatDamageSubStep, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
-    SyntheticTriggerProvenance, TriggerSourceRead, WaitingFor,
+    CastingVariant, CombatDamageSubStep, GameState, PendingManaAbility, StackEntry, StackEntryKind,
+    StackPaidSnapshot, SyntheticTriggerProvenance, TriggerSourceRead, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::InteractionId;
 use crate::types::keywords::Keyword;
 use crate::types::layers::Layer;
-use crate::types::mana::ManaCost;
+use crate::types::mana::{ManaCost, ManaPipId, ManaPool, PaymentContext};
 use crate::types::player::PlayerId;
 use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
@@ -223,9 +229,9 @@ pub struct PlayerStatusView {
 /// neither attribution, nor which axes are unbounded, nor whether a collapse is coming.
 ///
 /// `player` is computed by [`attribution_player`] (NOT the raw producing
-/// controller): a payload-keyed axis (`Life(p)`/`DamageDealt(p)`/`LibraryDelta(p)`)
-/// routes to the player it names (the drain/mill victim or the lifegain/self-mill
-/// beneficiary), while aggregate axes route to the loop's controller.
+/// controller): a payload-keyed axis (each one [`payload_seat`] lists) routes to the player
+/// it names (the drain/mill victim, the lifegain/self-mill beneficiary, or the energy
+/// holder), while aggregate axes route to the loop's controller.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnboundedResourceView {
     pub player: PlayerId,
@@ -240,7 +246,7 @@ pub struct UnboundedResourceView {
 ///
 /// `rename_all` so the wire strings ARE the client's family literals — one type, no mirror map.
 /// Pinned against the client's `Record<ResourceAxisTag, UnboundedFamily>` by the
-/// `unbounded-family-tags.json` golden, which carries all 17 axis-tag→family pairs.
+/// `unbounded-family-tags.json` golden, which carries all 18 axis-tag→family pairs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UnboundedFamily {
@@ -441,7 +447,9 @@ pub fn family_of(axis: ResourceAxis) -> UnboundedFamily {
         ResourceAxis::Life(_) => UnboundedFamily::Life,
         ResourceAxis::DamageDealt(_) => UnboundedFamily::Damage,
         ResourceAxis::LibraryDelta(_) => UnboundedFamily::Mill,
-        ResourceAxis::Counter(_, _) | ResourceAxis::Poison(_) => UnboundedFamily::Counters,
+        ResourceAxis::Counter(_, _) | ResourceAxis::Poison(_) | ResourceAxis::Energy(_) => {
+            UnboundedFamily::Counters
+        }
         ResourceAxis::TokensCreated => UnboundedFamily::Tokens,
         ResourceAxis::CardsDrawn => UnboundedFamily::Cards,
         ResourceAxis::Casts => UnboundedFamily::Casts,
@@ -454,6 +462,15 @@ pub fn family_of(axis: ResourceAxis) -> UnboundedFamily {
         | ResourceAxis::LtbTriggers
         | ResourceAxis::SacTriggers => UnboundedFamily::Triggers,
     }
+}
+
+/// CR 601.2g + CR 605.3a: display data for a manual mana ability's payment
+/// window: the ability's source, its mana sub-cost and the pinned pool units.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManaAbilityPaymentView {
+    pub source_id: ObjectId,
+    pub cost: ManaCost,
+    pub pinned_pool_units: Vec<ManaPipId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -477,6 +494,31 @@ pub struct ArchenemyView {
     pub hero_player_ids: Vec<PlayerId>,
 }
 
+/// Engine-authored Horde presentation state: which seats are the Horde, which
+/// are survivors, and which Bosses are currently deployed. The frontend renders
+/// this directly instead of selecting a Boss from command-zone objects or
+/// classifying seats from the raw seat vector.
+///
+/// Every list is the game-state authority's answer, not a client re-derivation:
+/// seats via `horde::horde_seats` (stored designation plus the archenemy
+/// fallback, so a snapshot omitting the seat vector still resolves), survivors
+/// as the remaining `seat_order` seats in seat order, Bosses via
+/// `boss::bosses_in_command_zone` (face-up Boss cards in command-zone order —
+/// the face-down Boss pile is excluded by construction, so no hidden identity
+/// can leak through this view). Bosses have no CR section of their own (the
+/// Turtle Team-Up product booklet is the rules authority); the representative
+/// Boss a seat identity names is `deployed_boss_ids[0]`, the first in
+/// command-zone order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HordeView {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub horde_seat_ids: Vec<PlayerId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hero_player_ids: Vec<PlayerId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deployed_boss_ids: Vec<ObjectId>,
+}
+
 /// Display-only turn-order chip row. `turns_from_now == 0` is the current
 /// turn; `1` is the next actual turn that would begin; larger values count
 /// future turn starts after that. Duplicate players are intentional when an
@@ -493,10 +535,16 @@ pub struct TurnOrderSlotView {
     /// display classification rather than comparing player IDs themselves.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_viewer: bool,
-    /// Whether this projected slot is the game's starting player. It is only
-    /// true while that player is also the current turn representative.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub is_starting_player: bool,
+}
+
+/// CR 103.1 + CR 103.1a: whether the viewer's side takes the first turn of a
+/// game with exactly two sides — the starting player's side ("on the play") or
+/// the other side ("on the draw"). Display classification only; no rules path
+/// reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlayDrawPosition {
+    OnThePlay,
+    OnTheDraw,
 }
 
 /// A card identity deliberately exposed to the debug library browser. This
@@ -624,12 +672,52 @@ pub struct SharedPilesView {
     pub graveyard: Option<PlayerId>,
 }
 
+/// CR 121.1 + CR 702.24a: the resolved draw an unless-payment prompt asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlessDrawCostView {
+    /// Cards one printed instruction draws (CR 107.1b: a negative count is 0).
+    pub cards: u32,
+    /// Printed instructions the payment performs, each drawing `cards`.
+    pub instructions: u32,
+    /// Whether the payer may still decline.
+    pub stage: UnlessDrawPaymentStage,
+}
+
+/// CR 702.24a: where a draw unless-payment prompt stands. "Either the entire set
+/// of costs is paid, or none of them is paid": once part of a repeated payment
+/// is performed, the prompt only continues it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnlessDrawPaymentStage {
+    /// The payer chooses whether to pay.
+    #[default]
+    Offered,
+    /// The payer chose to pay and part of the payment is performed; the prompt
+    /// continues the instructions still owed and cannot be declined.
+    Continuing,
+}
+
+/// CR 510.1a + CR 702.4b + CR 120.3a/b: display-only projection, at the current
+/// state, of what a creature that may attack would do to a player if it attacks
+/// and is not blocked. Computed before replacement and prevention effects
+/// (CR 614.1 / CR 615.1), which apply only as the damage event happens.
+/// Not a game action; recomputed on every snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnblockedAttackPreview {
+    /// CR 510.1a + CR 702.4b: combat damage across every damage step it would assign in.
+    pub damage: u32,
+    /// CR 120.3a / CR 120.3b: life loss that damage causes a player (0 for infect).
+    pub life_loss: u32,
+}
+
 /// Engine-authored projections used by the display layer. Keep this struct
 /// small — every field becomes mandatory payload on every state snapshot
 /// the client receives. Add a new field only when the frontend would
 /// otherwise have to compute game logic (a CLAUDE.md violation).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DerivedViews {
+    /// Chooser-private ranking for an unrestricted creature-type prompt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub named_choice_suggestions: Vec<String>,
     /// The sole player currently authorized to answer the live prompt. Omitted
     /// when there is no actor or multiple distinct authorized submitters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -662,6 +750,13 @@ pub struct DerivedViews {
     /// seat whose `Player` container stores each shared pile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_piles: Option<SharedPilesView>,
+    /// CR 121.1 + CR 702.24a: the draw an open unless-payment prompt asks the
+    /// payer to perform — the resolved card count of one printed draw
+    /// instruction and how many times it repeats (one per age counter for
+    /// cumulative upkeep). Present only while that prompt is a draw cost, so
+    /// the client renders these numbers instead of decoding the cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unless_draw_cost: Option<UnlessDrawCostView>,
     /// The live (post-layer) keyword badges each battlefield permanent should
     /// display. The engine classifies the complete keyword list so the client
     /// can render the compact strip without reinterpreting keyword timing.
@@ -776,6 +871,14 @@ pub struct DerivedViews {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dungeon_rooms: BTreeMap<PlayerId, DungeonRoomView>,
 
+    /// CR 704.5c / CR 704.6b + CR 810.8d / CR 904.13c: the poison-loss rule each
+    /// player with a nonzero poison-loss count is measured against, so the HUD
+    /// states the threshold the SBA actually uses (a house-rule dial, or the
+    /// shared fifteen) instead of a client literal. Keyed by PlayerId; omitted
+    /// when nobody is poisoned. Poison counters and the format are public.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub poison_loss: BTreeMap<PlayerId, PoisonLossView>,
+
     /// Engine-authored coalesced view of the stack. Adjacent entries with
     /// the same (source, kind, description, targets) signature collapse
     /// into one `StackDisplayGroup` with a `count`. Empty when the stack
@@ -887,14 +990,22 @@ pub struct DerivedViews {
     pub player_status: Vec<PlayerStatusView>,
 
     /// CR 118.3a + CR 601.2g: during the viewer's own manual mana payment for a
-    /// spell, the portion of the locked cost still UNPAID by the pool units they
-    /// have pinned (selected) so far — the cost reduced against a pool of ONLY
-    /// those pinned units. Lets the payment UI show the cost shrinking as the
-    /// player picks mana, and "covered" (`NoCost`) when their selection alone
-    /// pays the whole cost. `None` outside a non-convoke spell `ManaPayment` the
+    /// spell or a manual mana ability, the portion of the locked cost still
+    /// UNPAID by the pool units they have pinned (selected) so far — the cost
+    /// reduced against a pool of ONLY those pinned units. Lets the payment UI
+    /// show the cost shrinking as the player picks mana, and "covered"
+    /// (`NoCost`) when their selection alone pays the whole cost. `None` outside
+    /// a non-convoke spell `ManaPayment` or a manual `ManaAbilityManaPayment` the
     /// viewer controls. Viewer-scoped — one caster's private in-progress choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_payment_remaining: Option<ManaCost>,
+
+    /// CR 601.2g + CR 602.2b + CR 605.3a: the viewer's own manual payment of a
+    /// mana ability's mana cost — its source, the mana it costs (X announced)
+    /// and the pool units they've directed. `None` outside that window.
+    /// Viewer-scoped, like `pending_payment_remaining`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_ability_payment: Option<ManaAbilityPaymentView>,
 
     /// CR 901: Engine-authored Planechase presentation state. The frontend
     /// renders this directly instead of deriving the active plane from command
@@ -908,19 +1019,37 @@ pub struct DerivedViews {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archenemy: Option<ArchenemyView>,
 
+    /// Engine-authored Horde presentation state. The frontend renders this
+    /// directly instead of selecting a deployed Boss from command-zone objects
+    /// or classifying Horde and survivor seats itself. Present in every Horde
+    /// game; the Boss list is empty before the first stage deploys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horde: Option<HordeView>,
+
     /// CR 101.4 + CR 103.1 + CR 500.7 + CR 614.10 + CR 805.4: Compact
     /// multiplayer turn-order slots. Empty for one-on-one games because the
     /// existing active-player ring is sufficient; populated by engine-owned
     /// projection so the frontend never computes extra/skipped/controlled turn
-    /// order from raw state.
+    /// order from raw state. Empty until the starting player is determined
+    /// (CR 103.1: there is no turn order before the starting player).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub turn_order: Vec<TurnOrderSlotView>,
 
     /// One-based projected turn position for the viewing player. This keeps
     /// player-specific turn-order interpretation in the engine while allowing
-    /// the client to render "You take turn N" directly.
+    /// the client to render "You take turn N" directly. Empty until the
+    /// starting player is determined (CR 103.1: there is no turn order before
+    /// the starting player).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewer_turn_number: Option<u8>,
+
+    /// CR 103.1 + CR 103.1a + CR 805.3: the viewer's side relative to the starting
+    /// side, for a game of exactly two sides that each take one turn per round
+    /// (two-player, Two-Headed Giant, Archenemy, Horde). `None` for an unseated
+    /// viewer, before the starting player is determined, and in every other
+    /// multiplayer game — where `viewer_turn_number` carries the viewer's position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_play_draw: Option<PlayDrawPosition>,
 
     /// CR 732.2a: the `∞` HUD rows — one per (attributed player, pumped axis) of
     /// every unbounded-resource loop in `GameState::unbounded_resources`. The
@@ -1013,6 +1142,18 @@ pub struct DerivedViews {
     /// `Life` axis for that seat is rising; only non-`Finite` entries are emitted.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub life_magnitude: BTreeMap<PlayerId, DisplayMagnitude>,
+
+    /// CR 508.1a + CR 510.1a + CR 120.3a/b: per-candidate-attacker projection of unblocked
+    /// damage, published only while the attack declaration prompt is open; keyed by attacker
+    /// id. Display-only; before replacement and prevention effects (CR 614.1 / CR 615.1).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub unblocked_attack_previews: HashMap<ObjectId, UnblockedAttackPreview>,
+
+    /// CR 506.4c: each attacking creature's current attack target, keyed by attacker id. An
+    /// attacker whose relation has ended is absent: it is still an attacking creature, but it
+    /// is not attacking any player, planeswalker, or battle.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub attack_targets: HashMap<ObjectId, AttackTarget>,
 }
 
 /// Serialize-only wrapper. The wire shape is
@@ -1199,20 +1340,36 @@ pub struct ClientGameState {
 }
 
 /// CR 118.3a + CR 601.2g: the cost still unpaid by `viewer`'s pinned pool units
-/// during their own manual mana payment for a spell. Reduces the locked spell
-/// cost against a pool containing ONLY the pinned units (so the residual is
-/// exactly what the player has chosen to spend), under the same spend-restriction
-/// context (`PaymentContext::Spell`) the finalize spend uses. Returns `None`
+/// during their own manual mana payment for a spell or a manual mana ability.
+/// Reduces the locked cost against a pool containing ONLY the pinned units (so
+/// the residual is exactly what the player has chosen to spend), under the same
+/// spend-restriction context the finalize spend uses (`PaymentContext::Spell`
+/// for a spell, the activation's context for a mana ability). Returns `None`
 /// unless the viewer is mid (non-convoke) spell `ManaPayment` with a pending
-/// cast — activated-ability mana payment keeps its full-cost display, and
-/// convoke/improvise/delve pay via board taps tracked by their own staged UI.
+/// cast, or mid their own manual `ManaAbilityManaPayment` — activated-ability
+/// mana payment keeps its full-cost display, and convoke/improvise/delve pay
+/// via board taps tracked by their own staged UI.
 ///
-/// Uses the current spell's typed mana-spend permission when matching pinned
-/// units to colored or colorless requirements. This projection subtracts only
-/// pinned mana units; it does not subtract life payments.
+/// Uses the payment's typed mana-spend permission when matching pinned units to
+/// colored or colorless requirements. This projection subtracts only pinned
+/// mana units; it does not subtract life payments.
 fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<ManaCost> {
-    use crate::types::game_state::WaitingFor;
-    use crate::types::mana::{ManaPool, PaymentContext};
+    if let Some(pending) = manual_mana_ability_payment(state, viewer) {
+        let cost = crate::game::mana_abilities::pending_mana_sub_cost(state, pending).ok()??;
+        let activation_context = crate::game::casting::activation_payment_context(
+            state,
+            pending.source_id,
+            pending.ability_index,
+        );
+        return remaining_after_pins(
+            state,
+            viewer,
+            pending.source_id,
+            &pending.pinned_pool_units,
+            &cost,
+            Some(&activation_context.as_payment_context()),
+        );
+    }
 
     let WaitingFor::ManaPayment {
         player,
@@ -1232,33 +1389,89 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
     if pending.activation_ability_index.is_some() {
         return None;
     }
-    let cost = pending.cost.clone();
-
-    // Scratch pool of ONLY the pinned units = the player's current selection.
-    let player_obj = state.players.iter().find(|p| p.id == viewer)?;
-    let selected = ManaPool::from_units(
-        player_obj
-            .mana_pool
-            .units()
-            .filter(|unit| pending.pinned_pool_units.contains(&unit.pip_id)),
-    );
 
     // CR 106.6: reduce under the SAME spend-restriction context the finalize
     // spend uses, so restricted mana the spell can't accept stays in the residual.
     let spell_meta = crate::game::casting::build_spell_meta(state, viewer, pending.object_id);
     let ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    remaining_after_pins(
+        state,
+        viewer,
+        pending.object_id,
+        &pending.pinned_pool_units,
+        &pending.cost,
+        ctx.as_ref(),
+    )
+}
+
+/// CR 118.3a + CR 106.6: `cost` reduced against a scratch pool of ONLY
+/// `viewer`'s pinned units (their current selection), under `ctx` and the
+/// payment's mana-spend permission for `source`.
+fn remaining_after_pins(
+    state: &GameState,
+    viewer: PlayerId,
+    source: ObjectId,
+    pins: &[ManaPipId],
+    cost: &ManaCost,
+    ctx: Option<&PaymentContext<'_>>,
+) -> Option<ManaCost> {
+    let player_obj = state.players.iter().find(|p| p.id == viewer)?;
+    let selected = ManaPool::from_units(
+        player_obj
+            .mana_pool
+            .units()
+            .filter(|unit| pins.contains(&unit.pip_id)),
+    );
     Some(crate::game::mana_payment::reduce_cost_by_pool(
         &selected,
-        &cost,
-        ctx.as_ref(),
+        cost,
+        ctx,
         crate::game::casting::player_mana_spend_permission_for_payment(
             state,
             viewer,
-            Some(pending.object_id),
-            ctx.as_ref(),
+            Some(source),
+            ctx,
         ),
         None,
     ))
+}
+
+/// CR 601.2g + CR 605.3a: the mana ability `viewer` is paying for by hand in
+/// its own `ManaAbilityManaPayment` window. An automatic window is paid by
+/// activating mana abilities alone, so it has nothing to display here.
+fn manual_mana_ability_payment(state: &GameState, viewer: PlayerId) -> Option<&PendingManaAbility> {
+    let WaitingFor::ManaAbilityManaPayment {
+        player,
+        pending_mana_ability,
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+    (*player == viewer
+        && crate::game::casting::payment_mode_pays_mana_manually(pending_mana_ability.payment_mode))
+    .then_some(pending_mana_ability.as_ref())
+}
+
+/// CR 601.2g + CR 602.2b + CR 605.3a: the viewer's own manual mana-ability
+/// payment window — the source, its mana sub-cost (X announced) and the pins
+/// still naming a unit in their pool.
+fn mana_ability_payment_view(
+    state: &GameState,
+    viewer: PlayerId,
+) -> Option<ManaAbilityPaymentView> {
+    let pending = manual_mana_ability_payment(state, viewer)?;
+    let cost = crate::game::mana_abilities::pending_mana_sub_cost(state, pending).ok()??;
+    let pool = &state.players.iter().find(|p| p.id == viewer)?.mana_pool;
+    Some(ManaAbilityPaymentView {
+        source_id: pending.source_id,
+        cost,
+        pinned_pool_units: pending
+            .pinned_pool_units
+            .iter()
+            .copied()
+            .filter(|pip| pool.contains_pip(*pip))
+            .collect(),
+    })
 }
 
 /// CR 309.4a-c: name the room each venturing player's marker currently sits on.
@@ -1286,6 +1499,60 @@ fn dungeon_rooms(state: &GameState) -> BTreeMap<PlayerId, DungeonRoomView> {
                     rooms: crate::game::dungeon::room_nodes(dungeon),
                 },
             ))
+        })
+        .collect()
+}
+
+/// The poison-loss rule one player is measured against, projected from
+/// `players::poison_loss_measure` — the authority the poison SBA reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoisonLossView {
+    pub scope: PoisonLossScope,
+    pub threshold: u32,
+    pub proximity: PoisonLossProximity,
+}
+
+/// Display classification (no CR): how close a player's poison-loss count is
+/// to its threshold, which the HUD badge styles from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PoisonLossProximity {
+    /// More than `POISON_NEAR_LETHAL_MARGIN` counters short of the threshold.
+    Normal,
+    /// Within `POISON_NEAR_LETHAL_MARGIN` counters of the threshold.
+    NearLethal,
+}
+
+/// Display-only: how many counters short of the loss threshold the HUD starts
+/// warning. 2 reproduces the badge's pre-dial `value >= 8` at the CR default
+/// of ten. No CR governs it.
+const POISON_NEAR_LETHAL_MARGIN: u32 = 2;
+
+/// CR 704.5c / CR 704.6b + CR 810.8d: the poison-loss rule for every player
+/// with a nonzero poison-loss count, read from the same measure the SBA uses.
+/// Empty (and omitted from the wire) when nobody is poisoned.
+fn poison_loss(state: &GameState) -> BTreeMap<PlayerId, PoisonLossView> {
+    state
+        .players
+        .iter()
+        .filter_map(|player| {
+            let measure = poison_loss_measure(state, player)?;
+            (measure.count > 0).then(|| {
+                let proximity = if measure.count.saturating_add(POISON_NEAR_LETHAL_MARGIN)
+                    >= measure.threshold
+                {
+                    PoisonLossProximity::NearLethal
+                } else {
+                    PoisonLossProximity::Normal
+                };
+                (
+                    player.id,
+                    PoisonLossView {
+                        scope: measure.scope,
+                        threshold: measure.threshold,
+                        proximity,
+                    },
+                )
+            })
         })
         .collect()
 }
@@ -1542,9 +1809,13 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         blocker_assignment_pairs: blocker_assignment_pairs(state),
         debug_library_cards: debug_library_cards(state, viewer),
         shared_piles: shared_piles(state),
+        unless_draw_cost: unless_draw_cost(state),
         current_target_kind: current_target_kind(state),
         dungeon_rooms: dungeon_rooms(state),
+        poison_loss: poison_loss(state),
         storm_count: storm_count(state),
+        unblocked_attack_previews: unblocked_attack_previews(state),
+        attack_targets: attack_targets(state),
         ..DerivedViews::default()
     };
 
@@ -1564,7 +1835,8 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // O(battlefield size); the BTreeMap stays empty (and `skip_serializing_if`
     // omits the field) when no Auras are enchanting any player, which is the
     // dominant case.
-    let block_restrictions = crate::game::combat::collect_block_restriction_statics(state);
+    let block_restrictions =
+        crate::game::combat::collect_functioning_block_restriction_statics(state);
     for &obj_id in &state.battlefield {
         let Some(obj) = state.objects.get(&obj_id) else {
             continue;
@@ -1774,6 +2046,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // pinned (selected) pool mana — drives the payment UI's live-shrinking cost.
     if let Some(viewer) = viewer {
         views.pending_payment_remaining = pending_payment_remaining(state, viewer);
+        views.mana_ability_payment = mana_ability_payment_view(state, viewer);
     }
 
     if state.format_config.format.is_planechase_family() {
@@ -1809,6 +2082,10 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         }
     }
 
+    if state.format_config.format == GameFormat::Horde {
+        views.horde = Some(horde_view(state));
+    }
+
     // CR 104.2b / 119.7 / 119.8 / 118.3 / 101.2 / 702.50b: aggregate
     // player-affecting conditions so the HUD can render status icons without
     // re-scanning static abilities. Runs in every format (not gated by the
@@ -1818,6 +2095,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     let (turn_order, viewer_turn_number) = turn_order_views(state, viewer);
     views.turn_order = turn_order;
     views.viewer_turn_number = viewer_turn_number;
+    views.viewer_play_draw = viewer_play_draw(state, viewer);
 
     // WHY THE THREE ∞ SURFACE CHANNELS BELOW ARE UNCONDITIONAL — the accept→boundary window.
     //
@@ -2167,7 +2445,41 @@ pub fn derive_filtered_views(
     viewer: Option<PlayerId>,
 ) -> DerivedViews {
     let mut views = derive_views(filtered_state, viewer);
+    // CR 400.2: deck composition includes hidden library and hand information.
+    // Derive only from authority, and disclose only to the prompt owner while
+    // they submit their own choice. CR 723.4: under turn control, information
+    // about cards outside the game stays visible only to the controlled
+    // player, so a controller submitting for them gets no pool suggestions.
+    views.named_choice_suggestions = match (&authoritative_state.waiting_for, viewer) {
+        (
+            WaitingFor::NamedChoice {
+                player,
+                choice_type: crate::types::ability::ChoiceType::CreatureType { options },
+                options: legal_options,
+                ..
+            },
+            Some(viewer),
+        ) if options.is_empty()
+            && *player == viewer
+            && crate::game::interaction::interaction_submitter_for_owner(
+                authoritative_state,
+                *player,
+            ) == viewer =>
+        {
+            crate::game::effects::choose::suggested_creature_types(
+                authoritative_state,
+                *player,
+                legal_options,
+            )
+        }
+        _ => Vec::new(),
+    };
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    // CR 702.24a: whether the prompt continues a payment already begun is read
+    // from the payment's parked owner, which the viewer projection drops.
+    if let Some(draw) = views.unless_draw_cost.as_mut() {
+        draw.stage = unless_draw_payment_stage(authoritative_state);
+    }
     views.scry_prompt_id = viewer.and_then(|viewer| {
         crate::game::interaction::scry_prompt_id_for_viewer(authoritative_state, viewer)
     });
@@ -2188,6 +2500,28 @@ pub fn derive_filtered_views(
             stack_display_groups_revealing(filtered_state, &views.stack_revealed_cards);
     }
     views
+}
+
+/// Horde seat and Boss identity for the display layer. Seats come from the
+/// single authority (`horde::horde_seats`, stored designation plus the
+/// archenemy fallback); survivors are the remaining `seat_order` seats in seat
+/// order; Bosses are the deployed set (`boss::bosses_in_command_zone`). Valid
+/// on filtered state: seats are public topology and deployed Bosses are
+/// face-up command-zone objects, so viewer redaction preserves everything this
+/// reads.
+fn horde_view(state: &GameState) -> HordeView {
+    let horde_seats = crate::game::horde::horde_seats(state);
+    let hero_player_ids = state
+        .seat_order
+        .iter()
+        .copied()
+        .filter(|id| !horde_seats.contains(id))
+        .collect();
+    HordeView {
+        horde_seat_ids: horde_seats,
+        hero_player_ids,
+        deployed_boss_ids: crate::game::boss::bosses_in_command_zone(state),
+    }
 }
 
 /// CR 702.40a: Storm counts each other spell cast before it this turn. A
@@ -2214,6 +2548,50 @@ fn storm_count(state: &GameState) -> u32 {
         .unwrap_or_else(|| spells_cast_this_turn(state))
 }
 
+/// CR 508.1a: one unblocked-attack projection per creature the open attack
+/// declaration prompt lets attack; empty in every other state (just-in-time).
+fn unblocked_attack_previews(state: &GameState) -> HashMap<ObjectId, UnblockedAttackPreview> {
+    let WaitingFor::DeclareAttackers {
+        valid_attacker_ids, ..
+    } = &state.waiting_for
+    else {
+        return HashMap::new();
+    };
+    valid_attacker_ids
+        .iter()
+        .filter_map(|&id| {
+            // CR 510.1b + CR 702.4b: unblocked attacker's damage over both damage steps — the
+            // shared authority.
+            let damage = combat_damage_to_defender(state, id, &[]).max(0) as u32;
+            let has_infect = DamageContext::from_source(state, id)?.has_infect;
+            let life_loss = if has_infect {
+                // CR 120.3b: infect damage to a player is poison counters, not life loss.
+                0
+            } else {
+                // CR 120.3a: damage to a player without infect is that much life loss.
+                damage
+            };
+            Some((id, UnblockedAttackPreview { damage, life_loss }))
+        })
+        .collect()
+}
+
+/// CR 400.7 + CR 506.4c: each attacker's relation read through the combat authority, which
+/// drops a planeswalker or battle removed from combat (CR 506.4) and a player who has left
+/// the game; empty outside combat.
+fn attack_targets(state: &GameState) -> HashMap<ObjectId, AttackTarget> {
+    let Some(combat) = &state.combat else {
+        return HashMap::new();
+    };
+    combat
+        .attackers
+        .iter()
+        .filter_map(|info| {
+            active_attack_target(state, info).map(|(target, _)| (info.object_id, target))
+        })
+        .collect()
+}
+
 /// The table-wide count of spells actually cast this turn. This is intentionally
 /// private: public Storm presentation must use [`storm_count`] so an active
 /// Storm trigger uses its cast-time snapshot rather than including itself.
@@ -2237,7 +2615,11 @@ fn visible_exile_object_ids(state: &GameState) -> BTreeMap<PlayerId, Vec<ObjectI
                 .copied()
                 .filter(|object_id| {
                     state.objects.get(object_id).is_some_and(|object| {
-                        object.owner == player.id
+                        // CR 707.13 + CR 400.11: a copy created outside the game is
+                        // staged in exile only as casting-pipeline bookkeeping; it is
+                        // in no zone, so it is never part of the public exile pile.
+                        !object.is_outside_game()
+                            && object.owner == player.id
                             && (!object.face_down || object.display_visible_to_viewer)
                     })
                 })
@@ -2245,6 +2627,41 @@ fn visible_exile_object_ids(state: &GameState) -> BTreeMap<PlayerId, Vec<ObjectI
             (!object_ids.is_empty()).then_some((player.id, object_ids))
         })
         .collect()
+}
+
+/// CR 121.1 + CR 702.24a: the draw the open unless-payment prompt asks for,
+/// with its count resolved against the pending ability as the payment would
+/// resolve it, and its repetition.
+fn unless_draw_cost(state: &GameState) -> Option<UnlessDrawCostView> {
+    let WaitingFor::UnlessPayment {
+        cost: AbilityCost::EffectCost { effect },
+        pending_effect,
+        repeat,
+        ..
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+    let Effect::Draw { count, .. } = effect.as_ref() else {
+        return None;
+    };
+    let resolved =
+        crate::game::quantity::resolve_quantity_with_targets(state, count, pending_effect);
+    Some(UnlessDrawCostView {
+        cards: u32::try_from(resolved).unwrap_or(0),
+        instructions: repeat.unwrap_or(1),
+        stage: unless_draw_payment_stage(state),
+    })
+}
+
+/// CR 702.24a: the stage of the open draw unless-payment prompt, read from the
+/// rules state that holds the payment's parked owner.
+fn unless_draw_payment_stage(state: &GameState) -> UnlessDrawPaymentStage {
+    if crate::game::engine_payment_choices::awaits_payment_continuation(state) {
+        UnlessDrawPaymentStage::Continuing
+    } else {
+        UnlessDrawPaymentStage::Offered
+    }
 }
 
 fn shared_piles(state: &GameState) -> Option<SharedPilesView> {
@@ -2331,22 +2748,52 @@ fn unique_authorized_submitter(state: &GameState) -> Option<PlayerId> {
     (submitters.len() == 1).then(|| submitters[0])
 }
 
+/// CR 103.1: the starting player of the game this state describes, once it has
+/// been determined. `current_starting_player` alone cannot answer this: it is
+/// non-optional and `GameState::new` seeds it with a format default before any
+/// determination. Turn 1 is established in the same step that assigns the
+/// starter (`engine::start_game_with_starting_player`,
+/// `engine::start_game_skip_mulligan`), so a state still on turn 0 has none.
+fn determined_starting_player(state: &GameState) -> Option<PlayerId> {
+    (state.turn_number > 0).then_some(state.current_starting_player)
+}
+
+/// CR 103.1 + CR 103.1a + CR 805.4: the viewer's play/draw position — see
+/// `DerivedViews::viewer_play_draw`. Sides come from `topology::sides`, which
+/// includes departed seats, so the position stays fixed for the whole game.
+fn viewer_play_draw(state: &GameState, viewer: Option<PlayerId>) -> Option<PlayDrawPosition> {
+    let viewer = viewer?;
+    let starter = determined_starting_player(state)?;
+    let sides = crate::game::topology::sides(state);
+    let [first, second] = sides.as_slice() else {
+        return None;
+    };
+    // CR 805.4: a side takes one turn per round when it is a single seat or
+    // takes shared team turns; any other side makes the game multiplayer-ordered.
+    let one_turn_per_round = |side: &Side| {
+        side.seats.len() == 1 || side.turn_structure == TurnStructure::SharedTeamTurns
+    };
+    if !(one_turn_per_round(first) && one_turn_per_round(second)) {
+        return None;
+    }
+    let side_index = |player| sides.iter().position(|side| side.seats.contains(&player));
+    Some(if side_index(viewer)? == side_index(starter)? {
+        PlayDrawPosition::OnThePlay
+    } else {
+        PlayDrawPosition::OnTheDraw
+    })
+}
+
 fn turn_order_views(
     state: &GameState,
     viewer: Option<PlayerId>,
 ) -> (Vec<TurnOrderSlotView>, Option<u8>) {
-    let mut seen = BTreeSet::new();
-    let representatives: Vec<PlayerId> = state
-        .seat_order
-        .iter()
-        .copied()
-        .filter(|&player| crate::game::players::is_alive(state, player))
-        .filter_map(|player| {
-            let representative =
-                crate::game::topology::normalize_shared_turn_recipient(state, player);
-            seen.insert(representative).then_some(representative)
-        })
-        .collect();
+    // CR 103.1: no turn order exists before the starting player is determined.
+    if determined_starting_player(state).is_none() {
+        return (Vec::new(), None);
+    }
+
+    let representatives = crate::game::topology::turn_representatives(state);
 
     if representatives.len() <= 2 {
         return (Vec::new(), None);
@@ -2363,7 +2810,6 @@ fn turn_order_views(
                 turns_from_now: slot_index,
                 turn_number: slot_index + 1,
                 is_viewer: viewer == Some(player),
-                is_starting_player: slot_index == 0 && player == state.current_starting_player,
             }
         })
         .collect();
@@ -2412,6 +2858,8 @@ fn accepted_collapse_axes(state: &GameState, controller: PlayerId) -> BTreeSet<R
 ///   empty-draw loss and a self-mill the controller's own; the seat follows `p`.
 /// - CR 704.5c: `Poison(p)` — a poison ∞ drives the afflicted player toward the
 ///   10-poison loss, so it belongs to the VICTIM.
+/// - CR 107.14: `Energy(p)` — the reserve is `p`'s own, so it badges on its holder `p`, not on
+///   a victim.
 ///
 /// Every aggregate axis carries no victim `PlayerId` and therefore no seat.
 pub(crate) fn payload_seat(axis: ResourceAxis) -> Option<PlayerId> {
@@ -2419,7 +2867,8 @@ pub(crate) fn payload_seat(axis: ResourceAxis) -> Option<PlayerId> {
         ResourceAxis::Life(p)
         | ResourceAxis::DamageDealt(p)
         | ResourceAxis::LibraryDelta(p)
-        | ResourceAxis::Poison(p) => Some(p),
+        | ResourceAxis::Poison(p)
+        | ResourceAxis::Energy(p) => Some(p),
         ResourceAxis::Mana(_)
         | ResourceAxis::Counter(_, _)
         | ResourceAxis::Trigger(_)
@@ -2546,6 +2995,7 @@ fn object_growth_backing(
         | ResourceAxis::DamageDealt(_)
         | ResourceAxis::LibraryDelta(_)
         | ResourceAxis::Poison(_)
+        | ResourceAxis::Energy(_)
         | ResourceAxis::Trigger(_)
         | ResourceAxis::CardsDrawn
         | ResourceAxis::Casts
@@ -2950,7 +3400,7 @@ fn combat_damage_label(sub_step: CombatDamageSubStep) -> String {
 
 fn stack_entry_targets(state: &GameState, entry: &StackEntry) -> Vec<StackTargetDisplay> {
     let targets = match &entry.kind {
-        StackEntryKind::KeywordAction { action } => keyword_action_targets(action),
+        StackEntryKind::KeywordAction { action } => action.targets(),
         _ => effective_stack_ability(state, entry)
             .ability
             .map(|ability| {
@@ -2971,17 +3421,6 @@ fn stack_entry_targets(state: &GameState, entry: &StackEntry) -> Vec<StackTarget
             target,
         })
         .collect()
-}
-
-fn keyword_action_targets(action: &KeywordAction) -> Vec<TargetRef> {
-    match action {
-        KeywordAction::Equip {
-            target_creature_id, ..
-        } => vec![TargetRef::Object(*target_creature_id)],
-        KeywordAction::Crew { .. }
-        | KeywordAction::Saddle { .. }
-        | KeywordAction::Station { .. } => Vec::new(),
-    }
 }
 
 fn target_label(state: &GameState, target: &TargetRef) -> String {
@@ -3211,34 +3650,34 @@ mod tests {
     use super::*;
     use crate::game::combat::CombatState;
     use crate::game::game_object::ObjectIncarnationRefExt;
+    use crate::game::scenario::{GameScenario, P0, P1};
     use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
         DelayedTriggerCondition, DelayedTriggerKind, Duration, Effect, EffectKind, ModalChoice,
         ResolvedAbility, RestrictionExpiry, StaticCondition, TargetFilter, TargetRef,
     };
+    use crate::types::actions::GameAction;
     use crate::types::card_printing::CardPrinting;
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        CommanderDamageEntry, DelayedTrigger, DistributionScope, DistributionUnit, PendingCast,
-        StackEntry, StackEntryKind, StackPaidSnapshot, TargetEffectDetail, TargetSelectionProgress,
-        TargetSelectionSlot, TriggerOrderGroup, WaitingFor, ZoneChangeRecord,
+        CastPaymentMode, CommanderDamageEntry, DelayedTrigger, DistributionScope, DistributionUnit,
+        PendingCast, StackEntry, StackEntryKind, StackPaidSnapshot, TargetEffectDetail,
+        TargetSelectionProgress, TargetSelectionSlot, TriggerOrderGroup, WaitingFor,
+        ZoneChangeRecord,
     };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, TriggerFiring,
     };
-    use crate::types::mana::ManaCost;
+    use crate::types::mana::{ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::statics::ActivationExemption;
     use crate::types::zones::Zone;
     use std::collections::HashMap;
 
     fn emblem_printing(collector: &str) -> SharedPrinting {
-        SharedPrinting::new(CardPrinting {
-            set_code: "owner".into(),
-            collector_number: collector.into(),
-        })
+        SharedPrinting::new(CardPrinting::owner("owner", collector))
     }
 
     /// A synthetic emblem row fixture. No printed emblem carries an activated ability or empty
@@ -4101,6 +4540,166 @@ mod tests {
 
         let views = derive_views(&state, None);
         assert!(views.dungeon_rooms.is_empty());
+    }
+
+    /// Minimal Horde game with one deployed Boss plus one Boss still waiting
+    /// face down in the Boss pile: the engine-owned seat/Boss identity the
+    /// Horde HUD renders instead of scanning command-zone objects itself.
+    fn setup_horde_game_with_boss() -> (GameState, PlayerId, ObjectId) {
+        use crate::types::format::{ChallengeDeck, FormatConfig};
+
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::TurtleTeamUpHorde.default_ruleset()),
+            3,
+            42,
+        );
+        let horde = state.format_config.archenemy_player().expect("Horde seat");
+        let boss = create_object(
+            &mut state,
+            CardId(9001),
+            horde,
+            "Shredder, Foot Clan Overlord".into(),
+            Zone::Command,
+        );
+        let obj = state.objects.get_mut(&boss).expect("deployed Boss");
+        obj.card_types.core_types.push(CoreType::Boss);
+        obj.face_down = false;
+        let pile_boss = create_object(
+            &mut state,
+            CardId(9002),
+            horde,
+            "Chrome Dome, Cyber-Ninja".into(),
+            Zone::Command,
+        );
+        // The pile birth pattern (`create_boss_deck_card`): born into the
+        // command zone face down, then held in the pile instead of the list.
+        state.command_zone.retain(|id| *id != pile_boss);
+        let pile = state.objects.get_mut(&pile_boss).expect("pile Boss");
+        pile.card_types.core_types.push(CoreType::Boss);
+        pile.face_down = true;
+        state.boss_deck.push_back(pile_boss);
+        (state, horde, boss)
+    }
+
+    /// The Horde view projects the engine's own answers: designated seats,
+    /// survivors in seat order, and the deployed Boss set — while the
+    /// face-down Boss pile stays out of the Boss list.
+    #[test]
+    fn horde_view_projects_seats_and_deployed_boss() {
+        let (state, horde, boss) = setup_horde_game_with_boss();
+        let views = derive_views(&state, None);
+        let horde_view = views.horde.expect("Horde games project a Horde view");
+        assert_eq!(
+            horde_view.horde_seat_ids,
+            vec![horde],
+            "fresh setup designates the archenemy seat"
+        );
+        let expected_heroes: Vec<PlayerId> = state
+            .seat_order
+            .iter()
+            .copied()
+            .filter(|id| *id != horde)
+            .collect();
+        assert_eq!(expected_heroes.len(), 2, "two survivors in a 3-seat game");
+        assert_eq!(
+            horde_view.hero_player_ids, expected_heroes,
+            "survivors are the non-Horde seats in seat order"
+        );
+        assert_eq!(
+            horde_view.deployed_boss_ids,
+            vec![boss],
+            "only the face-up command-zone Boss deploys; the pile Boss is excluded"
+        );
+    }
+
+    /// A compatible snapshot omitting the seat vector still resolves: the
+    /// projection reads the stored designation plus the archenemy fallback,
+    /// never the raw vector alone. Exercised through the delivered viewer
+    /// path (`filter_state_for_viewer` + `derive_filtered_views`), with the
+    /// omission asserted on the filtered state so the fallback conjunct — not
+    /// the stored vec — is what answers.
+    #[test]
+    fn horde_view_resolves_horde_seat_with_omitted_seat_vector() {
+        let (mut state, horde, boss) = setup_horde_game_with_boss();
+        state.horde_seats.clear();
+        let viewer = state
+            .seat_order
+            .iter()
+            .copied()
+            .find(|id| *id != horde)
+            .expect("a survivor viewer");
+        let filtered = crate::game::visibility::filter_state_for_viewer(&state, viewer);
+        assert!(
+            filtered.horde_seats.is_empty(),
+            "precondition: the delivered snapshot omits the seat vector"
+        );
+        assert_eq!(
+            crate::game::topology::archenemy(&filtered),
+            Some(horde),
+            "precondition: the archenemy fallback input survives filtering"
+        );
+        let views = derive_filtered_views(&state, &filtered, Some(viewer));
+        let horde_view = views.horde.expect("Horde games project a Horde view");
+        assert_eq!(
+            horde_view.horde_seat_ids,
+            vec![horde],
+            "omitted vector falls back to the archenemy seat"
+        );
+        assert_eq!(
+            horde_view.deployed_boss_ids,
+            vec![boss],
+            "the public deployed Boss survives viewer filtering"
+        );
+    }
+
+    /// Non-Horde formats project no Horde view at all.
+    #[test]
+    fn horde_view_absent_outside_horde_format() {
+        let state = GameState::new(FormatConfig::standard(), 2, 42);
+        assert!(
+            derive_views(&state, None).horde.is_none(),
+            "no Horde view outside Horde games"
+        );
+    }
+
+    /// Wire shape: the Horde view serializes through `ClientGameStateRef` →
+    /// JSON → `ClientGameState`, and the empty Boss list omits its key.
+    #[test]
+    fn horde_view_round_trip_through_wire() {
+        let (state, horde, boss) = setup_horde_game_with_boss();
+        let json =
+            serde_json::to_string(&ClientGameStateRef::wrap(&state, None)).expect("serialize");
+        assert!(
+            json.contains("deployed_boss_ids"),
+            "Boss key present when a Boss is deployed"
+        );
+        let round: ClientGameState = serde_json::from_str(&json).expect("deserialize");
+        let horde_view = round.derived.horde.expect("Horde view survives the wire");
+        assert_eq!(horde_view.horde_seat_ids, vec![horde]);
+        assert_eq!(horde_view.deployed_boss_ids, vec![boss]);
+
+        // Pre-deploy: the view is present (seats are known at setup) but the
+        // Boss list is empty, so its key is omitted.
+        let (mut undeployed, undeployed_horde, _) = setup_horde_game_with_boss();
+        undeployed.command_zone.clear();
+        let empty_json = serde_json::to_string(&ClientGameStateRef::wrap(&undeployed, None))
+            .expect("serialize pre-deploy");
+        assert!(
+            empty_json.contains("\"horde\":"),
+            "the view itself is present before the first stage deploys"
+        );
+        assert!(
+            !empty_json.contains("deployed_boss_ids"),
+            "empty Boss list omits its key"
+        );
+        let empty_round: ClientGameState =
+            serde_json::from_str(&empty_json).expect("deserialize pre-deploy");
+        let empty_view = empty_round
+            .derived
+            .horde
+            .expect("pre-deploy view survives the wire");
+        assert_eq!(empty_view.horde_seat_ids, vec![undeployed_horde]);
+        assert!(empty_view.deployed_boss_ids.is_empty());
     }
 
     /// JIT short-circuit: non-Commander formats must return an empty view
@@ -5224,7 +5823,17 @@ mod tests {
 
     #[test]
     fn turn_order_hidden_for_two_or_fewer_live_representatives() {
-        let state = GameState::new(FormatConfig::standard(), 2, 42);
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        // A game in progress: the starting player is determined (CR 103.1), so
+        // the representative count and not determination is what hides turn order.
+        state.turn_number = 1;
+
+        assert!(
+            derive_views(&state, Some(PlayerId(0)))
+                .viewer_play_draw
+                .is_some(),
+            "the determination guard passed, so the <= 2 branch hides turn order"
+        );
 
         let views = derive_views(&state, None);
 
@@ -5244,14 +5853,18 @@ mod tests {
     #[test]
     fn turn_order_duplicates_survive_wire_round_trip() {
         let mut state = GameState::new(FormatConfig::free_for_all(), 4, 42);
+        // A game in progress: the starting player is determined (CR 103.1).
+        state.turn_number = 1;
         state.active_player = PlayerId(0);
         state.extra_turns.push(crate::types::game_state::ExtraTurn {
             player: PlayerId(2),
             anchor: PlayerId(0),
+            id: crate::types::identifiers::ExtraTurnId(1),
         });
         state.extra_turns.push(crate::types::game_state::ExtraTurn {
             player: PlayerId(0),
             anchor: PlayerId(0),
+            id: crate::types::identifiers::ExtraTurnId(2),
         });
 
         let views = derive_views(&state, None);
@@ -5265,7 +5878,6 @@ mod tests {
                     turns_from_now: 0,
                     turn_number: 1,
                     is_viewer: false,
-                    is_starting_player: true,
                 },
                 TurnOrderSlotView {
                     player: PlayerId(0),
@@ -5273,7 +5885,6 @@ mod tests {
                     turns_from_now: 1,
                     turn_number: 2,
                     is_viewer: false,
-                    is_starting_player: false,
                 },
             ],
             "same player can be both NOW and NEXT when an extra turn is queued"
@@ -5814,6 +6425,70 @@ mod tests {
         );
     }
 
+    /// CR 601.2g + CR 602.2b + CR 605.3a: in the payer's own manual Rakdos
+    /// Signet window (`{1}, {T}: Add {B}{R}.`) the engine publishes the Signet,
+    /// its `{1}` and the pins, and the remaining cost shrinks with the pins.
+    /// The opponent sees neither.
+    #[test]
+    fn mana_ability_payment_view_reflects_the_manual_window_for_its_payer_only() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let signet = scenario
+            .add_artifact_from_oracle(P0, "Rakdos Signet", "{1}, {T}: Add {B}{R}.")
+            .id();
+        let mut runner = scenario.build();
+        for color in [ManaType::Black, ManaType::Red] {
+            let _ = runner
+                .state_mut()
+                .add_mana_to_pool(P0, ManaUnit::new(color, ObjectId(0), false, vec![]));
+        }
+        let red = runner.state().players[0]
+            .mana_pool
+            .units()
+            .find(|unit| unit.color == ManaType::Red)
+            .map(|unit| unit.pip_id)
+            .expect("the floating {R}");
+        let ability_index = runner.state().objects[&signet]
+            .abilities
+            .iter()
+            .position(crate::game::mana_abilities::is_mana_ability)
+            .expect("the Signet's mana ability");
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: signet,
+                ability_index,
+                payment_mode: CastPaymentMode::Manual,
+            })
+            .expect("the manual activation opens its window");
+
+        let views = derive_views(runner.state(), Some(P0));
+        assert_eq!(
+            views.mana_ability_payment,
+            Some(ManaAbilityPaymentView {
+                source_id: signet,
+                cost: ManaCost::generic(1),
+                pinned_pool_units: vec![],
+            })
+        );
+        assert_eq!(views.pending_payment_remaining, Some(ManaCost::generic(1)));
+
+        runner
+            .act(GameAction::SpendPoolMana { pip_id: red })
+            .expect("the {R} can pay the {1}");
+        let views = derive_views(runner.state(), Some(P0));
+        assert_eq!(
+            views
+                .mana_ability_payment
+                .map(|view| view.pinned_pool_units),
+            Some(vec![red])
+        );
+        assert_eq!(views.pending_payment_remaining, Some(ManaCost::NoCost));
+
+        let opponent = derive_views(runner.state(), Some(P1));
+        assert_eq!(opponent.mana_ability_payment, None);
+        assert_eq!(opponent.pending_payment_remaining, None);
+    }
+
     #[test]
     fn derive_views_wires_stack_entry_details() {
         let mut state = GameState::new_two_player(42);
@@ -6334,6 +7009,8 @@ mod tests {
                 combat_status: Default::default(),
                 block_pairs: Vec::new(),
                 co_departed: Vec::new(),
+                co_entered: Vec::new(),
+                instruction_lead: None,
                 attached_to: None,
                 entered_incarnation: None,
                 turn_zone_change_index: 0,
@@ -7560,6 +8237,7 @@ mod tests {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }]
             .into();
         }
@@ -7607,6 +8285,7 @@ mod tests {
         assert_eq!(attribution_player(ResourceAxis::LibraryDelta(p1), p0), p1);
         // CR 704.5c: a poison ∞ belongs on the afflicted player's HUD, not the controller's.
         assert_eq!(attribution_player(ResourceAxis::Poison(p1), p0), p1);
+        assert_eq!(attribution_player(ResourceAxis::Energy(p1), p0), p1);
 
         // Aggregate axes (no victim PlayerId) attribute to the controller.
         assert_eq!(
@@ -8191,7 +8870,7 @@ mod tests {
 
         // One representative per tag. Payloads are arbitrary because `family_of` is
         // payload-independent by construction, exactly as the client's Record keys on the tag.
-        const AXIS_REPRESENTATIVES: [ResourceAxis; 17] = [
+        const AXIS_REPRESENTATIVES: [ResourceAxis; 18] = [
             ResourceAxis::Mana(ManaType::Colorless),
             ResourceAxis::Life(PlayerId(0)),
             ResourceAxis::DamageDealt(PlayerId(0)),
@@ -8209,6 +8888,7 @@ mod tests {
             ResourceAxis::LtbTriggers,
             ResourceAxis::SacTriggers,
             ResourceAxis::Poison(PlayerId(0)),
+            ResourceAxis::Energy(PlayerId(0)),
         ];
 
         // Tag extraction uses the SAME rule as the client's `axisTag`: externally-tagged serde
@@ -8250,7 +8930,7 @@ mod tests {
 
         assert_eq!(
             table.len(),
-            17,
+            18,
             "one entry per ResourceAxis tag — a duplicate representative silently shrinks this"
         );
         let committed: BTreeMap<String, UnboundedFamily> =
@@ -10078,6 +10758,90 @@ mod tests {
         state.library_of_mut(PlayerId(1)).push_back(card);
         assert!(state.players[0].library.contains(&card));
         assert!(state.players[1].library.is_empty());
+    }
+
+    /// CR 121.1 + CR 702.24a: the unless-payment draw view resolves the
+    /// instruction's count against the pending ability (fixed, zero and
+    /// dynamic) and carries the repetition; any other prompt has none.
+    #[test]
+    fn unless_draw_cost_resolves_the_count_and_repetition() {
+        use crate::types::ability::{
+            AbilityCost, Effect, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility,
+        };
+        let mut state = GameState::new_two_player(42);
+        assert_eq!(derive_views(&state, None).unless_draw_cost, None);
+        let draw = |count: QuantityExpr| AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count,
+                target: TargetFilter::Controller,
+            }),
+        };
+        let prompt = |cost: AbilityCost, repeat: Option<u32>| WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost,
+            pending_effect: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+            repeat,
+            affected_object: None,
+        };
+        for (count, repeat, expected) in [
+            (QuantityExpr::Fixed { value: 1 }, None, (1, 1)),
+            (QuantityExpr::Fixed { value: 3 }, None, (3, 1)),
+            (QuantityExpr::Fixed { value: 0 }, None, (0, 1)),
+            (QuantityExpr::Fixed { value: -2 }, None, (0, 1)),
+            (QuantityExpr::Fixed { value: 1 }, Some(65), (1, 65)),
+        ] {
+            state.waiting_for = prompt(draw(count), repeat);
+            assert_eq!(
+                derive_views(&state, None).unless_draw_cost,
+                Some(UnlessDrawCostView {
+                    cards: expected.0,
+                    instructions: expected.1,
+                    stage: UnlessDrawPaymentStage::Offered,
+                })
+            );
+        }
+        // A dynamic count is resolved by the engine, here P0's hand size.
+        for _ in 0..4 {
+            create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                "Hand Card".to_string(),
+                Zone::Hand,
+            );
+        }
+        state.waiting_for = prompt(
+            draw(QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Controller,
+                },
+            }),
+            None,
+        );
+        assert_eq!(
+            derive_views(&state, None).unless_draw_cost,
+            Some(UnlessDrawCostView {
+                cards: 4,
+                instructions: 1,
+                stage: UnlessDrawPaymentStage::Offered,
+            })
+        );
+        // A non-draw unless cost has no draw view.
+        state.waiting_for = prompt(
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            None,
+        );
+        assert_eq!(derive_views(&state, None).unless_draw_cost, None);
     }
 
     #[test]

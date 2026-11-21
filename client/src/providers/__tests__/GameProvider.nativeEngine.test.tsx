@@ -28,7 +28,11 @@ type NativeAdapterEvent =
   // Non-terminal: the server refused a fire-and-forget request. Listed here
   // alongside the two terminal events precisely because `handleNativeEvent`
   // must treat it differently from both.
-  | { type: "requestRejected"; reason: string };
+  | { type: "requestRejected"; reason: string }
+  // Terminal events from the native engine (mirrors WsAdapterEvent)
+  | { type: "terminalDelivery"; delivery: { key: { game_code: string; generation: number }; terminalRevision: number; deliveryId: string; credential: string; display: { winner: number | null; reason: string }; finalView?: unknown } }
+  | { type: "gameOver"; winner: number | null; reason: string }
+  | { type: "terminalUnavailable"; message: string };
 
 const {
   NativeEngineVersionMismatchError,
@@ -83,7 +87,10 @@ const {
     private listener: ((event: NativeAdapterEvent) => void) | null = null;
     readonly nativeAiOptions:
       | {
-          aiSeats: Array<{ difficulty: string; deck: { main_deck: string[] } }>;
+          aiSeats: Array<{
+            difficulty: string;
+            deck: { main_deck: string[]; bracket_tier?: string | null; combo_declaration?: unknown };
+          }>;
           formatConfig?: { starting_life: number };
         }
       | undefined;
@@ -108,7 +115,10 @@ const {
       _displayName?: string,
       options?: {
         nativeAi?: {
-          aiSeats: Array<{ difficulty: string; deck: { main_deck: string[] } }>;
+          aiSeats: Array<{
+            difficulty: string;
+            deck: { main_deck: string[]; bracket_tier?: string | null; combo_declaration?: unknown };
+          }>;
           formatConfig?: { starting_life: number };
         };
         nativePregame?: NativePregameReconnect;
@@ -160,6 +170,7 @@ const {
     adapter: null as unknown,
     gameId: null as string | null,
     gameState: null,
+    waitingFor: null as unknown,
     initGame: vi.fn(async (gameId: string, adapter: { initialize: () => Promise<void> }, ..._payload: unknown[]) => {
       gameStoreState.gameId = gameId;
       gameStoreState.adapter = adapter;
@@ -277,7 +288,8 @@ vi.mock("../../constants/storage", async (importOriginal) => ({
   loadSavedDeckBracket: () => null,
 }));
 
-vi.mock("../../services/aiDeckCatalog", () => ({
+vi.mock("../../services/aiDeckCatalog", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/aiDeckCatalog")>(),
   buildLegalAiDeckCatalog: vi.fn(async () => ({
     candidates: [{ id: "ai-deck", deck: { main: [{ count: 1, name: "Mountain" }], sideboard: [] }, bracket: null }],
   })),
@@ -347,6 +359,12 @@ vi.mock("../../services/quickDraftPersistence", () => ({
   inspectActiveQuickDraftLifecycle,
 }));
 
+// Routing tests resume a live seat. The terminal recovery a resume runs first
+// is exercised end to end in GameProvider.nativeTerminalRecovery.test.tsx.
+vi.mock("../../services/fullTerminalRecovery", () => ({
+  recoverFullTerminal: vi.fn(async () => "reconnect"),
+}));
+
 vi.mock("../../services/serverDetection", () => ({
   detectServerUrl: vi.fn(async () => "ws://test-server"),
 }));
@@ -397,6 +415,8 @@ function aiCandidate(id: string, main: string[], bracket: CommanderBracket | nul
     coveragePct: 100,
     archetype: null,
     bracket,
+    declaredBracket: bracket,
+    comboDeclaration: { kind: "undeclared" },
   };
 }
 
@@ -409,6 +429,7 @@ const COMMANDER_FORMAT_CONFIG: FormatConfig = {
   singleton: true,
   command_zone: true,
   commander_damage_threshold: 21,
+  poison_counter_threshold: 10,
   range_of_influence: null,
   team_based: false,
   sideboard_policy: { type: "Forbidden" },
@@ -417,9 +438,14 @@ const COMMANDER_FORMAT_CONFIG: FormatConfig = {
   allow_debug_actions: false,
 };
 
-function publishedPayload(playerDeck = ["Player"], opponentDeck = ["Opponent"], pool?: string[] | null) {
+function publishedPayload(
+  playerDeck = ["Player"], opponentDeck = ["Opponent"], pool?: string[] | null, companion?: string[],
+) {
   return {
-    player: { main_deck: playerDeck, sideboard: [], commander: [] },
+    player: {
+      main_deck: playerDeck, sideboard: [], commander: [],
+      ...(companion === undefined ? {} : { companion }),
+    },
     opponent: { main_deck: opponentDeck, sideboard: [], commander: [] },
     ai_decks: [],
     ...(pool === undefined ? {} : { booster_pack_pool: pool }),
@@ -428,12 +454,13 @@ function publishedPayload(playerDeck = ["Player"], opponentDeck = ["Opponent"], 
 
 function seedSoloRun(draftId: string, gameId: string, options: {
   playerDeck?: string[]; opponentDeck?: string[]; pool?: string[] | null;
-  setCode?: string; phase?: string; currentGameId?: string;
+  setCode?: string; phase?: string; currentGameId?: string; companion?: string;
 } = {}) {
   const playerDeck = options.playerDeck ?? ["Player"];
   const opponentDeck = options.opponentDeck ?? ["Opponent"];
   const run = {
     format: "run", results: [], usedBotSeats: [1], playerDeck, opponentDeck,
+    ...(options.companion === undefined ? {} : { companion: options.companion }),
     ...(options.pool === undefined ? {} : { booster_pack_pool: options.pool }),
     activeMatch: { draftId, gameId, format: "run", resultCountAtLaunch: 0, botSeat: 1, opponentDeck },
   };
@@ -476,6 +503,7 @@ describe("GameProvider native AI routing", () => {
     loadActiveGame.mockReturnValue(null);
     gameStoreState.resumeNativeSolo.mockClear();
     gameStoreState.initGame.mockClear();
+    gameStoreState.waitingFor = null;
     nativeAdapters.splice(0);
     wasmAdapters.splice(0);
     multiplayerDraftGetState.mockReset();
@@ -1109,6 +1137,49 @@ describe("GameProvider native AI routing", () => {
     expect(gameStoreState.initGame).not.toHaveBeenCalled();
     expect(sessionStorage.getItem(key)).toBe(raw);
   });
+
+  // CR 702.139a: the Quick Draft publisher always writes the seat's companion
+  // key (empty when none); the exact-run consumer must accept it, check it
+  // against the stored run, and carry it through reconstruction.
+  it.each([
+    ["no companion", undefined],
+    ["a companion", "Gyruda, Doom of Depths"],
+  ])("launches the real published Quick Draft payload with %s", async (_label, companion) => {
+    const run = seedSoloRun("run", "game", { companion });
+    const { matchPayload } = await import("../../stores/draftStore");
+    sessionStorage.setItem("phase:draft-deck:game", JSON.stringify(matchPayload(run as never)));
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    expect(onNoDeck).not.toHaveBeenCalled();
+    expect((gameStoreState.initGame.mock.calls[0][2] as { player: { companion?: string[] } }).player.companion)
+      .toEqual(companion ? [companion] : []);
+  });
+
+  it.each([
+    ["a missing key for a stored companion", ["Gyruda, Doom of Depths"], undefined, "Gyruda, Doom of Depths"],
+    ["a different companion", ["Gyruda, Doom of Depths"], ["Lurrus of the Dream-Den"], undefined],
+    ["a companion the run never designated", ["Gyruda, Doom of Depths"], ["Gyruda, Doom of Depths"], undefined],
+  ] as const)("rejects a published payload with %s", async (_label, _stored, published, stored) => {
+    seedSoloRun("run", "game", { companion: stored });
+    sessionStorage.setItem(
+      "phase:draft-deck:game",
+      JSON.stringify(publishedPayload(["Player"], ["Opponent"], undefined, published as string[] | undefined)),
+    );
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(UNAVAILABLE));
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "Gyruda, Doom of Depths"])(
+    "carries the stored companion (%s) through reconstruction when the handoff key is absent", async (companion) => {
+      seedSoloRun("run", "game", { companion });
+      render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+      await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+      expect((gameStoreState.initGame.mock.calls[0][2] as { player: { companion?: string[] } }).player.companion)
+        .toEqual(companion ? [companion] : []);
+    });
 
   it("accepts a published null booster source on an ordinary run", async () => {
     seedSoloRun("run", "game", { pool: null });
@@ -1836,6 +1907,55 @@ describe("GameProvider native AI routing", () => {
     expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.main_deck).toEqual(["B2-Card"]);
   });
 
+  it.each([
+    ["an untagged deck the pool filtered on its estimate", null, null],
+    ["a declared deck", 4, "optimized"],
+  ] as const)("sends %s to the engine as its declaration only", async (_label, declaredBracket, sentTier) => {
+    preferences.aiSeats = [{ difficulty: "Medium", deckId: "Random" }];
+    // `bracket` is the value the pool filters on; for an untagged deck it is the estimate.
+    const pick = { ...aiCandidate("saved:Pick", ["Pick-Card"], 3), declaredBracket };
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({ candidates: [pick], allCandidates: [pick] });
+
+    render(
+      <GameProvider gameId={`declared-tier-${sentTier}`} mode="ai" formatConfig={COMMANDER_FORMAT_CONFIG}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(nativeAdapters).toHaveLength(1);
+    });
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.main_deck).toEqual(["Pick-Card"]);
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.bracket_tier).toBe(sentTier);
+  });
+
+  it("sends each AI seat its own combo answer on the native path", async () => {
+    const early = { kind: "intended", window: "early_game" } as const;
+    preferences.aiSeats = [
+      { difficulty: "Medium", deckId: "saved:Early" },
+      { difficulty: "Medium", deckId: "saved:Plain" },
+    ];
+    const picks = [
+      { ...aiCandidate("saved:Early", ["Early-Card"], null), comboDeclaration: early },
+      aiCandidate("saved:Plain", ["Plain-Card"], null),
+    ];
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({ candidates: picks, allCandidates: picks });
+
+    render(
+      <GameProvider gameId="native-combo-answers" mode="ai" playerCount={3} formatConfig={COMMANDER_FORMAT_CONFIG}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(nativeAdapters).toHaveLength(1);
+    });
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats.map((seat) => seat.deck.combo_declaration)).toEqual([
+      early,
+      { kind: "undeclared" },
+    ]);
+  });
+
   it("starts each AI seat from the game's seat snapshot instead of single-player preferences", async () => {
     // Host Game's all-AI start writes this snapshot before navigating.
     preferences.aiSeats = [
@@ -2052,6 +2172,7 @@ describe("GameProvider native AI routing", () => {
       singleton: true,
       command_zone: true,
       commander_damage_threshold: 21,
+      poison_counter_threshold: 10,
       range_of_influence: null,
       team_based: false,
       sideboard_policy: { type: "Forbidden" },
@@ -2273,6 +2394,99 @@ describe("GameProvider native AI routing", () => {
 
   it("disposes a native game and surfaces bridge errors as terminal", async () => {
     await expectNativeTerminalEvent({ type: "error", message: "WebSocket connection failed" });
+  });
+
+  it("forwards terminalDelivery, updates waitingFor to GameOver, and disposes the controller", async () => {
+    const onWsEvent = vi.fn();
+    render(
+      <GameProvider gameId="native-terminal-delivery" mode="ai" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setGameMode).toHaveBeenCalledWith("native-ai");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    const nativeAdapter = nativeAdapters[0]!;
+    const delivery = {
+      key: { game_code: "GAME01", generation: 1 },
+      terminalRevision: 5,
+      deliveryId: "del-1",
+      credential: "cred-1",
+      display: { winner: 0, reason: "Victory" },
+    };
+    const event = { type: "terminalDelivery" as const, delivery };
+    const controllers = vi.mocked(createGameLoopController).mock.results;
+    const latestController = controllers[controllers.length - 1]?.value;
+
+    act(() => {
+      nativeAdapter.emit(event);
+    });
+
+    expect(onWsEvent).toHaveBeenCalledWith(event);
+    expect(gameStoreState.waitingFor).toEqual({
+      type: "GameOver",
+      data: { winner: 0 },
+    });
+    expect(latestController?.dispose).toHaveBeenCalled();
+    expect(nativeAdapter.dispose).not.toHaveBeenCalled();
+  });
+
+  it("forwards gameOver, updates waitingFor to GameOver, and disposes the controller", async () => {
+    const onWsEvent = vi.fn();
+    render(
+      <GameProvider gameId="native-game-over" mode="ai" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setGameMode).toHaveBeenCalledWith("native-ai");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    const nativeAdapter = nativeAdapters[0]!;
+    const event = { type: "gameOver" as const, winner: 1, reason: "opponentConceded" };
+    const controllers = vi.mocked(createGameLoopController).mock.results;
+    const latestController = controllers[controllers.length - 1]?.value;
+
+    act(() => {
+      nativeAdapter.emit(event);
+    });
+
+    expect(onWsEvent).toHaveBeenCalledWith(event);
+    expect(gameStoreState.waitingFor).toEqual({
+      type: "GameOver",
+      data: { winner: 1 },
+    });
+    expect(latestController?.dispose).toHaveBeenCalled();
+    expect(nativeAdapter.dispose).not.toHaveBeenCalled();
+  });
+
+  it("forwards terminalUnavailable without disposing the native session", async () => {
+    const onWsEvent = vi.fn();
+    render(
+      <GameProvider gameId="native-terminal-unavailable" mode="ai" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setGameMode).toHaveBeenCalledWith("native-ai");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    const nativeAdapter = nativeAdapters[0]!;
+    const event = { type: "terminalUnavailable" as const, message: "Storage error" };
+
+    act(() => {
+      nativeAdapter.emit(event);
+    });
+
+    expect(onWsEvent).toHaveBeenCalledWith(event);
+    expect(nativeAdapter.dispose).not.toHaveBeenCalled();
   });
 
   it("keeps a native setup failure off the terminal connection surface", async () => {

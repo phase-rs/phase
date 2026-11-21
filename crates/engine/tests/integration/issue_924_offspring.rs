@@ -83,7 +83,7 @@ fn offspring_cast_creates_token_without_labeling_original_as_copy() {
         match &runner.state().waiting_for {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("pay offspring");
             }
             WaitingFor::ManaPayment { .. } => {

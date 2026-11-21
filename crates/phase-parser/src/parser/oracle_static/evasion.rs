@@ -3,9 +3,11 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::parser::oracle_ir::ast::AnaphorNumber;
 use crate::parser::oracle_nom::defender_exception;
 use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
 use crate::parser::oracle_nom::target::{controller_phrase_among_mixed_case, ControllerPhrase};
+use crate::parser::oracle_target::scope_target_spell_phrase;
 #[allow(unused_imports)]
 use crate::types::ability::AttachmentReferent;
 
@@ -197,6 +199,9 @@ fn doubler_source_is_restrictive(filter: &TargetFilter) -> bool {
                 || !tf.properties.is_empty()
         }
         TargetFilter::Or { filters } => filters.iter().all(doubler_source_is_restrictive),
+        // CR 112.1: a stack-scoped "spell" clause excludes every permanent.
+        TargetFilter::StackSpell => true,
+        TargetFilter::And { filters } => filters.iter().any(doubler_source_is_restrictive),
         // CR 603.2d: "a triggered ability of ~" names the doubler's own source
         // object — a self-reference that narrows to exactly one permanent, so it
         // is restrictive (Cloud, Midgar Mercenary).
@@ -236,7 +241,13 @@ fn parse_doubler_disjunct(phrase: &str) -> (TargetFilter, &str) {
     {
         return (filter, rest);
     }
-    parse_type_phrase_folding(phrase)
+    let (filter, rest) = parse_type_phrase_folding(phrase);
+    // CR 112.1 + CR 603.2d: "a colorless spell you control" (Echoes of
+    // Eternity) names an object on the stack. Scope it there, or the disjunct
+    // also matches a battlefield permanent with the same characteristics,
+    // including the doubler itself.
+    let consumed = &phrase[..phrase.len() - rest.len()];
+    (scope_target_spell_phrase(filter, consumed), rest)
 }
 
 pub(crate) fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
@@ -1745,6 +1756,23 @@ pub(crate) fn try_split_and_cant_be_sacrificed(text: &str) -> Option<Vec<StaticD
     Some(defs)
 }
 
+/// CR 115.1: fail-closed result for a targeting prohibition whose source-kind or
+/// source-quality qualifier ("of spells", "of abilities", "of black or red spells
+/// your opponents control") `StaticMode::CantBeTargeted { who }` cannot express.
+/// Emitting the blanket mode would also forbid the sources the card does not name
+/// (Spectral Shield must not stop Royal Assassin's activated ability), so the
+/// clause is carried as an inert, coverage-visible `StaticMode::Other` holding the
+/// printed text. Source-kind modeling is a separate enum axis, deliberately not
+/// added here.
+pub(crate) fn source_qualified_cant_be_targeted_gap(
+    affected: TargetFilter,
+    original: &str,
+) -> StaticDefinition {
+    StaticDefinition::new(StaticMode::Other(original.to_string()))
+        .affected(affected)
+        .description(original.to_string())
+}
+
 /// CR 702.18a / CR 702.11a: Decompose `"<grant or restriction> and can't be the
 /// target of …"` into the first conjunct's static(s) plus the targeting
 /// restriction, sharing the same `affected` set.
@@ -1780,7 +1808,15 @@ pub(crate) fn try_split_and_cant_be_targeted(text: &str) -> Option<Vec<StaticDef
     // the unqualified form → blanket Shroud (CR 702.18a). Decline if the tail is
     // not a recognized targeting restriction.
     let targeting_clause = &lower[before.len()..];
-    let scope = crate::parser::oracle_keyword::classify_cant_be_targeted(targeting_clause)?;
+    let qualified =
+        crate::parser::oracle_keyword::is_source_qualified_cant_be_targeted(targeting_clause);
+    let scope = if qualified {
+        None
+    } else {
+        Some(crate::parser::oracle_keyword::classify_cant_be_targeted(
+            targeting_clause,
+        )?)
+    };
 
     let cut_end = before
         .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
@@ -1796,23 +1832,20 @@ pub(crate) fn try_split_and_cant_be_targeted(text: &str) -> Option<Vec<StaticDef
 
     let affected = defs[0].affected.clone()?;
     let companion = match scope {
-        // CR 702.11a: "… your opponents control" grants Hexproof so the
-        // permanent's own controller can still target it.
-        crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
-            StaticDefinition::continuous()
-                .affected(affected)
-                .modifications(vec![ContinuousModification::AddKeyword {
-                    keyword: crate::types::keywords::Keyword::Hexproof,
-                }])
-                .description(text.to_string())
-        }
-        // CR 702.18a: blanket — can't be targeted by any player. Enforced in
-        // `targeting.rs::can_target` via the object's active static definitions.
-        crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
-            StaticDefinition::new(StaticMode::CantBeTargeted)
+        Some(scope) => {
+            let who = match scope {
+                crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+                    crate::types::statics::ProhibitionScope::Opponents
+                }
+                crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+                    crate::types::statics::ProhibitionScope::AllPlayers
+                }
+            };
+            StaticDefinition::new(StaticMode::CantBeTargeted { who })
                 .affected(affected)
                 .description(text.to_string())
         }
+        None => source_qualified_cant_be_targeted_gap(affected, text),
     };
     defs.push(companion);
     Some(defs)
@@ -2763,6 +2796,26 @@ pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefin
         // `CantAttack`/`CantBlock`/`CantAttackOrBlock`; see
         // `combat::combat_tax_mode_matches`), so the gate defers those to an
         // honest gap instead of a condition no player can ever satisfy.
+        // CR 508.1c + CR 118.12a: scope the combat-tax payload to the parsed
+        // defended scope. The generic trailing-`unless` route always builds
+        // `UnlessPay { defended: None }`, while this production's own predicate
+        // already parsed the defended scope into `def.attack_defended` via the
+        // shared combinator. Without this stamp the runtime tax
+        // (`compute_combat_tax`) reads only `UnlessPay.defended` and taxes every
+        // attack by the affected creatures — the parsed scope would live only on
+        // `attack_defended` and the U1 matcher arm would never fire on this path.
+        let unless_cond = match unless_cond {
+            StaticCondition::UnlessPay {
+                cost,
+                scaling,
+                defended: None,
+            } if def.attack_defended.is_some() => StaticCondition::UnlessPay {
+                cost,
+                scaling,
+                defended: def.attack_defended.clone(),
+            },
+            other => other,
+        };
         let gap_text = tp.split_around(" unless ").map_or_else(
             || trailing.to_string(),
             |(_, after)| after.original.trim().trim_end_matches('.').to_string(),
@@ -2974,6 +3027,7 @@ pub(crate) fn parse_crew_contribution_static(text: &str) -> Option<StaticDefinit
 ///   color     := ("non")? ("white"|"blue"|"black"|"red"|"green")
 ///   restriction := "can't attack" | "can't block" | "can't attack or block"
 ///   scope     := " you" | " planeswalkers you control" | " you or planeswalkers you control"
+///              | " <planeswalker-subtype>s you control"
 ///   payer     := "their controller pays " | "its controller pays " | "you pay "
 ///   suffix    := " for each ..." dynamic_x?
 ///   dynamic_x := ", where x is the number of " <filter-phrase>
@@ -3069,9 +3123,16 @@ pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxPa
             tag_no_case::<_, _, OracleError<'_>>(" you or planeswalkers you control"),
         ),
         value(
-            AttackTargetFilter::Planeswalker,
+            AttackTargetFilter::Planeswalker { subtype: None },
             tag_no_case::<_, _, OracleError<'_>>(" planeswalkers you control"),
         ),
+        // CR 205.3j: subtype-defended scope ("Jaces you control") sits after
+        // the generic planeswalker arm and before bare " you", mirroring the
+        // rule-static defended table — longest-first, since nom `alt` is
+        // leftmost-match. Routes subtype taxes through the complete parser
+        // (full cost, per-affected scaling, native defended) instead of the
+        // lossy subject-led fallback.
+        super::shared::parse_subtype_planeswalkers_you_control_mixed_case_nom,
         value(
             AttackTargetFilter::Player,
             tag_no_case::<_, _, OracleError<'_>>(" you"),
@@ -3129,10 +3190,19 @@ pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxPa
     // Optional ", where X is the number of <filter>" — only valid when the base
     // cost carried an {X} shard. Used by Sphere of Safety.
     let (input, dynamic_qty) = opt(parse_dynamic_x_clause).parse(input)?;
-    let (input, for_each_qty) = if per_affected.is_none() {
-        opt(parse_for_each_cost_quantity).parse(input)?
-    } else {
-        (input, None)
+    // CR 118.12a + CR 508.1h / CR 509.1d: the counter-kind census of a pronoun
+    // ("{1} for each kind of counter on it") names one object the attack/block
+    // cost is determined from. Only a tax on the source permanent itself names
+    // that object unambiguously; every other subject leaves the tail
+    // unconsumed, so the whole line declines (`parse_combat_tax_static`).
+    let (input, for_each_qty) = match (per_affected, &subject) {
+        (Some(_), _) => (input, None),
+        (None, CombatTaxSubject::SourcePermanent) => opt(alt((
+            parse_for_each_own_counter_kinds,
+            parse_for_each_cost_quantity,
+        )))
+        .parse(input)?,
+        (None, _) => opt(parse_for_each_cost_quantity).parse(input)?,
     };
     let dynamic_qty = dynamic_qty.or(for_each_qty);
 
@@ -3216,6 +3286,30 @@ pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxPa
             defended,
         },
     ))
+}
+
+/// CR 122.1 + CR 608.2k: " for each kind of counter on it" on a self tax —
+/// the pronoun names the source permanent, so the census reads
+/// `DistinctCounterKindsAmong { SelfRef }`. A plural pronoun names no single
+/// source and declines.
+fn parse_for_each_own_counter_kinds(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag_no_case::<_, _, OracleError<'_>>(" for each ").parse(input)?;
+    let lowered = rest.trim_end_matches('.').to_lowercase();
+    let number = all_consuming(nom_quantity::parse_counter_kinds_on_object_pronoun)
+        .parse(lowered.as_str())
+        .map(|(_, number)| number);
+    match number {
+        Ok(AnaphorNumber::Singular) => Ok((
+            "",
+            QuantityRef::DistinctCounterKindsAmong {
+                filter: TargetFilter::SelfRef,
+            },
+        )),
+        _ => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        ))),
+    }
 }
 
 /// CR 702.3b + CR 611.3a: parse "<subject> can attack as though <pronoun>
@@ -3778,6 +3872,7 @@ mod assign_damage_pronoun_tests {
 mod structural_marker_tests {
     use super::*;
     use crate::types::ability::UnlessPayScaling;
+    use crate::types::triggers::AttackTargetFilter;
 
     #[test]
     fn combat_tax_per_affected_marker() {
@@ -3856,6 +3951,65 @@ mod structural_marker_tests {
                 "{tail:?}"
             );
         }
+    }
+
+    /// Row 9 route-A: the dedicated combat-tax body accepts subtype-defended
+    /// scope with the complete tax payload — full cost, per-affected scaling,
+    /// native defended. REVERT-FAIL (arm removed): the probe declines and the
+    /// line falls to the lossy subject-led route (`Flat` + dropped tail).
+    #[test]
+    fn combat_tax_body_accepts_subtype_defended_scope_complete() {
+        let text = "Creatures can't attack Jaces you control unless their controller pays {2} for each creature they control that's attacking you";
+        let (rest, tax) = parse_combat_tax_body(text).expect("subtype-defended tax body");
+        assert_eq!(rest, "", "the body must consume the whole line");
+        assert_eq!(tax.base_cost.mana_value(), 2, "got {:?}", tax.base_cost);
+        assert_eq!(
+            tax.scaling,
+            UnlessPayScaling::PerAffectedCreature,
+            "the written for-each tail must scale, got {:?}",
+            tax.scaling
+        );
+        assert_eq!(
+            tax.defended,
+            Some(AttackTargetFilter::Planeswalker {
+                subtype: Some("Jace".to_string())
+            }),
+            "got {:?}",
+            tax.defended
+        );
+    }
+
+    /// Full-payment preservation through the dedicated path: a multi-shard
+    /// colored tax keeps every shard (the lowercasing subject-led fallback
+    /// truncated "{2}{U}" to "{2}").
+    #[test]
+    fn combat_tax_body_preserves_colored_multi_shard_cost() {
+        let text = "Creatures can't attack Jaces you control unless their controller pays {2}{U}";
+        let (rest, tax) = parse_combat_tax_body(text).expect("colored tax body");
+        assert_eq!(rest, "", "the body must consume the whole line");
+        assert_eq!(tax.base_cost.mana_value(), 3, "got {:?}", tax.base_cost);
+        match &tax.base_cost {
+            crate::types::mana::ManaCost::Cost { shards, generic } => {
+                assert_eq!(*generic, 2, "got {:?}", tax.base_cost);
+                assert_eq!(
+                    shards.len(),
+                    1,
+                    "the {{U}} shard must survive, got {shards:?}"
+                );
+            }
+            other => panic!("expected a shard-carrying cost, got {other:?}"),
+        }
+    }
+
+    /// A non-planeswalker subtype still fails the defended gate — never a
+    /// silent `defended: None` acceptance of subtype tax text.
+    #[test]
+    fn combat_tax_body_declines_non_planeswalker_subtype() {
+        let text = "Creatures can't attack Goblins you control unless their controller pays {2}.";
+        assert!(
+            parse_combat_tax_body(text).is_err(),
+            "non-planeswalker subtype tax text must decline the dedicated path"
+        );
     }
 
     /// The combat-tax body reads original-case text, so a capitalized controller

@@ -25,6 +25,7 @@
 use engine::game::combat::creature_must_attack;
 use engine::game::game_object::GameObject;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{AbilityKind, EffectKind};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -403,6 +404,13 @@ fn academy_manufactor_batches_follow_the_same_order() {
     let clue = the_token(&runner, "Clue");
     let food = the_token(&runner, "Food");
     assert_eq!(ledger(&runner), vec![treasure, clue, food]);
+    // Strike It Rich specifies no tapped entry, so none of the three is tapped.
+    for id in [treasure, clue, food] {
+        assert!(
+            !runner.state().objects[&id].tapped,
+            "{id:?} enters untapped"
+        );
+    }
 }
 
 /// Sibling order: Halving Season right after Manufactor halves each one-token
@@ -1400,4 +1408,98 @@ fn last_copy_batch_choice_pause_on_token_route_emits_effect_resolved_once() {
         runner.state().resolution_stack.is_empty(),
         "no completion frame is left parked"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The creating instruction's "tapped" reaches every appended batch
+// ---------------------------------------------------------------------------
+
+/// P0 controls `permanents` (real card data) and casts Season of the Bold
+/// choosing only its first mode, "Create a tapped Treasure token.", up to its
+/// first decision.
+fn season_of_the_bold_treasure(permanents: &[&str]) -> GameRunner {
+    let db = crate::support::shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for name in permanents {
+        scenario.add_real_card(P0, name, Zone::Battlefield, db);
+    }
+    let spell = scenario.add_real_card(P0, "Season of the Bold", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P0,
+        (0..5)
+            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    runner.cast(spell).modes(&[0]).resolve();
+    runner
+}
+
+fn assert_all_tapped(runner: &GameRunner, subtype: &str) {
+    let found = tokens(runner, subtype);
+    assert!(!found.is_empty(), "reach: a {subtype} token was created");
+    for token in found {
+        assert!(token.tapped, "the {subtype} {:?} enters tapped", token.id);
+    }
+}
+
+/// CR 614.6 + the Chatterfang ruling ("Anything else specified in the effect
+/// creating the tokens (such as tapped …) applies to both the original tokens
+/// and the Squirrels"): the tapped Treasure's Squirrel enters tapped too.
+#[test]
+fn chatterfang_squirrel_follows_a_tapped_creation() {
+    let mut runner = season_of_the_bold_treasure(&["Chatterfang, Squirrel General"]);
+    settle(&mut runner, &[], Until::StackEmpty);
+    let treasure = the_token(&runner, "Treasure");
+    let squirrel = the_token(&runner, "Squirrel");
+    assert!(runner.state().objects[&treasure].tapped);
+    assert!(
+        runner.state().objects[&squirrel].tapped,
+        "the Squirrel keeps the creation's tapped"
+    );
+}
+
+/// A batch appended to an appended batch keeps the creating instruction's
+/// tapped too (Chatterfang and Peregrin Took rulings). The ordering choice the
+/// two replacements may raise is answered with whatever the engine offers
+/// first; the token counts are not pinned here.
+#[test]
+fn appended_batch_of_an_appended_batch_follows_a_tapped_creation() {
+    let mut runner =
+        season_of_the_bold_treasure(&["Chatterfang, Squirrel General", "Peregrin Took"]);
+    for _ in 0..200 {
+        match &runner.state().waiting_for {
+            WaitingFor::ReplacementChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("the choice is accepted");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority is legal");
+            }
+            other => panic!("unexpected decision {other:?}"),
+        }
+    }
+    for subtype in ["Treasure", "Squirrel", "Food"] {
+        assert_all_tapped(&runner, subtype);
+    }
+}
+
+/// Academy Manufactor's "instead create one of each" is one modified creation
+/// (CR 614.6), so the tapped instruction reaches the Clue and the Food it adds.
+#[test]
+fn academy_manufactor_batches_follow_a_tapped_creation() {
+    let mut runner = season_of_the_bold_treasure(&["Academy Manufactor"]);
+    settle(&mut runner, &[], Until::StackEmpty);
+    for subtype in ["Treasure", "Clue", "Food"] {
+        let id = the_token(&runner, subtype);
+        assert!(
+            runner.state().objects[&id].tapped,
+            "the {subtype} enters tapped"
+        );
+    }
 }

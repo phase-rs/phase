@@ -7,7 +7,7 @@ import {
 } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
-import type { ChosenAttribute, GameObject, Keyword, ManaCost, Zone } from "../../adapter/types.ts";
+import type { AttackTarget, ChosenAttribute, GameObject, Keyword, ManaCost, PlayerId, Zone } from "../../adapter/types.ts";
 import { ABILITY_BLOCK_REASON_KEY } from "../../viewmodel/abilityBlockReason.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 import { abilityLabel, loyaltyBadge, spellCostDisplay, stripLoyaltyCostPrefix } from "../../viewmodel/costLabel.ts";
@@ -22,6 +22,9 @@ import { faceDownMarkerRef } from "./faceDownMarker.ts";
 import { shouldRenderCardBack } from "../../viewmodel/cardProps.ts";
 import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { getOpponentDisplayName } from "../../stores/multiplayerStore.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { useBackFaceSpellCost } from "../../hooks/useBackFaceSpellCost.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore, type MobileHandGesture } from "../../stores/uiStore.ts";
@@ -59,6 +62,8 @@ type CardPreviewArt =
       isFlip: boolean;
       rungs?: ImageRungs;
       advanceFailedSource?(failedSrc: string): void;
+      reload?(): void;
+      cardArtFailed?: boolean;
     };
 
 let lastPointerPosition: { x: number; y: number } | null = null;
@@ -467,6 +472,8 @@ function CardPreviewInner({
         isFlip: activeImage.isFlip,
         rungs: activeImage.rungs,
         advanceFailedSource: activeImage.advanceFailedSource,
+        reload: activeImage.reload,
+        cardArtFailed: activeImage.cardArtFailed,
       };
   const activeRotated = activeArt.kind === "face" && activeArt.isRotated;
   const activeImageSrc = activeArt.kind === "face" ? activeArt.src : null;
@@ -474,6 +481,43 @@ function CardPreviewInner({
   const displayName = showOtherFace ? backFaceName! : cardName;
   const showInfoPanel = obj?.zone === "Battlefield";
   const handPreview = handOrigin != null && !position && !dockSide;
+  // The face's art lookup settled with no art: the one answer every surface
+  // below reads. `isLoading` is load-bearing, not decoration: `useCardImage`
+  // assigns `src` in a post-render effect, so `src` is null on EVERY first
+  // paint, and deriving this from `!src` alone would flash the artless tile
+  // before every normal card's art. A hidden face's art is the card back, so
+  // it never gets here.
+  const missingArt = activeArt.kind === "face" && !activeArt.isLoading && !activeArt.src
+    ? activeArt
+    : null;
+  // The mobile preview's artless tile shows the card's rules text, so the card
+  // stays readable while its art is missing, and names the card in the same
+  // language. As in `CardImage`, the lookup waits until the tile shows. Without
+  // a game object the front face is already looked up, and a token carries its
+  // own rules text. The preview that follows a finger held on the hand takes no
+  // taps and closes when the finger lifts, so it keeps its name-only
+  // placeholder; the hand drawer's modal preview carries the text and reload.
+  const showsMobileArtFallback = missingArt != null && isMobile && !handPreview && !suppressArtLookup;
+  const objectFallbackFace = useEngineCardData(
+    showsMobileArtFallback && obj && !isToken ? cardName : null,
+  );
+  const fallbackFace = obj ? objectFallbackFace : engineFrontFace;
+  const artFallback = missingArt && {
+    name: fallbackFace?.name ?? cardName,
+    rulesText: isToken ? obj?.token_rules_text : fallbackFace?.oracle_text ?? undefined,
+    reload: missingArt.reload,
+  };
+  // This preview's own art is on screen, but another surface of the card shows
+  // none because its image failed: a battlefield tile asks for a smaller
+  // image, so its failure never reaches this request. The preview offers that
+  // surface's reload too. A hidden face never asks for the card's art, so its
+  // image result carries no failure.
+  const reloadOtherSurfaces = !suppressArtLookup
+    && activeArt.kind === "face"
+    && activeArt.src
+    && activeArt.cardArtFailed
+    ? activeArt.reload
+    : undefined;
   const infoPanelHeight = showCardPreviewFooter && showInfoPanel ? 120 : 0;
   const portraitPreviewWidth =
     typeof window === "undefined"
@@ -782,6 +826,8 @@ function CardPreviewInner({
       <MobilePreviewOverlay
         cardName={cardName}
         art={activeArt}
+        fallback={artFallback}
+        reloadOtherSurfaces={reloadOtherSurfaces}
         onDismiss={onDismiss ?? dismissPreview}
         layout={mobileLayout ?? "modal"}
         report={reportContext}
@@ -852,6 +898,7 @@ function CardPreviewInner({
             parseDetails={showOtherFace && backParseDetails ? backParseDetails : frontParseDetails}
             maxHeight={viewportHeight - margin * 2}
             report={reportContext}
+            onReloadArt={missingArt?.reload ?? reloadOtherSurfaces}
           />
         ) : (
           <CardImagePreview
@@ -879,10 +926,61 @@ function CardPreviewInner({
   );
 }
 
-/** Mobile/tablet: card anchored right (landscape) or center (portrait), whole card visible. */
+/**
+ * The mobile modal preview's frame, sized to the drawn card so the frame IS the
+ * card: the image, the art fallback tile, the skeleton and the card back all
+ * fill it, and nothing can anchor to empty space beside the card (#11001). The
+ * width is the smallest of three bounds:
+ * - a ceiling: 488px for an upright card, the `normal` image's native width,
+ *   so it is never upscaled; 420px across for a rotated card, the cap this
+ *   preview already used;
+ * - the room across: the screen less padding in portrait, and 45vw in
+ *   landscape, which keeps the board in view and leaves the action strip room
+ *   on the left;
+ * - the room down, converted to a width through the frame's ratio (488:680
+ *   upright, 680:488 rotated): the screen less padding, and in portrait less
+ *   the action strip under the card as well (5.5rem covers the p-4 padding,
+ *   the gap-3 and the strip's 44px pill).
+ */
+const MOBILE_PREVIEW_FRAME_CLASS = {
+  upright: [
+    "aspect-[488/680]",
+    "w-[min(488px,calc(100vw_-_2rem),calc((100dvh_-_5.5rem)*488/680))]",
+    "landscape:w-[min(488px,45vw,calc((100dvh_-_3rem)*488/680))]",
+  ].join(" "),
+  rotated: [
+    "aspect-[680/488]",
+    "w-[min(420px,calc(100vw_-_2rem),calc((100dvh_-_5.5rem)*680/488))]",
+    "landscape:w-[min(420px,45vw,calc((100dvh_-_3rem)*680/488))]",
+  ].join(" "),
+};
+
+/** A rotated card's art is upright art turned a quarter inside the 680:488
+ *  frame: as wide as the frame is tall and as tall as it is wide, centered
+ *  before the turn. */
+const MOBILE_PREVIEW_ROTATED_IMAGE_CLASS = [
+  "absolute left-1/2 top-1/2 h-[calc(100%*680/488)] w-[calc(100%*488/680)]",
+  "-translate-x-1/2 -translate-y-1/2 rotate-90 object-cover",
+].join(" ");
+
+/** One button in the mobile preview's action strip, without a text color.
+ *  `min-h-11` keeps the touch target at least 44px tall. */
+const MOBILE_ACTION_PILL_CLASS = [
+  "min-h-11 rounded-full border border-white/20 bg-black/70 px-4 py-2",
+  "text-sm font-semibold shadow-lg backdrop-blur active:bg-black/80",
+].join(" ");
+
+/**
+ * Mobile/tablet: card anchored right (landscape) or center (portrait), whole
+ * card visible. Its actions (Flip, Reload art, Report) sit in a strip beside the
+ * card, left of it in landscape and below it in portrait, so they never cover
+ * the card.
+ */
 function MobilePreviewOverlay({
   cardName,
   art,
+  fallback,
+  reloadOtherSurfaces,
   onDismiss,
   layout = "modal",
   report,
@@ -893,6 +991,13 @@ function MobilePreviewOverlay({
    *  `useCardImage` with raw `printed_ref` fields is exactly the mobile
    *  hidden-information bypass the PR 7551 review flagged. */
   art: CardPreviewArt;
+  /** The artless tile's name, rules text and reload, or null while the face
+   *  has art or is still resolving it. Resolved by the parent for the same
+   *  reason: the overlay never looks a card up itself. */
+  fallback: { name: string; rulesText?: string; reload?: () => void } | null;
+  /** Reloads the card's art for another surface that failed while this
+   *  preview's own art loaded; the full modal layout shows it as a pill. */
+  reloadOtherSurfaces?: () => void;
   onDismiss: () => void;
   layout?: "modal" | "compact";
   /** In-game report context; absent in the deck builder. Only the full modal
@@ -901,15 +1006,8 @@ function MobilePreviewOverlay({
 }) {
   const { t } = useTranslation("game");
   const src = art.kind === "face" ? art.src : null;
-  const isLoading = art.kind === "face" && art.isLoading;
   const isRotated = art.kind === "face" && art.isRotated;
   const isFlip = art.kind === "face" && art.isFlip;
-  // `isLoading` is load-bearing, not decoration: `useCardImage` assigns `src`
-  // in a post-render effect, so `src` is null on EVERY first paint. Deriving
-  // the fallback from `!src` alone would flash the "no art" tile before every
-  // normal card's art — the same conflation this PR fixed on the board
-  // renderers. Only a settled lookup with no art gets the tile.
-  const showArtFallback = art.kind === "face" && !isLoading && !src;
 
   // Mobile has no Ctrl key, so a Kamigawa flip card's 180° spin is a tap toggle
   // (desktop holds Ctrl). Only the full-screen modal layout can host the button —
@@ -948,9 +1046,11 @@ function MobilePreviewOverlay({
       >
         {art.kind === "back" ? (
           <CardBackFallback className="pointer-events-auto max-h-[60vh] max-w-[68vw] w-[68vw] rounded-xl border border-white/15 shadow-2xl" />
-        ) : showArtFallback ? (
+        ) : fallback ? (
           <CardArtFallback
-            name={cardName}
+            name={fallback.name}
+            oracleText={fallback.rulesText}
+            variant="peek"
             className="pointer-events-auto aspect-[5/7] max-h-[60vh] max-w-[68vw] w-[68vw] rounded-xl border border-white/15 shadow-2xl"
           />
         ) : !src ? (
@@ -976,8 +1076,14 @@ function MobilePreviewOverlay({
     );
   }
 
+  const hasActions = isFlip || report != null || reloadOtherSurfaces != null;
+
   // pointerdown (not click): the touch-release that opened this overlay fires
-  // pointerup, not pointerdown, so a fresh tap is required to dismiss.
+  // pointerup, not pointerdown, so a fresh tap is required to dismiss. Only the
+  // card and its action strip take taps, and the wrapper stops their
+  // pointerdown, so tapping either never dismisses. The wrapper itself is
+  // click-through: the empty space it spans beside the card (left of the card
+  // and above the strip, in landscape) still reads as backdrop and dismisses.
   return (
     <div
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4 landscape:justify-end landscape:p-6"
@@ -985,45 +1091,77 @@ function MobilePreviewOverlay({
       onPointerDown={onDismiss}
     >
       <div
-        className={isRotated
-          ? "relative h-[min(60vw,300px)] w-[min(84vw,420px)] max-h-[calc(100dvh-2rem)] max-w-full overflow-hidden rounded-lg shadow-2xl landscape:max-w-[45vw]"
-          : "relative max-h-[calc(100dvh-2rem)] max-w-full overflow-hidden rounded-lg shadow-2xl landscape:max-w-[45vw]"}
-        onPointerDown={(e) => e.stopPropagation()}
+        className="pointer-events-none flex flex-col items-center gap-3 landscape:flex-row-reverse landscape:items-end"
+        onPointerDown={(event) => event.stopPropagation()}
       >
-        {art.kind === "back" ? (
-          <CardBackFallback className="aspect-[5/7] max-h-[calc(100dvh-2rem)] w-[68vw] max-w-full rounded-lg" />
-        ) : showArtFallback ? (
-          <CardArtFallback
-            name={cardName}
-            className="aspect-[5/7] max-h-[calc(100dvh-2rem)] w-[68vw] max-w-full rounded-lg"
-          />
-        ) : !src ? (
-          // Still resolving — skeleton, not the artless tile.
-          <div className="aspect-[5/7] max-h-[calc(100dvh-2rem)] w-[68vw] max-w-full animate-pulse rounded-lg bg-gray-700" />
-        ) : (
-          <img
-            src={src}
-            {...getCardImageSrcSetProps(src, art.rungs)}
-            alt={cardName}
-            draggable={false}
-            onError={() => art.advanceFailedSource?.(src)}
-            className={isRotated
-              ? "absolute left-1/2 top-1/2 h-[min(84vw,420px)] w-[min(60vw,300px)] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
-              : `max-h-[calc(100dvh-2rem)] max-w-full object-contain${isFlip ? " transition-transform duration-200" : ""}${flipped ? " rotate-180" : ""}`}
-          />
-        )}
-        {isFlip && (
-          <button
-            type="button"
-            onClick={() => setFlipped((f) => !f)}
-            className="pointer-events-auto absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-white/20 bg-black/70 px-4 py-2 text-sm font-semibold text-white shadow-lg backdrop-blur active:bg-black/80"
+        {/* The frame's size comes from its own width and aspect ratio alone;
+            every child is laid over it, so none depends on a percentage of a
+            height the browser might not treat as definite. */}
+        <div
+          className={`pointer-events-auto relative shrink-0 overflow-hidden rounded-lg shadow-2xl ${
+            isRotated ? MOBILE_PREVIEW_FRAME_CLASS.rotated : MOBILE_PREVIEW_FRAME_CLASS.upright
+          }`}
+        >
+          {art.kind === "back" ? (
+            <CardBackFallback className="absolute inset-0 h-full w-full" />
+          ) : fallback ? (
+            // The reload lives here, not on the compact peek: that layout
+            // dismisses on the pointerdown before a button's click lands.
+            <CardArtFallback
+              name={fallback.name}
+              oracleText={fallback.rulesText}
+              variant="preview"
+              className="absolute inset-0 h-full w-full"
+              onReload={fallback.reload}
+            />
+          ) : !src ? (
+            // Still resolving: a skeleton, not the artless tile.
+            <div className="absolute inset-0 animate-pulse bg-gray-700" />
+          ) : (
+            <img
+              src={src}
+              {...getCardImageSrcSetProps(src, art.rungs)}
+              alt={cardName}
+              draggable={false}
+              onError={() => art.advanceFailedSource?.(src)}
+              className={isRotated
+                ? MOBILE_PREVIEW_ROTATED_IMAGE_CLASS
+                : `absolute inset-0 h-full w-full object-cover${isFlip ? " transition-transform duration-200" : ""}${flipped ? " rotate-180" : ""}`}
+            />
+          )}
+        </div>
+        {hasActions && (
+          // `-m-2 p-2` widens the strip's tap area by 8px on every side
+          // without moving the pills, so a near miss lands on the strip.
+          <div
+            className="pointer-events-auto -m-2 flex items-center gap-2 p-2 landscape:flex-col landscape:items-end"
+            data-card-preview-actions
           >
-            ⟳ {t("preview.flip")}
-          </button>
-        )}
-        {report && (
-          <div className="absolute bottom-3 left-3 rounded-full border border-white/20 bg-black/70 px-3 py-1.5 shadow-lg backdrop-blur">
-            <ReportCardButton key={report.oracleId || report.name} {...report} />
+            {isFlip && (
+              <button
+                type="button"
+                onClick={() => setFlipped((isFlipped) => !isFlipped)}
+                className={`${MOBILE_ACTION_PILL_CLASS} text-white`}
+              >
+                ⟳ {t("preview.flip")}
+              </button>
+            )}
+            {reloadOtherSurfaces && (
+              <button
+                type="button"
+                onClick={reloadOtherSurfaces}
+                className={`${MOBILE_ACTION_PILL_CLASS} text-white`}
+              >
+                {t("preview.reloadArt")}
+              </button>
+            )}
+            {report && (
+              <ReportCardButton
+                key={report.oracleId || report.name}
+                className={MOBILE_ACTION_PILL_CLASS}
+                {...report}
+              />
+            )}
           </div>
         )}
       </div>
@@ -1336,9 +1474,23 @@ interface ParsedAbilitiesPanelProps {
   /** In-game report context for the displayed face; absent in the deck builder
    *  (no live game), where the report button is not shown. */
   report?: CardReportContext;
+  /** Reloads the card's art; present when the displayed face's art failed, or
+   *  another surface of the card failed while this one loaded. The pinned panel
+   *  is the desktop preview's one surface that takes clicks, so the reload sits
+   *  beside Report. */
+  onReloadArt?: () => void;
 }
 
-function ParsedAbilitiesPanel({ name, cardTypes, keywords, localizedTypeLine, parseDetails, maxHeight, report }: ParsedAbilitiesPanelProps) {
+function ParsedAbilitiesPanel({
+  name,
+  cardTypes,
+  keywords,
+  localizedTypeLine,
+  parseDetails,
+  maxHeight,
+  report,
+  onReloadArt,
+}: ParsedAbilitiesPanelProps) {
   const { t } = useTranslation("game");
   const items = parseDetails ?? [];
   const rulings = useCardRulings(name);
@@ -1359,9 +1511,25 @@ function ParsedAbilitiesPanel({ name, cardTypes, keywords, localizedTypeLine, pa
           <div className="text-[10px] text-gray-500 mt-0.5">{typeLine}</div>
         )}
         <SupportSummary items={items} />
-        {report && (
-          <div className="mt-1 flex justify-end">
-            <ReportCardButton key={report.oracleId || report.name} {...report} />
+        {(report || onReloadArt) && (
+          <div className="mt-1 flex items-center justify-end gap-3">
+            {onReloadArt && (
+              // `min-h-11` keeps the target at least 44px tall.
+              <button
+                type="button"
+                onClick={onReloadArt}
+                className="min-h-11 px-1 text-[11px] text-indigo-300 hover:text-indigo-200"
+              >
+                {t("preview.reloadArt")}
+              </button>
+            )}
+            {report && (
+              <ReportCardButton
+                key={report.oracleId || report.name}
+                className="text-[11px]"
+                {...report}
+              />
+            )}
           </div>
         )}
       </div>
@@ -1422,6 +1590,43 @@ function CardInfoPanel({
   const keywordSources = buildGrantedKeywordSources(attribution, obj.id, deref);
   const ptSources = buildPTSources(attribution, obj.id, deref);
   const chosenAttributes = obj.chosen_attributes ?? [];
+  // CR 506.3 + CR 508.1b: this creature's attack declaration, if it is attacking.
+  const attacker = useGameStore((s) =>
+    s.gameState?.combat?.attackers.find((a) => a.object_id === obj.id),
+  );
+  // CR 506.4c: the engine's current target of this creature's attack; absent once that relation
+  // has ended, while the creature is still attacking.
+  const attackTarget = useGameStore((s) => s.gameState?.derived?.attack_targets?.[String(obj.id)]);
+  const myId = usePlayerId();
+  // `usePlayerId()` answers seat 0 in spectate mode, so the second-person arms are gated on
+  // `useSpectatorMode()`: a spectator reads the third-person copy, never "you".
+  const spectating = useSpectatorMode();
+
+  const formatAttackTarget = (target: AttackTarget | undefined, defendingPlayer: PlayerId): string => {
+    if (!target) return t("preview.attacking.nothing");
+    switch (target.type) {
+      case "Player":
+        return !spectating && target.data === myId
+          ? t("preview.attacking.you")
+          : t("preview.attacking.player", { player: getOpponentDisplayName(target.data) });
+      case "Planeswalker": {
+        const name = objects?.[String(target.data)]?.name;
+        // CR 506.2: the planeswalker's controller is the defending player the engine recorded.
+        return !spectating && defendingPlayer === myId
+          ? t("preview.attacking.yourPlaneswalker", { name })
+          : t("preview.attacking.planeswalker", {
+              name,
+              player: getOpponentDisplayName(defendingPlayer),
+            });
+      }
+      case "Battle":
+        return t("preview.attacking.battle", { name: objects?.[String(target.data)]?.name });
+      default: {
+        const _exhaustive: never = target;
+        return _exhaustive;
+      }
+    }
+  };
 
   const formatChosenAttribute = (attribute: ChosenAttribute): { label: string; value: string } => {
     switch (attribute.type) {
@@ -1485,6 +1690,9 @@ function CardInfoPanel({
       <div className="font-semibold text-gray-300">
         <RichLabel text={formatTypeLine(obj.card_types, obj.keywords)} size="xs" />
       </div>
+      {attacker && (
+        <div className="mt-1 font-semibold text-red-300">⚔ {formatAttackTarget(attackTarget, attacker.defending_player)}</div>
+      )}
 
       {activateLabels.length > 0 && (
         <div className="mt-1 text-cyan-300/90">

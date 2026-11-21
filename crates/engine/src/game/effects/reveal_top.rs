@@ -123,6 +123,7 @@ pub fn resolve(
                     .collect();
                 events.push(GameEvent::CardsRevealed {
                     player: pid,
+                    occurrences: state.disclosed_occurrences(&revealed_ids),
                     card_ids: revealed_ids.clone(),
                     card_names,
                 });
@@ -177,6 +178,7 @@ pub fn resolve(
         .collect();
     events.push(GameEvent::CardsRevealed {
         player: target_player,
+        occurrences: state.disclosed_occurrences(&revealed_ids),
         card_ids: revealed_ids,
         card_names,
     });

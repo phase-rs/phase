@@ -247,6 +247,7 @@ fn publish_ripple_reveal(
         .collect();
     events.push(GameEvent::CardsRevealed {
         player: controller,
+        occurrences: state.disclosed_occurrences(revealed),
         card_ids: revealed.to_vec(),
         card_names,
     });

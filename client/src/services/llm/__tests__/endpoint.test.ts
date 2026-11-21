@@ -19,7 +19,9 @@ function profile(patch: Partial<LlmProfile>): LlmProfile {
     model: "m",
     maxOutputTokens: null,
     temperature: null,
+    decisionContext: "selfContained",
     enabled: true,
+    rememberApiKey: false,
     ...patch,
   };
 }

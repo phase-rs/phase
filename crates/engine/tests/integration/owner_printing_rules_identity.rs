@@ -231,10 +231,9 @@ fn bogwater_life_gain_batch_claims_every_gain_at_its_consumer_occurrence() {
 const BITTER_TRIUMPH_ORACLE: &str = "As an additional cost to cast this spell, discard a card or pay 3 life.\nDestroy target creature or planeswalker.";
 
 fn printing(set_code: &str) -> DisplayOnly<Option<SharedPrinting>> {
-    DisplayOnly::new(Some(SharedPrinting::new(CardPrinting {
-        set_code: set_code.to_string(),
-        collector_number: "1".to_string(),
-    })))
+    DisplayOnly::new(Some(SharedPrinting::new(CardPrinting::owner(
+        set_code, "1",
+    ))))
 }
 
 fn stamp(state: &mut GameState, id: ObjectId, set_code: &str) {
@@ -244,6 +243,39 @@ fn stamp(state: &mut GameState, id: ObjectId, set_code: &str) {
         .expect("the stamped object exists");
     object.printing = printing(set_code);
     object.base_printing = printing(set_code);
+}
+
+#[test]
+fn automatic_provenance_changes_display_but_not_rules_identity() {
+    let mut owner = GameState::new_two_player(271);
+    let id = engine::game::zones::create_object(
+        &mut owner,
+        CardId(1),
+        P0,
+        "Forest".into(),
+        Zone::Battlefield,
+    );
+    stamp(&mut owner, id, "m21");
+    let mut automatic = owner.clone();
+    let object = automatic.objects.get_mut(&id).unwrap();
+    let mut printing = object.printing.get().as_ref().unwrap().as_ref().clone();
+    printing.automatic_art_catalog_version = std::num::NonZeroU8::new(1);
+    let printing = SharedPrinting::new(printing);
+    object.printing = DisplayOnly::new(Some(printing.clone()));
+    object.base_printing = DisplayOnly::new(Some(printing));
+    assert_ne!(
+        serde_json::to_value(&owner).unwrap(),
+        serde_json::to_value(&automatic).unwrap()
+    );
+    assert_eq!(
+        rules_projection(&owner).unwrap(),
+        rules_projection(&automatic).unwrap()
+    );
+    automatic.players[0].life -= 1;
+    assert_ne!(
+        rules_projection(&owner).unwrap(),
+        rules_projection(&automatic).unwrap()
+    );
 }
 
 fn set_code(state: &GameState, id: ObjectId) -> Option<String> {
@@ -772,7 +804,7 @@ fn pay_by_discarding(runner: &mut GameRunner, spell: ObjectId, fodder: ObjectId)
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("choose to discard");
     runner
         .act(GameAction::SelectCards {
@@ -1651,7 +1683,7 @@ fn a_printing_never_chooses_between_rules_identical_occurrences() {
             (turn, twin_index),
             "{label} (iii): the stack carrier keeps its stamp"
         );
-        let GameEvent::ZoneChanged { record, .. } = &both.deferred_entry_events[0] else {
+        let GameEvent::ZoneChanged { record, .. } = &both.deferred_entry_events[0].event else {
             panic!("{label} (iii): the copy is a zone-change event");
         };
         assert_eq!(stamps(record), (turn, row), "{label} (iii): the copy too");
@@ -1871,7 +1903,7 @@ fn fast_paths_keep_their_structure() {
         })
         .expect("printing-only carriers of one key agree");
         assert_bound(&pair, turn, row, &format!("{label}: printing-only pair"));
-        let GameEvent::ZoneChanged { record, .. } = &pair.deferred_entry_events[0] else {
+        let GameEvent::ZoneChanged { record, .. } = &pair.deferred_entry_events[0].event else {
             panic!("{label}: the copy is a zone-change event");
         };
         assert_eq!(stamps(record), (turn, row));
