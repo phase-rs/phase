@@ -12,10 +12,10 @@ use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
     BlockPairDirection, CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef,
-    CountScope, DamageKindFilter, Duration, Effect, FilterProp, ObjectProperty, ObjectScope,
-    Parity, ParitySource, PlayerFilter, PlayerRelation, PlayerScope, ProtectionDoesNotRemove,
-    PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation,
-    SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    CountScope, DamageKindFilter, Designation, Duration, Effect, FilterProp, ObjectProperty,
+    ObjectScope, Parity, ParitySource, PlayerFilter, PlayerRelation, PlayerScope,
+    ProtectionDoesNotRemove, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
+    SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -186,6 +186,139 @@ fn dynamic_for_each_pump_recovers_trailing_quoted_ability() {
         mods.iter()
             .any(|m| matches!(m, ContinuousModification::GrantAbility { .. })),
         "trailing quoted ability dropped: {mods:?}"
+    );
+}
+
+/// Dark Matter Manipulator's printed static counts complete groups of seven.
+/// CR 109.5 binds "your" to the current controller. The +2 power modifier
+/// applies in layer 7c (CR 613.4c).
+#[test]
+fn dynamic_for_every_pt_counts_complete_groups() {
+    let defs = parse_static_line_multi(
+        "This creature gets +2/+0 for every seven cards in your graveyard.",
+    );
+    let expected = QuantityExpr::Multiply {
+        factor: 2,
+        inner: Box::new(QuantityExpr::DivideRounded {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![],
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            }),
+            divisor: 7,
+            rounding: RoundingMode::Down,
+        }),
+    };
+
+    assert_eq!(defs.len(), 1, "one self-static must parse");
+    assert_eq!(defs[0].affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        defs[0].modifications,
+        vec![ContinuousModification::AddDynamicPower { value: expected }],
+        "each complete group of seven cards must add +2 power and leave toughness intact"
+    );
+}
+
+/// Eidolon of Countless Battles repeats "for each" in a P/T pump. Dark Matter
+/// Manipulator uses "for every". The pinned MTGJSON AtomicCards corpus has no
+/// printed repeated pump that mixes the two spellings. This fixture uses
+/// "for every" in the second term to exercise the repeated-term boundary.
+/// Both power modifiers apply in layer 7c (CR 613.4c).
+#[test]
+fn dynamic_for_each_and_for_every_pt_terms_keep_order() {
+    let defs = parse_static_line_multi(
+        "This creature gets +2/+0 for each land card in your graveyard and +1/+0 for every three cards in your graveyard.",
+    );
+    assert_eq!(defs.len(), 1, "one self-static must parse");
+    assert_eq!(defs[0].affected, Some(TargetFilter::SelfRef));
+
+    let power_values: Vec<_> = defs[0]
+        .modifications
+        .iter()
+        .filter_map(|modification| match modification {
+            ContinuousModification::AddDynamicPower { value } => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(power_values.len(), 2, "both dynamic terms must survive");
+    assert_eq!(
+        power_values[0],
+        &QuantityExpr::Multiply {
+            factor: 2,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![TypeFilter::Land],
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            }),
+        },
+        "the leading for-each term keeps its +2 coefficient and land filter"
+    );
+    assert_eq!(
+        power_values[1],
+        &QuantityExpr::DivideRounded {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![],
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            }),
+            divisor: 3,
+            rounding: RoundingMode::Down,
+        },
+        "the second for-every term counts complete groups of three cards"
+    );
+}
+
+/// Biorganic Carapace grants a quoted ability that uses "for each". The pinned
+/// MTGJSON AtomicCards corpus has no fixed P/T pump with a quoted ability using
+/// "for every", so this fixture exercises that combination. The quoted count
+/// belongs to the activated ability's effect (CR 602.1). The outer fixed P/T
+/// modifier applies in layer 7c (CR 613.4c).
+#[test]
+fn fixed_pt_keeps_quoted_for_every_count_inside_granted_ability() {
+    let defs = parse_static_line_multi(
+        r#"This creature gets +2/+0 and has "{T}: Draw a card for every seven cards in your graveyard."."#,
+    );
+    assert_eq!(defs.len(), 1, "the outer self-static must parse");
+    assert_eq!(defs[0].affected, Some(TargetFilter::SelfRef));
+    assert!(
+        defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }),
+        "the outer +2 power must remain fixed: {:?}",
+        defs[0].modifications
+    );
+    assert!(
+        defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 0 }),
+        "the outer +0 toughness must remain fixed: {:?}",
+        defs[0].modifications
+    );
+    assert!(
+        !defs[0].modifications.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::AddDynamicPower { .. }
+                | ContinuousModification::AddDynamicToughness { .. }
+        )),
+        "the quoted marker must not become an outer dynamic pump: {:?}",
+        defs[0].modifications
+    );
+    assert!(
+        defs[0].modifications.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::GrantAbility { .. }
+        )),
+        "the quoted activated ability must remain present: {:?}",
+        defs[0].modifications
     );
 }
 
@@ -23909,6 +24042,46 @@ fn control_enchanted_creature() {
     // Also works without trailing period
     let def2 = parse_static_line("You control enchanted creature").unwrap();
     assert_eq!(def2.mode, StaticMode::Continuous);
+}
+
+/// CR 303.4e + CR 613.1b + CR 725.5: "The monarch controls enchanted
+/// creature" (Fealty to the Realm pattern) — structural twin of the Control
+/// Magic arm: same affected filter, designation-anchored modification.
+#[test]
+fn monarch_controls_enchanted_creature() {
+    let def = parse_static_line("The monarch controls enchanted creature.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::ChangeControllerToDesignation {
+            designation: Designation::Monarch,
+        }));
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+        }
+        _ => panic!("expected Typed filter"),
+    }
+    // Also works without trailing period
+    let def2 = parse_static_line("The monarch controls enchanted creature").unwrap();
+    assert_eq!(def2.mode, StaticMode::Continuous);
+}
+
+/// Fail-closed: a trailing clause after the type phrase must NOT produce a
+/// partial control grant — the line falls through (no designation member).
+#[test]
+fn monarch_controls_enchanted_creature_with_trailing_clause_falls_through() {
+    let result = parse_static_line("The monarch controls enchanted creature. Draw a card.");
+    assert!(
+        result
+            .as_ref()
+            .is_none_or(|def| !def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::ChangeControllerToDesignation { .. }
+            ))),
+        "trailing clause must not yield a designation control grant: {result:?}"
+    );
 }
 
 #[test]

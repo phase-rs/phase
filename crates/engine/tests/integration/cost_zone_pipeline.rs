@@ -1423,6 +1423,7 @@ fn ward_multi_sacrifice_payment_reparks_each_replacement_before_effect_resolved(
         )),
         remaining: 1,
         min_total_power: Some(2),
+        trigger_event: None,
     };
 
     let initial = runner
@@ -1532,6 +1533,7 @@ fn ward_sequential_sacrifice_payment_reprompts_only_after_replacement_resolves()
         )),
         remaining: 2,
         min_total_power: None,
+        trigger_event: None,
     };
 
     let initial = runner
@@ -1643,6 +1645,7 @@ fn ward_sacrifice_payment_completes_synchronously_without_replacements() {
         )),
         remaining: 1,
         min_total_power: Some(2),
+        trigger_event: None,
     };
     let aggregate = aggregate_runner
         .act(GameAction::SelectCards {
@@ -1688,6 +1691,7 @@ fn ward_sacrifice_payment_completes_synchronously_without_replacements() {
         )),
         remaining: 2,
         min_total_power: None,
+        trigger_event: None,
     };
     let first = sequential_runner
         .act(GameAction::SelectCards {
