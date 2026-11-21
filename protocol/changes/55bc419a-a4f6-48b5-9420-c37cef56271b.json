@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "TriggerCause::ControlledCreatureDealtDamage becomes TriggerCause::ControlledCreature { event: ControlledCreatureEvent } (DealtDamage for Wayta, plus new BecameTarget for Valiant Emberkin and DealsCombatDamageToPlayer for Felix Five-Boots, CR 603.2d), and TriggerCause::EntersBattlefield gains an optional entrant scope (CausingObject::OtherThanDoubler for The Fish Brewer's \"another permanent entering\"), and new TriggerCause::PlayerAction { player: PlayerRelation, action: PlayerCauseAction } (Dr. Beverly Crusher's \"you gaining life\", Krang's \"a player drawing a card\") and TriggerCause::TurnedFaceUp (Panoptic Projektor) replace those cards' unrestricted Any cause. These are serialized in card definitions inside GameState, so an older peer cannot decode the new shapes or honor the entrant scope."
+}
