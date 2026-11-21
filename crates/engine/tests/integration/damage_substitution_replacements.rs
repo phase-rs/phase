@@ -417,6 +417,10 @@ fn combat_events(
         );
     }
     for _ in 0..8 {
+        // H0, CR 510.2: no priority window while the combat damage batch is parked.
+        super::unpreventable_damage_prevention_effects::assert_no_priority_inside_the_batch(
+            runner.state(),
+        );
         if matches!(
             runner.state().phase,
             Phase::EndCombat | Phase::PostCombatMain

@@ -23160,6 +23160,10 @@ pub struct PendingCombatLifelink {
     /// `ProposedEvent::LifeGain` is owned by `state.pending_replacement` and is
     /// completed by `engine_replacement::handle_replacement_choice`. Re-queueing
     /// it here would gain the life twice.
+    ///
+    /// CR 614.6 + CR 616.1g: the batch can also park on a lifelink gain's
+    /// substitute, whose own action asks a choice (Nefarious Lich's "draw that
+    /// many cards instead" meeting Abundance); the gains after it stay here.
     pub remaining: VecDeque<PendingLifelinkGain>,
     /// CR 510.2 + CR 603.3b: every event this batch has produced. Each resume
     /// appends the events its own replacement round trip produced, so the
@@ -23167,6 +23171,10 @@ pub struct PendingCombatLifelink {
     /// `process_combat_damage_triggers` as ONE batch — CR 702.15b makes the gain
     /// simultaneous with the damage, and no player received priority for the
     /// CR 616.1 choice.
+    ///
+    /// It also holds the events of an answer that left the batch parked
+    /// (`combat_damage::hold_parked_combat_damage_answer_events`), so their
+    /// triggers join the batch's one placement too (CR 510.3a).
     pub batch_events: Vec<GameEvent>,
     /// CR 510.2: the per-player `CombatDamageDealtToPlayer` aggregate, built in
     /// Phase C and emitted AFTER the lifelink gains — the position it occupies
@@ -23180,6 +23188,10 @@ pub struct PendingCombatLifelink {
     /// predicate over recipients and a single batch routinely prevents damage for
     /// several of them; the entries are sorted so each shield's recipients stay
     /// contiguous and the CR 615.5 rider can still fire once per shield.
+    ///
+    /// Once Phase D has begun, it holds the shields not yet published: a rider
+    /// that left its prompt standing parks the batch with the later shields
+    /// here (CR 608.2c).
     #[serde(deserialize_with = "deserialize_prevention_tally_with_legacy_reject")]
     pub prevention_tally: Vec<PreventedDamageEntry>,
     /// CR 510.4: which sub-step owns this batch. Snapshotted because
@@ -34371,6 +34383,17 @@ impl GameState {
             || self.pending_discard_for_cost.is_some()
             || self.waiting_for.is_mana_ability_continuation()
             || self.pending_triggered_mana_resume.is_some()
+    }
+
+    /// CR 510.2: a combat damage batch is parked on a choice; until it completes, no player has
+    /// priority, the deferred queue is not placed, and the batch owns every event its answers
+    /// produce (CR 510.3a + CR 603.3b).
+    ///
+    /// Deliberately not part of [`Self::withholds_priority`]: that predicate also reads "a play
+    /// is in progress" (`play_trace::play_in_progress`), and a combat damage batch is a
+    /// turn-based action, not a play.
+    pub(crate) fn combat_damage_batch_parked(&self) -> bool {
+        self.pending_combat_lifelink.is_some()
     }
 
     /// CR 601.2: The cast or activation announcement currently in flight, if

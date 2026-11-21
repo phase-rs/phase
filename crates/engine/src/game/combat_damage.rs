@@ -163,7 +163,7 @@ pub fn resolve_combat_damage(
     // resume completes the unapplied legs. Placed AHEAD of
     // `state.combat.as_ref()?` so no combat teardown can strand the record
     // behind that `?`.
-    if state.pending_combat_lifelink.is_some() {
+    if state.combat_damage_batch_parked() {
         // Any live prompt — the CR 616.1 ordering choice itself, or a sub-choice
         // raised while answering it — means an answer is still coming. Surface it
         // rather than re-collecting assignments. The `matches!` below excludes
@@ -173,14 +173,15 @@ pub fn resolve_combat_damage(
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             return Some(state.waiting_for.clone());
         }
-        // Settled to priority with a batch still parked. Either the seat that
-        // owed the CR 616.1 answer left the game (CR 800.4a: `elimination` cleared
-        // `pending_replacement` and the reconcile wrote `Priority { next }`), or a
-        // sub-choice of the answer resolved through a dispatcher other than
-        // `handle_replacement_choice`. No further `ChooseReplacement` will arrive,
-        // so finish the batch here — otherwise the owed gains die with combat AND
-        // the `!regular_damage_done` completeness gate (priority.rs) re-enters
-        // this function forever.
+        // Settled to priority with a batch still parked. An answer that settles to
+        // priority finishes the batch in its own action
+        // (`engine::resume_parked_combat_damage_at_action_boundary`), so this is
+        // reached only when the active player left the game with the batch parked
+        // (CR 800.4j: the turn continues, `turns::auto_advance_once`), or from a
+        // save written before that convergence existed. No further answer will
+        // arrive, so finish the batch here — otherwise the owed gains die with
+        // combat AND the `!regular_damage_done` completeness gate (priority.rs)
+        // re-enters this function forever.
         //
         // `events.len()` folds nothing: no answering action's events are in
         // flight on this path.
@@ -386,12 +387,14 @@ fn finish_combat_damage_sub_step(
 ///
 /// `action_event_start` is the index at which the ANSWERING action's events
 /// begin. It is a parameter, never stored: `handle_replacement_choice` captures
-/// it as a local before the answer is applied, and the re-entry guard passes
-/// `events.len()` when no answer is in flight. Both are `<= events.len()` by
-/// construction, so the slice below cannot be out of range.
+/// it as a local before the answer is applied, the action boundary takes it from
+/// its [`ParkedCombatDamageAnswer`], and the re-entry guard passes `events.len()`
+/// when no answer is in flight. It is clamped to `events.len()` at entry, so the
+/// fold and the claims below read one range that is never out of bounds.
 ///
 /// The answering action's events — the resumed `LifeChanged` among them — are
-/// folded into the parked batch, so "whenever you gain life" observers
+/// folded into the parked batch by the one fold rule,
+/// [`take_answer_events_into_batch`], so "whenever you gain life" observers
 /// (CR 119.9) join the SAME CR 603.3b batch as the combat-damage observers.
 /// CR 702.15b makes the gain simultaneous with the damage, and no player
 /// received priority for the CR 616.1 choice, so splitting them would be a rules
@@ -413,10 +416,9 @@ pub(crate) fn resume_pending_combat_lifelink(
     choice: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    let action_event_start = action_event_start.min(events.len());
     let mut record = *state.pending_combat_lifelink.take()?;
-    record
-        .batch_events
-        .extend_from_slice(&events[action_event_start..]);
+    take_answer_events_into_batch(state, &mut record, events, action_event_start);
     let owed_from = record.batch_events.len();
     let sub_step = record.sub_step;
     // CR 510.2 + CR 616.1: a batch parked on a LEG's life-loss pause completes
@@ -484,6 +486,96 @@ pub(crate) fn claim_combat_batch_events_for_ordinary_collection(
     event_start: usize,
 ) {
     triggers::claim_events_for_ordinary_collection(state, events, event_start);
+}
+
+/// CR 510.2: an action that answers a parked combat damage batch's choice, and
+/// where in its event buffer the answer's events begin.
+///
+/// Only an action that found the batch parked as it began is an answer. An
+/// action that parks the batch (declaring blockers, the step's start) publishes
+/// and claims its own events as it parks, so it never folds them a second time.
+/// Taken as a local at an action boundary and never stored, so no index outlives
+/// its action.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ParkedCombatDamageAnswer {
+    action_event_start: usize,
+}
+
+impl ParkedCombatDamageAnswer {
+    /// `Some` only when a combat damage batch is parked as the action begins;
+    /// `action_event_start` is the length of the action's event buffer then.
+    pub(crate) fn begin(state: &GameState, action_event_start: usize) -> Option<Self> {
+        state
+            .combat_damage_batch_parked()
+            .then_some(Self { action_event_start })
+    }
+
+    pub(crate) fn action_event_start(self) -> usize {
+        self.action_event_start
+    }
+}
+
+/// CR 510.2 + CR 603.2 + CR 603.2c + CR 603.3b: the one fold rule — a parked
+/// combat damage batch takes custody of its answering action's events, so each
+/// occurrence is collected once, by the batch's one placement when it completes.
+///
+/// Three kinds of occurrence are left out, each because another owner collects
+/// it, as the post-action pipeline leaves them out too:
+/// * an occurrence already claimed for ordinary collection (the batch's own
+///   earlier claims on the same buffer included, so a second fold of one
+///   buffer adds nothing);
+/// * a parked battlefield entry, whose replay collects it (issue #830);
+/// * an occurrence a paused logical-zone or cost owner retains for its own
+///   settlement.
+///
+/// A queued context's `ZoneChanged` witness is kept: the batch's collector drops
+/// it from its rescan and moves the queued context into its placement instead
+/// (`triggers::collect_combat_damage_batch_triggers`), and the occurrence stays
+/// visible to the batch's delayed scan (CR 603.7b).
+///
+/// The start is clamped: an anchor taken before the answer can exceed a buffer
+/// the answer shortened (`collect_answer_slice_matching` documents this for
+/// `zone_pipeline::drain_pending_batch_deliveries`).
+fn take_answer_events_into_batch(
+    state: &GameState,
+    record: &mut PendingCombatLifelink,
+    events: &[GameEvent],
+    action_event_start: usize,
+) {
+    let start = action_event_start.min(events.len());
+    let mut retained = crate::game::engine_priority::retained_logical_zone_events(state);
+    retained.extend(crate::game::engine_priority::retained_cost_events(state));
+    let unclaimed = triggers::filter_consumed_trigger_events_from(
+        events,
+        start,
+        triggers::TriggerCollectionRequester::Ordinary,
+        &state.consumed_before_priority_trigger_events,
+    );
+    record
+        .batch_events
+        .extend(unclaimed.into_iter().filter(|event| {
+            !crate::game::engine_replacement::entry_event_is_parked(state, event)
+                && !retained.contains(event)
+        }));
+}
+
+/// CR 603.2 + CR 603.3 + CR 510.3a: an answer that leaves the combat damage
+/// batch parked (its next choice is asked) hands the batch its events, so their
+/// triggers join the combat damage step's one placement once, when the batch
+/// completes. The events are claimed for ordinary collection, so no generic
+/// collector takes them in the meantime.
+pub(crate) fn hold_parked_combat_damage_answer_events(
+    state: &mut GameState,
+    answer: ParkedCombatDamageAnswer,
+    events: &[GameEvent],
+) {
+    let Some(mut record) = state.pending_combat_lifelink.take() else {
+        return;
+    };
+    let start = answer.action_event_start().min(events.len());
+    take_answer_events_into_batch(state, &mut record, events, start);
+    state.pending_combat_lifelink = Some(record);
+    claim_combat_batch_events_for_ordinary_collection(state, events, start);
 }
 
 /// Returns a terminal or trigger-ordering state produced while combat damage resolves.
@@ -1662,7 +1754,7 @@ pub(crate) enum CombatDamageBatch {
     Complete(Vec<GameEvent>),
     /// CR 616.1 + CR 616.1g: the batch parked on a choice made while one of its
     /// events is applied, and the unfinished rest is in
-    /// `state.pending_combat_lifelink`. Three park points:
+    /// `state.pending_combat_lifelink`. Five park points:
     /// * Phase B (`PendingCombatLifelink::replacement` is `Some`): a damage
     ///   event met two or more co-applicable replacements and the affected
     ///   player orders them (`state.pending_replacement` holds that event), or
@@ -1674,6 +1766,13 @@ pub(crate) enum CombatDamageBatch {
     /// * The lifelink tail: a lifelink life-gain event met two or more
     ///   co-applicable replacement effects. All damage is already dealt;
     ///   `state.pending_replacement` holds the paused source's own `LifeGain`.
+    /// * The lifelink tail's substitute (CR 614.6 + CR 616.1g): a gain's
+    ///   substitute asked a choice of its own (Nefarious Lich's draws meeting
+    ///   Abundance). The gain itself is settled; `remaining` holds the later
+    ///   gains.
+    /// * Phase D (CR 615.5 + CR 608.2d): a prevention rider asked its player a
+    ///   choice (Channel Harm's "may"). `prevention_tally` holds the shields not
+    ///   yet published.
     Paused {
         events: Vec<GameEvent>,
         /// Boxed: `WaitingFor` is ~1720 bytes against `Complete`'s 24, so an
@@ -2395,11 +2494,15 @@ fn apply_combat_damage_survivors(
 /// NOTHING. The rest of the batch is parked here so the resume can finish it;
 /// dropping it loses 100% of that source's gain, not a portion, plus every
 /// later source in the batch.
+///
+/// Two more choices park the batch here, and the same resume finishes it:
+/// a gain's substitute that asks a choice of its own (CR 614.6 + CR 616.1g),
+/// and a Phase D rider that asks one (CR 615.5 + CR 608.2d). Neither is
+/// answered in the player's place.
 fn drain_combat_lifelink(
     state: &mut GameState,
     mut record: PendingCombatLifelink,
 ) -> CombatDamageBatch {
-    let waiting_before = state.waiting_for.clone();
     // CR 104.1: "A game ends immediately when a player wins". An earlier gain's
     // replacement (Nefarious Lich's draw, then Laboratory Maniac's win) can end
     // the game inside the batch; no later source's gain is applied after that.
@@ -2431,21 +2534,16 @@ fn drain_combat_lifelink(
             // CR 614.6 + CR 614.1: a cross-event substitute (Lich class) already
             // ran its replacing action. On Execute the gain was APPLIED before
             // `drain_substitution_continuation` ran, and on Prevented nothing was
-            // owed — so NO lifelink gain is outstanding on this arm and nothing
-            // needs parking.
+            // owed — so this source's gain is not re-queued.
             //
-            // strict-failure: restoring `waiting_for` here preserves the existing
-            // behavior byte-for-byte, and that behavior orphans the substitute's
-            // own interactive prompt. That is a PRE-EXISTING defect on the
-            // substitution-continuation seam, which this change neither owns nor
-            // worsens. The codebase distinguishes the two deferral kinds elsewhere
-            // for exactly this reason (`turns.rs` calls
-            // `mark_phase_transition_awaiting_post_replacement` only for the
-            // substitution variant), so the divergence here is deliberate, not an
-            // oversight.
+            // CR 614.6 + CR 616.1g: the substitute's own action stopped at a choice
+            // (Nefarious Lich's "draw that many cards instead", each draw meeting
+            // Abundance's "may"). Its player is asked it: the rest of the batch
+            // (the later gains, the per-player aggregate and Phase D) is parked
+            // beneath the prompt, and the answer's resume finishes it.
             //
             // CR 104.1: a substitute that ended the game (Laboratory Maniac's win)
-            // left `GameOver`; the earlier wait is never restored over it.
+            // left `GameOver`, and nothing of the batch happens after it.
             Err(ReplacementDeferred::SubstitutionContinuation { .. }) => {
                 if state.game_end.is_some() {
                     crate::game::elimination::ensure_game_over_if_terminal(
@@ -2453,7 +2551,13 @@ fn drain_combat_lifelink(
                         &mut record.batch_events,
                     );
                 } else {
-                    state.waiting_for = waiting_before.clone();
+                    let waiting_for = state.waiting_for.clone();
+                    let events = record.batch_events.clone();
+                    state.pending_combat_lifelink = Some(Box::new(record));
+                    return CombatDamageBatch::Paused {
+                        events,
+                        waiting_for: Box::new(waiting_for),
+                    };
                 }
             }
         }
@@ -2465,16 +2569,32 @@ fn drain_combat_lifelink(
     // CR 615.5 + CR 615.13: Phase D fires once per shield, and only here — after
     // the last gain, so no rider continuation can ever run while a CR 616.1
     // prompt is open, and after nothing else can stamp `last_effect_count`.
-    // Fire-all: combat keeps its standing shape (see the `stop_on_fresh_choice`
-    // contract on `fire_batch_prevention_riders`).
     // CR 104.1: a gain that ended the game ends the batch; no rider runs after it.
     if state.game_end.is_none() {
-        let _ = fire_batch_prevention_riders(
-            state,
-            &record.prevention_tally,
-            &mut record.batch_events,
-            false,
-        );
+        let prevention_tally = std::mem::take(&mut record.prevention_tally);
+        // CR 608.2c + CR 608.2d: a rider that asks its player a choice (Channel
+        // Harm's "you may have Channel Harm deal that much damage") stops Phase D:
+        // the later shields wait beneath the prompt as the unpublished remainder,
+        // and the answer's resume fires them (`resume_combat_damage_replacements`,
+        // whose `replacement` is `None` here, re-enters this drain with nothing
+        // else owed).
+        if let BatchRiderDrainOutcome::Paused { published_entries } =
+            fire_batch_prevention_riders(state, &prevention_tally, &mut record.batch_events)
+        {
+            if state.game_end.is_none() {
+                record.prevention_tally = prevention_tally
+                    .into_iter()
+                    .skip(published_entries)
+                    .collect();
+                let waiting_for = state.waiting_for.clone();
+                let events = record.batch_events.clone();
+                state.pending_combat_lifelink = Some(Box::new(record));
+                return CombatDamageBatch::Paused {
+                    events,
+                    waiting_for: Box::new(waiting_for),
+                };
+            }
+        }
     }
     CombatDamageBatch::Complete(record.batch_events)
 }
@@ -2556,16 +2676,14 @@ pub(crate) enum BatchRiderDrainOutcome {
 /// "for each 1 damage prevented this way") resolves against the whole batch
 /// total.
 ///
-/// `stop_on_fresh_choice` (Matt C2, the noncombat batch's Phase D): stop after
-/// the first rider that leaves its prompt standing and report it, so later
-/// groups do not execute ahead of the pending prompt; the batch parks the
-/// unpublished remainder. Combat passes `false` and settles every rider pause
-/// in the batch (`replacement::drain_combat_damage_rider`).
+/// CR 615.5 + CR 608.2c (Matt C2): the drain stops after the first rider that
+/// leaves its prompt standing and reports it, so later groups do not execute
+/// ahead of the pending prompt; both callers (the combat batch and the
+/// noncombat two-phase batch) park the unpublished remainder beneath it.
 pub(crate) fn fire_batch_prevention_riders(
     state: &mut GameState,
     prevention_tally: &[PreventedDamageEntry],
     events: &mut Vec<GameEvent>,
-    stop_on_fresh_choice: bool,
 ) -> BatchRiderDrainOutcome {
     // CR 615.13 + CR 120.3: the tally arrives sorted with each shield's entries
     // contiguous, so one chunk IS one prevention application over the CR 510.2
@@ -2681,25 +2799,30 @@ pub(crate) fn fire_batch_prevention_riders(
         state.install_ready_continuation(
             crate::types::ability::PostReplacementContinuation::Resolved(Box::new(runtime)),
         );
-        if let Some(source) = event_source {
-            if let Some(drain) = state
-                .active_post_replacement_drains_mut()
-                .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
-            {
+        // CR 615.5 + CR 614.6: the rider's "that much" is the amount this application
+        // prevented, latched on its drain as a per-event prevention latches it
+        // (`replacement::replaced_event_amount`), so a rider that asks a choice first
+        // (Channel Harm's "may") still reads it when the answer comes in a later action,
+        // after `last_effect_count` has been cleared.
+        if let Some(drain) = state
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+        {
+            drain.event_amount = u32::try_from(total_prevented).ok();
+            if let Some(source) = event_source {
                 drain.event_source = Some(source);
             }
         }
-        // CR 510.2: in fire-all mode (combat Phase D) every pause the rider
-        // raises is settled, as the per-portion drain does.
-        if !stop_on_fresh_choice {
-            replacement::drain_combat_damage_rider(state, events);
-            continue;
-        }
-        replacement::drain_damage_rider(state, events);
-        // CR 608.2c (Matt C2): in stop mode a rider that left its prompt standing
-        // ends the drain here — later groups must not execute ahead of it.
-        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-            return BatchRiderDrainOutcome::Paused { published_entries };
+        // CR 608.2c (Matt C2): a rider that left its prompt standing ends the
+        // drain here — later groups must not execute ahead of it. The pause is
+        // read from the drain's own result, never from `state.waiting_for`: at
+        // combat Phase D that still holds the caller's earlier wait (an
+        // `AssignCombatDamage` answer, a blocker declaration), not a rider's.
+        match replacement::drain_damage_rider(state, events) {
+            replacement::DamageRiderDrain::Completed => {}
+            replacement::DamageRiderDrain::Paused { .. } => {
+                return BatchRiderDrainOutcome::Paused { published_entries };
+            }
         }
     }
     BatchRiderDrainOutcome::Completed

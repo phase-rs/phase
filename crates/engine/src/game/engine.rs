@@ -1618,6 +1618,10 @@ fn apply_action_boundary_core(
         && action.is_submitter_scoped()
         && !matches!(action, GameAction::Concede { .. } | GameAction::Debug(_)))
     .then(|| (action.clone(), authenticated_actor));
+    // CR 510.2: whether this action answers a parked combat damage batch's choice.
+    // The reducer fills a fresh `ActionResult`, so its events begin at index 0.
+    let parked_combat_damage_answer =
+        super::combat_damage::ParkedCombatDamageAnswer::begin(state, 0);
     let mut result = match if payment_transaction::owns_action(state, &action) {
         // All staged-payment actions enter through this admission point. The
         // authenticated actor is recorded for deterministic replay; the
@@ -1763,9 +1767,13 @@ fn apply_action_boundary_core(
     // `run_post_action_pipeline` — one of the reducer arms that builds an `ActionResult` straight
     // out of the match. Converge those onto the same
     // pipeline the rest of the reducer uses, scanning ONLY the slice this realization appended, so
-    // a handler that already settled its own events (`handle_opponent_may_choice`, which collects
-    // into `deferred_triggers` without recording them in `consumed_before_priority_trigger_events`)
-    // cannot have them collected a second time. Inert on every other route: the flush returns
+    // a handler that already settled its own events (`handle_opponent_may_choice`, whose settled
+    // branch collects into `deferred_triggers` without recording them in
+    // `consumed_before_priority_trigger_events`) cannot have them collected a second time. While a
+    // combat damage batch is parked that handler collects nothing inline
+    // (`announcement_triggers::take_inline_trigger_span`) and drains nothing
+    // (`triggers::can_drain_deferred_triggers`); the convergence first in the block below folds its
+    // events into the batch instead (CR 510.2). Inert on every other route: the flush returns
     // `false` when nothing was parked or an earlier convergence point already consumed it
     // (`Option::take_if`).
     // CR 104.3a: a concession's follow-up that fails stops here; finalization
@@ -1773,6 +1781,34 @@ fn apply_action_boundary_core(
     let follow_up_failure =
         'follow_up: {
             let scan_from = result.events.len();
+            // CR 510.2 + CR 510.3a + CR 603.3b: a direct-return answer to a parked
+            // combat damage batch's choice (`handle_opponent_may_choice`, a
+            // concession) finishes the batch here, or hands it its events; when the
+            // batch completed under a priority window, its events join the
+            // convergence pass below. Inert when the reducer already converged it.
+            let resumed_combat_damage = match resume_parked_combat_damage_at_action_boundary(
+                state,
+                parked_combat_damage_answer,
+                &result.waiting_for,
+                &mut result.events,
+            ) {
+                Ok(Some(waiting_for)) => {
+                    result.waiting_for = waiting_for;
+                    true
+                }
+                Ok(None) => false,
+                Err(err) => {
+                    if committed_departure.is_some() {
+                        break 'follow_up Some(err);
+                    }
+                    let failure = boundary_life_change_failure(state);
+                    lifecycle.discard();
+                    *state = cast_undo_boundary.restore(boundary_snapshot);
+                    return Err(failure.map_or(err, |player| {
+                        EngineError::LifeChangeUnrepresentable { player }
+                    }));
+                }
+            };
             // CR 601.2h + CR 602.2b + CR 605.3b: a parked counter-cost root's subtree is
             // finished and the root resumed before the action returns; when that made
             // progress, its events join the convergence pass below.
@@ -1833,7 +1869,7 @@ fn apply_action_boundary_core(
             let settled_entry_continuation_is_parked =
                 matches!(result.waiting_for, WaitingFor::Priority { .. })
                     && !state.deferred_entry_events.is_empty();
-            if ((resumed_parked_root || reconciled_unless_payment)
+            if ((resumed_combat_damage || resumed_parked_root || reconciled_unless_payment)
                 && matches!(result.waiting_for, WaitingFor::Priority { .. }))
                 || realized_token_entry
                 || settled_entry_batch
@@ -1964,6 +2000,65 @@ fn resume_parked_counter_cost_root_at_action_boundary(
         );
     }
     Ok(progressed.then(|| state.waiting_for.clone()))
+}
+
+/// CR 510.2 + CR 510.3a + CR 603.3b: the action-boundary convergence for a
+/// combat damage batch parked on a choice. No player has the chance to cast
+/// spells or activate abilities between the time combat damage is assigned and
+/// the time it's dealt, so an answer that settles to a priority window does not
+/// hand anyone priority: the batch finishes in the answering action, whichever
+/// handler took the answer (a zone choice, an optional effect, an opponent's
+/// "may", a concession). An answer that leaves the batch parked on its next
+/// choice hands the batch its events instead (fold-only), so their triggers join
+/// the combat damage step's one placement.
+///
+/// `answer` is `Some` only when the batch was parked as the action began
+/// ([`super::combat_damage::ParkedCombatDamageAnswer::begin`]). `Some` is returned when
+/// the batch moved (it completed, or its answer's wait changed); the caller then
+/// adopts that wait. Inert with nothing parked, so a boundary reached after
+/// `handle_replacement_choice`'s own resume, or a second boundary over the same
+/// action, changes nothing (the fold-only claims what it folds).
+///
+/// CR 800.4j: with the active player gone the turn continues to its completion,
+/// and the batch is finished by `turns::auto_advance_once`, which keeps a wait
+/// from naming a seat that left; this boundary leaves it to that authority.
+fn resume_parked_combat_damage_at_action_boundary(
+    state: &mut GameState,
+    answer: Option<super::combat_damage::ParkedCombatDamageAnswer>,
+    waiting_for: &WaitingFor,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    let Some(answer) = answer else {
+        return Ok(None);
+    };
+    if !state.combat_damage_batch_parked() || !super::players::is_alive(state, state.active_player)
+    {
+        return Ok(None);
+    }
+    if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+        super::combat_damage::hold_parked_combat_damage_answer_events(state, answer, events);
+        return Ok(None);
+    }
+    sync_waiting_for(state, waiting_for);
+    resume_pending_continuation_if_priority(state, events)?;
+    if !state.combat_damage_batch_parked() {
+        // The continuation's own drain finished the batch.
+        return Ok(Some(state.waiting_for.clone()));
+    }
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        // The continuation stopped at its next choice with the batch still parked.
+        super::combat_damage::hold_parked_combat_damage_answer_events(state, answer, events);
+        return Ok(Some(state.waiting_for.clone()));
+    }
+    let resumed = super::combat_damage::resume_pending_combat_lifelink(
+        state,
+        answer.action_event_start(),
+        None,
+        events,
+    )
+    .unwrap_or_else(|| state.waiting_for.clone());
+    state.waiting_for = resumed.clone();
+    Ok(Some(resumed))
 }
 
 /// CR 800.4a + CR 616.1 + CR 117.2e: the concession-boundary reconciliation of
@@ -3081,9 +3176,13 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
     // owned by a resolution keep the net. CR 117.2e + CR 121.4: one exception is
     // a parked unless payment of draws: a draw from an empty library loses at the
     // next priority, after the payment's later replacement prompts.
+    // CR 510.2 + CR 704.3: a parked combat damage batch is not a point where a
+    // player would receive priority; its state-based actions are checked once it
+    // completes.
     if sba::has_pending_player_loss_sba(state)
         && !state.withholds_priority()
         && !engine_payment_choices::draw_payment_is_parked(state)
+        && !state.combat_damage_batch_parked()
     {
         // CR 117.2e: the loss may cancel the current pause of a resolution
         // that is still under way (its chooser left). This net applies the
@@ -12272,6 +12371,10 @@ fn apply_non_priority_pass_action(
     // `PendingCast` exists.
     let answers_a_cast_step = state.waiting_for.has_pending_cast()
         || matches!(state.waiting_for, WaitingFor::ModalFaceChoice { .. });
+    // CR 510.2: whether this action answers a parked combat damage batch's choice,
+    // and where its events begin — see the convergence below the match.
+    let parked_combat_damage_answer =
+        super::combat_damage::ParkedCombatDamageAnswer::begin(state, events.len());
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
         (
@@ -17182,6 +17285,18 @@ fn apply_non_priority_pass_action(
         semantic_actor,
         &action_for_divergence,
     );
+
+    // CR 510.2 + CR 510.3a + CR 603.3b: an answer to a parked combat damage batch's
+    // choice finishes the batch here, before the pipeline below, so no player
+    // receives priority inside it; an answer that leaves it parked hands it its
+    // events. Direct-return arms converge at `apply_action_boundary_core`.
+    let waiting_for = resume_parked_combat_damage_at_action_boundary(
+        state,
+        parked_combat_damage_answer,
+        &waiting_for,
+        &mut events,
+    )?
+    .unwrap_or(waiting_for);
 
     // CR 704.3 + CR 117.5 + CR 117.3c: a parked counter-cost root's subtree is
     // finished and the root resumed before the pipeline below, so the activation

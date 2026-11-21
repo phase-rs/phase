@@ -4440,8 +4440,10 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 //
                 // CR 800.4a: everything else is a real prompt, but this is the one
                 // call site of `resume_pending_combat_lifelink` reached while the
-                // active player is NOT in the game (the other two run with a living
-                // active player by construction), so a wait it produces can name a
+                // active player is NOT in the game (`handle_replacement_choice`,
+                // `resolve_combat_damage`'s re-entry guard and the action-boundary
+                // convergence run with a living active player; the convergence
+                // checks it), so a wait it produces can name a
                 // seat that cannot answer. `elimination` already enforces exactly
                 // this invariant once, at elimination time, with the same accessor
                 // and the same aliveness test; re-apply it here because this is the

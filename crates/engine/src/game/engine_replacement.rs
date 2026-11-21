@@ -390,11 +390,14 @@ pub(super) fn resume_active_draw_sequences(
 /// action that can be parked waiting on it.
 ///
 /// A simultaneous combat-damage batch (CR 510.2) parks in
-/// `state.pending_combat_lifelink` (lifelink gain ordering, or its replacement pass). This is the
-/// only boundary that knows where THIS action's events begin, and the resumed `LifeChanged` must
-/// join the batch's own CR 603.3b trigger batch — so the anchor is a LOCAL captured here, and
-/// the drain lives here rather than in `engine::resume_pending_continuation_if_priority`,
-/// which has no such anchor. Stored on the record it would be a persisted index into a
+/// `state.pending_combat_lifelink` (lifelink gain ordering, or its replacement pass). The resumed
+/// `LifeChanged` must join the batch's own CR 603.3b trigger batch, so the resume needs to know
+/// where THIS action's events begin — so the anchor is a LOCAL captured here, and the drain lives
+/// here rather than in `engine::resume_pending_continuation_if_priority`, which has no such
+/// anchor. This handler resumes in place because its batch-leg arm consumes the choice index;
+/// every other answer converges at the generic boundary,
+/// `engine::resume_parked_combat_damage_at_action_boundary`, which also holds the events of a
+/// non-`Priority` return below (its fold-only arm). Stored on the record it would be a persisted index into a
 /// finished action's event vector with no owner to clear it on every exit path; a stale one
 /// panics or folds unrelated events into the batch, while a local cannot go stale and
 /// `action_event_start <= events.len()` holds by construction. A wrapper rather than in-arm

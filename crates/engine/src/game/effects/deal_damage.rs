@@ -2152,12 +2152,8 @@ fn run_damage_batch_phases(
     // `DamagePrevented` per (shield, recipient), and each shield's rider once, against what it
     // prevented across the batch.
     if !prevention.is_empty() {
-        let outcome = crate::game::combat_damage::fire_batch_prevention_riders(
-            state,
-            &prevention,
-            events,
-            true,
-        );
+        let outcome =
+            crate::game::combat_damage::fire_batch_prevention_riders(state, &prevention, events);
         // CR 104.1: a rider that ended the game ends the batch.
         if state.game_end.is_some() {
             return Ok(DamageTail::Caller);
