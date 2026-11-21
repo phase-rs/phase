@@ -15746,6 +15746,13 @@ mod cycling_quantity_scan_tests {
         let trigger = |lhs| comparison_trigger(lhs, fixed(2));
         let named_cycles = quantity(CyclingHistoryWindow::ThisGame, Some(name));
         let turn_cycles = quantity(CyclingHistoryWindow::ThisTurn, None);
+        // No printed card uses the synthetic comparison or filter shapes below. The closest
+        // printed cases are Yidaro's resolution instruction (CR 608.2c), "If you've cycled a card
+        // named Yidaro, Wandering Monster four or more times this game", and Spellpyre Phoenix's
+        // intervening-if condition (CR 603.4), "if you cycled two or more cards this turn".
+        // The cast-count comparison isolates whether scanning the other operand still picks up
+        // its projected-resource dependency. The Any filter isolates rejection of unsupported
+        // cycling filters by both the history and projected-resource scans.
         let yidaro = ability(named_cycles.clone());
         let phoenix = trigger(turn_cycles.clone());
         assert!(!ability_reads_projected_resource(&yidaro));

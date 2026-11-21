@@ -26284,19 +26284,20 @@ mod tests {
 
     #[test]
     fn phase4_v7_library_movement_and_spend_retain_cycling_history() {
+        use crate::game::effects::drawn_this_turn_choice::record_drawn_card;
+
         let caster = PlayerId(0);
         let recurrence = |prior: &GameState, current: &GameState| {
             resource_recurrence_covers(prior, current, caster, None, None)
         };
-        let (prior, current) = in_step_draw(0);
+        let (prior, mut current) = in_step_draw(0);
+        record_drawn_card(&mut current, caster, prior.library_of(caster)[0]);
         assert!(library_departures_cover(&prior, &current, caster, None));
-        // The instructed-departure certificate is tried before the library-departure cover, so it
-        // answers this pair first.
         assert_eq!(
             recurrence(&prior, &current),
             Some(PairCover::Certified(
-                CoveredGrowth::PerformedOnly,
-                RecurrenceCover::Departure,
+                CoveredGrowth::EQUALIZED_HISTORY,
+                RecurrenceCover::LibraryDepartures,
             ))
         );
         let changed = with_added_cycle(&current);
