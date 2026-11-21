@@ -17,6 +17,7 @@ import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { resolvePileSeat } from "../../viewmodel/gameStateView.ts";
+import { halfPointValue } from "../../viewmodel/halfPoints.ts";
 import { audioManager } from "../../audio/AudioManager.ts";
 import { FORGE_YELLOW, hexToRgb } from "./particleEffects.ts";
 import { CardRevealBurst } from "./CardRevealBurst.tsx";
@@ -549,7 +550,13 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         }
 
         case "LifeChanged": {
-          const { player_id, amount, new_total } = event.data;
+          const { player_id } = event.data;
+          // Exact values: the engine sends an Unhinged half point beside each
+          // whole field (Vile Bile's hit leaves 17½, sent as `17` + `"Half"`).
+          const amount = halfPointValue(event.data.amount, event.data.amount_fraction);
+          const new_total = event.data.new_total === undefined
+            ? undefined
+            : halfPointValue(event.data.new_total, event.data.new_total_fraction);
 
           // Tick every life readout the moment this hit lands, rather than
           // leaving them on the pre-action snapshot until the whole step queue

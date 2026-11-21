@@ -981,8 +981,6 @@ export const PermanentCard = memo(function PermanentCard({
               ptDisplay={ptDisplay}
               position={obj.loyalty != null ? "left" : "right"}
               ptSources={ptSources}
-              basePower={obj.base_power}
-              baseToughness={obj.base_toughness}
             />
           )}
 

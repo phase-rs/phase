@@ -30,3 +30,13 @@ export function formatHalves(halves: number): string {
   if (halves % 2 === 0) return `${sign}${whole}`;
   return whole === 0 ? `${sign}½` : `${sign}${whole}½`;
 }
+
+/** Display a half-point value as the printed number: 2.5 → "2½", -0.5 → "-½". */
+export function formatHalfPointValue(value: number): string {
+  return formatHalves(Math.round(value * 2));
+}
+
+/** Split a half-point value back into the engine's whole + fraction pair. */
+export function splitHalfPointValue(value: number): { whole: number; fraction: HalfFraction } {
+  return fromHalves(Math.round(value * 2));
+}

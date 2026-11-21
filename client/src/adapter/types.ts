@@ -1975,6 +1975,8 @@ export interface GameObject {
   flipped: boolean;
   transformed: boolean;
   damage_marked: number;
+  /** The Unhinged half point of `damage_marked`; absent when zero. */
+  damage_marked_fraction?: HalfFraction;
   dealt_deathtouch_damage: boolean;
   /** Mirrors engine `Option<AttachTarget>`: null when unattached, otherwise
    *  a tagged-union pointing at either an Object host (Equipment, Faith's
@@ -1987,7 +1989,11 @@ export interface GameObject {
   counters: Partial<Record<CounterType, number>>;
   name: string;
   power: number | null;
+  /** The Unhinged half point of `power` (Vile Bile's 2½ is `2` + `"Half"`); absent when zero. */
+  power_fraction?: HalfFraction;
   toughness: number | null;
+  /** The Unhinged half point of `toughness`; absent when zero. */
+  toughness_fraction?: HalfFraction;
   loyalty: number | null;
   card_types: CardType;
   mana_cost: ManaCost;
@@ -1998,7 +2004,9 @@ export interface GameObject {
   static_definitions: unknown[];
   color: ManaColor[];
   base_power: number | null;
+  base_power_fraction?: HalfFraction;
   base_toughness: number | null;
+  base_toughness_fraction?: HalfFraction;
   base_keywords: Keyword[];
   base_color: ManaColor[];
   timestamp: number;
@@ -2354,6 +2362,8 @@ export type PlayerStatus =
 export interface Player {
   id: PlayerId;
   life: number;
+  /** The Unhinged half point of `life` (17½ is `17` + `"Half"`); absent when zero. */
+  life_fraction?: HalfFraction;
   /**
    * Engine-derived: this seat has NO life total, so `life` is meaningless for it
    * and must not be presented as a resource. True only for the Horde seat in a
@@ -4032,8 +4042,9 @@ export type GameEvent =
   // `new_total` is the player's life total once this change is applied, supplied
   // by the engine (`LifeTotalReading`, serialized transparently) so a mid-animation
   // display can show intermediate totals. Absent on an event from a peer older than
-  // the field; fall back to the state snapshot.
-  | { type: "LifeChanged"; data: { player_id: PlayerId; amount: number; new_total?: number } }
+  // the field; fall back to the state snapshot. Each `_fraction` is the Unhinged half
+  // point of the whole field beside it (a −2½ change is `-3` + `"Half"`).
+  | { type: "LifeChanged"; data: { player_id: PlayerId; amount: number; amount_fraction?: HalfFraction; new_total?: number; new_total_fraction?: HalfFraction } }
   | { type: "ManaAdded"; data: { player_id: PlayerId; mana_type: ManaType; source_id: ObjectId; tapped_for_mana?: boolean } }
   | { type: "PermanentTapped"; data: { object_id: ObjectId } }
   | { type: "PlayerLost"; data: { player_id: PlayerId; reasons: LossReason[] } }

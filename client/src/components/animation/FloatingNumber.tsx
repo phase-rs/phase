@@ -1,5 +1,7 @@
 import { motion } from "framer-motion";
 
+import { formatHalfPointValue } from "../../viewmodel/halfPoints.ts";
+
 interface FloatingNumberProps {
   value: number;
   position: { x: number; y: number };
@@ -33,7 +35,7 @@ export function FloatingNumber({
         zIndex: 60,
       }}
     >
-      {value > 0 ? `+${value}` : value}
+      {value > 0 ? `+${formatHalfPointValue(value)}` : formatHalfPointValue(value)}
     </motion.div>
   );
 }

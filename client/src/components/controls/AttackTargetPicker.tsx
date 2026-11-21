@@ -13,6 +13,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
+import { formatHalfPointValue } from "../../viewmodel/halfPoints.ts";
 import {
   type AttackerStack,
   attackTargetKey,
@@ -188,22 +189,22 @@ export function AttackTargetPicker({
       if (readout.magnitude === "Unbounded") {
         return t("attackTargetPicker.playerTarget", { name, life: formatLifeReadout(readout) });
       }
-      const currentLife = readout.life;
+      const currentLife = formatHalfPointValue(readout.life);
       const assignedDamage = showProjectedLife
         ? (assignedTotalsByTarget.get(attackTargetKey(target))?.lifeLoss ?? 0)
         : 0;
       if (assignedDamage > 0) {
-        const projectedLife = Math.max(0, currentLife - assignedDamage);
+        const projectedLife = Math.max(0, readout.life - assignedDamage);
         return projectedLife === 0
           ? t("attackTargetPicker.playerTargetLethal", {
             name,
             life: currentLife,
-            projectedLife,
+            projectedLife: formatHalfPointValue(projectedLife),
           })
           : t("attackTargetPicker.playerTargetProjected", {
             name,
             life: currentLife,
-            projectedLife,
+            projectedLife: formatHalfPointValue(projectedLife),
           });
       }
       return t("attackTargetPicker.playerTarget", {

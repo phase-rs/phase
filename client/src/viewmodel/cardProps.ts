@@ -1,5 +1,6 @@
 import type { ParseKeys } from "i18next";
 import type { AttachTarget, CardType, GameObject, Keyword, ManaColor, ObjectId } from "../adapter/types";
+import { formatHalves, toHalves } from "./halfPoints";
 import { isChangeling } from "./keywordProps";
 
 const ROMAN = ["", "I", "II", "III", "IV", "V"] as const;
@@ -49,8 +50,12 @@ export interface CardViewProps {
 export type PTColor = "white" | "green" | "red";
 
 export interface PTDisplay {
-  power: number;
-  toughness: number;
+  /** Printed form of the exact power, half point included ("2½"). */
+  power: string;
+  /** Printed form of the exact remaining toughness, half point included. */
+  toughness: string;
+  /** Printed form of the exact base P/T ("2½/2½"), when the engine sends one. */
+  base: string | null;
   powerColor: PTColor;
   toughnessColor: PTColor;
 }
@@ -261,25 +266,38 @@ export function hasOtherPrintedFace(
 export function computePTDisplay(obj: GameObject): PTDisplay | null {
   if (obj.power == null || obj.toughness == null) return null;
 
+  // Exact values in halves: the engine sends an Unhinged half point beside each
+  // whole field (Vile Bile's 2½ power is `2` + `"Half"`).
+  const power = toHalves(obj.power, obj.power_fraction);
+  const toughness = toHalves(obj.toughness, obj.toughness_fraction);
+  const damage = toHalves(obj.damage_marked, obj.damage_marked_fraction);
+  const basePower = obj.base_power == null ? null : toHalves(obj.base_power, obj.base_power_fraction);
+  const baseToughness = obj.base_toughness == null
+    ? null
+    : toHalves(obj.base_toughness, obj.base_toughness_fraction);
+
   const powerColor: PTColor =
-    obj.base_power != null && obj.power > obj.base_power
+    basePower != null && power > basePower
       ? "green"
-      : obj.base_power != null && obj.power < obj.base_power
+      : basePower != null && power < basePower
         ? "red"
         : "white";
 
   const toughnessColor: PTColor =
-    obj.damage_marked > 0
+    damage > 0
       ? "red"
-      : obj.base_toughness != null && obj.toughness > obj.base_toughness
+      : baseToughness != null && toughness > baseToughness
         ? "green"
-        : obj.base_toughness != null && obj.toughness < obj.base_toughness
+        : baseToughness != null && toughness < baseToughness
           ? "red"
           : "white";
 
   return {
-    power: obj.power,
-    toughness: obj.damage_marked > 0 ? obj.toughness - obj.damage_marked : obj.toughness,
+    power: formatHalves(power),
+    toughness: formatHalves(toughness - damage),
+    base: basePower != null && baseToughness != null
+      ? `${formatHalves(basePower)}/${formatHalves(baseToughness)}`
+      : null,
     powerColor,
     toughnessColor,
   };

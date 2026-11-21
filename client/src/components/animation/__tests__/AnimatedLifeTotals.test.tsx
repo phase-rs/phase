@@ -179,4 +179,97 @@ describe("life totals during a damage animation", () => {
     expect(screen.getByText("20")).toBeInTheDocument();
     expect(screen.queryByText("18")).not.toBeInTheDocument();
   });
+
+  /**
+   * Unhinged half points: Vile Bile's 2½ combat damage. The engine sends each
+   * exact value as a whole part plus a `"Half"` remainder (a −2½ change is
+   * `-3` + `"Half"`, a 17½ total is `17` + `"Half"`).
+   */
+  function vileBileHit(sourceId: number, newHalves: number): GameEvent[] {
+    return [
+      {
+        type: "DamageDealt",
+        data: { source_id: sourceId, target: { Player: 1 }, amount: 2, is_combat: true },
+      },
+      {
+        type: "LifeChanged",
+        data: {
+          player_id: 1,
+          amount: -3,
+          amount_fraction: "Half",
+          new_total: Math.floor(newHalves / 2),
+          new_total_fraction: newHalves % 2 === 0 ? "Zero" : "Half",
+        },
+      },
+    ];
+  }
+
+  it("shows a landed half-point total and keeps it once the snapshot commits", () => {
+    const steps = normalizeEvents(vileBileHit(11, 35));
+
+    render(
+      <>
+        <AnimationOverlay containerRef={containerRef} />
+        <LifeTotal playerId={1} hideLabel />
+      </>,
+    );
+    playSteps(steps);
+    act(() => {
+      vi.advanceTimersByTime(steps[0].duration * 2);
+    });
+    expect(screen.getByText("17½")).toBeInTheDocument();
+    expect(useGameStore.getState().gameState?.players[1].life).toBe(20);
+
+    act(() => {
+      useGameStore.setState((state) => {
+        const previous = state.gameState ?? buildGameState();
+        const players = previous.players.map((player, index) =>
+          index === 1 ? { ...player, life: 17, life_fraction: "Half" as const } : player,
+        );
+        return {
+          gameState: { ...previous, players },
+          engineCommitEpoch: state.engineCommitEpoch + 1,
+        };
+      });
+    });
+    expect(screen.getByText("17½")).toBeInTheDocument();
+  });
+
+  it("keeps the half point through a collapsed damage flurry", () => {
+    setLife(1, 40);
+    // 13 hits of 2½ from 40: totals 37½, 35, …, ending at 7½.
+    const events = Array.from({ length: 13 }, (_, hit) => vileBileHit(100 + hit, 80 - 5 * (hit + 1)))
+      .flat();
+    const steps = normalizeEvents(events);
+    expect(steps.some((step) =>
+      step.effects.some((effect) => effect.event.type === "GroupedDamageFlurry"))).toBe(true);
+    const collapsed = steps
+      .flatMap((step) => step.effects)
+      .map((effect) => effect.event)
+      .filter((event) => event.type === "LifeChanged");
+    expect(collapsed).toEqual([
+      {
+        type: "LifeChanged",
+        data: {
+          player_id: 1,
+          amount: -33,
+          amount_fraction: "Half",
+          new_total: 7,
+          new_total_fraction: "Half",
+        },
+      },
+    ]);
+
+    render(
+      <>
+        <AnimationOverlay containerRef={containerRef} />
+        <LifeTotal playerId={1} hideLabel />
+      </>,
+    );
+    playSteps(steps);
+    act(() => {
+      vi.advanceTimersByTime(steps.reduce((total, step) => total + step.duration, 0) * 2);
+    });
+    expect(screen.getByText("7½")).toBeInTheDocument();
+  });
 });

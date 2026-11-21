@@ -1,4 +1,5 @@
 import type { GameEvent, GameState } from "../adapter/types";
+import { halfPointValue, splitHalfPointValue } from "../viewmodel/halfPoints";
 import type { AnimationEvent, AnimationStep, PacingCategory, StepEffect } from "./types";
 import {
   DEFAULT_DURATION,
@@ -408,7 +409,7 @@ function buildGroupedStep(
     effects.push({
       event: {
         type: "LifeChanged",
-        data: { player_id: lifePlayerId, amount: change.amount, new_total: change.newTotal },
+        data: lifeChangedData(lifePlayerId, change),
       },
       duration: EVENT_DURATIONS.LifeChanged,
       displayOnly: true,
@@ -424,21 +425,46 @@ function buildGroupedStep(
  *  sum of amounts, which replacement effects can make diverge from the real
  *  sequence, or an earlier total when the final event came from a pre-field peer. */
 interface AggregatedLifeChange {
+  /** Exact, Unhinged half point included (a −2½ change is `-2.5`). */
   amount: number;
-  /** `undefined` when the final consumed event came from a pre-field peer. */
+  /** Exact; `undefined` when the final consumed event came from a pre-field peer. */
   newTotal: number | undefined;
+}
+
+type LifeChangedData = Extract<GameEvent, { type: "LifeChanged" }>["data"];
+
+/** The exact amount and total an engine `LifeChanged` reports (wire whole + half point). */
+function exactLifeChange(data: LifeChangedData): AggregatedLifeChange {
+  return {
+    amount: halfPointValue(data.amount, data.amount_fraction),
+    newTotal: data.new_total === undefined
+      ? undefined
+      : halfPointValue(data.new_total, data.new_total_fraction),
+  };
+}
+
+/** A synthesized `LifeChanged` payload for `change`, split back into the wire's whole + half point. */
+function lifeChangedData(playerId: number, change: AggregatedLifeChange): LifeChangedData {
+  const amount = splitHalfPointValue(change.amount);
+  const newTotal = change.newTotal === undefined ? undefined : splitHalfPointValue(change.newTotal);
+  return {
+    player_id: playerId,
+    amount: amount.whole,
+    amount_fraction: amount.fraction,
+    new_total: newTotal?.whole,
+    new_total_fraction: newTotal?.fraction,
+  };
 }
 
 function addLifeChange(
   changes: Map<number, AggregatedLifeChange>,
   playerId: number,
-  amount: number,
-  newTotal: number | undefined,
+  change: AggregatedLifeChange,
 ): void {
   const previous = changes.get(playerId);
   changes.set(playerId, {
-    amount: (previous?.amount ?? 0) + amount,
-    newTotal,
+    amount: (previous?.amount ?? 0) + change.amount,
+    newTotal: change.newTotal,
   });
 }
 
@@ -449,7 +475,7 @@ function buildLifeChangeStep(lifeChanges: Map<number, AggregatedLifeChange>): An
     effects.push({
       event: {
         type: "LifeChanged",
-        data: { player_id: playerId, amount: change.amount, new_total: change.newTotal },
+        data: lifeChangedData(playerId, change),
       },
       duration: EVENT_DURATIONS.LifeChanged,
       displayOnly: true,
@@ -479,9 +505,12 @@ function findPositiveLifeChanges(
   const changes = new Map<number, AggregatedLifeChange>();
   for (let index = segmentStart; index <= segmentEnd; index++) {
     const event = events[index];
-    if (consumed.has(index) || event.type !== "LifeChanged" || event.data.amount <= 0) continue;
+    if (consumed.has(index) || event.type !== "LifeChanged") continue;
+    const change = exactLifeChange(event.data);
+    // A +½ gain is a gain, though its whole part is 0.
+    if (change.amount <= 0) continue;
     indices.add(index);
-    addLifeChange(changes, event.data.player_id, event.data.amount, event.data.new_total);
+    addLifeChange(changes, event.data.player_id, change);
   }
   return { indices, changes };
 }
@@ -548,12 +577,7 @@ function findAggregateReplacements(
         for (const sideEffectIndex of lifeChange.sideEffectIndices) matchedLifeIndices.add(sideEffectIndex);
         const lifeEvent = events[lifeChange.lifeIndex];
         if (lifeEvent.type === "LifeChanged") {
-          addLifeChange(
-            consumedLifeChanges,
-            lifeEvent.data.player_id,
-            lifeEvent.data.amount,
-            lifeEvent.data.new_total,
-          );
+          addLifeChange(consumedLifeChanges, lifeEvent.data.player_id, exactLifeChange(lifeEvent.data));
         }
       }
     }
@@ -624,7 +648,7 @@ function findAggregateReplacements(
             groupedStep.effects.push({
               event: {
                 type: "LifeChanged",
-                data: { player_id: playerId, amount: change.amount, new_total: change.newTotal },
+                data: lifeChangedData(playerId, change),
               },
               duration: EVENT_DURATIONS.LifeChanged,
               displayOnly: true,
@@ -741,8 +765,8 @@ function matchingAdjacentDamageUnit(
 ): {
   damage: Extract<GameEvent, { type: "DamageDealt" }>;
   consumed: number[];
-  lifeDelta: number;
-  lifeNewTotal: number | undefined;
+  /** The exact life loss the damage caused; amount 0 when none was paired with it. */
+  life: AggregatedLifeChange;
 } | null {
   const leadingSideEffects: number[] = [];
   let firstIndex = index;
@@ -767,8 +791,7 @@ function matchingAdjacentDamageUnit(
       return {
         damage: next,
         consumed: [...leadingSideEffects, firstIndex, ...interveningSideEffects, nextIndex],
-        lifeDelta: first.data.amount,
-        lifeNewTotal: first.data.new_total,
+        life: exactLifeChange(first.data),
       };
     }
   }
@@ -790,11 +813,10 @@ function matchingAdjacentDamageUnit(
       return {
         damage: first,
         consumed: [...consumed, lifeIndex],
-        lifeDelta: lifeEvent.data.amount,
-        lifeNewTotal: lifeEvent.data.new_total,
+        life: exactLifeChange(lifeEvent.data),
       };
     }
-    return { damage: first, consumed, lifeDelta: 0, lifeNewTotal: undefined };
+    return { damage: first, consumed, life: { amount: 0, newTotal: undefined } };
   }
 
   return null;
@@ -820,8 +842,8 @@ function findFallbackRun(
     if (!unit) break;
     sourceIds.push(unit.damage.data.source_id);
     totalDamage += unit.damage.data.amount;
-    if (unit.lifeDelta !== 0) {
-      addLifeChange(lifeChanges, playerId, unit.lifeDelta, unit.lifeNewTotal);
+    if (unit.life.amount !== 0) {
+      addLifeChange(lifeChanges, playerId, unit.life);
     }
     hitCount++;
     index += unit.consumed.length;
@@ -835,7 +857,7 @@ function findFallbackRun(
   const segmentEnd = aggregateIndex === -1 ? index - 1 : aggregateIndex - 1;
   const positiveLife = findPositiveLifeChanges(events, index, segmentEnd, new Set());
   for (const [lifePlayerId, change] of positiveLife.changes) {
-    addLifeChange(lifeChanges, lifePlayerId, change.amount, change.newTotal);
+    addLifeChange(lifeChanges, lifePlayerId, change);
   }
 
   return {
