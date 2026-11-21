@@ -5,6 +5,7 @@ use engine::ai_support::{adversarial_swarm_witness, SwarmWitnessResult};
 use engine::game::combat::{
     can_block_pair, can_block_pair_with_precomputed, collect_block_restriction_statics,
     collect_blocker_allowed_statics, collect_blocker_restriction_statics, AttackTarget,
+    BlockRestrictions,
 };
 use engine::game::commander::commander_lethal_headroom;
 use engine::game::players;
@@ -34,9 +35,9 @@ use crate::zone_eval::available_mana;
 /// through the per-pair `can_block_pair` checks. Hoisting these out of the
 /// O(battlefield²) attacker/blocker loops avoids re-walking the battlefield's
 /// functioning statics for every candidate pair.
-pub(crate) struct BlockLegalitySlices {
+pub(crate) struct BlockLegalitySlices<'a> {
     blocker_restriction: Vec<(ObjectId, StaticDefinition)>,
-    block_restriction: Vec<(ObjectId, StaticDefinition)>,
+    block_restriction: BlockRestrictions<'a>,
     blocker_allowed: Vec<(ObjectId, StaticDefinition)>,
     // CR 604.1: shadow block-lift existence gate (CR 509.1b/609.4/702.28b),
     // hoisted once so per-pair legality skips the O(N) CanBlockShadow sweep.
@@ -65,8 +66,8 @@ impl<'a> AttackTargetingContext<'a> {
     }
 }
 
-impl BlockLegalitySlices {
-    pub(crate) fn collect(state: &GameState) -> Self {
+impl<'a> BlockLegalitySlices<'a> {
+    pub(crate) fn collect(state: &'a GameState) -> Self {
         Self {
             blocker_restriction: collect_blocker_restriction_statics(state),
             block_restriction: collect_block_restriction_statics(state),
@@ -1204,7 +1205,7 @@ struct ExpandedComparisonInput<'a> {
     opponents: &'a [PlayerId],
     candidates: &'a [ObjectId],
     mandatory: &'a [ObjectId],
-    slices: &'a BlockLegalitySlices,
+    slices: &'a BlockLegalitySlices<'a>,
     blockers_by_controller: &'a HashMap<PlayerId, Vec<ObjectId>>,
     valid_attack_targets: Option<&'a [AttackTarget]>,
     valid_attack_targets_by_attacker: Option<&'a HashMap<ObjectId, Vec<AttackTarget>>>,
@@ -2182,7 +2183,7 @@ pub fn choose_blockers_with_profile(
     // The block-restriction statics are collected once here and threaded through
     // the precomputed variant: every pass below reads this per attacker, and the
     // non-precomputed entry point re-walks the battlefield on each call.
-    let block_restriction_statics = engine::game::combat::collect_block_restriction_statics(state);
+    let block_restriction_statics = BlockRestrictions::from_statics(state);
     let required_blockers = |attacker_id: &ObjectId| -> usize {
         engine::game::combat::min_blockers_required_from_precomputed(
             state,
@@ -3486,7 +3487,7 @@ fn defender_best_block(
     attacker_id: ObjectId,
     attacker_value: f64,
     blockers: &[ObjectId],
-    slices: &BlockLegalitySlices,
+    slices: &BlockLegalitySlices<'_>,
 ) -> Option<DefenderBlock> {
     let eligible: Vec<_> = blockers
         .iter()
@@ -6535,8 +6536,8 @@ mod tests {
 
     #[test]
     fn open_board_exact_limit_completes_and_next_attacker_falls_back_without_work() {
-        let mut exact_state = setup_multiplayer(3);
-        let exact_attackers: Vec<_> = (0..2048)
+        let mut exact_state = setup_multiplayer(5);
+        let exact_attackers: Vec<_> = (0..1024)
             .map(|_| add_creature(&mut exact_state, PlayerId(0), "Attacker", 2, 2, vec![]))
             .collect();
         let exact_opponents = players::opponents(&exact_state, PlayerId(0));
@@ -6564,10 +6565,10 @@ mod tests {
         assert!(matches!(exact.attackers, Some(ref ids) if !ids.is_empty()));
         assert_eq!(exact_receipt.attacker_evaluations, 4096);
         assert_eq!(exact_receipt.pairs, 0);
-        assert_eq!(exact_receipt.completed_proposals, 2);
+        assert_eq!(exact_receipt.completed_proposals, 4);
 
-        let mut above_state = setup_multiplayer(3);
-        let above_attackers: Vec<_> = (0..2049)
+        let mut above_state = setup_multiplayer(5);
+        let above_attackers: Vec<_> = (0..1025)
             .map(|_| add_creature(&mut above_state, PlayerId(0), "Attacker", 2, 2, vec![]))
             .collect();
         let above_opponents = players::opponents(&above_state, PlayerId(0));
@@ -6607,14 +6608,14 @@ mod tests {
         let public_fallback = choose_attackers_with_targets(&above_state, PlayerId(0));
         assert_eq!(
             public_fallback.len(),
-            2049,
+            1025,
             "the public fallback retains every legal open attacker"
         );
         assert_eq!(
             expanded_comparison_receipt().attacker_evaluations
                 + expanded_comparison_receipt().pairs,
             0,
-            "the public 4098-unit admission rejection still performs no comparison work"
+            "the public 4100-unit admission rejection still performs no comparison work"
         );
         above_state.phase = engine::types::phase::Phase::DeclareAttackers;
         above_state.waiting_for = WaitingFor::DeclareAttackers {
@@ -6623,6 +6624,8 @@ mod tests {
             valid_attack_targets: vec![
                 AttackTarget::Player(PlayerId(1)),
                 AttackTarget::Player(PlayerId(2)),
+                AttackTarget::Player(PlayerId(3)),
+                AttackTarget::Player(PlayerId(4)),
             ],
             valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),

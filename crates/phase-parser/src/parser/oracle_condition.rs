@@ -245,6 +245,17 @@ fn static_condition_to_restriction_condition(
             .map(static_condition_to_restriction_condition)
             .collect::<Option<Vec<_>>>()
             .map(|conditions| ParsedCondition::And { conditions }),
+        // CR 602.5: This exact pair has a shared live-source restriction
+        // predicate even though the standalone blocking leaf has no equivalent.
+        StaticCondition::Or { conditions }
+            if matches!(
+                conditions.as_slice(),
+                [StaticCondition::SourceIsAttacking, StaticCondition::SourceIsBlocking]
+                    | [StaticCondition::SourceIsBlocking, StaticCondition::SourceIsAttacking]
+            ) =>
+        {
+            Some(ParsedCondition::SourceIsAttackingOrBlocking)
+        }
         StaticCondition::Or { conditions } => conditions
             .into_iter()
             .map(static_condition_to_restriction_condition)
@@ -414,7 +425,7 @@ fn static_condition_to_restriction_condition(
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -454,6 +465,12 @@ fn static_condition_to_restriction_condition(
         // you), the same failure mode this match rejects for
         // `TopOfLibraryMatches` above.
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        // CR 508.6: retrospective this-turn player-pair attack test -- a
+        // delayed-resolution predicate, not a cast/activation restriction,
+        // and with no `ParsedCondition` counterpart (same vocabulary
+        // asymmetry as `AnyPlayerAttackedYouLastTurn` above). Lowering
+        // returns `None`.
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::CastingAsVariant { .. } => None,
     }
 }
@@ -1609,15 +1626,16 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::SpellsCastThisTurn {
+                            QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(TargetFilter::Or { .. }),
+                                window: crate::types::ability::TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 3 },
             } => {}
-            other => panic!("expected filtered SpellsCastThisTurn >= 3, got {other:?}"),
+            other => panic!("expected filtered SpellsCast >= 3, got {other:?}"),
         }
     }
 

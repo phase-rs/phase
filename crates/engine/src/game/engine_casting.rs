@@ -1995,6 +1995,7 @@ pub(super) fn handle_tap_creatures_for_spell_cost(
     mode: TapCreaturesSelectionMode,
     creatures: &[ObjectId],
     chosen: &[ObjectId],
+    paid_cost: Option<casting_costs::SpellCostPayment<'_>>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     casting_costs::handle_tap_creatures_for_spell_cost(
@@ -2006,6 +2007,7 @@ pub(super) fn handle_tap_creatures_for_spell_cost(
         mode,
         creatures,
         chosen,
+        paid_cost,
         events,
     )
 }
@@ -2316,10 +2318,7 @@ mod tests {
     use crate::types::object_map::sweep_test_support::state_with_objects;
 
     fn printing(tag: &str) -> SharedPrinting {
-        SharedPrinting::new(CardPrinting {
-            set_code: tag.into(),
-            collector_number: "1".into(),
-        })
+        SharedPrinting::new(CardPrinting::owner(tag, "1"))
     }
 
     fn stamp(state: &mut GameState, id: ObjectId, tag: &str) {

@@ -80,6 +80,7 @@ let storeState: {
   adapter: TestAdapter | null;
   logHistory: unknown[];
   gameSessionGeneration: number;
+  pendingUndoId: number | null;
 };
 
 vi.mock("../../../stores/gameStore", () => ({
@@ -150,6 +151,7 @@ beforeEach(() => {
     adapter: null,
     logHistory: [],
     gameSessionGeneration: 1,
+    pendingUndoId: null,
   };
 });
 
@@ -623,6 +625,33 @@ describe("LLM-driven AI seats", () => {
       error: "this decision cannot be put to the provider",
       errorKind: { kind: "unsupportedDecision" },
     }));
+    dispatchMocks.dispatchAiActionProposal.mockResolvedValue({ status: "stale" });
+    storeState.adapter = {
+      getAiActionProposal: vi.fn(async () => heuristic),
+      buildLlmDecisionRequest,
+      getAiActionProposalFromLlmResponse: vi.fn(),
+    };
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    for (let attempt = 0; attempt < 6; attempt += 1) await runOnce();
+
+    // Well past the three-failure ceiling, and still being consulted.
+    expect(buildLlmDecisionRequest.mock.calls.length).toBeGreaterThan(3);
+    expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
+    expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(heuristic);
+    controller.dispose();
+  });
+
+  it("keeps asking the provider after the engine builds no request for the seat", async () => {
+    bindSeatToProvider();
+    const heuristic = proposal(PASS, "heuristic");
+    // The engine builds nothing for a seat with no decision to make (#10999):
+    // the provider was never asked, so this must never count toward giving it
+    // up for the rest of the game.
+    const buildLlmDecisionRequest = vi.fn(async () => null);
     dispatchMocks.dispatchAiActionProposal.mockResolvedValue({ status: "stale" });
     storeState.adapter = {
       getAiActionProposal: vi.fn(async () => heuristic),

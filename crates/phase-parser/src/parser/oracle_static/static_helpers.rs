@@ -5,6 +5,7 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use crate::types::ability::PlayerScope;
+use crate::types::ability::TurnWindow;
 
 /// CR 113.6 + CR 201.2: Recognize the "sources with the chosen name" / "cards with
 /// the chosen name" subject phrase and map it to `TargetFilter::HasChosenName`.
@@ -1260,13 +1261,14 @@ pub(crate) fn parse_cost_modifier_condition(cond_text: &str) -> Option<StaticCon
     }
     Some(StaticCondition::QuantityComparison {
         lhs: QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: if filter == TargetFilter::Any {
                     None
                 } else {
                     Some(filter)
                 },
+                window: TurnWindow::ThisTurn,
             },
         },
         comparator: Comparator::GE,
@@ -1895,6 +1897,9 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        // Attack-pair endpoints are absolute player refs, not the designation
+        // anaphor: nothing to rebind, like its last-turn analog above.
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
@@ -1902,7 +1907,7 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -2262,6 +2267,10 @@ pub(crate) fn accept_enforceable_condition(
 ///   `"gets +N/+M as long as X"` / `"has <keyword> as long as X"` grant branch,
 ///   and the whole-predicate `Continuous` default beneath it that carries the
 ///   trailing `"unless"` rider (Heroic Defiance).
+/// - `oracle_static::grammar::parse_enchanted_equipped_predicate`'s PATTERN 3b
+///   source-hosted restriction companion, which gates a peeled "Otherwise"
+///   restriction conjunct on the complement of the head condition (Burden of
+///   Proof).
 pub(crate) fn attach_gated_condition(
     def: &mut StaticDefinition,
     condition: StaticCondition,

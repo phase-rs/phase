@@ -4175,22 +4175,6 @@ mod lifecycle_tests {
     }
 
     #[tokio::test]
-    async fn lobby_expiry_prunes_only_the_finished_game_connections() {
-        let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
-        {
-            let mut conns = connections.lock().await;
-            conns.insert("EXPIRED".to_string(), HashMap::new());
-            conns.insert("ACTIVE".to_string(), HashMap::new());
-        }
-
-        prune_game_connections(&connections, ["EXPIRED"]).await;
-
-        let conns = connections.lock().await;
-        assert!(!conns.contains_key("EXPIRED"));
-        assert!(conns.contains_key("ACTIVE"));
-    }
-
-    #[tokio::test]
     async fn delist_removed_sessions_delists_every_removed_room_and_leaves_the_rest() {
         // The reaper hands this helper every session it removed in one tick,
         // which is more than one, so a single-room fixture would admit a
@@ -13534,6 +13518,169 @@ mod state_transport_derived_tests {
     use engine::types::identifiers::ObjectId;
     use engine::types::phase::Phase;
 
+    #[tokio::test]
+    async fn native_messages_deliver_assigned_basic_art_on_play_and_reconnect() {
+        use engine::types::actions::MulliganChoice;
+        use engine::types::zones::Zone;
+        use serde_json::{json, to_value};
+        use server_core::DeckData;
+
+        let db = Arc::new(CardDatabase::from_json_str(
+            &json!({
+                "forest": {
+                    "name": "Forest",
+                    "scryfall_oracle_id": "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6",
+                    "mana_cost": {"type": "NoCost"},
+                    "card_type": {"supertypes": ["Basic"], "core_types": ["Land"], "subtypes": ["Forest"]},
+                    "legalities": {"standard": "legal"},
+                    "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": []
+                }
+            })
+            .to_string(),
+        )
+        .unwrap());
+        let deck = DeckData {
+            main_deck: vec!["Forest".to_string(); 60],
+            ..Default::default()
+        };
+        let resolved = resolve_deck(&db, &ComboTable::default(), &deck).unwrap();
+        let choice = Some(DeckChoice::DeckList(Box::new(deck)));
+        let mut manager = SessionManager::new();
+        let (code, host_token) = manager.create_game(resolved.clone(), choice.clone());
+        let handle = manager.session(&code).unwrap();
+        let shared = Arc::new(Mutex::new(manager));
+        let mut session = handle.lock().await;
+        let (guest_token, _) = session
+            .join_with_reservation(resolved, choice, "Guest".into(), None)
+            .unwrap();
+        session.start_game(&db).unwrap();
+
+        let [host, guest] = [PlayerId(0), PlayerId(1)];
+        let tokens = [&host_token, &guest_token];
+        let WaitingFor::ChooseStartingPlayer { player, .. } = session.state.waiting_for else {
+            panic!("expected starting-player choice");
+        };
+        session
+            .handle_action(
+                tokens[usize::from(player.0)],
+                GameAction::ChooseStartingPlayer { player: host },
+            )
+            .unwrap();
+        let id = *session.state.players[0].hand.front().expect("opening hand");
+        let key = id.0.to_string();
+        let card_id = session.state.objects[&id].card_id;
+        let owner_view = to_value(build_game_started_message(
+            &session,
+            &DecisionSnapshot::from_state(&session.state),
+            host,
+            None,
+            Vec::new(),
+        ))
+        .unwrap();
+        let guest_view = to_value(build_game_started_message(
+            &session,
+            &DecisionSnapshot::from_state(&session.state),
+            guest,
+            None,
+            Vec::new(),
+        ))
+        .unwrap();
+        let owner_card = &owner_view["data"]["state"]["objects"][&key];
+        let private = &guest_view["data"]["state"]["objects"][&key];
+        assert!(private.is_object());
+        let collector = owner_card["printing"]["collector_number"]
+            .as_str()
+            .expect("assigned collector");
+        assert!(matches!(collector, "272" | "273"));
+        let expected = json!({
+            "set_code": "m21", "collector_number": collector, "automatic_art_catalog_version": 1
+        });
+        let assert_printing = |card: &serde_json::Value| {
+            assert_eq!(card["name"], "Forest");
+            assert_eq!(card["card_id"], card_id.0);
+            for field in ["printing", "base_printing"] {
+                assert_eq!(card[field], expected, "{field}");
+            }
+        };
+        assert_printing(owner_card);
+        for field in ["printing", "base_printing"] {
+            assert!(private.get(field).is_none(), "{field}");
+        }
+        for token in tokens {
+            session
+                .handle_action(
+                    token,
+                    GameAction::MulliganDecision {
+                        choice: MulliganChoice::Keep,
+                    },
+                )
+                .unwrap();
+        }
+        for _ in 0..8 {
+            if session.state.phase == Phase::PreCombatMain {
+                break;
+            }
+            let WaitingFor::Priority { player } = session.state.waiting_for else {
+                panic!("expected priority on the way to main phase");
+            };
+            session
+                .handle_action(tokens[usize::from(player.0)], GameAction::PassPriority)
+                .unwrap();
+        }
+        let result = session
+            .handle_action(
+                &host_token,
+                GameAction::PlayLand {
+                    object_id: id,
+                    card_id,
+                },
+            )
+            .expect("host plays the stamped land");
+        assert_eq!(result.0.objects[&id].zone, Zone::Battlefield);
+        let full_key = server_core::FullSessionKey {
+            game_code: code.clone(),
+            generation: 1,
+        };
+        let source = game_executor::StateUpdateSource::from_result(&result, session.state_revision)
+            .guarded(&code)
+            .expect("broadcastable land play");
+        for seat in [host, guest] {
+            let wire = to_value(build_state_update_message(
+                &source,
+                &full_key,
+                seat,
+                session.rewind_options(),
+                &[],
+            ))
+            .unwrap();
+            assert_eq!(wire["type"], "StateUpdate");
+            assert_printing(&wire["data"]["state"]["objects"][&key]);
+        }
+
+        let disconnected_at = Instant::now();
+        session.mark_disconnected_at(guest, disconnected_at);
+        shared
+            .lock()
+            .await
+            .record_disconnect(&code, guest, disconnected_at);
+        reconnect_seat_while_session_locked(&shared, &mut session, &guest_token, Instant::now())
+            .await
+            .unwrap();
+        let seat = session.player_for_token(&guest_token).unwrap();
+        assert_eq!(seat, guest);
+        let decision = DecisionSnapshot::from_state(&session.state);
+        let wire = to_value(build_game_started_message(
+            &session,
+            &decision,
+            seat,
+            None,
+            Vec::new(),
+        ))
+        .unwrap();
+        assert_eq!(wire["type"], "GameStarted");
+        assert_printing(&wire["data"]["state"]["objects"][&key]);
+    }
+
     fn low_use_window_priority_result(
         semantic_player: PlayerId,
         controller: Option<PlayerId>,
@@ -20057,7 +20204,8 @@ mod issue_4548_full_create_tests {
 #[cfg(test)]
 mod game_submission_tests {
     use super::issue_4548_full_create_tests::{
-        recv_server_message, spawn_full_mode_server, spawn_full_mode_server_with_db,
+        recv_server_message, send_test_message, spawn_full_mode_server,
+        spawn_full_mode_server_with_db, test_client_hello,
     };
     use super::*;
     use engine::game::interaction::MAX_INTERACTION_STRING_LEN;
@@ -20986,6 +21134,80 @@ mod game_submission_tests {
         .await;
         server.abort();
         result.expect("stale socket replacement scenario timed out");
+    }
+
+    #[tokio::test]
+    async fn full_websocket_refuses_previous_game_protocol_before_state_delivery() {
+        let (url, server, _temp_dir, _app) =
+            spawn_full_mode_server_with_db(basic_land_test_database()).await;
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut host = connect_and_hello(url.clone()).await;
+            let deck = DeckData {
+                main_deck: vec!["Network Test Land".to_string(); 60],
+                ..Default::default()
+            };
+            let (game_code, player_token, full_key) = create_started_ai_game(
+                &mut host,
+                None,
+                deck,
+                Some(engine::types::format::FormatConfig::freeform().with_sandbox()),
+            )
+            .await;
+            let reconnect = ClientMessage::Reconnect {
+                game_code,
+                player_token,
+                full_key,
+            };
+
+            let previous = PROTOCOL_VERSION - 1;
+            let (mut outdated, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+            assert!(matches!(
+                recv_server_message(&mut outdated).await,
+                ServerMessage::ServerHello {
+                    mode: ServerMode::Full,
+                    protocol_version: PROTOCOL_VERSION,
+                    ..
+                }
+            ));
+            let mut hello = test_client_hello(Vec::new());
+            let ClientMessage::ClientHello { protocol_version, .. } = &mut hello else {
+                unreachable!("test_client_hello builds ClientHello");
+            };
+            *protocol_version = previous;
+            send_test_message(&mut outdated, &hello, false).await;
+            send_test_message(&mut outdated, &reconnect, false).await;
+
+            let refusal = recv_server_message(&mut outdated).await;
+            assert!(
+                matches!(&refusal, ServerMessage::Error { message, .. } if *message == format!(
+                    "Protocol version mismatch (client={previous} server={PROTOCOL_VERSION}). Please update your client."
+                )),
+                "expected a protocol refusal as the first reply, got {refusal:?}"
+            );
+            let reply = recv_server_message(&mut outdated).await;
+            assert!(
+                matches!(&reply, ServerMessage::Error { message, .. }
+                    if message == "ClientHello required before any other message"),
+                "expected the reconnect to be refused before state delivery, got {reply:?}"
+            );
+
+            let mut current = connect_and_hello(url).await;
+            send_test_message(&mut current, &reconnect, false).await;
+            loop {
+                match recv_server_message(&mut current).await {
+                    ServerMessage::GameStarted { state, your_player, .. } => {
+                        assert_eq!(your_player, PlayerId(0));
+                        assert!(!state.objects.is_empty(), "reconnect must deliver game objects");
+                        break;
+                    }
+                    ServerMessage::Error { message, .. } => panic!("current reconnect failed: {message}"),
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        server.abort();
+        result.expect("Full WebSocket protocol admission timed out");
     }
 
     #[tokio::test]

@@ -7,14 +7,15 @@ use crate::game::game_object::{
 };
 
 use super::counter::CounterType;
+use super::definitions::ReplacementIdentity;
 
 use super::ability::{
     ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile,
     LibraryPosition, TargetRef,
 };
 use super::events::EventObjectSnapshot;
-use super::identifiers::{ObjectId, ObjectIncarnationRef};
-use super::keywords::Keyword;
+use super::identifiers::{ObjectId, ObjectIncarnationRef, ProtectionReplacementSourceExt};
+use super::keywords::{Keyword, MatchedProtectionQuality};
 use super::mana::{ManaType, UnitDecision};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
@@ -25,10 +26,31 @@ pub use super::token_spec::{
 };
 pub use super::zones::{ChainReferentIntent, EtbTapState};
 
+/// CR 616.1: identity of one replacement candidate: the source object plus a
+/// per-source ordinal — or, for virtual protection candidates, the quality's
+/// full 64-bit minor word. `u64`, never `usize`: the index rides in
+/// serialized pause records on every target including wasm32, where `usize`
+/// is 32 bits wide and would truncate fingerprint qualities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReplacementId {
     pub source: ObjectId,
-    pub index: usize,
+    pub index: u64,
+}
+
+impl ReplacementId {
+    /// Contained `u64`→`usize` conversion for registry indexing. Real
+    /// definition ordinals always fit; anything wider (a virtual-candidate
+    /// payload, or foreign) resolves to `None` — the same answer a direct
+    /// `.get()` gives an out-of-range index on 64-bit.
+    pub(crate) fn index_as_usize(self) -> Option<usize> {
+        usize::try_from(self.index).ok()
+    }
+}
+
+impl ReplacementIdentity for ReplacementId {
+    fn registry_index(self) -> Option<usize> {
+        self.index_as_usize()
+    }
 }
 
 /// CR 701.23a + CR 614.6: Final disposition of one found card after the
@@ -116,21 +138,33 @@ pub struct BoundSearchFoundCandidate {
 pub enum AppliedReplacementKey {
     Object {
         source: ObjectId,
-        index: usize,
+        index: u64,
     },
     Floating {
-        index: usize,
+        index: u64,
     },
     StepEndMana {
-        index: usize,
+        index: u64,
     },
     /// CR 614.12a: The selected controller for an as-enters replacement.
     /// This rides the event's existing replacement provenance so the selected
     /// answer remains distinguishable from an originating controller override.
     EntryControllerChoice {
         source: ObjectId,
-        index: usize,
+        index: u64,
         controller: PlayerId,
+    },
+    /// CR 702.16e + CR 615.13 (Matt F4, keyed by ability in R8-F1):
+    /// prevention by player/object protection inside a simultaneous batch.
+    /// Protection has no registry shield (and no rider), so it aggregates
+    /// under its own key — one application per (quality, recipient) per
+    /// batch — instead of fragmenting one event per damage event. The key
+    /// carries the matched protection quality (CR 702.16g: "protection from
+    /// [A] and from [B]" behaves as two separate abilities), never granter
+    /// identity: the gate claims each event for its first matching ability,
+    /// and qualities survive save/load while grantor tables do not.
+    Protection {
+        quality: MatchedProtectionQuality,
     },
 }
 
@@ -139,18 +173,21 @@ pub enum AppliedReplacementKey {
 enum TaggedAppliedReplacementKey {
     Object {
         source: ObjectId,
-        index: usize,
+        index: u64,
     },
     Floating {
-        index: usize,
+        index: u64,
     },
     StepEndMana {
-        index: usize,
+        index: u64,
     },
     EntryControllerChoice {
         source: ObjectId,
-        index: usize,
+        index: u64,
         controller: PlayerId,
+    },
+    Protection {
+        quality: MatchedProtectionQuality,
     },
 }
 
@@ -191,6 +228,9 @@ impl AppliedReplacementKeyCompat {
                 index,
                 controller,
             },
+            AppliedReplacementKeyCompat::Tagged(TaggedAppliedReplacementKey::Protection {
+                quality,
+            }) => AppliedReplacementKey::Protection { quality },
             AppliedReplacementKeyCompat::Legacy(ReplacementId {
                 source: ObjectId(0),
                 index,
@@ -216,15 +256,15 @@ impl<'de> Deserialize<'de> for AppliedReplacementKey {
 }
 
 impl AppliedReplacementKey {
-    pub fn object(source: ObjectId, index: usize) -> Self {
+    pub fn object(source: ObjectId, index: u64) -> Self {
         Self::Object { source, index }
     }
 
-    pub fn floating(index: usize) -> Self {
+    pub fn floating(index: u64) -> Self {
         Self::Floating { index }
     }
 
-    pub fn step_end_mana(index: usize) -> Self {
+    pub fn step_end_mana(index: u64) -> Self {
         Self::StepEndMana { index }
     }
 
@@ -232,18 +272,22 @@ impl AppliedReplacementKey {
         match self {
             AppliedReplacementKey::Object { source, .. }
             | AppliedReplacementKey::EntryControllerChoice { source, .. } => source,
-            AppliedReplacementKey::Floating { .. } | AppliedReplacementKey::StepEndMana { .. } => {
-                ObjectId(0)
-            }
+            AppliedReplacementKey::Floating { .. }
+            | AppliedReplacementKey::StepEndMana { .. }
+            | AppliedReplacementKey::Protection { .. } => ObjectId(0),
         }
     }
 
-    pub fn index(self) -> usize {
+    pub fn index(self) -> u64 {
         match self {
             AppliedReplacementKey::Object { index, .. }
             | AppliedReplacementKey::Floating { index }
             | AppliedReplacementKey::StepEndMana { index }
             | AppliedReplacementKey::EntryControllerChoice { index, .. } => index,
+            // Protection never reaches `as_replacement_id`: the aggregate
+            // drain matches it before the registry lookup. The 0 is a
+            // type-system placeholder, never a registry address.
+            AppliedReplacementKey::Protection { .. } => 0,
         }
     }
 
@@ -255,6 +299,19 @@ impl AppliedReplacementKey {
     }
 
     pub fn for_event(event: &ProposedEvent, id: ReplacementId) -> Self {
+        // CR 616.1 (Matt R10-F1): protection virtual candidates key by
+        // their quality (pure unpack — no state needed, so the applied-set
+        // path stays total). The rid index carries the minor word whole on
+        // every target (`u64`, never `usize`), so our own writes always
+        // decode; foreign rids in the source range fall through to the
+        // opaque object key, contained.
+        if let Some(discriminant) = id.source.protection_source_discriminant() {
+            if let Some(quality) =
+                MatchedProtectionQuality::from_replacement_parts(discriminant, id.index)
+            {
+                return Self::Protection { quality };
+            }
+        }
         if id.source != ObjectId(0) {
             return Self::object(id.source, id.index);
         }
@@ -310,6 +367,26 @@ impl DrawEventStage {
     }
 }
 
+/// CR 614.16: provenance of a counter placement for "if an effect would put
+/// one or more counters" replacement effects. A placement is eligible when its
+/// cause is [`CounterCause::ResolvingEffect`] (the effect of a resolving spell
+/// or ability put the counter on) or [`CounterCause::ReplacementOrPrevention`]
+/// (another replacement or prevention effect did so, even when the original
+/// event being modified was not itself an effect). [`CounterCause::Other`] is
+/// the fail-closed default: cost payment, turn-based action, or any producer
+/// not yet classified. Real cause assignment owns to the callers (Phase 3);
+/// every direct constructor stamps `Other` until then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum CounterCause {
+    /// The placement comes from resolving a spell or ability effect.
+    ResolvingEffect,
+    /// The placement comes from another replacement or prevention effect.
+    ReplacementOrPrevention,
+    /// Fail-closed default: cost, turn-based action, or unclassified producer.
+    #[default]
+    Other,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CounterPlacement {
@@ -318,15 +395,24 @@ pub enum CounterPlacement {
         actor: PlayerId,
         object_id: ObjectId,
         counter_type: CounterType,
+        /// CR 614.16 provenance; inert until the eligibility gate lands.
+        #[serde(default)]
+        cause: CounterCause,
     },
     Player {
         actor: PlayerId,
         player_id: PlayerId,
         counter_kind: PlayerCounterKind,
+        /// CR 614.16 provenance; inert until the eligibility gate lands.
+        #[serde(default)]
+        cause: CounterCause,
     },
     Energy {
         actor: PlayerId,
         player_id: PlayerId,
+        /// CR 614.16 provenance; inert until the eligibility gate lands.
+        #[serde(default)]
+        cause: CounterCause,
     },
 }
 
@@ -352,6 +438,42 @@ impl CounterPlacement {
             | CounterPlacement::Player { actor, .. }
             | CounterPlacement::Energy { actor, .. } => *actor,
         }
+    }
+}
+
+impl ProposedEvent {
+    /// CR 614.16: promote a counter placement's [`CounterCause`] to
+    /// [`CounterCause::ReplacementOrPrevention`] once a replacement modifies
+    /// it. "If an effect would put one or more counters" replacements "also
+    /// apply if another replacement or prevention effect does so, even if the
+    /// original event being modified wasn't itself an effect" — so the
+    /// modified placement is effect-eligible whatever its original cause was
+    /// (cost payment and turn-based actions stamp `Other`, which fails the
+    /// gate until a replacement touches the placement). Callers are the
+    /// counter appliers that return a modified placement (`add_counter_applier`'s
+    /// three `Modified` arms and `apply_compleated_replacement`); every other
+    /// shape — including the move's remove stage, which is not a "put" — is
+    /// returned unchanged.
+    pub fn promote_counter_placement_cause(mut event: ProposedEvent) -> ProposedEvent {
+        match &mut event {
+            ProposedEvent::AddCounter { placement, .. } => match placement {
+                CounterPlacement::Object { cause, .. }
+                | CounterPlacement::Player { cause, .. }
+                | CounterPlacement::Energy { cause, .. } => {
+                    *cause = CounterCause::ReplacementOrPrevention;
+                }
+            },
+            ProposedEvent::MoveCounter {
+                stage: CounterMoveStage::Add,
+                cause,
+                ..
+            } => {
+                *cause = CounterCause::ReplacementOrPrevention;
+            }
+            ProposedEvent::MoveCounter { .. } => {}
+            _ => {}
+        }
+        event
     }
 }
 
@@ -440,6 +562,10 @@ pub struct TokenBatch {
     #[serde(default)]
     pub enter_tapped: EtbTapState,
     pub count: u32,
+    /// CR 614.6: where an applied replacement sent this batch's entrants
+    /// instead of the battlefield (see [`ProposedEvent::CreateToken`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirected_to: Option<Zone>,
 }
 
 impl TokenBatch {
@@ -451,6 +577,7 @@ impl TokenBatch {
             copy,
             enter_tapped,
             count,
+            redirected_to,
         } = self;
         ProposedEvent::CreateToken {
             owner,
@@ -459,6 +586,7 @@ impl TokenBatch {
             enter_tapped,
             count,
             appended: Vec::new(),
+            redirected_to,
             applied,
         }
     }
@@ -671,6 +799,26 @@ pub enum ProposedEvent {
         target: TargetRef,
         amount: u32,
         is_combat: bool,
+        /// CR 608.2h + CR 702.16e: the source's name as observed when the
+        /// damage event was created — the live name for live sources, the
+        /// last-known-information projection for departed sources (a Clone
+        /// copying Volatile Rig now in the graveyard reads "Volatile Rig",
+        /// not "Clone"). Protection matching reads this override before the
+        /// live object so chosen-name protection (Runed Halo) survives its
+        /// source across pauses, resumes, and save/load. `None` (including
+        /// payloads written before the field existed) falls back to the live
+        /// object, exactly the pre-override behavior.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_name: Option<String>,
+        /// CR 400.7 + CR 608.2h: the source incarnation observed when the
+        /// damage event was created. Protection matching reads the live object
+        /// only while it is still this incarnation; a later object under the
+        /// id (a Clone back in the graveyard) is a different object and the
+        /// match falls to this incarnation's exit last-known information
+        /// instead. `None` (including payloads written before the field
+        /// existed) keeps the legacy live-first read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_incarnation: Option<u64>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -830,6 +978,9 @@ pub enum ProposedEvent {
         remove_count: u32,
         add_count: u32,
         stage: CounterMoveStage,
+        /// CR 614.16 provenance of the initiating placement; inert until gate.
+        #[serde(default)]
+        cause: CounterCause,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -868,11 +1019,21 @@ pub enum ProposedEvent {
         /// whole event is delivered (and its created referent published) as one.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         appended: Vec<TokenBatch>,
+        /// CR 614.6 + CR 111.1: where an applied replacement sent the batch's
+        /// entrants instead of the battlefield (Hallowed Moonlight: "exile it
+        /// instead"). The creation itself still happens (CR 111.1, CR 701.7a);
+        /// only the entry is replaced. `None` is the ordinary battlefield entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redirected_to: Option<Zone>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     TokenEntry {
         entry_ref: ObjectId,
+        /// CR 614.6: the zone an applied replacement sent this entrant to
+        /// instead of the battlefield; `None` is the ordinary battlefield entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redirected_to: Option<Zone>,
         #[serde(default)]
         enter_tapped: EtbTapState,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1574,6 +1735,7 @@ impl ProposedEvent {
                 enter_tapped,
                 count,
                 appended,
+                redirected_to,
                 applied,
             } => {
                 let mut views = Vec::with_capacity(appended.len() + 1);
@@ -1584,6 +1746,7 @@ impl ProposedEvent {
                     enter_tapped,
                     count,
                     appended: Vec::new(),
+                    redirected_to,
                     applied: applied.clone(),
                 });
                 views.extend(
@@ -1639,6 +1802,7 @@ impl ProposedEvent {
             enter_tapped,
             count,
             mut appended,
+            redirected_to,
             mut applied,
         } = views.next()?
         else {
@@ -1652,6 +1816,7 @@ impl ProposedEvent {
                 enter_tapped,
                 count,
                 appended: view_appended,
+                redirected_to: view_redirected_to,
                 applied: view_applied,
             } = view
             else {
@@ -1663,6 +1828,7 @@ impl ProposedEvent {
                 copy,
                 enter_tapped,
                 count,
+                redirected_to: view_redirected_to,
             });
             appended.extend(view_appended);
             applied.extend(view_applied);
@@ -1674,6 +1840,7 @@ impl ProposedEvent {
             enter_tapped,
             count,
             appended,
+            redirected_to,
             applied,
         })
     }
@@ -1689,6 +1856,7 @@ impl ProposedEvent {
             enter_tapped,
             count,
             appended,
+            redirected_to,
             ..
         } = self
         else {
@@ -1701,6 +1869,7 @@ impl ProposedEvent {
             copy,
             enter_tapped,
             count,
+            redirected_to,
         });
         batches.extend(appended);
         Some(batches)
@@ -1936,6 +2105,28 @@ mod tests {
         assert!(!set.contains(&id3));
     }
 
+    /// CR 702.16e + CR 615.13 (Matt F4, keyed by ability in R8-F1): the
+    /// protection tally key round-trips through the tagged mirror with its
+    /// matched quality, so paused-batch frames carrying protection
+    /// prevention survive save/load. The pre-quality shape (PR heads only,
+    /// never main) fails closed instead of loading as a quality-less key.
+    #[test]
+    fn protection_key_serde_round_trip() {
+        let key = AppliedReplacementKey::Protection {
+            quality: MatchedProtectionQuality::CardType(CoreType::Artifact),
+        };
+        let json = serde_json::to_string(&key).expect("the key serializes");
+        assert_eq!(
+            json,
+            r#"{"type":"Protection","quality":{"CardType":"Artifact"}}"#
+        );
+        let back: AppliedReplacementKey =
+            serde_json::from_str(&json).expect("the key deserializes");
+        assert_eq!(back, key);
+        assert_eq!(back.source(), ObjectId(0));
+        assert!(serde_json::from_str::<AppliedReplacementKey>(r#"{"type":"Protection"}"#).is_err());
+    }
+
     #[test]
     fn add_counter_object_serde_keeps_legacy_flat_shape() {
         let event = ProposedEvent::AddCounter {
@@ -1943,6 +2134,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: ObjectId(1),
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -1967,6 +2159,7 @@ mod tests {
                     actor: PlayerId(0),
                     object_id: ObjectId(1),
                     counter_type: CounterType::Plus1Plus1,
+                    ..
                 },
                 count: 1,
                 ..
@@ -1981,6 +2174,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: ObjectId(1),
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),
@@ -2000,8 +2194,87 @@ mod tests {
                     actor: PlayerId(0),
                     object_id: ObjectId(1),
                     counter_type: CounterType::Plus1Plus1,
+                    ..
                 },
                 count: 1,
+                ..
+            }
+        ));
+    }
+
+    /// P1-1: every `CounterCause` field defaults to fail-closed `Other`, and a
+    /// pre-cause save (no `cause` key) loads with `Other`. Revert-fails in both
+    /// directions: remove any `#[serde(default)]` and the legacy half fails to
+    /// deserialize; stop stamping `Other` and the fresh-save assertions fail.
+    #[test]
+    fn counter_cause_default_and_backcompat() {
+        assert_eq!(CounterCause::default(), CounterCause::Other);
+        let placements = [
+            CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(1),
+                counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
+            },
+            CounterPlacement::Player {
+                actor: PlayerId(0),
+                player_id: PlayerId(1),
+                counter_kind: PlayerCounterKind::Rad,
+                cause: CounterCause::Other,
+            },
+            CounterPlacement::Energy {
+                actor: PlayerId(0),
+                player_id: PlayerId(1),
+                cause: CounterCause::Other,
+            },
+        ];
+        for placement in placements {
+            let event = ProposedEvent::AddCounter {
+                placement,
+                count: 1,
+                applied: HashSet::new(),
+            };
+            let mut wire = serde_json::to_value(&event).unwrap();
+            // Reach-guard: a fresh save actually carries the new field.
+            assert_eq!(wire["AddCounter"]["cause"], serde_json::json!("Other"));
+            wire["AddCounter"].as_object_mut().unwrap().remove("cause");
+            let legacy: ProposedEvent = serde_json::from_value(wire).unwrap();
+            assert!(matches!(
+                legacy,
+                ProposedEvent::AddCounter {
+                    placement: CounterPlacement::Object {
+                        cause: CounterCause::Other,
+                        ..
+                    } | CounterPlacement::Player {
+                        cause: CounterCause::Other,
+                        ..
+                    } | CounterPlacement::Energy {
+                        cause: CounterCause::Other,
+                        ..
+                    },
+                    ..
+                }
+            ));
+        }
+        let moved = ProposedEvent::MoveCounter {
+            actor: PlayerId(0),
+            source_id: ObjectId(1),
+            destination_id: ObjectId(2),
+            counter_type: CounterType::Plus1Plus1,
+            remove_count: 1,
+            add_count: 1,
+            stage: CounterMoveStage::Add,
+            cause: CounterCause::Other,
+            applied: HashSet::new(),
+        };
+        let mut wire = serde_json::to_value(&moved).unwrap();
+        assert_eq!(wire["MoveCounter"]["cause"], serde_json::json!("Other"));
+        wire["MoveCounter"].as_object_mut().unwrap().remove("cause");
+        let legacy: ProposedEvent = serde_json::from_value(wire).unwrap();
+        assert!(matches!(
+            legacy,
+            ProposedEvent::MoveCounter {
+                cause: CounterCause::Other,
                 ..
             }
         ));
@@ -2034,6 +2307,7 @@ mod tests {
             remove_count: 1,
             add_count: 1,
             stage: CounterMoveStage::Remove,
+            cause: CounterCause::Other,
             applied: HashSet::new(),
         };
         let add = ProposedEvent::MoveCounter {
@@ -2044,6 +2318,7 @@ mod tests {
             remove_count: 1,
             add_count: 1,
             stage: CounterMoveStage::Add,
+            cause: CounterCause::Other,
             applied: HashSet::new(),
         };
 
@@ -2145,6 +2420,7 @@ mod tests {
 
     fn batch(name: &str, count: u32) -> TokenBatch {
         TokenBatch {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: batch_spec(name),
             copy: None,
@@ -2154,11 +2430,12 @@ mod tests {
     }
 
     fn applied_with(index: usize) -> HashSet<AppliedReplacementKey> {
-        HashSet::from([AppliedReplacementKey::object(ObjectId(9), index)])
+        HashSet::from([AppliedReplacementKey::object(ObjectId(9), index as u64)])
     }
 
     fn compound(primary: &str, appended: Vec<TokenBatch>) -> ProposedEvent {
         ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: batch_spec(primary),
             copy: None,

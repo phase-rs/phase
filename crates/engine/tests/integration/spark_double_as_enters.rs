@@ -2778,14 +2778,12 @@ mod feldon_tokens {
         // Reach guard: each copy stopped on its own Tribute, answered by the
         // chosen opponent; the first answer went on to the second copy's choice.
         if pay {
-            // Reach guard: the paid counter stopped on its order for each copy.
-            // The second copy is not offered its own Tribute after the first
-            // copy's ordered counter; the merge base behaves the same.
+            // CR 702.104a + CR 616.1f: each entering copy independently
+            // offers Tribute, then orders its own paid counter's replacements.
             assert_eq!(
                 (tributes, counter_orders),
-                (1, 2),
-                "KNOWN-WRONG, pre-existing, as at the merge base: the second copy is not \
-                 offered its own Tribute (CR 702.104a) after the first copy's ordered counter"
+                (2, 2),
+                "each copy offers Tribute and orders its paid counter"
             );
         } else {
             assert_eq!((tributes, counter_orders), (2, 0), "one Tribute per copy");
@@ -2834,14 +2832,19 @@ mod feldon_tokens {
     /// The same event when the opponent pays the Tribute and its counter stops
     /// on its Hardened Scales / Doubling Season order: the order's answer puts
     /// the copy onto the battlefield and hands its entry to the event, so Soul
-    /// Warden sees both copies. Not a clean Tribute witness: the second copy is
-    /// not asked for its own Tribute (see the reach guard), which is the state
-    /// of the merge base.
+    /// Warden sees both copies. Each copy offers its own Tribute before entering
+    /// and receives only its own counters, even after the first copy suspends.
+    /// CR 702.104a + CR 616.1f.
     #[test]
     fn a_paid_tribute_whose_counter_is_ordered_keeps_its_entrant_in_the_event() {
         let (copies, gained) = fanatic_copies_and_warden_life(2, P1, true);
         assert_eq!(copies.len(), 2, "Doubling Season makes two copies");
         assert_eq!(gained, 2, "Soul Warden sees both copies");
+        assert_eq!(
+            copies,
+            vec![(Some(7), false); 2],
+            "each 3/3 gets four counters from Scales-before-Season and no unpaid Tribute bonus"
+        );
     }
 
     const SATORU: &str = "Menace\nWhenever Satoru and/or one or more other nontoken creatures you control enter, if none of them were cast or no mana was spent to cast them, draw a card.";

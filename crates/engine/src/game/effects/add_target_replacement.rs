@@ -410,7 +410,7 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::StartingLifeTotal { .. }
         | QuantityRef::StartingDeckSize { .. }
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::LifeGainedThisTurn { .. }
@@ -444,7 +444,7 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         QuantityRef::ControlledByEachPlayer { .. }
         | QuantityRef::ZoneChangeCountThisTurn { .. }
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::TargetObjectManaValue { .. }
@@ -479,7 +479,6 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         | QuantityRef::ChosenNumber
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::DungeonsCompleted
         | QuantityRef::TimesCostPaidThisResolution
@@ -852,6 +851,8 @@ mod tests {
             target,
             amount,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: Default::default(),
         }
     }
@@ -1885,6 +1886,8 @@ mod tests {
             target: TargetRef::Object(victim),
             amount: 2,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: Default::default(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -1902,6 +1905,8 @@ mod tests {
             target: TargetRef::Object(victim),
             amount: 2,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: Default::default(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
@@ -1995,6 +2000,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             spec: Box::new(token_spec),
             copy: None,
@@ -2092,6 +2098,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(1),
             spec: Box::new(token_spec),
             copy: None,
@@ -2184,6 +2191,7 @@ mod tests {
             attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         };
         let proposed = ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(token_spec),
             copy: None,

@@ -729,6 +729,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -1263,6 +1264,7 @@ mod tests {
                 )),
                 remaining: 1,
                 min_total_power: None,
+                trigger_event: None,
             },
             candidates: Vec::new(),
         };

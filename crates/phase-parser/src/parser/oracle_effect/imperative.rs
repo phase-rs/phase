@@ -21,7 +21,7 @@ use super::counter::{
 };
 use super::lower::{
     parse_multi_target_count_expr, parse_where_x_quantity_expression,
-    parse_where_x_quantity_expression_with_owner, rebind_cost_paid_object_pt_to_target,
+    parse_where_x_quantity_expression_with_owner, rebind_pt_scope_to_target,
     strip_leading_quantifier, strip_terminal_where_x, strip_trailing_where_x, WhereXBinding,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
@@ -62,7 +62,7 @@ use crate::types::ability::{
     CopyRetargetPermission, CountBinding, CountScope, CounterAdjustment, CounterKindChooser,
     CounterKindDomain, DigSource, DoorLockOp, Duration, Effect, EffectScope, ExtraPhaseAnchor,
     ExtraPhaseRecipient, FaceDownProfile, FilterProp, ForceBlockAttackerRef, GrantedAbilityScope,
-    LibraryPosition, LibraryShuffleMode, MultiTargetSpec, ObjectSelectionCardinality,
+    LibraryPosition, LibraryShuffleMode, MultiTargetSpec, ObjectScope, ObjectSelectionCardinality,
     ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerFilter,
     PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat,
     PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, ReturnResultReadSpec,
@@ -1915,6 +1915,9 @@ pub(super) fn parse_targeted_action_ast(
         if matches!(count_word, CountWord::SourceExclusion) {
             add_another_to_filter_recursive(&mut target);
         }
+        // CR 301.5a + CR 701.21a: "sacrifice an Equipment attached to ~" names a population,
+        // not every Equipment you control (Outfitted Jouster; Three Dog, Galaxy News DJ).
+        let (target, rem) = crate::parser::oracle_cost::fold_attached_to_source_rider(target, rem);
         let base_was_typed = matches!(target, TargetFilter::Typed(_));
         let (target, folded_rest) = fold_article_led_type_union(target, rem);
         // CR 608.2c: A union can leave a third leg whether the base is already
@@ -4712,22 +4715,41 @@ fn parse_hand_reveal_target_and_card_filter(
 
     // CR 107.1c + CR 701.20a: "any number of [type] cards in your hand" lets the
     // player choose which matching cards (zero or more) to reveal; "all [type]
-    // cards" keeps the historical single post-reveal choice.
-    if let Ok((after_quantifier, cardinality)) = alt((
+    // cards" / "each [type] card" keep the historical single post-reveal choice.
+    if let Ok((after_quantifier, (cardinality, noun_marker, noun_in, noun_from))) = alt((
         value(
-            ObjectSelectionCardinality::AnyNumber,
+            (
+                ObjectSelectionCardinality::AnyNumber,
+                " cards",
+                " cards in ",
+                " cards from ",
+            ),
             tag::<_, _, OracleError<'_>>("any number of "),
         ),
-        value(ObjectSelectionCardinality::SINGLE, tag("all ")),
+        value(
+            (
+                ObjectSelectionCardinality::SINGLE,
+                " cards",
+                " cards in ",
+                " cards from ",
+            ),
+            tag("all "),
+        ),
+        value(
+            (
+                ObjectSelectionCardinality::SINGLE,
+                " card",
+                " card in ",
+                " card from ",
+            ),
+            tag("each "),
+        ),
     ))
     .parse(after_reveal_lower)
     {
         let Ok((hand_phrase, descriptor)) = terminated(
-            take_until::<_, _, OracleError<'_>>(" cards"),
-            alt((
-                tag::<_, _, OracleError<'_>>(" cards in "),
-                tag(" cards from "),
-            )),
+            take_until::<_, _, OracleError<'_>>(noun_marker),
+            alt((tag::<_, _, OracleError<'_>>(noun_in), tag(noun_from))),
         )
         .parse(after_quantifier) else {
             return (TargetFilter::Any, TargetFilter::None, cardinality);
@@ -4741,7 +4763,9 @@ fn parse_hand_reveal_target_and_card_filter(
         let singular = format!("{} card", descriptor.trim());
         let (filter, rem) =
             parse_type_phrase_folding_with_ctx(&singular, &mut ctx.clone_player_antecedents());
-        if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
+        if rem.trim().is_empty()
+            && matches!(filter, TargetFilter::Typed(_) | TargetFilter::Or { .. })
+        {
             return (target, filter, cardinality);
         }
         return (target, TargetFilter::None, cardinality);
@@ -5366,6 +5390,20 @@ pub(super) fn parse_choose_ast(
         }
 
         if super::is_choose_as_targeting(rest_lower) {
+            // CR 115.1 + CR 115.9b/c: a choose-target instruction can qualify
+            // the stack object by both kind and the objects/players it targets.
+            // Consume the complete target phrase before the generic effect
+            // parser, whose ordinary target reader only sees the first spell
+            // leg of "spell or ability" and drops the qualifier.
+            if let Some((target, remainder)) = nom_on_lower(rest, rest_lower, |input| {
+                let (input, _) = tag("target ").parse(input)?;
+                nom_target::parse_stack_object_target(input)
+            }) {
+                if terminal_punctuation_only(remainder) {
+                    return Some(ChooseImperativeAst::TargetOnly { target });
+                }
+            }
+
             // CR 115.1c + CR 601.2c: "Choose target X and target Y" declares
             // two independent target slots on the same activated/triggered
             // ability. Detect the compound "target ... and target ..." shape
@@ -8255,8 +8293,9 @@ fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> 
 ///
 /// CR 113.3b / CR 113.3c: `kind: None` (both kinds legal) is CORRECT here and
 /// is not a dropped axis. Every call site is gated to a phrase that names both
-/// kinds or none: `parse_counter_ast` (this file) requires
-/// "activated or triggered ability" or mass-mode bare "abilities", and both
+/// kinds or none: `parse_counter_ast` (this file) reaches it in mass mode, and
+/// in single-target mode only for an "activated or triggered ability" phrase
+/// `parse_stack_object_target` refuses; both
 /// `oracle_effect::mod` sites require the same phrase. A kind-narrowing counter
 /// phrase ("counter target triggered ability …", Consign to Memory) never
 /// reaches here — it is routed to
@@ -13267,16 +13306,6 @@ pub(super) fn parse_counter_ast(
     }
     let abilities_match = nom_primitives::scan_contains(rest, "activated or triggered ability")
         || (mass_consumed && abilities_head(rest).is_ok());
-    if abilities_match {
-        // CR 118.12: Parse "unless pays" even for ability counters.
-        let unless_pay = parse_counter_unless_pay(rest)?;
-        return Some(ZoneCounterImperativeAst::Counter {
-            target: stack_ability_filter_from_text(rest),
-            source_rider: None,
-            unless_pay,
-            all: mass_consumed,
-        });
-    }
 
     // CR 701.6a + CR 115.1: "Counter target <stack-object phrase>" where the
     // phrase is a multi-way disjunction of spells and/or activated/triggered
@@ -13285,18 +13314,28 @@ pub(super) fn parse_counter_ast(
     // "activated ability" disjunct (it is not a card type) and silently drops
     // the noncreature restriction, yielding a degenerate empty-`type_filters`
     // stack filter. Strip the leading "target " token (nom `tag`, not string
-    // matching) and try the dedicated stack-object combinator first; it
-    // composes the ability-kind axis with an optional restricted-spell tail.
+    // matching) and try the dedicated stack-object combinator; it composes the
+    // ability-kind axis with an optional restricted-spell tail and the
+    // trailing controller / "that targets" qualifier.
     let stack_phrase = opt(tag::<_, _, OracleError<'_>>("target "))
         .parse(rest)
         .map(|(after, _)| after)
         .unwrap_or(rest);
-    if let Ok((_, stack_target)) =
-        crate::parser::oracle_nom::target::parse_stack_object_target(stack_phrase)
-    {
+    let stack_target = crate::parser::oracle_nom::target::parse_stack_object_target(stack_phrase)
+        .ok()
+        .map(|(_, target)| target);
+    // Single-target mode prefers the grammar so a qualifier after "activated
+    // or triggered ability" is kept (Nimble Obstructionist).
+    let target = if abilities_match && (mass_consumed || stack_target.is_none()) {
+        Some(stack_ability_filter_from_text(rest))
+    } else {
+        stack_target
+    };
+    if let Some(target) = target {
+        // CR 118.12: Parse "unless pays" even for ability counters.
         let unless_pay = parse_counter_unless_pay(rest)?;
         return Some(ZoneCounterImperativeAst::Counter {
-            target: stack_target,
+            target,
             source_rider: None,
             unless_pay,
             all: mass_consumed,
@@ -19708,7 +19747,7 @@ pub(super) fn try_parse_amass(text: &str, lower: &str, player: TargetFilter) -> 
     // already resolves against (see `parent_target_controller`) and reads the
     // object live while present, falling back to its LKI once it has left
     // (CR 608.2h) — mirroring the identical rebind
-    // `rebind_cost_paid_object_pt_to_target` already performs for a targeted
+    // `rebind_pt_scope_to_target` already performs for a targeted
     // continuous grant's "that creature's power" (Xenagos, God of Revels).
     // Gated on the parent-target player anaphor so a plain "you"/"they"
     // amass (`player == Controller`, no parent-target dependency) is
@@ -19717,7 +19756,7 @@ pub(super) fn try_parse_amass(text: &str, lower: &str, player: TargetFilter) -> 
         player,
         TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner
     ) {
-        rebind_cost_paid_object_pt_to_target(&mut count);
+        rebind_pt_scope_to_target(&mut count, ObjectScope::CostPaidObject);
     }
 
     Some(Effect::Amass {
@@ -20156,6 +20195,9 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{
+        filter_contains_filter_prop, filter_grammar_any, FilterGrammarNode, TurnWindow,
+    };
 
     use crate::types::ability::{EffectKind, ParitySource, ZoneChoiceChooser};
     use crate::types::counter::CounterType;
@@ -22619,10 +22661,10 @@ mod tests {
                     matches!(
                         amount,
                         QuantityExpr::Ref {
-                            qty: crate::types::ability::QuantityRef::LifeLostThisTurn { .. }
+                            qty: crate::types::ability::QuantityRef::LifeLost { .. }
                         }
                     ),
-                    "Expected LifeLostThisTurn, got {amount:?}"
+                    "Expected LifeLost, got {amount:?}"
                 );
             }
             other => panic!("Expected GainLife, got {other:?}"),
@@ -24088,7 +24130,7 @@ mod tests {
     /// CR 115.1 + CR 119.3: Astarion (Feed mode) — "loses life equal to the
     /// amount of life they lost this turn." The third-person "they" anaphor in a
     /// targeted life-change refers to the effect's player target, so it maps to
-    /// `LifeLostThisTurn { Target }` (NOT `Controller` like the "you" form). The
+    /// `LifeLost { Target }` (NOT `Controller` like the "you" form). The
     /// maintainer's shared `parse_life_lost_ref` "amount of … they lost" tag is
     /// unreachable behind its own prefix strip, so this targeted-context
     /// recognizer is what resurrects the Feed mode.
@@ -24105,8 +24147,9 @@ mod tests {
                 NumericImperativeAst::LoseLife { amount } => assert_eq!(
                     amount,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::LifeLostThisTurn {
+                        qty: QuantityRef::LifeLost {
                             player: PlayerScope::Target,
+                            window: TurnWindow::ThisTurn,
                         },
                     },
                     "{text:?} must be Target-scoped",
@@ -24342,7 +24385,7 @@ mod tests {
     /// other target creature" — established), not a cost/trigger-condition
     /// snapshot. The shared where-X/CDA grammar lowers the context-free
     /// phrase to `ObjectScope::CostPaidObject`; `try_parse_amass` rebinds it
-    /// to `ObjectScope::Target` (`rebind_cost_paid_object_pt_to_target`) so
+    /// to `ObjectScope::Target` (`rebind_pt_scope_to_target`) so
     /// the quantity reads the referenced creature LIVE while it remains on
     /// the battlefield (indestructible, regenerated, or otherwise-prevented
     /// destruction) and falls back to its LKI only once it has actually
@@ -27756,6 +27799,122 @@ mod tests {
         }
     }
 
+    fn has_stack_leg(filter: &TargetFilter, ability: bool) -> bool {
+        filter_grammar_any(filter, &|node| match node {
+            FilterGrammarNode::Filter(TargetFilter::StackSpell) => !ability,
+            FilterGrammarNode::Filter(TargetFilter::StackAbility { .. }) => ability,
+            FilterGrammarNode::Filter(_)
+            | FilterGrammarNode::Prop(_)
+            | FilterGrammarNode::Player(_) => false,
+        })
+    }
+
+    /// SHAPE — CR 115.1 + CR 115.9b: Flavor Judge's exact target clause must
+    /// preserve both stack-object kinds and the "targets a permanent" filter.
+    #[test]
+    fn flavor_judge_choose_target_preserves_spell_ability_and_targets_filter() {
+        let text = "Choose target spell or ability that targets a permanent you control.";
+        let lower = text.to_lowercase();
+        let Some(ChooseImperativeAst::TargetOnly { target }) =
+            parse_choose_ast(text, &lower, &mut ParseContext::default())
+        else {
+            panic!("Flavor Judge's exact target clause must lower to TargetOnly");
+        };
+
+        assert!(matches!(
+            target,
+            TargetFilter::Or { ref filters } if filters.len() == 2
+        ));
+        assert!(
+            has_stack_leg(&target, false),
+            "the spell leg must survive the target qualifier: {target:?}"
+        );
+        assert!(
+            has_stack_leg(&target, true),
+            "the ability leg must survive the target qualifier: {target:?}"
+        );
+        assert!(
+            filter_contains_filter_prop(&target, &|property| matches!(
+                property,
+                FilterProp::Targets { .. }
+            )),
+            "the Targets property must survive: {target:?}"
+        );
+    }
+
+    /// SHAPE — CR 115.1 + CR 115.9c: Radiant Performer's exact target clause
+    /// must preserve both stack-object kinds and both single-target qualifiers.
+    #[test]
+    fn radiant_performer_choose_target_preserves_spell_ability_and_single_target_filters() {
+        let text = "Choose target spell or ability that targets only a single permanent or player.";
+        let lower = text.to_lowercase();
+        let Some(ChooseImperativeAst::TargetOnly { target }) =
+            parse_choose_ast(text, &lower, &mut ParseContext::default())
+        else {
+            panic!("Radiant Performer's exact target clause must lower to TargetOnly");
+        };
+
+        assert!(matches!(
+            target,
+            TargetFilter::Or { ref filters } if filters.len() == 2
+        ));
+        assert!(
+            has_stack_leg(&target, false),
+            "the spell leg must survive the target qualifier: {target:?}"
+        );
+        assert!(
+            has_stack_leg(&target, true),
+            "the ability leg must survive the target qualifier: {target:?}"
+        );
+        assert!(
+            filter_contains_filter_prop(&target, &|property| matches!(
+                property,
+                FilterProp::TargetsOnly { .. }
+            )),
+            "the TargetsOnly property must survive: {target:?}"
+        );
+        assert!(
+            filter_contains_filter_prop(&target, &|property| {
+                matches!(property, FilterProp::HasSingleTarget)
+            }),
+            "the HasSingleTarget property must survive: {target:?}"
+        );
+    }
+
+    /// The exact Wyll's Reversal clause has an unsupported trailing target
+    /// cardinality rider. It must not be claimed by the all-consuming stack
+    /// target arm; the positive `Some` guard proves the ordinary choose path
+    /// still reaches a real AST instead of failing before the boundary check.
+    #[test]
+    fn choose_target_stack_grammar_respects_wyll_reversal_boundary() {
+        let text = "Choose target spell or ability with one or more targets.";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("Wyll's Reversal target clause must reach a choose AST");
+        assert!(
+            !matches!(
+                result,
+                ChooseImperativeAst::TargetOnly {
+                    target: TargetFilter::Or { .. }
+                }
+            ),
+            "the unsupported Wyll's Reversal rider must not be swallowed as a complete Or target"
+        );
+
+        let ordinary = "Choose target creature.";
+        let ordinary_lower = ordinary.to_lowercase();
+        let Some(ChooseImperativeAst::TargetOnly { target }) =
+            parse_choose_ast(ordinary, &ordinary_lower, &mut ParseContext::default())
+        else {
+            panic!("ordinary choose-target text must still reach TargetOnly");
+        };
+        assert!(
+            matches!(target, TargetFilter::Typed(TypedFilter { ref type_filters, .. })
+                if type_filters.contains(&TypeFilter::Creature)),
+            "ordinary choose target creature must retain its creature filter: {target:?}"
+        );
+    }
+
     /// CR 609.7a: Desperate Gambit's "Choose a source you control" must lower to
     /// `ChooseDamageSource` with a controller-scoped candidate filter, not
     /// `TargetOnly { Any }`.
@@ -30933,11 +31092,11 @@ mod tests {
             "draw a card for each spell you've cast this turn from anywhere other than your hand";
         match parse_numeric_imperative_ast(text, text) {
             Some(NumericImperativeAst::Draw { count, .. }) => {
-                // Must resolve to the SpellsCastThisTurn ref carrying the cast-origin
+                // Must resolve to the SpellsCast ref carrying the cast-origin
                 // filter, not a Fixed(1) draw.
                 match count {
                     QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn { filter, .. },
+                        qty: QuantityRef::SpellsCast { filter, .. },
                     } => {
                         let filter = filter.expect("cast-origin filter must be present");
                         assert!(
@@ -30946,7 +31105,7 @@ mod tests {
                             "draw count must carry the cast-origin Not(InZone(Hand)) filter, got {filter:?}"
                         );
                     }
-                    other => panic!("expected SpellsCastThisTurn ref, got {other:?}"),
+                    other => panic!("expected SpellsCast ref, got {other:?}"),
                 }
             }
             other => panic!("expected Draw imperative, got {other:?}"),
@@ -31575,6 +31734,89 @@ mod tests {
                 assert_eq!(scope, crate::types::ability::CountScope::Controller);
             }
             other => panic!("expected ZoneCardCount, got {other:?}"),
+        }
+    }
+
+    /// CR 701.20a: "reveals each nonland card in their hand" (Thought Rattle)
+    /// is a whole-hand reveal restricted to a typed filter, not an unfiltered one.
+    #[test]
+    fn parse_hand_reveal_each_filtered_card() {
+        for input in [
+            "reveals each nonland card in their hand",
+            "reveals each nonland card from their hand",
+        ] {
+            let lower = input.to_lowercase();
+            let result = parse_hand_reveal_ast(input, &lower, &mut ParseContext::default());
+            let Some(HandRevealImperativeAst::RevealAll {
+                card_filter,
+                cardinality,
+                ..
+            }) = result
+            else {
+                panic!("{input}: expected RevealAll, got {result:?}");
+            };
+            assert_eq!(cardinality, ObjectSelectionCardinality::SINGLE);
+            assert!(
+                matches!(card_filter, TargetFilter::Typed(_)),
+                "{input}: expected typed nonland filter, got {card_filter:?}"
+            );
+        }
+    }
+
+    /// CR 701.20a: "reveals all nonland cards in their hand" (Thought Partition, Juggernaut Peddler)
+    /// and "reveals all creature and land cards in their hand" (Boareskyr Tollkeeper)
+    /// retain the typed filter.
+    #[test]
+    fn parse_hand_reveal_all_filtered_cards() {
+        for input in [
+            "reveals all nonland cards in their hand",
+            "reveals all nonland cards from their hand",
+            "reveals all creature and land cards in their hand",
+        ] {
+            let lower = input.to_lowercase();
+            let result = parse_hand_reveal_ast(input, &lower, &mut ParseContext::default());
+            let Some(HandRevealImperativeAst::RevealAll {
+                card_filter,
+                cardinality,
+                ..
+            }) = result
+            else {
+                panic!("{input}: expected RevealAll, got {result:?}");
+            };
+            assert_eq!(cardinality, ObjectSelectionCardinality::SINGLE);
+            assert!(
+                matches!(
+                    card_filter,
+                    TargetFilter::Typed(_) | TargetFilter::Or { .. }
+                ),
+                "{input}: expected typed or disjunctive filter, got {card_filter:?}"
+            );
+        }
+    }
+
+    /// CR 107.1c + CR 701.20a: "any number of" preserves ObjectSelectionCardinality::AnyNumber
+    /// and the typed filter.
+    #[test]
+    fn parse_hand_reveal_any_number_filtered_cards() {
+        for input in [
+            "reveals any number of creature cards from their hand",
+            "reveals any number of nonland cards in their hand",
+        ] {
+            let lower = input.to_lowercase();
+            let result = parse_hand_reveal_ast(input, &lower, &mut ParseContext::default());
+            let Some(HandRevealImperativeAst::RevealAll {
+                card_filter,
+                cardinality,
+                ..
+            }) = result
+            else {
+                panic!("{input}: expected RevealAll, got {result:?}");
+            };
+            assert_eq!(cardinality, ObjectSelectionCardinality::AnyNumber);
+            assert!(
+                matches!(card_filter, TargetFilter::Typed(_)),
+                "{input}: expected typed filter, got {card_filter:?}"
+            );
         }
     }
 

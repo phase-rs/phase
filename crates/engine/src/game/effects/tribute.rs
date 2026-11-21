@@ -17,6 +17,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::proposed_event::CounterCause;
 
 /// CR 702.104a: Prompt the previously chosen opponent pay-or-decline.
 ///
@@ -105,6 +106,9 @@ pub(crate) fn apply_paid(
             source_id,
             crate::types::counter::CounterType::Plus1Plus1,
             count,
+            // CR 614.16: the paid tribute counters enter with the creature
+            // (CR 702.104a replacement-style entry modification).
+            CounterCause::ReplacementOrPrevention,
             events,
         )
     {

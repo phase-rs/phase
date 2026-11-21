@@ -152,7 +152,8 @@
     "loading": "Wczytywanie {{name}}",
     "unimplemented": "Niezaimplementowane: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Obrócona"
+    "tapped": "Obrócona",
+    "reloadArt": "Dotknij, aby ponownie wczytać grafikę"
   },
   "preview": {
     "holdCtrlBack": "Przytrzymaj Ctrl, aby zobaczyć tylną stronę",
@@ -161,6 +162,8 @@
     "flip": "Odwróć",
     "report": "Zgłoś problem",
     "reported": "Zgłoszono ✓",
+    "reportNotSent": "Nie wysłano",
+    "reloadArt": "Wczytaj grafikę ponownie",
     "altParsedAbilities": "Alt: przeanalizowane zdolności",
     "debugId": "ID: {{id}}",
     "engineParse": "Analiza silnika",
@@ -1348,7 +1351,8 @@
       "title": "{{effect}}, chyba że zapłacisz",
       "titleChooseOne": "{{effect}}, chyba że zapłacisz jeden",
       "dontPay": "Nie płać",
-      "takeEffect": "Przyjmij efekt"
+      "takeEffect": "Przyjmij efekt",
+      "priorChoice": "Gracz {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "Połącz z Arcane?",
@@ -1856,6 +1860,13 @@
       "titleExact_one": "Odrzuć kartę",
       "titleExact_other": "Odrzuć {{count}} kart",
       "titleWard": "Ward — Odrzuć kartę",
+      "instructionWithReason": "{{reason}}: {{instruction}}",
+      "reason": {
+        "ward": "Ward",
+        "connive": "Connive",
+        "additionalCost": "Koszt dodatkowy",
+        "manaAbility": "Zdolność manowa"
+      },
       "subtitleUpTo_one": "Wybierz do {{count}} karty do odrzucenia",
       "subtitleUpTo_other": "Wybierz do {{count}} kart do odrzucenia",
       "subtitleUnless": "Wybierz {{count}} kart lub 1 pasującą kartę do odrzucenia",
@@ -2015,7 +2026,8 @@
     "scrollLeft": "Przewiń w lewo",
     "scrollRight": "Przewiń w prawo",
     "confirm": "Potwierdź",
-    "cancel": "Anuluj"
+    "cancel": "Anuluj",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Adventure",
@@ -2441,6 +2453,9 @@
     "optionalTriggers": "Opcjonalne zdolności wyzwalane ({{count, number}})",
     "replacementChoices": "Wybory zastępowania ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Przytrzymaj, aby zobaczyć całą kartę"
+  },
   "optionalEffect": {
     "sourceFallback": "Efekt",
     "title": "{{name}} - Efekt opcjonalny",
@@ -2555,7 +2570,7 @@
     "appliedLast": "Zastosowany ostatni — ten zadziała",
     "resultLabel": "Wynik: {{outcome}}",
     "confirmOrder": "Potwierdź kolejność",
-    "dragHint": "Przeciągnij, aby zmienić kolejność, lub użyj strzałek.",
+    "dragHint": "Przeciągnij uchwyt <grip>⠿</grip>, aby zmienić kolejność, lub użyj strzałek.",
     "chooseSubtitle": "Wybierz, który efekt zastępujący zastosować.",
     "candidateFallback": "Efekt zastępujący {{number}}",
     "orderSubtitleComposing": "Wszystkie te efekty zmieniają przebieg tego zdarzenia. Przeciągnij, aby ustawić kolejność ich zastosowania — każdy zostanie zastosowany, więc kolejność zmienia wynik (CR 616.1).",
@@ -2564,6 +2579,7 @@
     "composesNote": "Każdy efekt zostaje zastosowany — kolejność zmienia sposób ich połączenia.",
     "moveUpNamed": "Przenieś {{name}} wcześniej",
     "moveDownNamed": "Przenieś {{name}} później",
+    "dragHandleNamed": "Przeciągnij {{name}}, aby zmienić kolejność",
     "positionAnnounce": "Pozycja {{position}} z {{total}}"
   },
   "retargetChoice": {
@@ -2583,6 +2599,9 @@
     "partitionSubtitle": "Rozdziel swoje stwory na dwa stosy. {{chooser}} wybierze jeden.",
     "partitionSubtitleRemaining_one": "Rozdziel swoje stwory na dwa stosy. {{chooser}} wybierze jeden. ({{count}} gracz więcej po tobie)",
     "partitionSubtitleRemaining_other": "Rozdziel swoje stwory na dwa stosy. {{chooser}} wybierze jeden. ({{count}} graczy więcej po tobie)",
+    "partitionInstruction": "{{chooser}} wybiera jeden",
+    "partitionInstructionRemaining_one": "{{chooser}} wybiera jeden ({{count}} gracz więcej po tobie)",
+    "partitionInstructionRemaining_other": "{{chooser}} wybiera jeden ({{count}} graczy więcej po tobie)",
     "pileALabel": "Stos A:",
     "pileBLabel": "Stos B:",
     "pileAria": "{{name}} — stos {{pile}}",
@@ -2689,6 +2708,20 @@
     "EndCombat": "Koniec walki",
     "PostCombatMain": "Główna faza 2",
     "End": "Krok końcowy",
+    "Cleanup": "Sprzątanie"
+  },
+  "phaseShortName": {
+    "Untap": "Odwracanie",
+    "Upkeep": "Utrzymanie",
+    "Draw": "Dobieranie",
+    "PreCombatMain": "Główna 1",
+    "BeginCombat": "Walka",
+    "DeclareAttackers": "Atakujący",
+    "DeclareBlockers": "Blokujący",
+    "CombatDamage": "Obrażenia",
+    "EndCombat": "Koniec walki",
+    "PostCombatMain": "Główna 2",
+    "End": "Koniec",
     "Cleanup": "Sprzątanie"
   },
   "counterMoveDistribution": {

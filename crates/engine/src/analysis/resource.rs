@@ -9160,6 +9160,7 @@ fn project_out_player_consumables(p: &mut Player) {
         has_no_life_total: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
+        spells_cast_last_turn,
 
         descended_this_turn: _,
         speed: _,
@@ -9202,6 +9203,11 @@ fn project_out_player_consumables(p: &mut Player) {
     // other draw consumables; the live counter is still read by
     // intervening-if checks on the real (post-collapse) state.
     *cards_drawn_last_turn = 0;
+    // CR 601.2i + CR 603.4: the last-turn spell snapshot is the same window-shifted count, and at
+    // base the table-wide snapshot was projected out here (`GameState::spells_cast_last_turn`
+    // reset), so a cast-bearing recurrence that crosses a turn boundary is not refused by strict
+    // equality. The live snapshot is still read by intervening-if checks on the real state.
+    *spells_cast_last_turn = 0;
     // CR 601.2i: the since-window grows with every cast inside a loop but
     // does not change the board configuration; project it out so two cycles
     // compare as the same state. The live counter is still read by
@@ -9537,7 +9543,6 @@ fn project_out_resources(state: &GameState) -> ResourceProjectedFrame {
     //     branch conditions or quantity refs, not by a legality gate), so their downstream effect
     //     is caught by the board-equality or net-progress gates.
     s.spells_cast_this_turn = 0;
-    s.spells_cast_last_turn = None;
     s.priority_pass_count = 0;
     // CR 602.5b: per-turn / per-game activation gates. These tallies are bumped for
     // EVERY activation (restrictions.rs record_ability_activation, unconditional), so
@@ -9651,6 +9656,12 @@ fn project_out_resources(state: &GameState) -> ResourceProjectedFrame {
     // `triggers_fired_this_game` (OncePerGame) are likewise NOT cleared here — consistent
     // with the preserved `crew_activated_this_turn`.
     // CR 120: who has dealt damage + the per-turn damage event log.
+    // The per-object `dealt_damage_kinds` latch is deliberately NOT projected:
+    // it decides "hasn't dealt combat damage yet" hexproof (which targets are
+    // legal), so `object_content_eq` compares it (CR 732.2a). The set clear is
+    // retained because strict `PartialEq` compares the set; for objects in
+    // `state.objects` it is redundant, since the damage writer keeps the set and
+    // the latch in lockstep, and it matters only for set entries without an object.
     s.objects_that_dealt_damage.clear();
     // CR 601: per-turn / per-game cast journals.
     s.spells_cast_this_turn_by_player.clear();
@@ -9766,6 +9777,7 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         has_no_life_total: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
+        spells_cast_last_turn: _,
         cards_drawn_last_turn: _,
         opponent_spells_cast_since_own_last_turn: _,
         descended_this_turn: _,
@@ -9829,6 +9841,7 @@ fn projected_player_maps(
         has_no_life_total: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
+        spells_cast_last_turn: _,
         cards_drawn_last_turn: _,
         opponent_spells_cast_since_own_last_turn: _,
         descended_this_turn: _,
@@ -9871,8 +9884,8 @@ pub(crate) fn driving_resources_non_decreasing(
 }
 
 /// [`driving_resources_non_decreasing`], with the object clauses (c) and (d) read over only the
-/// permanents on the battlefield in `carried`, `prior` and `current` when `carried` is given: an
-/// object the period minted is growth, not a driving resource the period spends.
+/// permanents on the battlefield that persist across `prior` and `current` (and `carried`, when
+/// given): an object the period minted is growth, not a driving resource the period spends (CR 111.1).
 pub(crate) fn driving_resources_non_decreasing_carried(
     prior: &GameState,
     current: &GameState,
@@ -9880,11 +9893,9 @@ pub(crate) fn driving_resources_non_decreasing_carried(
     carried: Option<&GameState>,
 ) -> bool {
     let in_population = |id: &ObjectId| {
-        carried.is_none_or(|first| {
-            first.battlefield.contains(id)
-                && prior.battlefield.contains(id)
-                && current.battlefield.contains(id)
-        })
+        prior.battlefield.contains(id)
+            && current.battlefield.contains(id)
+            && carried.is_none_or(|first| first.battlefield.contains(id))
     };
     // CR 119: no `GameState::player` accessor exists — find by id.
     let (Some(pp), Some(cp)) = (
@@ -10088,7 +10099,9 @@ fn ability_has_per_game_activation_gate(state: &GameState, key: &AbilityUsageKey
 #[cfg(test)]
 mod tests {
     use crate::game::game_object::ObjectIncarnationRefExt;
+    use crate::types::ability::TurnWindow;
     use crate::types::events::GameEvent;
+    use crate::types::proposed_event::CounterCause;
 
     /// The window enumerator over `state.stack` alone.
     fn stack_pin_slots(
@@ -17962,7 +17975,7 @@ mod tests {
     /// CR 601.2f + CR 732.2a: the period tie is NOT a "the source must cast itself" carve-out.
     /// Rakdos, Lord of Riots — "Creature spells you cast cost {1} less to cast for each 1 life
     /// your opponents have lost this turn." — is a PRINTED battlefield reducer that prices
-    /// ANOTHER spell off a projected per-turn journal (`LifeLostThisTurn { Opponent, Sum }`,
+    /// ANOTHER spell off a projected per-turn journal (`LifeLost { Opponent, Sum }`,
     /// the same `projected` axis class as the Hulk's energy journal). It is asked the same
     /// question: an unmoved journal certifies, a moved one rejects. This is the half a
     /// self-spell-only exclusion would lose. The static below is Rakdos's printed shape —
@@ -17987,10 +18000,11 @@ mod tests {
                     spell_filter: Some(TargetFilter::Typed(
                         TypedFilter::creature().controller(ControllerRef::You),
                     )),
-                    dynamic_count: Some(QuantityRef::LifeLostThisTurn {
+                    dynamic_count: Some(QuantityRef::LifeLost {
                         player: PlayerScope::Opponent {
                             aggregate: AggregateFunction::Sum,
                         },
+                        window: TurnWindow::ThisTurn,
                     }),
                     reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
                 }));
@@ -19186,6 +19200,16 @@ mod tests {
                 .damage_marked = 2;
             current
         };
+        let minted_damaged = |id: u64| {
+            let mut current = prior.clone();
+            inert_token(&mut current, id, 0, "MintedCopy");
+            current
+                .objects
+                .get_mut(&ObjectId(id))
+                .unwrap()
+                .damage_marked = 2;
+            current
+        };
         let read = |current: &GameState| {
             (
                 driving_resources_non_decreasing_carried(
@@ -19199,6 +19223,10 @@ mod tests {
         };
         assert_eq!(read(&damaged(801)), (true, false));
         assert_eq!(read(&damaged(800)), (false, false));
+        // CR 111.1 / CR 704.5g / CR 732.2a: an object minted during the period enters with
+        // damage, but did not exist in `prior`. It is growth, not a spent driving resource,
+        // so both carried and uncarried readings exclude its entry damage.
+        assert_eq!(read(&minted_damaged(802)), (true, true));
     }
 
     /// S+ (positive reach-guard for every S- below): no consumable decreases.
@@ -23406,6 +23434,7 @@ mod tests {
                     actor: PlayerId(0),
                     object_id: ObjectId(CHURN_SRC),
                     counter_type: crate::types::counter::CounterType::Loyalty,
+                    cause: CounterCause::Other,
                 },
                 count: 0,
                 applied: Default::default(),

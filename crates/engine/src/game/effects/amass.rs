@@ -14,7 +14,7 @@ use crate::types::game_state::{GameState, PendingCounterPostAction};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaColor;
 use crate::types::proposed_event::{
-    EtbTapState, ProposedEvent, TokenAttackRequest, TokenCharacteristics, TokenSpec,
+    CounterCause, EtbTapState, ProposedEvent, TokenAttackRequest, TokenCharacteristics, TokenSpec,
 };
 use std::collections::HashSet;
 
@@ -115,6 +115,8 @@ pub(crate) fn continue_amass_on_army(
             object_id,
             CounterType::Plus1Plus1,
             count,
+            // CR 614.16: amass's counters are placed by a resolving ability.
+            CounterCause::ResolvingEffect,
             events,
         )
     {
@@ -225,6 +227,7 @@ fn create_army_token(
     };
 
     let proposed = ProposedEvent::CreateToken {
+        redirected_to: None,
         owner: controller,
         spec: Box::new(spec),
         copy: None,

@@ -945,7 +945,42 @@ pub fn parse_event_context_ref(input: &str) -> OracleResult<'_, TargetFilter> {
 /// `parse_target` + `constrain_filter_to_stack`. This combinator only fires for
 /// the cases bare `parse_target` cannot — an "activated/triggered ability"
 /// disjunct. It returns a nom `Err` otherwise so callers fall back cleanly.
+///
+/// A trailing controller phrase ("an opponent controls") and/or "that targets
+/// [only] …" clause is consumed and conjoined onto every leg.
 pub fn parse_stack_object_target(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, mut legs) = parse_stack_object_legs(input)?;
+    let (rest, controller) = opt(preceded(tag(" "), parse_controller_suffix)).parse(rest)?;
+    let (rest, properties) =
+        match crate::parser::oracle_target::parse_that_clause_suffix(rest, None) {
+            Some((properties, consumed)) => (&rest[consumed..], properties),
+            None => (rest, Vec::new()),
+        };
+    if controller.is_some() || !properties.is_empty() {
+        // CR 115.1 + CR 115.9b + CR 113.8 / CR 405.4: a trailing controller phrase and/or
+        // "that targets …" clause restricts every leg; each leg stays a top-level
+        // `Or` branch because legal-target enumeration dispatches per branch.
+        let qualifier = TargetFilter::Typed(TypedFilter {
+            type_filters: Vec::new(),
+            controller,
+            properties,
+        });
+        legs = legs
+            .into_iter()
+            .map(|leg| TargetFilter::And {
+                filters: vec![leg, qualifier.clone()],
+            })
+            .collect();
+    }
+    let filter = match <[TargetFilter; 1]>::try_from(legs) {
+        Ok([leg]) => leg,
+        Err(filters) => TargetFilter::Or { filters },
+    };
+    Ok((rest, filter))
+}
+
+/// The disjunct legs of a stack-object phrase, in source order (never empty).
+fn parse_stack_object_legs(input: &str) -> OracleResult<'_, Vec<TargetFilter>> {
     alt((
         // "spell or ability" / "spell and/or ability" → both spells and abilities.
         // This literal arm stays FIRST so the simple two-word form keeps its
@@ -956,16 +991,14 @@ pub fn parse_stack_object_target(input: &str) -> OracleResult<'_, TargetFilter> 
         // `parse_ability_spell_disjunction`), but the literal arm preserves the
         // asserted canonical shape with zero risk.
         value(
-            TargetFilter::Or {
-                filters: vec![
-                    TargetFilter::StackSpell,
-                    TargetFilter::StackAbility {
-                        controller: None,
-                        tag: None,
-                        kind: None,
-                    },
-                ],
-            },
+            vec![
+                TargetFilter::StackSpell,
+                TargetFilter::StackAbility {
+                    controller: None,
+                    tag: None,
+                    kind: None,
+                },
+            ],
             alt((
                 tag("spell or ability"),
                 tag("spell and/or ability"),
@@ -1138,7 +1171,7 @@ fn parse_ability_kind_leg(input: &str) -> OracleResult<'_, TargetFilter> {
 /// spell", "spell") is owned by `parse_target` + `constrain_filter_to_stack`;
 /// this combinator only fires for what bare `parse_target` cannot represent —
 /// an ability disjunct.
-fn parse_ability_spell_disjunction(input: &str) -> OracleResult<'_, TargetFilter> {
+fn parse_ability_spell_disjunction(input: &str) -> OracleResult<'_, Vec<TargetFilter>> {
     enum StackLeg {
         Spell(TargetFilter),
         Ability(TargetFilter),
@@ -1234,14 +1267,7 @@ fn parse_ability_spell_disjunction(input: &str) -> OracleResult<'_, TargetFilter
         return Err(oracle_err(input));
     }
 
-    let filter = match filters.len() {
-        // Unreachable given the `saw_ability` guard (a true `saw_ability`
-        // implies at least one pushed leg), but kept total.
-        0 => return Err(oracle_err(input)),
-        1 => filters.into_iter().next().unwrap(),
-        _ => TargetFilter::Or { filters },
-    };
-    Ok((rest, filter))
+    Ok((rest, filters))
 }
 
 /// Parse a (possibly type-restricted) spell phrase into a stack-constrained
@@ -2503,6 +2529,136 @@ mod tests {
                         kind: None,
                     },
                 ],
+            }
+        );
+    }
+
+    fn stack_ability_leg() -> TargetFilter {
+        TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+            kind: None,
+        }
+    }
+
+    fn qualified_spell_or_ability(
+        controller: Option<ControllerRef>,
+        property: FilterProp,
+    ) -> TargetFilter {
+        let qualifier = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller,
+            properties: vec![property],
+        });
+        TargetFilter::Or {
+            filters: vec![
+                TargetFilter::And {
+                    filters: vec![TargetFilter::StackSpell, qualifier.clone()],
+                },
+                TargetFilter::And {
+                    filters: vec![stack_ability_leg(), qualifier],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_stack_object_qualifier_conjoined_onto_each_leg() {
+        let targets = |filter: TypedFilter| FilterProp::Targets {
+            filter: Box::new(TargetFilter::Typed(filter)),
+        };
+        for (phrase, expected) in [
+            (
+                "spell or ability that targets a permanent you control",
+                qualified_spell_or_ability(
+                    None,
+                    targets(TypedFilter::permanent().controller(ControllerRef::You)),
+                ),
+            ),
+            (
+                "spell or ability that targets a creature",
+                qualified_spell_or_ability(None, targets(TypedFilter::creature())),
+            ),
+            (
+                "spell or ability an opponent controls that targets a land you control",
+                qualified_spell_or_ability(
+                    Some(ControllerRef::Opponent),
+                    targets(TypedFilter::land().controller(ControllerRef::You)),
+                ),
+            ),
+            (
+                "spell or ability that targets only ~",
+                qualified_spell_or_ability(
+                    None,
+                    FilterProp::TargetsOnly {
+                        filter: Box::new(TargetFilter::SelfRef),
+                    },
+                ),
+            ),
+            (
+                "activated or triggered ability you don't control",
+                TargetFilter::And {
+                    filters: vec![
+                        stack_ability_leg(),
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![],
+                            controller: Some(ControllerRef::Opponent),
+                            properties: vec![],
+                        }),
+                    ],
+                },
+            ),
+        ] {
+            assert_eq!(
+                parse_stack_object_target(phrase).unwrap(),
+                ("", expected),
+                "{phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stack_object_player_or_creature_qualifier() {
+        // Siren Stormtamer: "you or a creature you control".
+        let (rest, filter) = parse_stack_object_target(
+            "spell or ability that targets you or a creature you control",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected per-leg Or, got {filter:?}");
+        };
+        let legs: Vec<_> = filters
+            .iter()
+            .map(|leg| match leg {
+                TargetFilter::And { filters } => match filters.as_slice() {
+                    [leg, TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller: None,
+                        properties,
+                    })] if type_filters.is_empty()
+                        && matches!(properties.as_slice(), [FilterProp::Targets { .. }]) =>
+                    {
+                        leg.clone()
+                    }
+                    other => panic!("expected [leg, Targets qualifier], got {other:?}"),
+                },
+                other => panic!("expected qualified leg, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(legs, vec![TargetFilter::StackSpell, stack_ability_leg()]);
+    }
+
+    #[test]
+    fn test_stack_object_non_qualifier_tail_left_unconsumed() {
+        // Mirrorshell Crab: an "unless" tail is not a qualifier.
+        let (rest, filter) =
+            parse_stack_object_target("spell or ability unless its controller pays {3}").unwrap();
+        assert_eq!(rest, " unless its controller pays {3}");
+        assert_eq!(
+            filter,
+            TargetFilter::Or {
+                filters: vec![TargetFilter::StackSpell, stack_ability_leg()],
             }
         );
     }

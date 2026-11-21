@@ -2,6 +2,7 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::EffectKind;
 use engine::types::events::GameEvent;
 use engine::types::game_state::ExtraTurn;
+use engine::types::identifiers::ExtraTurnId;
 use engine::types::phase::Phase;
 
 const TIME_WARP: &str = "Target player takes an extra turn after this one.";
@@ -19,15 +20,16 @@ fn cast_extra_turn_spell(name: &str, oracle: &str) -> engine::game::scenario::Ca
 
 fn assert_extra_turn_result(name: &str, oracle: &str, expected: usize) {
     let outcome = cast_extra_turn_spell(name, oracle);
+    // Each granted turn is minted its own identity, in grant order (CR 500.7).
     assert_eq!(
         outcome.state().extra_turns,
-        vec![
-            ExtraTurn {
+        (1..=expected as u64)
+            .map(|id| ExtraTurn {
                 player: P1,
                 anchor: P0,
-            };
-            expected
-        ]
+                id: ExtraTurnId(id),
+            })
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         outcome

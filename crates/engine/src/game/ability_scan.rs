@@ -416,6 +416,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes<'_> {
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no dynamic read
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no dynamic read
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp, no dynamic read
+        declared_player_target_slots: _, // CR 115.1 announced player-role identity, no dynamic read
         controller: _,           // player id
         original_controller: _,  // player id
         scoped_player: _,        // player id (iteration binding)
@@ -800,6 +801,12 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             target: _,
             amount: _,
             is_combat: _,
+        }
+        | Effect::ResumeDamageBatch {
+            kind: _,
+            replaced: _,
+            remaining: _,
+            awaiting: _,
         } => Axes::NONE,
         Effect::EachDealsDamageEqualToPower {
             sources,
@@ -3651,7 +3658,10 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             aggregate: _,
         } => Axes::NONE,
         QuantityRef::PreviousEffectCount => Axes::NONE,
-        QuantityRef::LifeLostThisTurn { player } => {
+        // `window` is bound and ignored on purpose: both windows read the same
+        // per-player journal class (the this-turn counter or its turn-boundary
+        // snapshot), so neither changes an axis. A new field forces a decision.
+        QuantityRef::LifeLost { player, window: _ } => {
             let mut acc = Axes {
                 event: false,
                 sibling: SiblingReads::None,
@@ -3714,7 +3724,12 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             history: HistoryReads::NONE,
             that_player: false,
         },
-        QuantityRef::SpellsCastThisTurn { scope, filter } => {
+        // `window` is bound and ignored on purpose, as for `LifeLost` above.
+        QuantityRef::SpellsCast {
+            scope,
+            filter,
+            window: _,
+        } => {
             let mut acc = Axes {
                 event: false,
                 sibling: SiblingReads::None,
@@ -3787,7 +3802,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
         }
         QuantityRef::CrimesCommittedThisTurn => Axes::NONE,
         // CR 107.14 + CR 122.1: controller energy-spent journal; a projected
-        // per-turn resource tracker like `LifeLostThisTurn`.
+        // per-turn resource tracker like `LifeLost`.
         QuantityRef::EnergyPaidOrLostThisTurn => Axes {
             event: false,
             sibling: SiblingReads::None,
@@ -3993,14 +4008,6 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             acc = acc.or(scan_player_scope(player));
             acc
         }
-        QuantityRef::SpellsCastLastTurn => Axes {
-            event: false,
-            sibling: SiblingReads::None,
-            projected: true,
-            source_counters: false,
-            history: HistoryReads::NONE,
-            that_player: false,
-        },
         QuantityRef::SpellsCastThisGame { scope, filter } => {
             let mut acc = Axes {
                 event: false,
@@ -4406,8 +4413,13 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes<'_> {
             filter,
             use_lki: _,
             subject_slot: _,
+            subject,
         } => {
             let mut acc = Axes::NONE;
+            // CR 603.2: `EventSource` reads the object the current trigger event
+            // names; `Target` (the default) is declared state. One axes mapping for
+            // every `ObjectScope`, shared with the quantity scan.
+            acc = acc.or(scan_object_scope(subject));
             acc = acc.or(scan_target_filter(
                 filter,
                 FilterReadContext::SnapshotOrEvent,
@@ -4500,6 +4512,20 @@ fn scan_ability_condition(x: &AbilityCondition, mode: ScanMode) -> Axes<'_> {
         AbilityCondition::WasStartingPlayer { controller, .. } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_controller_ref(controller));
+            acc
+        }
+        // Turn-structure ledger read (projected, cf. the static last-turn
+        // analog) plus the endpoint axes (`WasStartingPlayer` pattern).
+        AbilityCondition::PlayerAttackedPlayer { attacker, defender } => {
+            // The uncollapsed this-turn ledger is not a `HistoryMember`;
+            // mirrors `SpellCastWithVariantThisTurn` (projected, no history
+            // axis).
+            let mut acc = Axes {
+                projected: true,
+                ..Axes::NONE
+            };
+            acc = acc.or(scan_player_scope(attacker));
+            acc = acc.or(scan_player_scope(defender));
             acc
         }
         AbilityCondition::SpellCastWithVariantThisTurn { variant: _ } => Axes {
@@ -6034,6 +6060,9 @@ fn scan_delayed_trigger_condition(c: &DelayedTriggerCondition, mode: ScanMode) -
         // The same coordinate plus the identity of one added phase
         // (`ExtraPhaseId`). Neither reaches a filter or a quantity.
         DelayedTriggerCondition::AtBeginningOfAddedPhase { phase: _, entry: _ } => Axes::NONE,
+        // The same coordinate plus the identity of one granted extra turn
+        // (`ExtraTurnId`). Neither reaches a filter or a quantity.
+        DelayedTriggerCondition::AtBeginningOfGrantedTurn { phase: _, turn: _ } => Axes::NONE,
         // CR 603.7c: a delayed triggered ability that refers to a particular object.
         // `object_id` is already resolved, so there is no filter to walk and no
         // population whose size a growing class could move.
@@ -6246,6 +6275,20 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
             history: HistoryReads::NONE,
             that_player: false,
         },
+        // Turn-structure ledger read (same class as the last-turn analog
+        // above) plus the endpoint axes (WasStartingPlayer pattern).
+        StaticCondition::PlayerAttackedPlayer { attacker, defender } => {
+            // The uncollapsed this-turn ledger is not a `HistoryMember`;
+            // mirrors `SpellCastWithVariantThisTurn` (projected, no history
+            // axis).
+            let mut acc = Axes {
+                projected: true,
+                ..Axes::NONE
+            };
+            acc = acc.or(scan_controller_ref(attacker));
+            acc = acc.or(scan_controller_ref(defender));
+            acc
+        }
         StaticCondition::OpponentPoisonAtLeast { count: _ } => Axes {
             event: false,
             sibling: SiblingReads::None,
@@ -6284,7 +6327,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
             that_player: false,
         },
         StaticCondition::SourceExertedThisTurn => Axes::CONSERVATIVE,
-        StaticCondition::SourceHasDealtDamage => Axes {
+        StaticCondition::SourceHasDealtDamage { kind: _ } => Axes {
             event: false,
             sibling: SiblingReads::None,
             projected: true,
@@ -6531,6 +6574,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes<'_> {
             defender.as_ref().map_or(Axes::NONE, scan_controller_ref)
         }
         FilterProp::ProtectorMatches { controller } => scan_controller_ref(controller),
+        FilterProp::CastThisTurn { caster } => scan_controller_ref(caster),
         FilterProp::Owned { controller } => scan_controller_ref(controller),
         FilterProp::AttachedTo { to: AttachmentReferent::Player { player } } => scan_controller_ref(player),
         FilterProp::HasAttachment { controller, .. } => {
@@ -6892,6 +6936,7 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes<
             acc
         }
         ReplacementCondition::HasMaxSpeed => Axes::NONE,
+        ReplacementCondition::OnlyIfStatic { condition } => scan_static_condition(condition, mode),
         ReplacementCondition::CastViaEscape => Axes::NONE,
         ReplacementCondition::CastVariantPaid { variant: _ } => {
             Axes::history_of(HistoryMember::TurnNumber)
@@ -6944,6 +6989,10 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes<
             acc
         }
         ReplacementCondition::EffectCausedDiscard => Axes::NONE,
+        // CR 614.16: reads only the event's own `CounterCause` (carried on the
+        // placement) — event-scoped like `EffectCausedDiscard`'s flag, no board
+        // census and no projected player resource.
+        ReplacementCondition::EffectCausedPlacement => Axes::NONE,
         ReplacementCondition::OnlyExtraTurn => Axes::NONE,
         ReplacementCondition::TokenSubtypeMatches { subtypes: _ } => Axes::NONE,
         ReplacementCondition::TokenCoreTypeMatches { core_types: _ } => Axes::NONE,
@@ -7198,6 +7247,8 @@ pub(crate) fn ability_reads_event_target(ability: &ResolvedAbility) -> bool {
             | Effect::ApplyPostReplacementDamage { .. }
             | Effect::EachDealsDamageEqualToPower { .. }
             | Effect::EachSourceDealsDamage { .. }
+            // A parked damage batch carries concrete recipients, never a filter.
+            | Effect::ResumeDamageBatch { .. }
             | Effect::Draw { .. }
             | Effect::Pump { .. }
             | Effect::PairWith { .. }
@@ -7710,6 +7761,57 @@ pub(crate) fn replacement_condition_reads_sibling_mutable(
     scan_replacement_condition(condition, ScanMode::Conservative)
         .sibling
         .is_read()
+}
+
+/// Axis 1 on a replacement effect's `condition` (CR 614.1): the verdict varies by event, so
+/// it can't be settled once for a simultaneous batch (Divine Presence reads each proposal).
+///
+/// A board census reads no event of its own: Sanwell, Avenger Ace's "As long as an artifact
+/// creature you control is attacking" counts the battlefield, so only its filter's own
+/// controller and properties can reach the proposal (an `EventContextAmount` threshold). This
+/// precision is for `valid_card: SelfRef` definitions, whose affected object is their host, so a
+/// census's scoped player is fixed across the batch's portions. The shared `Typed` arm stays
+/// fail-closed for every other consumer.
+pub(crate) fn replacement_condition_reads_event(condition: &ReplacementCondition) -> bool {
+    match condition {
+        ReplacementCondition::And { conditions } => {
+            conditions.iter().any(replacement_condition_reads_event)
+        }
+        ReplacementCondition::OnlyIfQuantity {
+            lhs,
+            rhs,
+            active_player_req,
+            comparator: _,
+        }
+        | ReplacementCondition::UnlessQuantity {
+            lhs,
+            rhs,
+            active_player_req,
+            comparator: _,
+        } => {
+            census_quantity_reads_event(lhs)
+                || census_quantity_reads_event(rhs)
+                || active_player_req
+                    .as_ref()
+                    .is_some_and(|controller| scan_controller_ref(controller).event)
+        }
+        other => scan_replacement_condition(other, ScanMode::Conservative).event,
+    }
+}
+
+/// Axis 1 on a quantity a replacement condition compares: a census over a `Typed` filter reads
+/// the event only through that filter's controller or properties; any other shape keeps the
+/// shared scan's answer.
+fn census_quantity_reads_event(quantity: &QuantityExpr) -> bool {
+    match quantity {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(filter),
+                },
+        } => typed_filter_axes(filter, ScanMode::Conservative).event,
+        other => scan_quantity_expr(other, ScanMode::Conservative).event,
+    }
 }
 
 /// Axis 2 on a transient `Duration::ForAsLongAs` condition (CR 604.1).
@@ -8605,6 +8707,10 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // CR 613.1b + CR 725.5: designation-anchored control reads a scalar
+        // designation (`state.monarch`), no growing aggregate — read-free
+        // alongside its `ChangeController` sibling.
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -8648,6 +8754,7 @@ fn scan_resolved_continuous_static(
         per_player_condition,
         attack_defended,
         bypass_beneficiary,
+        bound_actor,
         // Restricts where `affected` is evaluated; `affected`'s own scan carries any read.
         affected_zone: _,
         // A location, a flag, a label, a fixed id, or an exemption over the protected object's
@@ -8728,6 +8835,11 @@ fn scan_resolved_continuous_static(
     }
     if let Some(beneficiary) = bypass_beneficiary {
         acc = acc.or(scan_controller_ref(beneficiary));
+    }
+    // Same controller-role vocabulary as the beneficiary above: the bound
+    // subject role is resolved at install against the resolving ability.
+    if let Some(actor) = bound_actor {
+        acc = acc.or(scan_controller_ref(actor));
     }
     if fail_closed {
         acc = Axes::CONSERVATIVE.or(acc);
@@ -9059,8 +9171,6 @@ fn scan_activation_restriction(
         | ActivationRestriction::DuringYourTurn
         | ActivationRestriction::DuringYourUpkeep
         | ActivationRestriction::DuringCombat
-        | ActivationRestriction::BeforeAttackersDeclared
-        | ActivationRestriction::BeforeCombatDamage
         | ActivationRestriction::OnlyOnceEachTurn
         | ActivationRestriction::OnlyOnce
         | ActivationRestriction::MaxTimesEachTurn { count: _ }
@@ -9077,6 +9187,16 @@ fn scan_activation_restriction(
             maximum: _,
         }
         | ActivationRestriction::MatchesCardCastTiming => Axes::NONE,
+        // The turn's step tally: a bare window closes once the first combat phase has ended.
+        ActivationRestriction::BeforeAttackersDeclared
+        | ActivationRestriction::BeforeCombatDamage => Axes {
+            event: false,
+            sibling: SiblingReads::None,
+            projected: true,
+            source_counters: false,
+            history: HistoryReads::NONE,
+            that_player: false,
+        },
     }
 }
 
@@ -9308,6 +9428,7 @@ pub(crate) fn transient_effect_history(
         id: _,
         source_id: _,
         controller: _,
+        bound_actor: _,
         timestamp: _,
         affected_recipient: _,
         duration_subject: _,
@@ -9538,6 +9659,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
         | Effect::RevealChosenNumbers { .. }
@@ -9979,6 +10101,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::OpponentGuess { .. }
         | Effect::SwapChosenLabels { .. }
         | Effect::RevealChosenNumbers { .. }
@@ -10169,6 +10292,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::TurnWindow;
     use crate::types::ability::{
         AbilityKind, AggregateFunction, CastManaObjectScope, CastManaSpentMetric,
         CombatHistoryScope, Comparator, CostDerivation, DamageKindFilter, DelayedTriggerLifetime,
@@ -11662,11 +11786,14 @@ mod tests {
             matches!(
                 &effect,
                 Effect::Pump {
-                    power: PtValue::Quantity(QuantityExpr::Ref {
-                        qty: QuantityRef::PropertyAggregate(_)
-                    }),
+                    power: PtValue::Quantity(QuantityExpr::ClampMin { inner, minimum: 0 }),
                     ..
-                }
+                } if matches!(
+                    **inner,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::PropertyAggregate(_)
+                    }
+                )
             ),
             "fixture pin: the attack pump's `power` must be a `QuantityRef::PropertyAggregate` \
              (\"the greatest mana value among artifacts you control\"), else the paired \
@@ -11870,16 +11997,33 @@ mod tests {
                 },
             ),
             (
-                "LifeLostThisTurn",
-                QuantityRef::LifeLostThisTurn {
+                "LifeLost",
+                QuantityRef::LifeLost {
                     player: PlayerScope::Controller,
+                    window: TurnWindow::ThisTurn,
                 },
             ),
             (
-                "SpellsCastThisTurn",
-                QuantityRef::SpellsCastThisTurn {
+                "SpellsCast",
+                QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: None,
+                    window: TurnWindow::ThisTurn,
+                },
+            ),
+            (
+                "SpellsCast (LastTurn)",
+                QuantityRef::SpellsCast {
+                    scope: CountScope::ScopedPlayer,
+                    filter: None,
+                    window: TurnWindow::LastTurn,
+                },
+            ),
+            (
+                "LifeLost (LastTurn)",
+                QuantityRef::LifeLost {
+                    player: PlayerScope::ScopedPlayer,
+                    window: TurnWindow::LastTurn,
                 },
             ),
             (
@@ -13395,9 +13539,10 @@ mod tests {
         )));
         // Cast journal (spells cast this turn, cleared by project_out_resources).
         assert!(ability_reads_projected_resource(&ability_with_amount(
-            QuantityRef::SpellsCastThisTurn {
+            QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
-                filter: None
+                filter: None,
+                window: TurnWindow::ThisTurn,
             }
         )));
         // Damage journal (damage dealt this turn).
@@ -14449,6 +14594,7 @@ mod tests {
             DelayedTriggerCondition::AtNextPhase { .. }
             | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
             | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
+            | DelayedTriggerCondition::AtBeginningOfGrantedTurn { .. }
             | DelayedTriggerCondition::WhenLeavesPlay { .. } => (false, false, false),
             DelayedTriggerCondition::WhenDies { .. }
             | DelayedTriggerCondition::WhenLeavesPlayFiltered { .. }

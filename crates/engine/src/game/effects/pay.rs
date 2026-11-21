@@ -285,12 +285,39 @@ pub fn resolve(
                 state.last_effect_count = Some(resolved as i32);
             }
         }
-        // All other resolution-time cost shapes (Mana without X, PayLife,
-        // PaySpeed, Composite, Discard, …) route through the single payment
-        // authority. CR 119.4: paying life IS losing life; CR 119.8: a
-        // CantLoseLife lock therefore blocks the payment (the replacement
-        // pipeline + lock both apply inside the authority's
-        // `pay_life_as_cost`).
+        // CR 608.2g + CR 605.3a: before a fresh mana payment the payer may
+        // activate mana abilities whether or not the pool already covers it.
+        // The head of "you may pay {N} and <B>" funds itself the way its
+        // conjunction verdict found leaves the conjuncts performable (Pristine
+        // Talisman under Nefarious Lich draws the card a conjoined "discard a
+        // card" needs), then the payment authority pays the cost. A resumed
+        // payment already made that choice.
+        AbilityCost::Mana { .. } => {
+            if origin.is_fresh_choice() {
+                if let casting::EffectManaFunding::ActivatingFirst(mana_source) =
+                    super::conjunction_head_funding(state, &payment_ability)
+                {
+                    let activated = casting::activate_mana_source_first(
+                        state,
+                        payer,
+                        ability.source_id,
+                        mana_source,
+                        events,
+                    );
+                    debug_assert!(
+                        activated,
+                        "the verdict selects only a funding its probe completed"
+                    );
+                }
+            }
+            prepare_pay_cost_life_amount(state, &mut payment_ability, cost);
+            resolve_ability_cost_payment(state, &payment_ability, payer, cost, origin, events)?;
+        }
+        // All other resolution-time cost shapes (PayLife, PaySpeed, Composite,
+        // Discard, …) route through the single payment authority. CR 119.4:
+        // paying life IS losing life; CR 119.8: a CantLoseLife lock therefore
+        // blocks the payment (the replacement pipeline + lock both apply inside
+        // the authority's `pay_life_as_cost`).
         _ => {
             prepare_pay_cost_life_amount(state, &mut payment_ability, cost);
             resolve_ability_cost_payment(state, &payment_ability, payer, cost, origin, events)?;
@@ -5115,6 +5142,7 @@ mod tests {
             root.context.forwarded_result_context = Some(Box::new(ForwardedResultContext {
                 targets: vec![],
                 object_incarnations: vec![],
+                phase_population: false,
             }));
             root.sub_ability = Some(Box::new(ResolvedAbility::new(
                 Effect::Destroy {

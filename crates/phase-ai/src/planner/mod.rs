@@ -6580,6 +6580,7 @@ pub(crate) mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.stack.push_back(StackEntry {
             id: ObjectId(600),
@@ -6625,52 +6626,44 @@ pub(crate) mod tests {
     fn planner_keys_ignore_printing_in_real_carriers() {
         use engine::types::card_printing::{CardPrinting, SharedPrinting};
 
-        let s1 = SharedPrinting::new(CardPrinting {
-            set_code: "SNTA".to_string(),
-            collector_number: "1".to_string(),
-        });
-        let s2 = SharedPrinting::new(CardPrinting {
-            set_code: "SNTB".to_string(),
-            collector_number: "2".to_string(),
-        });
+        let s1 = SharedPrinting::new(CardPrinting::owner("SNTA", "1"));
+        let s2 = SharedPrinting::new(CardPrinting::owner("SNTB", "2"));
         let powers = [2, 2, 2];
         let none = printing_carrier_fixture(None, powers);
         let first = printing_carrier_fixture(Some(s1.clone()), powers);
         let second = printing_carrier_fixture(Some(s2), powers);
 
-        // Reach: every root really carries the printing on the wire, and the projection the
-        // keys fold omits it.
-        for (label, wire, projected) in [
-            (
-                "resolution stack",
-                serde_json::to_string(&first.resolution_stack).unwrap(),
-                serde_json::to_string(&rules_projection(&first.resolution_stack).unwrap()).unwrap(),
-            ),
-            (
-                "stack entry",
-                serde_json::to_string(&first.stack[0]).unwrap(),
-                serde_json::to_string(&rules_projection(&first.stack[0]).unwrap()).unwrap(),
-            ),
-            (
-                "waiting state",
-                serde_json::to_string(&first.waiting_for).unwrap(),
-                serde_json::to_string(&rules_projection(&first.waiting_for).unwrap()).unwrap(),
-            ),
-        ] {
-            assert!(
-                wire.contains("SNTA"),
-                "{label}: the wire carries the printing"
-            );
-            assert!(
-                !projected.contains("SNTA"),
-                "{label}: the projection omits it"
-            );
+        let automatic = printing_carrier_fixture(
+            Some(SharedPrinting::new(CardPrinting {
+                automatic_art_catalog_version: std::num::NonZeroU8::new(1),
+                ..s1.as_ref().clone()
+            })),
+            powers,
+        );
+
+        fn assert_display_projection<T: Serialize>(owner: &T, automatic: &T) {
+            let owner_wire = serde_json::to_string(owner).unwrap();
+            let automatic_wire = serde_json::to_string(automatic).unwrap();
+            assert!(owner_wire.contains("SNTA"));
+            let marker = r#","automatic_art_catalog_version":1"#;
+            assert!(automatic_wire.contains(marker));
+            assert_eq!(automatic_wire.replace(marker, ""), owner_wire);
+            for root in [owner, automatic] {
+                let projected = serde_json::to_string(&rules_projection(root).unwrap()).unwrap();
+                assert!(!projected.contains("SNTA"));
+                assert!(!projected.contains("automatic_art_catalog_version"));
+            }
         }
+
+        assert_display_projection(&first.resolution_stack, &automatic.resolution_stack);
+        assert_display_projection(&first.stack[0], &automatic.stack[0]);
+        assert_display_projection(&first.waiting_for, &automatic.waiting_for);
 
         // Revert-failing: a root hashed from `serde_json::to_value` would tell these apart.
         let keys = planner_keys(&none);
         assert_eq!(keys, planner_keys(&first));
         assert_eq!(keys, planner_keys(&second));
+        assert_eq!(keys, planner_keys(&automatic));
 
         // Positive controls, one per position: the same `lki.power` changed under a printing
         // moves exactly the keys that read that root.

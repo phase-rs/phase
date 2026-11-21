@@ -15,6 +15,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::CounterCause;
 
 /// CR 707.2 / CR 613.1a: Become a copy of target permanent via a layer-1 copy effect.
 pub fn resolve(
@@ -264,6 +265,9 @@ pub(crate) fn apply_precomputed_copy_values(
             object_id: recipient_id,
             counter_type,
             count,
+            // CR 614.16: copy-entry exceptions are entering-with-counters
+            // placements (replacement-driven entry modification).
+            cause: CounterCause::ReplacementOrPrevention,
         })
         .collect();
         for (index, addition) in additions.iter().cloned().enumerate() {
@@ -272,6 +276,7 @@ pub(crate) fn apply_precomputed_copy_values(
                 object_id,
                 counter_type,
                 count,
+                cause,
             } = addition
             else {
                 continue;
@@ -282,6 +287,7 @@ pub(crate) fn apply_precomputed_copy_values(
                 object_id,
                 counter_type,
                 count,
+                cause,
                 events,
             ) {
                 super::counters::stash_pending_counter_additions(
@@ -461,6 +467,9 @@ impl<'a> CopyExceptionOperation<'a> {
             | ContinuousModification::AssignDamageAsThoughUnblocked
             | ContinuousModification::AssignNoCombatDamage
             | ContinuousModification::ChangeController
+            // CR 613.1b: designation-anchored control is layered (layer 2)
+            // like its source-controller sibling — preserved, not folded.
+            | ContinuousModification::ChangeControllerToDesignation { .. }
             | ContinuousModification::SetBasicLandType { .. }
             | ContinuousModification::SetChosenBasicLandType
             | ContinuousModification::SetChosenName

@@ -41,6 +41,7 @@ use crate::parser::oracle_target::{
     parse_target, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
 };
 use crate::parser::oracle_util::{merge_or_filters, parse_count_multiplier};
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AggregateFunction, AttackSubject, CardTypeSetSource, CombatHistoryScope, Comparator,
     ControllerRef, CountScope, DamageChannel, DamageKindFilter, DevotionColors, FilterProp,
@@ -855,9 +856,11 @@ pub(crate) fn parse_cda_quantity_with_context(
 
     // CR 608.2k: owner-bound possessive pronouns ("its power", "2 plus its
     // power", "half its toughness"). When the context carries a
-    // `characteristic_pronoun_owner` (set only by
+    // `characteristic_pronoun_owner` (set only by the where-X interpreters:
     // `parse_where_x_quantity_expression_with_owner` for boon-granted
-    // "it"/"that" tails, where the pronoun names the triggering object), the
+    // "it"/"that" tails, and the antecedent rung for a trigger body whose "it"
+    // names the trigger event's object — in both the pronoun names that
+    // object), the
     // bare pronoun-characteristic surface binds the owner STRUCTURALLY during
     // this shared parse — every recursive arm below (fractions, multipliers,
     // offsets, sums) re-enters through this same context, so composed and
@@ -1078,13 +1081,18 @@ pub(crate) fn parse_cda_quantity_with_context(
     // "the number of spells they've cast this turn"
     // "the number of spells you've cast this turn from anywhere other than your hand"
     // CR 400.1 + CR 601.2a: the shared helper locates the verb phrase
-    // mid-clause (via take_until) so a trailing cast-origin qualifier survives;
+    // mid-clause (via the shared word-boundary scanner) so a trailing
+    // cast-origin qualifier survives;
     // "this turn" may already be stripped by strip_trailing_duration, so the bare
     // " they've cast" / " that player has cast" forms are also recognized.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the number of ").parse(text) {
         if let Some((scope, filter)) = parse_spell_history_clause(rest, CountScope::Controller) {
             return Some(QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn { scope, filter },
+                qty: QuantityRef::SpellsCast {
+                    scope,
+                    filter,
+                    window: TurnWindow::ThisTurn,
+                },
             });
         }
     }
@@ -2122,22 +2130,21 @@ pub(crate) fn parse_event_context_quantity_with_context(
         return Some(expr);
     }
 
+    // CR 706.2: "the result" of a coin flip / die roll — the result amount
+    // is exposed via the same EventContextAmount channel that "that much" /
+    // "that many" use (Adorable Kitten "You gain life equal to the result"
+    // after roll-a-die). Both compile to the same runtime resolver. The whole
+    // phrase only: a remainder falls through to the `Offset` arms.
+    if let Ok(("", qty)) = nom_quantity::parse_die_result_ref(lower) {
+        return Some(QuantityExpr::Ref { qty });
+    }
+
     match lower {
         // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
         "that much" | "that many" | "that many cards" => {
             return Some(QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount,
             })
-        }
-        // CR 706.2: "the result" of a coin flip / die roll — the result amount
-        // is exposed via the same EventContextAmount channel that "that much" /
-        // "that many" use (Adorable Kitten "You gain life equal to the result"
-        // after roll-a-die). Both compile to the same runtime resolver.
-        // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
-        "the result" => {
-            return Some(QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
-            });
         }
         // CR 608.2k: bare anaphoric "its" — referent bound at parse time by the
         // enclosing clause's subject/target. Emits `Anaphoric` so context
@@ -2242,7 +2249,7 @@ pub(crate) fn parse_event_context_quantity_with_context(
     }
 
     // Fall back to parse_quantity_ref for named quantity patterns
-    // (e.g., "the life you've lost this turn" → LifeLostThisTurn).
+    // (e.g., "the life you've lost this turn" → LifeLost).
     // Strip leading "the " article before matching. If that fails, try the full
     // phrase only for CommanderManaValue — that grammar requires the leading
     // article (Stinging Study's "where X is the mana value of a commander…").
@@ -2793,7 +2800,7 @@ pub(crate) fn parse_for_each_clause_expr_deferred(
 
 /// "Other spell(s) cast this turn" (Storm Entity class): all spells cast this
 /// turn by any player, excluding the resolving spell. Composes
-/// `SpellsCastThisTurn { scope: All }` with offset −1, clamped at zero.
+/// `SpellsCast { scope: All }` with offset −1, clamped at zero.
 /// Uses `All` (not `Controller`) because Oracle text counts every other
 /// spell, including opponents'.
 fn parse_other_spells_cast_this_turn_for_each(clause: &str) -> Option<QuantityExpr> {
@@ -2810,9 +2817,10 @@ fn parse_other_spells_cast_this_turn_for_each(clause: &str) -> Option<QuantityEx
     Some(QuantityExpr::ClampMin {
         inner: Box::new(QuantityExpr::Offset {
             inner: Box::new(QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: CountScope::All,
                     filter: None,
+                    window: TurnWindow::ThisTurn,
                 },
             }),
             offset: -1,
@@ -3337,125 +3345,117 @@ fn parse_characteristic_head(input: &str) -> OracleResult<'_, ()> {
 }
 
 /// CR 400.1 + CR 601.2a: Parse a spell-history count clause into its
-/// controller scope and an optional characteristic/cast-origin filter.
+/// player scope and an optional characteristic/cast-origin filter.
 ///
 /// Single authority shared by both the `for each <spell> you've cast this turn …`
 /// arm and the `the number of <spell> you've cast this turn …` (CDA) arm. The
 /// verb phrase (`you've cast this turn`, `they've cast`, …) can appear *mid-clause*
 /// when a cast-origin qualifier follows (`spell you've cast this turn from
-/// anywhere other than your hand`), so it is located with `take_until` rather
-/// than `strip_suffix`. The noun before the verb and the `from …` tail after it
+/// anywhere other than your hand`), so the shared word-boundary scanner returns
+/// the first match's offset and remainder. The noun before the verb and the
+/// `from …` tail after it
 /// are reattached into the verb-phrase-free noun phrase
 /// (`spell from anywhere other than your hand`) that `parse_spell_history_filter`
 /// accepts, which yields the `FilterProp::InAnyZone` cast-origin filter.
 ///
 /// Returns `None` only when no verb phrase matches (so callers fall through to
 /// other arms). `default_controller` supplies the scope for the `you`/`you've`
-/// forms; `they`/`that player` forms always resolve to `CountScope::Controller`
-/// per the existing arms' semantics.
+/// forms; `they`/`that player` forms resolve to `CountScope::ScopedPlayer`, which
+/// binds to the player named by the surrounding event or iteration context.
 fn parse_spell_history_clause(
     clause: &str,
     default_controller: CountScope,
 ) -> Option<(CountScope, Option<TargetFilter>)> {
-    // Verb-phrase alternates, longest-first so "… this turn" wins over the bare
-    // form. Each is a typed (tag, scope) separator, not a verbatim whole-clause
-    // match — the noun and `from …` tail around it are captured slices.
-    let verb_phrases: [(&str, CountScope); 8] = [
-        (" they've cast this turn", CountScope::Controller),
-        (" that player has cast this turn", CountScope::Controller),
-        (" you've cast this turn", default_controller.clone()),
-        (" you cast this turn", default_controller.clone()),
-        (" they've cast", CountScope::Controller),
-        (" that player has cast", CountScope::Controller),
-        (" you've cast", default_controller.clone()),
-        (" you cast", default_controller.clone()),
-    ];
+    // Subject alternates share one optional time suffix. The shared scanner owns
+    // the word-boundary traversal; this parser only describes the typed subject
+    // alternatives that may occur at each cursor position.
+    let (noun_end, scope, tail) =
+        nom_primitives::scan_at_word_boundaries_with_offset(clause, |input| {
+            let (input, scope) = alt((
+                value(
+                    CountScope::ScopedPlayer,
+                    alt((tag("they've cast"), tag("that player has cast"))),
+                ),
+                value(
+                    default_controller.clone(),
+                    alt((tag("you've cast"), tag("you cast"))),
+                ),
+            ))
+            .parse(input)?;
+            let (input, _) = opt(tag(" this turn")).parse(input)?;
+            Ok((input, scope))
+        })?;
+    let noun = clause[..noun_end].trim();
+    let tail = tail.trim();
 
-    for (verb_phrase, scope) in verb_phrases {
-        let Ok((after, noun)) = take_until::<_, _, OracleError<'_>>(verb_phrase).parse(clause)
-        else {
-            continue;
-        };
-        let Ok((tail, _)) = tag::<_, _, OracleError<'_>>(verb_phrase).parse(after) else {
-            continue;
-        };
-        let noun = noun.trim();
-        let tail = tail.trim();
+    // Reconstruct the verb-phrase-free noun phrase: noun + trailing `from …`
+    // qualifier. For "spell" + "from anywhere other than your hand" this is
+    // exactly the string `parse_spell_history_filter` consumes.
+    let noun_phrase = if tail.is_empty() {
+        noun.to_string()
+    } else {
+        format!("{noun} {tail}")
+    };
 
-        // Reconstruct the verb-phrase-free noun phrase: noun + trailing `from …`
-        // qualifier. For "spell" + "from anywhere other than your hand" this is
-        // exactly the string `parse_spell_history_filter` consumes.
-        let noun_phrase = if tail.is_empty() {
-            noun.to_string()
-        } else {
-            format!("{noun} {tail}")
-        };
-
-        // Bare spell/time forms with no qualifier keep the historical
-        // `filter: None` behavior.
-        let bare = matches!(noun, "spells" | "spell" | "time" | "") && tail.is_empty();
-        if bare {
-            return Some((scope, None));
-        }
-
-        // Cast-origin / type / color qualifiers route through the shared
-        // spell-history filter grammar (which emits FilterProp::InAnyZone for
-        // "from anywhere other than …").
-        if let Some(filter) = parse_spell_history_filter(&noun_phrase) {
-            return Some((scope, Some(filter)));
-        }
-
-        // A non-empty `tail` means trailing text followed the verb phrase
-        // (`… you've cast this turn <tail>`). The only `tail` shape this helper
-        // recognizes is the cast-origin qualifier consumed by
-        // `parse_spell_history_filter` above. If that did not match, the tail is
-        // unrelated trailing text (e.g. a compound `… and <something else>`
-        // clause): return `None` so later arms can try, rather than swallowing
-        // the tail and mis-quantifying as `filter: None`. This restores the
-        // suffix-anchored original's behavior — which would not have matched a
-        // mid-clause verb phrase at all — now that the verb phrase is located
-        // with `take_until`.
-        if !tail.is_empty() {
-            return None;
-        }
-
-        // Fallback for type-only phrasings the spell-history grammar may reject
-        // (e.g. "instant", "noncreature spell"): strip the trailing spell noun and
-        // run the context-free type-phrase parser. Cast-origin clauses never
-        // reach here (they parse above), so this only recovers legacy type forms.
-        // Strip the trailing spell noun via nom (mirrors
-        // `strip_spell_history_noun`) before the context-free type-phrase
-        // parse: "noncreature spell" → "noncreature", "instant" unchanged.
-        let qualifier = terminated(
-            take_until::<_, _, OracleError<'_>>(" spell"),
-            alt((tag(" spells"), tag(" spell"))),
-        )
-        .parse(noun)
-        .map(|(_, before)| before.trim())
-        .unwrap_or(noun);
-        let (filter, remainder) = parse_type_phrase_folding(qualifier);
-        if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
-            return Some((scope, Some(filter)));
-        }
-
-        // CR 608.2c: a noun that still carries an unconsumed aggregation head
-        // ("colors among …", "card types among …") is NOT a spell-history noun —
-        // the head belongs to a characteristic-count grammar that owns the whole
-        // clause. Returning a bare spell count here would silently discard it and
-        // report a confident count of SPELLS where the card asks for a count of
-        // COLORS or CARD TYPES (First Family, April O'Neil, Hurkyl). Decline so
-        // later arms can try.
-        if parse_characteristic_head(noun).is_ok() {
-            return None;
-        }
-
-        // Suffix-anchored noun with no recognized qualifier (e.g. an unknown
-        // spell noun that ended the clause): mirror the original arms' contract
-        // of returning the spell-history scope with no filter.
+    // Bare spell/time forms with no qualifier keep the historical
+    // `filter: None` behavior.
+    let bare = matches!(noun, "spells" | "spell" | "time" | "") && tail.is_empty();
+    if bare {
         return Some((scope, None));
     }
 
-    None
+    // Cast-origin / type / color qualifiers route through the shared
+    // spell-history filter grammar (which emits FilterProp::InAnyZone for
+    // "from anywhere other than …").
+    if let Some(filter) = parse_spell_history_filter(&noun_phrase) {
+        return Some((scope, Some(filter)));
+    }
+
+    // A non-empty `tail` means trailing text followed the verb phrase
+    // (`… you've cast this turn <tail>`). The only `tail` shape this helper
+    // recognizes is the cast-origin qualifier consumed by
+    // `parse_spell_history_filter` above. If that did not match, the tail is
+    // unrelated trailing text (e.g. a compound `… and <something else>`
+    // clause): return `None` so later arms can try, rather than swallowing
+    // the tail and mis-quantifying as `filter: None`.
+    if !tail.is_empty() {
+        return None;
+    }
+
+    // Fallback for type-only phrasings the spell-history grammar may reject
+    // (e.g. "instant", "noncreature spell"): strip the trailing spell noun and
+    // run the context-free type-phrase parser. Cast-origin clauses never
+    // reach here (they parse above), so this only recovers legacy type forms.
+    // Strip the trailing spell noun via nom (mirrors
+    // `strip_spell_history_noun`) before the context-free type-phrase
+    // parse: "noncreature spell" → "noncreature", "instant" unchanged.
+    let qualifier = terminated(
+        take_until::<_, _, OracleError<'_>>(" spell"),
+        alt((tag(" spells"), tag(" spell"))),
+    )
+    .parse(noun)
+    .map(|(_, before)| before.trim())
+    .unwrap_or(noun);
+    let (filter, remainder) = parse_type_phrase_folding(qualifier);
+    if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+        return Some((scope, Some(filter)));
+    }
+
+    // CR 608.2c: a noun that still carries an unconsumed aggregation head
+    // ("colors among …", "card types among …") is NOT a spell-history noun —
+    // the head belongs to a characteristic-count grammar that owns the whole
+    // clause. Returning a bare spell count here would silently discard it and
+    // report a confident count of SPELLS where the card asks for a count of
+    // COLORS or CARD TYPES (First Family, April O'Neil, Hurkyl). Decline so
+    // later arms can try.
+    if parse_characteristic_head(noun).is_ok() {
+        return None;
+    }
+
+    // Suffix-anchored noun with no recognized qualifier (e.g. an unknown
+    // spell noun that ended the clause): mirror the original arms' contract
+    // of returning the spell-history scope with no filter.
+    Some((scope, None))
 }
 
 /// CR 614.6 + CR 400.3: the graveyard phrase of a "put into <graveyard> this
@@ -4069,7 +4069,11 @@ fn parse_for_each_clause_with_they_controller(
     // patterns; the shared helper locates the verb phrase mid-clause so a trailing
     // cast-origin qualifier survives. CR 400.1 + CR 601.2a.
     if let Some((scope, filter)) = parse_spell_history_clause(clause, CountScope::Controller) {
-        return Some(QuantityRef::SpellsCastThisTurn { scope, filter });
+        return Some(QuantityRef::SpellsCast {
+            scope,
+            filter,
+            window: TurnWindow::ThisTurn,
+        });
     }
 
     if let Some(qty) = parse_suspended_card_clause(clause) {
@@ -7179,9 +7183,10 @@ mod tests {
             QuantityExpr::ClampMin {
                 inner: Box::new(QuantityExpr::Offset {
                     inner: Box::new(QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::All,
                             filter: None,
+                            window: TurnWindow::ThisTurn,
                         },
                     }),
                     offset: -1,
@@ -7217,6 +7222,28 @@ mod tests {
                 qty: QuantityRef::EventContextAmount
             })
         );
+    }
+
+    /// CR 706.4 + CR 706.2: "the total of those results" (Neverwinter Hydra,
+    /// Hydradoodle) names the same die-result channel as "the result". The
+    /// phrase is matched whole: a suffixed phrase is not consumed by this arm,
+    /// and the CDA authority stays blind to the bare die-result phrase (the
+    /// where-X binder relies on that).
+    #[test]
+    fn parse_event_context_quantity_die_result_aggregate() {
+        let event_amount = Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
+        assert_eq!(
+            parse_event_context_quantity("the total of those results"),
+            event_amount
+        );
+        assert_eq!(parse_event_context_quantity("the result"), event_amount);
+        assert_ne!(
+            parse_event_context_quantity("the total of those results plus one"),
+            event_amount
+        );
+        assert_eq!(parse_cda_quantity("the total of those results"), None);
     }
 
     /// The TOTAL channel. Every phrase here names an unqualified
@@ -7675,8 +7702,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the life you've lost this turn"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::Controller
+                qty: QuantityRef::LifeLost {
+                    player: PlayerScope::Controller,
+                    window: TurnWindow::ThisTurn,
                 }
             })
         );
@@ -8434,8 +8462,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the life you've lost this turn"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::Controller
+                qty: QuantityRef::LifeLost {
+                    player: PlayerScope::Controller,
+                    window: TurnWindow::ThisTurn,
                 }
             })
         );
@@ -8443,8 +8472,9 @@ mod tests {
         assert_eq!(
             parse_event_context_quantity("the life you've lost"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::Controller
+                qty: QuantityRef::LifeLost {
+                    player: PlayerScope::Controller,
+                    window: TurnWindow::ThisTurn,
                 }
             })
         );
@@ -8474,8 +8504,9 @@ mod tests {
     fn parse_quantity_ref_life_lost() {
         assert_eq!(
             parse_quantity_ref("life you've lost"),
-            Some(QuantityRef::LifeLostThisTurn {
-                player: PlayerScope::Controller
+            Some(QuantityRef::LifeLost {
+                player: PlayerScope::Controller,
+                window: TurnWindow::ThisTurn,
             })
         );
     }
@@ -9805,6 +9836,66 @@ mod tests {
     }
 
     #[test]
+    fn spell_history_clause_event_player_pronouns_use_scoped_player() {
+        for clause in [
+            "spells they've cast this turn",
+            "spells that player has cast this turn",
+        ] {
+            assert_eq!(
+                parse_spell_history_clause(clause, CountScope::Controller),
+                Some((CountScope::ScopedPlayer, None)),
+                "{clause} must bind to the player named by the event context",
+            );
+        }
+    }
+
+    #[test]
+    fn spell_history_clause_accepts_optional_this_turn_for_all_subject_forms() {
+        for (with_suffix, without_suffix, expected_scope) in [
+            (
+                "spells they've cast this turn",
+                "spells they've cast",
+                CountScope::ScopedPlayer,
+            ),
+            (
+                "spells that player has cast this turn",
+                "spells that player has cast",
+                CountScope::ScopedPlayer,
+            ),
+            (
+                "spells you've cast this turn",
+                "spells you've cast",
+                CountScope::Owner,
+            ),
+            (
+                "spells you cast this turn",
+                "spells you cast",
+                CountScope::Owner,
+            ),
+        ] {
+            for clause in [with_suffix, without_suffix] {
+                assert_eq!(
+                    parse_spell_history_clause(clause, CountScope::Owner),
+                    Some((expected_scope.clone(), None)),
+                    "spell-history subject form must accept optional `this turn`: {clause:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn spell_history_clause_filtered_event_player_pronoun_uses_scoped_player() {
+        let (scope, filter) = parse_spell_history_clause(
+            "noncreature spells they've cast this turn",
+            CountScope::Controller,
+        )
+        .expect("filtered event-player spell history must parse");
+        assert_eq!(scope, CountScope::ScopedPlayer);
+        assert!(matches!(filter, Some(TargetFilter::Typed(ref filter))
+            if filter.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Creature)))));
+    }
+
+    #[test]
     fn spell_history_clause_type_only_fallback() {
         let (scope, filter) =
             parse_spell_history_clause("instant you've cast this turn", CountScope::Controller)
@@ -9845,7 +9936,11 @@ mod tests {
             parse_for_each_clause("spell you've cast this turn from anywhere other than your hand")
                 .expect("cast-origin for-each clause must parse");
         match qty {
-            QuantityRef::SpellsCastThisTurn { scope, filter } => {
+            QuantityRef::SpellsCast {
+                scope,
+                filter,
+                window: TurnWindow::ThisTurn,
+            } => {
                 assert_eq!(scope, CountScope::Controller);
                 let filter = filter.expect("cast-origin clause must carry a filter");
                 assert_eq!(
@@ -9854,7 +9949,7 @@ mod tests {
                     "filter must carry Not(InZone(Hand))"
                 );
             }
-            other => panic!("expected SpellsCastThisTurn, got {other:?}"),
+            other => panic!("expected SpellsCast, got {other:?}"),
         }
     }
 
@@ -9862,9 +9957,10 @@ mod tests {
     fn for_each_spell_bare_no_filter() {
         assert_eq!(
             parse_for_each_clause("spell you've cast this turn"),
-            Some(QuantityRef::SpellsCastThisTurn {
+            Some(QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             }),
         );
     }
@@ -10003,7 +10099,12 @@ mod tests {
         .expect("cast-origin CDA spell-history clause must parse");
         match expr {
             QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn { scope, filter },
+                qty:
+                    QuantityRef::SpellsCast {
+                        scope,
+                        filter,
+                        window: TurnWindow::ThisTurn,
+                    },
             } => {
                 assert_eq!(scope, CountScope::Controller);
                 let filter = filter.expect("cast-origin clause must carry a filter");
@@ -10013,7 +10114,7 @@ mod tests {
                     "filter must carry Not(InZone(Hand))"
                 );
             }
-            other => panic!("expected SpellsCastThisTurn ref, got {other:?}"),
+            other => panic!("expected SpellsCast ref, got {other:?}"),
         }
     }
 
@@ -10030,7 +10131,12 @@ mod tests {
         .expect("qualifier-then-time cast-origin clause must parse");
         match expr {
             QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn { scope, filter },
+                qty:
+                    QuantityRef::SpellsCast {
+                        scope,
+                        filter,
+                        window: TurnWindow::ThisTurn,
+                    },
             } => {
                 assert_eq!(scope, CountScope::Controller);
                 let filter = filter.expect("cast-origin clause must carry a filter");
@@ -10040,7 +10146,7 @@ mod tests {
                     "filter must carry Not(InZone(Hand))"
                 );
             }
-            other => panic!("expected SpellsCastThisTurn ref, got {other:?}"),
+            other => panic!("expected SpellsCast ref, got {other:?}"),
         }
     }
 
@@ -10049,9 +10155,10 @@ mod tests {
         assert_eq!(
             parse_cda_quantity("the number of spells you've cast this turn"),
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: None,
+                    window: TurnWindow::ThisTurn,
                 },
             }),
         );
@@ -10954,8 +11061,11 @@ mod tests {
         else {
             panic!("{:?}", armor.statics[0].modifications[0]);
         };
+        let QuantityExpr::ClampMin { inner, minimum: 0 } = value else {
+            panic!("{value:?}");
+        };
         assert_eq!(
-            *aggregate_population(value),
+            *aggregate_population(inner),
             your_commanders_in_every_zone()
         );
         let ContinuousModification::AddDynamicToughness { value } =
@@ -10963,8 +11073,11 @@ mod tests {
         else {
             panic!("{:?}", armor.statics[0].modifications[1]);
         };
+        let QuantityExpr::ClampMin { inner, minimum: 0 } = value else {
+            panic!("{value:?}");
+        };
         assert_eq!(
-            *aggregate_population(value),
+            *aggregate_population(inner),
             your_commanders_in_every_zone()
         );
 

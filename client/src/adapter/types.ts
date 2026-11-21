@@ -791,6 +791,7 @@ export type DeckSection =
 export interface CardPrinting {
   set_code: string;
   collector_number: string;
+  automatic_art_catalog_version?: number;
 }
 
 /** Mirrors the engine's `DeckPrinting`: an owner's explicit printing for `count` copies. */
@@ -798,7 +799,7 @@ export interface DeckPrinting {
   section: DeckSection;
   name: string;
   count: number;
-  printing: CardPrinting;
+  printing: Pick<CardPrinting, "set_code" | "collector_number">;
 }
 
 /** Name-only per-player deck list, mirroring the engine's `PlayerDeckList`. */
@@ -1412,6 +1413,12 @@ export interface CastingVariantChoiceOption {
    * under. Present for every cast through a graveyard-cast permission.
    */
   authority?: CastAuthorityChoice | null;
+  /**
+   * CR 113.2c + CR 601.2b: the keyword instance whose alternative cost this
+   * option pays (Deep Analysis' printed flashback or Lier's granted one).
+   * Engine-authored; absent for options with no instance to elect.
+   */
+  alternative_cost_keyword?: Keyword | null;
 }
 
 /** CR 601.2a: one graveyard-cast permission grant: its source and the grant on it. */
@@ -2594,6 +2601,9 @@ export interface PendingCast {
   activation_ability_index?: number;
   target_constraints?: Array<{ type: string }>;
   deferred_sacrificed_permanents?: DeferredSpellSacrifice[];
+  // CR 601.2b + CR 601.2h: creatures selected before targets for a spell tap
+  // cost, tapped at the payment commit. Absent when none.
+  deferred_tapped_permanents?: { object_ids: ObjectId[]; cost: SerializedAbilityCost }[];
   // CR 118.3a: pip ids the caster pinned to direct payment. `#[serde(default,
   // skip_serializing_if = "Vec::is_empty")]` — absent when no pin is recorded.
   pinned_pool_units?: number[];
@@ -2617,6 +2627,10 @@ export interface PendingCast {
   // "Option::is_none")]` — absent for spells, automatic activations and a
   // manual activation that has not reached its announcement.
   activation_phyrexian_intent?: ActivationPhyrexianIntent;
+  // CR 113.2c + CR 601.2b: the alternative-cost keyword instance elected for
+  // this cast. `#[serde(default, skip_serializing_if = "Option::is_none")]` —
+  // absent when the cast elected no instance.
+  alternative_cost_keyword?: Keyword | null;
 }
 
 /// CR 107.4f + CR 118.13a: how one Phyrexian-shaped symbol of an activation's
@@ -3247,7 +3261,7 @@ export type WaitingFor =
   // "unless they X or Y" punisher class.
   | { type: "UnlessPaymentChooseCost"; data: { player: PlayerId; costs: UnlessCost[]; pending_effect: unknown; trigger_event?: unknown; effect_description?: string; affected_object?: ObjectId } }
   | { type: "WardDiscardChoice"; data: { player: PlayerId; cards: ObjectId[]; pending_effect: unknown; remaining: number; filter?: unknown } }
-  | { type: "WardSacrificeChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number; min_total_power?: number | null } }
+  | { type: "WardSacrificeChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number; min_total_power?: number | null; trigger_event?: unknown } }
   | { type: "UnlessBounceChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
   | { type: "ChooseRingBearer"; data: { player: PlayerId; candidates: ObjectId[] } }
   | { type: "RevealUntilKeptChoice"; data: { player: PlayerId; hit_card: ObjectId; source_id: ObjectId; accept_zone: string; decline_zone: string; enter_tapped: boolean; enters_attacking: boolean; revealed_misses: ObjectId[]; rest_destination: string } }
@@ -4022,6 +4036,19 @@ export type GameEvent =
   | { type: "PermanentUntapped"; data: { object_id: ObjectId } }
   | { type: "LandPlayed"; data: { object_id: ObjectId; player_id: PlayerId; from_zone: Zone } }
   | { type: "StackPushed"; data: { object_id: ObjectId } }
+  // CR 603.2: a triggered ability triggered (pushed, or `stack_entry: null`
+  // when removed during placement). Bookkeeping for observer triggers; the
+  // engine never sends `causes` on the event stream, but state carriers hold it.
+  | {
+      type: "AbilityTriggered";
+      data: {
+        stack_entry: ObjectId | null;
+        source_id: ObjectId;
+        controller: PlayerId;
+        origin: "SourceAbility" | "Delayed";
+        causes: GameEvent[];
+      };
+    }
   | { type: "StackResolved"; data: { object_id: ObjectId } }
   // CR 714.2: a Saga's chapter ability finished resolving. Bookkeeping the
   // engine publishes for meta-triggers (Narci, Fable Singer); non-visual, since
@@ -4111,7 +4138,7 @@ export type GameEvent =
   // the engine's authoritative roll (1..=sides after modifiers). `result` is
   // `null` for the symbolic planar die (CR 901.9d / CR 706.7), which has no
   // numeric face value to animate.
-  | { type: "DieRolled"; data: { player_id: PlayerId; sides: number; result: number | null } }
+  | { type: "DieRolled"; data: { player_id: PlayerId; sides: number; result: number | null; pre_entry_source?: ObjectId } }
   // CR 706.6: a die roll ignored by a replacement, shown so players see what
   // the lowest roll was. Display mirror only — never a rules roll: triggers,
   // results tables, aggregates, and AI must not read it. `result` is always
@@ -4637,6 +4664,8 @@ export interface UnlessDrawCostView {
 }
 
 export interface DerivedViews {
+  /** Chooser-private printed creature types, ranked by deck frequency. */
+  named_choice_suggestions?: string[];
   unique_authorized_submitter?: PlayerId;
   /** Engine-owned Scry prompt identity for this viewer, independent of opportunities. */
   scry_prompt_id?: InteractionId;
@@ -5153,6 +5182,19 @@ export interface GameState {
   /** CR 732.2a: opt-in gate for the live combo-detector (default Off). Set from the
    *  match's immutable `MatchConfig` at game creation; not mutable mid-game. */
   loop_detection?: LoopDetectionMode;
+  /** CR 101.4 + CR 101.4b: engine-projected APNAP scoped-unless poll state.
+   *  Public sacrifice selections keep their chosen object ids; discard card
+   *  identities are redacted by the engine for non-owning viewers. */
+  pending_player_scope_unless_punishment?: PendingPlayerScopeUnlessPunishmentView | null;
+}
+
+export interface PendingPlayerScopeUnlessPunishmentView {
+  declining_players: PlayerId[];
+  payments: Array<{
+    player: PlayerId;
+    action: "Sacrifice" | "Discard";
+    objects: Array<{ object_id: ObjectId; incarnation: number }>;
+  }>;
 }
 
 /**

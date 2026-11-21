@@ -6,6 +6,7 @@ use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCounterPostAction};
+use crate::types::proposed_event::CounterCause;
 use crate::types::zones::Zone;
 
 /// CR 702.112a: Renown N.
@@ -47,6 +48,8 @@ pub fn resolve(
             source_id,
             CounterType::Plus1Plus1,
             n,
+            // CR 614.16: renown's counters are placed by a resolving ability.
+            CounterCause::ResolvingEffect,
             events,
         )
     {

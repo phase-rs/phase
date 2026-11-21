@@ -1084,6 +1084,7 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
         // input — so like its counter-addition sibling it affiliates with no
         // payment-continuation root.
         | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+        | PendingCostMoveResume::PlayerScopeUnlessSettlement(..)
         | PendingCostMoveResume::LoyaltyActivation { .. }
         | PendingCostMoveResume::TurnFaceUpCostMove { .. } => {
             PaymentContinuationState::NotAffiliated
@@ -1378,6 +1379,7 @@ fn pending_cost_move_contains_root(
         | Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
         // CR 701.9b: holds no pending cast, so it can contain no root.
         | Some(PendingCostMoveResume::RandomDiscardUnlessPayment(..))
+        | Some(PendingCostMoveResume::PlayerScopeUnlessSettlement(..))
         | Some(PendingCostMoveResume::LoyaltyActivation { .. })
         | Some(PendingCostMoveResume::TurnFaceUpCostMove { .. })
         | None => false,
@@ -1582,6 +1584,7 @@ mod tests {
                     trigger_events: Vec::new(),
                     trigger_match_count: None,
                     return_result_occurrence: None,
+                    replacement_action: None,
                 }),
                 selected: Vec::new(),
             },

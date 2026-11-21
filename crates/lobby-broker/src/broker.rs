@@ -5670,10 +5670,10 @@ mod tests {
                         section: DeckSection::MainDeck,
                         name: "x".repeat(MAX_DECK_CARD_NAME_LEN),
                         count: 1,
-                        printing: CardPrinting {
-                            set_code: "s".repeat(MAX_PRINTING_SET_CODE_LEN),
-                            collector_number: "c".repeat(MAX_PRINTING_COLLECTOR_NUMBER_LEN),
-                        },
+                        printing: CardPrinting::owner(
+                            "s".repeat(MAX_PRINTING_SET_CODE_LEN),
+                            "c".repeat(MAX_PRINTING_COLLECTOR_NUMBER_LEN),
+                        ),
                     })
                     .collect(),
                 ..Default::default()
@@ -5876,10 +5876,10 @@ mod tests {
                         section: DeckSection::MainDeck,
                         name: "x".repeat(MAX_DECK_CARD_NAME_LEN),
                         count: 1,
-                        printing: CardPrinting {
-                            set_code: "s".repeat(MAX_PRINTING_SET_CODE_LEN),
-                            collector_number: "c".repeat(MAX_PRINTING_COLLECTOR_NUMBER_LEN),
-                        },
+                        printing: CardPrinting::owner(
+                            "s".repeat(MAX_PRINTING_SET_CODE_LEN),
+                            "c".repeat(MAX_PRINTING_COLLECTOR_NUMBER_LEN),
+                        ),
                     })
                     .collect(),
                 ..Default::default()
@@ -6007,10 +6007,10 @@ mod tests {
                         section: DeckSection::MainDeck,
                         name: "x".repeat(MAX_DECK_CARD_NAME_LEN),
                         count: 1,
-                        printing: CardPrinting {
-                            set_code: "s".repeat(MAX_PRINTING_SET_CODE_LEN),
-                            collector_number: "c".repeat(MAX_PRINTING_COLLECTOR_NUMBER_LEN),
-                        },
+                        printing: CardPrinting::owner(
+                            "s".repeat(MAX_PRINTING_SET_CODE_LEN),
+                            "c".repeat(MAX_PRINTING_COLLECTOR_NUMBER_LEN),
+                        ),
                     })
                     .collect(),
                 ..Default::default()
@@ -6070,7 +6070,7 @@ mod tests {
     /// Blocker-1 proof: the complete-snapshot bound caps the *whole* persisted
     /// broker — every event's entrant/pairing metadata as well as its decks — not
     /// deck bytes alone, and a write that would cross it is a state-preserving
-    /// refusal. Every event the registry admits holds a heavy deck (each within its
+    /// refusal. Every event the registry admits holds a deck (each within its
     /// own per-event budget, and paid for by its own reservation); one greedy event
     /// then registers entrants through the production `Broker::handle` path until
     /// the shared remainder is gone. That registration is refused naming the
@@ -6093,10 +6093,10 @@ mod tests {
                         section: DeckSection::MainDeck,
                         name: "x".repeat(MAX_DECK_CARD_NAME_LEN),
                         count: 1,
-                        printing: CardPrinting {
-                            set_code: "s".repeat(MAX_PRINTING_SET_CODE_LEN),
-                            collector_number: "c".repeat(MAX_PRINTING_COLLECTOR_NUMBER_LEN),
-                        },
+                        printing: CardPrinting::owner(
+                            "s".repeat(MAX_PRINTING_SET_CODE_LEN),
+                            "c".repeat(MAX_PRINTING_COLLECTOR_NUMBER_LEN),
+                        ),
                     })
                     .collect(),
                 ..Default::default()
@@ -6104,7 +6104,7 @@ mod tests {
         }
 
         // A deck under the per-deck cap, so each is individually admitted.
-        let heavy = heavy_deck(120);
+        let heavy = heavy_deck(1);
         let each = serde_json::to_vec(&heavy).expect("serializes").len();
         assert!(
             each < crate::tournament::MAX_SINGLE_DECK_ENCODED_BYTES,
@@ -6115,7 +6115,7 @@ mod tests {
         let mut broker = Broker::new();
         let mut organizer = ConnState::default();
 
-        // Fill the registry; each event admits one heavy deck. The first is kept to
+        // Fill the registry; each event admits one deck. The first is kept to
         // prove it survives the later refusal.
         let mut witness: Option<(String, String)> = None; // (code, player_key)
         let mut greedy = String::new();
@@ -6145,14 +6145,17 @@ mod tests {
         // Register entrants into one event until the shared snapshot is full.
         let mut refused: Option<(String, String)> = None; // (player_key, reason)
         for seat in 0..10_000 {
-            let key = format!("late-{seat}");
+            let key = format!("late-{seat:0>w$}", w = crate::validation::MAX_TOKEN_LEN - 5);
             let mut conn = ConnState::default();
             let out = broker.handle(
                 &mut conn,
                 LobbyClientMessage::JoinTournament {
                     code: greedy.clone(),
                     player_key: key.clone(),
-                    display_name: key.clone(),
+                    display_name: format!(
+                        "{seat:0>w$}",
+                        w = crate::validation::MAX_DISPLAY_NAME_LEN
+                    ),
                 },
                 &env,
             );

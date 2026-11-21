@@ -1,7 +1,9 @@
 use crate::game::filter;
 use crate::game::game_object::ObjectIncarnationRefExt;
-use crate::game::layers::evaluate_condition;
-use crate::game::quantity::resolve_quantity_with_targets;
+use crate::game::layers::{evaluate_condition_with_context, ConditionContext};
+use crate::game::quantity::{
+    resolve_quantity_with_targets, resolve_quantity_with_targets_and_recipient,
+};
 use crate::types::ability::{
     quantity_expr_uses_recipient, ContinuousModification, ControllerRef, Duration, Effect,
     EffectError, EffectKind, QuantityExpr, QuantityRef, ResolvedAbility, StaticCondition,
@@ -266,17 +268,24 @@ fn evaluate_static_condition_for_ability(
         StaticCondition::Not { condition } => {
             !evaluate_static_condition_for_ability(state, condition, ability)
         }
-        _ => evaluate_condition(state, condition, ability.controller, ability.source_id),
+        _ => evaluate_condition_with_context(
+            state,
+            condition,
+            ability.controller,
+            ability.source_id,
+            ConditionContext::ability_holder(ability.controller),
+        ),
     }
 }
 
-/// CR 611.2c: a resolved "can't be the target of ..." grant is a rule effect read
+/// CR 611.2c: a resolved targeting or countering prohibition is a rule effect read
 /// straight off its transient effect, not an ability on the recipient.
-fn is_cant_be_targeted_rule_effect(modification: &ContinuousModification) -> bool {
+fn is_live_prohibition_rule_effect(modification: &ContinuousModification) -> bool {
     matches!(
         modification,
         ContinuousModification::AddStaticMode {
-            mode: crate::types::statics::StaticMode::CantBeTargeted { .. },
+            mode: crate::types::statics::StaticMode::CantBeTargeted { .. }
+                | crate::types::statics::StaticMode::CantBeCountered,
         }
     )
 }
@@ -301,6 +310,7 @@ fn install_transient(
     affected: TargetFilter,
     modifications: Vec<ContinuousModification>,
     condition: Option<StaticCondition>,
+    bound_actor: Option<PlayerId>,
 ) -> Option<u64> {
     let mut modifications = modifications;
     // CR 201.5a + CR 400.7 + CR 113.7: a grant names the object whose ability resolved, as
@@ -317,12 +327,16 @@ fn install_transient(
                 .map(|occurrence| occurrence.caster),
         );
     }
-    // CR 400.7 + CR 611.2c: a targeted "can't be the target" rule effect applies to
+    // CR 400.7 + CR 611.2c: a rule effect on a specific object applies to
     // the recipient as it was when the effect resolved; a blinked or otherwise
     // re-created object is a new object it no longer reaches.
     let affected_recipient = match &affected {
         TargetFilter::SpecificObject { id }
-            if modifications.iter().any(is_cant_be_targeted_rule_effect) =>
+            if modifications.iter().any(|modification| {
+                is_live_prohibition_rule_effect(modification)
+                    || crate::game::layers::transient_relative_blocker_filter(modification)
+                        .is_some()
+            }) =>
         {
             state
                 .objects
@@ -345,6 +359,7 @@ fn install_transient(
             affected_recipient,
             ..TransientContinuousEffectBindings::default()
         },
+        bound_actor,
         // CR 113.7a: an event deadline is bound to the creating ability's own
         // source (or its last known information), not to whatever now holds the id.
         Some(ability),
@@ -381,6 +396,20 @@ fn bind_transient_effect(
     end_permission: Option<&EndEffectPermission>,
     modifications: Vec<ContinuousModification>,
 ) {
+    // CR 109.5: resolve the def's bound subject role once — every arm below
+    // installs the same def, so the resolved actor is identical for all of
+    // them. `controller_ref_player` is the shared single-ref resolver; an
+    // unresolvable role fails closed to `None` (object-wide bar).
+    let bound_actor = static_def.bound_actor.as_ref().and_then(|role| {
+        crate::game::filter::controller_ref_player(
+            state,
+            ability.source_id,
+            Some(ability.controller),
+            Some(ability),
+            role,
+        )
+    });
+
     // CR 708.5: A duration-bound "you may look at face-down [permanents] you don't
     // control any time" permission (Lumbering Laundry) is a *player-scoped* look
     // permission, not an object grant. Unlike a pump or keyword grant, the set of
@@ -410,6 +439,7 @@ fn bind_transient_effect(
                 affected,
                 modifications,
                 static_def.condition.clone(),
+                bound_actor,
             );
             return;
         }
@@ -447,6 +477,7 @@ fn bind_transient_effect(
                 affected,
                 modifications,
                 static_def.condition.clone(),
+                bound_actor,
             );
             return;
         }
@@ -480,6 +511,7 @@ fn bind_transient_effect(
                 affected,
                 modifications,
                 static_def.condition.clone(),
+                bound_actor,
             );
             return;
         }
@@ -534,6 +566,7 @@ fn bind_transient_effect(
                     affected,
                     modifications,
                     static_def.condition.clone(),
+                    bound_actor,
                 );
                 return;
             }
@@ -551,20 +584,37 @@ fn bind_transient_effect(
     // never grafts it onto an object. A targeted grant (Vines of Vastwood) falls
     // through to the chosen-target arms, which bind the recipient's incarnation
     // (see `install_transient`).
-    if modifications.iter().any(is_cant_be_targeted_rule_effect) {
-        if let Some(affected) = static_def.affected.clone() {
-            if !generic_effect_affected_uses_inherited_targets(&affected) {
-                install_transient(
+    if let Some(affected) = static_def.affected.clone() {
+        if !generic_effect_affected_uses_inherited_targets(&affected)
+            && modifications.iter().any(is_live_prohibition_rule_effect)
+        {
+            // CR 611.2c: determine rule-changing and characteristic-changing
+            // populations independently, even when one definition contains both.
+            let (rules, characteristics): (Vec<_>, Vec<_>) = modifications
+                .into_iter()
+                .partition(is_live_prohibition_rule_effect);
+            install_transient(
+                state,
+                end_permission,
+                ability,
+                duration.clone(),
+                affected,
+                rules,
+                static_def.condition.clone(),
+                bound_actor,
+            );
+            if !characteristics.is_empty() {
+                bind_transient_effect(
                     state,
-                    end_permission,
                     ability,
-                    duration.clone(),
-                    affected,
-                    modifications,
-                    static_def.condition.clone(),
+                    static_def,
+                    target_filter,
+                    duration,
+                    end_permission,
+                    characteristics,
                 );
-                return;
             }
+            return;
         }
     }
 
@@ -610,6 +660,7 @@ fn bind_transient_effect(
             },
             modifications,
             static_def.condition.clone(),
+            bound_actor,
         );
         return;
     }
@@ -630,6 +681,7 @@ fn bind_transient_effect(
                 TargetFilter::SpecificObject { id: obj_id },
                 modifications.clone(),
                 static_def.condition.clone(),
+                bound_actor,
             );
         }
         return;
@@ -664,6 +716,7 @@ fn bind_transient_effect(
                 TargetFilter::SpecificObject { id: obj_id },
                 modifications,
                 static_def.condition.clone(),
+                bound_actor,
             );
         }
         return;
@@ -757,6 +810,7 @@ fn bind_transient_effect(
                 bound_filter,
                 modifications.clone(),
                 static_def.condition.clone(),
+                bound_actor,
             );
         }
         return;
@@ -775,6 +829,7 @@ fn bind_transient_effect(
                 TargetFilter::SpecificPlayer { id: player_id },
                 modifications.clone(),
                 static_def.condition.clone(),
+                bound_actor,
             );
         }
     };
@@ -827,6 +882,7 @@ fn bind_transient_effect(
                 },
                 modifications.clone(),
                 static_def.condition.clone(),
+                bound_actor,
             );
         }
         // Pass-through: the caller already pinned a specific player.
@@ -841,6 +897,7 @@ fn bind_transient_effect(
                     TargetFilter::SpecificPlayer { id: *id },
                     modifications.clone(),
                     static_def.condition.clone(),
+                    bound_actor,
                 );
             }
         }
@@ -925,6 +982,7 @@ fn bind_transient_effect(
                     TargetFilter::SpecificObject { id },
                     modifications.clone(),
                     static_def.condition.clone(),
+                    bound_actor,
                 );
             }
         }
@@ -959,6 +1017,7 @@ fn bind_transient_effect(
                     TargetFilter::SpecificObject { id },
                     modifications.clone(),
                     static_def.condition.clone(),
+                    bound_actor,
                 );
             }
         }
@@ -977,6 +1036,7 @@ fn bind_transient_effect(
                     TargetFilter::SpecificObject { id: obj_id },
                     modifications.clone(),
                     static_def.condition.clone(),
+                    bound_actor,
                 );
             }
         }
@@ -1001,6 +1061,7 @@ fn bind_transient_effect(
                     TargetFilter::SpecificObject { id: obj_id },
                     modifications.clone(),
                     static_def.condition.clone(),
+                    bound_actor,
                 );
             }
         }
@@ -1028,6 +1089,7 @@ fn bind_transient_effect(
                     TargetFilter::SpecificObject { id: obj_id },
                     modifications.clone(),
                     static_def.condition.clone(),
+                    bound_actor,
                 );
             }
         }
@@ -1303,6 +1365,18 @@ pub(crate) fn snapshot_transient_modifications(
     ability: &ResolvedAbility,
     modifications: &[ContinuousModification],
 ) -> Vec<ContinuousModification> {
+    // The one object this effect was applied to, when that is the effect's only
+    // target. A recipient-relative quantity read against it is the quantity the
+    // effect gives that object (CR 608.2h).
+    let single_target = ability
+        .targets
+        .iter()
+        .find_map(|t| match t {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        })
+        .filter(|_| ability.targets.len() == 1);
+
     modifications
         .iter()
         .map(|modification| match modification {
@@ -1332,6 +1406,70 @@ pub(crate) fn snapshot_transient_modifications(
             {
                 ContinuousModification::SetToughness {
                     value: resolve_quantity_with_targets(state, value, ability),
+                }
+            }
+            // CR 608.2h: an effect that requires information from the game (such
+            // as the number of creatures on the battlefield) determines that
+            // answer only once, when the effect is applied. A recipient-relative
+            // dynamic P/T quantity ("+1/+1 for each OTHER attacking creature",
+            // Paladin Class level 3) is counted against the single object the
+            // effect targets here, at resolution, and fixed for the rest of the
+            // duration: a later change to the counted set does not move the
+            // bonus. This function is reached only by transient, resolution-
+            // created effects (CR 611.2d), so a printed static ability's dynamic
+            // P/T stays live and is recomputed per recipient in `game/layers.rs`.
+            // CR 608.2h
+            ContinuousModification::AddDynamicPower { value }
+                if quantity_expr_uses_recipient(value) =>
+            {
+                match single_target {
+                    Some(recipient) => ContinuousModification::AddPower {
+                        value: resolve_quantity_with_targets_and_recipient(
+                            state, value, ability, recipient,
+                        ),
+                    },
+                    // No single object recipient: leave the payload dynamic so
+                    // the live per-recipient resolution still applies.
+                    None => modification.clone(),
+                }
+            }
+            // CR 608.2h
+            ContinuousModification::AddDynamicToughness { value }
+                if quantity_expr_uses_recipient(value) =>
+            {
+                match single_target {
+                    Some(recipient) => ContinuousModification::AddToughness {
+                        value: resolve_quantity_with_targets_and_recipient(
+                            state, value, ability, recipient,
+                        ),
+                    },
+                    None => modification.clone(),
+                }
+            }
+            // CR 608.2h
+            ContinuousModification::SetPowerDynamic { value }
+                if quantity_expr_uses_recipient(value) =>
+            {
+                match single_target {
+                    Some(recipient) => ContinuousModification::SetPower {
+                        value: resolve_quantity_with_targets_and_recipient(
+                            state, value, ability, recipient,
+                        ),
+                    },
+                    None => modification.clone(),
+                }
+            }
+            // CR 608.2h
+            ContinuousModification::SetToughnessDynamic { value }
+                if quantity_expr_uses_recipient(value) =>
+            {
+                match single_target {
+                    Some(recipient) => ContinuousModification::SetToughness {
+                        value: resolve_quantity_with_targets_and_recipient(
+                            state, value, ability, recipient,
+                        ),
+                    },
+                    None => modification.clone(),
                 }
             }
             // CR 702.16k + CR 608.2c + CR 608.2h: "you gain protection from that
@@ -1607,7 +1745,7 @@ fn snapshot_resolution_context_quantity(expr: &QuantityExpr, events: &[GameEvent
 /// cost {X} less … where X is the amount of life you lost/gained this turn"),
 /// CR 611.2d requires X to be determined exactly once, on resolution — not
 /// re-read at each later cast. The parser lowers X as
-/// `ModifyCost { amount, dynamic_count: Some(LifeLostThisTurn/…), .. }`, where
+/// `ModifyCost { amount, dynamic_count: Some(LifeLost/…), .. }`, where
 /// the effective reduction is `amount * resolve_quantity(dynamic_count)`
 /// (casting.rs::collect_self_cost_modifiers). We resolve that multiplier here
 /// and fold it into a concrete `amount` (via [`ManaCost::scaled`], matching the
@@ -4935,6 +5073,7 @@ mod tests {
                 player_id: PlayerId(0),
                 sides: 6,
                 result: Some(4),
+                pre_entry_source: None,
             },
             GameEvent::EffectResolved {
                 kind: EffectKind::RollDie,
@@ -4959,6 +5098,7 @@ mod tests {
             player_id: PlayerId(0),
             sides: 6,
             result: Some(4),
+            pre_entry_source: None,
         }];
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount {

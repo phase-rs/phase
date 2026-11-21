@@ -189,6 +189,98 @@ fn clear_exert_history_on_zone_change(
     }
 }
 
+/// CR 400.7 + CR 120.2a / CR 120.2b + CR 702.11b: the damage history a
+/// permanent accrued on the battlefield (the per-object `dealt_damage_kinds`
+/// latch and its `GameState::objects_that_dealt_damage` Any-set entry) belongs
+/// to the old object. `ObjectId` persists across the zone change, so both are
+/// retired on a battlefield departure (death/bounce/exile/flicker); otherwise
+/// a flickered "has hexproof as long as it hasn't dealt damage yet" creature
+/// would re-enter still treated as having dealt damage and never regain
+/// hexproof. Shared by `apply_zone_exit_cleanup` and
+/// `apply_resolved_zone_change`, so a replayed departure retires exactly what
+/// the live one did; on the live path the replay applier runs after the
+/// cleanup and this call is an idempotent no-op. The latch half delegates to
+/// `GameObject::retire_dealt_damage_kinds`, the single latch-reset definition.
+/// State only: no event, trigger, timestamp or incarnation allocation. Marks a
+/// full layer pass iff either store changed, since a layer condition reads them.
+fn retire_damage_history_on_zone_change(
+    state: &mut GameState,
+    object_id: ObjectId,
+    from: Zone,
+    _to: Zone,
+) {
+    if from != Zone::Battlefield {
+        return;
+    }
+    let any_retired = state.objects_that_dealt_damage.remove(&object_id);
+    let latch_retired = state
+        .objects
+        .get_mut(&object_id)
+        .is_some_and(GameObject::retire_dealt_damage_kinds);
+    if any_retired || latch_retired {
+        state.layers_dirty.mark_full();
+    }
+}
+
+/// CR 608.2h: preserve the departing incarnation before its characteristics
+/// are reset. A caller outside zone cleanup supplies the pre-move attachments.
+pub(super) fn capture_exit_lki(
+    state: &mut GameState,
+    object_id: ObjectId,
+    attachments: Vec<crate::types::game_state::AttachmentSnapshot>,
+) {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return;
+    };
+    let incarnation = obj.incarnation;
+    let lki_copiable_values =
+        crate::game::layers::compute_current_copiable_values(state, object_id);
+    let lki = crate::types::game_state::LKISnapshot {
+        name: obj.name.clone(),
+        token_image_ref: obj.token_image_ref.clone(),
+        power: obj.power,
+        toughness: obj.toughness,
+        // CR 208.4b + CR 613.4b: keep both current and layer-7b base values.
+        base_power: obj.layer_base_power.or(obj.base_power),
+        base_toughness: obj.layer_base_toughness.or(obj.base_toughness),
+        // CR 202.3d + CR 709.4d + CR 709.5: reuse the zone-aware
+        // characteristic readers, including fused spells and unlocked Rooms.
+        mana_value: obj.effective_mana_value(),
+        controller: obj.controller,
+        owner: obj.owner,
+        card_types: obj.card_types.core_types.clone(),
+        subtypes: obj.card_types.subtypes.clone(),
+        supertypes: obj.card_types.supertypes.clone(),
+        keywords: obj.keywords.clone(),
+        colors: obj.effective_colors(),
+        chosen_attributes: obj.chosen_attributes.clone(),
+        counters: obj.counters.clone(),
+        // CR 110.5d: the new off-battlefield object has no tap status.
+        tapped: obj.tapped,
+        // CR 701.60b: suspected status is read at exit.
+        is_suspected: obj.is_suspected,
+        // CR 722.3a + CR 400.7: keep the old object's prepared designation.
+        was_prepared: obj.prepared.is_some(),
+        intensity: obj.intensity,
+        // CR 701.3d: the caller captures these before any attachment sever.
+        attachments,
+    };
+    state.lki_cache.insert(object_id, lki.clone());
+    state
+        .lki_by_incarnation
+        .entry(object_id)
+        .or_default()
+        .insert(incarnation, lki);
+    if let Some(values) = lki_copiable_values {
+        state
+            .lki_copiable_values_by_incarnation
+            .entry(object_id)
+            .or_default()
+            .insert(incarnation, values.clone());
+        state.lki_copiable_values.insert(object_id, values);
+    }
+}
+
 /// CR 400.7: Snapshot LKI and apply all cleanup side effects when an object
 /// leaves its current zone. Shared by `move_to_zone` and `move_to_library_at_index`.
 ///
@@ -300,90 +392,18 @@ pub(crate) fn apply_zone_exit_cleanup(
     }
     clear_exert_history_on_zone_change(state, object_id, from, to);
 
-    // CR 400.7: Snapshot LKI before a zone change out of any zone whose
-    // characteristics are not recomputed on demand. Power/toughness reflect
-    // layer modifications on battlefield (Layer 7); from exile they will be
-    // None (no layer computation), which is correct.
-    //
-    // CR 608.2h + CR 109.4: `Zone::Stack` is included because the CR 109.4
-    // reset below erases `obj.controller` on the way out, and a look-back
-    // effect that needs the at-exit controller of a stack object has nowhere
-    // else to read it. Render Silent ("Counter target spell. Its controller
-    // can't cast spells this turn") is the measured consumer:
-    // `ability_utils::parent_target_controller` already prefers this snapshot
-    // for any off-battlefield object and only falls through to `obj.controller`
-    // when there is none, so widening the capture is the whole fix — no
-    // consumer changes. The stack seed (`layers.rs`) owns a stack object's
-    // controller on the way IN; this owns the record of it on the way OUT.
-    if from == Zone::Battlefield || from == Zone::Exile || from == Zone::Stack {
-        let lki_copiable_values =
-            crate::game::layers::compute_current_copiable_values(state, object_id);
-        if let Some(obj) = state.objects.get(&object_id) {
-            let incarnation = obj.incarnation;
-            let lki = crate::types::game_state::LKISnapshot {
-                name: obj.name.clone(),
-                token_image_ref: obj.token_image_ref.clone(),
-                power: obj.power,
-                toughness: obj.toughness,
-                // CR 208.4b + CR 613.4b: Capture the layer-7b base values so
-                // base-scope P/T look-back filters read the base, not current.
-                base_power: obj.layer_base_power.or(obj.base_power),
-                base_toughness: obj.layer_base_toughness.or(obj.base_toughness),
-                // CR 202.3d + CR 709.4b: this LKI is captured on leaving the
-                // battlefield or exile (off the stack), so a split card records
-                // its combined mana value and colors (no-op for single-face and
-                // battlefield Rooms, which gate out).
-                mana_value: obj.effective_mana_value(),
-                controller: obj.controller,
-                owner: obj.owner,
-                // CR 400.7: Capture core types for "if it was a creature" patterns.
-                card_types: obj.card_types.core_types.clone(),
-                subtypes: obj.card_types.subtypes.clone(),
-                supertypes: obj.card_types.supertypes.clone(),
-                keywords: obj.keywords.clone(),
-                colors: obj.effective_colors(),
-                chosen_attributes: obj.chosen_attributes.clone(),
-                // CR 400.7: Capture counters for "if it had counters on it" patterns.
-                counters: obj.counters.clone(),
-                // CR 110.5 + CR 110.5d: Capture tap status AT zone exit. Once the
-                // object leaves the battlefield it is neither tapped nor untapped,
-                // so a use_lki rider ("if it was tapped", Brackish Blunder) reads
-                // this captured value instead of the live (now-absent) object.
-                tapped: obj.tapped,
-                // CR 701.60b: Capture suspected status at zone exit for
-                // "was suspected" look-back riders.
-                is_suspected: obj.is_suspected,
-                // CR 722.3a + CR 608.2h: Capture the prepared designation at
-                // zone exit, before the move clears it — a departed source's
-                // "isn't prepared" intervening-if recheck (CR 603.4) reads
-                // this exit value, not the trigger-time appearance.
-                was_prepared: obj.prepared.is_some(),
-                // CR 608.2h: intensity at zone exit, for a departed source's
-                // "its intensity" read.
-                intensity: obj.intensity,
-                // CR 608.2h: The attachment set as it stood BEFORE the departure
-                // sever (CR 701.3d) cleared it, so a source-referential intervening-if
-                // re-checked at resolution ("if this creature is enchanted" — Dreampod
-                // Druid) reads last known information once its source has left the
-                // battlefield.
-                // Supplied by the caller: the sever already ran by the time we get here.
-                attachments,
-            };
-            state.lki_cache.insert(object_id, lki.clone());
-            state
+    // CR 608.2h + CR 109.4: record characteristics (including controller)
+    // before normal exit cleanup. If a counter or fizzle had to restore the
+    // normal face before zone delivery, it already captured this incarnation
+    // while it still had its stack face. Do not replace that data.
+    if matches!(from, Zone::Battlefield | Zone::Exile)
+        || (from == Zone::Stack
+            && !state
                 .lki_by_incarnation
-                .entry(object_id)
-                .or_default()
-                .insert(incarnation, lki);
-        }
-        if let Some(values) = lki_copiable_values {
-            state
-                .lki_copiable_values_by_incarnation
-                .entry(object_id)
-                .or_default()
-                .insert(occurrence.incarnation, values.clone());
-            state.lki_copiable_values.insert(object_id, values);
-        }
+                .get(&object_id)
+                .is_some_and(|history| history.contains_key(&occurrence.incarnation)))
+    {
+        capture_exit_lki(state, object_id, attachments);
     }
 
     // CR 122.2 + CR 113.6b: Decide counter persistence using the still-current
@@ -721,6 +741,7 @@ pub(crate) fn apply_zone_exit_cleanup(
     }
 
     prune_object_bound_effects_on_exit(state, object_id, from, to);
+    retire_damage_history_on_zone_change(state, object_id, from, to);
 
     // Prune host-bound transient effects and clean up mana-tap tracking
     // when a permanent leaves the battlefield.
@@ -732,12 +753,6 @@ pub(crate) fn apply_zone_exit_cleanup(
         super::effects::remove_from_combat::remove_object_from_combat(state, object_id);
         super::pairing::break_pair(state, object_id);
         crate::game::layers::mark_layers_full(state);
-        // CR 400.7 + CR 702.11b: The "has dealt damage since entering" sticky flag
-        // belongs to the old object. ObjectId persists across this zone change, so
-        // clear it on a battlefield exit (death/bounce/exile/flicker) — otherwise a
-        // flickered "has hexproof if it hasn't dealt damage yet" creature would
-        // re-enter still treated as having dealt damage and never regain hexproof.
-        state.objects_that_dealt_damage.remove(&object_id);
         super::layers::prune_host_left_effects(state, object_id);
         // CR 611.2a + CR 400.7: `prune_host_left_effects` above covers only
         // `transient_continuous_effects`. A play/cast permission whose duration
@@ -1506,6 +1521,10 @@ pub fn apply_resolved_zone_change(
     // CR 400.7: the same object-bound grant lifetime as the live cleanup
     // (issue #8795), through the shared authority.
     prune_object_bound_effects_on_exit(state, command.object.object_id, command.from, command.to);
+    // CR 400.7: replay bypasses `apply_zone_exit_cleanup`, so it must retire
+    // the departed incarnation's damage history through the same shared
+    // authority, or a replayed blink leaves a stale latch and Any-set entry.
+    retire_damage_history_on_zone_change(state, command.object.object_id, command.from, command.to);
     if command.from == Zone::Battlefield && command.to != Zone::Battlefield {
         // CR 400.7 + CR 611.2a: replay bypasses the live battlefield host-left
         // replacement prune. Run the same authority before the object is
@@ -2171,7 +2190,10 @@ pub(crate) fn move_to_zone_with_entry_flags(
     // — self-gated so routine library churn stays cheap when no such static is
     // live.
     if to == Zone::Library || from == Zone::Library {
-        crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+        crate::game::layers::mark_layers_full_if_dimension_read_live(
+            state,
+            crate::game::layers::LayerInvalidationDimension::TopOfLibrary,
+        );
     }
 
     // CR 702.145b: a daybound permanent entering at night enters transformed;
@@ -2303,10 +2325,17 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Option<crate::types::game_state::ZoneChangeRecord> {
-    let mut record = state
-        .objects
-        .get(&object_id)
-        .map(|obj| obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield))?;
+    // CR 614.6 + CR 111.1: the object was created in the zone it enters — the
+    // battlefield for every ordinary entry, or the zone an applied replacement
+    // sent a token to instead (Hallowed Moonlight's exile). Nothing here is a
+    // battlefield entry unless that zone is the battlefield, and
+    // `record_zone_change` keys its battlefield-entry bookkeeping on the record's
+    // destination.
+    let mut record = state.objects.get(&object_id).map(|obj| {
+        let to = obj.zone;
+        obj.snapshot_for_zone_change(object_id, None, to)
+    })?;
+    let to = record.to_zone;
     // CR 400.7: entries from no zone are created in place — no `move_to_zone`
     // call fills the entered incarnation — so the authority fills it here from
     // the birth incarnation, mirroring the battlefield arm there. Without it,
@@ -2317,7 +2346,7 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
     events.push(GameEvent::ZoneChanged {
         object_id,
         from: None,
-        to: Zone::Battlefield,
+        to,
         record: Box::new(record.clone()),
     });
     Some(record)
@@ -2328,8 +2357,9 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
 /// after the entering instruction completed and before the next instruction can change it.
 /// Layers are flushed first (CR 613.1), so static continuous effects and the counters it
 /// entered with (CR 614.1c) are part of the observation. An entry whose `ZoneChanged` is parked
-/// in `deferred_entry_events` is still mid-entry (CR 614.12a / CR 707.5: its choice is made
-/// before it enters) and is skipped; its replay collects against the realized object.
+/// in `deferred_entry_events` is skipped in either state: it may be mid-entry (CR 614.12a /
+/// CR 707.5: its choice is made before it enters), its as-enters continuation may be running
+/// (CR 603.6d + CR 614.1c), or it may have completed and be waiting for its collector.
 /// Idempotent. An entrant that is no longer the exact entered incarnation on the battlefield is
 /// not observed.
 ///
@@ -2340,8 +2370,7 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
 /// inside that entry and the held entrants' event is not complete.
 pub(crate) fn settle_battlefield_entry_observations(state: &mut GameState, events: &[GameEvent]) {
     let parked_entry_keys: Vec<(u32, usize)> = state
-        .deferred_entry_events
-        .iter()
+        .parked_entry_events()
         .filter_map(|event| match event {
             GameEvent::ZoneChanged { record, .. } => {
                 Some((record.recorded_turn_number, record.turn_zone_change_index))
@@ -3196,7 +3225,10 @@ pub(crate) fn settle_library_arrangement(
     // CR 401.5 + CR 611.3a: A library reorder can change its top card without
     // creating a ZoneChanged event, so invalidate the dependent static directly
     // (self-gated).
-    crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+    crate::game::layers::mark_layers_full_if_dimension_read_live(
+        state,
+        crate::game::layers::LayerInvalidationDimension::TopOfLibrary,
+    );
 }
 
 /// Move an object to a specific position in its owner's library (top or bottom), emitting a ZoneChanged event.
@@ -3404,7 +3436,10 @@ pub fn move_to_library_at_index(
     // CR 401.5 + CR 611.3a: placing a card at library index 0 changes the top
     // card, so a `TopOfLibraryMatches` static must be re-evaluated. This path
     // bypasses `move_to_zone`, so it invalidates directly (self-gated).
-    crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+    crate::game::layers::mark_layers_full_if_dimension_read_live(
+        state,
+        crate::game::layers::LayerInvalidationDimension::TopOfLibrary,
+    );
 }
 
 /// Remove an ObjectId from the appropriate zone collection (CR 400.1).
@@ -7262,6 +7297,119 @@ mod tests {
         assert_eq!(
             replayed.resolved_rules_journal, replay_journal_before,
             "applying a recorded transition must not allocate or journal fresh replay authority"
+        );
+    }
+
+    /// A live object in `zone` carrying both damage-kind latches and an
+    /// Any-set entry, plus the recorded command for its move to `to` (produced
+    /// by the ordinary resolve-and-apply path on a throwaway clone). Returns
+    /// the untouched pre-move state for replay.
+    fn damage_history_replay_fixture(
+        zone: Zone,
+        to: Zone,
+    ) -> (GameState, ObjectId, ResolvedZoneChangeCommand) {
+        let mut pre = setup();
+        let id = create_object(
+            &mut pre,
+            CardId(10_440),
+            PlayerId(0),
+            "Damage History Source".to_string(),
+            zone,
+        );
+        {
+            let object = pre.objects.get_mut(&id).unwrap();
+            assert!(object.dealt_damage_kinds.record(true));
+            assert!(object.dealt_damage_kinds.record(false));
+        }
+        pre.objects_that_dealt_damage.insert(id);
+        let mut recorder = pre.clone();
+        let record = crate::types::game_state::ZoneChangeRecord::test_minimal(id, Some(zone), to);
+        let command =
+            resolve_and_apply_zone_change(&mut recorder, id, zone, to, PlayerId(0), None, record)
+                .expect("the recorded transition resolves");
+        (pre, id, command)
+    }
+
+    /// CR 400.7: the replay applier retires damage history only on a
+    /// battlefield departure. A Graveyard -> Exile replay touches neither
+    /// store and schedules no layer pass; a Battlefield -> Graveyard replay
+    /// retires both stores and dirties layers (paired positive: the helper is
+    /// reached on the replay path).
+    #[test]
+    fn p2_replayed_zone_command_retires_damage_history_only_from_battlefield() {
+        use crate::types::ability::DamageKindFilter;
+        use crate::types::game_state::LayersDirty;
+
+        let (pre, id, command) = damage_history_replay_fixture(Zone::Graveyard, Zone::Exile);
+        let mut replayed = pre.clone();
+        replayed.layers_dirty = LayersDirty::Clean;
+        apply_resolved_zone_change(&mut replayed, &command).expect("Graveyard -> Exile replays");
+        assert_eq!(replayed.objects[&id].zone, Zone::Exile, "reach-guard");
+        assert_eq!(
+            replayed.objects[&id].dealt_damage_kinds, pre.objects[&id].dealt_damage_kinds,
+            "a non-battlefield move keeps the latch"
+        );
+        assert!(replayed.objects_that_dealt_damage.contains(&id));
+        assert!(
+            !replayed.layers_dirty.is_dirty(),
+            "a non-battlefield move schedules no damage-history layer pass"
+        );
+
+        let (pre, id, command) = damage_history_replay_fixture(Zone::Battlefield, Zone::Graveyard);
+        assert!(
+            pre.objects[&id]
+                .dealt_damage_kinds
+                .has(DamageKindFilter::CombatOnly)
+                && pre.objects[&id]
+                    .dealt_damage_kinds
+                    .has(DamageKindFilter::NoncombatOnly),
+            "reach-guard: both latches set before the departure"
+        );
+        let mut replayed = pre.clone();
+        replayed.layers_dirty = LayersDirty::Clean;
+        apply_resolved_zone_change(&mut replayed, &command)
+            .expect("Battlefield -> Graveyard replays");
+        assert_eq!(replayed.objects[&id].zone, Zone::Graveyard, "reach-guard");
+        assert!(replayed.objects[&id].dealt_damage_kinds.is_empty());
+        assert!(!replayed.objects_that_dealt_damage.contains(&id));
+        assert!(replayed.layers_dirty.is_dirty());
+    }
+
+    /// CR 400.7 + CR 120.2a / CR 120.2b: the shared retirement helper clears
+    /// both stores through the object's single latch-reset definition and
+    /// dirties layers; a second call (the live-then-replay arrangement) is a
+    /// no-op that schedules no layer pass.
+    #[test]
+    fn p3_retire_damage_history_clears_both_stores_and_is_idempotent() {
+        use crate::types::game_state::LayersDirty;
+
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(10_441),
+            PlayerId(0),
+            "Damage History Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&id).unwrap();
+            assert!(object.dealt_damage_kinds.record(true));
+            assert!(object.dealt_damage_kinds.record(false));
+        }
+        state.objects_that_dealt_damage.insert(id);
+        state.layers_dirty = LayersDirty::Clean;
+
+        retire_damage_history_on_zone_change(&mut state, id, Zone::Battlefield, Zone::Exile);
+        assert!(state.objects[&id].dealt_damage_kinds.is_empty());
+        assert!(!state.objects_that_dealt_damage.contains(&id));
+        assert!(state.layers_dirty.is_dirty());
+
+        state.layers_dirty = LayersDirty::Clean;
+        retire_damage_history_on_zone_change(&mut state, id, Zone::Battlefield, Zone::Exile);
+        assert!(state.objects[&id].dealt_damage_kinds.is_empty());
+        assert!(
+            !state.layers_dirty.is_dirty(),
+            "a second retirement changes nothing and schedules no layer pass"
         );
     }
 

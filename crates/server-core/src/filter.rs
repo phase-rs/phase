@@ -398,6 +398,9 @@ mod tests {
 
         state.waiting_for = WaitingFor::EffectZoneChoice {
             performed_by: None,
+            // CR 402.3: the producer captured the Hand scan scope; the prompt
+            // owns it so restore and projection agree on what is private.
+            privacy_zones: Some(vec![Zone::Hand]),
             player: PlayerId(0),
             cards: vec![card_a, card_b],
             count: 1,
@@ -430,8 +433,17 @@ mod tests {
         let filtered = filter_state_for_player(&state, PlayerId(1));
 
         match filtered.waiting_for {
-            WaitingFor::EffectZoneChoice { cards, .. } => {
-                assert_eq!(cards, vec![ObjectId(0), ObjectId(0)]);
+            WaitingFor::EffectZoneChoice {
+                cards,
+                count,
+                min_count,
+                ..
+            } => {
+                assert!(
+                    cards.is_empty(),
+                    "a Hand-scoped choice must not expose even the eligible count"
+                );
+                assert_eq!((count, min_count), (0, 0));
             }
             other => panic!("Expected EffectZoneChoice, got {:?}", other),
         }
@@ -456,6 +468,8 @@ mod tests {
         state.waiting_for = WaitingFor::EffectZoneChoice {
             library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
             performed_by: Some(PlayerId(1)),
+            // CR 402.3: the producer captured the Hand scan scope.
+            privacy_zones: Some(vec![Zone::Hand]),
             player: PlayerId(1),
             cards: vec![card],
             count: 1,
@@ -483,14 +497,17 @@ mod tests {
             enters_modified_if: None,
             duration: None,
         };
-        for (viewer, offered) in [(PlayerId(1), card), (PlayerId(0), ObjectId(0))] {
+        // CR 402.3: a Hand-scoped prompt clears its candidate list even when a
+        // single eligible card exists, so the opponent's envelope is empty
+        // rather than the pre-scope placeholder projection.
+        for (viewer, expected) in [(PlayerId(1), vec![card]), (PlayerId(0), Vec::new())] {
             match filter_state_for_player(&state, viewer).waiting_for {
                 WaitingFor::EffectZoneChoice {
                     cards,
                     performed_by,
                     ..
                 } => {
-                    assert_eq!(cards, vec![offered], "viewer {viewer:?}");
+                    assert_eq!(cards, expected, "viewer {viewer:?}");
                     assert_eq!(performed_by, Some(PlayerId(1)), "viewer {viewer:?}");
                 }
                 other => panic!("Expected EffectZoneChoice, got {other:?}"),
@@ -538,6 +555,8 @@ mod tests {
 
         state.waiting_for = WaitingFor::EffectZoneChoice {
             performed_by: None,
+            // CR 401.4: the producer captured the Library scan scope.
+            privacy_zones: Some(vec![Zone::Library]),
             player: PlayerId(0),
             cards: vec![card_a, card_b],
             count: 2,

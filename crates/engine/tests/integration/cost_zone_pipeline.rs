@@ -982,6 +982,7 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         .description("Prevent the staged mana cost move".to_string())]
     .into();
     state.pending_replacement = Some(PendingReplacement {
+        settled_damage_guards: Vec::new(),
         proposed: ProposedEvent::Destroy {
             object_id: source,
             source: None,
@@ -1000,6 +1001,7 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         exile_tracking: engine::types::game_state::ZoneDeliveryExileTracking::None,
         excess_recipient: None,
         lifelink_bonus: 0,
+        source_incarnation: None,
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
@@ -1422,6 +1424,7 @@ fn ward_multi_sacrifice_payment_reparks_each_replacement_before_effect_resolved(
         )),
         remaining: 1,
         min_total_power: Some(2),
+        trigger_event: None,
     };
 
     let initial = runner
@@ -1531,6 +1534,7 @@ fn ward_sequential_sacrifice_payment_reprompts_only_after_replacement_resolves()
         )),
         remaining: 2,
         min_total_power: None,
+        trigger_event: None,
     };
 
     let initial = runner
@@ -1642,6 +1646,7 @@ fn ward_sacrifice_payment_completes_synchronously_without_replacements() {
         )),
         remaining: 1,
         min_total_power: Some(2),
+        trigger_event: None,
     };
     let aggregate = aggregate_runner
         .act(GameAction::SelectCards {
@@ -1687,6 +1692,7 @@ fn ward_sacrifice_payment_completes_synchronously_without_replacements() {
         )),
         remaining: 2,
         min_total_power: None,
+        trigger_event: None,
     };
     let first = sequential_runner
         .act(GameAction::SelectCards {
@@ -5326,6 +5332,7 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         .description("Prevent the staged cost move".to_string())]
     .into();
     runner.state_mut().pending_replacement = Some(PendingReplacement {
+        settled_damage_guards: Vec::new(),
         proposed: ProposedEvent::Destroy {
             object_id: source,
             source: None,
@@ -5344,6 +5351,7 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         exile_tracking: engine::types::game_state::ZoneDeliveryExileTracking::None,
         excess_recipient: None,
         lifelink_bonus: 0,
+        source_incarnation: None,
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
@@ -13862,12 +13870,15 @@ fn targeted_sacrifice_reparks_replacement_before_terminal_effect_resolved() {
 
     let first_resumed = runner
         .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("the first replacement delivers and re-parks the second sacrifice");
+        .expect("the first replacement queues its move and re-parks the second sacrifice");
     assert!(matches!(
         first_resumed.waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
-    assert_eq!(runner.state().objects[&first].zone, Zone::Exile);
+    // CR 616.1: the answer decides how the first permanent moves, but the two
+    // sacrifices are one simultaneous action: nothing moves until the second
+    // permanent's replacements have been consulted too.
+    assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
     assert!(
         !initial_events
@@ -13888,6 +13899,7 @@ fn targeted_sacrifice_reparks_replacement_before_terminal_effect_resolved() {
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("the remaining selected sacrifice and terminal tail resolve");
     assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(runner.state().objects[&first].zone, Zone::Exile);
     assert_eq!(runner.state().objects[&second].zone, Zone::Exile);
     assert_eq!(runner.state().last_effect_count, Some(2));
     assert_eq!(
@@ -14590,6 +14602,7 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
 
         let completed = runner
