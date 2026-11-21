@@ -2,18 +2,24 @@
 //! `wrong_count` class whose cited clause the engine already carries out correctly. Every released
 //! card is the printed card (printed cost, type line, P/T and verbatim Oracle text, loaded from the
 //! card database through `add_real_card`) and is driven through the public `GameRunner` actions.
-//! Only textless fillers (vanilla creatures, basic lands) are synthetic.
+//! Only the textless library fillers (`P1 Draw N`) and the stack entry injected for the opponent's
+//! printed spell are synthetic.
 //!
-//! One group per clause shape. Every group asserts the prompt the engine shows (actor and offered
-//! cards) before the effect, has controls that would fail if the clause counted wrongly (a card the
-//! filter must not offer, a different count, an empty answer), and ends with an empty stack
-//! and priority.
+//! One group per clause shape. The Goblin Recruiter group asserts the prompt the engine shows
+//! (actor, offered cards, count, reveal, ordering) before the effect; every group has controls
+//! that would fail if the clause counted wrongly (a card the filter must not offer, a different
+//! count, an empty answer), and ends with an empty stack and priority.
 use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::zones::move_to_zone;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::events::GameEvent;
+use engine::types::game_state::{
+    CastPaymentMode, CastingVariant, StackEntry, StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -25,8 +31,8 @@ fn db() -> &'static CardDatabase {
     shared_card_db().expect("the committed integration card fixture is present")
 }
 
-/// Pool mana for every printed cost used below (CR 106.4), so that a cast pays exactly its printed
-/// cost and never taps a land the test needs untapped.
+/// Pool mana for every printed cost used below (CR 106.4: mana in the pool pays costs), so that a
+/// cast pays exactly its printed cost and never taps a land the test needs untapped.
 fn pool() -> Vec<ManaUnit> {
     let mut kinds = Vec::new();
     for kind in [
@@ -146,13 +152,12 @@ fn resolve_with(r: &mut GameRunner, label: &str, policy: Policy) -> Vec<String> 
         if matches!(waiting, WaitingFor::Priority { player: _ }) && r.state().stack.is_empty() {
             return seen;
         }
-        let action = match &waiting {
-            WaitingFor::Priority { player: _ } => GameAction::PassPriority,
-            other => {
-                let name: String = format!("{other:?}").chars().take(24).collect();
-                seen.push(name);
-                policy(other).unwrap_or_else(|| panic!("{label}: unexpected prompt {other:?}"))
-            }
+        let action = if matches!(waiting, WaitingFor::Priority { player: _ }) {
+            GameAction::PassPriority
+        } else {
+            let name: String = format!("{waiting:?}").chars().take(24).collect();
+            seen.push(name);
+            policy(&waiting).unwrap_or_else(|| panic!("{label}: unexpected prompt {waiting:?}"))
         };
         r.act(action)
             .unwrap_or_else(|e| panic!("{label}: action rejected ({e:?}) at {waiting:?}"));
@@ -211,6 +216,64 @@ fn ghastly_conscription_manifests_every_creature_card_in_the_targeted_graveyard(
     );
 }
 
+/// CR 701.24a: "shuffle that pile" reorders the exiled pile before it is manifested. Every creature
+/// card of the targeted graveyard is exiled first (the pile), and the order in which the cards are
+/// then manifested differs from the order in which they were exiled. The comparison is with the
+/// observed exile order, not with the graveyard order, so it fails when the shuffle step is
+/// removed from the chain (seed-dependent: five cards leave a 1 in 120 chance of a false pass).
+#[test]
+fn ghastly_conscription_exiles_the_pile_then_manifests_it_in_a_shuffled_order() {
+    let mut s = table();
+    let spell = s.add_real_card(P0, "Ghastly Conscription", Zone::Hand, db());
+    let creatures: Vec<ObjectId> = [
+        "Grizzly Bears",
+        "Llanowar Elves",
+        "Serra Angel",
+        "Goblin Piker",
+        "Raging Goblin",
+    ]
+    .iter()
+    .map(|n| s.add_real_card(P1, n, Zone::Graveyard, db()))
+    .collect();
+    let mut r = s.build();
+    let outcome = r.cast(spell).target_player(P1).resolve();
+    let mut exile_order: Vec<ObjectId> = Vec::new();
+    let mut manifest_order: Vec<ObjectId> = Vec::new();
+    for event in outcome.events() {
+        if let GameEvent::ZoneChanged {
+            object_id,
+            from: _,
+            to,
+            record: _,
+        } = event
+        {
+            if !creatures.contains(object_id) {
+                continue;
+            }
+            if *to == Zone::Exile {
+                exile_order.push(*object_id);
+            } else if *to == Zone::Battlefield {
+                manifest_order.push(*object_id);
+            }
+        }
+    }
+    assert_eq!(
+        sorted(exile_order.clone()),
+        sorted(creatures.clone()),
+        "every creature card of the targeted graveyard is exiled into the pile"
+    );
+    assert_eq!(
+        sorted(manifest_order.clone()),
+        sorted(creatures.clone()),
+        "every exiled creature card is manifested exactly once"
+    );
+    assert_ne!(
+        manifest_order, exile_order,
+        "the pile was shuffled between the exile and the manifest (non-identity for this seed)"
+    );
+    assert_settled(&r, P0, "Ghastly Conscription, shuffled pile");
+}
+
 /// Control: a graveyard with no creature card manifests nothing.
 #[test]
 fn ghastly_conscription_with_no_creature_card_in_the_graveyard_manifests_nothing() {
@@ -264,7 +327,8 @@ fn kozilek_draw(others: usize) -> (usize, GameRunner) {
     let before = hand_of(&r, P0).len() - 1;
     assert_eq!(before, others);
     cast_from_hand(&mut r, kozilek);
-    // The "when you cast" trigger goes above the spell (CR 603.3b): it resolves first.
+    // CR 603.3: the "when you cast" trigger is put on the stack above the spell; CR 405.5: the
+    // top object resolves first.
     assert_eq!(
         r.state().stack.len(),
         2,
@@ -344,6 +408,85 @@ fn kozilek_cast_trigger_draws_nothing_with_seven_or_more_other_cards_in_hand() {
     }
 }
 
+/// Kozilek's other two printed clauses, on the printed card: Menace, and "Discard a card with mana
+/// value X: Counter target spell with mana value X." (a discard of the announced mana value counters
+/// a spell of that mana value; an X no card in hand matches cannot be paid).
+fn kozilek_on_battlefield_facing_a_spell() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let mut s = table();
+    let kozilek = s.add_real_card(P0, "Kozilek, the Great Distortion", Zone::Battlefield, db());
+    let discard = s.add_real_card(P0, "Divination", Zone::Hand, db());
+    let off_value = s.add_real_card(P0, "Grizzly Bears", Zone::Hand, db());
+    let target = s.add_real_card(P1, "Phyrexian Arena", Zone::Hand, db());
+    let mut r = s.build();
+    // The opponent's spell is put on the stack directly (as the existing Kozilek counter witness
+    // does): Divination and Phyrexian Arena both have mana value three.
+    let state = r.state_mut();
+    let card_id = state.objects[&target].card_id;
+    let mut events = Vec::new();
+    move_to_zone(state, target, Zone::Stack, &mut events);
+    state.stack.push_back(StackEntry {
+        id: target,
+        source_id: target,
+        controller: P1,
+        kind: StackEntryKind::Spell {
+            card_id,
+            ability: None,
+            casting_variant: CastingVariant::Normal,
+            actual_mana_spent: 0,
+        },
+    });
+    (r, kozilek, discard, off_value, target)
+}
+
+#[test]
+fn kozilek_has_menace() {
+    let (r, kozilek, _, _, _) = kozilek_on_battlefield_facing_a_spell();
+    assert!(
+        r.state().objects[&kozilek].has_keyword(&Keyword::Menace),
+        "Kozilek has menace"
+    );
+}
+
+#[test]
+fn kozilek_discards_a_card_of_the_announced_mana_value_to_counter_a_spell_of_that_value() {
+    let (mut r, kozilek, discard, off_value, target) = kozilek_on_battlefield_facing_a_spell();
+    let outcome = r
+        .activate(kozilek, 0)
+        .x(3)
+        .target_object(target)
+        .pay_with(&[discard])
+        .resolve();
+    outcome.assert_zone(&[discard, target], Zone::Graveyard);
+    assert_eq!(
+        zone_of(&r, off_value),
+        Zone::Hand,
+        "the card with another mana value was not discarded"
+    );
+    assert_settled(&r, P0, "Kozilek counter");
+}
+
+/// Control: with X = 4 no card in hand has the announced mana value, so the cost cannot be paid.
+#[test]
+fn kozilek_rejects_an_announced_x_that_no_card_in_hand_matches() {
+    let (mut r, kozilek, discard, _, target) = kozilek_on_battlefield_facing_a_spell();
+    r.act(GameAction::ActivateAbility {
+        source_id: kozilek,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    })
+    .expect("activation reaches the X announcement");
+    assert!(
+        r.act(GameAction::ChooseX { value: 4 }).is_err(),
+        "X = 4 has no matching discard"
+    );
+    assert_eq!(zone_of(&r, discard), Zone::Hand);
+    assert_eq!(
+        zone_of(&r, target),
+        Zone::Stack,
+        "the spell was not countered"
+    );
+}
+
 // ---- Shape 3: "search your library for any number of Goblin cards, reveal them, then shuffle and
 // put those cards on top in any order." (Goblin Recruiter) ----
 
@@ -366,20 +509,38 @@ fn recruiter_run(pick: impl Fn(&[ObjectId]) -> Vec<ObjectId>) -> (GameRunner, Ve
     let mut r = s.build();
     cast_from_hand(&mut r, recruiter);
     let goblins = vec![lib[1], lib[3], lib[5]];
+    let mut search_prompts = 0usize;
     let mut policy = |w: &WaitingFor| {
         let WaitingFor::SearchChoice {
             player,
+            library_owner,
             cards,
             count,
-            up_to,
             reveal,
+            up_to,
+            allows_partial_find: _,
+            constraint,
             ordering_hint,
-            ..
+            split,
         } = w
         else {
             return None;
         };
         assert_eq!(*player, P0);
+        assert_eq!(
+            *library_owner,
+            Some(P0),
+            "the caster searches their own library"
+        );
+        assert_eq!(
+            *constraint,
+            engine::types::ability::SearchSelectionConstraint::default(),
+            "no relation among the chosen cards is required"
+        );
+        assert!(
+            split.is_none(),
+            "the chosen cards are not split between destinations"
+        );
         assert!(*reveal, "the found cards are revealed");
         assert_eq!(
             *ordering_hint,
@@ -393,13 +554,11 @@ fn recruiter_run(pick: impl Fn(&[ObjectId]) -> Vec<ObjectId>) -> (GameRunner, Ve
         );
         assert_eq!(*count, 3, "any number of them");
         assert!(*up_to, "zero to all three");
+        search_prompts += 1;
         Some(GameAction::SelectCards { cards: pick(&lib) })
     };
     let prompts = resolve_with(&mut r, "Goblin Recruiter", &mut policy);
-    assert!(
-        prompts.iter().any(|p| p.starts_with("SearchChoice")),
-        "{prompts:?}"
-    );
+    assert_eq!(search_prompts, 1, "exactly one search prompt: {prompts:?}");
     (r, lib)
 }
 
@@ -431,9 +590,9 @@ fn goblin_recruiter_puts_the_found_goblins_on_top_in_the_chosen_order_after_the_
     }
 }
 
-/// Control: finding no Goblin puts nothing on top.
+/// Control: an empty selection is accepted and all seven cards stay in the library.
 #[test]
-fn goblin_recruiter_finding_no_goblin_leaves_the_library_shuffled_with_nothing_placed() {
+fn goblin_recruiter_accepts_an_empty_selection_and_keeps_all_seven_cards_in_the_library() {
     let (r, lib) = recruiter_run(|_| vec![]);
     assert_settled(&r, P0, "Goblin Recruiter, nothing found");
     let library = library_of(&r, P0);
