@@ -312,6 +312,62 @@ proptest! {
     }
 }
 
+/// CR 510.1c: Vile Bile (2½/2½) blocked by two 2/2s prompts for a 2½ budget.
+/// Every generated assignment spends exactly 2½ (one carries the half point)
+/// and is reducer-legal.
+#[test]
+fn half_point_assignment_budget_is_spent_exactly() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let Some(db) = crate::support::shared_card_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+    let bile = scenario.add_real_card(P0, "Vile Bile", Zone::Battlefield, db);
+    let blocker_a = scenario.add_creature(P1, "Blocker A", 2, 2).id();
+    let blocker_b = scenario.add_creature(P1, "Blocker B", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.pass_both_players();
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(bile, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("declare attackers should succeed");
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker_a, bile), (blocker_b, bile)],
+        })
+        .expect("declare blockers should succeed");
+    runner.pass_both_players();
+    let state = runner.state().clone();
+    let WaitingFor::AssignCombatDamage {
+        total_damage,
+        total_damage_fraction,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!("expected an assignment prompt, got {:?}", state.waiting_for);
+    };
+    assert_eq!(
+        (*total_damage, *total_damage_fraction),
+        (2, HalfFraction::Half),
+        "the budget is Vile Bile's exact 2½ power"
+    );
+    assert!(
+        legal_actions(&state).iter().any(|action| matches!(
+            action,
+            GameAction::AssignCombatDamage { assignments_fraction, .. }
+                if !assignments_fraction.is_empty()
+        )),
+        "a generated assignment carries the half point"
+    );
+    assert_assign_combat_damage_actions_respect_budget(&state);
+    assert_all_legal_actions_apply(&state);
+}
+
 #[test]
 fn generated_priority_actions_remain_reducer_legal_in_default_opening_state() {
     let state = GameState::new_two_player(42);
