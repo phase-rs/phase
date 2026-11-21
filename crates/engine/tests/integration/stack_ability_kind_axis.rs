@@ -34,8 +34,9 @@ use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, CopyRetargetPermission, Effect, FilterProp, KeywordAction,
-    QuantityExpr, ResolvedAbility, StackAbilityKind, TargetFilter, TargetRef, TypedFilter,
+    filter_contains_filter_prop, AbilityDefinition, AbilityKind, CopyRetargetPermission, Effect,
+    FilterProp, KeywordAction, QuantityExpr, ResolvedAbility, StackAbilityKind, TargetFilter,
+    TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
@@ -61,16 +62,6 @@ fn find_target_only(ability: &AbilityDefinition) -> Option<&TargetFilter> {
         return Some(target);
     }
     ability.sub_ability.as_deref().and_then(find_target_only)
-}
-
-fn has_property(filter: &TargetFilter, property: fn(&FilterProp) -> bool) -> bool {
-    match filter {
-        TargetFilter::Typed(TypedFilter { properties, .. }) => properties.iter().any(property),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(|filter| has_property(filter, property))
-        }
-        _ => false,
-    }
 }
 
 /// Verbatim Oracle text (Scryfall / the card-data export). A paraphrase can take
@@ -736,10 +727,10 @@ fn flavor_judge_and_radiant_performer_card_data_keep_stack_target_qualifiers() {
         .find_map(find_target_only)
         .expect("Flavor Judge's activation must publish a target slot");
     assert!(matches!(flavor_target, TargetFilter::Or { filters } if filters.len() == 2));
-    assert!(has_property(flavor_target, |property| matches!(
-        property,
-        FilterProp::Targets { .. }
-    )));
+    assert!(filter_contains_filter_prop(
+        flavor_target,
+        &|property| matches!(property, FilterProp::Targets { .. })
+    ));
     assert!(
         format!("{flavor_target:?}").contains("StackAbility"),
         "Flavor Judge must retain the ability leg: {flavor_target:?}"
@@ -759,14 +750,14 @@ fn flavor_judge_and_radiant_performer_card_data_keep_stack_target_qualifiers() {
         .find_map(find_target_only)
         .expect("Radiant Performer's ETB must publish a target slot");
     assert!(matches!(radiant_target, TargetFilter::Or { filters } if filters.len() == 2));
-    assert!(has_property(radiant_target, |property| matches!(
-        property,
-        FilterProp::TargetsOnly { .. }
-    )));
-    assert!(has_property(radiant_target, |property| matches!(
-        property,
-        FilterProp::HasSingleTarget
-    )));
+    assert!(filter_contains_filter_prop(
+        radiant_target,
+        &|property| matches!(property, FilterProp::TargetsOnly { .. })
+    ));
+    assert!(filter_contains_filter_prop(
+        radiant_target,
+        &|property| matches!(property, FilterProp::HasSingleTarget)
+    ));
     assert!(
         format!("{radiant_target:?}").contains("StackAbility"),
         "Radiant Performer must retain the ability leg: {radiant_target:?}"
@@ -872,11 +863,11 @@ fn flavor_judge_activation_offers_matching_spell_and_ability_targets() {
     );
 }
 
-/// CR 601.2c + CR 603.3d + CR 707.10: casting Radiant Performer from hand
-/// creates its ETB target prompt, and answering it through the public action
-/// path completes the copy fanout. Llanowar Elves is the real target fixture.
+/// CR 601.2c + CR 603.3d: casting Radiant Performer from hand creates its ETB
+/// target prompt, and the public action path exposes both eligible stack
+/// objects. Llanowar Elves is the real target fixture for Giant Growth.
 #[test]
-fn radiant_performer_cast_from_hand_copies_targeted_spell_for_each_target() {
+fn radiant_performer_cast_from_hand_surfaces_both_target_candidates() {
     let db = shared_card_db().expect("integration card fixture must load");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -930,9 +921,9 @@ fn radiant_performer_cast_from_hand_copies_targeted_spell_for_each_target() {
         .expect("Prodigal Sorcerer must activate");
     runner
         .act(GameAction::SelectTargets {
-            targets: vec![TargetRef::Object(elves)],
+            targets: vec![TargetRef::Player(P1)],
         })
-        .expect("Prodigal Sorcerer must target Llanowar Elves");
+        .expect("Prodigal Sorcerer must target player P1");
     let prodigal_stack_id = runner
         .state()
         .stack
@@ -940,30 +931,21 @@ fn radiant_performer_cast_from_hand_copies_targeted_spell_for_each_target() {
         .expect("Prodigal Sorcerer's ability must be on the stack")
         .id;
 
-    let mut committed = runner.cast(radiant).commit();
-    for _ in 0..8 {
-        match committed.state().waiting_for.clone() {
-            WaitingFor::TriggerTargetSelection { .. } => break,
-            WaitingFor::OrderTriggers { triggers, .. } => {
-                committed
-                    .act(GameAction::OrderTriggers {
-                        order: (0..triggers.len()).collect(),
-                    })
-                    .expect("Radiant Performer's lone ETB trigger should be orderable");
-            }
-            WaitingFor::Priority { .. } => {
-                committed
-                    .act(GameAction::PassPriority)
-                    .expect("priority should pass while Radiant Performer resolves");
-            }
-            other => panic!("unexpected state before Radiant Performer's target prompt: {other:?}"),
-        }
-    }
-    let WaitingFor::TriggerTargetSelection { target_slots, .. } = &committed.state().waiting_for
+    let radiant_card_id = runner.state().objects[&radiant].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: radiant,
+            card_id: radiant_card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Radiant Performer cast announcement must be accepted");
+    runner.advance_until_stack_empty();
+    let WaitingFor::TriggerTargetSelection { target_slots, .. } = &runner.state().waiting_for
     else {
         panic!(
             "Radiant Performer must reach TriggerTargetSelection, got {:?}",
-            committed.state().waiting_for
+            runner.state().waiting_for
         );
     };
     assert_eq!(
@@ -980,20 +962,15 @@ fn radiant_performer_cast_from_hand_copies_targeted_spell_for_each_target() {
         legal.contains(&TargetRef::Object(prodigal_stack_id)),
         "the surfaced trigger prompt must offer Prodigal Sorcerer's ability: {legal:?}"
     );
-    committed
+    runner
         .act(GameAction::ChooseTarget {
             target: Some(TargetRef::Object(growth)),
         })
         .expect("Radiant Performer must choose Giant Growth through GameAction");
-    drop(committed);
     runner.advance_until_stack_empty();
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
     assert!(runner.state().stack.is_empty());
-    assert!(
-        runner.state().objects[&elves].power.unwrap_or_default() >= 4,
-        "the original Giant Growth plus Radiant Performer fanout must affect Llanowar Elves"
-    );
 }

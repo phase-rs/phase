@@ -20195,7 +20195,9 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::TurnWindow;
+    use crate::types::ability::{
+        filter_contains_filter_prop, filter_grammar_any, FilterGrammarNode, TurnWindow,
+    };
 
     use crate::types::ability::{EffectKind, ParitySource, ZoneChoiceChooser};
     use crate::types::counter::CounterType;
@@ -27798,24 +27800,13 @@ mod tests {
     }
 
     fn has_stack_leg(filter: &TargetFilter, ability: bool) -> bool {
-        match filter {
-            TargetFilter::StackSpell => !ability,
-            TargetFilter::StackAbility { .. } => ability,
-            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-                filters.iter().any(|filter| has_stack_leg(filter, ability))
-            }
-            _ => false,
-        }
-    }
-
-    fn has_filter_property(filter: &TargetFilter, predicate: fn(&FilterProp) -> bool) -> bool {
-        match filter {
-            TargetFilter::Typed(TypedFilter { properties, .. }) => properties.iter().any(predicate),
-            TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
-                .iter()
-                .any(|filter| has_filter_property(filter, predicate)),
-            _ => false,
-        }
+        filter_grammar_any(filter, &|node| match node {
+            FilterGrammarNode::Filter(TargetFilter::StackSpell) => !ability,
+            FilterGrammarNode::Filter(TargetFilter::StackAbility { .. }) => ability,
+            FilterGrammarNode::Filter(_)
+            | FilterGrammarNode::Prop(_)
+            | FilterGrammarNode::Player(_) => false,
+        })
     }
 
     /// SHAPE — CR 115.1 + CR 115.9b: Flavor Judge's exact target clause must
@@ -27843,7 +27834,7 @@ mod tests {
             "the ability leg must survive the target qualifier: {target:?}"
         );
         assert!(
-            has_filter_property(&target, |property| matches!(
+            filter_contains_filter_prop(&target, &|property| matches!(
                 property,
                 FilterProp::Targets { .. }
             )),
@@ -27876,14 +27867,14 @@ mod tests {
             "the ability leg must survive the target qualifier: {target:?}"
         );
         assert!(
-            has_filter_property(&target, |property| matches!(
+            filter_contains_filter_prop(&target, &|property| matches!(
                 property,
                 FilterProp::TargetsOnly { .. }
             )),
             "the TargetsOnly property must survive: {target:?}"
         );
         assert!(
-            has_filter_property(&target, |property| {
+            filter_contains_filter_prop(&target, &|property| {
                 matches!(property, FilterProp::HasSingleTarget)
             }),
             "the HasSingleTarget property must survive: {target:?}"
