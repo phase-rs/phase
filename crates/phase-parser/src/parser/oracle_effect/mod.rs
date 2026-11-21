@@ -28975,10 +28975,10 @@ fn try_parse_becomes_plotted_clause(lower: &str) -> bool {
 }
 
 /// CR 122.1: a verbless counter-placement conjunct — a count (article, number word, digit
-/// or X, all read by `parse_number_or_x`) followed by counters placed "on" a recipient, with no verb of its own. The count
-/// axis is the shared count grammar; the singular and plural noun are one axis ("counter
-/// on" / "counters on"), so "a loyalty counter on …" and "five loyalty counters on …" both
-/// qualify.
+/// or X, all read by `parse_number_or_x`) followed by counters placed "on" a recipient, with
+/// no verb of its own. The count axis is the shared count grammar; the singular and plural
+/// noun are one axis ("counter on" / "counters on"), so "a loyalty counter on …" and "five
+/// loyalty counters on …" both qualify.
 fn starts_counted_counter_placement(sub_lower: &str) -> bool {
     let Ok((after_count, _)) = terminated(
         nom_primitives::parse_number_or_x,
