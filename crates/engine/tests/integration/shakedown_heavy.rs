@@ -81,7 +81,9 @@ fn hand_len(runner: &GameRunner) -> usize {
 /// "If they do" effect.
 #[test]
 fn decline_stays_tapped_and_attacking() {
-    let Some(db) = shared_card_db() else { return; };
+    let Some(db) = shared_card_db() else {
+        return;
+    };
     let (runner, heavy, actors, hand_before) = attack(db, false);
     let tapped = runner.state().objects[&heavy].tapped;
     let attacking = is_attacking(&runner, heavy);
@@ -95,7 +97,9 @@ fn decline_stays_tapped_and_attacking() {
 /// "If they do" untaps Shakedown Heavy and removes it from combat.
 #[test]
 fn accept_draws_untaps_and_removes_it_from_combat() {
-    let Some(db) = shared_card_db() else { return; };
+    let Some(db) = shared_card_db() else {
+        return;
+    };
     let (runner, heavy, actors, hand_before) = attack(db, true);
     let tapped = runner.state().objects[&heavy].tapped;
     let attacking = is_attacking(&runner, heavy);

@@ -171,7 +171,9 @@ fn cast_and_resolve_with(
 /// surveils and the controller does not draw.
 #[test]
 fn decline_opponent_loses_four_and_controller_surveils_one() {
-    let Some(db) = shared_card_db() else { return; };
+    let Some(db) = shared_card_db() else {
+        return;
+    };
     let (mut runner, card) = scenario(2, db);
     let p0_life = runner.life(P0);
     let p1_life = runner.life(P1);
@@ -207,7 +209,9 @@ fn decline_opponent_loses_four_and_controller_surveils_one() {
 /// surveil 1" is the "If they don't" effect.
 #[test]
 fn accept_controller_draws_one_and_nobody_surveils() {
-    let Some(db) = shared_card_db() else { return; };
+    let Some(db) = shared_card_db() else {
+        return;
+    };
     let (mut runner, card) = scenario(2, db);
     let p0_life = runner.life(P0);
     let p1_life = runner.life(P1);
@@ -240,7 +244,9 @@ fn accept_controller_draws_one_and_nobody_surveils() {
 /// a legal target for the enters trigger.
 #[test]
 fn enters_trigger_offers_only_opponents_as_targets() {
-    let Some(db) = shared_card_db() else { return; };
+    let Some(db) = shared_card_db() else {
+        return;
+    };
     let (mut runner, card) = scenario(2, db);
     let p1_life = runner.life(P1);
     let record = cast_and_resolve(&mut runner, card, P1, false);
@@ -272,7 +278,9 @@ fn enters_trigger_offers_only_opponents_as_targets() {
 #[test]
 fn three_players_only_the_targeted_opponent_decides() {
     const P2: PlayerId = PlayerId(2);
-    let Some(db) = shared_card_db() else { return; };
+    let Some(db) = shared_card_db() else {
+        return;
+    };
     let (mut runner, card) = scenario(3, db);
     let p0_life = runner.life(P0);
     let p1_life = runner.life(P1);
@@ -297,7 +305,9 @@ fn three_players_only_the_targeted_opponent_decides() {
 #[test]
 fn three_players_accept_targets_one_opponent_and_controller_draws() {
     const P2: PlayerId = PlayerId(2);
-    let Some(db) = shared_card_db() else { return; };
+    let Some(db) = shared_card_db() else {
+        return;
+    };
     let (mut runner, card) = scenario(3, db);
     let lives = [runner.life(P0), runner.life(P1), runner.life(P2)];
     let p0_hand_after_cast = hand_len(&runner, P0) - 1;
@@ -321,7 +331,9 @@ fn three_players_accept_targets_one_opponent_and_controller_draws() {
 #[test]
 fn no_legal_target_removes_the_enters_trigger() {
     const P2: PlayerId = PlayerId(2);
-    let Some(db) = shared_card_db() else { return; };
+    let Some(db) = shared_card_db() else {
+        return;
+    };
     let (mut runner, card) = scenario_with_leylines(3, &[P1, P2], db);
     let lives = [runner.life(P0), runner.life(P1), runner.life(P2)];
     let p0_hand_after_cast = hand_len(&runner, P0) - 1;
@@ -351,7 +363,9 @@ fn no_legal_target_removes_the_enters_trigger() {
 #[test]
 fn target_illegal_on_resolution_does_nothing() {
     const P2: PlayerId = PlayerId(2);
-    let Some(db) = shared_card_db() else { return; };
+    let Some(db) = shared_card_db() else {
+        return;
+    };
     let (mut runner, card) = scenario(3, db);
     let lives = [runner.life(P0), runner.life(P1), runner.life(P2)];
     let p0_hand_after_cast = hand_len(&runner, P0) - 1;

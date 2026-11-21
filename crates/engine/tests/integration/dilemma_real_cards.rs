@@ -92,7 +92,9 @@ fn random_modal_dilemma_observers_sit_above_the_whole_original_batch() {
         "Cult twice and Adeline twice (Isshin doubles each): {triggers:?}"
     );
     assert!(
-        triggers.iter().all(|t| t.source_id == cult || t.source_id == adeline),
+        triggers
+            .iter()
+            .all(|t| t.source_id == cult || t.source_id == adeline),
         "only the attack triggers are being ordered: {triggers:?}"
     );
     // Placement order, bottom first: both Cult triggers, then both Adeline
@@ -116,7 +118,11 @@ fn random_modal_dilemma_observers_sit_above_the_whole_original_batch() {
         vec![cult, cult, adeline, adeline, seven, seven],
         "both dilemma observers go above all four original triggers"
     );
-    assert_eq!(dilemmas(&runner, P0), 2, "each Cult trigger faced one dilemma");
+    assert_eq!(
+        dilemmas(&runner, P0),
+        2,
+        "each Cult trigger faced one dilemma"
+    );
     let _ = isshin;
 
     // Settle: everything resolves, Seven draws once per dilemma.

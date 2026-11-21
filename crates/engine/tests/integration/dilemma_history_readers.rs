@@ -182,7 +182,9 @@ fn sisko_board(charms: usize, db: &CardDatabase) -> (GameRunner, Vec<ObjectId>) 
 /// S1 — one Officer per dilemma faced this turn: two dilemmas, two Officers.
 #[test]
 fn sisko_creates_an_officer_per_dilemma() {
-    let Some(db) = shared_card_db() else { return; };
+    let Some(db) = shared_card_db() else {
+        return;
+    };
     let (mut runner, charms) = sisko_board(2, db);
     for charm in charms {
         face_one_dilemma(&mut runner, charm);
@@ -196,7 +198,9 @@ fn sisko_creates_an_officer_per_dilemma() {
 /// S2 — no dilemma this turn, no Officer.
 #[test]
 fn sisko_creates_nothing_without_a_dilemma() {
-    let Some(db) = shared_card_db() else { return; };
+    let Some(db) = shared_card_db() else {
+        return;
+    };
     let (mut runner, _) = sisko_board(0, db);
     runner.advance_to_end_step();
     drive(&mut runner, Plan::default());
@@ -207,7 +211,9 @@ fn sisko_creates_nothing_without_a_dilemma() {
 /// at a later end step of P0's.
 #[test]
 fn sisko_counts_only_this_turns_dilemmas() {
-    let Some(db) = shared_card_db() else { return; };
+    let Some(db) = shared_card_db() else {
+        return;
+    };
     let (mut runner, charms) = sisko_board(1, db);
     face_one_dilemma(&mut runner, charms[0]);
     runner.advance_to_end_step();
@@ -265,7 +271,9 @@ fn exiled(runner: &GameRunner, name: &str) -> bool {
 /// gains 4).
 #[test]
 fn caretaker_exiles_until_nonland_and_offers_the_free_cast() {
-    let Some(db) = shared_card_db() else { return; };
+    let Some(db) = shared_card_db() else {
+        return;
+    };
     let (mut runner, charm) = caretaker_board(db);
     face_one_dilemma(&mut runner, charm);
     let life = runner.life(P0);
@@ -286,7 +294,9 @@ fn caretaker_exiles_until_nonland_and_offers_the_free_cast() {
 /// C2 — CR 603.4: with no dilemma this turn the ability does not trigger.
 #[test]
 fn caretaker_does_not_trigger_without_a_dilemma() {
-    let Some(db) = shared_card_db() else { return; };
+    let Some(db) = shared_card_db() else {
+        return;
+    };
     let (mut runner, _) = caretaker_board(db);
     let life = runner.life(P0);
     runner.advance_to_end_step();
@@ -304,7 +314,9 @@ fn caretaker_does_not_trigger_without_a_dilemma() {
 /// castable; Angel's Mercy (mana value 4, one over the count) is not.
 #[test]
 fn sisko_casts_only_spells_within_the_officer_count() {
-    let Some(db) = shared_card_db() else { return; };
+    let Some(db) = shared_card_db() else {
+        return;
+    };
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     for index in 0..3 {
@@ -406,7 +418,9 @@ fn drive_casting_from_among(runner: &mut GameRunner) -> FromAmong {
 /// modal spell) makes The Caretaker trigger at P1's end step.
 #[test]
 fn caretaker_triggers_at_an_opponents_end_step() {
-    let Some(db) = shared_card_db() else { return; };
+    let Some(db) = shared_card_db() else {
+        return;
+    };
     let (mut runner, charm) = caretaker_board(db);
     for _ in 0..64 {
         if runner.state().active_player == P1 && runner.state().phase == Phase::PreCombatMain {
