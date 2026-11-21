@@ -122,7 +122,10 @@ fn co_pending_entries_keep_event_identity_and_independent_life_amounts() {
         "Power Entrant",
         2,
         2,
-        ContinuousModification::AddPower { value: 3 },
+        ContinuousModification::AddPower {
+            value: 3,
+            fraction: Default::default(),
+        },
     );
     let entrant_b = staged_entrant(
         &mut scenario,
@@ -130,7 +133,10 @@ fn co_pending_entries_keep_event_identity_and_independent_life_amounts() {
         "Toughness Entrant",
         1,
         1,
-        ContinuousModification::AddToughness { value: 5 },
+        ContinuousModification::AddToughness {
+            value: 5,
+            fraction: Default::default(),
+        },
     );
     let mut runner = scenario.build();
 
@@ -219,7 +225,10 @@ fn three_player_target_selection_stores_and_consumes_only_the_chosen_opponent() 
         "Power Entrant",
         2,
         2,
-        ContinuousModification::AddPower { value: 3 },
+        ContinuousModification::AddPower {
+            value: 3,
+            fraction: Default::default(),
+        },
     );
     let mut runner = scenario.build();
     let events = enter_from_exile(&mut runner, entrant);
@@ -279,7 +288,10 @@ fn chosen_opponent_is_revalidated_if_they_phase_out_before_resolution() {
         "Power Entrant",
         2,
         2,
-        ContinuousModification::AddPower { value: 3 },
+        ContinuousModification::AddPower {
+            value: 3,
+            fraction: Default::default(),
+        },
     );
     let mut runner = scenario.build();
     let events = enter_from_exile(&mut runner, entrant);
@@ -314,7 +326,10 @@ fn entrant_pt_uses_lki_after_it_leaves_before_jaws_resolves() {
         "Power Entrant",
         2,
         2,
-        ContinuousModification::AddPower { value: 3 },
+        ContinuousModification::AddPower {
+            value: 3,
+            fraction: Default::default(),
+        },
     );
     let mut runner = scenario.build();
     let events = enter_from_exile(&mut runner, entrant);
@@ -359,7 +374,10 @@ fn blinked_entrant_uses_original_incarnation_lki_not_reentered_live_pt() {
     entrant_builder.with_static_definition(
         StaticDefinition::continuous()
             .affected(TargetFilter::SpecificObject { id: entrant })
-            .modifications(vec![ContinuousModification::AddPower { value: 3 }])
+            .modifications(vec![ContinuousModification::AddPower {
+                value: 3,
+                fraction: Default::default(),
+            }])
             .condition(StaticCondition::SourceIsTapped),
     );
     let mut runner = scenario.build();

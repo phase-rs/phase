@@ -114,6 +114,7 @@ pub fn resolve(
             let proposed = ProposedEvent::LifeLoss {
                 player_id,
                 amount: nonland_count,
+                amount_fraction: Default::default(),
                 applied: HashSet::new(),
             };
 

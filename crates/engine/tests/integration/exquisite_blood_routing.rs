@@ -37,6 +37,8 @@ fn exquisite_blood_heals_controller_not_triggering_opponent() {
         player_id: opponent,
         amount: -5,
         new_total: engine::types::events::LifeTotalReading::default(),
+        amount_fraction: Default::default(),
+        new_total_fraction: Default::default(),
     });
 
     // Build the parsed shape Exquisite Blood lowers to:

@@ -4442,9 +4442,13 @@ fn reveal_until_object_context_from_events(events: &[GameEvent]) -> Option<CostP
                 name: subject.name.clone(),
                 token_image_ref: None,
                 power: subject.power,
+                power_fraction: subject.power_fraction,
                 toughness: subject.toughness,
+                toughness_fraction: subject.toughness_fraction,
                 base_power: subject.base_power,
+                base_power_fraction: subject.base_power_fraction,
                 base_toughness: subject.base_toughness,
+                base_toughness_fraction: subject.base_toughness_fraction,
                 mana_value: subject.mana_value,
                 controller: subject.controller,
                 owner: subject.owner,
@@ -4505,12 +4509,16 @@ pub(crate) fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) ->
         name: record.name.clone(),
         token_image_ref: None,
         power: record.power,
+        power_fraction: record.power_fraction,
         toughness: record.toughness,
+        toughness_fraction: record.toughness_fraction,
         // CR 208.4b + CR 613.4b: Carry the layer-7b base values from the
         // zone-change snapshot so a later `PtComparison { scope: Base }`
         // evaluation on this LKI reads the base, not the current, value.
         base_power: record.base_power,
+        base_power_fraction: record.base_power_fraction,
         base_toughness: record.base_toughness,
+        base_toughness_fraction: record.base_toughness_fraction,
         mana_value: record.mana_value,
         controller: record.controller,
         owner: record.owner,
@@ -10500,7 +10508,7 @@ fn quantity_is_fixed(quantity: &QuantityExpr) -> bool {
 /// Whether a printed power or toughness is a fixed number.
 fn pt_value_is_fixed(value: &PtValue) -> bool {
     match value {
-        PtValue::Fixed(_) => true,
+        PtValue::Fixed(_) | PtValue::HalfPoints(_) => true,
         PtValue::Quantity(quantity) => quantity_is_fixed(quantity),
         PtValue::Variable(_) => false,
     }
@@ -12187,6 +12195,7 @@ fn replacement_matchers_read_filter_population(
         die_ignore_rule: _,
         planeswalk_scope: _,
         shield_kind: _,
+        shield_fraction: _,
         quantity_modification: _,
         token_owner_scope: _,
         token_owner_redirect: _,
@@ -17662,15 +17671,17 @@ fn affected_objects_from_events(
         // Jaya Ballard, Task Mage). Object targets only — a player carries no
         // regen shield and the static is inert on players. CR 120.3/120.6: only
         // creatures actually dealt a nonzero amount were "dealt damage this way"
-        // (fully-prevented damage doesn't count), so require `amount > 0`.
+        // (fully-prevented damage doesn't count), so require a nonzero exact
+        // amount (an Unhinged ½ counts).
         Effect::DealDamage { .. } | Effect::DamageAll { .. } => events
             .iter()
             .filter_map(|event| match event {
                 GameEvent::DamageDealt {
                     target: TargetRef::Object(id),
                     amount,
+                    amount_fraction,
                     ..
-                } if *amount > 0 => Some(*id),
+                } if *amount > 0 || amount_fraction.is_half() => Some(*id),
                 _ => None,
             })
             .collect(),
@@ -41807,6 +41818,8 @@ mod tests {
             player_id: PlayerId(1),
             amount: -1,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         });
         assert!(ability_with_event_context_targets(&state, &ability)
             .targets
@@ -43322,6 +43335,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
         );
 
@@ -47633,6 +47650,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         }];
 
         let snapshot = damaged_object_context_from_events(&state, &events)
@@ -47668,6 +47687,8 @@ mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             },
             GameEvent::DamageDealt {
                 source_id: ObjectId(99),
@@ -47676,6 +47697,8 @@ mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             },
         ];
         assert!(damaged_object_context_from_events(&state, &events).is_none());
@@ -47693,6 +47716,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         }];
         assert!(damaged_object_context_from_events(&state, &events).is_none());
     }
@@ -47757,6 +47782,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
         );
         let events = vec![
@@ -52893,7 +52922,10 @@ mod tests {
     fn outer_target_only_granted_static_followup(source: ObjectId) -> ResolvedAbility {
         let granted_static = StaticDefinition::continuous()
             .affected(TargetFilter::Typed(TypedFilter::creature()))
-            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+            .modifications(vec![ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }]);
         ResolvedAbility::new(
             Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::continuous()
@@ -58846,6 +58878,8 @@ mod tests {
             room_halves: None,
             prepare_face: None,
             name_origin: Default::default(),
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         };
         let copy_values = |values: CopiableValues| {
             generic(granting(ContinuousModification::CopyValues {
@@ -59209,7 +59243,10 @@ mod tests {
         let affected = |filter: TargetFilter| {
             StaticDefinition::continuous()
                 .affected(filter)
-                .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }])
         };
         let generic = |static_def: StaticDefinition| Effect::GenericEffect {
             static_abilities: vec![static_def],
@@ -59284,7 +59321,10 @@ mod tests {
         let fixed_grant = || {
             StaticDefinition::continuous()
                 .affected(your_creatures())
-                .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }])
         };
         let gated = |condition: StaticCondition| fixed_grant().condition(condition);
         let reading_conditions = vec![
@@ -60413,7 +60453,10 @@ mod tests {
                 effect_row(Box::new(move |filter| Effect::GenericEffect {
                     static_abilities: vec![StaticDefinition::continuous()
                         .affected(TargetFilter::SelfRef)
-                        .modifications(vec![ContinuousModification::AddPower { value: 1 }])],
+                        .modifications(vec![ContinuousModification::AddPower {
+                            value: 1,
+                            fraction: Default::default(),
+                        }])],
                     duration: Some(Duration::UntilEvent {
                         event: Box::new(dies(filter)),
                     }),
@@ -66620,6 +66663,8 @@ mod tests {
                 player_id: PlayerId(1),
                 amount: -1,
                 new_total: crate::types::events::LifeTotalReading::default(),
+                amount_fraction: Default::default(),
+                new_total_fraction: Default::default(),
             });
             assert!(state.players[0].hand.is_empty());
             state
@@ -68930,8 +68975,14 @@ mod tests {
                         .condition(crate::types::ability::StaticCondition::HasCityBlessing)
                         .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
                         .modifications(vec![
-                            ContinuousModification::AddPower { value: 1 },
-                            ContinuousModification::AddToughness { value: 1 },
+                            ContinuousModification::AddPower {
+                                value: 1,
+                                fraction: Default::default(),
+                            },
+                            ContinuousModification::AddToughness {
+                                value: 1,
+                                fraction: Default::default(),
+                            },
                         ]),
                 );
                 ascend_permanent = Some(id);
@@ -74039,6 +74090,8 @@ mod resolution_progress_contract_tests {
                 is_combat: true,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             });
             let branch = AbilityDefinition::new(
                 AbilityKind::Spell,
@@ -76958,8 +77011,14 @@ mod with_entry_effect_tests {
     fn storm_of_souls_rider_is_retained() {
         let spirit_1_1_flying = vec![
             subtype("Spirit"),
-            ContinuousModification::SetPower { value: 1 },
-            ContinuousModification::SetToughness { value: 1 },
+            ContinuousModification::SetPower {
+                value: 1,
+                fraction: Default::default(),
+            },
+            ContinuousModification::SetToughness {
+                value: 1,
+                fraction: Default::default(),
+            },
             ContinuousModification::AddKeyword {
                 keyword: Keyword::Flying,
             },
@@ -77529,8 +77588,14 @@ mod with_entry_effect_tests {
             ContinuousModification::AddType {
                 core_type: CoreType::Creature,
             },
-            ContinuousModification::SetPower { value: 4 },
-            ContinuousModification::SetToughness { value: 4 },
+            ContinuousModification::SetPower {
+                value: 4,
+                fraction: Default::default(),
+            },
+            ContinuousModification::SetToughness {
+                value: 4,
+                fraction: Default::default(),
+            },
         ];
         let rider = |condition: Option<StaticCondition>| {
             let mut static_def = StaticDefinition::continuous()
@@ -77970,7 +78035,10 @@ mod with_entry_effect_tests {
             carried.modifications,
             vec![
                 subtype("Skeleton"),
-                ContinuousModification::AddPower { value: 2 },
+                ContinuousModification::AddPower {
+                    value: 2,
+                    fraction: Default::default(),
+                },
             ]
         );
 
@@ -78107,6 +78175,8 @@ mod saturating_amount_tests {
             is_combat: false,
             excess,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         }
     }
 
@@ -78115,6 +78185,8 @@ mod saturating_amount_tests {
             player_id: PlayerId(1),
             amount,
             new_total: LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         }
     }
 

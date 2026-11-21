@@ -50,8 +50,14 @@ fn buff_attacker_like_thoughtweft(runner: &mut GameRunner, attacker: ObjectId) {
         Duration::UntilEndOfTurn,
         TargetFilter::SpecificObject { id: attacker },
         vec![
-            ContinuousModification::AddPower { value: 1 },
-            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            },
+            ContinuousModification::AddToughness {
+                value: 1,
+                fraction: Default::default(),
+            },
             ContinuousModification::AddKeyword {
                 keyword: Keyword::Trample,
             },

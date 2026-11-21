@@ -1005,6 +1005,7 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         may_cost_remaining: None,
         delivery_boundary: None,
         unrepresentable_life_change: Default::default(),
+        lifelink_bonus_fraction: Default::default(),
     });
     state.waiting_for = WaitingFor::ReplacementChoice {
         player: P0,
@@ -5354,6 +5355,7 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         may_cost_remaining: None,
         delivery_boundary: None,
         unrepresentable_life_change: Default::default(),
+        lifelink_bonus_fraction: Default::default(),
     });
     runner.state_mut().waiting_for = WaitingFor::ReplacementChoice {
         player: P0,

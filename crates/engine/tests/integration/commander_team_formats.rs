@@ -62,6 +62,7 @@ fn thgc_commander_damage_cascades_to_team_loss() {
         player: PlayerId(0),
         commander: ObjectId(999),
         damage: 21,
+        damage_fraction: Default::default(),
     });
     let mut events = Vec::new();
     check_state_based_actions(&mut state, &mut events);
@@ -105,6 +106,7 @@ fn archc_hero_commander_damage_cascades_to_heroes_loss() {
         player: PlayerId(1),
         commander: ObjectId(999),
         damage: 21,
+        damage_fraction: Default::default(),
     });
     let mut events = Vec::new();
     check_state_based_actions(&mut state, &mut events);
@@ -146,6 +148,7 @@ fn archc_archenemy_commander_damage_ends_with_hero_win() {
         player: ARCHENEMY,
         commander: ObjectId(999),
         damage: 21,
+        damage_fraction: Default::default(),
     });
     let mut events = Vec::new();
     check_state_based_actions(&mut state, &mut events);

@@ -83,6 +83,9 @@ fn run_damage(
                         assignments: vec![],
                         trample_damage: 0,
                         controller_damage: 0,
+                        assignments_fraction: Vec::new(),
+                        trample_damage_fraction: Default::default(),
+                        controller_damage_fraction: Default::default(),
                     }
                 } else {
                     GameAction::AssignCombatDamage {
@@ -90,6 +93,9 @@ fn run_damage(
                         assignments: vec![(blockers[0].blocker_id, total_damage)],
                         trample_damage: 0,
                         controller_damage: 0,
+                        assignments_fraction: Vec::new(),
+                        trample_damage_fraction: Default::default(),
+                        controller_damage_fraction: Default::default(),
                     }
                 };
                 runner.act(action).expect("AssignCombatDamage");

@@ -11,7 +11,7 @@ use super::definitions::ReplacementIdentity;
 
 use super::ability::{
     ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile,
-    LibraryPosition, TargetRef,
+    HalfFraction, LibraryPosition, TargetRef,
 };
 use super::events::EventObjectSnapshot;
 use super::identifiers::{ObjectId, ObjectIncarnationRef, ProtectionReplacementSourceExt};
@@ -798,6 +798,8 @@ pub enum ProposedEvent {
         source_id: ObjectId,
         target: TargetRef,
         amount: u32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        amount_fraction: HalfFraction,
         is_combat: bool,
         /// CR 608.2h + CR 702.16e: the source's name as observed when the
         /// damage event was created — the live name for live sources, the
@@ -940,12 +942,16 @@ pub enum ProposedEvent {
     LifeGain {
         player_id: PlayerId,
         amount: u32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        amount_fraction: HalfFraction,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
     LifeLoss {
         player_id: PlayerId,
         amount: u32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        amount_fraction: HalfFraction,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -2404,6 +2410,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: Vec::new(),
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: name.to_string(),
             static_abilities: Vec::new(),
@@ -2595,6 +2603,8 @@ mod tests {
                 supertypes: vec![],
                 colors: vec![ManaColor::Red],
                 keywords: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Goblin".to_string(),
             static_abilities: vec![],

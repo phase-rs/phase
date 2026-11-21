@@ -899,6 +899,7 @@ fn proposed_events(
         source_id,
         target,
         amount: 1,
+        amount_fraction: Default::default(),
         is_combat: false,
         source_name: None,
         source_incarnation: None,
@@ -985,6 +986,7 @@ fn proposed_events(
             .map(|player_id| ProposedEvent::LifeLoss {
                 player_id,
                 amount: 1,
+                amount_fraction: Default::default(),
                 applied: Default::default(),
             })
             .collect(),

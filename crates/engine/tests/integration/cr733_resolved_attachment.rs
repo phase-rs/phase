@@ -665,7 +665,10 @@ fn compound_attachment_retires_non_tce_tails_without_swap_back_revival() {
             TargetFilter::SpecificObject {
                 id: board.other_host,
             },
-            vec![engine::types::ability::ContinuousModification::AddPower { value: 1 }],
+            vec![engine::types::ability::ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }],
             None,
         )
         .expect("the fixture's duration begins");
@@ -679,7 +682,10 @@ fn compound_attachment_retires_non_tce_tails_without_swap_back_revival() {
             TargetFilter::SpecificObject {
                 id: board.other_host,
             },
-            vec![engine::types::ability::ContinuousModification::AddPower { value: 2 }],
+            vec![engine::types::ability::ContinuousModification::AddPower {
+                value: 2,
+                fraction: Default::default(),
+            }],
             None,
         )
         .expect("the fixture's duration begins");

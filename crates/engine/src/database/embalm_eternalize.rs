@@ -116,8 +116,8 @@ fn eternalize_overrides() -> Vec<ContinuousModification> {
         ContinuousModification::SetColor {
             colors: vec![ManaColor::Black],
         },
-        ContinuousModification::SetPower { value: 4 },
-        ContinuousModification::SetToughness { value: 4 },
+        ContinuousModification::set_power(4),
+        ContinuousModification::set_toughness(4),
         ContinuousModification::RemoveManaCost,
         ContinuousModification::AddSubtype {
             subtype: "Zombie".to_string(),

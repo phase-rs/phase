@@ -487,14 +487,14 @@ fn fixed_pt_keeps_quoted_for_every_count_inside_granted_ability() {
     assert!(
         defs[0]
             .modifications
-            .contains(&ContinuousModification::AddPower { value: 2 }),
+            .contains(&ContinuousModification::add_power(2)),
         "the outer +2 power must remain fixed: {:?}",
         defs[0].modifications
     );
     assert!(
         defs[0]
             .modifications
-            .contains(&ContinuousModification::AddToughness { value: 0 }),
+            .contains(&ContinuousModification::add_toughness(0)),
         "the outer +0 toughness must remain fixed: {:?}",
         defs[0].modifications
     );
@@ -594,7 +594,7 @@ fn unquoted_cost_separator_declines_costed_lines_in_the_static_authority() {
     let def = parse_static_line(equipped).expect("equip static must survive the guard");
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
 
     // Quote-masking guard: the colon belongs to the INNER granted ability, so the
     // outer line stays a static grant. Goes red if the guard were
@@ -880,10 +880,10 @@ fn ability_word_prefix_is_stripped_from_subject_anchored_statics() {
     );
     assert!(
         def.modifications
-            .contains(&ContinuousModification::AddPower { value: 1 })
+            .contains(&ContinuousModification::add_power(1))
             && def
                 .modifications
-                .contains(&ContinuousModification::AddToughness { value: 4 }),
+                .contains(&ContinuousModification::add_toughness(4)),
         "Fateful hour must pump +1/+4: {:?}",
         def.modifications
     );
@@ -1358,10 +1358,10 @@ fn static_angry_mob_two_clause_turn_window_setter() {
     assert!(
         off_turn
             .modifications
-            .contains(&ContinuousModification::SetPower { value: 2 })
+            .contains(&ContinuousModification::set_power(2))
             && off_turn
                 .modifications
-                .contains(&ContinuousModification::SetToughness { value: 2 }),
+                .contains(&ContinuousModification::set_toughness(2)),
         "off-turn clause must set constant 2/2: {:?}",
         off_turn.modifications
     );
@@ -3240,14 +3240,14 @@ fn cant_be_sacrificed_static_splits_from_grant() {
     assert!(
         continuous
             .modifications
-            .contains(&ContinuousModification::AddPower { value: 2 }),
+            .contains(&ContinuousModification::add_power(2)),
         "expected +2 power grant, got {:?}",
         continuous.modifications
     );
     assert!(
         continuous
             .modifications
-            .contains(&ContinuousModification::AddToughness { value: 2 }),
+            .contains(&ContinuousModification::add_toughness(2)),
         "expected +2 toughness grant, got {:?}",
         continuous.modifications
     );
@@ -3348,14 +3348,14 @@ fn tinfoil_helm_copula_pump_and_bare_list_protection() {
     assert!(
         continuous
             .modifications
-            .contains(&ContinuousModification::AddPower { value: 2 }),
+            .contains(&ContinuousModification::add_power(2)),
         "expected +2 power (copula pump), got {:?}",
         continuous.modifications
     );
     assert!(
         continuous
             .modifications
-            .contains(&ContinuousModification::AddToughness { value: 2 }),
+            .contains(&ContinuousModification::add_toughness(2)),
         "expected +2 toughness (copula pump), got {:?}",
         continuous.modifications
     );
@@ -3525,7 +3525,7 @@ fn spectral_shield_spells_only_targeting_fails_closed() {
     assert!(
         defs.iter().any(|d| matches!(d.mode, StaticMode::Continuous)
             && d.modifications
-                .contains(&ContinuousModification::AddToughness { value: 2 })),
+                .contains(&ContinuousModification::add_toughness(2))),
         "the +0/+2 grant must be preserved, got {:?}",
         defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
     );
@@ -3565,9 +3565,9 @@ fn cant_be_targeted_opponents_scope_splits_as_opponents_restriction() {
     assert!(
         defs.iter().any(|d| matches!(d.mode, StaticMode::Continuous)
             && d.modifications
-                .contains(&ContinuousModification::AddPower { value: 1 })
+                .contains(&ContinuousModification::add_power(1))
             && d.modifications
-                .contains(&ContinuousModification::AddToughness { value: 1 })),
+                .contains(&ContinuousModification::add_toughness(1))),
         "expected a +1/+1 grant, got {:?}",
         defs.iter()
             .map(|d| (&d.mode, &d.modifications))
@@ -3984,8 +3984,8 @@ fn cant_be_blocked_static_split_unless_attacking_owner_or_permanent() {
     assert!(
         pt.modifications.iter().any(|m| matches!(
             m,
-            ContinuousModification::AddPower { value: 2 }
-                | ContinuousModification::AddToughness { value: 2 }
+            ContinuousModification::AddPower { value: 2, .. }
+                | ContinuousModification::AddToughness { value: 2, .. }
         )),
         "expected AddPower(2)/AddToughness(2), got {:?}",
         pt.modifications
@@ -4552,8 +4552,8 @@ fn continuous_mods_grant_chosen_keyword_anaphor() {
 #[test]
 fn continuous_mods_replace_creature_subtypes_for_bare_becomes_clause() {
     let mods = parse_continuous_modifications("gets +3/+3 and becomes a Bear Berserker");
-    assert!(mods.contains(&ContinuousModification::AddPower { value: 3 }));
-    assert!(mods.contains(&ContinuousModification::AddToughness { value: 3 }));
+    assert!(mods.contains(&ContinuousModification::add_power(3)));
+    assert!(mods.contains(&ContinuousModification::add_toughness(3)));
     assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
         set: crate::types::card_type::SubtypeSet::Creature,
     }));
@@ -4613,8 +4613,8 @@ fn continuous_mods_preserve_still_type_retention_clause() {
     let mods = parse_continuous_modifications(
         "becomes a 0/0 Elemental creature with vigilance and haste that's still a land",
     );
-    assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
-    assert!(mods.contains(&ContinuousModification::SetToughness { value: 0 }));
+    assert!(mods.contains(&ContinuousModification::set_power(0)));
+    assert!(mods.contains(&ContinuousModification::set_toughness(0)));
     assert!(mods.contains(&ContinuousModification::AddSubtype {
         subtype: "Elemental".to_string(),
     }));
@@ -4653,7 +4653,7 @@ fn static_merfolk_lord() {
     let def = parse_static_line("Other Merfolk you control get +1/+1.").unwrap();
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
 }
 
 /// CR 113.1 + CR 113.3 + CR 604.1: Muraganda Petroglyphs' battlefield-wide anthem
@@ -4687,10 +4687,10 @@ fn static_muraganda_petroglyphs() {
     }
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 2 }));
+        .contains(&ContinuousModification::add_toughness(2)));
 }
 
 /// CR 509.1b + CR 609.4 + CR 702.14c: Ur-Drago's landwalk canceller produces
@@ -4749,10 +4749,10 @@ fn static_bonesplitter() {
     assert_eq!(def.mode, StaticMode::Continuous);
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 0 }));
+        .contains(&ContinuousModification::add_toughness(0)));
 }
 
 #[test]
@@ -5403,7 +5403,7 @@ fn static_creatures_you_control_also_get_with_condition() {
     ));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(def
         .modifications
         .contains(&ContinuousModification::AddKeyword {
@@ -5454,7 +5454,7 @@ fn static_all_creatures() {
     ));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
 }
 
 #[test]
@@ -5524,10 +5524,10 @@ fn static_controlled_compound_subject_shares_continuous_predicate() {
     ));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
     assert!(def
         .modifications
         .contains(&ContinuousModification::AddKeyword {
@@ -5568,10 +5568,10 @@ fn static_bare_compound_tribal_subject_verdeloth() {
     ));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
 }
 
 // CR 611.3a: Raphael, Fiendish Savior — a 4-member Oxford-comma tribal anthem
@@ -5694,8 +5694,8 @@ fn life_and_limb_real_text_dual_subject_animation() {
     // green (layer 5), additive Creature+Saproling and Land+Forest (layer 4).
     use ContinuousModification as CM;
     for expected in [
-        CM::SetPower { value: 1 },
-        CM::SetToughness { value: 1 },
+        CM::set_power(1),
+        CM::set_toughness(1),
         CM::SetColor {
             colors: vec![ManaColor::Green],
         },
@@ -5755,8 +5755,8 @@ fn compound_subject_animation_replacement_predicate() {
 
     use ContinuousModification as CM;
     for expected in [
-        CM::SetPower { value: 2 },
-        CM::SetToughness { value: 2 },
+        CM::set_power(2),
+        CM::set_toughness(2),
         CM::RemoveAllSubtypes {
             set: SubtypeSet::Creature,
         },
@@ -6058,8 +6058,8 @@ fn bello_compound_negated_type_subject_animation_with_granted_abilities() {
     // presence-only `contains` check.
     let count_of = |target: &CM| def.modifications.iter().filter(|m| *m == target).count();
     for expected in [
-        CM::SetPower { value: 4 },
-        CM::SetToughness { value: 4 },
+        CM::set_power(4),
+        CM::set_toughness(4),
         CM::AddType {
             core_type: CoreType::Creature,
         },
@@ -6173,10 +6173,10 @@ fn static_opponent_controlled_compound_subject_shares_continuous_predicate() {
     ));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: -1 }));
+        .contains(&ContinuousModification::add_power(-1)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: -1 }));
+        .contains(&ContinuousModification::add_toughness(-1)));
 }
 
 #[test]
@@ -9147,10 +9147,10 @@ fn static_keen_eyed_curator_condition_parses() {
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 4 }));
+        .contains(&ContinuousModification::add_power(4)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 4 }));
+        .contains(&ContinuousModification::add_toughness(4)));
     assert!(def
         .modifications
         .contains(&ContinuousModification::AddKeyword {
@@ -9187,7 +9187,7 @@ fn static_exactly_one_creature_binds_that_creature_to_controlled_creature() {
     assert!(def
         .modifications
         .iter()
-        .any(|modification| modification == &ContinuousModification::AddPower { value: 2 }));
+        .any(|modification| modification == &ContinuousModification::add_power(2)));
     assert!(def.modifications.iter().any(|modification| modification
         == &ContinuousModification::AddKeyword {
             keyword: Keyword::Deathtouch,
@@ -9223,7 +9223,7 @@ fn static_exactly_one_qualified_creature_reuses_condition_filter() {
     assert_eq!(def.affected.as_ref(), Some(condition_filter));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
 }
 
 #[test]
@@ -9249,11 +9249,11 @@ fn static_self_and_land_creatures_you_control_share_pump() {
     assert!(def
         .modifications
         .iter()
-        .any(|modification| modification == &ContinuousModification::AddPower { value: 2 }));
+        .any(|modification| modification == &ContinuousModification::add_power(2)));
     assert!(def
         .modifications
         .iter()
-        .any(|modification| modification == &ContinuousModification::AddToughness { value: 2 }));
+        .any(|modification| modification == &ContinuousModification::add_toughness(2)));
     assert!(matches!(
         def.condition,
         Some(StaticCondition::QuantityComparison {
@@ -9453,11 +9453,11 @@ fn static_top_of_library_creature_gate_mul_daya_channelers() {
     assert!(def
         .modifications
         .iter()
-        .any(|m| m == &ContinuousModification::AddPower { value: 3 }));
+        .any(|m| m == &ContinuousModification::add_power(3)));
     assert!(def
         .modifications
         .iter()
-        .any(|m| m == &ContinuousModification::AddToughness { value: 3 }));
+        .any(|m| m == &ContinuousModification::add_toughness(3)));
 }
 
 /// CR 401.1 + CR 401.5: Vampire Nocturnus — the marquee "top card of your library
@@ -9880,10 +9880,10 @@ fn static_life_more_than_starting_conditional() {
     ));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 2 }));
+        .contains(&ContinuousModification::add_toughness(2)));
     assert_eq!(
         def.condition,
         Some(StaticCondition::QuantityComparison {
@@ -9915,10 +9915,10 @@ fn static_elenda_additional_buff_uses_life_above_starting_condition() {
     );
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 5 }));
+        .contains(&ContinuousModification::add_power(5)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 5 }));
+        .contains(&ContinuousModification::add_toughness(5)));
 }
 
 #[test]
@@ -10000,7 +10000,7 @@ fn static_control_creature_with_power_ge() {
     assert!(def
         .modifications
         .iter()
-        .any(|m| matches!(m, ContinuousModification::AddPower { value: 1 })));
+        .any(|m| matches!(m, ContinuousModification::AddPower { value: 1, .. })));
 }
 
 #[test]
@@ -10171,10 +10171,10 @@ fn static_enchanted_creature_gets_pt_and_cant_be_targeted_by_opponents() {
     assert_eq!(defs[0].affected, Some(expected_filter.clone()));
     assert!(defs[0]
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(defs[0]
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
     assert_eq!(
         defs[1].mode,
         StaticMode::CantBeTargeted {
@@ -10337,10 +10337,10 @@ fn static_legendary_gets_and_has_compound() {
         }));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
     assert!(def
         .modifications
         .contains(&ContinuousModification::AddKeyword {
@@ -10365,10 +10365,10 @@ fn static_self_gets_pt() {
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 2 }));
+        .contains(&ContinuousModification::add_toughness(2)));
 }
 
 #[test]
@@ -11506,10 +11506,10 @@ fn static_pump_and_must_be_blocked_if_able_emits_both_defs() {
     assert_eq!(defs[0].mode, StaticMode::Continuous);
     assert!(defs[0]
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 3 }));
+        .contains(&ContinuousModification::add_power(3)));
     assert!(defs[0]
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 3 }));
+        .contains(&ContinuousModification::add_toughness(3)));
     assert_eq!(defs[1].mode, StaticMode::MustBeBlocked { by: None });
     assert_eq!(defs[1].affected, defs[0].affected);
 }
@@ -11534,7 +11534,7 @@ fn parse_continuous_modifications_cant_become_suspected_emits_static_mode() {
     let mods = parse_continuous_modifications("gets +2/+2 and can't become suspected");
     assert!(
         mods.iter()
-            .any(|m| matches!(m, ContinuousModification::AddPower { value: 2 })),
+            .any(|m| matches!(m, ContinuousModification::AddPower { value: 2, .. })),
         "P/T buff preserved alongside the prohibition rider"
     );
     assert!(
@@ -12697,10 +12697,10 @@ fn static_pump_must_be_blocked_and_goaded_emits_all_defs() {
     assert_eq!(defs[0].mode, StaticMode::Continuous);
     assert!(defs[0]
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 3 }));
+        .contains(&ContinuousModification::add_power(3)));
     assert!(defs[0]
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 3 }));
+        .contains(&ContinuousModification::add_toughness(3)));
     assert_eq!(defs[1].mode, StaticMode::MustBeBlocked { by: None });
     assert_eq!(defs[2].mode, StaticMode::Goaded);
     assert_eq!(defs[1].affected, defs[0].affected);
@@ -12950,7 +12950,7 @@ fn static_as_long_as_equipped_creature_is_blocking_grants_to_host() {
     assert_eq!(defs[0].affected, Some(equipped_creature_filter()));
     assert!(defs[0]
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
     assert_eq!(
         defs[0].condition,
         Some(StaticCondition::RecipientMatchesFilter {
@@ -13028,10 +13028,10 @@ fn static_as_long_as_attacking_gets_and_has_keyword_has_no_false_residual() {
     assert_eq!(defs.len(), 1, "fully modeled grant, got {defs:?}");
     assert!(defs[0]
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(defs[0]
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
     assert!(defs[0]
         .modifications
         .contains(&ContinuousModification::AddKeyword {
@@ -13060,10 +13060,10 @@ fn slayers_cleaver_lure_conjunct_models_typed_must_be_blocked() {
     assert_eq!(defs[0].mode, StaticMode::Continuous);
     assert!(defs[0]
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 3 }));
+        .contains(&ContinuousModification::add_power(3)));
     assert!(defs[0]
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
     assert_eq!(defs[0].condition, None);
 
     let eldrazi = crate::parser::oracle_target::parse_type_phrase_folding("an eldrazi").0;
@@ -13188,7 +13188,7 @@ fn unrecognized_lure_conjunct_surfaces_unimplemented_residual() {
     assert!(
         defs.iter().any(|d| d
             .modifications
-            .contains(&ContinuousModification::AddPower { value: 3 })),
+            .contains(&ContinuousModification::add_power(3))),
         "P/T grant must be modeled, got {defs:?}"
     );
     // The lure is surfaced as an Unimplemented residual, not dropped.
@@ -13284,10 +13284,10 @@ fn static_pump_and_goaded_emits_both_defs() {
     assert_eq!(defs[0].mode, StaticMode::Continuous);
     assert!(defs[0]
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
     assert!(defs[0]
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 2 }));
+        .contains(&ContinuousModification::add_toughness(2)));
     assert_eq!(defs[1].mode, StaticMode::Goaded);
     assert_eq!(defs[1].affected, defs[0].affected);
 }
@@ -13414,7 +13414,7 @@ fn static_anchor_controlled_creature_anthem_parses() {
     assert!(def
         .modifications
         .iter()
-        .any(|m| matches!(m, ContinuousModification::AddPower { value: 2 })));
+        .any(|m| matches!(m, ContinuousModification::AddPower { value: 2, .. })));
 }
 
 #[test]
@@ -14085,10 +14085,10 @@ fn static_black_creatures_get_plus_one_plus_one() {
     );
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
 }
 
 #[test]
@@ -14109,10 +14109,10 @@ fn static_creatures_you_control_with_mana_value_filter() {
     );
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 0 }));
+        .contains(&ContinuousModification::add_toughness(0)));
 }
 
 #[test]
@@ -14131,10 +14131,10 @@ fn static_creatures_you_control_with_flying_filter() {
     );
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
 }
 
 #[test]
@@ -14176,19 +14176,16 @@ fn static_creature_tokens_you_control_lose_all_abilities_and_have_base_pt() {
         .contains(&ContinuousModification::RemoveAllAbilities));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::SetPower { value: 3 }));
+        .contains(&ContinuousModification::set_power(3)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::SetToughness { value: 3 }));
+        .contains(&ContinuousModification::set_toughness(3)));
 }
 
 #[test]
 fn static_target_subject_can_set_base_power_without_toughness() {
     let modifications = parse_continuous_modifications("has base power 3 until end of turn");
-    assert_eq!(
-        modifications,
-        vec![ContinuousModification::SetPower { value: 3 }]
-    );
+    assert_eq!(modifications, vec![ContinuousModification::set_power(3)]);
 }
 
 #[test]
@@ -14368,10 +14365,10 @@ fn soulbond_paired_pt_grant_still_parses() {
     assert_eq!(def.condition, Some(StaticCondition::SourceIsPaired));
     assert!(
         def.modifications
-            .contains(&ContinuousModification::AddPower { value: 4 })
+            .contains(&ContinuousModification::add_power(4))
             && def
                 .modifications
-                .contains(&ContinuousModification::AddToughness { value: 4 }),
+                .contains(&ContinuousModification::add_toughness(4)),
         "P/T grant regressed: {:?}",
         def.modifications
     );
@@ -14670,14 +14667,14 @@ fn quoted_non_selfref_static_grants_full_static_definition() {
     assert!(
         definition
             .modifications
-            .contains(&ContinuousModification::AddPower { value: 2 }),
+            .contains(&ContinuousModification::add_power(2)),
         "missing AddPower +2 in {:?}",
         definition.modifications,
     );
     assert!(
         definition
             .modifications
-            .contains(&ContinuousModification::AddToughness { value: 2 }),
+            .contains(&ContinuousModification::add_toughness(2)),
         "missing AddToughness +2 in {:?}",
         definition.modifications,
     );
@@ -14790,7 +14787,7 @@ fn static_creatures_attacking_opponents_and_planeswalkers_get_pump() {
     );
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
 }
 
 #[test]
@@ -14807,7 +14804,7 @@ fn static_creatures_attacking_you_get_pump() {
     );
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: -1 }));
+        .contains(&ContinuousModification::add_power(-1)));
 }
 
 #[test]
@@ -14845,7 +14842,7 @@ fn static_creatures_attacking_last_chosen_player_scope() {
     );
     assert!(pump
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
 
     // Shorter "the chosen player" phrasing resolves to the same scope.
     let short = parse_static_line("Creatures attacking the chosen player have menace.").unwrap();
@@ -15282,10 +15279,10 @@ fn parse_compound_static_kaito_animation() {
     // Verify modifications
     assert!(def
         .modifications
-        .contains(&ContinuousModification::SetPower { value: 3 }));
+        .contains(&ContinuousModification::set_power(3)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::SetToughness { value: 4 }));
+        .contains(&ContinuousModification::set_toughness(4)));
     assert!(def
         .modifications
         .contains(&ContinuousModification::SetCardTypes {
@@ -16314,7 +16311,7 @@ fn parse_compound_static_counter_minimum_variants() {
     }
     assert!(def
         .modifications
-        .contains(&ContinuousModification::SetPower { value: 2 }));
+        .contains(&ContinuousModification::set_power(2)));
 }
 
 // ── CR 510.1c: AssignDamageFromToughness (Doran-class) ─────────────
@@ -16397,10 +16394,10 @@ fn static_enchanted_creature_gets_pt_and_assigns_damage_from_toughness() {
     );
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 0 }));
+        .contains(&ContinuousModification::add_power(0)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 2 }));
+        .contains(&ContinuousModification::add_toughness(2)));
     assert!(def
         .modifications
         .contains(&ContinuousModification::AssignDamageFromToughness));
@@ -16563,7 +16560,7 @@ fn static_creatures_with_counter_get_pump() {
     }
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
 }
 
 // --- split_keyword_list protection-awareness tests ---
@@ -16700,12 +16697,12 @@ fn continuous_mods_cant_be_blocked_and_has_base_pt() {
     );
     assert!(
         mods.iter()
-            .any(|m| matches!(m, ContinuousModification::SetPower { value: 1 })),
+            .any(|m| matches!(m, ContinuousModification::SetPower { value: 1, .. })),
         "missing SetPower(1) in {mods:?}"
     );
     assert!(
         mods.iter()
-            .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1 })),
+            .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1, .. })),
         "missing SetToughness(1) in {mods:?}"
     );
 }
@@ -16931,8 +16928,8 @@ fn attached_continuous_gets_and_keywords_no_split() {
     assert_eq!(
         defs[0].modifications,
         vec![
-            ContinuousModification::AddPower { value: 1 },
-            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::add_power(1),
+            ContinuousModification::add_toughness(1),
             ContinuousModification::AddKeyword {
                 keyword: Keyword::Trample
             },
@@ -16953,8 +16950,8 @@ fn attached_continuous_gets_and_keywords_no_split() {
     assert_eq!(
         warhammer[0].modifications,
         vec![
-            ContinuousModification::AddPower { value: 3 },
-            ContinuousModification::AddToughness { value: 0 },
+            ContinuousModification::add_power(3),
+            ContinuousModification::add_toughness(0),
             ContinuousModification::AddKeyword {
                 keyword: Keyword::Trample
             },
@@ -19791,7 +19788,7 @@ fn untapped_creatures_you_control_anthem_uses_status_prop() {
     assert_eq!(tf.controller, Some(ControllerRef::You));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 2 }));
+        .contains(&ContinuousModification::add_toughness(2)));
 }
 
 // Regression: "Other tapped creatures you control" must carry BOTH the status
@@ -20673,7 +20670,7 @@ fn dynamic_pt_in_text_mixed_dynamic_power_fixed_toughness() {
     );
     assert!(
         mods.iter()
-            .any(|m| matches!(m, ContinuousModification::AddToughness { value: 1 })),
+            .any(|m| matches!(m, ContinuousModification::AddToughness { value: 1, .. })),
         "expected fixed AddToughness {{ value: 1 }} for the +1 toughness axis, got {mods:?}"
     );
     // The fixed +1 toughness must be a constant, never a dynamic modification.
@@ -20972,10 +20969,10 @@ fn static_as_long_as_enchanted_permanent_is_creature_sets_attached_condition() {
     assert_eq!(def.mode, StaticMode::Continuous);
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
     match def.condition {
         Some(StaticCondition::IsPresent {
             filter: Some(TargetFilter::Typed(tf)),
@@ -21035,10 +21032,10 @@ fn static_as_long_as_enchanted_creature_is_legendary_grants_to_enchanted_creatur
     );
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
     assert!(
         def.modifications.iter().any(|modification| matches!(
             modification,
@@ -21076,10 +21073,10 @@ fn static_as_long_as_enchanted_creature_is_color_grants_to_enchanted_creature() 
     );
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
     assert!(def.modifications.iter().any(|modification| matches!(
         modification,
         ContinuousModification::AddKeyword {
@@ -21163,12 +21160,12 @@ fn static_enchanted_creature_gets_pt_as_long_as() {
     );
     assert!(
         def.modifications
-            .contains(&ContinuousModification::AddPower { value: 1 }),
+            .contains(&ContinuousModification::add_power(1)),
         "Expected AddPower(1)"
     );
     assert!(
         def.modifications
-            .contains(&ContinuousModification::AddToughness { value: 1 }),
+            .contains(&ContinuousModification::add_toughness(1)),
         "Expected AddToughness(1)"
     );
     assert!(
@@ -21925,10 +21922,10 @@ fn static_enchanted_creature_gets_pt_regression() {
     );
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 2 }));
+        .contains(&ContinuousModification::add_toughness(2)));
 }
 
 // --- Lord pattern tests (Plan 33-02) ---
@@ -22020,10 +22017,10 @@ fn lord_conditional_as_long_as_control() {
     assert_eq!(def.mode, StaticMode::Continuous);
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
     assert!(def.condition.is_some(), "Expected a StaticCondition");
     match def.condition {
         Some(StaticCondition::IsPresent { .. }) => {}
@@ -22041,10 +22038,10 @@ fn lord_each_creature_with_keyword() {
     assert_eq!(def.mode, StaticMode::Continuous);
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
     // Should have a filter with WithKeyword for flying
     match &def.affected {
         Some(TargetFilter::Typed(tf)) => {
@@ -22065,10 +22062,10 @@ fn lord_other_zombie_creatures_regression() {
     assert_eq!(def.mode, StaticMode::Continuous);
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
     match &def.affected {
         Some(TargetFilter::Typed(tf)) => {
             assert!(tf
@@ -22266,8 +22263,8 @@ fn darksteel_mutation_full_modification_set() {
     assert!(mods.contains(&ContinuousModification::AddKeyword {
         keyword: Keyword::Indestructible,
     }));
-    assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
-    assert!(mods.contains(&ContinuousModification::SetToughness { value: 1 }));
+    assert!(mods.contains(&ContinuousModification::set_power(0)));
+    assert!(mods.contains(&ContinuousModification::set_toughness(1)));
     // CR 613.7 written-order contract: RemoveAllSubtypes must precede the
     // AddSubtype(Insect) so Insect survives the subtype wipe; and
     // RemoveAllAbilities must precede AddKeyword so indestructible survives.
@@ -22323,8 +22320,8 @@ fn lignify_subtype_only_with_base_pt_type_change() {
     assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
         set: SubtypeSet::Creature,
     }));
-    assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
-    assert!(mods.contains(&ContinuousModification::SetToughness { value: 4 }));
+    assert!(mods.contains(&ContinuousModification::set_power(0)));
+    assert!(mods.contains(&ContinuousModification::set_toughness(4)));
     assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
     // CR 613.7 written-order: RemoveAllSubtypes must precede AddSubtype so the
     // granted creature type survives the subtype wipe.
@@ -22419,8 +22416,8 @@ fn enchanted_is_type_with_base_pt_preserves_trailing_keyword_clause() {
         keyword: Keyword::Flying,
     }));
     assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
-    assert!(mods.contains(&ContinuousModification::SetPower { value: 2 }));
-    assert!(mods.contains(&ContinuousModification::SetToughness { value: 2 }));
+    assert!(mods.contains(&ContinuousModification::set_power(2)));
+    assert!(mods.contains(&ContinuousModification::set_toughness(2)));
 }
 
 // --- Land type-changing statics (CR 305.7) ---
@@ -22537,12 +22534,13 @@ fn all_lands_are_creatures_living_plane() {
     );
     assert!(
         mods.iter()
-            .any(|m| matches!(m, ContinuousModification::SetPower { value } if *value == 1)),
+            .any(|m| matches!(m, ContinuousModification::SetPower { value, .. } if *value == 1)),
         "must set power to 1 (Layer 7b): {mods:?}"
     );
     assert!(
-        mods.iter()
-            .any(|m| matches!(m, ContinuousModification::SetToughness { value } if *value == 1)),
+        mods.iter().any(
+            |m| matches!(m, ContinuousModification::SetToughness { value, .. } if *value == 1)
+        ),
         "must set toughness to 1 (Layer 7b): {mods:?}"
     );
     // No SetBasicLandType / type replacement — the land keeps its land type.
@@ -22742,8 +22740,8 @@ fn land_animation_additive_predicate_merges_animation_and_land_type_grants() {
 
     use ContinuousModification as CM;
     for expected in [
-        CM::SetPower { value: 1 },
-        CM::SetToughness { value: 1 },
+        CM::set_power(1),
+        CM::set_toughness(1),
         CM::SetColor {
             colors: vec![ManaColor::Green],
         },
@@ -22783,10 +22781,10 @@ fn lands_you_control_are_creatures_scope_and_pt() {
     )));
     assert!(mods
         .iter()
-        .any(|m| matches!(m, ContinuousModification::SetPower { value } if *value == 2)));
+        .any(|m| matches!(m, ContinuousModification::SetPower { value, .. } if *value == 2)));
     assert!(mods
         .iter()
-        .any(|m| matches!(m, ContinuousModification::SetToughness { value } if *value == 2)));
+        .any(|m| matches!(m, ContinuousModification::SetToughness { value, .. } if *value == 2)));
     match &def.affected {
         Some(TargetFilter::Typed(tf)) => {
             assert!(tf.type_filters.contains(&TypeFilter::Land));
@@ -22831,8 +22829,8 @@ fn controller_scoped_basic_land_type_subject_animates() {
     assert_eq!(
         def.modifications,
         vec![
-            CM::SetPower { value: 1 },
-            CM::SetToughness { value: 1 },
+            CM::set_power(1),
+            CM::set_toughness(1),
             CM::SetColor {
                 colors: vec![ManaColor::Green],
             },
@@ -22955,10 +22953,10 @@ fn conjunctive_every_creature_type_arachnoform() {
     assert_eq!(def.mode, StaticMode::Continuous);
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 2 }));
+        .contains(&ContinuousModification::add_toughness(2)));
     assert!(def
         .modifications
         .iter()
@@ -22975,10 +22973,10 @@ fn conjunctive_every_creature_type_runed_stalactite() {
         parse_static_line("Equipped creature gets +1/+1 and is every creature type.").unwrap();
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
     assert!(def
         .modifications
         .contains(&ContinuousModification::AddAllCreatureTypes));
@@ -23136,13 +23134,13 @@ fn futurist_operative_subtype_animation_preserves_card_types_shape() {
         .find(|definition| {
             definition
                 .modifications
-                .contains(&ContinuousModification::SetPower { value: 1 })
+                .contains(&ContinuousModification::set_power(1))
         })
         .expect("Futurist must parse its base-P/T animation");
     assert_eq!(animation.affected, Some(TargetFilter::SelfRef));
     for modification in [
-        ContinuousModification::SetPower { value: 1 },
-        ContinuousModification::SetToughness { value: 1 },
+        ContinuousModification::set_power(1),
+        ContinuousModification::set_toughness(1),
         ContinuousModification::AddSubtype {
             subtype: "Human".to_string(),
         },
@@ -23166,8 +23164,8 @@ fn futurist_operative_subtype_animation_preserves_card_types_shape() {
 #[test]
 fn self_animation_card_type_replacement_preserves_other_modifications() {
     let mixed = vec![
-        ContinuousModification::SetPower { value: 3 },
-        ContinuousModification::SetToughness { value: 4 },
+        ContinuousModification::set_power(3),
+        ContinuousModification::set_toughness(4),
         ContinuousModification::AddSubtype {
             subtype: "Ninja".to_string(),
         },
@@ -23208,8 +23206,8 @@ fn self_animation_card_type_replacement_preserves_other_modifications() {
     // replace card types. Core words in granted abilities are outside it.
     for (first, second) in [("Human", "Citizen"), ("Elf", "Scout")] {
         let inferred = vec![
-            ContinuousModification::SetPower { value: 1 },
-            ContinuousModification::SetToughness { value: 1 },
+            ContinuousModification::set_power(1),
+            ContinuousModification::set_toughness(1),
             ContinuousModification::AddSubtype {
                 subtype: first.to_string(),
             },
@@ -24817,10 +24815,10 @@ fn enchanted_artifact_is_creature_with_base_pt() {
         }));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::SetPower { value: 5 }));
+        .contains(&ContinuousModification::set_power(5)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::SetToughness { value: 5 }));
+        .contains(&ContinuousModification::set_toughness(5)));
     match &def.affected {
         Some(TargetFilter::Typed(tf)) => {
             assert!(tf.type_filters.contains(&TypeFilter::Artifact));
@@ -24862,8 +24860,8 @@ fn enchanted_creature_loses_abilities_becomes_insect() {
     assert_eq!(def.mode, StaticMode::Continuous);
     let mods = &def.modifications;
     assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
-    assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
-    assert!(mods.contains(&ContinuousModification::SetToughness { value: 1 }));
+    assert!(mods.contains(&ContinuousModification::set_power(0)));
+    assert!(mods.contains(&ContinuousModification::set_toughness(1)));
     // CR 205.1a + CR 613.1d: non-additive → SetCardTypes, not AddType.
     assert!(
         mods.contains(&ContinuousModification::SetCardTypes {
@@ -24937,8 +24935,8 @@ fn enchanted_creature_is_blue_frog() {
         }),
         "must emit AddSubtype(Frog): {mods:?}"
     );
-    assert!(mods.contains(&ContinuousModification::SetPower { value: 1 }));
-    assert!(mods.contains(&ContinuousModification::SetToughness { value: 1 }));
+    assert!(mods.contains(&ContinuousModification::set_power(1)));
+    assert!(mods.contains(&ContinuousModification::set_toughness(1)));
     // CR 613.7 written-order: RemoveAllSubtypes must precede AddSubtype(Frog)
     let pos = |m: &ContinuousModification| mods.iter().position(|x| x == m).unwrap();
     assert!(
@@ -24993,8 +24991,8 @@ fn witness_protection_replaces_colors_types_subtypes_name_and_abilities() {
     assert!(mods.contains(&ContinuousModification::AddSubtype {
         subtype: "Citizen".to_string(),
     }));
-    assert!(mods.contains(&ContinuousModification::SetPower { value: 1 }));
-    assert!(mods.contains(&ContinuousModification::SetToughness { value: 1 }));
+    assert!(mods.contains(&ContinuousModification::set_power(1)));
+    assert!(mods.contains(&ContinuousModification::set_toughness(1)));
     assert!(mods.contains(&ContinuousModification::SetTextName {
         name: "Legitimate Businessperson".to_string(),
     }));
@@ -26168,10 +26166,10 @@ fn static_kudo_adds_bear_subtype_alongside_base_pt() {
         .unwrap();
     assert!(def
         .modifications
-        .contains(&ContinuousModification::SetPower { value: 2 }));
+        .contains(&ContinuousModification::set_power(2)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::SetToughness { value: 2 }));
+        .contains(&ContinuousModification::set_toughness(2)));
     assert!(def
         .modifications
         .contains(&ContinuousModification::AddSubtype {
@@ -26466,8 +26464,8 @@ fn static_all_creatures_are_color_composes_trailing_modifications() {
             ContinuousModification::SetColor {
                 colors: vec![ManaColor::White]
             },
-            ContinuousModification::AddPower { value: 1 },
-            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::add_power(1),
+            ContinuousModification::add_toughness(1),
         ]
     );
 
@@ -26678,10 +26676,10 @@ fn static_all_subject_are_color_does_not_eat_get_plus_lines() {
     let def = parse_static_line("All creatures get +1/+1.").unwrap();
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
     for m in &def.modifications {
         assert!(
             !matches!(m, ContinuousModification::SetColor { .. }),
@@ -27195,8 +27193,8 @@ fn all_creatures_engineered_plague_preserves_chosen_type_shape() {
     assert_eq!(
         def.modifications,
         vec![
-            ContinuousModification::AddPower { value: -1 },
-            ContinuousModification::AddToughness { value: -1 },
+            ContinuousModification::add_power(-1),
+            ContinuousModification::add_toughness(-1),
         ]
     );
     assert_eq!(
@@ -29585,8 +29583,8 @@ fn death_baron_compound_get_have_predicate_unaffected_by_typed_you_control_guard
     );
     use ContinuousModification as CM;
     for expected in [
-        CM::AddPower { value: 1 },
-        CM::AddToughness { value: 1 },
+        CM::add_power(1),
+        CM::add_toughness(1),
         CM::AddKeyword {
             keyword: Keyword::Deathtouch,
         },
@@ -30255,10 +30253,10 @@ fn static_enchanted_creatures_you_control_uses_attachment_predicate() {
     );
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
     assert!(def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 2 }));
+        .contains(&ContinuousModification::add_toughness(2)));
 }
 
 #[test]
@@ -34454,10 +34452,10 @@ fn multi_sentence_dual_subject_anthem_emits_both_statics() {
     ));
     assert!(legendary
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
     assert!(legendary
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
     // Ward cost must be {1} — the swallowed-period bug produced an empty {0}.
     let ward = legendary
         .modifications
@@ -34496,10 +34494,10 @@ fn multi_sentence_dual_subject_anthem_emits_both_statics() {
     ));
     assert!(nonlegendary
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(nonlegendary
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
     assert!(
         !nonlegendary
             .modifications
@@ -34524,7 +34522,7 @@ fn single_sentence_anthem_unaffected_by_multi_sentence_split() {
     );
     assert!(defs[0]
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
 }
 
 /// CR 611.3a + CR 613.1f: Compound static where the keyword-grant conjunct has
@@ -34556,14 +34554,14 @@ fn compound_static_foreign_keyword_grant_splits_angelic_field_marshal() {
     assert!(
         primary
             .modifications
-            .contains(&ContinuousModification::AddPower { value: 2 }),
+            .contains(&ContinuousModification::add_power(2)),
         "primary must add +2 power, got {:?}",
         primary.modifications
     );
     assert!(
         primary
             .modifications
-            .contains(&ContinuousModification::AddToughness { value: 2 }),
+            .contains(&ContinuousModification::add_toughness(2)),
         "primary must add +2 toughness, got {:?}",
         primary.modifications
     );
@@ -34626,8 +34624,8 @@ fn compound_static_foreign_pt_grant_splits_thunderfoot_baloth() {
     assert_eq!(
         def0.modifications,
         vec![
-            ContinuousModification::AddPower { value: 2 },
-            ContinuousModification::AddToughness { value: 2 },
+            ContinuousModification::add_power(2),
+            ContinuousModification::add_toughness(2),
         ]
     );
     assert_eq!(
@@ -34657,13 +34655,13 @@ fn compound_static_foreign_pt_grant_splits_thunderfoot_baloth() {
     }
     assert!(
         def1.modifications
-            .contains(&ContinuousModification::AddPower { value: 2 }),
+            .contains(&ContinuousModification::add_power(2)),
         "def1 must add +2 power, got {:?}",
         def1.modifications
     );
     assert!(
         def1.modifications
-            .contains(&ContinuousModification::AddToughness { value: 2 }),
+            .contains(&ContinuousModification::add_toughness(2)),
         "def1 must add +2 toughness, got {:?}",
         def1.modifications
     );
@@ -36285,13 +36283,13 @@ fn static_nonlegendary_creatures_enchanted_player_controls_base_pt_and_lose_type
     // Modifications: SetPower{3}, SetToughness{3}, RemoveAllSubtypes{Creature}.
     assert!(
         def.modifications
-            .contains(&ContinuousModification::SetPower { value: 3 }),
+            .contains(&ContinuousModification::set_power(3)),
         "must set power to 3, got {:?}",
         def.modifications
     );
     assert!(
         def.modifications
-            .contains(&ContinuousModification::SetToughness { value: 3 }),
+            .contains(&ContinuousModification::set_toughness(3)),
         "must set toughness to 3, got {:?}",
         def.modifications
     );
@@ -36354,7 +36352,7 @@ fn no_abilities_filter_is_not_ability_removal() {
         }
         assert!(
             def.modifications
-                .contains(&ContinuousModification::AddPower { value: power }),
+                .contains(&ContinuousModification::add_power(power)),
             "{text}: {:?}",
             def.modifications
         );
@@ -36605,14 +36603,14 @@ fn heroic_defiance_pt_grant_gated_on_most_common_color() {
     assert!(
         grant
             .modifications
-            .contains(&ContinuousModification::AddPower { value: 3 }),
+            .contains(&ContinuousModification::add_power(3)),
         "grant must add +3 power, got {:?}",
         grant.modifications
     );
     assert!(
         grant
             .modifications
-            .contains(&ContinuousModification::AddToughness { value: 3 }),
+            .contains(&ContinuousModification::add_toughness(3)),
         "grant must add +3 toughness, got {:?}",
         grant.modifications
     );
@@ -36650,14 +36648,14 @@ fn sulam_djinn_pt_penalty_gated_on_green_being_most_common_color() {
     assert!(
         penalty
             .modifications
-            .contains(&ContinuousModification::AddPower { value: -2 }),
+            .contains(&ContinuousModification::add_power(-2)),
         "penalty must subtract 2 power, got {:?}",
         penalty.modifications
     );
     assert!(
         penalty
             .modifications
-            .contains(&ContinuousModification::AddToughness { value: -2 }),
+            .contains(&ContinuousModification::add_toughness(-2)),
         "penalty must subtract 2 toughness, got {:?}",
         penalty.modifications
     );
@@ -37001,8 +36999,8 @@ fn on_serras_wings_compound_legendary_grant_keeps_pump_and_keywords() {
         defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
     );
     assert!(
-        has(&ContinuousModification::AddPower { value: 1 })
-            && has(&ContinuousModification::AddToughness { value: 1 }),
+        has(&ContinuousModification::add_power(1))
+            && has(&ContinuousModification::add_toughness(1)),
         "the +1/+1 pump must survive, got {:?}",
         defs.iter().map(|d| &d.modifications).collect::<Vec<_>>()
     );
@@ -37499,10 +37497,10 @@ fn an_additional_pt_grant_parses_with_gate() {
     assert_eq!(s.len(), 1, "Taste for Mayhem: {s:?}");
     assert!(s[0]
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
     assert!(s[0]
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 0 }));
+        .contains(&ContinuousModification::add_toughness(0)));
     assert!(
         matches!(
             s[0].condition,
@@ -37525,10 +37523,10 @@ fn an_additional_pt_grant_parses_with_gate() {
     assert_eq!(s.len(), 1, "Divine Sacrament: {s:?}");
     assert!(s[0]
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 1 }));
+        .contains(&ContinuousModification::add_power(1)));
     assert!(s[0]
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 1 }));
+        .contains(&ContinuousModification::add_toughness(1)));
     assert!(
         matches!(
             s[0].condition,
@@ -37552,10 +37550,10 @@ fn an_additional_pt_grant_parses_with_gate() {
     assert_eq!(s.len(), 1, "Patriarch's Desire: {s:?}");
     assert!(s[0]
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
     assert!(s[0]
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: -2 }));
+        .contains(&ContinuousModification::add_toughness(-2)));
     assert!(
         matches!(
             s[0].condition,
@@ -37578,10 +37576,10 @@ fn an_additional_pt_grant_parses_with_gate() {
     assert_eq!(s.len(), 1, "Strange Augmentation: {s:?}");
     assert!(s[0]
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
     assert!(s[0]
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 2 }));
+        .contains(&ContinuousModification::add_toughness(2)));
     assert!(
         matches!(
             s[0].condition,
@@ -37607,10 +37605,10 @@ fn an_additional_pt_grant_bare_parses() {
     assert_eq!(statics.len(), 1, "expected exactly one static: {statics:?}");
     assert!(statics[0]
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
     assert!(statics[0]
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 0 }));
+        .contains(&ContinuousModification::add_toughness(0)));
     assert!(
         statics[0].condition.is_none(),
         "bare grant carries no gate: {:?}",
@@ -38713,7 +38711,7 @@ fn inverted_bare_self_declines_compound_effect() {
     );
     assert!(defs[0]
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
     assert!(defs[0]
         .modifications
         .contains(&ContinuousModification::AddKeyword {
@@ -40354,8 +40352,8 @@ fn idol_of_false_gods_animates_and_keeps_annihilator() {
         "CR 613.1d (Layer 4): Idol must become a creature; mods = {mods:?}"
     );
     assert!(
-        mods.contains(&ContinuousModification::SetPower { value: 0 })
-            && mods.contains(&ContinuousModification::SetToughness { value: 0 }),
+        mods.contains(&ContinuousModification::set_power(0))
+            && mods.contains(&ContinuousModification::set_toughness(0)),
         "CR 613.4b (Layer 7b): base P/T 0/0 must be set; mods = {mods:?}"
     );
     assert!(
@@ -40414,8 +40412,8 @@ fn animation_conjunct_emits_both_halves_for_every_grant_verb() {
             "animation half (CR 613.1d) must survive the conjunct; line = {line:?}, mods = {mods:?}"
         );
         assert!(
-            mods.contains(&ContinuousModification::SetPower { value: 0 })
-                && mods.contains(&ContinuousModification::SetToughness { value: 0 }),
+            mods.contains(&ContinuousModification::set_power(0))
+                && mods.contains(&ContinuousModification::set_toughness(0)),
             "base P/T (CR 613.4b) must survive the conjunct; line = {line:?}, mods = {mods:?}"
         );
         assert!(
@@ -40592,8 +40590,8 @@ fn additive_type_leaf_keeps_base_pt_and_pre_marker_keywords() {
     )
     .expect("the additive-type leaf must claim this clause");
     for expected in [
-        ContinuousModification::SetPower { value: 4 },
-        ContinuousModification::SetToughness { value: 4 },
+        ContinuousModification::set_power(4),
+        ContinuousModification::set_toughness(4),
         ContinuousModification::AddKeyword {
             keyword: Keyword::Deathtouch,
         },
@@ -40803,13 +40801,13 @@ fn bello_verbatim_line_retains_each_compound_subject_owner() {
     let def = &defs[0];
     assert_eq!(
         def.modifications.first(),
-        Some(&ContinuousModification::SetPower { value: 4 }),
+        Some(&ContinuousModification::set_power(4)),
         "the dedicated compound-subject owner must emit SetPower first: {:?}",
         def.modifications
     );
     assert_eq!(
         def.modifications.get(1),
-        Some(&ContinuousModification::SetToughness { value: 4 }),
+        Some(&ContinuousModification::set_toughness(4)),
         "then SetToughness: {:?}",
         def.modifications
     );
@@ -41417,8 +41415,8 @@ fn adjacent_defender_grammars_keep_their_own_parse() {
     assert_eq!(
         arm4[0].modifications,
         vec![
-            ContinuousModification::AddPower { value: 1 },
-            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::add_power(1),
+            ContinuousModification::add_toughness(1),
         ]
     );
     assert_eq!(arm4[1].mode, StaticMode::CanAttackWithDefender);
@@ -42389,8 +42387,8 @@ fn grist_negated_battlefield_static_declares_every_other_zone() {
     assert_eq!(def.condition, Some(negated(in_zone(Zone::Battlefield))));
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     for expected in [
-        ContinuousModification::SetPower { value: 1 },
-        ContinuousModification::SetToughness { value: 1 },
+        ContinuousModification::set_power(1),
+        ContinuousModification::set_toughness(1),
         ContinuousModification::AddType {
             core_type: crate::types::card_type::CoreType::Creature,
         },
@@ -43203,8 +43201,8 @@ fn commanders_plate_static_line_parses_to_each_color_protection_set() {
     assert_eq!(
         def.modifications,
         vec![
-            ContinuousModification::AddPower { value: 3 },
-            ContinuousModification::AddToughness { value: 3 },
+            ContinuousModification::add_power(3),
+            ContinuousModification::add_toughness(3),
             ContinuousModification::AddKeyword {
                 keyword: Keyword::Protection(ProtectionTarget::EachColor(
                     ProtectionColorSet::OutsideCommanderColorIdentity
@@ -43437,7 +43435,7 @@ fn enchanted_land_creature_retention_clause_keeps_land_type() {
             }),
             "{line}: {mods:?}"
         );
-        assert!(mods.contains(&ContinuousModification::SetPower { value: 3 }));
+        assert!(mods.contains(&ContinuousModification::set_power(3)));
         assert!(mods.contains(&ContinuousModification::AddSubtype {
             subtype: "Ooze".to_string()
         }));

@@ -15,11 +15,11 @@ use crate::types::ability::{
     quantity_expr_recipient_read, AbilityCost, AbilityDefinition, AbilityKind,
     ActivationRestriction, AttachCardinality, AttachSelection, CastingPermission, ChosenAttribute,
     Comparator, ContinuousModification, ControllerRef, CopiableValues, DelayedTriggerCondition,
-    DelayedTriggerKind, Duration, Effect, EffectError, EffectKind, FilterProp, ManaContribution,
-    ManaProduction, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
-    RecipientRead, ResolvedAbility, SacrificeCost, SearchSelectionConstraint, StaticDefinition,
-    TargetFilter, TargetRef, TokenAttackDestination, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter,
+    DelayedTriggerKind, Duration, Effect, EffectError, EffectKind, FilterProp, HalfFraction,
+    HalfSigned, ManaContribution, ManaProduction, PermissionGrantee, PlayerFilter, PtValue,
+    QuantityExpr, QuantityRef, RecipientRead, ResolvedAbility, SacrificeCost,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef, TokenAttackDestination,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card::PrintedLoyalty;
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -421,7 +421,9 @@ fn materialize_catalog_token_payload(
 struct TokenAttrs {
     display_name: String,
     power: Option<i32>,
+    power_fraction: HalfFraction,
     toughness: Option<i32>,
+    toughness_fraction: HalfFraction,
     core_types: Vec<CoreType>,
     subtypes: Vec<String>,
     colors: Vec<ManaColor>,
@@ -460,7 +462,9 @@ fn parse_token_script(script: &str) -> Option<TokenAttrs> {
             Some(TokenAttrs {
                 display_name: format_display_name(&subtypes),
                 power: None,
+                power_fraction: HalfFraction::Zero,
                 toughness: None,
+                toughness_fraction: HalfFraction::Zero,
                 core_types: vec![CoreType::Artifact],
                 subtypes,
                 colors,
@@ -474,7 +478,9 @@ fn parse_token_script(script: &str) -> Option<TokenAttrs> {
             Some(TokenAttrs {
                 display_name: format_display_name(&subtypes),
                 power: None,
+                power_fraction: HalfFraction::Zero,
                 toughness: None,
+                toughness_fraction: HalfFraction::Zero,
                 core_types: vec![CoreType::Enchantment],
                 subtypes,
                 colors,
@@ -526,7 +532,9 @@ fn parse_creature_parts(
     TokenAttrs {
         display_name,
         power,
+        power_fraction: HalfFraction::Zero,
         toughness,
+        toughness_fraction: HalfFraction::Zero,
         core_types,
         subtypes,
         colors,
@@ -1106,45 +1114,69 @@ fn build_token_spec(
         }
     }
 
-    let (display_name, power, toughness, core_types, subtypes, supertypes, colors, keywords) =
-        if let Some(attrs) = parsed {
-            (
-                attrs.display_name.clone(),
-                attrs.power,
-                attrs.toughness,
-                attrs.core_types.clone(),
-                attrs.subtypes.clone(),
-                attrs.supertypes.clone(),
-                attrs.colors.clone(),
-                attrs.keywords.clone(),
-            )
+    let (
+        display_name,
+        power,
+        power_fraction,
+        toughness,
+        toughness_fraction,
+        core_types,
+        subtypes,
+        supertypes,
+        colors,
+        keywords,
+    ) = if let Some(attrs) = parsed {
+        (
+            attrs.display_name.clone(),
+            attrs.power,
+            attrs.power_fraction,
+            attrs.toughness,
+            attrs.toughness_fraction,
+            attrs.core_types.clone(),
+            attrs.subtypes.clone(),
+            attrs.supertypes.clone(),
+            attrs.colors.clone(),
+            attrs.keywords.clone(),
+        )
+    } else {
+        // No parsed attrs — resolve fallback P/T, and defer type/color
+        // inference to the apply path's creature-only fallback branch.
+        let rp = resolve_pt_exact(fallback_power, state, ability);
+        let rt = resolve_pt_exact(fallback_toughness, state, ability);
+        let (p, pf, t, tf, core) = if !rp.is_zero() || !rt.is_zero() {
+            let (pw, p_frac) = rp.into_whole_and_fraction();
+            let (tw, t_frac) = rt.into_whole_and_fraction();
+            (Some(pw), p_frac, Some(tw), t_frac, vec![CoreType::Creature])
         } else {
-            // No parsed attrs — resolve fallback P/T, and defer type/color
-            // inference to the apply path's creature-only fallback branch.
-            let rp = resolve_pt_value(fallback_power, state, ability);
-            let rt = resolve_pt_value(fallback_toughness, state, ability);
-            let (p, t, core) = if rp != 0 || rt != 0 {
-                (Some(rp), Some(rt), vec![CoreType::Creature])
-            } else {
-                (None, None, Vec::new())
-            };
             (
-                script_name.to_string(),
-                p,
-                t,
-                core,
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
+                None,
+                HalfFraction::Zero,
+                None,
+                HalfFraction::Zero,
                 Vec::new(),
             )
         };
+        (
+            script_name.to_string(),
+            p,
+            pf,
+            t,
+            tf,
+            core,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    };
 
     TokenSpec {
         characteristics: TokenCharacteristics {
             display_name,
             power,
+            power_fraction,
             toughness,
+            toughness_fraction,
             loyalty: None,
             core_types,
             subtypes,
@@ -2378,12 +2410,18 @@ pub(crate) fn materialize_token_spec_body(
         || !ch.keywords.is_empty();
     if has_attrs {
         object.power = ch.power;
+        object.power_fraction = ch.power_fraction;
         object.toughness = ch.toughness;
+        object.toughness_fraction = ch.toughness_fraction;
         object.base_name = ch.display_name.clone();
         object.base_power = ch.power;
+        object.base_power_fraction = ch.power_fraction;
         object.base_toughness = ch.toughness;
+        object.base_toughness_fraction = ch.toughness_fraction;
         object.layer_base_power = ch.power;
+        object.layer_base_power_fraction = ch.power_fraction;
         object.layer_base_toughness = ch.toughness;
+        object.layer_base_toughness_fraction = ch.toughness_fraction;
         // CR 306.5b + CR 306.5c: record the token's printed loyalty; live loyalty
         // stays counter-derived. Placing entry loyalty counters from this value is
         // not yet done for tokens. Mirrors `printed_cards::apply_face`, so a
@@ -4426,7 +4464,9 @@ pub(crate) fn copy_probe_spec_for(
         characteristics: TokenCharacteristics {
             display_name: values.name.clone(),
             power: values.power,
+            power_fraction: values.power_fraction,
             toughness: values.toughness,
+            toughness_fraction: values.toughness_fraction,
             loyalty: None,
             core_types: values.card_types.core_types.clone(),
             subtypes: values.card_types.subtypes.clone(),
@@ -5080,21 +5120,35 @@ fn build_token_attrs_from_effect(
         }
     }
 
-    let resolved_power = resolve_pt_value(power, state, ability);
-    let resolved_toughness = resolve_pt_value(toughness, state, ability);
-    if core_types.is_empty() && (resolved_power != 0 || resolved_toughness != 0) {
+    let resolved_power = resolve_pt_exact(power, state, ability);
+    let resolved_toughness = resolve_pt_exact(toughness, state, ability);
+    let has_power_toughness = !resolved_power.is_zero() || !resolved_toughness.is_zero();
+    if core_types.is_empty() && has_power_toughness {
         core_types.push(CoreType::Creature);
     }
 
-    let has_power_toughness = resolved_power != 0 || resolved_toughness != 0;
     let has_explicit_pt =
         !matches!(power, PtValue::Fixed(0)) || !matches!(toughness, PtValue::Fixed(0));
     let is_creature = core_types.contains(&CoreType::Creature);
+    let include_pt = is_creature || has_explicit_pt || has_power_toughness;
+    let (power_whole, power_fraction) = if include_pt {
+        let (w, f) = resolved_power.into_whole_and_fraction();
+        (Some(w), f)
+    } else {
+        (None, HalfFraction::Zero)
+    };
+    let (toughness_whole, toughness_fraction) = if include_pt {
+        let (w, f) = resolved_toughness.into_whole_and_fraction();
+        (Some(w), f)
+    } else {
+        (None, HalfFraction::Zero)
+    };
     Some(TokenAttrs {
         display_name: name.to_string(),
-        power: (is_creature || has_explicit_pt || has_power_toughness).then_some(resolved_power),
-        toughness: (is_creature || has_explicit_pt || has_power_toughness)
-            .then_some(resolved_toughness),
+        power: power_whole,
+        power_fraction,
+        toughness: toughness_whole,
+        toughness_fraction,
         core_types,
         subtypes,
         colors: colors.to_vec(),
@@ -5103,11 +5157,16 @@ fn build_token_attrs_from_effect(
     })
 }
 
-fn resolve_pt_value(value: &PtValue, state: &GameState, ability: &ResolvedAbility) -> i32 {
+fn resolve_pt_exact(value: &PtValue, state: &GameState, ability: &ResolvedAbility) -> HalfSigned {
     match value {
-        PtValue::Fixed(n) => *n,
-        PtValue::Variable(_) => 0,
-        PtValue::Quantity(expr) => resolve_quantity_with_targets(state, expr, ability),
+        PtValue::Fixed(n) => HalfSigned::from_whole(*n),
+        PtValue::HalfPoints(halves) => HalfSigned::from_halves(*halves),
+        PtValue::Variable(_) => HalfSigned::ZERO,
+        // CR 208.1: a token whose P/T is "equal to" a dynamic amount
+        // keeps an Unhinged half-point value exactly.
+        PtValue::Quantity(expr) => {
+            crate::game::quantity::resolve_quantity_with_targets_exact(state, expr, ability)
+        }
     }
 }
 
@@ -5459,7 +5518,9 @@ fn incubator_phyrexian_back_face() -> BackFaceData {
     BackFaceData {
         name: "Phyrexian Token".to_string(),
         power: Some(0),
+        power_fraction: Default::default(),
         toughness: Some(0),
+        toughness_fraction: Default::default(),
         loyalty: None,
         printed_loyalty: None,
         defense: None,
@@ -5653,8 +5714,8 @@ fn role_static(modifications: Vec<ContinuousModification>, description: &str) ->
 fn cursed_role_statics() -> Vec<StaticDefinition> {
     vec![role_static(
         vec![
-            ContinuousModification::SetPower { value: 1 },
-            ContinuousModification::SetToughness { value: 1 },
+            ContinuousModification::set_power(1),
+            ContinuousModification::set_toughness(1),
         ],
         "Enchanted creature has base power and toughness 1/1.",
     )]
@@ -5664,8 +5725,8 @@ fn cursed_role_statics() -> Vec<StaticDefinition> {
 fn monster_role_statics() -> Vec<StaticDefinition> {
     vec![role_static(
         vec![
-            ContinuousModification::AddPower { value: 1 },
-            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::add_power(1),
+            ContinuousModification::add_toughness(1),
             ContinuousModification::AddKeyword {
                 keyword: Keyword::Trample,
             },
@@ -5678,8 +5739,8 @@ fn monster_role_statics() -> Vec<StaticDefinition> {
 fn royal_role_statics() -> Vec<StaticDefinition> {
     vec![role_static(
         vec![
-            ContinuousModification::AddPower { value: 1 },
-            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::add_power(1),
+            ContinuousModification::add_toughness(1),
             ContinuousModification::AddKeyword {
                 keyword: Keyword::Ward(WardCost::Mana(ManaCost::generic(1))),
             },
@@ -5791,8 +5852,8 @@ fn sorcerer_role_statics() -> Vec<StaticDefinition> {
 
     vec![role_static(
         vec![
-            ContinuousModification::AddPower { value: 1 },
-            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::add_power(1),
+            ContinuousModification::add_toughness(1),
             ContinuousModification::GrantTrigger {
                 trigger: Box::new(trigger),
             },
@@ -5843,8 +5904,8 @@ impl RoleSpec {
 fn wicked_role_spec() -> RoleSpec {
     let pump = role_static(
         vec![
-            ContinuousModification::AddPower { value: 1 },
-            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::add_power(1),
+            ContinuousModification::add_toughness(1),
         ],
         "Enchanted creature gets +1/+1.",
     );
@@ -6387,6 +6448,8 @@ mod tests {
                 supertypes: vec![],
                 colors: vec![ManaColor::Red],
                 keywords: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Goblin".to_string(),
             static_abilities: vec![],
@@ -8441,6 +8504,8 @@ mod tests {
                 supertypes: vec![],
                 colors: vec![],
                 keywords: vec![Keyword::Haste],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Gingerbrute".to_string(),
             static_abilities: vec![],
@@ -8531,6 +8596,8 @@ mod tests {
             supertypes: vec![],
             colors: vec![],
             keywords: vec![],
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         };
         materialize_token_spec_body(
             &mut treasure,
@@ -8849,6 +8916,8 @@ mod tests {
                 supertypes: vec![],
                 colors: vec![ManaColor::Black, ManaColor::Green],
                 keywords: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Pest".to_string(),
             static_abilities: vec![],
@@ -9053,6 +9122,8 @@ mod tests {
                 supertypes: vec![],
                 colors: vec![],
                 keywords: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: name.to_string(),
             static_abilities: vec![],
@@ -9135,6 +9206,8 @@ mod tests {
                 supertypes: vec![],
                 colors: vec![],
                 keywords: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Treasure".to_string(),
             static_abilities: vec![],
@@ -9208,6 +9281,8 @@ mod tests {
                 supertypes: vec![],
                 colors: vec![],
                 keywords: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Royal".to_string(),
             static_abilities: vec![],
@@ -9290,6 +9365,8 @@ mod tests {
                 supertypes: vec![],
                 colors: vec![],
                 keywords: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Monster Role".to_string(),
             static_abilities: vec![],
@@ -9486,6 +9563,8 @@ mod tests {
                 supertypes: vec![],
                 colors: vec![],
                 keywords: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Monster Role".to_string(),
             static_abilities: vec![],
@@ -9547,12 +9626,16 @@ mod tests {
             panic!("affected must be a TypedFilter");
         };
         assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+        assert!(s.modifications.contains(&ContinuousModification::AddPower {
+            value: 1,
+            fraction: Default::default(),
+        }));
         assert!(s
             .modifications
-            .contains(&ContinuousModification::AddPower { value: 1 }));
-        assert!(s
-            .modifications
-            .contains(&ContinuousModification::AddToughness { value: 1 }));
+            .contains(&ContinuousModification::AddToughness {
+                value: 1,
+                fraction: Default::default(),
+            }));
         let ward = s.modifications.iter().find_map(|m| match m {
             ContinuousModification::AddKeyword {
                 keyword: Keyword::Ward(cost),
@@ -9582,12 +9665,16 @@ mod tests {
             panic!("affected must be a TypedFilter");
         };
         assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+        assert!(s.modifications.contains(&ContinuousModification::SetPower {
+            value: 1,
+            fraction: Default::default(),
+        }));
         assert!(s
             .modifications
-            .contains(&ContinuousModification::SetPower { value: 1 }));
-        assert!(s
-            .modifications
-            .contains(&ContinuousModification::SetToughness { value: 1 }));
+            .contains(&ContinuousModification::SetToughness {
+                value: 1,
+                fraction: Default::default(),
+            }));
         // Cursed's encoding belongs in layer 7b only — emitting AddPower
         // alongside SetPower would apply +1 in 7c on top of the base set,
         // turning Cursed creatures into 2/2.
@@ -9603,12 +9690,16 @@ mod tests {
         let statics = predefined_role_token_spec_statics("Monster").unwrap();
         assert_eq!(statics.len(), 1);
         let s = &statics[0];
+        assert!(s.modifications.contains(&ContinuousModification::AddPower {
+            value: 1,
+            fraction: Default::default(),
+        }));
         assert!(s
             .modifications
-            .contains(&ContinuousModification::AddPower { value: 1 }));
-        assert!(s
-            .modifications
-            .contains(&ContinuousModification::AddToughness { value: 1 }));
+            .contains(&ContinuousModification::AddToughness {
+                value: 1,
+                fraction: Default::default(),
+            }));
         assert!(s
             .modifications
             .contains(&ContinuousModification::AddKeyword {
@@ -9728,12 +9819,16 @@ mod tests {
         assert_eq!(statics.len(), 1);
         let s = &statics[0];
 
+        assert!(s.modifications.contains(&ContinuousModification::AddPower {
+            value: 1,
+            fraction: Default::default(),
+        }));
         assert!(s
             .modifications
-            .contains(&ContinuousModification::AddPower { value: 1 }));
-        assert!(s
-            .modifications
-            .contains(&ContinuousModification::AddToughness { value: 1 }));
+            .contains(&ContinuousModification::AddToughness {
+                value: 1,
+                fraction: Default::default(),
+            }));
 
         let trigger = s
             .modifications
@@ -9772,10 +9867,16 @@ mod tests {
         let pump = &spec.statics[0];
         assert!(pump
             .modifications
-            .contains(&ContinuousModification::AddPower { value: 1 }));
+            .contains(&ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }));
         assert!(pump
             .modifications
-            .contains(&ContinuousModification::AddToughness { value: 1 }));
+            .contains(&ContinuousModification::AddToughness {
+                value: 1,
+                fraction: Default::default(),
+            }));
         assert!(
             !pump.modifications.iter().any(|m| matches!(
                 m,
@@ -10051,6 +10152,8 @@ mod tests {
                 supertypes: vec![],
                 colors: vec![],
                 keywords: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Construct".to_string(),
             static_abilities: vec![boost],
@@ -10120,6 +10223,8 @@ mod tests {
                 supertypes: vec![],
                 colors: vec![],
                 keywords: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Stoneforged Blade".to_string(),
             static_abilities: vec![equip_static],
@@ -10180,6 +10285,8 @@ mod tests {
                 supertypes: vec![],
                 colors: vec![],
                 keywords: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Probe Curse".to_string(),
             static_abilities: statics,
@@ -10334,6 +10441,8 @@ mod tests {
                 supertypes: vec![],
                 colors: vec![],
                 keywords: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Conditional Blade".to_string(),
             static_abilities: vec![conditional_equip],
@@ -10413,6 +10522,8 @@ mod tests {
                 supertypes: vec![],
                 colors: vec![],
                 keywords: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Meteorite".to_string(),
             static_abilities: vec![grant_static],
@@ -10471,6 +10582,8 @@ mod tests {
                 supertypes: vec![],
                 colors: vec![],
                 keywords: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "c_1_1_hero".to_string(),
             static_abilities: vec![],

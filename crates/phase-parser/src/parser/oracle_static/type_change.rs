@@ -35,8 +35,8 @@ pub(crate) fn parse_inverted_base_pt_type_grant(
     modifications.extend(
         super::oracle_effect::animation::parse_becomes_type_modifications(type_text.original),
     );
-    modifications.push(ContinuousModification::SetPower { value: power });
-    modifications.push(ContinuousModification::SetToughness { value: toughness });
+    modifications.push(ContinuousModification::set_power(power));
+    modifications.push(ContinuousModification::set_toughness(toughness));
 
     let grants = tail.trim().trim_start_matches(',').trim();
     if !grants.is_empty() {
@@ -1443,8 +1443,8 @@ pub(crate) fn parse_enchanted_is_type(
 
         // 3. Base P/T from explicit "with base power and toughness" or inline "N/N"
         if let Some((p, t)) = base_pt.or(inline_pt) {
-            modifications.push(ContinuousModification::SetPower { value: p });
-            modifications.push(ContinuousModification::SetToughness { value: t });
+            modifications.push(ContinuousModification::set_power(p));
+            modifications.push(ContinuousModification::set_toughness(t));
         }
 
         // CR 205.1a + CR 613.1d (Layer 4): Non-additive "is a [subtype] creature"

@@ -349,7 +349,7 @@ pub(crate) fn effect_matches_in_walk(
 /// "-X" for a shrink), so the sign is stripped before the comparison.
 fn pt_value_references_x(value: &PtValue) -> bool {
     match value {
-        PtValue::Fixed(_) => false,
+        PtValue::Fixed(_) | PtValue::HalfPoints(_) => false,
         PtValue::Variable(name) => name.strip_prefix('-').unwrap_or(name) == "X",
         PtValue::Quantity(expr) => expr.contains_x(),
     }

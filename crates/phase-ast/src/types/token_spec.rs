@@ -25,8 +25,12 @@ pub struct TokenCharacteristics {
     pub display_name: String,
     /// CR 208.2: Fixed power, or `None` for non-creature tokens.
     pub power: Option<i32>,
+    #[serde(default, skip_serializing_if = "super::ability::HalfFraction::is_zero")]
+    pub power_fraction: super::ability::HalfFraction,
     /// CR 208.2: Fixed toughness, or `None` for non-creature tokens.
     pub toughness: Option<i32>,
+    #[serde(default, skip_serializing_if = "super::ability::HalfFraction::is_zero")]
+    pub toughness_fraction: super::ability::HalfFraction,
     /// CR 306.5b: Printed loyalty, or `None` for non-planeswalker tokens.
     ///
     /// The token's *printed* loyalty, as `CardFace::loyalty` is for a card-backed

@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use thiserror::Error;
 
 use crate::types::ability::{
-    AbilityCondition, DigSource, DurationEvent, Effect, EffectKind, KeywordAction, QuantityExpr,
-    QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
+    AbilityCondition, DigSource, DurationEvent, Effect, EffectKind, HalfFraction, HalfSigned,
+    KeywordAction, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -16729,6 +16729,7 @@ fn apply_non_priority_pass_action(
                 player,
                 attacker_id,
                 total_damage,
+                total_damage_fraction,
                 blockers,
                 assignment_modes,
                 trample,
@@ -16740,8 +16741,11 @@ fn apply_non_priority_pass_action(
             GameAction::AssignCombatDamage {
                 mode,
                 assignments,
+                assignments_fraction,
                 trample_damage,
+                trample_damage_fraction,
                 controller_damage,
+                controller_damage_fraction,
             },
         ) => {
             triggers_processed_inline = true;
@@ -16750,6 +16754,7 @@ fn apply_non_priority_pass_action(
                 *player,
                 *attacker_id,
                 *total_damage,
+                *total_damage_fraction,
                 blockers,
                 assignment_modes,
                 *trample,
@@ -16759,8 +16764,11 @@ fn apply_non_priority_pass_action(
                 *pw_controller,
                 mode,
                 &assignments,
+                &assignments_fraction,
                 trample_damage,
+                trample_damage_fraction,
                 controller_damage,
+                controller_damage_fraction,
                 &mut events,
             )?
         }
@@ -16768,21 +16776,28 @@ fn apply_non_priority_pass_action(
         // the active player among the attackers it blocks.
         (
             WaitingFor::AssignBlockerDamage {
-                player,
+                player: _,
                 blocker_id,
                 total_damage,
+                total_damage_fraction,
                 attackers,
             },
-            GameAction::AssignBlockerDamage { assignments },
+            GameAction::AssignBlockerDamage {
+                assignments,
+                assignments_fraction,
+            },
         ) => {
             triggers_processed_inline = true;
             engine_combat::handle_assign_blocker_damage(
                 state,
-                *player,
                 *blocker_id,
-                *total_damage,
+                crate::types::ability::HalfMagnitude::from_whole_and_fraction(
+                    *total_damage,
+                    *total_damage_fraction,
+                ),
                 attackers,
                 &assignments,
+                &assignments_fraction,
                 &mut events,
             )?
         }
@@ -19804,19 +19819,23 @@ fn handle_crew_activation(
     // per-creature contributions travel with the choice so the UI gates the
     // selection on the same adjusted values the engine validates against, rather
     // than re-deriving from raw power.
-    let contributions: Vec<i32> = eligible_creatures
+    // CR 702.122a: contributions are exact, so two ½-power creatures meet Crew 1.
+    let exact_contributions: Vec<HalfSigned> = eligible_creatures
         .iter()
         .map(|&id| {
-            super::static_abilities::object_crew_power_contribution(
+            super::static_abilities::object_crew_power_contribution_exact(
                 state,
                 id,
                 crate::types::statics::CrewAction::Crew,
             )
         })
         .collect();
-    let total_power: i32 = contributions.iter().sum();
+    let total_power = sum_exact_contributions(&exact_contributions);
+    let (contributions, contribution_fractions) = split_contributions(&exact_contributions);
 
-    if total_power < crew_power as i32 {
+    if total_power
+        < HalfSigned::from_whole(crate::game::arithmetic::u32_to_i32_saturating(crew_power))
+    {
         return Err(EngineError::ActionNotAllowed(
             "Not enough total power among eligible creatures to crew".to_string(),
         ));
@@ -19830,6 +19849,7 @@ fn handle_crew_activation(
         crew_power,
         eligible_creatures,
         contributions,
+        contribution_fractions,
     })
 }
 
@@ -19900,7 +19920,7 @@ fn handle_crew_announcement(
     }
 
     // Re-validate and read power of each creature BEFORE tapping (HarmonizeTap idiom)
-    let mut total_power: i32 = 0;
+    let mut total_power = HalfSigned::ZERO;
     for &cid in creature_ids {
         let obj = state
             .objects
@@ -19922,15 +19942,19 @@ fn handle_crew_announcement(
             ));
         }
         // CR 702.122a: apply any crew power-contribution modifier.
-        total_power += super::static_abilities::object_crew_power_contribution(
-            state,
-            cid,
-            crate::types::statics::CrewAction::Crew,
+        total_power = total_power.saturating_add(
+            super::static_abilities::object_crew_power_contribution_exact(
+                state,
+                cid,
+                crate::types::statics::CrewAction::Crew,
+            ),
         );
     }
 
     // CR 702.122a: Total power must meet threshold
-    if total_power < crew_power as i32 {
+    if total_power
+        < HalfSigned::from_whole(crate::game::arithmetic::u32_to_i32_saturating(crew_power))
+    {
         return Err(EngineError::InvalidAction(
             "Selected creatures' total power is less than crew requirement".to_string(),
         ));
@@ -20166,19 +20190,22 @@ fn handle_saddle_activation(
         .collect();
 
     // CR 702.171a: a creature's saddle contribution may be modified.
-    let contributions: Vec<i32> = eligible_creatures
+    let exact_contributions: Vec<HalfSigned> = eligible_creatures
         .iter()
         .map(|&id| {
-            super::static_abilities::object_crew_power_contribution(
+            super::static_abilities::object_crew_power_contribution_exact(
                 state,
                 id,
                 crate::types::statics::CrewAction::Saddle,
             )
         })
         .collect();
-    let total_power: i32 = contributions.iter().sum();
+    let total_power = sum_exact_contributions(&exact_contributions);
+    let (contributions, contribution_fractions) = split_contributions(&exact_contributions);
 
-    if total_power < saddle_power as i32 {
+    if total_power
+        < HalfSigned::from_whole(crate::game::arithmetic::u32_to_i32_saturating(saddle_power))
+    {
         return Err(EngineError::ActionNotAllowed(
             "Not enough total power among eligible creatures to saddle".to_string(),
         ));
@@ -20192,7 +20219,33 @@ fn handle_saddle_activation(
         saddle_power,
         eligible_creatures,
         contributions,
+        contribution_fractions,
     })
+}
+
+/// CR 702.122a / 702.171a: the exact total power of a set of crew / saddle
+/// contributions.
+fn sum_exact_contributions(contributions: &[HalfSigned]) -> HalfSigned {
+    contributions
+        .iter()
+        .fold(HalfSigned::ZERO, |total, c| total.saturating_add(*c))
+}
+
+/// Splits exact crew / saddle contributions into the prompt's whole-number
+/// `contributions` and its aligned `contribution_fractions`. The fraction list
+/// is empty when no contribution carries a half, so normal games serialize the
+/// prompt unchanged.
+fn split_contributions(contributions: &[HalfSigned]) -> (Vec<i32>, Vec<HalfFraction>) {
+    let (wholes, fractions): (Vec<i32>, Vec<HalfFraction>) = contributions
+        .iter()
+        .map(|c| c.into_whole_and_fraction())
+        .unzip();
+    let fractions = if fractions.iter().all(HalfFraction::is_zero) {
+        Vec::new()
+    } else {
+        fractions
+    };
+    (wholes, fractions)
 }
 
 /// CR 702.171a + CR 113.3b: Announce Saddle. Pays the cost (tap selected
@@ -20231,7 +20284,7 @@ fn handle_saddle_announcement(
         }
     }
 
-    let mut total_power: i32 = 0;
+    let mut total_power = HalfSigned::ZERO;
     for &cid in creature_ids {
         let obj = state
             .objects
@@ -20248,14 +20301,18 @@ fn handle_saddle_announcement(
             ));
         }
         // CR 702.171a: apply any saddle power-contribution modifier.
-        total_power += super::static_abilities::object_crew_power_contribution(
-            state,
-            cid,
-            crate::types::statics::CrewAction::Saddle,
+        total_power = total_power.saturating_add(
+            super::static_abilities::object_crew_power_contribution_exact(
+                state,
+                cid,
+                crate::types::statics::CrewAction::Saddle,
+            ),
         );
     }
 
-    if total_power < saddle_power as i32 {
+    if total_power
+        < HalfSigned::from_whole(crate::game::arithmetic::u32_to_i32_saturating(saddle_power))
+    {
         return Err(EngineError::InvalidAction(
             "Selected creatures' total power is less than saddle requirement".to_string(),
         ));
@@ -21342,6 +21399,8 @@ mod priority_principal_tests {
             casting_options: Vec::new(),
             layout_kind: None,
             parse_warnings: vec![],
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         });
         for _ in 0..mana_count {
             runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
@@ -27300,6 +27359,8 @@ mod damage_history_priority_cost_tests {
                     amount: 1,
                     is_combat: false,
                     excess: 0,
+                    amount_fraction: Default::default(),
+                    excess_fraction: Default::default(),
                 }),
                 description: None,
                 source_name: String::new(),

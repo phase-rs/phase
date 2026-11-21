@@ -178,6 +178,9 @@ fn menace_attacker_can_be_blocked_by_two_creatures() {
                     assignments: vec![(blocker_a, 1), (blocker_b, 1)],
                     trample_damage: 0,
                     controller_damage: 0,
+                    assignments_fraction: Vec::new(),
+                    trample_damage_fraction: Default::default(),
+                    controller_damage_fraction: Default::default(),
                 })
             }
             _ => break,

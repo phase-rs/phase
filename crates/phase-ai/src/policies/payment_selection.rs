@@ -572,6 +572,7 @@ mod tests {
         score_for_action(
             state,
             WaitingFor::CrewVehicle {
+                contribution_fractions: Default::default(),
                 player: AI,
                 vehicle_id,
                 crew_power,
@@ -599,6 +600,7 @@ mod tests {
         score_for_action(
             state,
             WaitingFor::SaddleMount {
+                contribution_fractions: Default::default(),
                 player: AI,
                 mount_id,
                 saddle_power,

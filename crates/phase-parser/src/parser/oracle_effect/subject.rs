@@ -1608,10 +1608,10 @@ fn try_parse_subject_base_pt_set_clause_ast(
     match value {
         BasePtSetValue::Fixed { power, toughness } => {
             if axes.set_power {
-                modifications.push(ContinuousModification::SetPower { value: power });
+                modifications.push(ContinuousModification::set_power(power));
             }
             if axes.set_toughness {
-                modifications.push(ContinuousModification::SetToughness { value: toughness });
+                modifications.push(ContinuousModification::set_toughness(toughness));
             }
         }
         BasePtSetValue::Dynamic(expr) => {
@@ -8772,11 +8772,27 @@ fn extract_pump_modifiers(
 
     for modification in modifications {
         match modification {
-            crate::types::ability::ContinuousModification::AddPower { value } => {
-                power = Some(PtValue::Fixed(*value));
+            crate::types::ability::ContinuousModification::AddPower { value, fraction } => {
+                power = Some(if fraction.is_zero() {
+                    PtValue::Fixed(*value)
+                } else {
+                    PtValue::HalfPoints(
+                        value
+                            .saturating_mul(2)
+                            .saturating_add(fraction.halves_i64() as i32),
+                    )
+                });
             }
-            crate::types::ability::ContinuousModification::AddToughness { value } => {
-                toughness = Some(PtValue::Fixed(*value));
+            crate::types::ability::ContinuousModification::AddToughness { value, fraction } => {
+                toughness = Some(if fraction.is_zero() {
+                    PtValue::Fixed(*value)
+                } else {
+                    PtValue::HalfPoints(
+                        value
+                            .saturating_mul(2)
+                            .saturating_add(fraction.halves_i64() as i32),
+                    )
+                });
             }
             _ => return None,
         }
@@ -13979,8 +13995,8 @@ mod tests {
         // upstream). "they gain trample" plural pronoun.
         let (mods, duration) =
             base_pt_set_mods("~'s base power and toughness become 6/6 and they gain trample");
-        assert!(mods.contains(&ContinuousModification::SetPower { value: 6 }));
-        assert!(mods.contains(&ContinuousModification::SetToughness { value: 6 }));
+        assert!(mods.contains(&ContinuousModification::set_power(6)));
+        assert!(mods.contains(&ContinuousModification::set_toughness(6)));
         assert!(mods.contains(&ContinuousModification::AddKeyword {
             keyword: Keyword::Trample
         }));
@@ -13995,8 +14011,8 @@ mod tests {
         let (mods, duration) = base_pt_set_mods(
             "Until end of turn, ~'s base power and toughness become 4/4 and it gains flying",
         );
-        assert!(mods.contains(&ContinuousModification::SetPower { value: 4 }));
-        assert!(mods.contains(&ContinuousModification::SetToughness { value: 4 }));
+        assert!(mods.contains(&ContinuousModification::set_power(4)));
+        assert!(mods.contains(&ContinuousModification::set_toughness(4)));
         assert!(mods.contains(&ContinuousModification::AddKeyword {
             keyword: Keyword::Flying
         }));
@@ -14050,8 +14066,8 @@ mod tests {
         // Bare "become N/M" with no trailing keyword grant is still a valid
         // set-base-P/T clause.
         let (mods, _) = base_pt_set_mods("~'s base power and toughness become 2/3");
-        assert!(mods.contains(&ContinuousModification::SetPower { value: 2 }));
-        assert!(mods.contains(&ContinuousModification::SetToughness { value: 3 }));
+        assert!(mods.contains(&ContinuousModification::set_power(2)));
+        assert!(mods.contains(&ContinuousModification::set_toughness(3)));
         assert!(!mods
             .iter()
             .any(|m| matches!(m, ContinuousModification::AddKeyword { .. })));
@@ -14215,8 +14231,8 @@ mod tests {
         // Fixed "N/M" value under the transitive verb frame — the same building
         // block as "become N/M", reached via "change … to".
         let (mods, _) = base_pt_set_mods("change ~'s base power and toughness to 0/2");
-        assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
-        assert!(mods.contains(&ContinuousModification::SetToughness { value: 2 }));
+        assert!(mods.contains(&ContinuousModification::set_power(0)));
+        assert!(mods.contains(&ContinuousModification::set_toughness(2)));
     }
 
     #[test]
@@ -15227,7 +15243,7 @@ mod entry_onset_tests {
         assert!(
             become_nodes(found[0], &TargetFilter::ParentTarget, |m| matches!(
                 m,
-                ContinuousModification::SetPower { value: 3 }
+                ContinuousModification::SetPower { value: 3, .. }
             ))
             .iter()
             .any(|node| std::ptr::eq(*node, found[0])),

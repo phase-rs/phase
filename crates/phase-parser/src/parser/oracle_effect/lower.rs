@@ -14129,7 +14129,7 @@ pub(super) fn rebind_cost_paid_object_pt_to_target(expr: &mut QuantityExpr) {
 fn rebind_cost_paid_object_pt_value_to_target(value: &mut PtValue) {
     match value {
         PtValue::Quantity(expr) => rebind_cost_paid_object_pt_to_target(expr),
-        PtValue::Fixed(_) | PtValue::Variable(_) => {}
+        PtValue::Fixed(_) | PtValue::HalfPoints(_) | PtValue::Variable(_) => {}
     }
 }
 
@@ -19013,7 +19013,7 @@ mod token_anaphor_rewrite_tests {
                     definition: Box::new(
                         StaticDefinition::continuous()
                             .affected(TargetFilter::Typed(TypedFilter::creature()))
-                            .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                            .modifications(vec![ContinuousModification::add_power(1)]),
                     ),
                 }])],
             duration: None,

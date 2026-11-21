@@ -1045,7 +1045,9 @@ fn resolve_predefined_token_display(
         TokenCharacteristics {
             display_name: token.name.clone(),
             power: token.power,
+            power_fraction: token.power_fraction,
             toughness: token.toughness,
+            toughness_fraction: token.toughness_fraction,
             loyalty: None,
             core_types: token.card_types.core_types.clone(),
             subtypes: token.card_types.subtypes.clone(),
@@ -2501,13 +2503,16 @@ fn resolve_copy_token_modification(
     quantity_source: ObjectId,
 ) -> ContinuousModification {
     match modification {
-        ContinuousModification::SetPowerDynamic { value } => ContinuousModification::SetPower {
-            value: resolve_quantity(state, value, controller, quantity_source),
-        },
+        ContinuousModification::SetPowerDynamic { value } => ContinuousModification::set_power(
+            resolve_quantity(state, value, controller, quantity_source),
+        ),
         ContinuousModification::SetToughnessDynamic { value } => {
-            ContinuousModification::SetToughness {
-                value: resolve_quantity(state, value, controller, quantity_source),
-            }
+            ContinuousModification::set_toughness(resolve_quantity(
+                state,
+                value,
+                controller,
+                quantity_source,
+            ))
         }
         other => other.clone(),
     }
@@ -2749,34 +2754,58 @@ fn apply_token_modifications(
             // CR 707.9b: "except it's 1/1" — set base and live P/T so the
             // override persists through layer resets. Used by Offspring
             // (CR 702.175a) and Saw in Half.
-            ContinuousModification::SetPower { value } => {
+            ContinuousModification::SetPower { value, fraction } => {
                 if let Some(token) = state.objects.get_mut(&token_id) {
                     token.base_power = Some(*value);
+                    token.base_power_fraction = *fraction;
                     token.power = Some(*value);
+                    token.power_fraction = *fraction;
                     token.layer_base_power = Some(*value);
+                    token.layer_base_power_fraction = *fraction;
                 }
             }
-            ContinuousModification::SetToughness { value } => {
+            ContinuousModification::SetToughness { value, fraction } => {
                 if let Some(token) = state.objects.get_mut(&token_id) {
                     token.base_toughness = Some(*value);
+                    token.base_toughness_fraction = *fraction;
                     token.toughness = Some(*value);
+                    token.toughness_fraction = *fraction;
                     token.layer_base_toughness = Some(*value);
+                    token.layer_base_toughness_fraction = *fraction;
                 }
             }
             // CR 707.9b: fixed additive P/T exceptions are baked into the
             // token's copiable values by updating both base and live P/T.
-            ContinuousModification::AddPower { value } => {
+            ContinuousModification::AddPower { value, fraction } => {
                 if let Some(token) = state.objects.get_mut(&token_id) {
-                    token.base_power = token.base_power.map(|p| p + *value);
-                    token.power = token.power.map(|p| p + *value);
-                    token.layer_base_power = token.layer_base_power.map(|p| p + *value);
+                    let delta = crate::types::ability::HalfSigned::from_whole_and_fraction(
+                        *value, *fraction,
+                    );
+                    let next_base = token.exact_base_power().map(|p| p.saturating_add(delta));
+                    let next_live = token.exact_power().map(|p| p.saturating_add(delta));
+                    let next_layer = token
+                        .exact_layer_base_power()
+                        .map(|p| p.saturating_add(delta));
+                    token.set_exact_base_power(next_base);
+                    token.set_exact_power(next_live);
+                    token.set_exact_layer_base_power(next_layer);
                 }
             }
-            ContinuousModification::AddToughness { value } => {
+            ContinuousModification::AddToughness { value, fraction } => {
                 if let Some(token) = state.objects.get_mut(&token_id) {
-                    token.base_toughness = token.base_toughness.map(|t| t + *value);
-                    token.toughness = token.toughness.map(|t| t + *value);
-                    token.layer_base_toughness = token.layer_base_toughness.map(|t| t + *value);
+                    let delta = crate::types::ability::HalfSigned::from_whole_and_fraction(
+                        *value, *fraction,
+                    );
+                    let next_base = token
+                        .exact_base_toughness()
+                        .map(|t| t.saturating_add(delta));
+                    let next_live = token.exact_toughness().map(|t| t.saturating_add(delta));
+                    let next_layer = token
+                        .exact_layer_base_toughness()
+                        .map(|t| t.saturating_add(delta));
+                    token.set_exact_base_toughness(next_base);
+                    token.set_exact_toughness(next_live);
+                    token.set_exact_layer_base_toughness(next_layer);
                 }
             }
             // CR 707.9b: "except its base power and toughness are each equal
@@ -3069,25 +3098,47 @@ pub(crate) fn apply_immediate_copy_token_modifications_to_object(
                     token.base_color.push(*color);
                 }
             }
-            ContinuousModification::SetPower { value } => {
+            ContinuousModification::SetPower { value, fraction } => {
                 token.base_power = Some(*value);
+                token.base_power_fraction = *fraction;
                 token.power = Some(*value);
+                token.power_fraction = *fraction;
                 token.layer_base_power = Some(*value);
+                token.layer_base_power_fraction = *fraction;
             }
-            ContinuousModification::SetToughness { value } => {
+            ContinuousModification::SetToughness { value, fraction } => {
                 token.base_toughness = Some(*value);
+                token.base_toughness_fraction = *fraction;
                 token.toughness = Some(*value);
+                token.toughness_fraction = *fraction;
                 token.layer_base_toughness = Some(*value);
+                token.layer_base_toughness_fraction = *fraction;
             }
-            ContinuousModification::AddPower { value } => {
-                token.base_power = token.base_power.map(|p| p + *value);
-                token.power = token.power.map(|p| p + *value);
-                token.layer_base_power = token.layer_base_power.map(|p| p + *value);
+            ContinuousModification::AddPower { value, fraction } => {
+                let delta =
+                    crate::types::ability::HalfSigned::from_whole_and_fraction(*value, *fraction);
+                let next_base = token.exact_base_power().map(|p| p.saturating_add(delta));
+                let next_live = token.exact_power().map(|p| p.saturating_add(delta));
+                let next_layer = token
+                    .exact_layer_base_power()
+                    .map(|p| p.saturating_add(delta));
+                token.set_exact_base_power(next_base);
+                token.set_exact_power(next_live);
+                token.set_exact_layer_base_power(next_layer);
             }
-            ContinuousModification::AddToughness { value } => {
-                token.base_toughness = token.base_toughness.map(|t| t + *value);
-                token.toughness = token.toughness.map(|t| t + *value);
-                token.layer_base_toughness = token.layer_base_toughness.map(|t| t + *value);
+            ContinuousModification::AddToughness { value, fraction } => {
+                let delta =
+                    crate::types::ability::HalfSigned::from_whole_and_fraction(*value, *fraction);
+                let next_base = token
+                    .exact_base_toughness()
+                    .map(|t| t.saturating_add(delta));
+                let next_live = token.exact_toughness().map(|t| t.saturating_add(delta));
+                let next_layer = token
+                    .exact_layer_base_toughness()
+                    .map(|t| t.saturating_add(delta));
+                token.set_exact_base_toughness(next_base);
+                token.set_exact_toughness(next_live);
+                token.set_exact_layer_base_toughness(next_layer);
             }
             ContinuousModification::SetStartingLoyalty { value } => {
                 token.base_loyalty = Some(*value);
@@ -3662,8 +3713,8 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
                 additional_modifications: vec![
-                    ContinuousModification::SetPower { value: 4 },
-                    ContinuousModification::SetToughness { value: 4 },
+                    ContinuousModification::set_power(4),
+                    ContinuousModification::set_toughness(4),
                     ContinuousModification::SetColor {
                         colors: vec![ManaColor::Black],
                     },
@@ -6782,8 +6833,8 @@ mod tests {
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
                 additional_modifications: vec![
-                    ContinuousModification::SetPower { value: 1 },
-                    ContinuousModification::SetToughness { value: 1 },
+                    ContinuousModification::set_power(1),
+                    ContinuousModification::set_toughness(1),
                 ],
             },
             vec![],
@@ -7389,7 +7440,9 @@ mod tests {
         state.objects.get_mut(&id).unwrap().back_face = Some(BackFaceData {
             name: "Sinuous Predator".to_string(),
             power: Some(4),
+            power_fraction: crate::types::ability::HalfFraction::Zero,
             toughness: Some(4),
+            toughness_fraction: crate::types::ability::HalfFraction::Zero,
             card_types: CardType {
                 core_types: vec![CoreType::Creature],
                 ..CardType::default()
@@ -7591,7 +7644,7 @@ mod tests {
             is_swap_snapshot: false,
             ..BackFaceData::default()
         };
-        let set_power = ContinuousModification::SetPower { value: 1 };
+        let set_power = ContinuousModification::set_power(1);
         let trigger = TriggerDefinition::new(TriggerMode::Phase);
         let stamped = vec![
             ContinuousModification::AddType {

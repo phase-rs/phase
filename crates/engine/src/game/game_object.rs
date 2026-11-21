@@ -9,9 +9,10 @@ use crate::types::ability::{
     AbilityProvenance, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
     BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
     CharacteristicSetRef, ChosenAttribute, ChosenSubtypeKind, CostPaidObjectSnapshot,
-    ExiledSpellRider, ModalChoice, ReplacementDefinition, SeatDirection, SolveCondition,
-    SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState, TriggerPrintedOrigin,
+    ExiledSpellRider, HalfFraction, HalfMagnitude, HalfSigned, ModalChoice, ReplacementDefinition,
+    SeatDirection, SolveCondition, SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef,
+    TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState,
+    TriggerPrintedOrigin,
 };
 use crate::types::card::{
     LayoutKind, PrintedCardRef, PrintedLoyalty, Rarity, TokenArtDescriptor, TokenImageRef,
@@ -823,6 +824,8 @@ pub struct GameObject {
 
     // Combat
     pub damage_marked: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub damage_marked_fraction: HalfFraction,
     pub dealt_deathtouch_damage: bool,
 
     // Attachments
@@ -918,18 +921,26 @@ pub struct GameObject {
     // Characteristics
     pub name: String,
     pub power: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub power_fraction: HalfFraction,
     pub toughness: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub toughness_fraction: HalfFraction,
     /// CR 208.4b + CR 613.4a-b: Current base power after layer 7a/7b set effects.
     /// `base_power` remains the printed/copiable baseline; this derived carrier
     /// is reset from it at the start of each layer pass and is updated by
     /// layer-7a/7b setters, before layer-7c modifications are applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layer_base_power: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub layer_base_power_fraction: HalfFraction,
     /// CR 208.4b + CR 613.4a-b: Current base toughness after layer 7a/7b set
     /// effects. `base_toughness` remains the printed/copiable baseline; this
     /// carrier stays paired with `layer_base_power` through layer evaluation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layer_base_toughness: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub layer_base_toughness_fraction: HalfFraction,
     pub loyalty: Option<u32>,
     /// CR 306.5b: Printed loyalty is the entry-counter baseline; battlefield
     /// loyalty itself is counter-derived (CR 306.5c).
@@ -1104,7 +1115,11 @@ pub struct GameObject {
 
     // Base characteristics (for layer system)
     pub base_power: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub base_power_fraction: HalfFraction,
     pub base_toughness: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub base_toughness_fraction: HalfFraction,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1989,6 +2004,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         // `modal_back_face` — not a copiable value.
         cast_face_committed: _,
         damage_marked: _,
+        damage_marked_fraction: _,
         dealt_deathtouch_damage: _,
         attached_to: _,
         attachments: _,
@@ -1999,9 +2015,13 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         perpetual_mods: _,
         name: _,
         power: _,
+        power_fraction: _,
         toughness: _,
+        toughness_fraction: _,
         layer_base_power: _,
+        layer_base_power_fraction: _,
         layer_base_toughness: _,
+        layer_base_toughness_fraction: _,
         loyalty: _,
         printed_loyalty: _,
         defense: _,
@@ -2047,7 +2067,9 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         specialize_faces: _,
         specialized_color: _,
         base_power: _,
+        base_power_fraction: _,
         base_toughness: _,
+        base_toughness_fraction: _,
         base_name: _,
         base_loyalty: _,
         base_printed_loyalty: _,
@@ -3179,14 +3201,26 @@ impl GameObject {
                 subject_scope: crate::types::game_state::SubjectIncarnationScope::Live,
             }),
             power: self.power,
+            power_fraction: self.power_fraction,
             toughness: self.toughness,
+            toughness_fraction: self.toughness_fraction,
             // CR 208.4b + CR 613.4b: Snapshot the layer-7b base values the same
             // way `power`/`toughness` capture the post-layer-7 current values,
             // so `PtComparison { scope: Base }` look-back filters read the
             // event-time base (a base-1/1 with a +1/+1 counter records base 1,
             // current 2).
             base_power: self.layer_base_power.or(self.base_power),
+            base_power_fraction: if self.layer_base_power.is_some() {
+                self.layer_base_power_fraction
+            } else {
+                self.base_power_fraction
+            },
             base_toughness: self.layer_base_toughness.or(self.base_toughness),
+            base_toughness_fraction: if self.layer_base_toughness.is_some() {
+                self.layer_base_toughness_fraction
+            } else {
+                self.base_toughness_fraction
+            },
             // CR 709.4b: Off the stack, a split card's colors are the combined
             // colors of both halves (`effective_colors` no-ops for single-face).
             colors: self.effective_colors(),
@@ -3357,6 +3391,7 @@ impl GameObject {
             modal_back_face: false,
             cast_face_committed: false,
             damage_marked: 0,
+            damage_marked_fraction: HalfFraction::Zero,
             dealt_deathtouch_damage: false,
             attached_to: None,
             attachments: Vec::new(),
@@ -3371,9 +3406,13 @@ impl GameObject {
             perpetual_mods: Vec::new(),
             name: name.clone(),
             power: None,
+            power_fraction: HalfFraction::Zero,
             toughness: None,
+            toughness_fraction: HalfFraction::Zero,
             layer_base_power: None,
+            layer_base_power_fraction: HalfFraction::Zero,
             layer_base_toughness: None,
+            layer_base_toughness_fraction: HalfFraction::Zero,
             loyalty: None,
             printed_loyalty: None,
             defense: None,
@@ -3407,7 +3446,9 @@ impl GameObject {
             specialize_faces: None,
             specialized_color: None,
             base_power: None,
+            base_power_fraction: HalfFraction::Zero,
             base_toughness: None,
+            base_toughness_fraction: HalfFraction::Zero,
             base_name: name.clone(),
             base_loyalty: None,
             base_printed_loyalty: None,
@@ -3544,11 +3585,23 @@ impl GameObject {
             name: self.name.clone(),
             token_image_ref: self.token_image_ref.clone(),
             power: self.power,
+            power_fraction: self.power_fraction,
             toughness: self.toughness,
+            toughness_fraction: self.toughness_fraction,
             // CR 208.4b + CR 613.4b: Layer-7b base values, mirroring how
             // `power`/`toughness` capture the post-layer-7 current values.
             base_power: self.layer_base_power.or(self.base_power),
+            base_power_fraction: if self.layer_base_power.is_some() {
+                self.layer_base_power_fraction
+            } else {
+                self.base_power_fraction
+            },
             base_toughness: self.layer_base_toughness.or(self.base_toughness),
+            base_toughness_fraction: if self.layer_base_toughness.is_some() {
+                self.layer_base_toughness_fraction
+            } else {
+                self.base_toughness_fraction
+            },
             // CR 202.3d + CR 709.4b: combined mana value / colors for a split card
             // off the stack (no-op for single-face, on-stack, and battlefield
             // Rooms, which gate out) so look-back queries read the CR-correct
@@ -3614,9 +3667,13 @@ impl GameObject {
         // Public characteristics (layer-applied at observation time).
         self.name = lki.name.clone();
         self.power = lki.power;
+        self.power_fraction = lki.power_fraction;
         self.toughness = lki.toughness;
+        self.toughness_fraction = lki.toughness_fraction;
         self.layer_base_power = lki.base_power;
+        self.layer_base_power_fraction = lki.base_power_fraction;
         self.layer_base_toughness = lki.base_toughness;
+        self.layer_base_toughness_fraction = lki.base_toughness_fraction;
         self.controller = lki.controller;
         self.owner = lki.owner;
         self.card_types.core_types = lki.card_types.clone();
@@ -3670,6 +3727,130 @@ impl GameObject {
         self.additional_cost_payment_count = context.additional_cost_payment_count;
         self.additional_cost_payments = context.additional_cost_payments.clone();
         self.cast_cost_paid_object = context.cast_cost_paid_object.clone();
+    }
+
+    pub fn exact_power(&self) -> Option<HalfSigned> {
+        self.power
+            .map(|w| HalfSigned::from_whole_and_fraction(w, self.power_fraction))
+    }
+
+    pub fn set_exact_power(&mut self, exact: Option<HalfSigned>) {
+        match exact {
+            Some(v) => {
+                let (w, f) = v.into_whole_and_fraction();
+                self.power = Some(w);
+                self.power_fraction = f;
+            }
+            None => {
+                self.power = None;
+                self.power_fraction = HalfFraction::Zero;
+            }
+        }
+    }
+
+    pub fn exact_toughness(&self) -> Option<HalfSigned> {
+        self.toughness
+            .map(|w| HalfSigned::from_whole_and_fraction(w, self.toughness_fraction))
+    }
+
+    pub fn set_exact_toughness(&mut self, exact: Option<HalfSigned>) {
+        match exact {
+            Some(v) => {
+                let (w, f) = v.into_whole_and_fraction();
+                self.toughness = Some(w);
+                self.toughness_fraction = f;
+            }
+            None => {
+                self.toughness = None;
+                self.toughness_fraction = HalfFraction::Zero;
+            }
+        }
+    }
+
+    pub fn exact_layer_base_power(&self) -> Option<HalfSigned> {
+        self.layer_base_power
+            .map(|w| HalfSigned::from_whole_and_fraction(w, self.layer_base_power_fraction))
+    }
+
+    pub fn set_exact_layer_base_power(&mut self, exact: Option<HalfSigned>) {
+        match exact {
+            Some(v) => {
+                let (w, f) = v.into_whole_and_fraction();
+                self.layer_base_power = Some(w);
+                self.layer_base_power_fraction = f;
+            }
+            None => {
+                self.layer_base_power = None;
+                self.layer_base_power_fraction = HalfFraction::Zero;
+            }
+        }
+    }
+
+    pub fn exact_layer_base_toughness(&self) -> Option<HalfSigned> {
+        self.layer_base_toughness
+            .map(|w| HalfSigned::from_whole_and_fraction(w, self.layer_base_toughness_fraction))
+    }
+
+    pub fn set_exact_layer_base_toughness(&mut self, exact: Option<HalfSigned>) {
+        match exact {
+            Some(v) => {
+                let (w, f) = v.into_whole_and_fraction();
+                self.layer_base_toughness = Some(w);
+                self.layer_base_toughness_fraction = f;
+            }
+            None => {
+                self.layer_base_toughness = None;
+                self.layer_base_toughness_fraction = HalfFraction::Zero;
+            }
+        }
+    }
+
+    pub fn exact_base_power(&self) -> Option<HalfSigned> {
+        self.base_power
+            .map(|w| HalfSigned::from_whole_and_fraction(w, self.base_power_fraction))
+    }
+
+    pub fn set_exact_base_power(&mut self, exact: Option<HalfSigned>) {
+        match exact {
+            Some(v) => {
+                let (w, f) = v.into_whole_and_fraction();
+                self.base_power = Some(w);
+                self.base_power_fraction = f;
+            }
+            None => {
+                self.base_power = None;
+                self.base_power_fraction = HalfFraction::Zero;
+            }
+        }
+    }
+
+    pub fn exact_base_toughness(&self) -> Option<HalfSigned> {
+        self.base_toughness
+            .map(|w| HalfSigned::from_whole_and_fraction(w, self.base_toughness_fraction))
+    }
+
+    pub fn set_exact_base_toughness(&mut self, exact: Option<HalfSigned>) {
+        match exact {
+            Some(v) => {
+                let (w, f) = v.into_whole_and_fraction();
+                self.base_toughness = Some(w);
+                self.base_toughness_fraction = f;
+            }
+            None => {
+                self.base_toughness = None;
+                self.base_toughness_fraction = HalfFraction::Zero;
+            }
+        }
+    }
+
+    pub fn exact_damage_marked(&self) -> HalfMagnitude {
+        HalfMagnitude::from_whole_and_fraction(self.damage_marked, self.damage_marked_fraction)
+    }
+
+    pub fn set_exact_damage_marked(&mut self, exact: HalfMagnitude) {
+        let (w, f) = exact.into_whole_and_fraction();
+        self.damage_marked = w;
+        self.damage_marked_fraction = f;
     }
 
     /// CR 106.3 + CR 601.2h: Capture the public source characteristics needed
@@ -3750,6 +3931,7 @@ impl GameObject {
             .any(|kw| matches!(kw, Keyword::Echo(_)));
         self.tapped = false;
         self.damage_marked = 0;
+        self.damage_marked_fraction = HalfFraction::Zero;
         self.dealt_deathtouch_damage = false;
         self.loyalty_activations_this_turn = 0;
         // CR 400.7 + CR 606.3: a re-entering permanent is a new object, so a
@@ -4014,7 +4196,9 @@ impl GameObject {
         }
         TokenArtDescriptor {
             power: self.base_power,
+            power_fraction: self.base_power_fraction,
             toughness: self.base_toughness,
+            toughness_fraction: self.base_toughness_fraction,
             colors: self.base_color.clone(),
             subtypes: self.base_card_types.subtypes.clone(),
             keywords,
@@ -4046,6 +4230,7 @@ impl GameObject {
         // CR 400.7: Marked damage belongs to the departing battlefield object and
         // is not carried by the new object in its destination zone.
         self.damage_marked = 0;
+        self.damage_marked_fraction = HalfFraction::Zero;
         self.dealt_deathtouch_damage = false;
         // CR 701.37b: Monstrous designation clears when a permanent leaves the battlefield.
         self.monstrous = false;

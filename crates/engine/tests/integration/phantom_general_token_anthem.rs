@@ -60,11 +60,11 @@ fn phantom_general_parses_token_anthem_static() {
         statics.iter().any(|sd| {
             sd.modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::AddPower { value: 1 }))
+                .any(|m| matches!(m, ContinuousModification::AddPower { value: 1, .. }))
                 && sd
                     .modifications
                     .iter()
-                    .any(|m| matches!(m, ContinuousModification::AddToughness { value: 1 }))
+                    .any(|m| matches!(m, ContinuousModification::AddToughness { value: 1, .. }))
         }),
         "Phantom General must carry a +1/+1 anthem static, statics={statics:?}"
     );

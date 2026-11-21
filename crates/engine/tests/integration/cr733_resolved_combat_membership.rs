@@ -380,6 +380,7 @@ fn permanent_ninjutsu_attack(battle: bool) -> (GameRunner, ObjectId, ObjectId, u
         vec![DamageAssignment {
             target: DamageTarget::Object(blocker),
             amount: 2,
+            amount_fraction: Default::default(),
         }],
     );
     combat.pending_damage.push((
@@ -387,6 +388,7 @@ fn permanent_ninjutsu_attack(battle: bool) -> (GameRunner, ObjectId, ObjectId, u
         DamageAssignment {
             target: DamageTarget::Player(P1),
             amount: 1,
+            amount_fraction: Default::default(),
         },
     ));
     combat.damage_step_index = Some(1);
@@ -734,6 +736,8 @@ fn replay_installs_recorded_defender_when_ambient_derivation_diverges() {
         is_combat: false,
         excess: 0,
         source_incarnation: None,
+        amount_fraction: Default::default(),
+        excess_fraction: Default::default(),
     });
 
     // Non-vacuity probe, VERIFIED APPLIED: run the live authority in this exact

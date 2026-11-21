@@ -538,7 +538,10 @@ mod tests {
                     TypedFilter::new(TypeFilter::Subtype("Elf".to_string()))
                         .controller(ControllerRef::You),
                 ))
-                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }]),
         );
         deck_entry(card, 1)
     }

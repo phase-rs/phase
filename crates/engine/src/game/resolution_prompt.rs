@@ -1604,6 +1604,7 @@ mod tests {
                     source_name: None,
                     source_incarnation: None,
                     applied: Default::default(),
+                    amount_fraction: Default::default(),
                 }),
                 accounted,
                 "the shield-damage virtual candidate is gated on `amount > 0`"

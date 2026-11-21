@@ -2597,8 +2597,11 @@ pub fn translate_response(
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?,
+            assignments_fraction: Vec::new(),
             trample_damage: 0,
+            trample_damage_fraction: Default::default(),
             controller_damage: 0,
+            controller_damage_fraction: Default::default(),
         }),
         UpstreamPromptOutput::Scry(ScryOutput::ScryDecision { zone_card_ids }) => {
             let bottom = zone_card_ids.get(1).cloned().unwrap_or_default();
@@ -6292,6 +6295,7 @@ mod tests {
                     player: PlayerId(0),
                     attacker_id: ObjectId(1),
                     total_damage: 1,
+                    total_damage_fraction: Default::default(),
                     blockers: vec![],
                     assignment_modes: vec![],
                     trample: None,

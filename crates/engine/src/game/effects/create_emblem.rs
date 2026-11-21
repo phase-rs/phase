@@ -171,8 +171,14 @@ mod tests {
                 properties: vec![],
             })),
             modifications: vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ],
             condition: None,
             per_player_condition: None,

@@ -85,8 +85,14 @@ fn attach_type_setting_aura(
         let aura_static = StaticDefinition::continuous()
             .affected(enchanted)
             .modifications(vec![
-                ContinuousModification::SetToughness { value: 1 },
-                ContinuousModification::SetPower { value: 0 },
+                ContinuousModification::SetToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::SetPower {
+                    value: 0,
+                    fraction: Default::default(),
+                },
                 ContinuousModification::AddType {
                     core_type: CoreType::Creature,
                 },
@@ -115,8 +121,14 @@ fn animate_until_eot(state: &mut GameState, id: ObjectId, controller: PlayerId) 
         Duration::UntilEndOfTurn,
         TargetFilter::SpecificObject { id },
         vec![
-            ContinuousModification::SetPower { value: 1 },
-            ContinuousModification::SetToughness { value: 1 },
+            ContinuousModification::SetPower {
+                value: 1,
+                fraction: Default::default(),
+            },
+            ContinuousModification::SetToughness {
+                value: 1,
+                fraction: Default::default(),
+            },
             ContinuousModification::AddType {
                 core_type: CoreType::Creature,
             },
@@ -271,8 +283,14 @@ fn equipment_buff_reapplies_after_phase_in() {
         let st = StaticDefinition::continuous()
             .affected(equipped)
             .modifications(vec![
-                ContinuousModification::AddPower { value: 2 },
-                ContinuousModification::AddToughness { value: 2 },
+                ContinuousModification::AddPower {
+                    value: 2,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 2,
+                    fraction: Default::default(),
+                },
             ]);
         obj.static_definitions = vec![st.clone()].into();
         obj.base_static_definitions = std::sync::Arc::new(vec![st]);

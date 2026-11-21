@@ -24987,8 +24987,8 @@ fn trigger_as_transforms_into_self_become_copy() {
                     ContinuousModification::SetName {
                         name: "Olag, Ludevic's Hubris".to_string()
                     },
-                    ContinuousModification::SetPower { value: 4 },
-                    ContinuousModification::SetToughness { value: 4 },
+                    ContinuousModification::set_power(4),
+                    ContinuousModification::set_toughness(4),
                     ContinuousModification::AddColor {
                         color: ManaColor::Blue
                     },

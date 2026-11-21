@@ -5635,19 +5635,19 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
         for (i, (p, t)) in [(3, 2), (5, 2), (7, 2)].iter().enumerate() {
             let mods = mode_modifications(&parsed.abilities[i]);
             assert!(
-                mods.contains(&ContinuousModification::SetPower { value: *p }),
+                mods.contains(&ContinuousModification::set_power(*p)),
                 "mode {i} must set power {p}: {mods:?}"
             );
             assert!(
-                mods.contains(&ContinuousModification::SetToughness { value: *t }),
+                mods.contains(&ContinuousModification::set_toughness(*t)),
                 "mode {i} must set toughness {t}: {mods:?}"
             );
         }
 
         // A4: wrong-tier hostile — Galian (mode 0) must carry ONLY its own power.
         let mode0 = mode_modifications(&parsed.abilities[0]);
-        assert!(!mode0.contains(&ContinuousModification::SetPower { value: 5 }));
-        assert!(!mode0.contains(&ContinuousModification::SetPower { value: 7 }));
+        assert!(!mode0.contains(&ContinuousModification::set_power(5)));
+        assert!(!mode0.contains(&ContinuousModification::set_power(7)));
 
         // A5: keep-green — the granted "When this creature dies, return it ...
         // tapped" trigger survives the distribution on every mode.
@@ -5804,8 +5804,8 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
                 assert_eq!(
                     grant.modifications,
                     vec![
-                        ContinuousModification::SetPower { value: 5 },
-                        ContinuousModification::SetToughness { value: 5 },
+                        ContinuousModification::set_power(5),
+                        ContinuousModification::set_toughness(5),
                         ContinuousModification::SetColor {
                             colors: vec![ManaColor::Green]
                         },

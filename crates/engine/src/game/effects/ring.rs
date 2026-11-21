@@ -392,6 +392,8 @@ mod tests {
                 source_amounts: vec![(bearer, 3)],
                 total_damage: 3,
                 source_incarnations: vec![],
+                source_amount_fractions: Vec::new(),
+                total_damage_fraction: Default::default(),
             }],
         );
 

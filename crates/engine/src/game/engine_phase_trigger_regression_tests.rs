@@ -4675,8 +4675,14 @@ fn superior_spider_man_full_copy_flow_copies_graveyard_card_and_exiles_it() {
                     ContinuousModification::SetName {
                         name: "Superior Spider-Man".to_string(),
                     },
-                    ContinuousModification::SetPower { value: 4 },
-                    ContinuousModification::SetToughness { value: 4 },
+                    ContinuousModification::SetPower {
+                        value: 4,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::SetToughness {
+                        value: 4,
+                        fraction: Default::default(),
+                    },
                     ContinuousModification::AddSubtype {
                         subtype: "Spider".to_string(),
                     },

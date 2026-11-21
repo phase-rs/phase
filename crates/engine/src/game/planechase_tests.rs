@@ -1197,8 +1197,14 @@ fn two_streams_anchor_statics_apply_from_command_zone() {
     let anthem = StaticDefinition::continuous()
         .affected(TargetFilter::Typed(anthem_filter))
         .modifications(vec![
-            ContinuousModification::AddPower { value: 2 },
-            ContinuousModification::AddToughness { value: 0 },
+            ContinuousModification::AddPower {
+                value: 2,
+                fraction: Default::default(),
+            },
+            ContinuousModification::AddToughness {
+                value: 0,
+                fraction: Default::default(),
+            },
             ContinuousModification::AddKeyword {
                 keyword: Keyword::Haste,
             },

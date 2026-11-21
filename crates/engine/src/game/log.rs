@@ -548,7 +548,11 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::DebugActionUsed { .. }
         | GameEvent::DebugPermissionGranted { .. }
         | GameEvent::DebugPermissionRevoked { .. } => LogTone::Diagnostic,
-        GameEvent::LifeChanged { amount, .. } if *amount > 0 => LogTone::Positive,
+        GameEvent::LifeChanged {
+            amount,
+            amount_fraction,
+            ..
+        } if *amount > 0 || (*amount == 0 && amount_fraction.is_half()) => LogTone::Positive,
         GameEvent::TokenCreated { .. }
         | GameEvent::ObjectConjured { .. }
         | GameEvent::CardCopyCreated { .. }
@@ -1535,14 +1539,19 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             source_id,
             target,
             amount,
+            amount_fraction,
         } => {
             let target_seg = match target {
                 TargetRef::Player(pid) => player_seg(state, *pid),
                 TargetRef::Object(oid) => card_seg(state, *oid),
             };
+            let dmg_str = crate::types::ability::HalfMagnitude::from_whole_and_fraction(
+                *amount,
+                *amount_fraction,
+            )
+            .fmt_display();
             vec![
-                num(*amount as i32),
-                text(" damage to "),
+                text(&format!("{dmg_str} damage to ")),
                 target_seg,
                 text(" from "),
                 card_seg(state, *source_id),
@@ -2609,6 +2618,7 @@ mod tests {
             source_id: ObjectId(7),
             target: TargetRef::Player(PlayerId(1)),
             amount: 3,
+            amount_fraction: Default::default(),
         };
 
         assert_eq!(importance(&countered), LogImportance::Context);
@@ -2623,6 +2633,8 @@ mod tests {
             source_amounts: vec![(ObjectId(7), 3), (ObjectId(8), 4)],
             total_damage: 7,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         };
 
         assert_eq!(
@@ -2885,6 +2897,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert_eq!(categorize(&event), LogCategory::Life);
     }
@@ -2898,6 +2912,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert_eq!(categorize(&event), LogCategory::Combat);
     }
@@ -3134,6 +3150,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
         );
         assert_eq!(resolve_object_name(&state, ObjectId(42)), "Grizzly Bears");
@@ -3147,6 +3167,8 @@ mod tests {
                 player_id: PlayerId(0),
                 amount: 3,
                 new_total: crate::types::events::LifeTotalReading::default(),
+                amount_fraction: Default::default(),
+                new_total_fraction: Default::default(),
             },
             &state,
         );
@@ -3163,6 +3185,8 @@ mod tests {
                 player_id: PlayerId(0),
                 amount: -3,
                 new_total: crate::types::events::LifeTotalReading::default(),
+                amount_fraction: Default::default(),
+                new_total_fraction: Default::default(),
             },
             &state,
         );
@@ -3181,6 +3205,8 @@ mod tests {
                     player_id: PlayerId(1),
                     amount: -5,
                     new_total: crate::types::events::LifeTotalReading::default(),
+                    amount_fraction: Default::default(),
+                    new_total_fraction: Default::default(),
                 },
                 GameEvent::ReplacementApplied {
                     source_id: ObjectId(9),
@@ -3198,12 +3224,16 @@ mod tests {
                     is_combat: true,
                     excess: 0,
                     source_incarnation: None,
+                    amount_fraction: Default::default(),
+                    excess_fraction: Default::default(),
                 },
                 GameEvent::CombatDamageDealtToPlayer {
                     player_id: PlayerId(1),
                     source_amounts: vec![(ObjectId(7), 5)],
                     total_damage: 5,
                     source_incarnations: vec![],
+                    source_amount_fractions: Vec::new(),
+                    total_damage_fraction: Default::default(),
                 },
             ],
             &state,
@@ -3238,18 +3268,24 @@ mod tests {
                 is_combat: true,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             },
             GameEvent::CombatDamageDealtToPlayer {
                 player_id: PlayerId(1),
                 source_amounts: vec![(ObjectId(7), 5)],
                 total_damage: 5,
                 source_incarnations: vec![],
+                source_amount_fractions: Vec::new(),
+                total_damage_fraction: Default::default(),
             },
             GameEvent::CombatDamageDealtToPlayer {
                 player_id: PlayerId(1),
                 source_amounts: vec![(ObjectId(7), 5)],
                 total_damage: 5,
                 source_incarnations: vec![],
+                source_amount_fractions: Vec::new(),
+                total_damage_fraction: Default::default(),
             },
         ];
 
@@ -3268,6 +3304,8 @@ mod tests {
                 player_id: PlayerId(1),
                 amount: -5,
                 new_total: crate::types::events::LifeTotalReading::default(),
+                amount_fraction: Default::default(),
+                new_total_fraction: Default::default(),
             }],
             &state,
             &state,
@@ -3289,6 +3327,8 @@ mod tests {
                     player_id: PlayerId(1),
                     amount: -5,
                     new_total: crate::types::events::LifeTotalReading::default(),
+                    amount_fraction: Default::default(),
+                    new_total_fraction: Default::default(),
                 },
                 GameEvent::EffectResolved {
                     kind: crate::types::ability::EffectKind::LoseLife,
@@ -3299,6 +3339,8 @@ mod tests {
                     player_id: PlayerId(1),
                     amount: -5,
                     new_total: crate::types::events::LifeTotalReading::default(),
+                    amount_fraction: Default::default(),
+                    new_total_fraction: Default::default(),
                 },
                 GameEvent::DamageDealt {
                     source_id: ObjectId(7),
@@ -3307,6 +3349,8 @@ mod tests {
                     is_combat: false,
                     excess: 0,
                     source_incarnation: None,
+                    amount_fraction: Default::default(),
+                    excess_fraction: Default::default(),
                 },
             ],
             &state,
@@ -3491,11 +3535,15 @@ mod tests {
                     player_id: PlayerId(0),
                     amount: 3,
                     new_total: crate::types::events::LifeTotalReading::default(),
+                    amount_fraction: Default::default(),
+                    new_total_fraction: Default::default(),
                 },
                 GameEvent::LifeChanged {
                     player_id: PlayerId(1),
                     amount: -3,
                     new_total: crate::types::events::LifeTotalReading::default(),
+                    amount_fraction: Default::default(),
+                    new_total_fraction: Default::default(),
                 },
                 GameEvent::TappedForMana {
                     source_id: ObjectId(1),
@@ -3534,6 +3582,8 @@ mod tests {
                     player_id: PlayerId(0),
                     amount: 1,
                     new_total: crate::types::events::LifeTotalReading::default(),
+                    amount_fraction: Default::default(),
+                    new_total_fraction: Default::default(),
                 },
                 LogImportance::Essential,
                 LogTone::Positive,
@@ -3546,6 +3596,8 @@ mod tests {
                     is_combat: false,
                     excess: 0,
                     source_incarnation: None,
+                    amount_fraction: Default::default(),
+                    excess_fraction: Default::default(),
                 },
                 LogImportance::Essential,
                 LogTone::Negative,

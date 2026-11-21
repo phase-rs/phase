@@ -2683,7 +2683,7 @@ mod tests {
         // The genuine copy exceptions still flow through.
         assert!(additional_modifications
             .iter()
-            .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })));
+            .any(|m| matches!(m, ContinuousModification::SetPower { value: 4, .. })));
         assert!(additional_modifications.iter().any(|m| matches!(
             m,
             ContinuousModification::AddType {
@@ -2827,10 +2827,10 @@ mod tests {
         );
         assert!(additional_modifications
             .iter()
-            .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })));
+            .any(|m| matches!(m, ContinuousModification::SetPower { value: 4, .. })));
         assert!(additional_modifications
             .iter()
-            .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4 })));
+            .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4, .. })));
         assert!(additional_modifications.iter().any(|m| matches!(
             m,
             ContinuousModification::AddType {
@@ -2881,7 +2881,7 @@ mod tests {
         );
         assert!(additional_modifications
             .iter()
-            .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })));
+            .any(|m| matches!(m, ContinuousModification::SetPower { value: 4, .. })));
         assert!(additional_modifications.iter().any(|m| matches!(
             m,
             ContinuousModification::AddSubtype { subtype } if subtype == "Construct"
@@ -2908,7 +2908,7 @@ mod tests {
         );
         assert!(additional_modifications
             .iter()
-            .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })));
+            .any(|m| matches!(m, ContinuousModification::SetPower { value: 4, .. })));
         assert!(additional_modifications.iter().any(|m| matches!(
             m,
             ContinuousModification::AddSubtype { subtype } if subtype == "Construct"
@@ -2997,10 +2997,8 @@ mod tests {
         else {
             panic!("expected CopyTokenOf, got {effect:?}");
         };
-        assert!(additional_modifications.contains(&ContinuousModification::SetPower { value: 4 }));
-        assert!(
-            additional_modifications.contains(&ContinuousModification::SetToughness { value: 4 })
-        );
+        assert!(additional_modifications.contains(&ContinuousModification::set_power(4)));
+        assert!(additional_modifications.contains(&ContinuousModification::set_toughness(4)));
         assert!(additional_modifications.iter().any(|m| matches!(
             m,
             ContinuousModification::SetColor { colors }

@@ -8082,6 +8082,8 @@ mod tests {
             casting_options: vec![],
             layout_kind: None,
             parse_warnings: vec![],
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         }
     }
 
@@ -8196,6 +8198,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let description =
             "Whenever this creature deals combat damage to a player, you may destroy target artifact or enchantment that player controls."
@@ -9829,11 +9833,15 @@ mod tests {
                 player_id: PlayerId(0),
                 amount: 1,
                 new_total: crate::types::events::LifeTotalReading::default(),
+                amount_fraction: Default::default(),
+                new_total_fraction: Default::default(),
             },
             GameEvent::LifeChanged {
                 player_id: PlayerId(1),
                 amount: 1,
                 new_total: crate::types::events::LifeTotalReading::default(),
+                amount_fraction: Default::default(),
+                new_total_fraction: Default::default(),
             },
         ]
         .into_iter()
@@ -11174,6 +11182,8 @@ mod tests {
                 player_id,
                 amount,
                 new_total: crate::types::events::LifeTotalReading::default(),
+                amount_fraction: Default::default(),
+                new_total_fraction: Default::default(),
             }
         }
 
@@ -11570,6 +11580,7 @@ mod tests {
                         crate::types::game_state::PendingLifelinkGain {
                             controller: PlayerId(0),
                             amount: 3,
+                            amount_fraction: Default::default(),
                         },
                     ]),
                     batch_events: Vec::new(),
@@ -11748,6 +11759,8 @@ mod tests {
                 player_id: PlayerId(0),
                 amount,
                 new_total: crate::types::events::LifeTotalReading(Some(total)),
+                amount_fraction: Default::default(),
+                new_total_fraction: Default::default(),
             }
         }
 
@@ -12844,6 +12857,8 @@ mod tests {
                     supertypes: vec![],
                     colors: vec![ManaColor::Green],
                     keywords: vec![],
+                    power_fraction: Default::default(),
+                    toughness_fraction: Default::default(),
                 },
                 script_name: "Insect".to_string(),
                 static_abilities: vec![],
@@ -14348,8 +14363,14 @@ mod tests {
                 ..Default::default()
             }));
             sd.modifications = vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ];
             {
                 let o = base.objects.get_mut(&anthem).unwrap();
@@ -14434,8 +14455,14 @@ mod tests {
             let mut sd = StaticDefinition::new(StaticMode::Continuous);
             sd.affected = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
             sd.modifications = vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ];
             sd.condition = Some(StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
@@ -14693,8 +14720,14 @@ mod tests {
             let mut sd = StaticDefinition::new(StaticMode::Continuous);
             sd.affected = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
             sd.modifications = vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ];
             sd.condition = Some(StaticCondition::IsPresent {
                 filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Land))),
@@ -15071,8 +15104,14 @@ mod tests {
             let mut anthem_sd = StaticDefinition::new(StaticMode::Continuous);
             anthem_sd.affected = Some(TargetFilter::Typed(TFil::new(TF::Creature)));
             anthem_sd.modifications = vec![
-                ContinuousModification::AddPower { value: 2 },
-                ContinuousModification::AddToughness { value: 2 },
+                ContinuousModification::AddPower {
+                    value: 2,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 2,
+                    fraction: Default::default(),
+                },
             ];
             anthem_sd.condition = Some(StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
@@ -15314,8 +15353,14 @@ mod tests {
                 ..Default::default()
             }));
             sd.modifications = vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ];
             {
                 let o = base.objects.get_mut(&anthem).unwrap();
@@ -15424,8 +15469,14 @@ mod tests {
             let mut sd = StaticDefinition::new(StaticMode::Continuous);
             sd.affected = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
             sd.modifications = vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ];
             // CR 700.5 + CR 611.3a: source-level gate "devotion to green < 7".
             sd.condition = Some(StaticCondition::Not {
@@ -15664,8 +15715,14 @@ mod tests {
             let mut sd = StaticDefinition::new(StaticMode::Continuous);
             sd.affected = Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)));
             sd.modifications = vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ];
             // Recipient-relative count: "creatures other than the recipient".
             let other_creatures = TargetFilter::Typed(TypedFilter {
@@ -15950,7 +16007,10 @@ mod tests {
             // Layer 7b, controller-agnostic: reaches the opponent's entrant too.
             let setter = continuous_static(
                 TargetFilter::Typed(TypedFilter::creature()),
-                vec![ContinuousModification::SetToughness { value: 4 }],
+                vec![ContinuousModification::SetToughness {
+                    value: 4,
+                    fraction: Default::default(),
+                }],
             );
             let tough_creatures = TargetFilter::Typed(TypedFilter {
                 type_filters: vec![TypeFilter::Creature],
@@ -16213,8 +16273,14 @@ mod tests {
                     ..Default::default()
                 }),
                 vec![
-                    ContinuousModification::AddPower { value: 3 },
-                    ContinuousModification::AddToughness { value: 3 },
+                    ContinuousModification::AddPower {
+                        value: 3,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::AddToughness {
+                        value: 3,
+                        fraction: Default::default(),
+                    },
                 ],
             );
             install_static_enchantment(&mut state, 690, "Different Name Buff", vec![rename, buff]);
@@ -16283,8 +16349,14 @@ mod tests {
             let mut buff = continuous_static(
                 TargetFilter::Typed(TypedFilter::creature()),
                 vec![
-                    ContinuousModification::AddPower { value: 3 },
-                    ContinuousModification::AddToughness { value: 3 },
+                    ContinuousModification::AddPower {
+                        value: 3,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::AddToughness {
+                        value: 3,
+                        fraction: Default::default(),
+                    },
                 ],
             );
             buff.condition = Some(StaticCondition::RecipientMatchesFilter {
@@ -16443,8 +16515,14 @@ mod tests {
                     ..Default::default()
                 }),
                 vec![
-                    ContinuousModification::AddPower { value: 3 },
-                    ContinuousModification::AddToughness { value: 3 },
+                    ContinuousModification::AddPower {
+                        value: 3,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::AddToughness {
+                        value: 3,
+                        fraction: Default::default(),
+                    },
                 ],
             );
             install_static_enchantment(&mut state, 742, "Self-Reading Buff", vec![buff]);
@@ -16611,8 +16689,14 @@ mod tests {
                 source,
                 &bears,
                 vec![
-                    ContinuousModification::AddPower { value: 1 },
-                    ContinuousModification::AddToughness { value: 1 },
+                    ContinuousModification::AddPower {
+                        value: 1,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::AddToughness {
+                        value: 1,
+                        fraction: Default::default(),
+                    },
                 ],
                 Duration::UntilEndOfTurn,
                 // Recipient-relative: "two or more OTHER Lands".
@@ -16716,8 +16800,14 @@ mod tests {
                 source,
                 &bears,
                 vec![
-                    ContinuousModification::AddPower { value: 3 },
-                    ContinuousModification::AddToughness { value: 3 },
+                    ContinuousModification::AddPower {
+                        value: 3,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::AddToughness {
+                        value: 3,
+                        fraction: Default::default(),
+                    },
                 ],
                 Duration::UntilEndOfTurn,
                 // CR 109.5: a resolved effect RETAINS its controller, so "an
@@ -16864,8 +16954,14 @@ mod tests {
                     source,
                     bears,
                     vec![
-                        ContinuousModification::AddPower { value: 1 },
-                        ContinuousModification::AddToughness { value: 1 },
+                        ContinuousModification::AddPower {
+                            value: 1,
+                            fraction: Default::default(),
+                        },
+                        ContinuousModification::AddToughness {
+                            value: 1,
+                            fraction: Default::default(),
+                        },
                     ],
                     Duration::UntilEndOfTurn,
                     Some(overridden_name_count(Comparator::GE, 3)),
@@ -16952,8 +17048,14 @@ mod tests {
                     source,
                     bears,
                     vec![
-                        ContinuousModification::AddPower { value: 1 },
-                        ContinuousModification::AddToughness { value: 1 },
+                        ContinuousModification::AddPower {
+                            value: 1,
+                            fraction: Default::default(),
+                        },
+                        ContinuousModification::AddToughness {
+                            value: 1,
+                            fraction: Default::default(),
+                        },
                     ],
                     Duration::ForAsLongAs {
                         condition: overridden_name_count(Comparator::LT, 3),
@@ -17045,8 +17147,14 @@ mod tests {
                 source,
                 &bears,
                 vec![
-                    ContinuousModification::AddPower { value: 3 },
-                    ContinuousModification::AddToughness { value: 3 },
+                    ContinuousModification::AddPower {
+                        value: 3,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::AddToughness {
+                        value: 3,
+                        fraction: Default::default(),
+                    },
                 ],
                 // CR 611.2b + CR 109.5: the duration is re-read every pass and
                 // "an opponent" stays bound to the resolver, P0.
@@ -17329,6 +17437,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
         state.stack.push_back(StackEntry {
             id: source,

@@ -313,6 +313,7 @@ mod a2_runtime {
             source_name: None,
             source_incarnation: None,
             applied: Default::default(),
+            amount_fraction: Default::default(),
         }
     }
 

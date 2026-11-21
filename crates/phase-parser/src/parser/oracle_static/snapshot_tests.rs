@@ -1127,11 +1127,11 @@ fn grand_master_of_flowers_becomes_777_dragon_god_creature() {
     let mods = &def.modifications;
 
     assert!(
-        mods.contains(&ContinuousModification::SetPower { value: 7 }),
+        mods.contains(&ContinuousModification::set_power(7)),
         "expected SetPower(7) in {mods:?}"
     );
     assert!(
-        mods.contains(&ContinuousModification::SetToughness { value: 7 }),
+        mods.contains(&ContinuousModification::set_toughness(7)),
         "expected SetToughness(7) in {mods:?}"
     );
     assert!(
@@ -1181,8 +1181,8 @@ fn goddric_celebration_grants_complete_dragon_characteristics() {
     assert!(mods.contains(&ContinuousModification::AddSubtype {
         subtype: "Dragon".to_string()
     }));
-    assert!(mods.contains(&ContinuousModification::SetPower { value: 4 }));
-    assert!(mods.contains(&ContinuousModification::SetToughness { value: 4 }));
+    assert!(mods.contains(&ContinuousModification::set_power(4)));
+    assert!(mods.contains(&ContinuousModification::set_toughness(4)));
     assert!(mods.contains(&ContinuousModification::AddKeyword {
         keyword: Keyword::Flying
     }));
@@ -1191,7 +1191,7 @@ fn goddric_celebration_grants_complete_dragon_characteristics() {
         ContinuousModification::GrantAbility { definition }
             if definition.kind == AbilityKind::Activated
     )));
-    assert!(!mods.contains(&ContinuousModification::AddPower { value: 1 }));
+    assert!(!mods.contains(&ContinuousModification::add_power(1)));
     assert!(def.condition.is_some());
 }
 
@@ -1207,11 +1207,11 @@ fn gendered_pronoun_she_becomes_creature_static() {
     let mods = &def.modifications;
 
     assert!(
-        mods.contains(&ContinuousModification::SetPower { value: 3 }),
+        mods.contains(&ContinuousModification::set_power(3)),
         "expected SetPower(3) in {mods:?}"
     );
     assert!(
-        mods.contains(&ContinuousModification::SetToughness { value: 3 }),
+        mods.contains(&ContinuousModification::set_toughness(3)),
         "expected SetToughness(3) in {mods:?}"
     );
     assert!(
@@ -1249,11 +1249,11 @@ fn neutral_plural_pronoun_they_becomes_creature_static() {
     let mods = &def.modifications;
 
     assert!(
-        mods.contains(&ContinuousModification::SetPower { value: 4 }),
+        mods.contains(&ContinuousModification::set_power(4)),
         "expected SetPower(4) in {mods:?}"
     );
     assert!(
-        mods.contains(&ContinuousModification::SetToughness { value: 4 }),
+        mods.contains(&ContinuousModification::set_toughness(4)),
         "expected SetToughness(4) in {mods:?}"
     );
     assert!(

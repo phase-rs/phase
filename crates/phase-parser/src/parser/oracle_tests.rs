@@ -2631,10 +2631,10 @@ fn modok_static_minus_one_to_opponents_creatures() {
     assert_eq!(tf.controller, Some(ControllerRef::Opponent));
     assert!(st
         .modifications
-        .contains(&ContinuousModification::AddPower { value: -1 }));
+        .contains(&ContinuousModification::add_power(-1)));
     assert!(st
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: -1 }));
+        .contains(&ContinuousModification::add_toughness(-1)));
 }
 
 /// Issue #69 (Banewhip Punisher): "Destroy target creature that has a -1/-1
@@ -2725,12 +2725,12 @@ fn curious_colossus_base_pt_comma_list_has_no_unimplemented_trigger_tail() {
             );
             assert!(
                 mods.iter()
-                    .any(|m| matches!(m, ContinuousModification::SetPower { value: 1 })),
+                    .any(|m| matches!(m, ContinuousModification::SetPower { value: 1, .. })),
                 "must contain SetPower(1): {mods:?}"
             );
             assert!(
                 mods.iter()
-                    .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1 })),
+                    .any(|m| matches!(m, ContinuousModification::SetToughness { value: 1, .. })),
                 "must contain SetToughness(1): {mods:?}"
             );
         }
@@ -2891,12 +2891,12 @@ fn azure_beastbinder_attack_trigger_has_no_unimplemented() {
                 .collect();
             assert!(
                 mods.iter()
-                    .any(|m| matches!(m, ContinuousModification::SetPower { value: 2 })),
+                    .any(|m| matches!(m, ContinuousModification::SetPower { value: 2, .. })),
                 "must contain SetPower(2): {mods:?}"
             );
             assert!(
                 mods.iter()
-                    .any(|m| matches!(m, ContinuousModification::SetToughness { value: 2 })),
+                    .any(|m| matches!(m, ContinuousModification::SetToughness { value: 2, .. })),
                 "must contain SetToughness(2): {mods:?}"
             );
         }
@@ -3619,8 +3619,8 @@ fn gideon_jura_full_parse() {
     };
     let mods = &static_abilities[0].modifications;
     assert!(
-        mods.contains(&ContinuousModification::SetPower { value: 6 })
-            && mods.contains(&ContinuousModification::SetToughness { value: 6 })
+        mods.contains(&ContinuousModification::set_power(6))
+            && mods.contains(&ContinuousModification::set_toughness(6))
             && mods.contains(&ContinuousModification::AddType {
                 core_type: crate::types::card_type::CoreType::Creature
             }),
@@ -5433,13 +5433,13 @@ fn parse_greymond_avacyns_stalwart_whole_card() {
         .iter()
         .find(|s| {
             s.modifications
-                .contains(&ContinuousModification::AddPower { value: 2 })
+                .contains(&ContinuousModification::add_power(2))
         })
         .expect("a static carrying +2 power");
     assert!(
         anthem
             .modifications
-            .contains(&ContinuousModification::AddToughness { value: 2 }),
+            .contains(&ContinuousModification::add_toughness(2)),
         "L3 anthem is +2/+2"
     );
     // The +2/+2 subject carries the Human subtype filter.
@@ -7992,10 +7992,10 @@ fn taught_by_surrak_class_patterns_parse() {
     );
     assert!(static_def
         .modifications
-        .contains(&ContinuousModification::AddPower { value: 2 }));
+        .contains(&ContinuousModification::add_power(2)));
     assert!(static_def
         .modifications
-        .contains(&ContinuousModification::AddToughness { value: 2 }));
+        .contains(&ContinuousModification::add_toughness(2)));
     assert!(static_def
         .modifications
         .contains(&ContinuousModification::AddKeyword {
@@ -9212,7 +9212,7 @@ fn colored_creature_lord_routes_to_static_parser() {
     assert_eq!(r.statics.len(), 1);
     assert!(r.statics[0]
         .modifications
-        .contains(&crate::types::ability::ContinuousModification::AddPower { value: 1 }));
+        .contains(&crate::types::ability::ContinuousModification::add_power(1)));
 }
 
 #[test]
@@ -9814,7 +9814,10 @@ fn spell_grants_quoted_ability_to_outlaw_creatures() {
         matches!(type_filter, TypeFilter::AnyOf(filters) if filters.len() == 5)
     }));
     assert!(static_def.modifications.iter().any(|modification| {
-        matches!(modification, ContinuousModification::AddPower { value: 1 })
+        matches!(
+            modification,
+            ContinuousModification::AddPower { value: 1, .. }
+        )
     }));
     assert!(static_def.modifications.iter().any(|modification| {
         matches!(
@@ -24413,10 +24416,10 @@ fn mbaku_attack_trigger_keeps_monarch_intervening_if_bound_to_defending_player()
     assert!(
         static_def
             .modifications
-            .contains(&ContinuousModification::AddPower { value: 1 })
+            .contains(&ContinuousModification::add_power(1))
             && static_def
                 .modifications
-                .contains(&ContinuousModification::AddToughness { value: 1 })
+                .contains(&ContinuousModification::add_toughness(1))
             && static_def
                 .modifications
                 .contains(&ContinuousModification::AddKeyword {
@@ -25302,8 +25305,8 @@ fn kargan_dragonlord_level_band_grants_an_activated_pump() {
         })
         .unwrap_or_else(|| panic!("LEVEL 8+ band static missing: {:#?}", r.statics));
     for expected in [
-        ContinuousModification::SetPower { value: 8 },
-        ContinuousModification::SetToughness { value: 8 },
+        ContinuousModification::set_power(8),
+        ContinuousModification::set_toughness(8),
         ContinuousModification::AddKeyword {
             keyword: Keyword::Trample,
         },
@@ -25413,8 +25416,8 @@ fn kargan_dragonlord_level_band_grants_an_activated_pump() {
         })
         .unwrap_or_else(|| panic!("LEVEL 4-7 band static missing: {:#?}", r.statics));
     for expected in [
-        ContinuousModification::SetPower { value: 4 },
-        ContinuousModification::SetToughness { value: 4 },
+        ContinuousModification::set_power(4),
+        ContinuousModification::set_toughness(4),
         ContinuousModification::AddKeyword {
             keyword: Keyword::Flying,
         },
@@ -27525,7 +27528,7 @@ fn gauntlets_treefolk_umbra_assign_damage_from_toughness_no_dynamic_qty_warning(
                         ))
                         && static_def
                             .modifications
-                            .contains(&ContinuousModification::AddToughness { value: 2 })
+                            .contains(&ContinuousModification::add_toughness(2))
                 })
                 .expect("expected enchanted creature +0/+2 static");
             assert!(static_def
@@ -28183,7 +28186,7 @@ fn plate_armor_equip_cost_reduction_stays_on_equip_ability() {
     assert!(
         static_def.modifications.iter().any(|modification| matches!(
             modification,
-            ContinuousModification::AddPower { value: 3 }
+            ContinuousModification::AddPower { value: 3, .. }
         )),
         "missing +3 power modification: {:?}",
         static_def.modifications
@@ -28191,7 +28194,7 @@ fn plate_armor_equip_cost_reduction_stays_on_equip_ability() {
     assert!(
         static_def.modifications.iter().any(|modification| matches!(
             modification,
-            ContinuousModification::AddToughness { value: 3 }
+            ContinuousModification::AddToughness { value: 3, .. }
         )),
         "missing +3 toughness modification: {:?}",
         static_def.modifications

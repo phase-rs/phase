@@ -1242,7 +1242,9 @@ mod tests {
                     .map(|amount| GameEvent::LifeChanged {
                         player_id: PlayerId(0),
                         amount,
+                        amount_fraction: Default::default(),
                         new_total: Default::default(),
+                        new_total_fraction: Default::default(),
                     })
                     .collect()
             };

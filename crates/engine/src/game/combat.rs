@@ -9,8 +9,8 @@ use crate::game::filter::{matches_target_filter, type_filter_matches, FilterCont
 use crate::game::functioning_abilities::static_kind_present;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
-    AttackerBlockStatus, ContinuousModification, ControllerRef, StaticCondition, StaticDefinition,
-    TargetFilter, TargetRef,
+    AttackerBlockStatus, ContinuousModification, ControllerRef, HalfFraction, HalfMagnitude,
+    HalfSigned, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
@@ -597,6 +597,31 @@ pub(crate) fn combat_attack_authority_is_coherent(state: &GameState) -> bool {
 pub struct DamageAssignment {
     pub target: DamageTarget,
     pub amount: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub amount_fraction: HalfFraction,
+}
+
+impl DamageAssignment {
+    pub const fn whole(target: DamageTarget, amount: u32) -> Self {
+        Self {
+            target,
+            amount,
+            amount_fraction: HalfFraction::Zero,
+        }
+    }
+
+    pub fn new(target: DamageTarget, amount: HalfMagnitude) -> Self {
+        let (whole, amount_fraction) = amount.into_whole_and_fraction();
+        Self {
+            target,
+            amount: whole,
+            amount_fraction,
+        }
+    }
+
+    pub fn exact_amount(&self) -> HalfMagnitude {
+        HalfMagnitude::from_whole_and_fraction(self.amount, self.amount_fraction)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3846,15 +3871,13 @@ fn validate_blockers_core(
         }
 
         // CR 702.118b: Skulk — cannot be blocked by creatures with strictly greater power.
-        if attacker.has_keyword(&Keyword::Skulk)
-            && blocker.power.unwrap_or(0) > attacker.power.unwrap_or(0)
-        {
+        if attacker.has_keyword(&Keyword::Skulk) && has_greater_power(blocker, attacker) {
             return Err(format!(
                 "{:?} cannot block {:?} (skulk: blocker power {} > attacker power {})",
                 blocker_id,
                 attacker_id,
-                blocker.power.unwrap_or(0),
-                attacker.power.unwrap_or(0)
+                exact_power_or_zero(blocker).fmt_display(),
+                exact_power_or_zero(attacker).fmt_display()
             ));
         }
 
@@ -8417,9 +8440,8 @@ pub fn can_block_pair_with_precomputed(
     {
         return false;
     }
-    if attacker.has_keyword(&Keyword::Skulk)
-        && blocker.power.unwrap_or(0) > attacker.power.unwrap_or(0)
-    {
+    // CR 702.118b: Skulk — cannot be blocked by creatures with greater power.
+    if attacker.has_keyword(&Keyword::Skulk) && has_greater_power(blocker, attacker) {
         return false;
     }
     if attacker.has_keyword(&Keyword::Horsemanship) && !blocker.has_keyword(&Keyword::Horsemanship)
@@ -8458,7 +8480,19 @@ fn ring_bearer_unblockable_by_greater_power(
     // CR 701.54c: The Ring emblem says "Your Ring-bearer is legendary and
     // can't be blocked by creatures with greater power."
     super::effects::ring::is_current_ring_bearer(state, attacker.controller, attacker.id)
-        && blocker.power.unwrap_or(0) > attacker.power.unwrap_or(0)
+        && has_greater_power(blocker, attacker)
+}
+
+/// A creature's exact power, reading no power as 0.
+fn exact_power_or_zero(object: &GameObject) -> HalfSigned {
+    object.exact_power().unwrap_or(HalfSigned::ZERO)
+}
+
+/// CR 702.118b + CR 701.54c: "can't be blocked by creatures with greater power"
+/// compares exact power, so a 1½-power Cardpecker has greater power than a
+/// 1-power skulk attacker.
+fn has_greater_power(blocker: &GameObject, attacker: &GameObject) -> bool {
+    exact_power_or_zero(blocker) > exact_power_or_zero(attacker)
 }
 
 /// CR 509.1a + CR 101.1: A creature blocks one attacker unless an effect (a
@@ -24901,6 +24935,7 @@ mod tests {
             vec![DamageAssignment {
                 target: DamageTarget::Object(blocker),
                 amount: 2,
+                amount_fraction: Default::default(),
             }],
         );
         combat.pending_damage.push((
@@ -24908,6 +24943,7 @@ mod tests {
             DamageAssignment {
                 target: DamageTarget::Object(walker),
                 amount: 1,
+                amount_fraction: Default::default(),
             },
         ));
         combat.damage_step_index = Some(1);

@@ -537,6 +537,7 @@ fn t9_snapshot_carries_excess_recipient_across_resume() {
             source_keyword: None,
         }),
         lifelink_bonus: 3,
+        lifelink_bonus_fraction: Default::default(),
     };
     let json = serde_json::to_string(&snap).expect("snapshot serializes");
     let back: DamageContextSnapshot = serde_json::from_str(&json).expect("snapshot deserializes");

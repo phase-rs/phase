@@ -164,6 +164,9 @@ fn trample_replaces_only_the_player_portion() {
             assignments: vec![(wall, 2)],
             trample_damage: 3,
             controller_damage: 0,
+            assignments_fraction: Vec::new(),
+            trample_damage_fraction: Default::default(),
+            controller_damage_fraction: Default::default(),
         })
         .expect("assign trample damage");
     let outcome = runner.combat_damage();

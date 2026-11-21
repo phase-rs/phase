@@ -399,7 +399,11 @@ fn catalog_normalized_display_name(name: &str) -> &str {
 }
 
 fn token_body_matches(a: &TokenCharacteristics, b: &TokenCharacteristics) -> bool {
-    token_body_identity_matches(a, b) && a.power == b.power && a.toughness == b.toughness
+    token_body_identity_matches(a, b)
+        && a.power == b.power
+        && a.power_fraction == b.power_fraction
+        && a.toughness == b.toughness
+        && a.toughness_fraction == b.toughness_fraction
 }
 
 fn token_body_identity_matches(a: &TokenCharacteristics, b: &TokenCharacteristics) -> bool {
@@ -418,7 +422,10 @@ fn token_preset_body_matches(
     mode: TokenRefMatchMode,
 ) -> bool {
     token_body_identity_matches(&preset.body, body)
-        && ((preset.body.power == body.power && preset.body.toughness == body.toughness)
+        && ((preset.body.power == body.power
+            && preset.body.power_fraction == body.power_fraction
+            && preset.body.toughness == body.toughness
+            && preset.body.toughness_fraction == body.toughness_fraction)
             || (matches!(mode, TokenRefMatchMode::SourceLinkedExact)
                 && preset.pt_provenance.is_source_defined_or_dynamic()))
 }
@@ -490,7 +497,9 @@ mod tests {
         TokenCharacteristics {
             display_name: "Ooze".to_string(),
             power,
+            power_fraction: Default::default(),
             toughness,
+            toughness_fraction: Default::default(),
             loyalty: None,
             core_types: vec![CoreType::Creature],
             subtypes: vec!["Ooze".to_string()],
@@ -504,7 +513,9 @@ mod tests {
         TokenCharacteristics {
             display_name: "Fanatic of Rhonas".to_string(),
             power: Some(4),
+            power_fraction: Default::default(),
             toughness: Some(4),
+            toughness_fraction: Default::default(),
             loyalty: None,
             core_types: vec![CoreType::Creature],
             subtypes: vec![
@@ -522,7 +533,9 @@ mod tests {
         TokenCharacteristics {
             display_name: "Iridescent Vinelasher".to_string(),
             power: Some(1),
+            power_fraction: Default::default(),
             toughness: Some(1),
+            toughness_fraction: Default::default(),
             loyalty: None,
             core_types: vec![CoreType::Creature],
             subtypes: vec!["Lizard".to_string(), "Assassin".to_string()],
@@ -792,7 +805,9 @@ mod tests {
             body: TokenCharacteristics {
                 display_name: name.to_string(),
                 power: Some(1),
+                power_fraction: Default::default(),
                 toughness: Some(1),
+                toughness_fraction: Default::default(),
                 loyalty: None,
                 core_types: vec![CoreType::Creature],
                 subtypes: vec![name.to_string()],
@@ -1249,7 +1264,9 @@ mod tests {
         let parsed_spec_body = TokenCharacteristics {
             display_name: "Gingerbrute".to_string(),
             power: Some(1),
+            power_fraction: Default::default(),
             toughness: Some(1),
+            toughness_fraction: Default::default(),
             loyalty: None,
             core_types: vec![CoreType::Artifact, CoreType::Creature],
             subtypes: vec!["Food".to_string(), "Golem".to_string()],

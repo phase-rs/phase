@@ -152,6 +152,8 @@ mod tests {
             casting_options: vec![],
             layout_kind: Some(crate::types::card::LayoutKind::Flip),
             parse_warnings: vec![],
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         });
         id
     }

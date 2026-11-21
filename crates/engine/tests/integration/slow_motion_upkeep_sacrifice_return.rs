@@ -450,6 +450,8 @@ fn breath_of_fury_trigger_does_not_sacrifice_creature_if_control_changed() {
             source_amounts: vec![(creature, 1)],
             total_damage: 1,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         }],
     );
 
@@ -546,6 +548,8 @@ fn breath_of_fury_combat_damage(cant_be_sacrificed: bool, bears: usize) -> Breat
             source_amounts: vec![(goblin, 1)],
             total_damage: 1,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         }],
     );
     assert!(!runner.state().stack.is_empty(), "trigger must be stacked");
@@ -646,6 +650,8 @@ fn breath_of_fury_in_graveyard_is_not_attached() {
             source_amounts: vec![(creature, 1)],
             total_damage: 1,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         }],
     );
     assert!(

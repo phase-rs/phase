@@ -286,7 +286,13 @@ mod tests {
         crate::game::effects::change_zone::shuffle_library(&mut state, PlayerId(0), &mut events);
         let after_second = state.rng_word_pos;
         state
-            .resolve_and_apply_player_edit(PlayerId(0), ResolvedPlayerEdit::Life { delta: -2 })
+            .resolve_and_apply_player_edit(
+                PlayerId(0),
+                ResolvedPlayerEdit::Life {
+                    delta: -2,
+                    fraction: Default::default(),
+                },
+            )
             .unwrap();
 
         assert!(after_second >= after_first);

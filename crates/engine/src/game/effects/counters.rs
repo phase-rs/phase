@@ -1552,7 +1552,9 @@ pub fn apply_resolved_counter_edit(
                     supertypes: object.card_types.supertypes.clone(),
                     keywords: object.keywords.clone(),
                     power: object.power,
+                    power_fraction: object.power_fraction,
                     toughness: object.toughness,
+                    toughness_fraction: object.toughness_fraction,
                     // CR 709.4b + CR 202.3d: combined colors / mana value for a
                     // split card off the stack remain part of the event-time fact.
                     colors: object.effective_colors(),
@@ -4099,7 +4101,10 @@ mod tests {
                     },
                 },
                 TargetFilter::SpecificObject { id: affected },
-                vec![ContinuousModification::AddPower { value: 1 }],
+                vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }],
                 application_condition,
                 TransientContinuousEffectBindings {
                     affected_recipient: Some(affected_ref),
@@ -4366,7 +4371,10 @@ mod tests {
                     },
                 },
                 TargetFilter::SpecificObject { id: subject },
-                vec![ContinuousModification::AddPower { value: 1 }],
+                vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }],
                 None,
             )
             .expect("the fixture's duration begins");
@@ -7131,6 +7139,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
         );
 

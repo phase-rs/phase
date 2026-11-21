@@ -1505,6 +1505,9 @@ mod tests {
                     assignments: vec![(board.angel, 3)],
                     trample_damage: 1,
                     controller_damage: 0,
+                    assignments_fraction: Vec::new(),
+                    trample_damage_fraction: Default::default(),
+                    controller_damage_fraction: Default::default(),
                 },
                 format!(
                     "Assign Combat Damage (Assignments: {}, 3, Controller Damage: 0, \
@@ -1515,6 +1518,7 @@ mod tests {
             (
                 GameAction::AssignBlockerDamage {
                     assignments: vec![(board.giant, 2), (board.angel, 1)],
+                    assignments_fraction: Vec::new(),
                 },
                 format!(
                     "Assign Blocker Damage (Assignments: {}, 2, {}, 1)",

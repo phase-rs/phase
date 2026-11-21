@@ -542,8 +542,14 @@ fn andrios_static_shape() {
     assert_eq!(
         def.modifications,
         vec![
-            ContinuousModification::SetPower { value: 16 },
-            ContinuousModification::SetToughness { value: 9 },
+            ContinuousModification::SetPower {
+                value: 16,
+                fraction: Default::default(),
+            },
+            ContinuousModification::SetToughness {
+                value: 9,
+                fraction: Default::default(),
+            },
         ]
     );
 }

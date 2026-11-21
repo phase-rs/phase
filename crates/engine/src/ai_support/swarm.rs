@@ -531,6 +531,7 @@ fn replacement_applies(
             source_id,
             target,
             amount,
+            amount_fraction: crate::types::ability::HalfFraction::Zero,
             is_combat: true,
             source_name: None,
             source_incarnation: None,

@@ -3504,6 +3504,9 @@ pub(super) fn fight_driving(
                     assignments,
                     trample_damage: 0,
                     controller_damage: 0,
+                    assignments_fraction: Vec::new(),
+                    trample_damage_fraction: Default::default(),
+                    controller_damage_fraction: Default::default(),
                 })
             }
             WaitingFor::ReplacementChoice {
@@ -5280,6 +5283,9 @@ fn outfitted_jouster_double_blocked_sacrifices_one_equipment() {
                         assignments,
                         trample_damage: 0,
                         controller_damage: 0,
+                        assignments_fraction: Vec::new(),
+                        trample_damage_fraction: Default::default(),
+                        controller_damage_fraction: Default::default(),
                     }
                 }
                 _ => break,

@@ -126,10 +126,10 @@ fn synthesize_eternalize_builds_4_4_black_zombie_no_mana_cost_copy() {
     )));
     assert!(mods
         .iter()
-        .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })));
+        .any(|m| matches!(m, ContinuousModification::SetPower { value: 4, .. })));
     assert!(mods
         .iter()
-        .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4 })));
+        .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4, .. })));
     assert!(mods
         .iter()
         .any(|m| matches!(m, ContinuousModification::RemoveManaCost)));

@@ -87,8 +87,14 @@ fn wedding_announcement_human_branch_transforms_and_applies_festivity_anthem() {
                     properties: vec![],
                 }))
                 .modifications(vec![
-                    ContinuousModification::AddPower { value: 1 },
-                    ContinuousModification::AddToughness { value: 1 },
+                    ContinuousModification::AddPower {
+                        value: 1,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::AddToughness {
+                        value: 1,
+                        fraction: Default::default(),
+                    },
                 ])]
             .into(),
             color: vec![ManaColor::White],
@@ -100,6 +106,8 @@ fn wedding_announcement_human_branch_transforms_and_applies_festivity_anthem() {
             casting_options: vec![],
             layout_kind: None,
             parse_warnings: vec![],
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         });
         wedding
     };

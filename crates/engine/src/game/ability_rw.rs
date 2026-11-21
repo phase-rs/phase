@@ -6817,6 +6817,7 @@ fn rw_effect(
             context: _,
             target: _,
             amount: _,
+            amount_fraction: _,
             is_combat: _,
         }
         | Effect::ResumeDamageBatch {
@@ -7009,7 +7010,7 @@ fn census_of_types(types: &[String]) -> Census {
 fn rw_pt_value(value: &PtValue) -> RwProfile {
     match value {
         PtValue::Quantity(q) => rw_quantity_expr(q),
-        PtValue::Fixed(_) | PtValue::Variable(_) => RwProfile::empty(),
+        PtValue::Fixed(_) | PtValue::HalfPoints(_) | PtValue::Variable(_) => RwProfile::empty(),
     }
 }
 

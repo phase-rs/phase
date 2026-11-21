@@ -161,6 +161,9 @@ fn run_mazed_combat_with_maze_removal(
                         assignments,
                         trample_damage,
                         controller_damage: 0,
+                        assignments_fraction: Vec::new(),
+                        trample_damage_fraction: Default::default(),
+                        controller_damage_fraction: Default::default(),
                     })
                     .is_err()
                 {

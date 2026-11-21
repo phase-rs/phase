@@ -411,6 +411,8 @@ fn rejects_oversized_debug_token_keyword_ast_payload() {
                 supertypes: Vec::new(),
                 colors: Vec::new(),
                 keywords: vec![Keyword::Unknown("x".repeat(MAX_DEBUG_AST_JSON_LEN + 1))],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             enter_with_counters: Vec::new(),
         },

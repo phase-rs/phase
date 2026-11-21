@@ -5933,6 +5933,7 @@ fn floating_replacement_can_name_object(
         die_ignore_rule: _,
         planeswalk_scope: _,
         shield_kind: _,
+        shield_fraction: _,
         quantity_modification: _,
         token_owner_scope: _,
         token_owner_redirect: _,
@@ -9136,12 +9137,15 @@ fn replacement_body_may_read_projected(def: &crate::types::ability::ReplacementD
 fn project_out_player_consumables(p: &mut Player) {
     let Player {
         life,
+        life_fraction,
         mana_pool,
         poison_counters,
         energy,
         player_counters,
         life_gained_this_turn,
+        life_gained_this_turn_fraction,
         life_lost_this_turn,
+        life_lost_this_turn_fraction,
         energy_paid_or_lost_this_turn,
         cards_drawn_this_turn,
         cards_drawn_this_step,
@@ -9160,6 +9164,7 @@ fn project_out_player_consumables(p: &mut Player) {
         has_no_life_total: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
+        life_lost_last_turn_fraction: _,
         spells_cast_last_turn,
 
         descended_this_turn: _,
@@ -9183,6 +9188,7 @@ fn project_out_player_consumables(p: &mut Player) {
     } = p;
     // CR 119: life is monotone in a drain/lifegain loop.
     *life = 0;
+    *life_fraction = crate::types::ability::HalfFraction::Zero;
     // CR 106.1: floating mana is consumed/produced within the loop.
     mana_pool.clear();
     // CR 122.1: consumable counters a loop pumps (poison/energy/…).
@@ -9192,7 +9198,9 @@ fn project_out_player_consumables(p: &mut Player) {
     // Per-turn resource trackers the strict PartialEq compares — these grow with the
     // loop but do not change the board configuration.
     *life_gained_this_turn = 0;
+    *life_gained_this_turn_fraction = crate::types::ability::HalfFraction::Zero;
     *life_lost_this_turn = 0;
+    *life_lost_this_turn_fraction = crate::types::ability::HalfFraction::Zero;
     *energy_paid_or_lost_this_turn = 0;
     *cards_drawn_this_turn = 0;
     *cards_drawn_this_step = 0;
@@ -9223,6 +9231,7 @@ fn project_out_player_consumables(p: &mut Player) {
 pub(crate) fn project_object_for_loop(object: &mut crate::game::game_object::GameObject) {
     // CR 120: marked damage is a monotone resource (lifelink/ping loops).
     object.damage_marked = 0;
+    object.damage_marked_fraction = crate::types::ability::HalfFraction::Zero;
     // CR 122.1: project out only *monotone* counters (CR 122.1a/613.4c +1/+1, -1/-1,
     // P/T; CR 306.5b loyalty; CR 310.4c defense) — these are the pumped resource of a
     // +1/+1 or loyalty loop, so two cycles compare as the same board. PRESERVE
@@ -9262,7 +9271,9 @@ pub(crate) fn project_object_for_loop(object: &mut crate::game::game_object::Gam
     // arms share, with no zone predicate — so an object the counter path touched carries the
     // counter-derived value wherever it sits.
     object.power = None;
+    object.power_fraction = crate::types::ability::HalfFraction::Zero;
     object.toughness = None;
+    object.toughness_fraction = crate::types::ability::HalfFraction::Zero;
     object.loyalty = None;
     object.defense = None;
 }
@@ -9751,11 +9762,14 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         poison_counters,
         energy,
         life_gained_this_turn,
+        life_gained_this_turn_fraction,
         life_lost_this_turn,
+        life_lost_this_turn_fraction,
         energy_paid_or_lost_this_turn,
         cards_drawn_this_turn,
         cards_drawn_this_step,
         life: _,
+        life_fraction: _,
         mana_pool: _,
         player_counters: _,
         // Strict-equality fields, no-`..`:
@@ -9771,6 +9785,7 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         has_no_life_total: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
+        life_lost_last_turn_fraction: _,
         spells_cast_last_turn: _,
         cards_drawn_last_turn: _,
         opponent_spells_cast_since_own_last_turn: _,
@@ -9793,8 +9808,16 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
     vec![
         *poison_counters as i64,
         *energy as i64,
-        *life_gained_this_turn as i64,
-        *life_lost_this_turn as i64,
+        crate::types::ability::HalfMagnitude::from_whole_and_fraction(
+            *life_gained_this_turn,
+            *life_gained_this_turn_fraction,
+        )
+        .0 as i64,
+        crate::types::ability::HalfMagnitude::from_whole_and_fraction(
+            *life_lost_this_turn,
+            *life_lost_this_turn_fraction,
+        )
+        .0 as i64,
         *energy_paid_or_lost_this_turn as i64,
         *cards_drawn_this_turn as i64,
         *cards_drawn_this_step as i64,
@@ -9815,11 +9838,14 @@ fn projected_player_maps(
         player_counters,
         // Scalar-projected + strict-equality fields (handled elsewhere), no-`..`:
         life: _,
+        life_fraction: _,
         mana_pool: _,
         poison_counters: _,
         energy: _,
         life_gained_this_turn: _,
+        life_gained_this_turn_fraction: _,
         life_lost_this_turn: _,
+        life_lost_this_turn_fraction: _,
         energy_paid_or_lost_this_turn: _,
         cards_drawn_this_turn: _,
         cards_drawn_this_step: _,
@@ -9835,6 +9861,7 @@ fn projected_player_maps(
         has_no_life_total: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
+        life_lost_last_turn_fraction: _,
         spells_cast_last_turn: _,
         cards_drawn_last_turn: _,
         opponent_spells_cast_since_own_last_turn: _,
@@ -10348,6 +10375,8 @@ mod tests {
                         amount: 1,
                         is_combat: false,
                         excess: 0,
+                        amount_fraction: Default::default(),
+                        excess_fraction: Default::default(),
                     }),
                     description: None,
                     source_name: String::new(),
@@ -11787,6 +11816,8 @@ mod tests {
                 amount: 3,
                 is_combat: false,
                 excess: 0,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             };
             state.stack.push_back(StackEntry {
                 id: ObjectId(101),
@@ -12135,6 +12166,8 @@ mod tests {
             amount: 2,
             is_combat: true,
             excess: 0,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         *trigger_event = Some(second_event.clone());
         frame.stack.push_back(second);
@@ -14856,6 +14889,8 @@ mod tests {
                     player_id: PlayerId(1),
                     amount,
                     new_total: crate::types::events::LifeTotalReading(Some(reported_total)),
+                    amount_fraction: Default::default(),
+                    new_total_fraction: Default::default(),
                 });
             }
             state.stack.push_back(entry);
@@ -15235,6 +15270,8 @@ mod tests {
             amount: 2,
             is_combat: true,
             excess: 0,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
         prior.stack.push_back(frozen.clone());
         prior.stack.push_back(g(101));
@@ -17236,6 +17273,8 @@ mod tests {
             amount: 1,
             is_combat: false,
             excess: 0,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         current.stack.push_back(StackEntry {
             id: ObjectId(900),
@@ -17315,6 +17354,8 @@ mod tests {
                         amount: 1,
                         is_combat: false,
                         excess: 0,
+                        amount_fraction: Default::default(),
+                        excess_fraction: Default::default(),
                     }),
                     description: None,
                     source_name: String::new(),
@@ -22999,6 +23040,7 @@ mod tests {
             player_id: PlayerId(0),
             amount: 1,
             applied: Default::default(),
+            amount_fraction: Default::default(),
         }];
         assert!(
             crate::game::replacement::proposed_event_prompt_cause(
@@ -26362,6 +26404,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             }
         }
 
@@ -26452,6 +26498,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             }
         }
 
@@ -27044,6 +27094,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
         );
         s

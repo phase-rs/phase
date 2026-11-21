@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::ability::is_false;
+use super::ability::{is_false, HalfFraction, HalfMagnitude, HalfSigned};
 use super::card_printing::SharedPrinting;
 use super::display_only::DisplayOnly;
 use super::event_kinds::BendingType;
@@ -77,6 +77,8 @@ pub struct CompanionInfo {
 pub struct Player {
     pub id: PlayerId,
     pub life: i32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub life_fraction: HalfFraction,
     /// This seat has NO life total, so `life` is meaningless for it and must not
     /// be presented as a resource. Damage and life loss it would take are
     /// redirected into milling its library, and it is exempt from the CR 704.5a
@@ -122,8 +124,12 @@ pub struct Player {
     pub energy: u32,
     #[serde(default)]
     pub life_gained_this_turn: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub life_gained_this_turn_fraction: HalfFraction,
     #[serde(default)]
     pub life_lost_this_turn: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub life_lost_this_turn_fraction: HalfFraction,
     /// CR 107.14 + CR 122.1: Energy counters this player has paid or otherwise
     /// lost this turn. Bumped on every energy decrement in
     /// `GameState::apply_resolved_player_edit` and reset at turn start. Read by
@@ -134,6 +140,8 @@ pub struct Player {
     /// Used by "if an opponent lost life during their last turn" intervening-if conditions.
     #[serde(default)]
     pub life_lost_last_turn: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub life_lost_last_turn_fraction: HalfFraction,
     /// CR 601.2i + CR 603.4: Number of spells this player cast during the
     /// previous turn, latched at the turn boundary from that turn's per-player
     /// cast journal (`GameState::spells_cast_this_turn_by_player`) before the
@@ -263,6 +271,7 @@ impl Default for Player {
         Player {
             id: PlayerId(0),
             life: 20,
+            life_fraction: HalfFraction::Zero,
             has_no_life_total: false,
             mana_pool: ManaPool::default(),
             library: im::Vector::new(),
@@ -277,9 +286,12 @@ impl Default for Player {
             poison_counters: 0,
             energy: 0,
             life_gained_this_turn: 0,
+            life_gained_this_turn_fraction: HalfFraction::Zero,
             life_lost_this_turn: 0,
+            life_lost_this_turn_fraction: HalfFraction::Zero,
             energy_paid_or_lost_this_turn: 0,
             life_lost_last_turn: 0,
+            life_lost_last_turn_fraction: HalfFraction::Zero,
             spells_cast_last_turn: 0,
             descended_this_turn: false,
             cards_drawn_this_turn: 0,
@@ -310,6 +322,57 @@ fn default_contraption_crank_sprocket() -> u8 {
 }
 
 impl Player {
+    /// Exact signed half-point life total (CR 119.1 + Unhinged half-point life).
+    pub fn exact_life(&self) -> HalfSigned {
+        HalfSigned::from_whole_and_fraction(self.life, self.life_fraction)
+    }
+
+    /// Sets the player's life total from an exact signed half-point value.
+    pub fn set_exact_life(&mut self, exact: HalfSigned) {
+        let (whole, fraction) = exact.into_whole_and_fraction();
+        self.life = whole;
+        self.life_fraction = fraction;
+    }
+
+    pub fn exact_life_gained_this_turn(&self) -> HalfMagnitude {
+        HalfMagnitude::from_whole_and_fraction(
+            self.life_gained_this_turn,
+            self.life_gained_this_turn_fraction,
+        )
+    }
+
+    pub fn set_exact_life_gained_this_turn(&mut self, exact: HalfMagnitude) {
+        let (whole, fraction) = exact.into_whole_and_fraction();
+        self.life_gained_this_turn = whole;
+        self.life_gained_this_turn_fraction = fraction;
+    }
+
+    pub fn exact_life_lost_this_turn(&self) -> HalfMagnitude {
+        HalfMagnitude::from_whole_and_fraction(
+            self.life_lost_this_turn,
+            self.life_lost_this_turn_fraction,
+        )
+    }
+
+    pub fn set_exact_life_lost_this_turn(&mut self, exact: HalfMagnitude) {
+        let (whole, fraction) = exact.into_whole_and_fraction();
+        self.life_lost_this_turn = whole;
+        self.life_lost_this_turn_fraction = fraction;
+    }
+
+    pub fn exact_life_lost_last_turn(&self) -> HalfMagnitude {
+        HalfMagnitude::from_whole_and_fraction(
+            self.life_lost_last_turn,
+            self.life_lost_last_turn_fraction,
+        )
+    }
+
+    pub fn set_exact_life_lost_last_turn(&mut self, exact: HalfMagnitude) {
+        let (whole, fraction) = exact.into_whole_and_fraction();
+        self.life_lost_last_turn = whole;
+        self.life_lost_last_turn_fraction = fraction;
+    }
+
     /// CR 101.4 + CR 608.2d: The number this player most recently chose for a
     /// per-player `Effect::Choose { ChoiceType::NumberRange }` ("each player
     /// secretly chooses a number 0 or greater"). `None` when this player has

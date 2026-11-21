@@ -1483,6 +1483,7 @@ mod tests {
         let state = GameState::new_two_player(42);
         let event_keys = keys_from_event(
             &GameEvent::DamagePrevented {
+                amount_fraction: Default::default(),
                 source_id: ObjectId(1),
                 target: crate::types::ability::TargetRef::Player(PlayerId(0)),
                 amount: 4,

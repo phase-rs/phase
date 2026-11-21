@@ -196,6 +196,8 @@ fn creature_token_spec(controller: PlayerId) -> TokenSpec {
             supertypes: Vec::new(),
             colors: Vec::new(),
             keywords: Vec::new(),
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         },
         script_name: "Zombie".to_string(),
         static_abilities: Vec::new(),

@@ -76,6 +76,8 @@ fn kenzo_alternative_face() -> BackFaceData {
         casting_options: vec![],
         layout_kind: Some(LayoutKind::Flip),
         parse_warnings: vec![],
+        power_fraction: Default::default(),
+        toughness_fraction: Default::default(),
     }
 }
 
@@ -138,6 +140,8 @@ fn tok_tok_alternative_face() -> BackFaceData {
         casting_options: vec![],
         layout_kind: Some(LayoutKind::Flip),
         parse_warnings: vec![],
+        power_fraction: Default::default(),
+        toughness_fraction: Default::default(),
     }
 }
 
@@ -668,6 +672,8 @@ fn nighteyes_alternative_face() -> BackFaceData {
         casting_options: vec![],
         layout_kind: Some(LayoutKind::Flip),
         parse_warnings: vec![],
+        power_fraction: Default::default(),
+        toughness_fraction: Default::default(),
     }
 }
 

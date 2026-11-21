@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "PtValue::HalfPoints and HalfFraction side-car fields preserve exact half-point P/T, damage, and life across state, wire actions, and events (issue #11111)"
+}

@@ -1044,28 +1044,44 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
         GameAction::AssignCombatDamage {
             mode: a0,
             assignments: a1,
+            assignments_fraction: a1f,
             trample_damage: a2,
+            trample_damage_fraction: a2f,
             controller_damage: a3,
+            controller_damage_fraction: a3f,
         } => {
             let GameAction::AssignCombatDamage {
                 mode: b0,
                 assignments: b1,
+                assignments_fraction: b1f,
                 trample_damage: b2,
+                trample_damage_fraction: b2f,
                 controller_damage: b3,
+                controller_damage_fraction: b3f,
             } = b
             else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
             cmp_val(a0, b0)
                 .then_with(|| cmp_val(a1, b1))
+                .then_with(|| cmp_val(a1f, b1f))
                 .then_with(|| cmp_val(a2, b2))
+                .then_with(|| cmp_val(a2f, b2f))
                 .then_with(|| cmp_val(a3, b3))
+                .then_with(|| cmp_val(a3f, b3f))
         }
-        GameAction::AssignBlockerDamage { assignments: a0 } => {
-            let GameAction::AssignBlockerDamage { assignments: b0 } = b else {
+        GameAction::AssignBlockerDamage {
+            assignments: a0,
+            assignments_fraction: a0f,
+        } => {
+            let GameAction::AssignBlockerDamage {
+                assignments: b0,
+                assignments_fraction: b0f,
+            } = b
+            else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
-            cmp_val(a0, b0)
+            cmp_val(a0, b0).then_with(|| cmp_val(a0f, b0f))
         }
         GameAction::DistributeAmong { distribution: a0 } => {
             let GameAction::DistributeAmong { distribution: b0 } = b else {

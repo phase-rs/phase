@@ -502,6 +502,8 @@ fn wyll(accept: bool) -> (GameRunner, ObjectId, ObjectId) {
             casting_options: vec![],
             layout_kind: None,
             parse_warnings: vec![],
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         };
         let mut faces = SpecializeFaceMap::new();
         faces.insert(ManaColor::White, back);

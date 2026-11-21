@@ -527,7 +527,13 @@ pub fn apply_debug_action(
                     EngineError::InvalidAction("Debug: life delta is not representable".to_string())
                 })?;
                 state
-                    .resolve_and_apply_player_edit(player_id, ResolvedPlayerEdit::Life { delta })
+                    .resolve_and_apply_player_edit(
+                        player_id,
+                        ResolvedPlayerEdit::Life {
+                            delta,
+                            fraction: Default::default(),
+                        },
+                    )
                     .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
             }
         }
@@ -2151,6 +2157,8 @@ mod tests {
             supertypes: Vec::new(),
             colors: vec![ManaColor::Green],
             keywords: Vec::<Keyword>::new(),
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         }
     }
 
@@ -2188,6 +2196,8 @@ mod tests {
             casting_options: Vec::new(),
             layout_kind: Some(LayoutKind::Prepare),
             parse_warnings: vec![],
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         }
     }
 

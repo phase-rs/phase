@@ -4715,6 +4715,7 @@ mod tests {
             player: PlayerId(0),
             commander: ObjectId(1),
             damage: 21,
+            damage_fraction: Default::default(),
         });
 
         let views = derive_views(&state, None);
@@ -5936,11 +5937,13 @@ mod tests {
             player: PlayerId(0),
             commander: cmd_p1,
             damage: 7,
+            damage_fraction: Default::default(),
         });
         state.commander_damage.push(CommanderDamageEntry {
             player: PlayerId(0),
             commander: cmd_p2,
             damage: 11,
+            damage_fraction: Default::default(),
         });
 
         let views = derive_views(&state, None);
@@ -6038,11 +6041,13 @@ mod tests {
             player: PlayerId(0),
             commander: partner_a,
             damage: 20,
+            damage_fraction: Default::default(),
         });
         state.commander_damage.push(CommanderDamageEntry {
             player: PlayerId(0),
             commander: partner_b,
             damage: 5,
+            damage_fraction: Default::default(),
         });
 
         let views = derive_views(&state, None);
@@ -7018,6 +7023,10 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 departure: crate::types::game_state::ZoneDeparture::Moved,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             }),
         };
         let ability = ResolvedAbility::new(
@@ -7107,6 +7116,7 @@ mod tests {
             player: PlayerId(0),
             commander: cmd,
             damage: 14,
+            damage_fraction: Default::default(),
         });
 
         let wrapped = ClientGameStateRef::wrap(&state, None);
@@ -8621,6 +8631,8 @@ mod tests {
             room_halves: None,
             prepare_face: None,
             name_origin: Default::default(),
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         })
     }
 

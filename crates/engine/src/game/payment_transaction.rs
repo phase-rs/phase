@@ -2144,6 +2144,8 @@ mod tests {
             player_id: PlayerId(1),
             amount: 3,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         });
         state.current_trigger_events = state.current_trigger_event.clone().into_iter().collect();
         let root = ResolvedAbility::new(

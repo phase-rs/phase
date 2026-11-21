@@ -1,8 +1,8 @@
 use crate::game::combat::{AttackTarget, CombatState, DamageAssignment, DamageTarget, TrampleKind};
 use crate::game::effects::deal_damage::{
-    apply_damage_after_replacement, emit_damage_dealt_and_record, pre_replacement_damage_gate,
-    tally_map_from_record_entries, wither_infect_post_counter_core, DamageContext,
-    DamageGateOutcome, DamageResult, PostCounterFlow,
+    apply_damage_after_replacement_exact, emit_damage_dealt_and_record,
+    pre_replacement_damage_gate, tally_map_from_record_entries, wither_infect_post_counter_core,
+    DamageContext, DamageGateOutcome, ExactDamageResult, PostCounterFlow,
 };
 use crate::game::effects::life::ReplacementDeferred;
 use crate::game::game_object::GameObject;
@@ -11,14 +11,16 @@ use crate::game::replacement;
 use crate::game::sba;
 use crate::game::triggers;
 use crate::game::turns;
-use crate::types::ability::{DamageContextSnapshot, ShieldKind, TargetRef};
+use crate::types::ability::{
+    DamageContextSnapshot, HalfFraction, HalfMagnitude, HalfSigned, ShieldKind, TargetRef,
+};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CombatDamageAssignmentMode, CombatDamageSubStep, CombatPreventionTally, DamageSlot, GameState,
     PendingCombatDamageEntry, PendingCombatDamageReplacement, PendingCombatLeg,
     PendingCombatLegProgress, PendingCombatLifelink, PendingCombatPhaseCRemnant,
-    PendingLifelinkGain, PerPlayerCombatDamage, PreventedDamageEntry, WaitingFor,
+    PendingLifelinkGain, PreventedDamageEntry, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
@@ -29,18 +31,24 @@ use std::collections::VecDeque;
 /// CR 510.1a + CR 613.11: Returns the amount of combat damage a creature assigns.
 /// Normally equal to power, but if `assigns_damage_from_toughness` is set (e.g. Doran),
 /// uses toughness instead. If `assigns_no_combat_damage` is set, returns 0.
-fn combat_damage_amount(obj: &GameObject) -> u32 {
+fn combat_damage_amount_exact(obj: &GameObject) -> HalfMagnitude {
     // CR 510.1a: "~ assigns no combat damage" — creature deals 0 combat damage.
     if obj.assigns_no_combat_damage {
-        return 0;
+        return HalfMagnitude::ZERO;
     }
-    if obj.assigns_damage_from_toughness {
+    let val = if obj.assigns_damage_from_toughness {
         // CR 613.11 + CR 510.1a: Rule effect uses toughness rather than power.
-        obj.toughness.unwrap_or(0).max(0) as u32
+        obj.exact_toughness()
     } else {
         // CR 510.1a: Assign combat damage equal to power.
-        obj.power.unwrap_or(0).max(0) as u32
-    }
+        obj.exact_power()
+    };
+    val.map_or(HalfMagnitude::ZERO, |v| v.clamp_non_negative())
+}
+
+#[allow(dead_code)]
+fn combat_damage_amount(obj: &GameObject) -> u32 {
+    combat_damage_amount_exact(obj).whole_floor()
 }
 
 /// CR 603.2 + CR 704.3: Full trigger/SBA loop after combat damage.
@@ -646,9 +654,9 @@ fn damage_is_not_fixed(
     state: &GameState,
     context: &DamageContext,
     target: &TargetRef,
-    amount: u32,
+    amount: HalfMagnitude,
 ) -> bool {
-    if amount == 0 {
+    if amount == HalfMagnitude::ZERO {
         return false;
     }
 
@@ -683,9 +691,9 @@ fn lethal_destruction_is_not_fixed(state: &GameState, object_id: ObjectId) -> bo
 }
 
 #[allow(dead_code)] // Reachable only through the deferred crate-visible assessment API.
-fn survives_marked_damage(object: &GameObject, incoming_damage: u32) -> Option<bool> {
-    let toughness = object.toughness?.max(0) as u32;
-    Some(object.damage_marked.saturating_add(incoming_damage) < toughness)
+fn survives_marked_damage(object: &GameObject, incoming_damage: HalfMagnitude) -> Option<bool> {
+    let toughness = object.exact_toughness()?.clamp_non_negative();
+    Some(object.exact_damage_marked().saturating_add(incoming_damage) < toughness)
 }
 
 /// Assess the next combat-damage exchange for a currently bound attacker/blocker pair.
@@ -797,27 +805,25 @@ pub(crate) fn assess_combat_impact(
         return CombatImpact::Indeterminate;
     }
 
-    let damage = FixedCombatDamage {
-        attacker_to_blocker: combat_damage_amount(attacker_object),
-        blocker_to_attacker: combat_damage_amount(blocker_object),
-    };
+    let attacker_to_blocker = combat_damage_amount_exact(attacker_object);
+    let blocker_to_attacker = combat_damage_amount_exact(blocker_object);
     if damage_is_not_fixed(
         state,
         &attacker_context,
         &TargetRef::Object(blocker.object_id),
-        damage.attacker_to_blocker,
+        attacker_to_blocker,
     ) || damage_is_not_fixed(
         state,
         &blocker_context,
         &TargetRef::Object(attacker.object_id),
-        damage.blocker_to_attacker,
+        blocker_to_attacker,
     ) {
         return CombatImpact::Indeterminate;
     }
 
     let (Some(attacker_survives), Some(blocker_survives)) = (
-        survives_marked_damage(attacker_object, damage.blocker_to_attacker),
-        survives_marked_damage(blocker_object, damage.attacker_to_blocker),
+        survives_marked_damage(attacker_object, blocker_to_attacker),
+        survives_marked_damage(blocker_object, attacker_to_blocker),
     ) else {
         return CombatImpact::Indeterminate;
     };
@@ -827,6 +833,10 @@ pub(crate) fn assess_combat_impact(
         return CombatImpact::Indeterminate;
     }
 
+    let damage = FixedCombatDamage {
+        attacker_to_blocker: attacker_to_blocker.whole_floor(),
+        blocker_to_attacker: blocker_to_attacker.whole_floor(),
+    };
     CombatImpact::Fixed {
         damage,
         survival: FixedCombatSurvival {
@@ -870,8 +880,8 @@ fn collect_damage_assignments(
             continue;
         }
 
-        let power = combat_damage_amount(obj);
-        if power == 0 {
+        let power = combat_damage_amount_exact(obj);
+        if power == HalfMagnitude::ZERO {
             continue;
         }
 
@@ -911,9 +921,15 @@ fn collect_damage_assignments(
                 .get(&attacker_info.object_id)
                 .into_iter()
                 .flatten()
-                .map(|&bid| DamageSlot {
-                    blocker_id: bid,
-                    lethal_minimum: lethal_damage_needed(state, bid, has_deathtouch),
+                .map(|&bid| {
+                    let (lethal_whole, lethal_fraction) =
+                        lethal_damage_needed_exact(state, bid, has_deathtouch)
+                            .into_whole_and_fraction();
+                    DamageSlot {
+                        blocker_id: bid,
+                        lethal_minimum: lethal_whole,
+                        lethal_minimum_fraction: lethal_fraction,
+                    }
                 })
                 .collect();
             let assignment_modes = combat_damage_assignment_modes(
@@ -958,10 +974,12 @@ fn collect_damage_assignments(
                 (None, None)
             };
 
+            let (total_damage, total_damage_fraction) = power.into_whole_and_fraction();
             return Some(WaitingFor::AssignCombatDamage {
                 player: controller,
                 attacker_id: attacker_info.object_id,
-                total_damage: power,
+                total_damage,
+                total_damage_fraction,
                 blockers,
                 assignment_modes,
                 trample,
@@ -1046,8 +1064,8 @@ fn collect_damage_assignments(
             continue;
         }
 
-        let power = combat_damage_amount(obj);
-        if power == 0 {
+        let power = combat_damage_amount_exact(obj);
+        if power == HalfMagnitude::ZERO {
             continue;
         }
 
@@ -1066,10 +1084,12 @@ fn collect_damage_assignments(
                 ));
 
         if active_player_divides {
+            let (total_damage, total_damage_fraction) = power.into_whole_and_fraction();
             return Some(WaitingFor::AssignBlockerDamage {
                 player: state.active_player,
                 blocker_id,
-                total_damage: power,
+                total_damage,
+                total_damage_fraction,
                 attackers: attacker_ids.clone(),
             });
         }
@@ -1082,10 +1102,10 @@ fn collect_damage_assignments(
             // CR 702.22k prompt does not re-push this blocker's division.
             c.damage_assignments.insert(
                 blocker_id,
-                vec![DamageAssignment {
-                    target: DamageTarget::Object(attacker_ids[0]),
-                    amount: power,
-                }],
+                vec![DamageAssignment::new(
+                    DamageTarget::Object(attacker_ids[0]),
+                    power,
+                )],
             );
         }
     }
@@ -1098,10 +1118,11 @@ fn collect_damage_assignments(
 }
 
 /// CR 510.1d: Distribute a blocker's combat damage among the attackers it blocks.
-/// When blocking multiple attackers, damage is split evenly (first attacker gets remainder).
+/// When blocking multiple attackers, whole-point damage splits evenly (first
+/// attacker gets the remainder) and any half-point remainder is added to the first attacker.
 fn distribute_blocker_damage(
     blocker_id: ObjectId,
-    power: u32,
+    power: HalfMagnitude,
     attacker_ids: &[ObjectId],
 ) -> Vec<(ObjectId, DamageAssignment)> {
     if attacker_ids.is_empty() {
@@ -1110,30 +1131,26 @@ fn distribute_blocker_damage(
     if attacker_ids.len() == 1 {
         return vec![(
             blocker_id,
-            DamageAssignment {
-                target: DamageTarget::Object(attacker_ids[0]),
-                amount: power,
-            },
+            DamageAssignment::new(DamageTarget::Object(attacker_ids[0]), power),
         )];
     }
-    // Split damage evenly; first attacker gets the remainder
+    let (whole, frac) = power.into_whole_and_fraction();
     let n = attacker_ids.len() as u32;
-    let base = power / n;
-    let remainder = power % n;
+    let base = whole / n;
+    let remainder = whole % n;
     attacker_ids
         .iter()
         .enumerate()
         .filter_map(|(i, &aid)| {
-            let amount = base + if (i as u32) < remainder { 1 } else { 0 };
-            if amount == 0 {
+            let w = base + if (i as u32) < remainder { 1 } else { 0 };
+            let f = if i == 0 { frac } else { HalfFraction::Zero };
+            let amount = HalfMagnitude::from_whole_and_fraction(w, f);
+            if amount == HalfMagnitude::ZERO {
                 None
             } else {
                 Some((
                     blocker_id,
-                    DamageAssignment {
-                        target: DamageTarget::Object(aid),
-                        amount,
-                    },
+                    DamageAssignment::new(DamageTarget::Object(aid), amount),
                 ))
             }
         })
@@ -1149,7 +1166,7 @@ pub(crate) fn needs_interactive_assignment(
     obj: &GameObject,
     combat: &CombatState,
     attacker_info: &crate::game::combat::AttackerInfo,
-    power: u32,
+    power: HalfMagnitude,
     has_deathtouch: bool,
     trample: Option<TrampleKind>,
 ) -> bool {
@@ -1175,7 +1192,7 @@ pub(crate) fn needs_interactive_assignment(
             .get(&attacker_info.object_id)
             .and_then(|b| b.first())
         {
-            return power > lethal_damage_needed(state, blocker_id, has_deathtouch);
+            return power > lethal_damage_needed_exact(state, blocker_id, has_deathtouch);
         }
     }
 
@@ -1209,8 +1226,10 @@ pub(crate) fn compute_pw_loyalty_threshold(
                 c.pending_damage
                     .iter()
                     .filter(|(_, da)| da.target == DamageTarget::Object(pw_id))
-                    .map(|(_, da)| da.amount)
-                    .sum()
+                    .fold(HalfMagnitude::ZERO, |acc, (_, da)| {
+                        acc.saturating_add(da.exact_amount())
+                    })
+                    .whole_floor()
             })
             .unwrap_or(0);
         let effective = base_loyalty.saturating_sub(pending_to_pw);
@@ -1226,31 +1245,28 @@ pub(crate) fn compute_pw_loyalty_threshold(
 fn assign_trample_over_pw_excess(
     state: &GameState,
     attacker_info: &crate::game::combat::AttackerInfo,
-    excess: u32,
+    excess: HalfMagnitude,
 ) -> Vec<DamageAssignment> {
     let mut result = Vec::new();
-    if excess == 0 {
+    if excess == HalfMagnitude::ZERO {
         return result;
     }
     let (pw_loyalty, pw_controller) = compute_pw_loyalty_threshold(state, attacker_info);
-    let effective_loyalty = pw_loyalty.unwrap_or(0);
+    let effective_loyalty = HalfMagnitude::from_whole(pw_loyalty.unwrap_or(0));
     let to_pw = excess.min(effective_loyalty);
     let to_controller = excess.saturating_sub(to_pw);
 
-    if to_pw > 0 {
+    if to_pw > HalfMagnitude::ZERO {
         // CR 702.19e: trample_over_pw=true so PW removal falls back to defending player.
         if let Some(target) = attacker_info.resolve_damage_target(state, true) {
-            result.push(DamageAssignment {
-                target,
-                amount: to_pw,
-            });
+            result.push(DamageAssignment::new(target, to_pw));
         }
     }
-    if to_controller > 0 {
-        result.push(DamageAssignment {
-            target: DamageTarget::Player(pw_controller.unwrap_or(attacker_info.defending_player)),
-            amount: to_controller,
-        });
+    if to_controller > HalfMagnitude::ZERO {
+        result.push(DamageAssignment::new(
+            DamageTarget::Player(pw_controller.unwrap_or(attacker_info.defending_player)),
+            to_controller,
+        ));
     }
     result
 }
@@ -1271,18 +1287,30 @@ fn combat_damage_assignment_modes(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn assign_damage_as_though_unblocked(
     state: &GameState,
     attacker_info: &crate::game::combat::AttackerInfo,
     power: u32,
     trample: Option<TrampleKind>,
 ) -> Vec<DamageAssignment> {
+    assign_damage_as_though_unblocked_exact(
+        state,
+        attacker_info,
+        HalfMagnitude::from_whole(power),
+        trample,
+    )
+}
+
+pub(crate) fn assign_damage_as_though_unblocked_exact(
+    state: &GameState,
+    attacker_info: &crate::game::combat::AttackerInfo,
+    power: HalfMagnitude,
+    trample: Option<TrampleKind>,
+) -> Vec<DamageAssignment> {
     let is_over_pw = trample == Some(TrampleKind::OverPlaneswalkers);
     match attacker_info.resolve_damage_target(state, is_over_pw) {
-        Some(target) => vec![DamageAssignment {
-            target,
-            amount: power,
-        }],
+        Some(target) => vec![DamageAssignment::new(target, power)],
         None => Vec::new(),
     }
 }
@@ -1293,7 +1321,7 @@ fn assign_attacker_damage(
     state: &GameState,
     attacker_info: &crate::game::combat::AttackerInfo,
     combat: &CombatState,
-    power: u32,
+    power: HalfMagnitude,
     has_deathtouch: bool,
     trample: Option<TrampleKind>,
 ) -> Vec<DamageAssignment> {
@@ -1320,10 +1348,7 @@ fn assign_attacker_damage(
                     // CR 702.19d: Standard trample with no blockers — all to attack target
                     match attacker_info.resolve_damage_target(state, false) {
                         Some(target) => {
-                            return vec![DamageAssignment {
-                                target,
-                                amount: power,
-                            }]
+                            return vec![DamageAssignment::new(target, power)];
                         }
                         None => return Vec::new(),
                     }
@@ -1336,10 +1361,7 @@ fn assign_attacker_damage(
             // CR 506.4c / CR 702.19e: If PW left, trample-over-PW falls back to defending player.
             let is_over_pw = trample == Some(TrampleKind::OverPlaneswalkers);
             match attacker_info.resolve_damage_target(state, is_over_pw) {
-                Some(target) => vec![DamageAssignment {
-                    target,
-                    amount: power,
-                }],
+                Some(target) => vec![DamageAssignment::new(target, power)],
                 None => Vec::new(),
             }
         }
@@ -1352,14 +1374,14 @@ fn assign_attacker_damage(
                     // when power <= lethal (excess == 0). The excess sub-block below stays as
                     // the shared lethal-then-excess logic used by the no-blockers and PW paths.
                     // CR 702.19b: Trample — assign lethal to blocker, excess to attack target.
-                    let lethal = lethal_damage_needed(state, blockers[0], has_deathtouch);
+                    let lethal = lethal_damage_needed_exact(state, blockers[0], has_deathtouch);
                     let to_blocker = power.min(lethal);
                     let excess = power.saturating_sub(to_blocker);
-                    let mut result = vec![DamageAssignment {
-                        target: DamageTarget::Object(blockers[0]),
-                        amount: to_blocker,
-                    }];
-                    if excess > 0 {
+                    let mut result = vec![DamageAssignment::new(
+                        DamageTarget::Object(blockers[0]),
+                        to_blocker,
+                    )];
+                    if excess > HalfMagnitude::ZERO {
                         if trample_kind == TrampleKind::OverPlaneswalkers
                             && matches!(attacker_info.attack_target, AttackTarget::Planeswalker(..))
                         {
@@ -1375,20 +1397,17 @@ fn assign_attacker_damage(
                             // non-PW — excess goes to the attack target directly.
                             if let Some(target) = attacker_info.resolve_damage_target(state, false)
                             {
-                                result.push(DamageAssignment {
-                                    target,
-                                    amount: excess,
-                                });
+                                result.push(DamageAssignment::new(target, excess));
                             }
                         }
                     }
                     result
                 } else {
                     // Single blocker without trample: all damage to blocker
-                    vec![DamageAssignment {
-                        target: DamageTarget::Object(blockers[0]),
-                        amount: power,
-                    }]
+                    vec![DamageAssignment::new(
+                        DamageTarget::Object(blockers[0]),
+                        power,
+                    )]
                 }
             } else {
                 // 2+ blockers: handled interactively via WaitingFor::AssignCombatDamage.
@@ -1433,17 +1452,25 @@ pub fn combat_damage_to_defender(
     attacker_id: ObjectId,
     blockers: &[ObjectId],
 ) -> i32 {
+    combat_damage_to_defender_exact(state, attacker_id, blockers).whole_floor()
+}
+
+pub fn combat_damage_to_defender_exact(
+    state: &GameState,
+    attacker_id: ObjectId,
+    blockers: &[ObjectId],
+) -> HalfSigned {
     let Some(attacker) = state.objects.get(&attacker_id) else {
-        return 0;
+        return HalfSigned(0);
     };
-    // CR 510.1a + CR 613.11: `combat_damage_amount` is the resolver's authority for
+    // CR 510.1a + CR 613.11: `combat_damage_amount_exact` is the resolver's authority for
     // how much a creature assigns — power normally, toughness under a Doran-style
     // rule-modifying effect, and 0 under "assigns no combat damage". Reading raw
     // power here would make this helper contradict the combat it exists to predict.
     // CR 510.1a: a creature assigning 0 or less assigns no combat damage at all.
-    let power = combat_damage_amount(attacker) as i32;
-    if power == 0 {
-        return 0;
+    let power = combat_damage_amount_exact(attacker);
+    if power == HalfMagnitude::ZERO {
+        return HalfSigned(0);
     }
     let has_trample = attacker.has_keyword(&Keyword::Trample);
     let has_deathtouch = attacker.has_keyword(&Keyword::Deathtouch);
@@ -1455,13 +1482,18 @@ pub fn combat_damage_to_defender(
     // `resolve_combat_damage` does (`double_strike_deals_damage_twice`: an unblocked
     // 3/3 double striker deals 6). Plain first strike assigns in one step only.
     if blockers.is_empty() {
-        return if has_double_strike { power * 2 } else { power };
+        let total = if has_double_strike {
+            HalfMagnitude(power.0.saturating_mul(2))
+        } else {
+            power
+        };
+        return HalfSigned::from_half_magnitude(total);
     }
 
     // Remaining lethal per blocker, in the order the attacker would exhaust them.
-    let mut remaining: Vec<i32> = blockers
+    let mut remaining: Vec<HalfMagnitude> = blockers
         .iter()
-        .map(|&bid| lethal_damage_needed(state, bid, has_deathtouch) as i32)
+        .map(|&bid| lethal_damage_needed_exact(state, bid, has_deathtouch))
         .collect();
     remaining.sort_unstable();
 
@@ -1472,31 +1504,36 @@ pub fn combat_damage_to_defender(
         .filter(|b| b.has_keyword(&Keyword::FirstStrike) || b.has_keyword(&Keyword::DoubleStrike))
         .collect();
 
-    let mut to_player = 0;
+    let mut to_player = HalfMagnitude::ZERO;
     let mut attacker_alive = true;
 
     // CR 702.4b: the first combat damage step exists at all only if some
     // participant has first or double strike.
     if attacker_strikes_first || !first_strike_blockers.is_empty() {
         if attacker_strikes_first {
-            to_player += assign_step_to_defender(&mut remaining, power, has_trample);
+            to_player = to_player.saturating_add(assign_step_to_defender(
+                &mut remaining,
+                power,
+                has_trample,
+            ));
         }
         // CR 702.7b: first-striking blockers assign now, and can kill the attacker
         // before it ever reaches the regular step.
-        let attacker_lethal = lethal_damage_needed(
+        let attacker_lethal = lethal_damage_needed_exact(
             state,
             attacker_id,
             first_strike_blockers
                 .iter()
                 .any(|b| b.has_keyword(&Keyword::Deathtouch)),
-        ) as i32;
+        );
         // CR 510.1a + CR 613.11: same authority for the blockers — a first-striking
         // Doran-style blocker kills the attacker with its toughness, and one that
         // assigns no combat damage cannot kill it at all.
-        let first_strike_damage: i32 = first_strike_blockers
+        let first_strike_damage: HalfMagnitude = first_strike_blockers
             .iter()
-            .map(|b| combat_damage_amount(b) as i32)
-            .sum();
+            .fold(HalfMagnitude::ZERO, |acc, b| {
+                acc.saturating_add(combat_damage_amount_exact(b))
+            });
         if first_strike_damage >= attacker_lethal {
             attacker_alive = false;
         }
@@ -1505,10 +1542,11 @@ pub fn combat_damage_to_defender(
     // CR 702.4b: the attacker assigns in the regular step if it has double strike,
     // or if it never had first strike and so has not assigned at all yet.
     if attacker_alive && (has_double_strike || !attacker_strikes_first) {
-        to_player += assign_step_to_defender(&mut remaining, power, has_trample);
+        to_player =
+            to_player.saturating_add(assign_step_to_defender(&mut remaining, power, has_trample));
     }
 
-    to_player
+    HalfSigned::from_half_magnitude(to_player)
 }
 
 /// CR 510.2 + CR 120.3b + CR 120.3g + CR 702.70a: the board after each unblocked attacker deals one step of combat damage to its player and the selected triggers that damage fires resolve, on a copy; None when either stops for a choice.
@@ -1521,13 +1559,10 @@ pub fn preview_unblocked_combat_damage(
     let assignments: Vec<(ObjectId, DamageAssignment)> = attacks
         .iter()
         .filter_map(|&(attacker, player)| {
-            let amount = combat_damage_amount(preview.objects.get(&attacker)?);
+            let amount = combat_damage_amount_exact(preview.objects.get(&attacker)?);
             Some((
                 attacker,
-                DamageAssignment {
-                    target: DamageTarget::Player(player),
-                    amount,
-                },
+                DamageAssignment::new(DamageTarget::Player(player), amount),
             ))
         })
         .collect();
@@ -1558,43 +1593,53 @@ pub fn preview_unblocked_combat_damage(
 /// One combat damage step's worth of assignment from a single attacker, returning
 /// the damage that reaches the defending player and consuming the blockers it
 /// kills. See `combat_damage_to_defender` for the governing rules.
-fn assign_step_to_defender(remaining: &mut Vec<i32>, power: i32, has_trample: bool) -> i32 {
+fn assign_step_to_defender(
+    remaining: &mut Vec<HalfMagnitude>,
+    power: HalfMagnitude,
+    has_trample: bool,
+) -> HalfMagnitude {
     if remaining.is_empty() {
         // CR 702.19d: blocked, but nothing is blocking it now — a trampler assigns
         // everything to the player. CR 510.1c: without trample it assigns nothing.
-        return if has_trample { power } else { 0 };
+        return if has_trample {
+            power
+        } else {
+            HalfMagnitude::ZERO
+        };
     }
 
-    let total_lethal: i32 = remaining.iter().sum();
+    let total_lethal: HalfMagnitude = remaining
+        .iter()
+        .fold(HalfMagnitude::ZERO, |acc, &x| acc.saturating_add(x));
 
     // CR 702.19b: excess reaches the player only once EVERY blocker has been
-    // assigned lethal damage.
-    if has_trample && power > total_lethal {
+    // assigned lethal damage (an integer-power attacker cannot split 1 point into
+    // halves, so against a blocker needing fractional lethal it must assign
+    // `ceil(lethal)` unless its power carries a half point).
+    let effective_total_lethal = if !power.has_half() && total_lethal.has_half() {
+        HalfMagnitude(total_lethal.0.saturating_add(1))
+    } else {
+        total_lethal
+    };
+    if has_trample && power > effective_total_lethal {
         remaining.clear();
-        return power - total_lethal;
+        return power.saturating_sub(effective_total_lethal);
     }
 
     // Otherwise every point is spent on blockers. Kill the cheapest first — the
     // attacking player chooses, and fewer survivors means less absorption in any
     // later step.
-    //
-    // CR 702.19b: damage assigned to a blocker that survives stays MARKED on it, so
-    // its lethal minimum in a later damage step is reduced by that much. Dropping
-    // the leftover budget instead understated the defender's exposure: a 5-power
-    // double-strike trampler against one 0/6 was read as 0 through, when the first
-    // step marks 5 and the regular step then needs only 1 more before trampling 4.
-    // `remaining` is sorted ascending, so the front is always the cheapest kill.
     let mut budget = power;
     while let Some(&lethal) = remaining.first() {
         if budget >= lethal {
-            budget -= lethal;
+            budget = budget.saturating_sub(lethal);
             remaining.remove(0);
         } else {
-            remaining[0] -= budget;
+            remaining[0] = remaining[0].saturating_sub(budget);
             break;
         }
     }
-    0
+    HalfMagnitude::ZERO
 }
 
 /// How much damage is needed to kill this creature.
@@ -1605,23 +1650,34 @@ fn assign_step_to_defender(remaining: &mut Vec<i32>, power: i32, has_trample: bo
 /// blocker before any excess is assigned to the player, so a consumer estimating
 /// trample absorption must read the same number this resolver assigns rather than
 /// re-deriving it from raw toughness and silently ignoring damage already marked.
-pub fn lethal_damage_needed(
+pub fn lethal_damage_needed_exact(
     state: &GameState,
     object_id: ObjectId,
     source_has_deathtouch: bool,
-) -> u32 {
+) -> HalfMagnitude {
     if source_has_deathtouch {
         // CR 702.2c + CR 702.19b: With deathtouch, 1 damage is lethal.
-        return 1;
+        return HalfMagnitude::ONE;
     }
     state
         .objects
         .get(&object_id)
         .map(|obj| {
-            let toughness = obj.toughness.unwrap_or(0).max(0) as u32;
-            toughness.saturating_sub(obj.damage_marked)
+            let toughness = obj
+                .exact_toughness()
+                .map_or(HalfMagnitude::ZERO, |t| t.clamp_non_negative());
+            HalfMagnitude(toughness.0.saturating_sub(obj.exact_damage_marked().0))
         })
-        .unwrap_or(1)
+        .unwrap_or(HalfMagnitude::ONE)
+}
+
+pub fn lethal_damage_needed(
+    state: &GameState,
+    object_id: ObjectId,
+    source_has_deathtouch: bool,
+) -> u32 {
+    let exact = lethal_damage_needed_exact(state, object_id, source_has_deathtouch);
+    exact.0.div_ceil(2).min(u64::from(u32::MAX)) as u32
 }
 
 /// Apply all combat damage assignments simultaneously (CR 510.2).
@@ -1695,10 +1751,108 @@ impl CombatDamageBatch {
 /// CR 510.2: Phase C accumulators — the lifelink sums and combat bookkeeping
 /// folded per applied leg. Owned so a leg pause can park them in the Phase C
 /// remnant and the resume can continue exactly where the batch parked.
+type PerPlayerExactCombatDamage = (PlayerId, Vec<(ObjectId, HalfMagnitude)>, HalfMagnitude);
+
 struct PhaseCAccumulators {
-    lifelink_by_source: Vec<(ObjectId, PlayerId, u32)>,
-    combat_damage_to_players: Vec<PerPlayerCombatDamage>,
+    lifelink_by_source: Vec<(ObjectId, PlayerId, HalfMagnitude)>,
+    combat_damage_to_players: Vec<PerPlayerExactCombatDamage>,
     source_incarnations: Vec<ObjectIncarnationRef>,
+}
+
+impl PhaseCAccumulators {
+    fn from_remnant(remnant: PendingCombatPhaseCRemnant) -> (Vec<PendingCombatLeg>, Self) {
+        let PendingCombatPhaseCRemnant {
+            remaining,
+            lifelink_by_source,
+            lifelink_by_source_fractions,
+            combat_damage_to_players,
+            combat_damage_to_players_fractions,
+            source_incarnations,
+        } = remnant;
+        let lifelink_by_source = lifelink_by_source
+            .into_iter()
+            .map(|(id, controller, whole)| {
+                let frac = lifelink_by_source_fractions
+                    .iter()
+                    .find(|(fid, _)| *fid == id)
+                    .map_or(HalfFraction::Zero, |(_, f)| *f);
+                (
+                    id,
+                    controller,
+                    HalfMagnitude::from_whole_and_fraction(whole, frac),
+                )
+            })
+            .collect();
+        let combat_damage_to_players = combat_damage_to_players
+            .into_iter()
+            .map(|(player, sources, total_whole)| {
+                let player_entry = combat_damage_to_players_fractions
+                    .iter()
+                    .find(|(pid, _, _)| *pid == player);
+                let total_frac = player_entry.map_or(HalfFraction::Zero, |(_, _, f)| *f);
+                let exact_sources = sources
+                    .into_iter()
+                    .map(|(sid, swhole)| {
+                        let sfrac = player_entry
+                            .and_then(|(_, svec, _)| svec.iter().find(|(id, _)| *id == sid))
+                            .map_or(HalfFraction::Zero, |(_, f)| *f);
+                        (sid, HalfMagnitude::from_whole_and_fraction(swhole, sfrac))
+                    })
+                    .collect();
+                (
+                    player,
+                    exact_sources,
+                    HalfMagnitude::from_whole_and_fraction(total_whole, total_frac),
+                )
+            })
+            .collect();
+        (
+            remaining,
+            Self {
+                lifelink_by_source,
+                combat_damage_to_players,
+                source_incarnations,
+            },
+        )
+    }
+
+    fn into_remnant(self, remaining: Vec<PendingCombatLeg>) -> PendingCombatPhaseCRemnant {
+        let mut lifelink_by_source = Vec::with_capacity(self.lifelink_by_source.len());
+        let mut lifelink_by_source_fractions = Vec::new();
+        for (id, controller, amt) in self.lifelink_by_source {
+            let (whole, frac) = amt.into_whole_and_fraction();
+            lifelink_by_source.push((id, controller, whole));
+            if frac.is_half() {
+                lifelink_by_source_fractions.push((id, frac));
+            }
+        }
+        let mut combat_damage_to_players = Vec::with_capacity(self.combat_damage_to_players.len());
+        let mut combat_damage_to_players_fractions = Vec::new();
+        for (player, sources, total) in self.combat_damage_to_players {
+            let (total_whole, total_frac) = total.into_whole_and_fraction();
+            let mut whole_sources = Vec::with_capacity(sources.len());
+            let mut frac_sources = Vec::new();
+            for (sid, samt) in sources {
+                let (swhole, sfrac) = samt.into_whole_and_fraction();
+                whole_sources.push((sid, swhole));
+                if sfrac.is_half() {
+                    frac_sources.push((sid, sfrac));
+                }
+            }
+            combat_damage_to_players.push((player, whole_sources, total_whole));
+            if total_frac.is_half() || !frac_sources.is_empty() {
+                combat_damage_to_players_fractions.push((player, frac_sources, total_frac));
+            }
+        }
+        PendingCombatPhaseCRemnant {
+            remaining,
+            lifelink_by_source,
+            lifelink_by_source_fractions,
+            combat_damage_to_players,
+            combat_damage_to_players_fractions,
+            source_incarnations: self.source_incarnations,
+        }
+    }
 }
 
 /// CR 510.2 + CR 616.1: outcome of running Phase C legs.
@@ -1735,7 +1889,7 @@ enum RemnantOutcome {
 fn fold_combat_leg_amount(
     state: &mut GameState,
     leg: &PendingCombatLeg,
-    actual_amount: u32,
+    actual_amount: HalfMagnitude,
     accums: &mut PhaseCAccumulators,
 ) {
     // CR 119.3 + CR 702.15b: accumulate this source's lifelink over the batch
@@ -1743,14 +1897,14 @@ fn fold_combat_leg_amount(
     // same life gain). Keyed by source so two different lifelink sources stay
     // separate events while one source hitting many targets is summed.
     if let Some(controller) = leg.lifelink_controller {
-        if actual_amount > 0 {
+        if actual_amount > HalfMagnitude::ZERO {
             let source_id = leg.ctx.source_id;
             if let Some((_, _, total)) = accums
                 .lifelink_by_source
                 .iter_mut()
                 .find(|(id, _, _)| *id == source_id)
             {
-                *total += actual_amount;
+                *total = total.saturating_add(actual_amount);
             } else {
                 accums
                     .lifelink_by_source
@@ -1770,7 +1924,7 @@ fn fold_combat_leg_amount(
         Some(ProposedEvent::Damage {
             target: TargetRef::Player(player_id),
             ..
-        }) if actual_amount > 0 => Some(*player_id),
+        }) if actual_amount > HalfMagnitude::ZERO => Some(*player_id),
         _ => None,
     };
     if let Some(player_id) = &delivered_player {
@@ -1791,11 +1945,11 @@ fn fold_combat_leg_amount(
             .find(|(damaged_player, _, _)| *damaged_player == *player_id)
         {
             if let Some((_, amt)) = sources.iter_mut().find(|(id, _)| *id == source_id) {
-                *amt += actual_amount;
+                *amt = amt.saturating_add(actual_amount);
             } else {
                 sources.push((source_id, actual_amount));
             }
-            *total += actual_amount;
+            *total = total.saturating_add(actual_amount);
         } else {
             accums.combat_damage_to_players.push((
                 *player_id,
@@ -1805,20 +1959,27 @@ fn fold_combat_leg_amount(
         }
 
         // CR 704.6c: Track commander combat damage for the 21-damage loss condition.
-        if leg.source_is_commander && actual_amount > 0 {
+        if leg.source_is_commander && actual_amount > HalfMagnitude::ZERO {
             if let Some(entry) = state
                 .commander_damage
                 .iter_mut()
                 .find(|e| e.player == *player_id && e.commander == source_id)
             {
-                entry.damage += actual_amount;
+                let next =
+                    HalfMagnitude::from_whole_and_fraction(entry.damage, entry.damage_fraction)
+                        .saturating_add(actual_amount);
+                let (w, f) = next.into_whole_and_fraction();
+                entry.damage = w;
+                entry.damage_fraction = f;
             } else {
+                let (w, f) = actual_amount.into_whole_and_fraction();
                 state
                     .commander_damage
                     .push(crate::types::game_state::CommanderDamageEntry {
                         player: *player_id,
                         commander: source_id,
-                        damage: actual_amount,
+                        damage: w,
+                        damage_fraction: f,
                     });
             }
         }
@@ -1850,14 +2011,24 @@ fn run_phase_c_legs(
                 let had_loss_stash = state.pending_damage_post_loss.is_some();
                 let had_counter_stash = state.pending_damage_post_counter.is_some();
                 let ctx = DamageContext::from(leg.ctx);
-                match apply_damage_after_replacement(state, &ctx, survivor_event, true, events) {
-                    DamageResult::Applied(amt) => amt,
-                    DamageResult::NeedsChoice => {
+                match apply_damage_after_replacement_exact(
+                    state,
+                    &ctx,
+                    survivor_event,
+                    true,
+                    events,
+                ) {
+                    ExactDamageResult::Applied(amt) => amt,
+                    ExactDamageResult::NeedsChoice => {
                         let mut loss_pause_amount = None;
                         if !had_loss_stash {
                             if let Some(stashed) = state.pending_damage_post_loss.as_ref() {
                                 if stashed.is_combat {
-                                    loss_pause_amount = Some(stashed.actual_amount);
+                                    loss_pause_amount =
+                                        Some(HalfMagnitude::from_whole_and_fraction(
+                                            stashed.actual_amount,
+                                            stashed.actual_amount_fraction,
+                                        ));
                                 }
                             }
                         }
@@ -1869,7 +2040,11 @@ fn run_phase_c_legs(
                         if !had_counter_stash {
                             if let Some(stashed) = state.pending_damage_post_counter.as_ref() {
                                 if stashed.is_combat {
-                                    counter_pause_amount = Some(stashed.actual_amount);
+                                    counter_pause_amount =
+                                        Some(HalfMagnitude::from_whole_and_fraction(
+                                            stashed.actual_amount,
+                                            stashed.actual_amount_fraction,
+                                        ));
                                 }
                             }
                         }
@@ -1885,12 +2060,12 @@ fn run_phase_c_legs(
                         // (infect/toxic) carry no post-loss stash, so the
                         // deferred portion is dropped (mirrors the legacy
                         // `apply_damage_to_target` combat behavior).
-                        0
+                        HalfMagnitude::ZERO
                     }
                 }
             }
             // Fully prevented or skipped — no damage applied.
-            None => 0,
+            None => HalfMagnitude::ZERO,
         };
         fold_combat_leg_amount(state, leg, actual_amount, accums);
     }
@@ -1901,22 +2076,38 @@ fn run_phase_c_legs(
 /// always been emitted and carried to the drain so a pause cannot reorder it
 /// ahead of a resumed gain.
 fn build_combat_damage_to_players_aggregate(
-    combat_damage_to_players: Vec<PerPlayerCombatDamage>,
+    combat_damage_to_players: Vec<PerPlayerExactCombatDamage>,
     source_incarnations: &[ObjectIncarnationRef],
 ) -> Vec<GameEvent> {
     combat_damage_to_players
         .into_iter()
-        .map(|(player_id, source_amounts, total_damage)| {
+        .map(|(player_id, exact_source_amounts, total_exact)| {
             // CR 400.7: the incarnations of this player's sources.
             let source_incarnations = source_incarnations
                 .iter()
-                .filter(|source| source_amounts.iter().any(|(id, _)| *id == source.object_id))
+                .filter(|source| {
+                    exact_source_amounts
+                        .iter()
+                        .any(|(id, _)| *id == source.object_id)
+                })
                 .copied()
                 .collect();
+            let mut source_amounts = Vec::with_capacity(exact_source_amounts.len());
+            let mut source_amount_fractions = Vec::new();
+            for (sid, samt) in exact_source_amounts {
+                let (w, f) = samt.into_whole_and_fraction();
+                source_amounts.push((sid, w));
+                if f.is_half() {
+                    source_amount_fractions.push((sid, f));
+                }
+            }
+            let (total_damage, total_damage_fraction) = total_exact.into_whole_and_fraction();
             GameEvent::CombatDamageDealtToPlayer {
                 player_id,
                 source_amounts,
+                source_amount_fractions,
                 total_damage,
+                total_damage_fraction,
                 source_incarnations,
             }
         })
@@ -1943,15 +2134,19 @@ fn complete_combat_phase_c_remnant(
         .pending_damage_post_loss
         .take_if(|stashed| stashed.is_combat)
     {
+        let actual_exact = HalfMagnitude::from_whole_and_fraction(
+            stashed.actual_amount,
+            stashed.actual_amount_fraction,
+        );
         emit_damage_dealt_and_record(
             state,
             stashed.source_id,
             stashed.source_incarnation,
             stashed.controller,
             &TargetRef::Player(stashed.target),
-            stashed.actual_amount,
-            stashed.actual_amount,
-            0,
+            actual_exact,
+            actual_exact,
+            HalfMagnitude::ZERO,
             true,
             &mut record.batch_events,
         );
@@ -1965,13 +2160,19 @@ fn complete_combat_phase_c_remnant(
         .take_if(|stashed| stashed.is_combat)
     {
         let ctx = DamageContext::from(stashed.ctx);
+        let actual_exact = HalfMagnitude::from_whole_and_fraction(
+            stashed.actual_amount,
+            stashed.actual_amount_fraction,
+        );
+        let excess_exact =
+            HalfMagnitude::from_whole_and_fraction(stashed.excess, stashed.excess_fraction);
         // CR 120.10: the remnant passes the stashed excess, never a recompute.
         match wither_infect_post_counter_core(
             state,
             &ctx,
             &stashed.target,
-            stashed.actual_amount,
-            stashed.excess,
+            actual_exact,
+            excess_exact,
             true,
             &mut record.batch_events,
         ) {
@@ -1979,17 +2180,7 @@ fn complete_combat_phase_c_remnant(
             PostCounterFlow::Continue { .. } => {}
         }
     }
-    let PendingCombatPhaseCRemnant {
-        remaining,
-        lifelink_by_source,
-        combat_damage_to_players,
-        source_incarnations,
-    } = remnant;
-    let mut accums = PhaseCAccumulators {
-        lifelink_by_source,
-        combat_damage_to_players,
-        source_incarnations,
-    };
+    let (remaining, mut accums) = PhaseCAccumulators::from_remnant(remnant);
     match run_phase_c_legs(state, &remaining, &mut accums, &mut record.batch_events) {
         PhaseCRunOutcome::Complete => {
             record.damage_to_players = build_combat_damage_to_players_aggregate(
@@ -1999,24 +2190,11 @@ fn complete_combat_phase_c_remnant(
             record.remaining = lifelink_gains_in_apnap_order(state, accums.lifelink_by_source);
             RemnantOutcome::Complete
         }
-        PhaseCRunOutcome::PausedOnLoss { index } => RemnantOutcome::Repaused {
-            remnant: PendingCombatPhaseCRemnant {
-                remaining: remaining[index + 1..].to_vec(),
-                lifelink_by_source: accums.lifelink_by_source,
-                combat_damage_to_players: accums.combat_damage_to_players,
-                source_incarnations: accums.source_incarnations,
-            },
-        },
-        // CR 120.3d + CR 616.1: same re-park shape as the loss pause — the
-        // paused leg rides its combat-flagged counter stash.
-        PhaseCRunOutcome::PausedOnCounter { index } => RemnantOutcome::Repaused {
-            remnant: PendingCombatPhaseCRemnant {
-                remaining: remaining[index + 1..].to_vec(),
-                lifelink_by_source: accums.lifelink_by_source,
-                combat_damage_to_players: accums.combat_damage_to_players,
-                source_incarnations: accums.source_incarnations,
-            },
-        },
+        PhaseCRunOutcome::PausedOnLoss { index } | PhaseCRunOutcome::PausedOnCounter { index } => {
+            RemnantOutcome::Repaused {
+                remnant: accums.into_remnant(remaining[index + 1..].to_vec()),
+            }
+        }
     }
 }
 
@@ -2042,14 +2220,21 @@ fn apnap_ranker(state: &GameState) -> impl Fn(PlayerId) -> usize {
 /// seat's gains keep their first-seen order.
 fn lifelink_gains_in_apnap_order(
     state: &GameState,
-    lifelink_by_source: Vec<(ObjectId, PlayerId, u32)>,
+    lifelink_by_source: Vec<(ObjectId, PlayerId, HalfMagnitude)>,
 ) -> VecDeque<PendingLifelinkGain> {
     let mut gains = lifelink_by_source;
     let rank = apnap_ranker(state);
     gains.sort_by_key(|(_, controller, _)| rank(*controller));
     gains
         .into_iter()
-        .map(|(_source_id, controller, amount)| PendingLifelinkGain { controller, amount })
+        .map(|(_source_id, controller, exact)| {
+            let (amount, amount_fraction) = exact.into_whole_and_fraction();
+            PendingLifelinkGain {
+                controller,
+                amount,
+                amount_fraction,
+            }
+        })
         .collect()
 }
 
@@ -2148,7 +2333,7 @@ pub(crate) fn apply_combat_damage(
         };
 
         if let DamageGateOutcome::Proposed(proposed) =
-            pre_replacement_damage_gate(state, &ctx, &target_ref, assignment.amount, true)
+            pre_replacement_damage_gate(state, &ctx, &target_ref, assignment.exact_amount(), true)
         {
             // CR 510.2: the entry carries the damage context, commander flag and
             // recipient alongside the source's `ProposedEvent`, so Phase C can
@@ -2351,12 +2536,7 @@ fn apply_combat_damage_survivors(
     if let Some(index) = paused_index {
         let batch_events = record.batch_events.clone();
         record.prevention_tally = prevention_tally;
-        record.phase_c_remnant = Some(PendingCombatPhaseCRemnant {
-            remaining: legs[index + 1..].to_vec(),
-            lifelink_by_source: accums.lifelink_by_source,
-            combat_damage_to_players: accums.combat_damage_to_players,
-            source_incarnations: accums.source_incarnations,
-        });
+        record.phase_c_remnant = Some(accums.into_remnant(legs[index + 1..].to_vec()));
         state.pending_combat_lifelink = Some(Box::new(record));
         return CombatDamageBatch::Paused {
             events: batch_events,
@@ -2407,10 +2587,10 @@ fn drain_combat_lifelink(
         let Some(gain) = record.remaining.pop_front() else {
             break;
         };
-        match crate::game::effects::life::apply_life_gain(
+        match crate::game::effects::life::apply_life_gain_exact(
             state,
             gain.controller,
-            gain.amount,
+            gain.exact_amount(),
             &mut record.batch_events,
         ) {
             Ok(_) => {}
@@ -2494,10 +2674,14 @@ pub(crate) fn sorted_prevention_entries(
 ) -> Vec<PreventedDamageEntry> {
     let mut entries: Vec<PreventedDamageEntry> = prevention_tally
         .into_iter()
-        .map(|((key, recipient), amount)| PreventedDamageEntry {
-            key,
-            recipient,
-            amount,
+        .map(|((key, recipient), exact)| {
+            let (whole, amount_fraction) = exact.into_whole_and_fraction();
+            PreventedDamageEntry {
+                key,
+                recipient,
+                amount: whole.min(i32::MAX as u32) as i32,
+                amount_fraction,
+            }
         })
         .collect();
     entries.sort_by_key(|entry| {
@@ -2587,10 +2771,13 @@ pub(crate) fn fire_batch_prevention_riders(
         // Every group counts exactly once — resolved means events pushed (or
         // standing-behavior skipped), whether or not a rider dispatched.
         published_entries += group.len();
-        let total_prevented: i32 = group.iter().map(|entry| entry.amount).sum();
-        if total_prevented <= 0 {
+        let exact_total = group.iter().fold(HalfMagnitude::ZERO, |acc, entry| {
+            acc.saturating_add(entry.exact_amount())
+        });
+        if exact_total == HalfMagnitude::ZERO {
             continue;
         }
+        let total_whole = exact_total.whole_floor();
 
         // CR 702.16e + CR 615.13 (Matt F4): protection prevention aggregates
         // under its own key — no registry shield, no rider, never a
@@ -2672,7 +2859,7 @@ pub(crate) fn fire_batch_prevention_riders(
         let Some(runtime) = runtime else {
             continue;
         };
-        state.last_effect_count = Some(total_prevented);
+        state.last_effect_count = Some(total_whole.min(i32::MAX as u32) as i32);
         // Policy is `Replace`: this path has always overwritten a resident
         // continuation rather than deferring to it. The rider inherits no applied
         // set (it is the batch's own aggregate follow-up) — the fresh drain says
@@ -2733,6 +2920,7 @@ fn push_prevented_events(
             source_id,
             target: entry.recipient.clone(),
             amount: entry.amount as u32,
+            amount_fraction: entry.amount_fraction,
         });
     }
 }
@@ -3196,6 +3384,9 @@ mod tests {
                     assignments,
                     trample_damage,
                     controller_damage,
+                    assignments_fraction: Vec::new(),
+                    trample_damage_fraction: Default::default(),
+                    controller_damage_fraction: Default::default(),
                 },
             )
             .expect("greedy combat damage assignment must be legal");
@@ -3400,8 +3591,14 @@ mod tests {
                 affected: TargetFilter::SelfRef,
                 affected_recipient: None,
                 modifications: vec![
-                    ContinuousModification::AddPower { value: 1 },
-                    ContinuousModification::AddToughness { value: 1 },
+                    ContinuousModification::AddPower {
+                        value: 1,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::AddToughness {
+                        value: 1,
+                        fraction: Default::default(),
+                    },
                 ],
                 condition: None,
                 duration_subject: None,
@@ -3536,6 +3733,7 @@ mod tests {
                     DamageAssignment {
                         target: DamageTarget::Player(PlayerId(1)),
                         amount: 2,
+                        amount_fraction: Default::default(),
                     },
                 )
             })
@@ -3554,6 +3752,7 @@ mod tests {
                     player_id,
                     amount,
                     new_total,
+                    ..
                 } if *player_id == PlayerId(1) => Some((*amount, new_total.0)),
                 _ => None,
             })
@@ -3588,6 +3787,7 @@ mod tests {
                 DamageAssignment {
                     target: DamageTarget::Object(shielded),
                     amount: 3,
+                    amount_fraction: Default::default(),
                 },
             ),
             (
@@ -3595,6 +3795,7 @@ mod tests {
                 DamageAssignment {
                     target: DamageTarget::Object(shielded),
                     amount: 3,
+                    amount_fraction: Default::default(),
                 },
             ),
         ];
@@ -3863,6 +4064,9 @@ mod tests {
                 assignments: vec![(blocker, 2)],
                 trample_damage: 3,
                 controller_damage: 0,
+                assignments_fraction: Vec::new(),
+                trample_damage_fraction: Default::default(),
+                controller_damage_fraction: Default::default(),
             },
         )
         .expect("lethal-to-blocker + trample-through is legal");
@@ -3917,6 +4121,7 @@ mod tests {
                 DamageAssignment {
                     target: DamageTarget::Object(blocker1),
                     amount: 1,
+                    amount_fraction: Default::default(),
                 },
             ));
             combat.pending_damage.push((
@@ -3924,6 +4129,7 @@ mod tests {
                 DamageAssignment {
                     target: DamageTarget::Object(blocker2),
                     amount: 1,
+                    amount_fraction: Default::default(),
                 },
             ));
             combat.pending_damage.push((
@@ -3931,6 +4137,7 @@ mod tests {
                 DamageAssignment {
                     target: DamageTarget::Player(PlayerId(1)),
                     amount: 3,
+                    amount_fraction: Default::default(),
                 },
             ));
             combat.damage_step_index = Some(combat.damage_step_index.unwrap_or(0) + 1);
@@ -4069,6 +4276,7 @@ mod tests {
                 DamageAssignment {
                     target: DamageTarget::Object(blocker),
                     amount: 2,
+                    amount_fraction: Default::default(),
                 },
             ),
             (
@@ -4076,6 +4284,7 @@ mod tests {
                 DamageAssignment {
                     target: DamageTarget::Player(PlayerId(1)),
                     amount: 3,
+                    amount_fraction: Default::default(),
                 },
             ),
         ];
@@ -4363,6 +4572,7 @@ mod tests {
                 DamageAssignment {
                     target: DamageTarget::Object(blocker1),
                     amount: 5,
+                    amount_fraction: Default::default(),
                 },
             ));
             combat.damage_step_index = Some(combat.damage_step_index.unwrap_or(0) + 1);
@@ -5086,8 +5296,14 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 7 },
             })
             .modifications(vec![
-                ContinuousModification::AddPower { value: 2 },
-                ContinuousModification::AddToughness { value: 2 },
+                ContinuousModification::AddPower {
+                    value: 2,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 2,
+                    fraction: Default::default(),
+                },
             ]);
         obj.static_definitions.push(static_def.clone());
         Arc::make_mut(&mut obj.base_static_definitions).push(static_def);
@@ -5238,11 +5454,13 @@ mod tests {
                             vec![DamageAssignment {
                                 target: DamageTarget::Object(pw),
                                 amount: 2,
+                                amount_fraction: Default::default(),
                             }]
                         } else if over_pw {
                             vec![DamageAssignment {
                                 target: DamageTarget::Player(PlayerId(1)),
                                 amount: 2,
+                                amount_fraction: Default::default(),
                             }]
                         } else {
                             vec![]
@@ -6125,7 +6343,7 @@ mod tests {
             &obj,
             &combat,
             &attacker_info,
-            power.max(0) as u32,
+            HalfMagnitude::from_whole(power.max(0) as u32),
             deathtouch,
             trample,
         )
@@ -6254,6 +6472,9 @@ mod tests {
                 assignments: vec![(blocker, 2)],
                 trample_damage: 3,
                 controller_damage: 0,
+                assignments_fraction: Vec::new(),
+                trample_damage_fraction: Default::default(),
+                controller_damage_fraction: Default::default(),
             },
         )
         .expect("trample-through assignment is legal");
@@ -6307,6 +6528,9 @@ mod tests {
                 assignments: vec![(blocker_a, 2), (blocker_b, 2)],
                 trample_damage: 0,
                 controller_damage: 0,
+                assignments_fraction: Vec::new(),
+                trample_damage_fraction: Default::default(),
+                controller_damage_fraction: Default::default(),
             },
         )
         .expect("distributing all damage among blockers with trample_damage=0 is legal");
@@ -6351,6 +6575,9 @@ mod tests {
                 assignments: vec![(blocker, 5)],
                 trample_damage: 0,
                 controller_damage: 0,
+                assignments_fraction: Vec::new(),
+                trample_damage_fraction: Default::default(),
+                controller_damage_fraction: Default::default(),
             },
         )
         .expect("keeping all damage on the blocker is legal (CR 702.19b)");
@@ -6902,6 +7129,9 @@ mod tests {
                 assignments: vec![(cadet_1, 1), (cadet_2, 1)],
                 trample_damage: 0,
                 controller_damage: 0,
+                assignments_fraction: Vec::new(),
+                trample_damage_fraction: Default::default(),
+                controller_damage_fraction: Default::default(),
             })
             .expect("assign the Bears' damage");
 
@@ -7621,6 +7851,7 @@ mod tests {
                     source_id,
                     target,
                     amount,
+                    ..
                 } => Some((*source_id, target.clone(), *amount)),
                 _ => None,
             })
@@ -8048,6 +8279,7 @@ mod tests {
                     source_id,
                     target,
                     amount,
+                    ..
                 } => Some((*source_id, target.clone(), *amount)),
                 _ => None,
             })
@@ -8214,6 +8446,7 @@ mod tests {
                     source_id,
                     target,
                     amount,
+                    ..
                 } => Some((*source_id, target.clone(), *amount)),
                 _ => None,
             })

@@ -1490,6 +1490,9 @@ fn interactive_excess_and_candidates_use_the_current_exact_recipient() {
                         assignments: vec![(b.blocker, 4)],
                         trample_damage: 2,
                         controller_damage: 0,
+                        assignments_fraction: Vec::new(),
+                        trample_damage_fraction: Default::default(),
+                        controller_damage_fraction: Default::default(),
                     });
                     assert!(matches!(
                         invalid,
@@ -1520,6 +1523,9 @@ fn interactive_excess_and_candidates_use_the_current_exact_recipient() {
                         assignments: vec![(b.blocker, 4)],
                         trample_damage: if retirement == 0 { 1 } else { 0 },
                         controller_damage: if retirement == 0 { 2 } else { 3 },
+                        assignments_fraction: Vec::new(),
+                        trample_damage_fraction: Default::default(),
+                        controller_damage_fraction: Default::default(),
                     }
                 } else if retirement == 0 {
                     GameAction::AssignCombatDamage {
@@ -1527,6 +1533,9 @@ fn interactive_excess_and_candidates_use_the_current_exact_recipient() {
                         assignments: vec![(b.blocker, 4)],
                         trample_damage: 2,
                         controller_damage: 0,
+                        assignments_fraction: Vec::new(),
+                        trample_damage_fraction: Default::default(),
+                        controller_damage_fraction: Default::default(),
                     }
                 } else {
                     GameAction::AssignCombatDamage {
@@ -1534,6 +1543,9 @@ fn interactive_excess_and_candidates_use_the_current_exact_recipient() {
                         assignments: vec![(b.blocker, 6)],
                         trample_damage: 0,
                         controller_damage: 0,
+                        assignments_fraction: Vec::new(),
+                        trample_damage_fraction: Default::default(),
+                        controller_damage_fraction: Default::default(),
                     }
                 };
                 assert_eq!(generated, expected_generated);
@@ -1545,6 +1557,9 @@ fn interactive_excess_and_candidates_use_the_current_exact_recipient() {
                             assignments: vec![(b.blocker, power)],
                             trample_damage: 0,
                             controller_damage: 0,
+                            assignments_fraction: Vec::new(),
+                            trample_damage_fraction: Default::default(),
+                            controller_damage_fraction: Default::default(),
                         }
                     } else {
                         generated

@@ -1575,8 +1575,14 @@ fn self_pump() -> StaticDefinition {
     StaticDefinition::continuous()
         .affected(TargetFilter::SelfRef)
         .modifications(vec![
-            ContinuousModification::AddPower { value: 1 },
-            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            },
+            ContinuousModification::AddToughness {
+                value: 1,
+                fraction: Default::default(),
+            },
         ])
 }
 
@@ -1953,8 +1959,14 @@ fn outside_slice_ordinary_granted_anthem_escalates_for_entrant() {
             TypedFilter::creature().controller(ControllerRef::You),
         ))
         .modifications(vec![
-            ContinuousModification::AddPower { value: 1 },
-            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            },
+            ContinuousModification::AddToughness {
+                value: 1,
+                fraction: Default::default(),
+            },
         ]);
     attach_synthetic_static(
         &mut runner,

@@ -153,6 +153,7 @@ fn awe_strike_zero_damage_event_does_not_consume_shield_or_fire_rider() {
             source_name: None,
             source_incarnation: None,
             applied: std::collections::HashSet::new(),
+            amount_fraction: Default::default(),
         },
         &mut events,
     );
@@ -667,6 +668,7 @@ fn awe_strike_prevents_both_trample_portions_and_gains_five_life_once() {
                 source_id,
                 target,
                 amount,
+                ..
             } => Some((*source_id, target.clone(), *amount)),
             _ => None,
         })
@@ -742,6 +744,9 @@ fn awe_strike_covers_portions_after_a_parked_ordering_choice() {
                 assignments: vec![(plain, 2), (shielded, 2)],
                 trample_damage: 2,
                 controller_damage: 0,
+                assignments_fraction: Vec::new(),
+                trample_damage_fraction: Default::default(),
+                controller_damage_fraction: Default::default(),
             })
             .expect("submit the trample split")
             .events,

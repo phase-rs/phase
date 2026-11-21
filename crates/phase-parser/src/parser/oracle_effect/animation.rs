@@ -199,10 +199,10 @@ pub(crate) fn animation_modifications(
     let mut modifications = Vec::new();
 
     if let Some(power) = spec.power {
-        modifications.push(ContinuousModification::SetPower { value: power });
+        modifications.push(ContinuousModification::set_power(power));
     }
     if let Some(toughness) = spec.toughness {
-        modifications.push(ContinuousModification::SetToughness { value: toughness });
+        modifications.push(ContinuousModification::set_toughness(toughness));
     }
     if let Some(value) = &spec.dynamic_power {
         modifications.push(ContinuousModification::SetPowerDynamic {
@@ -1149,11 +1149,11 @@ mod test_den_bugbear {
                 "{name}: a Vehicle is not a creature until crewed: {modifications:?}"
             );
             assert!(
-                modifications.contains(&&ContinuousModification::SetPower { value: power }),
+                modifications.contains(&&ContinuousModification::set_power(power)),
                 "{name}: {modifications:?}"
             );
             assert!(
-                modifications.contains(&&ContinuousModification::SetToughness { value: toughness }),
+                modifications.contains(&&ContinuousModification::set_toughness(toughness)),
                 "{name}: {modifications:?}"
             );
             assert!(
@@ -1458,11 +1458,8 @@ mod test_den_bugbear {
         .expect("Frodo-style animation phrase should parse");
 
         let mods = animation_modifications(&spec);
-        assert!(
-            mods.contains(&crate::types::ability::ContinuousModification::SetPower { value: 2 })
-        );
-        assert!(mods
-            .contains(&crate::types::ability::ContinuousModification::SetToughness { value: 3 }));
+        assert!(mods.contains(&crate::types::ability::ContinuousModification::set_power(2)));
+        assert!(mods.contains(&crate::types::ability::ContinuousModification::set_toughness(3)));
         assert!(
             mods.contains(&crate::types::ability::ContinuousModification::AddType {
                 core_type: crate::types::card_type::CoreType::Creature,
@@ -1568,8 +1565,8 @@ mod test_den_bugbear {
         assert!(mods.contains(&ContinuousModification::AddSupertype {
             supertype: Supertype::Legendary,
         }));
-        assert!(mods.contains(&ContinuousModification::SetPower { value: 4 }));
-        assert!(mods.contains(&ContinuousModification::SetToughness { value: 4 }));
+        assert!(mods.contains(&ContinuousModification::set_power(4)));
+        assert!(mods.contains(&ContinuousModification::set_toughness(4)));
         assert!(mods.contains(&ContinuousModification::SetColor {
             colors: vec![ManaColor::Red],
         }));

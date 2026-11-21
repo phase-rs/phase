@@ -150,6 +150,8 @@ fn ghyrson_does_not_trigger_when_ghyrson_is_the_damage_source() {
         is_combat: false,
         excess: 0,
         source_incarnation: None,
+        amount_fraction: Default::default(),
+        excess_fraction: Default::default(),
     };
 
     process_triggers(runner.state_mut(), &[event]);

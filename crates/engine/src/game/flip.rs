@@ -224,7 +224,9 @@ pub(crate) fn flipped_normal_copiable_values(obj: &GameObject) -> Option<Copiabl
         color: normal_face.color.clone(),
         card_types: normal_face.card_types.clone(),
         power: normal_face.power,
+        power_fraction: normal_face.power_fraction,
         toughness: normal_face.toughness,
+        toughness_fraction: normal_face.toughness_fraction,
         loyalty: normal_face.loyalty,
         printed_loyalty: normal_face.printed_loyalty,
         keywords: normal_face.keywords.clone(),
@@ -354,11 +356,17 @@ pub(crate) fn apply_flipped_face_to_object(obj: &mut GameObject, face: BackFaceD
 
     // CR 710.1b: alternative power and toughness.
     obj.power = face.power;
+    obj.power_fraction = face.power_fraction;
     obj.base_power = face.power;
+    obj.base_power_fraction = face.power_fraction;
     obj.layer_base_power = face.power;
+    obj.layer_base_power_fraction = face.power_fraction;
     obj.toughness = face.toughness;
+    obj.toughness_fraction = face.toughness_fraction;
     obj.base_toughness = face.toughness;
+    obj.base_toughness_fraction = face.toughness_fraction;
     obj.layer_base_toughness = face.toughness;
+    obj.layer_base_toughness_fraction = face.toughness_fraction;
 
     // CR 306.5b + CR 310.4b: loyalty/defense track the alternative type line.
     obj.loyalty = face.loyalty;
@@ -500,6 +508,8 @@ mod tests {
             casting_options: vec![],
             layout_kind: Some(crate::types::card::LayoutKind::Flip),
             parse_warnings: vec![],
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         });
 
         id

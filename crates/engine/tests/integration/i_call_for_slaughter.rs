@@ -69,6 +69,7 @@ fn damage(source: ObjectId, victim: ObjectId, amount: u32) -> ProposedEvent {
         source_name: None,
         source_incarnation: None,
         applied: Default::default(),
+        amount_fraction: Default::default(),
     }
 }
 
