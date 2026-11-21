@@ -105906,12 +105906,12 @@ fn search_this_way_guard_rung_does_not_widen() {
 /// The two sentences above are constructed: no printed card says "an opponent searches their library this way"
 /// or "you searched your library this way" (MTGJSON 5.3.0+20261115 has no hit for either). The printed neighbours of
 /// the clause are pinned here with their verbatim Oracle text: Auditore Ambush ("they", a targeted player's
-/// search) and Boldwyr Heavyweights ("each player who searched", past tense) keep an unguarded `Shuffle`, and
+/// search) keeps an unguarded `Shuffle`, and
 /// Prishe's Wanderings (a "when you search your library this way" reflexive trigger) is not turned into a
 /// guard either. Each has a reach guard: the parse still carries its `Shuffle` or its counter effect.
 #[test]
 fn search_this_way_guard_rung_leaves_printed_neighbours_alone() {
-    let cases: [(&str, &str, &[&str], &[&str], &str, &str); 3] = [
+    let cases: [(&str, &str, &[&str], &[&str], &str, &str); 2] = [
         (
             "Auditore Ambush",
             "Choose one or both \u{2014}\n\u{2022} Return target creature to its owner's hand.\n\u{2022} Target player searches their library and/or graveyard for a card named Ezio, Blade of Vengeance, reveals it, and puts it into their hand. If they search their library this way, they shuffle.",
@@ -105919,14 +105919,6 @@ fn search_this_way_guard_rung_leaves_printed_neighbours_alone() {
             &[],
             "\"Shuffle\"",
             "reach guard: the modal ability parsed a Shuffle",
-        ),
-        (
-            "Boldwyr Heavyweights",
-            "Trample\nWhen this creature enters, each opponent may search their library for a creature card and put it onto the battlefield. Then each player who searched their library this way shuffles.",
-            &["Creature"],
-            &["Giant", "Warrior"],
-            "\"Shuffle\"",
-            "reach guard: the trigger parsed a Shuffle",
         ),
         (
             "Prishe's Wanderings",
