@@ -4017,10 +4017,9 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             if crate::game::filter::cycling_history_filter_name(filter.as_ref()).is_err() {
                 return Axes::NONE;
             }
-            let mut acc = Axes::history_of(HistoryMember::CompletedCyclingHistory)
+            // Resource comparison retains the ledger. The turn window also reads the frame turn.
+            let acc = Axes::history_of(HistoryMember::CompletedCyclingHistory)
                 .or(scan_count_scope(scope));
-            // Resource projection clears the completed cycling ledger.
-            acc.projected = true;
             match window {
                 crate::types::ability::CyclingHistoryWindow::ThisTurn => {
                     acc.or(Axes::history_of(HistoryMember::TurnNumber))
@@ -15729,24 +15728,45 @@ mod cycling_quantity_scan_tests {
             },
         };
         let fixed = |value| QuantityExpr::Fixed { value };
-        let ability = |lhs| {
+        let comparison_ability = |lhs, rhs| {
             let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
             ability.condition = Some(AbilityCondition::QuantityCheck {
                 lhs,
                 comparator: Comparator::GE,
-                rhs: fixed(4),
+                rhs,
             });
             ability
         };
-        let trigger = |lhs| TriggerCondition::QuantityComparison {
+        let comparison_trigger = |lhs, rhs| TriggerCondition::QuantityComparison {
             lhs,
             comparator: Comparator::GE,
-            rhs: fixed(2),
+            rhs,
         };
-        let yidaro = ability(quantity(CyclingHistoryWindow::ThisGame, Some(name)));
-        let phoenix = trigger(quantity(CyclingHistoryWindow::ThisTurn, None));
-        assert!(ability_reads_projected_resource(&yidaro));
-        assert!(trigger_condition_reads_projected_resource(&phoenix));
+        let ability = |lhs| comparison_ability(lhs, fixed(4));
+        let trigger = |lhs| comparison_trigger(lhs, fixed(2));
+        let named_cycles = quantity(CyclingHistoryWindow::ThisGame, Some(name));
+        let turn_cycles = quantity(CyclingHistoryWindow::ThisTurn, None);
+        let yidaro = ability(named_cycles.clone());
+        let phoenix = trigger(turn_cycles.clone());
+        assert!(!ability_reads_projected_resource(&yidaro));
+        assert!(!trigger_condition_reads_projected_resource(&phoenix));
+        let casts = QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisGame {
+                scope: CountScope::Controller,
+                filter: None,
+            },
+        };
+        assert!(ability_reads_projected_resource(&ability(casts.clone())));
+        assert!(trigger_condition_reads_projected_resource(&trigger(
+            casts.clone()
+        )));
+        assert!(ability_reads_projected_resource(&comparison_ability(
+            named_cycles,
+            casts.clone(),
+        )));
+        assert!(trigger_condition_reads_projected_resource(
+            &comparison_trigger(turn_cycles, casts,)
+        ));
         assert!(!ability_reads_projected_resource(&ability(fixed(0))));
         assert!(!trigger_condition_reads_projected_resource(&trigger(
             fixed(0)
@@ -15758,6 +15778,10 @@ mod cycling_quantity_scan_tests {
             (CyclingHistoryWindow::ThisGame, false),
         ] {
             let lhs = quantity(window, None);
+            assert!(!ability_reads_projected_resource(&ability(lhs.clone())));
+            assert!(!trigger_condition_reads_projected_resource(&trigger(
+                lhs.clone()
+            )));
             for history in [
                 resolved_ability_history(&ability(lhs.clone())),
                 trigger_condition_history(&trigger(lhs)),
@@ -15774,11 +15798,20 @@ mod cycling_quantity_scan_tests {
             trigger_condition_history(&trigger(fixed(0))),
             HistoryReads::NONE
         );
-        let malformed = ability(quantity(
-            CyclingHistoryWindow::ThisTurn,
-            Some(TargetFilter::Any),
+        let unsupported = quantity(CyclingHistoryWindow::ThisTurn, Some(TargetFilter::Any));
+        let unsupported_ability = ability(unsupported.clone());
+        let unsupported_trigger = trigger(unsupported);
+        assert!(!ability_reads_projected_resource(&unsupported_ability));
+        assert!(!trigger_condition_reads_projected_resource(
+            &unsupported_trigger
         ));
-        assert!(!ability_reads_projected_resource(&malformed));
-        assert_eq!(resolved_ability_history(&malformed), HistoryReads::NONE);
+        assert_eq!(
+            resolved_ability_history(&unsupported_ability),
+            HistoryReads::NONE
+        );
+        assert_eq!(
+            trigger_condition_history(&unsupported_trigger),
+            HistoryReads::NONE
+        );
     }
 }
