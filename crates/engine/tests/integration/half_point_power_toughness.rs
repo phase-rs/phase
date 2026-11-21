@@ -957,8 +957,11 @@ fn skulk_compares_exact_half_point_power() {
         .expect("½ power is not greater than 1: Little Girl can block");
 }
 
+/// Exact prevented amounts, by recipient.
+type PreventedExact = Vec<(TargetRef, HalfMagnitude)>;
+
 /// Every exact `DamagePrevented` amount in `events`, by recipient.
-fn prevented_exact(events: &[GameEvent]) -> Vec<(TargetRef, HalfMagnitude)> {
+fn prevented_exact(events: &[GameEvent]) -> PreventedExact {
     events
         .iter()
         .filter_map(|event| match event {
@@ -982,7 +985,7 @@ fn prevented_exact(events: &[GameEvent]) -> Vec<(TargetRef, HalfMagnitude)> {
 /// unblocked. Returns P0's and P1's exact life and the prevention events.
 fn awe_strike_on_unblocked_attacker(
     attacker_name: &str,
-) -> Option<(HalfSigned, HalfSigned, Vec<(TargetRef, HalfMagnitude)>)> {
+) -> Option<(HalfSigned, HalfSigned, PreventedExact)> {
     let db = load_db()?;
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
