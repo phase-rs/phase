@@ -7047,7 +7047,7 @@ pub struct PendingMassLibraryOrderChoice {
 /// battlefield to its owner's graveyard.
 /// Per-player sacrifice choices for one simultaneous instruction such as
 /// "each player sacrifices a creature."
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PendingPlayerScopeSacrificeChoice {
     /// The scoped sacrifice ability template. The current chooser is rebound
     /// onto a clone before each prompt is built.
@@ -7115,6 +7115,96 @@ pub struct PendingPlayerScopeUnlessPayment {
     pub current_player: PlayerId,
     /// The typed sacrifice cost is retained to re-emit the next existing prompt.
     pub cost: AbilityCost,
+    /// CR 101.4: the sacrifices the paying seats chose, pinned to the
+    /// permanents they were (CR 400.7). Nothing is sacrificed until the last
+    /// seat has answered; then the batch and the tokens happen together.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub payments: Vec<PlayerScopeUnlessSelection>,
+}
+
+/// CR 101.4 + CR 118.12a: The action a seat chose to avert a scoped unless
+/// instruction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlayerScopeUnlessAction {
+    Sacrifice,
+    Discard,
+}
+
+/// CR 101.4 + CR 118.12a: One seat's recorded payment choice in an open
+/// player-scope unless poll. Nothing moves until the last seat has answered.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerScopeUnlessSelection {
+    pub player: PlayerId,
+    pub action: PlayerScopeUnlessAction,
+    pub objects: Vec<ObjectIncarnationRef>,
+}
+
+/// CR 101.4 + CR 118.12a: An APNAP poll for a player-scoped "[instruction]
+/// unless [that player] [sacrifices / discards ...]" instruction.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PendingPlayerScopeUnlessPunishment {
+    /// The scoped ability template, re-entered at settlement for decliners.
+    pub ability: Box<ResolvedAbility>,
+    /// The seat whose prompt is currently live.
+    pub current_player: PlayerId,
+    /// Remaining seats in APNAP order.
+    pub remaining_players: Vec<PlayerId>,
+    /// Seats that declined (will suffer the instruction at settlement).
+    pub declining_players: Vec<PlayerId>,
+    /// Seats that chose to pay, with their pinned selections.
+    pub payments: Vec<PlayerScopeUnlessSelection>,
+    /// Multi-pick buffer for the current seat while `remaining > 1`.
+    pub current_picks: Vec<ObjectIncarnationRef>,
+    /// Trigger event captured when the poll opened, restored at settlement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_event: Option<GameEvent>,
+}
+
+/// CR 101.4 + CR 118.12a: Settling payload for a completed player-scope unless
+/// poll, preserved across any CR 616.1 replacement pause on a chosen discard.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlayerScopeUnlessSettlement {
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    pub discards: Vec<(PlayerId, ObjectIncarnationRef)>,
+    pub sacrifices: Vec<(PlayerId, Vec<ObjectIncarnationRef>)>,
+    /// What happens to the players who declined, after every payment. `None`
+    /// when nothing is owed (an aggregate token instruction nobody declined).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub punishment: Option<Box<ResolvedAbility>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_event: Option<GameEvent>,
+}
+
+/// CR 101.4 + CR 701.21a: A single sacrifice move whose outer and inner
+/// replacement passes already ran while all co-sacrificed permanents remained on
+/// the battlefield, queued for simultaneous delivery.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PendingSacrificeDelivery {
+    pub sacrifice: PendingSacrificeMove,
+    /// CR 614.6: the post-replacement work the consult installed for this move
+    /// (Kalitas, Traitor of Ghet's "create a 2/2 black Zombie"). Each queued
+    /// move keeps its own, so consulting the next move cannot displace it, and
+    /// it runs when this move is delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rider: Option<PostReplacementDrain>,
+}
+
+/// CR 701.21a: The approved shape of a consulted sacrifice move.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PendingSacrificeMove {
+    Sacrifice {
+        object_id: ObjectId,
+        player_id: PlayerId,
+        zone_event: ProposedEvent,
+    },
+    InnerPrevented {
+        object_id: ObjectId,
+        player_id: PlayerId,
+    },
+    DirectMove {
+        zone_event: ProposedEvent,
+    },
 }
 
 /// CR 101.4 + CR 701.21a: Accumulated terminal state for a simultaneous
@@ -7122,7 +7212,7 @@ pub struct PendingPlayerScopeUnlessPayment {
 /// The individual choice queue can become empty while the final proposed
 /// sacrifice is still awaiting replacement resolution, so this state must be
 /// carried independently of the remaining selections.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PendingPlayerScopeSacrificeCompletion {
     /// Every permanent announced for this sacrifice action. The ids scope
     /// event-derived bookkeeping to this batch when a replacement resumes.
@@ -7177,6 +7267,17 @@ pub struct PendingPlayerScopeSacrificeCompletion {
     /// on the same typed batch when the selected sacrifice pauses.
     #[serde(default)]
     pub propagate_parent_context: bool,
+    /// CR 101.4: Pre-consulted sacrifice moves awaiting delivery after every
+    /// co-sacrificed permanent in the batch has cleared replacement consult.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_deliveries: Vec<PendingSacrificeDelivery>,
+    /// CR 101.4 + CR 616.1: the sacrifice whose replacement consult a CR 616.1
+    /// choice interrupted, before every selection was consulted. Answering
+    /// that choice only finishes this sacrifice's consult: its approved move
+    /// joins `pending_deliveries`, and nothing moves until the rest of the
+    /// batch has been consulted too. `None` while the batch is delivering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consult_pause: Option<PendingSacrificeProvenance>,
 }
 
 /// CR 702.110b + CR 701.21a + CR 616.1: A per-sacrifice consequence carried
@@ -11428,6 +11529,9 @@ pub enum PendingCostMoveResume {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         departure_record_indices: Vec<usize>,
     },
+    /// CR 101.4 + CR 118.12a + CR 616.1: A settled player-scope unless poll
+    /// whose cost discard paused on a replacement choice.
+    PlayerScopeUnlessSettlement(Box<PlayerScopeUnlessSettlement>),
 }
 
 /// CR 702.37e: The kind of cost move being performed to turn a permanent face up.
@@ -11497,6 +11601,7 @@ impl PendingCostMoveResume {
             | Self::LoyaltyActivation { .. }
             | Self::CounterAdditionUnlessPayment { .. }
             | Self::RandomDiscardUnlessPayment(_)
+            | Self::PlayerScopeUnlessSettlement(_)
             | Self::TurnFaceUpCostMove { .. } => None,
         }
     }
@@ -11536,7 +11641,8 @@ impl PendingCostMoveResume {
             | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
             | PendingCostMoveResume::UnlessBouncePayment { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
-            | PendingCostMoveResume::RandomDiscardUnlessPayment(_) => false,
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(_)
+            | PendingCostMoveResume::PlayerScopeUnlessSettlement(_) => false,
         }
     }
 
@@ -11575,6 +11681,7 @@ impl PendingCostMoveResume {
             | PendingCostMoveResume::LoyaltyActivation { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             | PendingCostMoveResume::RandomDiscardUnlessPayment(_)
+            | PendingCostMoveResume::PlayerScopeUnlessSettlement(_)
             | PendingCostMoveResume::TurnFaceUpCostMove { .. } => None,
         }
     }
@@ -12344,6 +12451,7 @@ impl GameState {
                 | PendingCostMoveResume::LoyaltyActivation { .. }
                 | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                 | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                | PendingCostMoveResume::PlayerScopeUnlessSettlement(..)
                 | PendingCostMoveResume::TurnFaceUpCostMove { .. } => None,
             },
             PendingCastOwner::DiscardForCost => match self.pending_discard_for_cost.as_deref()? {
@@ -12393,6 +12501,7 @@ impl GameState {
                 | PendingCostMoveResume::LoyaltyActivation { .. }
                 | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                 | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                | PendingCostMoveResume::PlayerScopeUnlessSettlement(..)
                 | PendingCostMoveResume::TurnFaceUpCostMove { .. } => None,
             },
             PendingCastOwner::DiscardForCost => {
@@ -12806,6 +12915,11 @@ fn visit_cost_move_resume_events(
         }
         PendingCostMoveResume::RandomDiscardUnlessPayment(resume) => {
             if let Some(event) = resume.trigger_event.as_mut() {
+                f(event);
+            }
+        }
+        PendingCostMoveResume::PlayerScopeUnlessSettlement(settlement) => {
+            if let Some(event) = settlement.trigger_event.as_mut() {
                 f(event);
             }
         }
@@ -28844,6 +28958,10 @@ declare_game_state! {
     /// across one-seat sacrifice choices and replacement pauses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_player_scope_unless_payment: Option<Box<PendingPlayerScopeUnlessPayment>>,
+    /// CR 101.4 + CR 118.12a: APNAP poll for a player-scoped unless
+    /// instruction whose seats all answer before anything moves or resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_player_scope_unless_punishment: Option<Box<PendingPlayerScopeUnlessPunishment>>,
     /// CR 608.2c + CR 701.9a: a discard instruction parked by a
     /// replacement-application choice. See [`PendingDiscardBatch`], whose doc
     /// records why CR 616.1 does not govern this path.
@@ -31352,6 +31470,15 @@ fn visit_cost_move_resume_chains<'a>(
             &resume.pending_effect,
             SuspendedChainEvent::Bound(resume.trigger_event.as_ref()),
         ),
+        PendingCostMoveResume::PlayerScopeUnlessSettlement(settlement) => settlement
+            .punishment
+            .as_deref()
+            .map_or(Ok(()), |punishment| {
+                f(
+                    punishment,
+                    SuspendedChainEvent::Bound(settlement.trigger_event.as_ref()),
+                )
+            }),
         PendingCostMoveResume::CollectEvidencePayment { resume, .. } => {
             visit_collect_evidence_resume_chains(resume, f)
         }
@@ -31930,6 +32057,12 @@ fn visit_suspended_chains<'a>(
     }
     if let Some(payment) = state.pending_player_scope_unless_payment.as_deref() {
         suspended(&payment.pending_effect, SuspendedChainEvent::Ambient)?;
+    }
+    if let Some(poll) = state.pending_player_scope_unless_punishment.as_deref() {
+        suspended(
+            &poll.ability,
+            SuspendedChainEvent::Bound(poll.trigger_event.as_ref()),
+        )?;
     }
     // CR 608.2f + CR 701.9a: a discard paused mid fan-out resumes the clause for
     // the remaining players and then its outer chain, in the current resolution.
@@ -34471,6 +34604,7 @@ impl GameState {
                 | PendingCostMoveResume::LoyaltyActivation { .. }
                 | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                 | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                | PendingCostMoveResume::PlayerScopeUnlessSettlement(..)
                 | PendingCostMoveResume::TurnFaceUpCostMove { .. } => false,
             });
         let deferred_life = self
@@ -38592,6 +38726,7 @@ impl GameState {
             pending_player_scope_sacrifice_choice: None,
             pending_player_scope_choice: None,
             pending_player_scope_unless_payment: None,
+            pending_player_scope_unless_punishment: None,
             pending_discard_batch: None,
             pending_hero_event: None,
             pending_horde_reveal: None,
@@ -42642,6 +42777,7 @@ impl GameState {
             pending_player_scope_sacrifice_choice: _,
             pending_player_scope_choice: _,
             pending_player_scope_unless_payment: _,
+            pending_player_scope_unless_punishment: _,
             pending_discard_batch: _,
             pending_exile_from_top_until: _,
             pending_mass_library_order_choice: _,
@@ -44347,6 +44483,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_player_scope_sacrifice_choice: _,
         pending_player_scope_choice: _,
         pending_player_scope_unless_payment: _,
+        pending_player_scope_unless_punishment: _,
         pending_discard_batch: _,
         pending_hero_event: _,
         pending_horde_reveal: _,
@@ -44877,6 +45014,8 @@ impl PartialEq for GameState {
             && self.pending_player_scope_choice == other.pending_player_scope_choice
             && self.pending_player_scope_unless_payment
                 == other.pending_player_scope_unless_payment
+            && self.pending_player_scope_unless_punishment
+                == other.pending_player_scope_unless_punishment
             && self.pending_discard_batch == other.pending_discard_batch
             && self.pending_damage_post_loss == other.pending_damage_post_loss
             && self.pending_damage_post_counter == other.pending_damage_post_counter
@@ -70733,6 +70872,7 @@ mod restored_exact_attack_authority_tests {
                             declining_players: vec![],
                             current_player: P0,
                             cost: AbilityCost::Tap,
+                            payments: Vec::new(),
                         }));
                     state.waiting_for.clone()
                 }
