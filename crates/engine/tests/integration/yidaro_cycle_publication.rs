@@ -7,15 +7,14 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityTag, ChosenAttribute, ControllerRef, CountScope, CyclingHistoryWindow, Effect,
-    FilterProp, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef, TypeFilter,
-    TypedFilter,
+    AbilityTag, ChoiceType, ControllerRef, CountScope, CyclingHistoryWindow, Effect, FilterProp,
+    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
     CastPaymentMode, CyclingOccurrence, CyclingRecord, GameState, ManaChoice, ManaChoicePrompt,
-    StackEntryKind, WaitingFor,
+    NamedChoiceSourceBinding, StackEntryKind, WaitingFor, ZoneDeparture,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
@@ -2001,13 +2000,14 @@ fn priority_for(runner: &mut GameRunner, seat: PlayerId, player_count: usize) {
 fn cycle_population(
     mut scenario: GameScenario,
     player_count: usize,
+    cycle_counts: [usize; 3],
 ) -> (GameRunner, [ObjectId; 3], GameEvent) {
     scenario.at_phase(Phase::PreCombatMain);
     let seats = [P0, P1, PlayerId(2)];
     let sources =
         seats.map(|seat| printed(&mut scenario, seat, "Sidewinder Sliver", Zone::Battlefield));
     let cards = seats.map(|seat| {
-        (0..=usize::from(seat.0))
+        (0..cycle_counts[usize::from(seat.0)])
             .map(|_| printed(&mut scenario, seat, "Street Wraith", Zone::Hand))
             .collect::<Vec<_>>()
     });
@@ -2018,22 +2018,7 @@ fn cycle_population(
     let mut last_cycle = None;
     for (seat, cards) in seats.into_iter().zip(cards) {
         for (journal_index, card) in cards.into_iter().enumerate() {
-            if runner
-                .state()
-                .format_config
-                .topology()
-                .has_shared_team_turns()
-                && seat == P1
-            {
-                // The live pass path rotates between team representatives.
-                // Set up the teammate as the acting seat in the team's window.
-                priority_for(&mut runner, P0, player_count);
-                let state = runner.state_mut();
-                state.priority_player = seat;
-                state.waiting_for = WaitingFor::Priority { player: seat };
-            } else {
-                priority_for(&mut runner, seat, player_count);
-            }
+            priority_for(&mut runner, seat, player_count);
             let paid_life =
                 |runner: &GameRunner| engine::game::players::team_life_total(runner.state(), seat);
             let life_before = paid_life(&runner);
@@ -2089,6 +2074,45 @@ fn cycle_population(
     )
 }
 
+fn cast_black_vise(runner: &mut GameRunner, vise: ObjectId, chosen: PlayerId) {
+    priority(runner);
+    let card_id = runner.state().objects[&vise].card_id;
+    act(
+        runner,
+        GameAction::CastSpell {
+            object_id: vise,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    );
+    assert_eq!(zone(runner, vise), Zone::Stack);
+    for _ in 0..3 {
+        act(runner, GameAction::PassPriority);
+    }
+    // CR 614.12a: the choice is made before the artifact enters.
+    let WaitingFor::NamedChoice {
+        player: P0,
+        choice_type: ChoiceType::Opponent { .. },
+        source: Some(source),
+        options,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("expected Black Vise's as-enters opponent choice");
+    };
+    assert_eq!(source.binding, NamedChoiceSourceBinding::PendingEntry);
+    assert_eq!(source.prompt.identity.reference.object_id, vise);
+    assert!(!runner.state().battlefield.contains(&vise));
+    let choice = chosen.0.to_string();
+    assert!(options.contains(&choice));
+    act(runner, GameAction::ChooseOption { choice });
+    priority(runner);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(zone(runner, vise), Zone::Battlefield);
+    assert_eq!(runner.state().objects[&vise].chosen_player(), Some(chosen));
+}
+
 #[test]
 fn phase3_v2_counts_teammates_departed_seats_and_bound_players() {
     use engine::types::format::FormatConfig;
@@ -2096,21 +2120,24 @@ fn phase3_v2_counts_teammates_departed_seats_and_bound_players() {
     let (team, sources, _) = cycle_population(
         GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42),
         4,
+        [2, 0, 3],
     );
     let observer = |source| ResolvedAbility::new(Effect::NoOp, vec![], source, P0);
-    let ability = observer(sources[0]);
+    // P0 cycles as the team's priority representative and P1 reads the history.
+    let ability = ResolvedAbility::new(Effect::NoOp, vec![], sources[1], P1);
     for (scope, n) in [
-        (CountScope::Controller, 1),
-        (CountScope::All, 6),
+        (CountScope::Controller, 0),
+        (CountScope::All, 5),
         (CountScope::Opponents, 3),
     ] {
         assert_cycle_windows(team.state(), &ability, scope, [n, n]);
     }
 
-    let (mut runner, sources, event) = cycle_population(
-        GameScenario::new_with_format(FormatConfig::free_for_all(), 3, 42),
-        3,
-    );
+    let mut scenario = GameScenario::new_with_format(FormatConfig::free_for_all(), 3, 42);
+    let opponents = [P1, other];
+    let vises = opponents.map(|_| printed(&mut scenario, P0, "Black Vise", Zone::Hand));
+    scenario.with_mana_pool(P0, mana(ManaType::Colorless, vises.len()));
+    let (mut runner, sources, event) = cycle_population(scenario, 3, [1, 2, 3]);
     let mut ability = observer(sources[2]);
     assert_eq!(runner.state().objects[&ability.source_id].owner, other);
     ability.original_controller = Some(P1);
@@ -2127,10 +2154,8 @@ fn phase3_v2_counts_teammates_departed_seats_and_bound_players() {
     assert_cycle_windows(runner.state(), &ability, CountScope::ScopedPlayer, [1, 1]);
     runner.state_mut().current_trigger_event = None;
 
-    for (source, chosen) in [(sources[0], P0), (sources[1], other)] {
-        let choices = runner.state_mut().chosen_attributes_mut(source).unwrap();
-        choices.push(ChosenAttribute::Player(chosen));
-        assert_eq!(choices.as_slice(), &[ChosenAttribute::Player(chosen)]);
+    for (vise, chosen) in vises.into_iter().zip(opponents) {
+        cast_black_vise(&mut runner, vise, chosen);
     }
     let capture = |state: &GameState, source| {
         state.objects[&source]
@@ -2139,8 +2164,8 @@ fn phase3_v2_counts_teammates_departed_seats_and_bound_players() {
             .unwrap()
             .clone()
     };
-    let mut ability = observer(sources[0]);
-    for (bound, n) in [(Some(sources[1]), 3), (Some(sources[0]), 1), (None, 1)] {
+    let mut ability = observer(vises[0]);
+    for (bound, n) in [(Some(vises[1]), 3), (Some(vises[0]), 2), (None, 2)] {
         ability.trigger_source = bound.map(|source| capture(runner.state(), source));
         assert_cycle_windows(
             runner.state(),
@@ -2159,14 +2184,28 @@ fn phase3_v2_counts_teammates_departed_seats_and_bound_players() {
 
     let ability = observer(sources[0]);
     priority_for(&mut runner, P1, 3);
+    let cycled_cards = runner.state().players[1].graveyard.clone();
+    assert_eq!(cycled_cards.len(), 2);
+    assert!(cycled_cards
+        .iter()
+        .all(|id| runner.state().objects[id].name == "Street Wraith"));
+    let departure_start = runner.state().zone_changes_this_turn.len();
     act(&mut runner, GameAction::Concede { player_id: P1 });
     assert!(runner.state().players[1].is_eliminated);
-    // CR 800.4a: the departed player's permanent has left the game.
-    assert!(runner
-        .state()
-        .objects
-        .get(&sources[1])
-        .is_none_or(|object| object.zone != Zone::Battlefield));
+    // CR 800.4a: the departed player's owned objects leave the game.
+    let owned_objects = std::iter::once((sources[1], Zone::Battlefield))
+        .chain(cycled_cards.into_iter().map(|id| (id, Zone::Graveyard)));
+    for (object_id, origin) in owned_objects {
+        let record = runner
+            .state()
+            .zone_changes_this_turn
+            .iter()
+            .skip(departure_start)
+            .find(|record| record.object_id == object_id)
+            .expect("concession records each owned object's departure");
+        assert_eq!(record.departure, ZoneDeparture::LeftGame);
+        assert_eq!(record.from_zone, Some(origin));
+    }
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
