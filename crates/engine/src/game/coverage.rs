@@ -5464,7 +5464,14 @@ fn fmt_trigger_constraint(c: &crate::types::ability::TriggerConstraint) -> Strin
                 None => format!("{timing} spell this turn"),
             }
         }
-        TC::NthDrawThisTurn { n } => format!("on your {} draw this turn", fmt_ordinal(*n)),
+        TC::NthDrawThisTurn { n, comparator } => match comparator {
+            Comparator::EQ => format!("on your {} draw this turn", fmt_ordinal(*n)),
+            Comparator::LE => format!("on or before your {} draw this turn", fmt_ordinal(*n)),
+            Comparator::GT | Comparator::LT | Comparator::GE | Comparator::NE => format!(
+                "when your draw ordinal {} {n} this turn",
+                fmt_comparator(comparator)
+            ),
+        },
         TC::OnlyDuringOpponentsTurn => "only during opponent's turn".into(),
         TC::OnlyDuringYourMainPhase => "only during your main phase".into(),
         TC::AtClassLevel { level } => format!("at class level {level}"),
@@ -19458,8 +19465,18 @@ mod tests {
             "on your 13th spell this turn"
         );
         assert_eq!(
-            fmt_trigger_constraint(&TriggerConstraint::NthDrawThisTurn { n: 3 }),
+            fmt_trigger_constraint(&TriggerConstraint::NthDrawThisTurn {
+                n: 3,
+                comparator: Comparator::EQ,
+            }),
             "on your 3rd draw this turn"
+        );
+        assert_eq!(
+            fmt_trigger_constraint(&TriggerConstraint::NthDrawThisTurn {
+                n: 2,
+                comparator: Comparator::LE,
+            }),
+            "on or before your 2nd draw this turn"
         );
     }
 
