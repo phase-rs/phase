@@ -3015,8 +3015,9 @@ fn settle_finished_game(state: &mut GameState, result: &mut ActionResult) {
 }
 
 /// CR 117.2e + CR 608.2c + CR 117.5: finish a resolution whose current pause a
-/// player's departure canceled (`elimination::DepartureResume`), then settle it
-/// as any action that completed one: the owed final part (CR 608.2n),
+/// player's departure canceled, or whose choose-all-then-act collection the
+/// departure completed and delivered (`elimination::DepartureResume`), then
+/// settle it as any action that completed one: the owed final part (CR 608.2n),
 /// state-based actions (CR 704.3), then the queued triggered abilities. The
 /// pipeline scans `events[scan_from..]` and skips every occurrence the departure
 /// already claimed (the departure collects its own triggers once, against the
@@ -3094,7 +3095,7 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
         // `departure_start` takes only what happened after it.
         let departure_start = result.events.len();
         match sba::check_state_based_actions_reporting_departure(state, &mut result.events) {
-            super::elimination::DepartureResume::ParkedZoneChangeTail => {
+            super::elimination::DepartureResume::ResolutionTail => {
                 settle_resolution_resumed_after_departure(
                     state,
                     &mut result.events,
@@ -9017,6 +9018,13 @@ fn resume_pending_continuation_pass(
             super::life_safety::observe_boundary_carrier(state);
             effects::resume_resolution_frames(state, events);
             effects::counters::resume_copy_target_entry_completions(state, events)?;
+            // CR 101.4 + CR 608.2c: a frame that retired in
+            // `resume_resolution_frames` (a post-replacement drain) may have
+            // been the last gate on a parked delivery; re-enter the drain so
+            // the delivery and then the later instructions resume.
+            if effects::simultaneous_unless::delivery_may_resume(state) {
+                effects::drain_pending_continuation(state, events);
+            }
         }
         resume_due_counter_cost_root(state, events)?;
         let mut drained_deferred_life = false;
@@ -11852,9 +11860,10 @@ fn apply_action(
     // performs CR 800.4a object cleanup and advances `waiting_for` if the conceder
     // owned it (see `elimination::concede`), and queues what the departure triggered
     // (CR 603.6c), since no pipeline scans the departure's own events. When the
-    // departure canceled the current pause of a resolution still under way, the
-    // resolution is finished and the action settled through the post-action
-    // pipeline (`settle_resolution_resumed_after_departure`).
+    // departure canceled the current pause of a resolution still under way, or
+    // completed and delivered its choose-all-then-act collection, the resolution
+    // is finished and the action settled through the post-action pipeline
+    // (`settle_resolution_resumed_after_departure`).
     if let GameAction::Concede { player_id } = action {
         // CR 614.17a + CR 118.12: keep the pre-departure base so a staged
         // payment's already-accepted prefix (including a synchronous leg that
@@ -11864,12 +11873,13 @@ fn apply_action(
         let mut events = Vec::new();
         let departure = super::elimination::concede(state, player_id, &mut events);
         // CR 117.2e + CR 608.2c + CR 117.5: the concession canceled the
-        // current pause of a parked zone-change owner while its resolution
+        // current pause of a parked zone-change owner, or completed and
+        // delivered a choose-all-then-act collection, while its resolution
         // still owes a surviving tail. Finish that resolution, then settle
         // the action as any action that completed one: the owed final part
         // (CR 608.2n), state-based actions (CR 704.3), then the triggered
         // abilities the departure queued together with the resumed ones.
-        if departure.resume == super::elimination::DepartureResume::ParkedZoneChangeTail {
+        if departure.resume == super::elimination::DepartureResume::ResolutionTail {
             let scan_from = events.len();
             settle_resolution_resumed_after_departure(state, &mut events, scan_from);
         }

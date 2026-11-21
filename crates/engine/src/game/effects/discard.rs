@@ -12,6 +12,11 @@ use crate::types::ability::{
     TargetRef,
 };
 use crate::types::events::GameEvent;
+/// CR 701.9a vs CR 118.12 / CR 601.2h: why a card is being discarded. Defined
+/// beside the records that carry it across a chain or a pause
+/// (`SpellContext::discard_cause`, `PendingDiscardBatch::cause`) and
+/// re-exported for this layer's callers.
+pub(crate) use crate::types::game_state::DiscardCause;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use crate::types::player::PlayerId;
@@ -174,12 +179,15 @@ pub(crate) fn hand_off_recruit_discard_result(
 /// for "this batch paused" — both selection modes park through it, so the two
 /// cannot drift on what a parked batch means.
 ///
-/// Deliberately private and called ONLY from `resolve`, the effect layer. The
-/// cost layer owns its own typed cursor (`PendingCostMoveResume::
+/// Deliberately private and called ONLY from `resolve`. The batch states its
+/// own [`DiscardCause`]: the resolving node's cause on the specific-card path
+/// (a CR 118.12 unless-cost delivery node discards as a cost), and the effect
+/// cause on the paths that discard as the effect does. The drain discards the
+/// remaining cards with that same cause, so a pause never turns a cost payment
+/// into an effect discard or the reverse. The cost layer's random unless-discard
+/// still owns its own typed cursor (`PendingCostMoveResume::
 /// RandomDiscardUnlessPayment`), because it additionally owes an unless-payment
-/// this carrier knows nothing about; sharing one carrier across the two would
-/// launder a cost payment into an effect, which is exactly what [`DiscardCause`]
-/// exists to make unrepresentable.
+/// this carrier knows nothing about.
 #[allow(clippy::too_many_arguments)]
 fn park_discard_batch(
     state: &mut GameState,
@@ -189,6 +197,7 @@ fn park_discard_batch(
     effect_kind: EffectKind,
     paused_card: ObjectIncarnationRef,
     discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
+    cause: DiscardCause,
     events: &mut Vec<GameEvent>,
     events_before_self: usize,
     completion: crate::types::game_state::PendingDiscardBatchCompletion,
@@ -202,6 +211,7 @@ fn park_discard_batch(
         effect_kind,
         paused_card,
         discard_frame,
+        cause,
         // The `player_scope` driver installs the fan-out remainder, if any,
         // as it unwinds — this layer only knows about one seat.
         fan_out: None,
@@ -346,6 +356,10 @@ pub fn resolve(
             }
             None => specific_targets,
         };
+        // CR 701.9a vs CR 118.12: this node's own discard cause. Only the
+        // CR 118.12 unless-cost delivery node (`scoped_discard_delivery_node`)
+        // carries `Cost`; every other discard is the resolving effect's.
+        let cause = ability.context.discard_cause;
         // Discard specific targeted cards
         for (index, obj_id) in specific_targets.iter().copied().enumerate() {
             let obj = state
@@ -359,13 +373,19 @@ pub fn resolve(
 
             // CR 701.9a + CR 609.3: Tamiyo, Collector of Tales class — an
             // opponent's spell or ability can't force the protected player to
-            // discard ANY card, regardless of which one.
-            if crate::game::static_abilities::forced_action_muzzled(
-                state,
-                ability.controller,
-                player_id,
-                crate::types::ability::CostCategory::Discards,
-            ) {
+            // discard ANY card, regardless of which one. CR 118.12: a cost
+            // discard is the payment the payer already chose. Whether a
+            // Tamiyo-class static lets them choose it is decided at the choice
+            // (Tamiyo's ruling: "you can't choose to sacrifice or discard"; the
+            // gate is missing, #11091), so delivery does not re-read the muzzle.
+            if cause == DiscardCause::Effect
+                && crate::game::static_abilities::forced_action_muzzled(
+                    state,
+                    ability.controller,
+                    player_id,
+                    crate::types::ability::CostCategory::Discards,
+                )
+            {
                 continue;
             }
 
@@ -373,7 +393,7 @@ pub fn resolve(
                 player_id,
                 object_id: obj_id,
                 source_id: Some(ability.source_id),
-                caused_by_effect: true,
+                caused_by_effect: cause == DiscardCause::Effect,
                 discard_frame,
                 applied: HashSet::new(),
             };
@@ -417,6 +437,7 @@ pub fn resolve(
                                     EffectKind::from(&ability.effect),
                                     pin_paused_occurrence(state, obj_id),
                                     discard_frame,
+                                    cause,
                                     events,
                                     events_before_self,
                                     crate::types::game_state::PendingDiscardBatchCompletion::Standard,
@@ -476,6 +497,7 @@ pub fn resolve(
                         EffectKind::from(&ability.effect),
                         pin_paused_occurrence(state, obj_id),
                         discard_frame,
+                        cause,
                         events,
                         events_before_self,
                         crate::types::game_state::PendingDiscardBatchCompletion::Standard,
@@ -577,6 +599,7 @@ pub fn resolve(
                     EffectKind::from(&ability.effect),
                     paused_card,
                     discard_frame,
+                    DiscardCause::Effect,
                     events,
                     events_before_self,
                     crate::types::game_state::PendingDiscardBatchCompletion::Standard,
@@ -618,6 +641,7 @@ pub fn resolve(
                         // CR 400.7: the pause parks the pre-move occurrence.
                         pin_paused_occurrence(state, *obj_id),
                         discard_frame,
+                        DiscardCause::Effect,
                         events,
                         events_before_self,
                         crate::types::game_state::PendingDiscardBatchCompletion::Standard,
@@ -934,30 +958,6 @@ pub(crate) fn discard_caused_by_effect_with_source(
     outcome
 }
 
-/// Resolving-effect discard with optional operation-owned provenance.
-/// CR 701.9a vs CR 118.12 / CR 601.2h: WHY a card is being discarded.
-///
-/// This is the `caused_by_effect` axis of `route_discard`, surfaced as a type
-/// rather than a bool because it is load-bearing and silently mis-set: it gates
-/// `ReplacementCondition::EffectCausedDiscard`. Library of Leng replaces a
-/// discard caused by a spell or ability, and must NOT touch a discard made to
-/// pay a cost — the boundary `library_of_leng_does_not_apply_to_discard_cost`
-/// pins.
-///
-/// Callers must state which one they are; there is deliberately no default. A
-/// shared discard helper that hard-codes one of these silently launders a cost
-/// payment into an effect (or vice versa), which is exactly the bug this enum
-/// exists to make unrepresentable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DiscardCause {
-    /// A resolving spell or ability discards the card (CR 701.9a).
-    /// Library-of-Leng-class replacements gate on this.
-    Effect,
-    /// The discard IS the payment of a cost (CR 118.12 unless-cost,
-    /// CR 601.2h additional cost). Effect-caused replacements must not apply.
-    Cost,
-}
-
 /// One game-selected discard batch: who, how many, from what pool, and why.
 ///
 /// Bundled rather than passed as positional arguments because the caller-supplied
@@ -1098,25 +1098,15 @@ pub(crate) fn discard_at_random(
         // `route_discard` is the shared tail; only the `caused_by_effect` flag
         // differs, and it is exactly what Library-of-Leng-class replacements
         // gate on.
-        let outcome = match cause {
-            DiscardCause::Effect => discard_caused_by_effect_with_source_and_frame(
-                state,
-                obj_id,
-                player,
-                Some(source_id),
-                discard_frame,
-                events,
-            ),
-            DiscardCause::Cost => route_discard(
-                state,
-                obj_id,
-                player,
-                Some(source_id),
-                false,
-                discard_frame,
-                events,
-            ),
-        };
+        let outcome = discard_with_cause_and_frame(
+            state,
+            obj_id,
+            player,
+            Some(source_id),
+            cause,
+            discard_frame,
+            events,
+        );
         if let DiscardOutcome::NeedsReplacementChoice(chooser) = outcome {
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(chooser, state);
@@ -1154,6 +1144,34 @@ pub(crate) fn discard_caused_by_effect_with_source_and_frame(
         player,
         source_id,
         true,
+        discard_frame,
+        events,
+    )
+}
+
+/// CR 701.9a vs CR 118.12: discard `object_id` with the stated cause. The
+/// single dispatch from [`DiscardCause`] to `route_discard`'s
+/// `caused_by_effect` flag, so a caller that carries a cause (a parked batch, a
+/// resolving node) never re-derives it.
+pub(crate) fn discard_with_cause_and_frame(
+    state: &mut GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+    cause: DiscardCause,
+    discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
+    events: &mut Vec<GameEvent>,
+) -> DiscardOutcome {
+    let caused_by_effect = match cause {
+        DiscardCause::Effect => true,
+        DiscardCause::Cost => false,
+    };
+    route_discard(
+        state,
+        object_id,
+        player,
+        source_id,
+        caused_by_effect,
         discard_frame,
         events,
     )

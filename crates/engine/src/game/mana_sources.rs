@@ -1185,7 +1185,7 @@ pub(crate) fn preflight_tap_land_action(
     if !matches!(action, GameAction::TapLandForMana { .. }) {
         return Ok(());
     }
-    super::engine_payment_choices::refuse_mana_at_draw_only_payment(state)?;
+    super::engine_payment_choices::refuse_mana_where_none_is_asked(state)?;
     let waiting_player = match &state.waiting_for {
         WaitingFor::Priority { player }
         | WaitingFor::ManaPayment { player, .. }

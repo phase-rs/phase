@@ -19,10 +19,10 @@ use crate::types::ability::{
     EffectScope, FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice,
     ObjectProperty, ObjectScope, PerPlayerScope, PerpetualGrantModification, PerpetualModification,
     PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat, PtValue, PtValueScope,
-    QuantityExpr, QuantityRef, RoundingMode, SeatDirection, SharedQuality, SiblingCondition,
-    SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition,
-    TurnJournalKind, TypeFilter, TypedFilter, XModification, ZoneChoiceCandidateSource,
-    ZoneChoiceChooser, ZoneOwner, ZoneRef,
+    QuantityExpr, QuantityRef, RepeatForTiming, RoundingMode, SeatDirection, SharedQuality,
+    SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition,
+    TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, XModification,
+    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner, ZoneRef,
 };
 use crate::types::ability::{
     IllegalTargetsDisposition, NumberQuality, Parity, SpentColor, StaticCondition, StaticDefinition,
@@ -19776,6 +19776,46 @@ fn trigger_unless_they_pay_binds_to_that_player_damage_target() {
     );
 }
 
+/// Every node of an ability tree: the chain, the else branch, modes, and the
+/// payload of a delayed trigger.
+fn collect_definitions(root: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    fn walk<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a AbilityDefinition>) {
+        out.push(def);
+        for child in def.sub_ability.iter().chain(def.else_ability.iter()) {
+            walk(child, out);
+        }
+        for mode in &def.mode_abilities {
+            walk(mode, out);
+        }
+        if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+            walk(effect, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out
+}
+
+/// The nodes of a tree that carry a counted repeat.
+fn counted_definitions(root: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    collect_definitions(root)
+        .into_iter()
+        .filter(|node| node.repeat_for.is_some())
+        .collect()
+}
+
+/// CR 608.2: a `SimultaneousInstances` timing never exists without its count
+/// at producer output.
+fn assert_repeat_timing_invariant(root: &AbilityDefinition) {
+    for node in collect_definitions(root) {
+        assert!(
+            node.repeat_timing != RepeatForTiming::SimultaneousInstances
+                || node.repeat_for.is_some(),
+            "SimultaneousInstances without a repeat_for count: {node:#?}"
+        );
+    }
+}
+
 /// Walk an `execute` chain and return the first node carrying `scope`, for
 /// asserting which clause a declined unless-hoist landed on.
 fn scoped_execute_node(def: &TriggerDefinition, scope: PlayerFilter) -> &AbilityDefinition {
@@ -19988,11 +20028,11 @@ fn trigger_unless_each_opponent_sacrifice_binds_scoped_player() {
     assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
 }
 
-/// CR 608.2f + CR 118.12a: Rottenmouth Viper's scoped clause is two links below
-/// the chain root, so a hoisted payer resolves against whatever stamped the
-/// root's `scoped_player` rather than against the fan-out's per-opponent seat.
+/// CR 608.2c + CR 608.2h + CR 608.2f + CR 118.12a: the counter is added before
+/// the repeat count is fixed, and each repeated instruction fans out to the
+/// opponents with its unless payer bound to the scoped player.
 #[test]
-fn trigger_scoped_unless_stays_on_the_scoped_clause_under_an_unimplemented_parent() {
+fn trigger_for_each_blight_counter_repeats_scoped_unless() {
     let def = parse_trigger_line(
             "Whenever this creature enters or attacks, put a blight counter on it. Then for each blight counter on it, each opponent loses 4 life unless that player sacrifices a nonland permanent of their choice or discards a card.",
             "Rottenmouth Viper",
@@ -20009,6 +20049,24 @@ fn trigger_scoped_unless_stays_on_the_scoped_clause_under_an_unimplemented_paren
         "the scoped clause should be the life loss, got {:?}",
         scoped.effect
     );
+    assert!(
+        matches!(
+            scoped.repeat_for.as_ref(),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: Some(CounterType::Generic(counter_type)),
+                }
+            }) if counter_type == "blight"
+        ),
+        "the scoped clause should repeat for Viper's blight counters: {scoped:#?}"
+    );
+    // CR 608.2c + CR 101.4: "Then for each blight counter on it, …" is a
+    // leading for-each prefix, so its iterations are instances of one
+    // instruction. Fails if the peel's stamp, its ClauseIr split, or the
+    // assembly transfer is reverted (each defaults to Sequential).
+    assert_eq!(scoped.repeat_timing, RepeatForTiming::SimultaneousInstances);
+    assert_repeat_timing_invariant(def.execute.as_deref().expect("execute"));
     let unless_pay = scoped
         .unless_pay
         .as_ref()
@@ -20028,6 +20086,7 @@ fn trigger_scoped_unless_stays_on_the_scoped_clause_under_an_unimplemented_paren
         "second branch should be Discard, got {:?}",
         costs[1]
     );
+    assert_no_unimplemented(def.execute.as_deref().expect("should have execute"));
 }
 
 /// CR 608.2f: Bellowing Mauler's `each player` subject is scope-bearing exactly
@@ -41733,6 +41792,13 @@ fn card_parking_hand_reveal_is_a_chosen_object_boundary_for_the_event_source_lif
     assert_eq!(choice.player_scope, Some(PlayerFilter::Opponent));
     let sub = choice.sub_ability.as_deref().expect("the exile consumer");
     assert_eq!(sub.duration, Some(Duration::UntilHostLeavesPlay));
+    // CR 608.2c: the "For each opponent," prefix is consumed by the per-opponent
+    // scope binding and its count cleared, so the exile consumer carries no
+    // repeat and no for-each timing is left behind without a count.
+    assert!(sub.repeat_for.is_none());
+    assert_eq!(sub.player_scope, Some(PlayerFilter::Opponent));
+    assert_eq!(sub.repeat_timing, RepeatForTiming::Sequential);
+    assert_repeat_timing_invariant(exec);
     match &*sub.effect {
         Effect::ChangeZone {
             destination,
@@ -46703,4 +46769,285 @@ fn or_split_carries_shared_adjunct_to_bare_leg() {
         let legs = parse_trigger_lines(line, name);
         assert_eq!(legs[0].description.as_deref(), Some(first_leg), "{name}");
     }
+}
+
+/// CR 608.2c: "Then for each opponent, … that player's graveyard …"
+/// binds its anaphor to each iterated opponent. A count-only `PlayerCount`
+/// repeat cannot carry that binding, so The Weaver King's clause must keep
+/// failing closed, while Rottenmouth Viper's blight-counter repeat (a count
+/// that is not a player set) stays fully supported.
+#[test]
+fn then_for_each_opponent_with_that_player_anaphor_fails_closed() {
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let weaver = parse_oracle_text(
+        "Shadow (This creature can block or be blocked by only creatures with shadow.)\nWhenever The Weaver King deals combat damage to a player, they mill that many cards. Then for each opponent, put a creature card from that player's graveyard that was put there from their library this turn onto the battlefield under your control.",
+        "The Weaver King",
+        &[],
+        &owned(&["Creature"]),
+        &owned(&["Horror", "Wizard"]),
+    );
+    assert_eq!(weaver.triggers.len(), 1, "{:?}", weaver.triggers);
+    let execute = weaver.triggers[0].execute.as_deref().expect("execute");
+    assert!(
+        has_unimplemented(execute),
+        "the per-opponent graveyard clause must stay an honest gap: {execute:#?}"
+    );
+    // The fail-closed gap tree carries no for-each stamp anywhere.
+    assert!(
+        collect_definitions(execute)
+            .iter()
+            .all(|node| node.repeat_timing == RepeatForTiming::Sequential),
+        "no SimultaneousInstances in the gap tree: {execute:#?}"
+    );
+    assert_repeat_timing_invariant(execute);
+
+    let viper = parse_oracle_text(
+        "Whenever this creature enters or attacks, put a blight counter on it. Then for each blight counter on it, each opponent loses 4 life unless that player sacrifices a nonland permanent of their choice or discards a card.",
+        "Rottenmouth Viper",
+        &[],
+        &owned(&["Creature"]),
+        &owned(&["Elemental", "Snake"]),
+    );
+    assert_eq!(viper.triggers.len(), 1, "{:?}", viper.triggers);
+    assert!(!has_unimplemented(
+        viper.triggers[0].execute.as_deref().expect("execute")
+    ));
+    assert_repeat_timing_invariant(viper.triggers[0].execute.as_deref().expect("execute"));
+}
+
+fn owned_strings(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| s.to_string()).collect()
+}
+
+/// CR 608.2c + CR 101.4: Twisted Sewer-Witch's "Then for each Rat you control,
+/// create a Wicked Role token attached to that Rat." is a for-each prefix, so
+/// its member-iterated repeat carries `SimultaneousInstances`; the Rat token
+/// creation before it is its own, uncounted instruction.
+#[test]
+fn for_each_rat_you_control_member_repeat_is_simultaneous_instances() {
+    let witch = parse_oracle_text(
+        "When this creature enters, create a 1/1 black Rat creature token with \"This creature can't block.\" Then for each Rat you control, create a Wicked Role token attached to that Rat. (If you control another Role on it, put that one into the graveyard. Enchanted creature gets +1/+1. When this token is put into a graveyard, each opponent loses 1 life.)",
+        "Twisted Sewer-Witch",
+        &[],
+        &owned_strings(&["Creature"]),
+        &owned_strings(&["Human", "Warlock"]),
+    );
+    assert_eq!(witch.triggers.len(), 1, "{:?}", witch.triggers);
+    let execute = witch.triggers[0].execute.as_deref().expect("execute");
+    let counted = counted_definitions(execute);
+    assert_eq!(counted.len(), 1, "exactly one counted node: {execute:#?}");
+    // Reach guard: the counted node repeats once per Rat the controller controls.
+    assert!(
+        matches!(
+            counted[0].repeat_for.as_ref(),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                }
+            }) if tf.controller == Some(ControllerRef::You)
+        ),
+        "the counted node should repeat for the Rats you control: {:#?}",
+        counted[0].repeat_for
+    );
+    assert_eq!(
+        counted[0].repeat_timing,
+        RepeatForTiming::SimultaneousInstances
+    );
+    // The Rat creation is a separate, uncounted instruction.
+    assert!(execute.repeat_for.is_none());
+    assert_eq!(execute.repeat_timing, RepeatForTiming::Sequential);
+    assert_repeat_timing_invariant(execute);
+}
+
+/// CR 608.2c + CR 101.4: the population-prefix arm ("For each of those
+/// permanents, choose a different opponent.") stamps the same for-each timing.
+#[test]
+fn for_each_of_those_permanents_population_repeat_is_simultaneous_instances() {
+    let dack = parse_oracle_text(
+        "When Dack Fayden enters, reveal cards from the top of your library until you reveal X creature cards, where X is the number of opponents you have. Put those creature cards onto the battlefield, then shuffle. They're goaded for the rest of the game. For each of those permanents, choose a different opponent. Each opponent gains control of the permanent for which they were chosen.",
+        "Dack Fayden, Helping Hand",
+        &[],
+        &owned_strings(&["Creature"]),
+        &owned_strings(&["Human", "Advisor"]),
+    );
+    assert_eq!(dack.triggers.len(), 1, "{:?}", dack.triggers);
+    let execute = dack.triggers[0].execute.as_deref().expect("execute");
+    let nodes = collect_definitions(execute);
+    let choose = nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                &*node.effect,
+                Effect::Choose {
+                    choice_type: crate::types::ability::ChoiceType::Opponent { .. },
+                    ..
+                }
+            )
+        })
+        .unwrap_or_else(|| panic!("no Choose Opponent node: {execute:#?}"));
+    // Reach guard: the node carries the population count.
+    assert!(
+        matches!(
+            choose.repeat_for.as_ref(),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. }
+            })
+        ),
+        "the choose node should repeat per member of the population: {:#?}",
+        choose.repeat_for
+    );
+    assert_eq!(choose.repeat_timing, RepeatForTiming::SimultaneousInstances);
+    // Every uncounted node (the shuffle, the goad) stays Sequential.
+    for node in nodes.iter().filter(|node| node.repeat_for.is_none()) {
+        assert_eq!(node.repeat_timing, RepeatForTiming::Sequential);
+    }
+    assert_repeat_timing_invariant(execute);
+}
+
+/// CR 701.16a: "investigate" means "create a Clue token". "Investigate twice"
+/// is a counted repetition of that whole instruction, not a for-each instance
+/// set, so the parser models it as `Sequential`, like the counted repeats in
+/// Torment of Hailfire's ruling (2017-07-14). The suffix producer stays
+/// `Sequential` (a stamp at the merge would yield `SimultaneousInstances`).
+#[test]
+fn counted_investigate_suffix_repeats_are_sequential() {
+    let armed = parse_oracle_text(
+        "When this enchantment enters, investigate twice. (To investigate, create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")\nClues you control are Equipment in addition to their other types and have \"Equipped creature gets +2/+0\" and equip {2}.",
+        "Armed with Proof",
+        &[],
+        &owned_strings(&["Enchantment"]),
+        &[],
+    );
+    let execute = armed.triggers[0].execute.as_deref().expect("execute");
+    let counted = counted_definitions(execute);
+    assert_eq!(counted.len(), 1, "{execute:#?}");
+    assert_eq!(
+        counted[0].repeat_for,
+        Some(QuantityExpr::Fixed { value: 2 })
+    );
+    assert_eq!(counted[0].repeat_timing, RepeatForTiming::Sequential);
+    assert_repeat_timing_invariant(execute);
+
+    let confirm = parse_oracle_text(
+        "Counter target spell.\nInvestigate three times. (To investigate, create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")",
+        "Confirm Suspicions",
+        &[],
+        &owned_strings(&["Instant"]),
+        &[],
+    );
+    let counted: Vec<&AbilityDefinition> = confirm
+        .abilities
+        .iter()
+        .flat_map(counted_definitions)
+        .collect();
+    assert_eq!(counted.len(), 1, "{:#?}", confirm.abilities);
+    assert_eq!(
+        counted[0].repeat_for,
+        Some(QuantityExpr::Fixed { value: 3 })
+    );
+    assert_eq!(counted[0].repeat_timing, RepeatForTiming::Sequential);
+    for ability in &confirm.abilities {
+        assert_repeat_timing_invariant(ability);
+    }
+}
+
+/// CR 608.2c + CR 101.4: the targeted counter-kind peel
+/// (`try_parse_for_each_counter_kind_adjust_target`) bypasses the shared peel
+/// but stamps the same timing through the same authority (Dramatist's Puppet;
+/// Quarry Hauler has identical text).
+#[test]
+fn for_each_kind_of_counter_on_target_permanent_is_simultaneous_instances() {
+    let puppet = parse_trigger_line(
+        "When this creature enters, for each kind of counter on target permanent, put another counter of that kind on it or remove one from it.",
+        "Dramatist's Puppet",
+    );
+    let execute = puppet.execute.as_deref().expect("execute");
+    // The TargetOnly parent carries no count.
+    assert!(matches!(&*execute.effect, Effect::TargetOnly { .. }));
+    assert!(execute.repeat_for.is_none());
+    assert_eq!(execute.repeat_timing, RepeatForTiming::Sequential);
+    let choice = execute
+        .sub_ability
+        .as_deref()
+        .expect("the choice sub-ability");
+    // Reach guard: the counted node is the per-kind add-or-remove choice.
+    assert!(matches!(&*choice.effect, Effect::ChooseOneOf { .. }));
+    assert_eq!(
+        choice.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCounterKindsAmong {
+                filter: TargetFilter::ParentTarget,
+            },
+        })
+    );
+    assert_eq!(choice.repeat_timing, RepeatForTiming::SimultaneousInstances);
+    assert_repeat_timing_invariant(execute);
+}
+
+/// CR 608.2c + CR 101.4: the sibling of the targeted counter-kind peel through
+/// the generic arm (Bribe Taker). One grammar class carries one timing.
+#[test]
+fn for_each_kind_of_counter_on_permanents_you_control_is_simultaneous_instances() {
+    let taker = parse_trigger_line(
+        "When this creature enters, for each kind of counter on permanents you control, you may put your choice of a +1/+1 counter or a counter of that kind on this creature.",
+        "Bribe Taker",
+    );
+    let execute = taker.execute.as_deref().expect("execute");
+    assert!(matches!(&*execute.effect, Effect::ChooseOneOf { .. }));
+    assert!(execute.optional);
+    assert!(
+        matches!(
+            execute.repeat_for.as_ref(),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCounterKindsAmong {
+                    filter: TargetFilter::Typed(tf),
+                }
+            }) if tf.controller == Some(ControllerRef::You)
+        ),
+        "the choice should repeat per counter kind among permanents you control: {:#?}",
+        execute.repeat_for
+    );
+    assert_eq!(
+        execute.repeat_timing,
+        RepeatForTiming::SimultaneousInstances
+    );
+    assert_eq!(counted_definitions(execute).len(), 1, "{execute:#?}");
+    assert_repeat_timing_invariant(execute);
+}
+
+/// CR 608.2c + CR 101.4: Tolarian Contempt's "for each opponent, choose up to
+/// one target creature they control ..." is a for-each prefix peel whose clause
+/// lowers to a bare `TargetOnly`, so the count and its `SimultaneousInstances`
+/// timing transfer to the def through the `TargetOnly` arm of the ClauseIr
+/// assembly (no sub-ability). The sibling arm that places the count on a
+/// `TargetOnly` clause's sub-ability has no printed-card row and is covered by
+/// the compiler only.
+#[test]
+fn for_each_opponent_choose_target_transfers_simultaneous_instances_on_target_only() {
+    let contempt = parse_trigger_line(
+        "At the beginning of your end step, for each opponent, choose up to one target creature they control with a rejection counter on it. That creature's owner puts it on their choice of the top or bottom of their library.",
+        "Tolarian Contempt",
+    );
+    let execute = contempt.execute.as_deref().expect("execute");
+    let counted = collect_definitions(execute)
+        .into_iter()
+        .find(|node| matches!(&*node.effect, Effect::TargetOnly { .. }))
+        .expect("a TargetOnly node");
+    // Reach guards: the TargetOnly node carries the opponent count and a
+    // "choose up to one" multi-target spec.
+    assert_eq!(
+        counted.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::Opponent,
+            },
+        }),
+        "{counted:#?}"
+    );
+    assert!(counted.multi_target.is_some(), "{counted:#?}");
+    assert_eq!(
+        counted.repeat_timing,
+        RepeatForTiming::SimultaneousInstances
+    );
+    assert_repeat_timing_invariant(execute);
 }

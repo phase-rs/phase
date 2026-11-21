@@ -340,11 +340,18 @@ pub(crate) fn concede(
 pub enum DepartureResume {
     /// Nothing of a resolution is left for the caller to finish.
     Settled,
-    /// The departure canceled the current replacement-choice pause of a parked
-    /// zone-change owner. Its surviving tail is still owed: the caller resumes
-    /// it and settles the action before any player receives priority, and the
-    /// departure left its queued triggers for that settlement to place.
-    ParkedZoneChangeTail,
+    /// CR 117.2e + CR 608.2c + CR 117.5: a resolution under way when the departure
+    /// began still owes its tail, and no player has priority while it does. The
+    /// caller resumes it and settles the action before any player receives priority
+    /// (`engine::settle_resolution_resumed_after_departure`), and the departure left
+    /// its queued triggers for that settlement to place. Reported when the departure
+    /// canceled the current replacement-choice pause of a parked zone-change owner,
+    /// or completed and delivered a choose-all-then-act unless poll (CR 101.4 +
+    /// CR 800.4f). The poll completes either because its last chooser left, or
+    /// because another player's departure staled the chooser's open prompt (the
+    /// pick pool emptied, or the branch set changed) and the remaining choices
+    /// were walked without a prompt (CR 608.2d).
+    ResolutionTail,
 }
 
 /// CR 603.2 + CR 603.6c: who collects the triggered abilities a departure's own
@@ -770,6 +777,8 @@ pub(crate) fn eliminate_players(
         state.pending_player_scope_sacrifice_choice = None;
         // CR 104.1: nor is a player-scope return owed to a finished game.
         state.pending_player_scope_choice = None;
+        // CR 104.1: nor is a choose-all-then-act unless poll.
+        state.pending_simultaneous_unless = None;
         // CR 104.1: nor is a player-scope unless poll.
         state.pending_player_scope_unless_punishment = None;
         super::turns::abandon_phase_begin_choice(state);
@@ -862,6 +871,24 @@ pub(crate) fn eliminate_players(
                 }
             };
 
+        // CR 800.4a + CR 800.4f + CR 101.4: an open choose-all-then-act unless poll is
+        // reconciled with the players still in the game. A delivered poll leaves its
+        // resolution's tail to this departure's caller (`DepartureResume::ResolutionTail`).
+        let simultaneous_unless =
+            match super::engine_resolution_choices::settle_simultaneous_unless_after_departure(
+                state, events,
+            ) {
+                Ok(resume) => resume,
+                Err(error) => {
+                    tracing::error!(%error, "simultaneous unless poll was not reconciled after a departure");
+                    debug_assert!(
+                        false,
+                        "simultaneous unless poll was not reconciled after a departure: {error}"
+                    );
+                    DepartureResume::Settled
+                }
+            };
+
         // CR 800.4a + CR 608.2d + CR 608.2m: an open resolution-time object choice
         // ("choose a creature you control") stored its candidates when it was
         // raised. The departure removed the leaving player's objects and ended
@@ -930,7 +957,13 @@ pub(crate) fn eliminate_players(
                 .active_zone_change_owner_pause()
                 .is_none()
         {
-            resume = DepartureResume::ParkedZoneChangeTail;
+            resume = DepartureResume::ResolutionTail;
+        }
+
+        // CR 117.2e + CR 608.2c + CR 117.5: a delivered choose-all-then-act poll leaves
+        // its resolution's tail owed; the caller resumes it and settles the action.
+        if simultaneous_unless == DepartureResume::ResolutionTail {
+            resume = DepartureResume::ResolutionTail;
         }
 
         if let Some(frame) = staged_optional_sacrifice_decline {
@@ -2885,6 +2918,7 @@ fn retire_parked_resolution_work(state: &mut GameState) {
     state.pending_player_scope_unless_punishment = None;
     state.pending_player_scope_sacrifice_choice = None;
     state.pending_player_scope_choice = None;
+    state.pending_simultaneous_unless = None;
     state.pending_mass_library_order_choice = None;
     state.pending_discard_batch = None;
     state.pending_single_discard = None;

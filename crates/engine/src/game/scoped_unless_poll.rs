@@ -1,6 +1,12 @@
 //! CR 101.4 + CR 118.12a: the APNAP poll for a player-scoped "[instruction]
 //! unless [that player] [sacrifices / discards ...]" (Hag of Ceaseless Torment,
-//! Bellowing Mauler, Rottenmouth Viper, Ob Nixilis's +1).
+//! Bellowing Mauler, Ob Nixilis's +1). A counted repeat of such an instruction
+//! either runs round by round, each round opening this poll (Torment of
+//! Hailfire's "Repeat the following process X times", whose repetitions are
+//! done separately), or, when it is a for-each instance set (Rottenmouth
+//! Viper's "for each blight counter on it"), is polled across all of its
+//! instances by `effects::simultaneous_unless`, which admits it before the
+//! `player_scope` driver that opens this poll is reached.
 //!
 //! CR 118.12a reads the instruction as "[that player] may [pay]. If they don't,
 //! [instruction]". With several affected players, CR 101.4 has each of them

@@ -37817,6 +37817,8 @@ pub struct AbilityDefinition {
     /// CR 608.2c: Repeat this ability N times, where N = resolve_quantity(repeat_for).
     /// Produced by "for each [X], [effect]" leading patterns.
     pub repeat_for: Option<QuantityExpr>,
+    /// CR 608.2: the iteration relation of `repeat_for`; see [`RepeatForTiming`].
+    pub repeat_timing: RepeatForTiming,
     /// Minimum legal announced value for X. Defaults to zero; set to one by
     /// "X can't be 0" annotations.
     pub min_x_value: u32,
@@ -38276,6 +38278,8 @@ struct AbilityDefinitionRepr<'a> {
     mode_abilities: &'a Vec<AbilityDefinition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     repeat_for: &'a Option<QuantityExpr>,
+    #[serde(skip_serializing_if = "RepeatForTiming::is_sequential")]
+    repeat_timing: RepeatForTiming,
     #[serde(skip_serializing_if = "is_zero_u32")]
     min_x_value: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38355,6 +38359,7 @@ impl Serialize for AbilityDefinition {
             modal,
             mode_abilities,
             repeat_for,
+            repeat_timing,
             min_x_value,
             announced_x,
             cant_be_copied,
@@ -38409,6 +38414,7 @@ impl Serialize for AbilityDefinition {
             modal,
             mode_abilities,
             repeat_for,
+            repeat_timing: *repeat_timing,
             min_x_value: *min_x_value,
             announced_x,
             cant_be_copied: *cant_be_copied,
@@ -38527,6 +38533,8 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     repeat_for: Option<QuantityExpr>,
     #[serde(default)]
+    repeat_timing: RepeatForTiming,
+    #[serde(default)]
     min_x_value: u32,
     #[serde(default)]
     announced_x: Option<QuantityExpr>,
@@ -38611,6 +38619,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             modal: de.modal,
             mode_abilities: de.mode_abilities,
             repeat_for: de.repeat_for,
+            repeat_timing: de.repeat_timing,
             min_x_value: de.min_x_value,
             announced_x: de.announced_x,
             cant_be_copied: de.cant_be_copied,
@@ -38820,6 +38829,33 @@ impl InstructionJoin {
     }
 }
 
+/// CR 608.2: how the iterations of a counted repeat (`repeat_for`) relate.
+/// Meaningful only when `repeat_for` is `Some`; producers never pair
+/// `SimultaneousInstances` with no count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum RepeatForTiming {
+    /// Each iteration completes before the next begins, as Torment of Hailfire's
+    /// ruling (2017-07-14) says: "Each repetition through this process is done
+    /// separately." Every producer other than the for-each prefix peel stamps this:
+    /// "repeat the following process", "twice" / "N times", difference counts,
+    /// and lifted and copy counts.
+    #[default]
+    Sequential,
+    /// CR 608.2c + CR 101.4: a leading "for each <count>, <instruction>" —
+    /// every iteration is an instance of one instruction. RUNTIME: read by the
+    /// engine's CR 101.4 admission authority (`effects::simultaneous_unless::admits`),
+    /// which resolves an admitted scoped unless poll choose-all-then-act; a shape
+    /// it does not admit resolves on the round-by-round driver like `Sequential`.
+    SimultaneousInstances,
+}
+
+impl RepeatForTiming {
+    /// `skip_serializing_if` predicate — the default needs no JSON byte.
+    pub fn is_sequential(timing: &Self) -> bool {
+        matches!(timing, Self::Sequential)
+    }
+}
+
 /// CR 608.2c + CR 107.1c: how a "repeat this process" loop decides whether to
 /// run another iteration. The non-count companion to `AbilityDefinition`'s
 /// `repeat_for` (a fixed `QuantityExpr` count) — this predicate decides
@@ -38993,6 +39029,7 @@ impl AbilityDefinition {
             modal: None,
             mode_abilities: Vec::new(),
             repeat_for: None,
+            repeat_timing: RepeatForTiming::Sequential,
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
@@ -50438,6 +50475,47 @@ mod tests {
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: AbilityDefinition = serde_json::from_str(&json).unwrap();
         assert_eq!(ability, deserialized);
+    }
+
+    /// The repeat timing is omitted at its default,
+    /// round-trips when `SimultaneousInstances`, and legacy JSON without the
+    /// key reads `Sequential`.
+    #[test]
+    fn repeat_timing_serde_default_roundtrip_and_legacy() {
+        let base = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+
+        // (a) Sequential is the default and writes no key.
+        let sequential_json = serde_json::to_value(&base).unwrap();
+        assert!(sequential_json.get("repeat_timing").is_none());
+
+        // (b) SimultaneousInstances writes its key and round-trips equal.
+        let mut simultaneous = base.clone();
+        simultaneous.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
+        simultaneous.repeat_timing = RepeatForTiming::SimultaneousInstances;
+        let json = serde_json::to_value(&simultaneous).unwrap();
+        assert_eq!(
+            json.get("repeat_timing"),
+            Some(&serde_json::json!("SimultaneousInstances"))
+        );
+        let round_trip: AbilityDefinition = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip, simultaneous);
+        assert_eq!(
+            round_trip.repeat_timing,
+            RepeatForTiming::SimultaneousInstances
+        );
+
+        // (c) Legacy JSON lacking the key reads Sequential.
+        let mut legacy = serde_json::to_value(&simultaneous).unwrap();
+        legacy.as_object_mut().unwrap().remove("repeat_timing");
+        let legacy: AbilityDefinition = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.repeat_timing, RepeatForTiming::Sequential);
+        assert_eq!(legacy.repeat_for, Some(QuantityExpr::Fixed { value: 2 }));
     }
 
     #[test]
