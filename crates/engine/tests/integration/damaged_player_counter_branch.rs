@@ -102,8 +102,7 @@ fn damage(events: &[GameEvent], gull: ObjectId, recipient: TargetRef) -> usize {
         .iter()
         .filter(|event| {
             matches!(event, GameEvent::DamageDealt {
-        source_id, target, amount: 1, is_combat: true, excess: _, source_incarnation: _,
-        ..
+        source_id, target, amount: 1, is_combat: true, ..
     } if *source_id == gull && *target == recipient)
         })
         .count()
