@@ -9630,6 +9630,9 @@ fn spell_object_matches_property(
     context: Option<SpellFilterContext<'_>>,
 ) -> bool {
     match prop {
+        // CR 208.1 + CR 601.2f: a P/T-gated cost filter compares the proposed
+        // spell's projected power or toughness (layers 7a-7b, CR 613.4a-b, for the
+        // base scope) while its total cost is determined.
         FilterProp::PtComparison {
             stat,
             scope,
@@ -9656,10 +9659,13 @@ fn spell_object_matches_property(
                     ),
                 )
         }),
+        // CR 208.1: compare the proposed spell's projected toughness with its power.
         FilterProp::ToughnessGTPower => context
             .and_then(|context| context.projected_spell)
             .and_then(|object| object.toughness.zip(object.power))
             .is_some_and(|(toughness, power)| toughness > power),
+        // CR 208.4b + CR 613.4b: base power is the value after characteristic-defining
+        // abilities and P/T-setting effects; current power includes every later change.
         FilterProp::PowerExceedsBase => context
             .and_then(|context| context.projected_spell)
             .and_then(|object| {
