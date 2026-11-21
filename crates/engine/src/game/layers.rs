@@ -12385,13 +12385,61 @@ fn layer_pass_materializes_keywords(zone: Zone) -> bool {
     matches!(zone, Zone::Battlefield | Zone::Hand | Zone::Stack)
 }
 
+/// CR 208.1 + CR 208.2a + CR 611.3b: A normal spell can reuse its
+/// origin characteristics only if neither zone supplies a continuous change.
+/// Inspect declarations before their conditions: moving the card can change
+/// a condition's truth or start a static that functions on the stack.
+pub(super) fn cast_may_change_layer_characteristics(state: &GameState, spell: &GameObject) -> bool {
+    let can_change_source = |modification: &ContinuousModification| {
+        matches!(
+            modification,
+            ContinuousModification::CopyValues { .. }
+                | ContinuousModification::CopyChosen
+                | ContinuousModification::GrantStaticAbility { .. }
+                | ContinuousModification::ChangeController
+                | ContinuousModification::ChangeControllerToDesignation { .. }
+                | ContinuousModification::SubstituteTextWord { .. }
+        )
+    };
+    if !state.transient_continuous_effects.is_empty() {
+        return true;
+    }
+    state.objects.values().any(|source| {
+        source
+            .static_definitions
+            .as_slice()
+            .iter()
+            .chain(source.base_static_definitions.iter())
+            .any(|def| {
+                if def.mode != StaticMode::Continuous || def.modifications.is_empty() {
+                    return false;
+                }
+                if def.modifications.iter().any(can_change_source)
+                    || (source.id == spell.id
+                        && (def.characteristic_defining
+                            || def.active_zones.contains(&spell.zone)
+                            || def.active_zones.contains(&Zone::Stack)))
+                {
+                    return true;
+                }
+                let affected = static_affected_filter(def);
+                if *affected == TargetFilter::SelfRef {
+                    return false;
+                }
+                let mut zones = Vec::new();
+                collect_scan_zones(state, &affected, Some(spell.id), &mut zones);
+                zones.contains(&spell.zone) || zones.contains(&Zone::Stack)
+            })
+    })
+}
+
 /// CR 613.1: the layer system computes the characteristics of an OBJECT — not only of a
 /// permanent — so the scan domain must be able to reach an object wherever it lives. A
 /// `SpecificObject` leaf is an IDENTITY reference resolved against `state`, which is why this
 /// takes `state`: see [`collect_scan_zones`].
 fn continuous_effect_scan_zones(state: &GameState, filter: &TargetFilter) -> Vec<Zone> {
     let mut zones = Vec::new();
-    collect_scan_zones(state, filter, &mut zones);
+    collect_scan_zones(state, filter, None, &mut zones);
     if zones.is_empty() {
         zones.push(Zone::Battlefield);
     }
@@ -12408,13 +12456,19 @@ fn continuous_effect_scan_zones(state: &GameState, filter: &TargetFilter) -> Vec
 /// [`FilterProp::InAnyZone`] rather than collapsing it to the first zone. Stack
 /// filters retain their implicit `Zone::Stack` interpretation through
 /// [`TargetFilter::extract_in_zone`].
-/// `SpecificObject` resolves its recipient's actual zone from `state`.
-fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zone>) {
+/// `SpecificObject` resolves its recipient's zone from `state` or the proposed
+/// spell's destination.
+fn collect_scan_zones(
+    state: &GameState,
+    filter: &TargetFilter,
+    proposed_spell: Option<ObjectId>,
+    out: &mut Vec<Zone>,
+) {
     match filter {
         TargetFilter::Or { filters } => {
             for f in filters {
                 let mut branch_zones = Vec::new();
-                collect_scan_zones(state, f, &mut branch_zones);
+                collect_scan_zones(state, f, proposed_spell, &mut branch_zones);
                 if branch_zones.is_empty() {
                     branch_zones.push(Zone::Battlefield);
                 }
@@ -12427,10 +12481,10 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
         }
         TargetFilter::And { filters } => {
             for f in filters {
-                collect_scan_zones(state, f, out);
+                collect_scan_zones(state, f, proposed_spell, out);
             }
         }
-        TargetFilter::Not { filter } => collect_scan_zones(state, filter, out),
+        TargetFilter::Not { filter } => collect_scan_zones(state, filter, proposed_spell, out),
         // CR 613.1 + CR 611.2c: `SpecificObject` is the IDENTITY filter — it denotes exactly
         // one object, already bound at resolution time (CR 611.2c: "the set of objects it
         // affects is determined when that continuous effect begins"). It therefore carries no
@@ -12463,12 +12517,16 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
         // An object that no longer exists likewise contributes no zone; the filter could not
         // match it anyway, so the effect is inert rather than misdirected.
         TargetFilter::SpecificObject { id } => {
-            if let Some(zone) = state
-                .objects
-                .get(id)
-                .map(|obj| obj.zone)
-                .filter(|zone| layer_pass_materializes_keywords(*zone))
-            {
+            let zone = if proposed_spell == Some(*id) {
+                Some(Zone::Stack)
+            } else {
+                state
+                    .objects
+                    .get(id)
+                    .map(|obj| obj.zone)
+                    .filter(|zone| layer_pass_materializes_keywords(*zone))
+            };
+            if let Some(zone) = zone {
                 if !out.contains(&zone) {
                     out.push(zone);
                 }

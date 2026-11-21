@@ -9609,7 +9609,104 @@ pub(super) fn filter_reads_pt(filter: &TargetFilter) -> bool {
             | FilterProp::PowerExceedsBase => true,
             FilterProp::Not { prop } => reads_pt(prop),
             FilterProp::AnyOf { props } => props.iter().any(reads_pt),
-            _ => false,
+            FilterProp::Token
+            | FilterProp::NonToken
+            | FilterProp::RepresentedByCard
+            | FilterProp::ControllerChoseLabel { .. }
+            | FilterProp::ControllerMatches { .. }
+            | FilterProp::WasPlayed
+            | FilterProp::CastThisTurn { .. }
+            | FilterProp::Attacking { .. }
+            | FilterProp::Blocking
+            | FilterProp::BlockingSource
+            | FilterProp::CombatRelation { .. }
+            | FilterProp::BlockStatus { .. }
+            | FilterProp::AttackingAlone
+            | FilterProp::BlockingAlone
+            | FilterProp::Tapped
+            | FilterProp::Untapped
+            | FilterProp::IsSaddled
+            | FilterProp::SaddledSource
+            | FilterProp::CrewedThisTurn { .. }
+            | FilterProp::ConvokedSource
+            | FilterProp::ProtectorMatches { .. }
+            | FilterProp::HasHasteOrControlledSinceTurnBegan
+            | FilterProp::WithKeyword { .. }
+            | FilterProp::HasKeywordKind { .. }
+            | FilterProp::WithoutKeyword { .. }
+            | FilterProp::WithoutKeywordKind { .. }
+            | FilterProp::CanEnchant { .. }
+            | FilterProp::Counters { .. }
+            | FilterProp::Cmc { .. }
+            | FilterProp::ManaValueParity { .. }
+            | FilterProp::ManaCostIn { .. }
+            | FilterProp::InZone { .. }
+            | FilterProp::Owned { .. }
+            | FilterProp::Foretold
+            | FilterProp::HasAdventure
+            | FilterProp::EnchantedBy
+            | FilterProp::EquippedBy
+            | FilterProp::AttachedTo { .. }
+            | FilterProp::HasAttachment { .. }
+            | FilterProp::HasAnyAttachmentOf { .. }
+            | FilterProp::Another
+            | FilterProp::Unpaired
+            | FilterProp::OtherThanTriggerObject
+            | FilterProp::HasColor { .. }
+            | FilterProp::PowerGTSource
+            | FilterProp::ColorCount { .. }
+            | FilterProp::ManaSymbolCount { .. }
+            | FilterProp::HasSupertype { .. }
+            | FilterProp::IsChosenCreatureType
+            | FilterProp::MostPrevalentCreatureTypeIn { .. }
+            | FilterProp::IsChosenColor
+            | FilterProp::IsChosenCardType
+            | FilterProp::MatchesLastChosenCardPredicate
+            | FilterProp::HasSingleTarget
+            | FilterProp::Modal
+            | FilterProp::PrepareSpell
+            | FilterProp::NotColor { .. }
+            | FilterProp::NotSupertype { .. }
+            | FilterProp::Suspected
+            | FilterProp::Renowned
+            | FilterProp::Goaded
+            | FilterProp::Prepared
+            | FilterProp::InTrackedSet { .. }
+            | FilterProp::Modified
+            | FilterProp::Historic
+            | FilterProp::NotHistoric
+            | FilterProp::DifferentNameFrom { .. }
+            | FilterProp::DistinctFrom { .. }
+            | FilterProp::InAnyZone { .. }
+            | FilterProp::SharesQuality { .. }
+            | FilterProp::WasDealtDamageThisTurn
+            | FilterProp::DealtDamageThisTurn { .. }
+            | FilterProp::EnteredThisTurn
+            | FilterProp::ControlledContinuouslySinceTurnBegan
+            | FilterProp::ZoneChangedThisTurn { .. }
+            | FilterProp::AttackedThisTurn { .. }
+            | FilterProp::BlockedThisTurn
+            | FilterProp::FoughtThisTurn
+            | FilterProp::AttackedOrBlockedThisTurn
+            | FilterProp::CountersPutOnThisTurn { .. }
+            | FilterProp::FaceDown
+            | FilterProp::Transformed
+            | FilterProp::TargetsOnly { .. }
+            | FilterProp::Targets { .. }
+            | FilterProp::CouldBeTargetedByTriggeringSpell
+            | FilterProp::HasXInManaCost
+            | FilterProp::HasXInActivationCost
+            | FilterProp::WasKicked
+            | FilterProp::HasManaAbility
+            | FilterProp::HasNoAbilities
+            | FilterProp::Named { .. }
+            | FilterProp::SameName
+            | FilterProp::SameNameAsParentTarget
+            | FilterProp::SameNameAsExiledBySource
+            | FilterProp::NameMatchesAnyPermanent { .. }
+            | FilterProp::IsCommander
+            | FilterProp::SharesCreatureTypeWithCommander
+            | FilterProp::Other { .. } => false,
         }
     }
     match filter {
@@ -9618,7 +9715,64 @@ pub(super) fn filter_reads_pt(filter: &TargetFilter) -> bool {
             filters.iter().any(filter_reads_pt)
         }
         TargetFilter::Not { filter } => filter_reads_pt(filter),
-        _ => false,
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
     }
 }
 
@@ -9630,6 +9784,7 @@ fn spell_object_matches_property(
     context: Option<SpellFilterContext<'_>>,
 ) -> bool {
     match prop {
+        // CR 208.1 + CR 601.2f: A cost predicate reads the spell's power or toughness.
         FilterProp::PtComparison {
             stat,
             scope,
@@ -9656,10 +9811,12 @@ fn spell_object_matches_property(
                     ),
                 )
         }),
+        // CR 208.1 + CR 601.2f: Compare the spell's current toughness and power.
         FilterProp::ToughnessGTPower => context
             .and_then(|context| context.projected_spell)
             .and_then(|object| object.toughness.zip(object.power))
             .is_some_and(|(toughness, power)| toughness > power),
+        // CR 208.4b + CR 601.2f: Compare current power to base power after setting effects.
         FilterProp::PowerExceedsBase => context
             .and_then(|context| context.projected_spell)
             .and_then(|object| {

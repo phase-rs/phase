@@ -13822,7 +13822,64 @@ fn cost_filter_reads_targets(filter: &TargetFilter) -> bool {
             filters.iter().any(cost_filter_reads_targets)
         }
         TargetFilter::Not { filter } => cost_filter_reads_targets(filter),
-        _ => false,
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
     }
 }
 
@@ -15087,6 +15144,7 @@ struct SpellCostView<'a> {
     spell_id: ObjectId,
     casting_variant: Option<CastingVariant>,
     proposed: OnceCell<Option<(Box<GameState>, Zone)>>,
+    origin_characteristics_stable: OnceCell<bool>,
 }
 
 impl<'a> SpellCostView<'a> {
@@ -15111,11 +15169,39 @@ impl<'a> SpellCostView<'a> {
             spell_id,
             casting_variant,
             proposed: OnceCell::new(),
+            origin_characteristics_stable: OnceCell::new(),
         }
     }
 
     fn matches(&self, filter: &TargetFilter, source_id: ObjectId) -> bool {
         self.matches_with_projection(filter, source_id, super::filter::filter_reads_pt(filter))
+    }
+
+    fn can_read_origin_pt(&self, object: &GameObject, filter: &TargetFilter) -> bool {
+        fn fixed_pt_gate(prop: &FilterProp) -> bool {
+            match prop {
+                FilterProp::PtComparison {
+                    value: QuantityExpr::Fixed { .. },
+                    ..
+                }
+                | FilterProp::ToughnessGTPower
+                | FilterProp::PowerExceedsBase => true,
+                FilterProp::Not { prop } => fixed_pt_gate(prop),
+                FilterProp::AnyOf { props } => props.iter().all(fixed_pt_gate),
+                _ => false,
+            }
+        }
+
+        matches!(self.casting_variant, None | Some(CastingVariant::Normal))
+            && !matches!(object.zone, Zone::Battlefield | Zone::Stack)
+            && object.back_face.is_none()
+            && !object.face_down
+            && object.stickers.is_empty()
+            && object.counters.is_empty()
+            && matches!(filter, TargetFilter::Typed(typed) if typed.properties.iter().all(fixed_pt_gate))
+            && *self.origin_characteristics_stable.get_or_init(|| {
+                !super::layers::cast_may_change_layer_characteristics(self.state, object)
+            })
     }
 
     fn matches_with_projection(
@@ -15137,7 +15223,6 @@ impl<'a> SpellCostView<'a> {
         if !state.objects.contains_key(&source_id) {
             return false;
         }
-        let fused = casting_variant == Some(CastingVariant::Fuse);
         // Reject a mismatched spell type or caster scope without cloning state.
         if let (true, TargetFilter::Typed(typed)) = (project_pt, filter) {
             let head = TargetFilter::Typed(TypedFilter {
@@ -15146,19 +15231,19 @@ impl<'a> SpellCostView<'a> {
                 properties: Vec::new(),
             });
             let with_rider = graveyard_rider_spell_projection(state, spell_id, object);
-            if !matches_cost_filter_on_view(
+            if !self.matches_cost_filter_on_view(
                 state,
-                caster,
                 with_rider.as_ref().unwrap_or(object),
                 object.zone,
                 &head,
                 source_id,
-                fused,
+                false,
             ) {
                 return false;
             }
         }
-        let (view, origin) = if project_pt {
+        let read_origin_pt = project_pt && self.can_read_origin_pt(object, filter);
+        let (view, origin) = if project_pt && !read_origin_pt {
             let Some((projected, origin)) = self
                 .proposed
                 .get_or_init(|| project_spell_on_stack(state, caster, spell_id, casting_variant))
@@ -15175,7 +15260,66 @@ impl<'a> SpellCostView<'a> {
         };
         let with_rider = graveyard_rider_spell_projection(state, spell_id, object);
         let object = with_rider.as_ref().unwrap_or(object);
-        matches_cost_filter_on_view(view, caster, object, origin, filter, source_id, fused)
+        self.matches_cost_filter_on_view(view, object, origin, filter, source_id, project_pt)
+    }
+
+    fn matches_cost_filter_on_view(
+        &self,
+        state: &GameState,
+        spell_obj: &GameObject,
+        origin: Zone,
+        filter: &TargetFilter,
+        source_id: ObjectId,
+        read_pt: bool,
+    ) -> bool {
+        let caster = self.caster;
+        let fused = self.casting_variant == Some(CastingVariant::Fuse);
+        match filter {
+            TargetFilter::Typed(_) => super::filter::spell_object_matches_filter_with_view(
+                state,
+                spell_obj,
+                origin,
+                caster,
+                filter,
+                source_id,
+                &state.all_creature_types,
+                fused,
+                None,
+                (read_pt && super::filter::filter_reads_pt(filter)).then_some(spell_obj),
+            ),
+            TargetFilter::Or { filters } => filters.iter().any(|inner| {
+                self.matches_cost_filter_on_view(
+                    state, spell_obj, origin, inner, source_id, read_pt,
+                )
+            }),
+            TargetFilter::And { filters } => filters.iter().all(|inner| {
+                self.matches_cost_filter_on_view(
+                    state, spell_obj, origin, inner, source_id, read_pt,
+                )
+            }),
+            TargetFilter::Not { filter: inner } => !self
+                .matches_cost_filter_on_view(state, spell_obj, origin, inner, source_id, read_pt),
+            // CR 201.2: "spells with the chosen name" (Disruptor Flute).
+            TargetFilter::HasChosenName => {
+                let Some(source_obj) = state.objects.get(&source_id) else {
+                    return false;
+                };
+                cant_cast_filter_matches_for(
+                    state, spell_obj, filter, source_obj, caster, fused, None,
+                )
+            }
+            TargetFilter::Named { .. } => {
+                let Some(source_obj) = state.objects.get(&source_id) else {
+                    return false;
+                };
+                cant_cast_filter_matches_for(
+                    state, spell_obj, filter, source_obj, caster, fused, None,
+                )
+            }
+            // CR 601.2f: Apply only cost modifications whose spell filter matches.
+            // Fail-closed: unrecognized filter shapes do not universally reduce costs.
+            _ => false,
+        }
     }
 }
 
@@ -15272,7 +15416,9 @@ mod spell_pt_projection_tests {
         }
 
         let mut scenario = GameScenario::new();
-        let creature = scenario.add_creature_to_hand(P0, "Creature", 4, 4).id();
+        let creature = scenario
+            .add_creature_to_hand(P0, "Rumbling Baloth", 4, 4)
+            .id();
         scenario.add_creature_from_oracle(
             P0,
             "Non-P/T reducer",
@@ -15297,7 +15443,9 @@ mod spell_pt_projection_tests {
             GORECLAW_REDUCER,
         );
         let sorcery = scenario.add_spell_to_hand(P0, "Sorcery", false).id();
-        let creature = scenario.add_creature_to_hand(P0, "Creature", 4, 4).id();
+        let creature = scenario
+            .add_creature_to_hand(P0, "Rumbling Baloth", 4, 4)
+            .id();
         let runner = scenario.build();
         let state = runner.state();
         SPELL_COST_PROJECTIONS.with(|count| count.set(0));
@@ -15307,7 +15455,26 @@ mod spell_pt_projection_tests {
             SpellCostTargets::Any,
         )
         .is_empty());
+        assert_eq!(snapshot(state, creature, vec![]).non_floor.len(), 1);
         assert_eq!(SPELL_COST_PROJECTIONS.with(std::cell::Cell::get), 0);
+
+        let mut scenario = GameScenario::new();
+        scenario
+            .add_creature_from_oracle(P0, "Goreclaw, Terror of Qal Sisma", 4, 3, GORECLAW_REDUCER)
+            .with_static_definition(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::StackSpell)
+                    .modifications(vec![ContinuousModification::AddPower { value: -1 }]),
+            );
+        let creature = scenario
+            .add_creature_to_hand(P0, "Rumbling Baloth", 4, 4)
+            .id();
+        let runner = scenario.build();
+        SPELL_COST_PROJECTIONS.with(|count| count.set(0));
+        assert!(snapshot(runner.state(), creature, vec![])
+            .non_floor
+            .is_empty());
+        assert_eq!(SPELL_COST_PROJECTIONS.with(std::cell::Cell::get), 1);
 
         let mut scenario = GameScenario::new();
         let self_reducer = parse_static_line(GORECLAW_REDUCER)
@@ -15334,8 +15501,19 @@ mod spell_pt_projection_tests {
             .add_creature_from_oracle(P0, "Goreclaw, Terror of Qal Sisma", 4, 3, GORECLAW_REDUCER)
             .with_static_definition(targeted_reducer)
             .id();
+        for _ in 0..4 {
+            scenario
+                .add_land_to_hand(P0, "Forest")
+                .from_oracle_text("({T}: Add {G}.)");
+        }
         let creature = scenario
-            .add_creature_to_hand(P0, "Creature", 4, 4)
+            .add_creature_to_hand_from_oracle(
+                P0,
+                "Maro",
+                0,
+                0,
+                "Maro's power and toughness are each equal to the number of cards in your hand.",
+            )
             .with_static_definition(self_reducer)
             .id();
         let runner = scenario.build();
@@ -15410,57 +15588,6 @@ mod spell_pt_projection_tests {
                 ..
             }
         ));
-    }
-}
-
-fn matches_cost_filter_on_view(
-    state: &GameState,
-    caster: PlayerId,
-    spell_obj: &GameObject,
-    origin: Zone,
-    filter: &TargetFilter,
-    source_id: ObjectId,
-    fused: bool,
-) -> bool {
-    match filter {
-        TargetFilter::Typed(_) => super::filter::spell_object_matches_filter_with_view(
-            state,
-            spell_obj,
-            origin,
-            caster,
-            filter,
-            source_id,
-            &state.all_creature_types,
-            fused,
-            None,
-            (spell_obj.zone == Zone::Stack && super::filter::filter_reads_pt(filter))
-                .then_some(spell_obj),
-        ),
-        TargetFilter::Or { filters } => filters.iter().any(|inner| {
-            matches_cost_filter_on_view(state, caster, spell_obj, origin, inner, source_id, fused)
-        }),
-        TargetFilter::And { filters } => filters.iter().all(|inner| {
-            matches_cost_filter_on_view(state, caster, spell_obj, origin, inner, source_id, fused)
-        }),
-        TargetFilter::Not { filter: inner } => {
-            !matches_cost_filter_on_view(state, caster, spell_obj, origin, inner, source_id, fused)
-        }
-        // CR 201.2: "spells with the chosen name" (Disruptor Flute).
-        TargetFilter::HasChosenName => {
-            let Some(source_obj) = state.objects.get(&source_id) else {
-                return false;
-            };
-            cant_cast_filter_matches_for(state, spell_obj, filter, source_obj, caster, fused, None)
-        }
-        TargetFilter::Named { .. } => {
-            let Some(source_obj) = state.objects.get(&source_id) else {
-                return false;
-            };
-            cant_cast_filter_matches_for(state, spell_obj, filter, source_obj, caster, fused, None)
-        }
-        // CR 601.2e: Cost modifications only apply when the filter explicitly matches.
-        // Fail-closed: unrecognized filter shapes do not universally reduce costs.
-        _ => false,
     }
 }
 
