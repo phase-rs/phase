@@ -407,6 +407,7 @@ mod vannifar_cloak_from_hand;
 mod vanquish_horde_ai_manapayment_wedge;
 mod varragoth_search_top;
 mod veteran_armorsmith_soldier_anthem;
+mod veyran_own_magecraft_doubling;
 mod veyran_storm_source_scope;
 mod victimize_graveyard_recursion_7898;
 mod vigor_regression;
