@@ -2382,16 +2382,6 @@ pub(super) fn match_spell_cast(
     {
         return false;
     }
-    // CR 115.9c: Check "that targets only [X]" constraint against the spell's actual targets.
-    if let Some(targets_only_filter) = trigger
-        .valid_card
-        .as_ref()
-        .and_then(super::filter::extract_targets_only)
-    {
-        if !stack_entry_targets_only(state, *object_id, &targets_only_filter, source_context) {
-            return false;
-        }
-    }
     // CR 115.9a / CR 115.9c: a single target, counted as the requirement says.
     if let Some(count) = trigger
         .valid_card
@@ -6775,40 +6765,6 @@ fn valid_player_is_controller(
     source_context: &TriggerSourceContext,
 ) -> bool {
     source_context.source_read(state).controller() == player_id
-}
-
-/// CR 115.9c: Check that a stack entry's targets ALL match the given filter.
-/// A spell with no targets does not satisfy "targets only X" (it doesn't target at all).
-fn stack_entry_targets_only(
-    state: &GameState,
-    stack_object_id: ObjectId,
-    constraint: &TargetFilter,
-    source_context: &TriggerSourceContext,
-) -> bool {
-    let entry = state.stack.iter().find(|e| e.id == stack_object_id);
-    let Some(entry) = entry else {
-        return false;
-    };
-    let Some(ability) = entry.ability() else {
-        return false;
-    };
-    let targets = super::ability_utils::declared_targets_in_chain(ability);
-    // A spell with no targets doesn't "target only X" — it doesn't target at all.
-    if targets.is_empty() {
-        return false;
-    }
-    let source_controller = Some(source_context.source_read(state).controller());
-    let ctx = super::filter::FilterContext::from_trigger_source(source_context);
-    targets.iter().all(|t| match t {
-        TargetRef::Object(id) => super::filter::matches_target_filter(state, *id, constraint, &ctx),
-        TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
-            state,
-            constraint,
-            *pid,
-            source_controller,
-            Some(ctx.source_id),
-        ),
-    })
 }
 
 /// CR 115.9b: Check that a stack entry has at least one target matching the filter.
@@ -18008,46 +17964,6 @@ mod tests {
             &test_trigger_source_context(&state, source_id),
             &state
         ));
-    }
-
-    // --- CR 115.9c: TargetsOnly helper tests ---
-
-    #[test]
-    fn extract_targets_only_from_typed_filter() {
-        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant).properties(vec![
-            FilterProp::TargetsOnly {
-                filter: Box::new(TargetFilter::SelfRef),
-            },
-        ]));
-        let result = crate::game::filter::extract_targets_only(&filter);
-        assert_eq!(result, Some(TargetFilter::SelfRef));
-    }
-
-    #[test]
-    fn extract_targets_only_from_or_filter() {
-        let filter = TargetFilter::Or {
-            filters: vec![
-                TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant).properties(vec![
-                    FilterProp::TargetsOnly {
-                        filter: Box::new(TargetFilter::SelfRef),
-                    },
-                ])),
-                TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery).properties(vec![
-                    FilterProp::TargetsOnly {
-                        filter: Box::new(TargetFilter::SelfRef),
-                    },
-                ])),
-            ],
-        };
-        let result = crate::game::filter::extract_targets_only(&filter);
-        assert_eq!(result, Some(TargetFilter::SelfRef));
-    }
-
-    #[test]
-    fn extract_targets_only_returns_none_when_absent() {
-        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
-        let result = crate::game::filter::extract_targets_only(&filter);
-        assert_eq!(result, None);
     }
 
     /// CR 608.2b + CR 608.2c: the player-axis leaves a delayed condition's
