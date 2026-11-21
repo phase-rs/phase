@@ -8760,9 +8760,11 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
-            if let Some(snapshot) =
-                effects::parent_referent_context_from_events(state, &events[events_before_effect..])
-            {
+            if let Some(snapshot) = effects::parent_referent_context_from_events(
+                state,
+                &events[events_before_effect..],
+                true,
+            ) {
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
                     frame
                         .pending
@@ -11819,7 +11821,7 @@ pub(crate) fn run_batch_completion(
                 });
             }
             if let Some(snapshot) = settled_kept_snapshot
-                .or_else(|| effects::parent_referent_context_from_events(state, events))
+                .or_else(|| effects::parent_referent_context_from_events(state, events, true))
             {
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
                     frame

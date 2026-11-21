@@ -4071,6 +4071,7 @@ pub(crate) fn prepend_remaining_pay_cost_before_parked_rider(
 pub(crate) fn parent_referent_context_from_events(
     state: &GameState,
     events: &[GameEvent],
+    allow_taps: bool,
 ) -> Option<CostPaidObjectSnapshot> {
     // CR 608.2c + CR 400.7j: Later instructions in one resolving effect may
     // refer to a single object the earlier instruction sacrificed, moved to a
@@ -4101,8 +4102,14 @@ pub(crate) fn parent_referent_context_from_events(
     // the damage referent so sacrifice/move/reveal/tap referents continue to
     // take precedence. The tapped permanent stays on the battlefield, so it is
     // snapshot live.
-    if let Some(snapshot) = tapped_object_context_from_events(state, events) {
-        return Some(snapshot);
+    //
+    // Mana payment taps (CR 605.3a) are incidental cost payments, not explicit
+    // tap effects, and must not create anaphoric referents. The caller signals
+    // this via `allow_taps = false` when the parent instruction is a `PayCost`.
+    if allow_taps {
+        if let Some(snapshot) = tapped_object_context_from_events(state, events) {
+            return Some(snapshot);
+        }
     }
 
     // CR 608.2c: the weakest referent — a later instruction's "that creature"
@@ -23648,8 +23655,8 @@ fn perform_player_scope_sacrifices(
     }
     if completion.propagate_parent_context {
         if let Some(snapshot) =
-            parent_referent_context_from_events(state, &events[events_before_sacrifice..]).or_else(
-                || {
+            parent_referent_context_from_events(state, &events[events_before_sacrifice..], true)
+                .or_else(|| {
                     // CR 608.2c + CR 701.21a: When the event-scan referent misses
                     // (e.g. PermanentSacrificed without a matching LKI row) but the
                     // completion ledger recorded exactly one sacrifice, bind that
@@ -23664,8 +23671,7 @@ fn perform_player_scope_sacrifices(
                                 completion.sacrificed[0],
                             )
                         })
-                },
-            )
+                })
         {
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
                 frame
@@ -24692,7 +24698,7 @@ pub(crate) fn finalize_discard_choice_completion(
     if let Some(frame_id) = discard_frame {
         discard::hand_off_recruit_discard_result(state, frame_id);
     }
-    if let Some(snapshot) = parent_referent_context_from_events(state, events) {
+    if let Some(snapshot) = parent_referent_context_from_events(state, events, true) {
         if let Some(frame) = state.active_ability_continuation_frame_mut() {
             frame
                 .pending
@@ -28857,7 +28863,13 @@ fn resolve_chain_body(
     // CR 608.2c + CR 608.2h: a later instruction may read a public-to-hidden
     // move's last-known controller/owner metadata, without treating the hidden
     // object itself as an available parent referent.
-    let event_context_object = parent_referent_context_from_events(state, effect_events);
+    //
+    // CR 605.3a: mana payment taps are incidental cost payments and must not
+    // create anaphoric referents. Suppress tap capture when the parent
+    // instruction is a PayCost effect.
+    let allow_taps = !matches!(ability.effect, Effect::PayCost { .. });
+    let event_context_object =
+        parent_referent_context_from_events(state, effect_events, allow_taps);
     // CR 608.2c + CR 614.9: a damage instruction's own result, the object its damage
     // was actually dealt to (after any redirection), for its direct child's "dealt
     // damage this way" rider. Taken from this instruction's `DamageDealt` events
@@ -37433,7 +37445,7 @@ mod tests {
         if let GameEvent::ZoneChanged { record, .. } = &mut event {
             record.controller = P1;
         }
-        let snapshot = parent_referent_context_from_events(&state, &[event])
+        let snapshot = parent_referent_context_from_events(&state, &[event], true)
             .expect("actual moved referent capture");
         assert_eq!(snapshot.object_id, object);
         assert_eq!(snapshot.lki.controller, P1);
@@ -42409,7 +42421,7 @@ mod tests {
             caused_by: None,
             incarnation: None,
         }];
-        let referent = parent_referent_context_from_events(&state, &events)
+        let referent = parent_referent_context_from_events(&state, &events, true)
             .expect("a single tapped creature must be captured as the anaphoric referent");
         assert_eq!(referent.object_id, creature);
         assert_eq!(
@@ -42460,7 +42472,7 @@ mod tests {
             },
         ];
         assert!(
-            parent_referent_context_from_events(&state, &events).is_none(),
+            parent_referent_context_from_events(&state, &events, true).is_none(),
             "two tapped creatures have no singular anaphoric referent"
         );
     }
@@ -42492,12 +42504,13 @@ mod tests {
         ];
 
         assert_eq!(
-            parent_referent_context_from_events(&state, &single).map(|snapshot| snapshot.object_id),
+            parent_referent_context_from_events(&state, &single, true)
+                .map(|snapshot| snapshot.object_id),
             Some(first),
             "one copied spell can feed ParentTarget"
         );
         assert!(
-            parent_referent_context_from_events(&state, &multiple).is_none(),
+            parent_referent_context_from_events(&state, &multiple, true).is_none(),
             "multiple copied spells must not bind ParentTarget arbitrarily"
         );
     }
@@ -42525,7 +42538,7 @@ mod tests {
         let state = GameState::new_two_player(42);
         let events = [zone_change_event(ObjectId(1), Zone::Library, Zone::Hand, 3)];
         assert!(
-            parent_referent_context_from_events(&state, &events).is_none(),
+            parent_referent_context_from_events(&state, &events, true).is_none(),
             "a draw has a hidden source zone and must not bind a referent"
         );
     }
@@ -42542,7 +42555,7 @@ mod tests {
             Zone::Hand,
             3,
         )];
-        let referent = parent_referent_context_from_events(&state, &events)
+        let referent = parent_referent_context_from_events(&state, &events, true)
             .expect("a public -> hidden move leaves last known information");
         assert_eq!(referent.object_id, ObjectId(1));
         assert_eq!(
@@ -42562,7 +42575,7 @@ mod tests {
             zone_change_event(ObjectId(2), Zone::Battlefield, Zone::Graveyard, 5),
         ];
         assert!(
-            parent_referent_context_from_events(&state, &events).is_none(),
+            parent_referent_context_from_events(&state, &events, true).is_none(),
             "two qualifying moves have no singular anaphoric referent"
         );
     }
@@ -42599,7 +42612,7 @@ mod tests {
                 incarnation: None,
             },
         ];
-        let referent = parent_referent_context_from_events(&state, &events)
+        let referent = parent_referent_context_from_events(&state, &events, true)
             .expect("duplicate tap events for one creature still have a singular referent");
         assert_eq!(referent.object_id, creature);
         assert_eq!(referent.lki.power, Some(4));
@@ -47056,7 +47069,7 @@ mod tests {
             record: Box::new(record),
         }];
 
-        let snapshot = parent_referent_context_from_events(&state, &events)
+        let snapshot = parent_referent_context_from_events(&state, &events, true)
             .expect("single zone change to a public zone should provide context");
 
         assert_eq!(snapshot.object_id, moved);
@@ -47092,7 +47105,7 @@ mod tests {
             },
         ];
 
-        assert!(parent_referent_context_from_events(&state, &events).is_none());
+        assert!(parent_referent_context_from_events(&state, &events, true).is_none());
     }
 
     /// CR 608.2c + CR 701.20b: a single-card `CardsRevealed` event introduces
@@ -47206,7 +47219,7 @@ mod tests {
             },
         ];
         assert!(damaged_object_context_from_events(&state, &events).is_none());
-        assert!(parent_referent_context_from_events(&state, &events).is_none());
+        assert!(parent_referent_context_from_events(&state, &events, true).is_none());
     }
 
     /// CR 608.2c: player-targeted damage carries no "that creature" referent.
@@ -47298,7 +47311,7 @@ mod tests {
                 player_id: PlayerId(0),
             },
         ];
-        let snapshot = parent_referent_context_from_events(&state, &events)
+        let snapshot = parent_referent_context_from_events(&state, &events, true)
             .expect("sacrifice should provide a referent");
         assert_eq!(
             snapshot.object_id, sacrificed,
@@ -49394,7 +49407,7 @@ mod tests {
             },
         ];
 
-        let snapshot = parent_referent_context_from_events(&state, &events)
+        let snapshot = parent_referent_context_from_events(&state, &events, true)
             .expect("cache-miss sacrifice must bind the same-span ZoneChanged record (not None)");
         assert_eq!(snapshot.object_id, sacrificed);
         assert_eq!(
