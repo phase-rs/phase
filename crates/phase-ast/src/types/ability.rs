@@ -6394,7 +6394,9 @@ pub enum DelayedTriggerPlayerBinding {
     /// step" — the exiled permanent may belong to any player, so "that
     /// player" (its owner, CR 400.3) is resolved from the parent target, or
     /// else the object the parent moved, at delayed-trigger creation, not
-    /// assumed to be the controller.
+    /// assumed to be the controller. Phytotitan's "their next upkeep" after
+    /// "under its owner's control" has neither, so the owner is read from the
+    /// payload's creation referent: the object its creation event moved.
     ParentTargetOwner,
     /// CR 603.7a + CR 608.2c: "that player's next [phase]" where "that
     /// player" anaphorically refers to a player CHOSEN earlier in the same
@@ -7889,16 +7891,12 @@ pub enum FilterProp {
     /// for each transformed permanent you control"). Mirrors `FaceDown`/`Tapped`:
     /// a per-object battlefield state read from `GameObject::transformed`.
     Transformed,
-    /// CR 115.9c: Matches stack entries whose targets ALL satisfy the given filter.
-    /// Used for "that targets only ~", "that targets only a single creature you control", etc.
-    /// Permissive at the per-object filter level; validated against the stack entry's actual
-    /// targets by trigger matchers and retarget effects.
+    /// CR 115.9c: Used for "that targets only ~", "that targets only a single creature you control", etc.
     TargetsOnly {
         filter: Box<TargetFilter>,
     },
     /// CR 115.9b: Matches stack entries that have at least one target satisfying the filter.
     /// Used for "that targets ~", "that targets you", etc. (.any() semantics).
-    /// Contrast with TargetsOnly (CR 115.9c) which requires ALL targets to match (.all()).
     Targets {
         filter: Box<TargetFilter>,
     },
