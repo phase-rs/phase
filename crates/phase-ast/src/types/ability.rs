@@ -40686,6 +40686,7 @@ impl AbilityCondition {
             | AbilityCondition::CostPaidObjectMatchesFilter { .. }
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
+            | AbilityCondition::PlayerAttackedPlayer { .. }
             | AbilityCondition::SourceLacksKeyword { .. } => false,
         }
     }
