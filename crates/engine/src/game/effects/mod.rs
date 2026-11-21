@@ -8052,6 +8052,23 @@ fn resolve_optional_effect_decision_step(
 ) -> Result<ResolutionProgress, EffectError> {
     // CR 608.2c: qualification is read from the state the prompt parked, before
     // the answer lowers optionality and strips the enclosing repeat driver.
+    // CR 118.3 + CR 608.2d: an accepted "you may <A> and <B>" option still
+    // needs the resources to pay it in full. Every acceptance — the prompt's
+    // answer, a remembered answer, a payment-branch choice — lands here before
+    // optionality lowers and any head component is spent, so an option no
+    // probed funding confirms resolves declined, never partially paid.
+    if choice == AutoMayChoice::Accept
+        && ability.optional
+        && !accepted_conjunction_commits(state, &ability)
+    {
+        return resolve_optional_effect_decision_step(
+            state,
+            ability,
+            AutoMayChoice::Decline,
+            events,
+            depth,
+        );
+    }
     let accepted_move = AcceptedOptionalMove::qualify(state, &ability);
     ability.optional = false;
     // CR 608.2c: the enclosing repeat driver owns progression. This answer
@@ -19973,11 +19990,18 @@ enum ConjunctionVerdict {
     /// The option may be chosen, and its mana head is funded this way: the
     /// first legal funding that leaves every modeled conjunct performable, or
     /// the planner's own when the walk decides none (an unmodeled chain or
-    /// step, or a funding paused for a choice).
+    /// step).
     Offered(crate::game::casting::EffectManaFunding),
     /// CR 118.3 + CR 608.2d: no legal funding leaves every conjunct
     /// performable in full.
     Impossible,
+    /// The funding search was cut short by its budget
+    /// (`EffectManaFundingCandidates::exhausted`) or a probed funding paused
+    /// for a choice, so no funding has been shown to leave every conjunct
+    /// performable AND none has been shown impossible. The option is offered,
+    /// but no funding is confirmed to pay it in full, so accepting it resolves
+    /// declined ([`accepted_conjunction_commits`], CR 118.3).
+    Undecided,
 }
 
 /// CR 118.12 + CR 118.3 + CR 608.2d: "you may <A> and <B>" is one option, a
@@ -19994,8 +20018,11 @@ enum ConjunctionVerdict {
 /// the option is impossible only when none of them leaves the conjuncts
 /// performable. The fundings probed are bounded
 /// ([`crate::game::casting::effect_mana_funding_candidates`]): a search the
-/// budget cuts short is not decided, like a conjunct whose pool an earlier
-/// step may have added to, or any other step, and the option is offered.
+/// budget cuts short is not decided ([`ConjunctionVerdict::Undecided`]): the
+/// option is offered, but only a confirmed funding commits an acceptance
+/// ([`accepted_conjunction_commits`], CR 118.3). A conjunct whose pool an
+/// earlier step may have added to, or any other unmodeled step, is not judged
+/// and the option is offered under the planner's funding.
 ///
 /// Covered heads: "you may exile it and collect evidence N" (Lamplight
 /// Phoenix), "you may pay {1} and discard a card" (Banon, the Returners'
@@ -20015,35 +20042,36 @@ fn optional_conjunction_verdict(
     ability: &ResolvedAbility,
 ) -> ConjunctionVerdict {
     use crate::game::casting::{EffectManaFunding, EffectManaFundingProbe};
-    let undecided = ConjunctionVerdict::Offered(EffectManaFunding::Planned);
+    let unjudged = ConjunctionVerdict::Offered(EffectManaFunding::Planned);
     let Some((prefix, funding)) = optional_conjunction_head(state, ability) else {
-        return undecided;
+        return unjudged;
     };
     let Some(first) = ability
         .sub_ability
         .as_ref()
         .and_then(|first| cast_from_zone::cast_metadata_continuation(ability, first))
     else {
-        return undecided;
+        return unjudged;
     };
     // No conjoined step ("you may pay {1}. If you do, …"): nothing to judge,
     // so no funding is simulated.
     if !is_step_of_optional_instruction(first) {
-        return undecided;
+        return unjudged;
     }
     match funding {
         ConjunctionHeadFunding::Unfunded => {
             if conjunct_steps_are_infeasible(state, first, prefix) {
                 ConjunctionVerdict::Impossible
             } else {
-                undecided
+                unjudged
             }
         }
         ConjunctionHeadFunding::Mana { payer, cost } => {
             let candidates = crate::game::casting::effect_mana_funding_candidates(state, payer);
             // A search cut short by the probe budget has not shown that no
-            // funding is performable, so it leaves the option offered and the
-            // real payment decides.
+            // funding is performable, so it decides nothing: the option is
+            // offered, but only a confirmed funding commits it
+            // ([`accepted_conjunction_commits`]).
             let mut any_undecided = candidates.exhausted;
             for candidate in candidates.fundings {
                 match crate::game::casting::effect_mana_funding_probe(
@@ -20063,7 +20091,7 @@ fn optional_conjunction_verdict(
                 }
             }
             if any_undecided {
-                undecided
+                ConjunctionVerdict::Undecided
             } else {
                 ConjunctionVerdict::Impossible
             }
@@ -20081,13 +20109,41 @@ fn optional_conjunction_is_infeasible(state: &GameState, ability: &ResolvedAbili
 /// performable, so the automated payment activates the mana ability the
 /// conjuncts need (Pristine Talisman under Nefarious Lich, ahead of floating
 /// mana or a land the planner prefers) rather than only the planner's choice.
+/// An undecided or impossible search names the planner's own funding: an
+/// optional head reaches this payment only when the verdict confirmed a
+/// funding ([`accepted_conjunction_commits`]), so that answer serves only a
+/// mandatory head, which is not an option to decline.
 pub(crate) fn conjunction_head_funding(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> crate::game::casting::EffectManaFunding {
     match optional_conjunction_verdict(state, ability) {
         ConjunctionVerdict::Offered(funding) => funding,
-        ConjunctionVerdict::Impossible => crate::game::casting::EffectManaFunding::Planned,
+        ConjunctionVerdict::Impossible | ConjunctionVerdict::Undecided => {
+            crate::game::casting::EffectManaFunding::Planned
+        }
+    }
+}
+
+/// CR 118.3 + CR 608.2d: whether an accepted "you may <A> and <B>" option
+/// commits as a whole. The head is spent only under a funding whose probe left
+/// every modeled conjunct performable ([`ConjunctionVerdict::Offered`]); the
+/// payment (`pay.rs`) then funds itself exactly that way
+/// ([`conjunction_head_funding`]). An [`ConjunctionVerdict::Undecided`] search
+/// was offered because it has not shown the option impossible, but it has not
+/// shown any funding that pays it in full either, and the same bounded search
+/// run again at acceptance cannot show more. Paying the head on it would risk
+/// the partial payment CR 118.3 forbids (a `{1}` spent, then a conjoined
+/// `discard` with no card), so such an acceptance resolves declined: nothing
+/// of the option is performed and its "If you do" rider does not happen.
+///
+/// Known limit of the bound: a board whose only performable funding lies past
+/// [`crate::game::casting::EFFECT_MANA_FUNDING_PROBE_BUDGET`] candidates, or
+/// behind a probe paused for a replacement choice, loses the option.
+fn accepted_conjunction_commits(state: &GameState, ability: &ResolvedAbility) -> bool {
+    match optional_conjunction_verdict(state, ability) {
+        ConjunctionVerdict::Offered(_) => true,
+        ConjunctionVerdict::Impossible | ConjunctionVerdict::Undecided => false,
     }
 }
 
