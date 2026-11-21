@@ -17064,10 +17064,10 @@ fn wheel_and_deal_implicit_draw_inherits_each_targeted_opponent() {
             &*per_opponent_draw.effect,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 7 },
-                target: TargetFilter::ParentTarget,
+                target: TargetFilter::ScopedPlayer,
             }
         ),
-        "expected the seven-card draw to inherit ParentTarget, got {:?}; full definition: {def:?}",
+        "expected the seven-card draw to bind the current target player, got {:?}; full definition: {def:?}",
         per_opponent_draw.effect
     );
     let controller_draw = per_opponent_draw
@@ -44915,9 +44915,8 @@ fn craterhoof_where_x_binds_dynamic_pump_to_object_count() {
         assert!(
             matches!(
                 value,
-                QuantityExpr::Ref {
-                    qty: QuantityRef::ObjectCount { .. }
-                }
+                QuantityExpr::ClampMin { inner, minimum: 0 }
+                    if matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ObjectCount { .. } })
             ),
             "X must bind to ObjectCount(creatures you control), got {value:?}"
         );
@@ -44946,15 +44945,18 @@ fn where_x_power_of_the_exiled_card_binds_exiled_card_power() {
     else {
         panic!("expected Pump, got {:?}", def.effect);
     };
-    let expected = QuantityExpr::Ref {
-        qty: QuantityRef::PropertyAggregate(
-            PropertyAggregate::new(
-                AggregateFunction::Sum,
-                ObjectProperty::Power,
-                CardTypeSetSource::ExiledBySource,
-            )
-            .expect("statically valid property aggregate"),
-        ),
+    let expected = QuantityExpr::ClampMin {
+        inner: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::ExiledBySource,
+                )
+                .expect("statically valid property aggregate"),
+            ),
+        }),
+        minimum: 0,
     };
     for (stat, value) in [("power", power), ("toughness", toughness)] {
         assert_eq!(
@@ -49771,23 +49773,20 @@ fn reveal_until_all_cards_revealed_this_way_erratic_mutation() {
         panic!("expected Pump, got {:?}", pump.effect);
     };
     assert_eq!(*pump_target, TargetFilter::ParentTarget);
-    assert_eq!(
-        *power,
-        PtValue::Quantity(QuantityExpr::Ref {
+    let mana_value = QuantityExpr::ClampMin {
+        inner: Box::new(QuantityExpr::Ref {
             qty: QuantityRef::ObjectManaValue {
                 scope: ObjectScope::Demonstrative,
-            }
-        })
-    );
+            },
+        }),
+        minimum: 0,
+    };
+    assert_eq!(*power, PtValue::Quantity(mana_value.clone()));
     assert_eq!(
         *toughness,
         PtValue::Quantity(QuantityExpr::Multiply {
             factor: -1,
-            inner: Box::new(QuantityExpr::Ref {
-                qty: QuantityRef::ObjectManaValue {
-                    scope: ObjectScope::Demonstrative,
-                }
-            }),
+            inner: Box::new(mana_value),
         })
     );
     let placement = pump
@@ -90568,9 +90567,12 @@ fn liliana_pt_disjunction_keeps_both_alternatives_and_binds_x_to_swamps() {
         );
     };
     assert_eq!(plus_power, plus_toughness, "the card prints +X/+X");
+    let QuantityExpr::ClampMin { inner, minimum: 0 } = plus_power else {
+        panic!("expected a floored Swamp count, got {plus_power:?}");
+    };
     let QuantityExpr::Ref {
         qty: QuantityRef::ObjectCount { filter },
-    } = plus_power
+    } = inner.as_ref()
     else {
         panic!("expected a Swamp ObjectCount, got {plus_power:?}");
     };
@@ -97388,6 +97390,7 @@ mod carried_player_reference_tests {
             inject_subject_target(&mut lib, &phrase, "that player searches their library");
             let expected = match carry {
                 CarriedPlayerSubject::Declared => TargetFilter::ParentTargetController,
+                CarriedPlayerSubject::TargetPopulation => TargetFilter::ScopedPlayer,
                 CarriedPlayerSubject::Reference { filter, .. } => filter.clone(),
             };
             assert!(matches!(
@@ -105991,4 +105994,194 @@ fn sproutwatch_dryad_preserves_per_keyword_conditions_and_duration() {
             .as_deref()
             .is_none_or(|description| !description.contains(" if ")));
     }
+}
+
+#[test]
+fn each_target_player_keeps_coordinated_predicate_recipients() {
+    // Synthetic by necessity: no printed card has a fixed-count "two target
+    // players each A and B". The nearest printed cards are Huddle Up ("Two
+    // target players each draw a card.") for the count and Priest of
+    // Forgotten Gods for the coordinated predicate. This pins the exact-count
+    // subject form, which builds its application with no single target and an
+    // exact `MultiTargetSpec`.
+    let chain = parse_effect_chain(
+        "Two target players each lose 2 life and sacrifice a creature of their choice.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        chain.multi_target,
+        Some(MultiTargetSpec::fixed(2, 2)),
+        "{chain:#?}"
+    );
+    assert!(
+        matches!(
+            *chain.effect,
+            Effect::LoseLife {
+                target: Some(TargetFilter::Player),
+                ..
+            }
+        ),
+        "{chain:#?}"
+    );
+    let sacrifice = chain.sub_ability.as_deref().expect("sacrifice action");
+    assert!(
+        matches!(&*sacrifice.effect, Effect::Sacrifice { target, .. }
+            if target_filter_controller_ref(target) == Some(ControllerRef::ScopedPlayer)),
+        "{chain:#?}"
+    );
+    assert_eq!(sacrifice.multi_target, None);
+    assert_eq!(sacrifice.sub_link, SubAbilityLink::ContinuationStep);
+    assert!(sacrifice.sub_ability.is_none(), "{chain:#?}");
+}
+
+#[test]
+fn each_target_player_keeps_life_and_permanent_actions_under_one_announcement() {
+    /// The ordered action pair each printed clause must lower to.
+    enum Expected {
+        LoseThenSacrifice,
+        SacrificeThenLose,
+        MillThenLose,
+    }
+    for (card, text, kind, expected, controller_riders) in [
+        (
+            "Priest of Forgotten Gods",
+            "Any number of target players each lose 2 life and sacrifice a creature of their choice. You add {B}{B} and draw a card.",
+            AbilityKind::Activated,
+            Expected::LoseThenSacrifice,
+            true,
+        ),
+        (
+            "Will of the Abzan",
+            "Any number of target opponents each sacrifice a creature with the greatest power among creatures that player controls and lose 3 life.",
+            AbilityKind::Spell,
+            Expected::SacrificeThenLose,
+            false,
+        ),
+        (
+            "Tinybones Joins Up",
+            "any number of target players each mill a card and lose 1 life.",
+            AbilityKind::Spell,
+            Expected::MillThenLose,
+            false,
+        ),
+    ] {
+        let chain = parse_effect_chain(text, kind);
+        assert_eq!(
+            chain.multi_target,
+            Some(MultiTargetSpec::unlimited(0)),
+            "{card}: {chain:#?}"
+        );
+        // CR 601.2c + CR 608.2d: the players are announced as targets, while
+        // the permanent is chosen during resolution, so a sacrifice-first
+        // clause announces its players on a node of their own.
+        let first = match expected {
+            Expected::SacrificeThenLose => {
+                assert!(
+                    matches!(*chain.effect, Effect::TargetOnly { .. }),
+                    "{card}: {chain:#?}"
+                );
+                chain.sub_ability.as_deref().expect("first action")
+            }
+            Expected::LoseThenSacrifice | Expected::MillThenLose => &chain,
+        };
+        let second = first.sub_ability.as_deref().expect("second action");
+        assert_eq!(second.multi_target, None);
+        assert_eq!(second.sub_link, SubAbilityLink::ContinuationStep);
+        let scoped_sacrifice = |effect: &Effect| {
+            matches!(effect, Effect::Sacrifice { target, .. }
+                if target_filter_controller_ref(target) == Some(ControllerRef::ScopedPlayer))
+        };
+        let scoped_loss = |effect: &Effect| {
+            matches!(
+                effect,
+                Effect::LoseLife {
+                    target: Some(TargetFilter::ScopedPlayer),
+                    ..
+                }
+            )
+        };
+        let (first_ok, second_ok) = match expected {
+            Expected::LoseThenSacrifice => (
+                matches!(
+                    *first.effect,
+                    Effect::LoseLife {
+                        target: Some(TargetFilter::Player),
+                        ..
+                    }
+                ),
+                scoped_sacrifice(&second.effect),
+            ),
+            Expected::SacrificeThenLose => {
+                (scoped_sacrifice(&first.effect), scoped_loss(&second.effect))
+            }
+            Expected::MillThenLose => (
+                matches!(
+                    *first.effect,
+                    Effect::Mill {
+                        target: TargetFilter::Player,
+                        ..
+                    }
+                ),
+                scoped_loss(&second.effect),
+            ),
+        };
+        assert!(first_ok, "{card}: first action {chain:#?}");
+        assert!(second_ok, "{card}: second action {chain:#?}");
+        if !controller_riders {
+            assert!(second.sub_ability.is_none(), "{card}: {chain:#?}");
+            continue;
+        }
+        // CR 109.5: "You add {B}{B} and draw a card." stays the controller's.
+        let mana = second
+            .sub_ability
+            .as_deref()
+            .expect("independent mana rider");
+        assert_eq!(mana.sub_link, SubAbilityLink::SequentialSibling);
+        assert!(matches!(*mana.effect, Effect::Mana { .. }), "{chain:#?}");
+        let draw = mana.sub_ability.as_deref().expect("independent draw rider");
+        assert!(
+            matches!(
+                *draw.effect,
+                Effect::Draw {
+                    target: TargetFilter::Controller,
+                    ..
+                }
+            ),
+            "{chain:#?}"
+        );
+    }
+}
+
+#[test]
+fn each_target_player_bounds_comparison_to_the_sacrificing_player() {
+    let chain = parse_effect_chain(
+        "Any number of target opponents each sacrifice a creature with the greatest power among creatures that player controls and lose 3 life.",
+        AbilityKind::Spell,
+    );
+    let sacrifice = chain.sub_ability.as_deref().expect("sacrifice action");
+    let Effect::Sacrifice {
+        target: TargetFilter::Typed(permanents),
+        ..
+    } = &*sacrifice.effect
+    else {
+        panic!("expected the sacrifice to retain its permanent filter");
+    };
+    assert_eq!(permanents.controller, Some(ControllerRef::ScopedPlayer));
+    let [FilterProp::PtComparison {
+        value:
+            QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(aggregate),
+            },
+        ..
+    }] = permanents.properties.as_slice()
+    else {
+        panic!("expected an aggregate power comparison");
+    };
+    let CardTypeSetSource::Objects { filter } = aggregate.source() else {
+        panic!("expected to compare battlefield objects");
+    };
+    assert_eq!(
+        target_filter_controller_ref(filter),
+        Some(ControllerRef::ScopedPlayer)
+    );
 }

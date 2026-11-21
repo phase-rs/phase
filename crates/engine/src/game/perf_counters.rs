@@ -308,6 +308,18 @@ pub struct ControlDependencyCounters {
     pub previews: u64,
 }
 
+/// Test-only count of `casting::effect_mana_funding_probe` runs: each simulates
+/// one funding of a resolution-time effect mana payment for the conjunction
+/// verdict of "you may pay {N} and <B>". Kept out of [`PerfCounterSnapshot`]
+/// for the same reason as the counter sets above: that struct's serialized
+/// field set powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EffectManaFundingProbeCounters {
+    /// Funding probes run, each a state clone and an auto-tap planner pass.
+    pub probes: u64,
+}
+
 /// Test-only count of `stack_reach::stack_entry_node_reach` calls for an entry with
 /// an ability: the calls that reach `resolution_board`, which copies the board
 /// unless it refuses the entry first. Kept out of [`PerfCounterSnapshot`] for the
@@ -759,6 +771,10 @@ thread_local! {
     #[cfg(feature = "test-support")]
     static STACK_REACH_COUNTERS: Cell<StackReachCounters> = const {
         Cell::new(StackReachCounters { entry_reaches: 0 })
+    };
+    #[cfg(feature = "test-support")]
+    static EFFECT_MANA_FUNDING_PROBE_COUNTERS: Cell<EffectManaFundingProbeCounters> = const {
+        Cell::new(EffectManaFundingProbeCounters { probes: 0 })
     };
     #[cfg(feature = "test-support")]
     static CONTROL_DEPENDENCY_COUNTERS: Cell<ControlDependencyCounters> = const {
@@ -1595,6 +1611,9 @@ pub fn reset() {
     #[cfg(feature = "test-support")]
     STACK_REACH_COUNTERS.with(|counters| counters.set(StackReachCounters::default()));
     #[cfg(feature = "test-support")]
+    EFFECT_MANA_FUNDING_PROBE_COUNTERS
+        .with(|counters| counters.set(EffectManaFundingProbeCounters::default()));
+    #[cfg(feature = "test-support")]
     CONTROL_DEPENDENCY_COUNTERS.with(|counters| counters.set(ControlDependencyCounters::default()));
     #[cfg(feature = "test-support")]
     CAST_UNDO_RECORD_COUNTERS.with(|counters| counters.set(CastUndoRecordCounters::default()));
@@ -1653,6 +1672,21 @@ pub fn record_stack_entry_reach() {
 #[cfg(feature = "test-support")]
 pub fn stack_reach_snapshot() -> StackReachCounters {
     STACK_REACH_COUNTERS.with(Cell::get)
+}
+
+/// One funding probe of a resolution-time effect mana payment.
+#[cfg(feature = "test-support")]
+pub fn record_effect_mana_funding_probe() {
+    EFFECT_MANA_FUNDING_PROBE_COUNTERS.with(|cell| {
+        let mut c = cell.get();
+        c.probes += 1;
+        cell.set(c);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn effect_mana_funding_probe_snapshot() -> EffectManaFundingProbeCounters {
+    EFFECT_MANA_FUNDING_PROBE_COUNTERS.with(Cell::get)
 }
 
 /// One Layer 2 control-dependency preview (a state clone).
