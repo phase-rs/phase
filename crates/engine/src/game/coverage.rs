@@ -18,7 +18,7 @@ use crate::parser::oracle_casting::parse_casting_restriction_line;
 use crate::parser::oracle_effect::gap_diagnosis::diagnose_clause_gap;
 use crate::parser::oracle_effect::imperative::try_parse_em_dash_die_result_line;
 use crate::parser::oracle_ir::diagnostic::{
-    ClauseGap, ClauseGapKind, OracleDiagnostic, OracleItemId, OracleSourceSpan,
+    ClauseGap, ClauseGapKind, OracleDiagnostic, OracleItemId, OracleSourceSpan, SpanPrecision,
 };
 use crate::parser::oracle_util::normalize_card_name_refs;
 use crate::types::ability::TurnWindow;
@@ -8339,44 +8339,72 @@ fn refine_swallow_text(face: &CardFace, gap_details: &mut [GapDetail]) {
         let Some(detector) = gap.handler.strip_prefix("Swallow:") else {
             continue;
         };
-        let description = face
-            .parse_warnings
-            .iter()
-            .find_map(|warning| match warning {
-                OracleDiagnostic::SwallowedClause {
-                    detector: warned,
-                    description,
-                    ..
-                } if warned == detector => Some(description.as_str()),
-                OracleDiagnostic::SwallowedClause { .. }
-                | OracleDiagnostic::TargetFallback { .. }
-                | OracleDiagnostic::IgnoredRemainder { .. }
-                | OracleDiagnostic::CascadeLoss { .. } => None,
-            });
-        if let Some(clause) = description.and_then(|text| swallow_clause_text(text, oracle)) {
+        let warning = face.parse_warnings.iter().find(|warning| {
+            matches!(
+                warning,
+                OracleDiagnostic::SwallowedClause { detector: warned, .. } if warned == detector
+            )
+        });
+        if let Some(clause) = warning.and_then(|warning| swallow_clause_text(warning, oracle)) {
             gap.source_text = Some(clause);
         }
     }
+}
+
+/// The printed clause a swallow warning flagged. A stamped warning carries its
+/// audit unit's provenance, so the clause is read from the Oracle lines the unit
+/// covers, from `line_index` (the unit's first ITEM line) to the span's last line:
+/// a unit can open with lines no item claimed (a keyword or reminder line, as on
+/// Cut Short's Convoke line), and those are not what the detector flagged. A
+/// warning without provenance (a pre-provenance payload, or a chain-relative span
+/// whose lines are not card-absolute) can only be completed from its truncated
+/// display text ([`swallow_clause_from_description`]).
+fn swallow_clause_text(warning: &OracleDiagnostic, oracle: &str) -> Option<String> {
+    let OracleDiagnostic::SwallowedClause {
+        description,
+        line_index,
+        unit_span,
+        ..
+    } = warning
+    else {
+        return None;
+    };
+    unit_span
+        .as_ref()
+        .filter(|span| span.precision == SpanPrecision::Exact)
+        .and_then(|span| {
+            let count = span.last_line.saturating_sub(*line_index) + 1;
+            clause_from_lines(oracle.lines().skip(*line_index).take(count))
+        })
+        .or_else(|| swallow_clause_from_description(description, oracle))
 }
 
 /// The printed clause behind a swallow detector's unit text. Each line of the
 /// unit is completed to the full Oracle line it begins (only the last can be cut
 /// short), reminder text is dropped, and a line that was only reminder text
 /// disappears. `None` when nothing but reminder text is left.
-fn swallow_clause_text(description: &str, oracle: &str) -> Option<String> {
-    let clause: Vec<String> = description
-        .lines()
+fn swallow_clause_from_description(description: &str, oracle: &str) -> Option<String> {
+    clause_from_lines(
+        description
+            .lines()
+            .map(str::trim)
+            .filter(|fragment| !fragment.is_empty())
+            .map(|fragment| {
+                oracle
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| line.starts_with(fragment))
+                    .unwrap_or(fragment)
+            }),
+    )
+}
+
+/// `lines` joined with reminder text stripped; `None` when only reminder text is left.
+fn clause_from_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Option<String> {
+    let clause: Vec<String> = lines
         .map(str::trim)
-        .filter(|fragment| !fragment.is_empty())
-        .filter_map(|fragment| {
-            let line = oracle
-                .lines()
-                .map(str::trim)
-                .find(|line| line.starts_with(fragment))
-                .unwrap_or(fragment);
-            let stripped = crate::parser::oracle_util::strip_reminder_text(line);
-            (!stripped.is_empty()).then_some(stripped)
-        })
+        .map(crate::parser::oracle_util::strip_reminder_text)
+        .filter(|line| !line.is_empty())
         .collect();
     (!clause.is_empty()).then(|| clause.join(" "))
 }
@@ -29222,7 +29250,12 @@ mod unpublished_event_source_tests {
 
     /// Parse a card through the production MTGJSON-to-face path
     /// (`build_oracle_face`), the same construction the parser tests use.
-    fn parsed_face(name: &str, type_line: &str, types: &[&str], oracle: &str) -> CardFace {
+    pub(super) fn parsed_face(
+        name: &str,
+        type_line: &str,
+        types: &[&str],
+        oracle: &str,
+    ) -> CardFace {
         use crate::database::mtgjson::{AtomicCard, AtomicIdentifiers};
         let card = AtomicCard {
             name: name.to_string(),
@@ -29610,14 +29643,17 @@ As this land enters, you may behold a Jace. If you don't, this land enters tappe
         let description = "({T}: Add {U}.)
 As this land enters, you may behold a Jace. If you don't, this land enters tapped. (To behold a Jace, choose a Jace you cont";
         assert_eq!(
-            swallow_clause_text(description, SANCTUM).as_deref(),
+            swallow_clause_from_description(description, SANCTUM).as_deref(),
             Some("As this land enters, you may behold a Jace. If you don't, this land enters tapped.")
         );
     }
 
     #[test]
     fn a_unit_of_only_reminder_text_yields_nothing() {
-        assert_eq!(swallow_clause_text("({T}: Add {U}.)", SANCTUM), None);
+        assert_eq!(
+            swallow_clause_from_description("({T}: Add {U}.)", SANCTUM),
+            None
+        );
     }
 
     #[test]
@@ -29641,6 +29677,86 @@ As this land enters, you may behold a Jace. If you don't, this land enters tappe
         assert_eq!(
             details[0].source_text.as_deref(),
             Some("As this land enters, you may behold a Jace. If you don't, this land enters tapped.")
+        );
+    }
+}
+
+#[cfg(test)]
+mod swallow_provenance_tests {
+    use super::unpublished_event_source_tests::parsed_face;
+    use super::*;
+
+    /// Cut Short's printed text, verbatim from the card database export.
+    const CUT_SHORT: &str = "Convoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's color.)\nDestroy target planeswalker that was activated this turn or tapped creature.";
+    const DESTROY: &str =
+        "Destroy target planeswalker that was activated this turn or tapped creature.";
+
+    fn swallow_gap(detector: &str) -> GapDetail {
+        GapDetail {
+            handler: format!("Swallow:{detector}"),
+            source_text: Some(format!("[warning:swallowed-clause] {detector}")),
+            diagnoses: vec![],
+        }
+    }
+
+    /// The production parser flags Cut Short's destroy line (line 1) under
+    /// `Duration_ThisTurn`, in a unit that also absorbs the Convoke line (line 0)
+    /// and whose display text is cut inside the Convoke reminder. The report must
+    /// name the destroy clause, not the supported Convoke keyword.
+    #[test]
+    fn cut_short_reports_the_destroy_clause_not_convoke() {
+        let face = parsed_face("Cut Short", "Instant", &["Instant"], CUT_SHORT);
+        let warning = face
+            .parse_warnings
+            .iter()
+            .find(|warning| {
+                matches!(
+                    warning,
+                    OracleDiagnostic::SwallowedClause { detector, .. }
+                        if detector == "Duration_ThisTurn"
+                )
+            })
+            .expect("the production parser flags Cut Short's destroy clause");
+        assert_eq!(warning.line_index(), 1, "the flagged item is on line 1");
+        let mut details = vec![swallow_gap("Duration_ThisTurn")];
+        refine_swallow_text(&face, &mut details);
+        assert_eq!(details[0].source_text.as_deref(), Some(DESTROY));
+    }
+
+    /// A stamped warning is read from its provenance, never from the display text:
+    /// the description here names only the reminder line, yet the clause is the
+    /// destroy line the unit's `line_index` points at.
+    #[test]
+    fn stamped_warning_uses_its_line_index_not_its_description() {
+        let warning = OracleDiagnostic::SwallowedClause {
+            detector: "Duration_ThisTurn".to_string(),
+            description: "Convoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's".to_string(),
+            line_index: 1,
+            unit_span: Some(OracleSourceSpan::exact(0, 1, 0, 225, 0)),
+            items: Vec::new(),
+            gap: None,
+        };
+        assert_eq!(
+            swallow_clause_text(&warning, CUT_SHORT).as_deref(),
+            Some(DESTROY)
+        );
+    }
+
+    /// A span that is not card-absolute carries no usable line coordinates, so the
+    /// clause falls back to the display text.
+    #[test]
+    fn chain_relative_span_falls_back_to_the_display_text() {
+        let warning = OracleDiagnostic::SwallowedClause {
+            detector: "Duration_ThisTurn".to_string(),
+            description: DESTROY.to_string(),
+            line_index: 0,
+            unit_span: Some(OracleSourceSpan::chain_relative(0, 0, 0, 10, 0)),
+            items: Vec::new(),
+            gap: None,
+        };
+        assert_eq!(
+            swallow_clause_text(&warning, CUT_SHORT).as_deref(),
+            Some(DESTROY)
         );
     }
 }
