@@ -176,11 +176,17 @@ fn real_cast_journals_an_exact_stack_entry_finalize() {
         "the recorded result is the entry that is actually live"
     );
     assert_eq!(
-        command.resulting_paid_facts.actual_mana_spent, 2,
+        command
+            .resulting_paid_facts
+            .as_deref()
+            .unwrap()
+            .actual_mana_spent,
+        2,
         "the recorded snapshot is the one the engine reads for paid facts"
     );
     assert_eq!(
-        state.stack_paid_facts[&entry.id], *command.resulting_paid_facts,
+        state.stack_paid_facts[&entry.id],
+        *command.resulting_paid_facts.as_deref().unwrap(),
         "the recorded snapshot is the snapshot that was installed"
     );
 
@@ -266,7 +272,7 @@ fn a_divergent_paid_facts_predecessor_installs_neither_half() {
     let stub_kind = predecessor.stack[command.entry_position].kind.clone();
     // Diverge ONLY the snapshot side, leaving the entry precondition satisfied,
     // so the rejection can only come from the paid-facts check.
-    let mut foreign = command.resulting_paid_facts.as_ref().clone();
+    let mut foreign = command.resulting_paid_facts.as_deref().unwrap().clone();
     foreign.actual_mana_spent += 7;
     predecessor
         .stack_paid_facts
@@ -441,7 +447,7 @@ fn a_recorded_prior_snapshot_is_required_to_match_before_install() {
     );
 
     // A command that claims a prior snapshot was present.
-    let mut prior = command.resulting_paid_facts.as_ref().clone();
+    let mut prior = command.resulting_paid_facts.as_deref().unwrap().clone();
     prior.actual_mana_spent = 1;
     let mut with_prior = command.clone();
     with_prior.expected_old_paid_facts = Some(Box::new(prior.clone()));
@@ -454,7 +460,8 @@ fn a_recorded_prior_snapshot_is_required_to_match_before_install() {
     apply_resolved_stack_entry_finalize(&mut matching, &with_prior)
         .expect("a recorded prior snapshot that matches the predecessor must install");
     assert_eq!(
-        matching.stack_paid_facts[&command.object], *command.resulting_paid_facts,
+        matching.stack_paid_facts[&command.object],
+        *command.resulting_paid_facts.as_deref().unwrap(),
         "the recorded result overwrites the recorded prior snapshot"
     );
     assert_eq!(

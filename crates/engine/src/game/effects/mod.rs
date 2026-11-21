@@ -9912,6 +9912,7 @@ fn instruction_outlives_declined_gate(
         targets: _,
         source_id: _,
         cast_occurrence: _,
+        cycling_occurrence: _,
         source_incarnation: _,
         announced_source_incarnation: _,
         trigger_source: _,
@@ -14558,16 +14559,17 @@ fn fan_out_head_is_allowlisted(head: &ResolvedAbility) -> bool {
         reads_return_result: _, // consumes a settled value
         source_id: _,        // object id
         cast_occurrence: _,  // cast provenance
-        source_incarnation: _, // self-transform epoch latch
+        cycling_occurrence: _,
+        source_incarnation: _,           // self-transform epoch latch
         announced_source_incarnation: _, // announcement-time source epoch
-        chosen_target_slots: _, // CR 115.1 announced-target record
-        noted_mana_payment: _, // activation-payment snapshot
-        trigger_source: _,   // trigger provenance
-        trigger_definition_ref: _, // trigger provenance
-        delayed_origin: _,   // delayed-trigger identity
-        force_block_attacker: _, // force-block referent
-        target_incarnations: _, // CR 400.7 referent pins
-        target_pins: _,      // CR 400.7 selected-target pins
+        chosen_target_slots: _,          // CR 115.1 announced-target record
+        noted_mana_payment: _,           // activation-payment snapshot
+        trigger_source: _,               // trigger provenance
+        trigger_definition_ref: _,       // trigger provenance
+        delayed_origin: _,               // delayed-trigger identity
+        force_block_attacker: _,         // force-block referent
+        target_incarnations: _,          // CR 400.7 referent pins
+        target_pins: _,                  // CR 400.7 selected-target pins
         legacy_selected_target_incarnations: _,
         illegal_target_slots: _,         // CR 608.2b legality stamp
         unjudged_target_slots: _,        // CR 608.2b legality stamp

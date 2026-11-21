@@ -402,16 +402,17 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes<'_> {
         reads_return_result,       // instruction-local result is a dynamic read
         source_id: _,              // object id
         cast_occurrence: _,        // finalized-cast provenance, no dynamic read
-        source_incarnation: _,     // self-transform epoch latch, no dynamic read
+        cycling_occurrence: _,
+        source_incarnation: _, // self-transform epoch latch, no dynamic read
         announced_source_incarnation: _, // announcement-time source epoch, no dynamic read
-        noted_mana_payment: _,     // concrete activation-payment snapshot, no dynamic read
-        trigger_source: _,         // exact triggered-source authority, no dynamic read
+        noted_mana_payment: _, // concrete activation-payment snapshot, no dynamic read
+        trigger_source: _,     // exact triggered-source authority, no dynamic read
         trigger_definition_ref: _, // exact trigger occurrence, no dynamic read
-        delayed_origin: _,         // delayed-trigger identity, no dynamic read
-        force_block_attacker: _,   // exact force-block referent, no dynamic read
-        target_incarnations: _,    // CR 400.7 referent pins, no dynamic read
-        target_pins: _,            // CR 400.7 selected-target pins, no dynamic read
-        chosen_target_slots: _,    // CR 115.1 announced-target record, no dynamic read
+        delayed_origin: _,     // delayed-trigger identity, no dynamic read
+        force_block_attacker: _, // exact force-block referent, no dynamic read
+        target_incarnations: _, // CR 400.7 referent pins, no dynamic read
+        target_pins: _,        // CR 400.7 selected-target pins, no dynamic read
+        chosen_target_slots: _, // CR 115.1 announced-target record, no dynamic read
         legacy_selected_target_incarnations: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no dynamic read
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no dynamic read

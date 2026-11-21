@@ -261,6 +261,7 @@ fn rewrite_resolved_ability(
         reads_return_result: _,
         source_id: _,
         cast_occurrence: _,
+        cycling_occurrence: _,
         source_incarnation: _,
         announced_source_incarnation: _,
         trigger_source: _,

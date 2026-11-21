@@ -4719,7 +4719,8 @@ fn walk_ability(
         declares_return_result: _, // producer effect accounts for publication
         reads_return_result,      // instruction-local result is member-bound
         source_id: _,
-        cast_occurrence: _,    // finalized-cast provenance, no read/write effect
+        cast_occurrence: _, // finalized-cast provenance, no read/write effect
+        cycling_occurrence: _,
         source_incarnation: _, // self-transform epoch latch, no read/write effect
         announced_source_incarnation: _, // announcement-time source epoch, no read/write effect
         trigger_source: _,     // exact triggered-source authority, no read/write effect

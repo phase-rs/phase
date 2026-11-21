@@ -9661,6 +9661,7 @@ fn project_out_resources(state: &GameState) -> ResourceProjectedFrame {
     s.spells_cast_this_turn_by_player.clear();
     s.spells_cast_this_game.clear();
     s.spells_cast_this_game_by_player.clear();
+    s.cycles_completed_this_game_by_player.clear();
     // CR 602.2 + CR 611.3a: the per-turn activation journal is the activation
     // analog of the cast journal above, and every row of it is pumped history
     // EXCEPT the one fact a "first activated ability … each turn" cost reads:

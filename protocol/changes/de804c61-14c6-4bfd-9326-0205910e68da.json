@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Persist completed cycling history and its resolved ledger edit and stack-finalize cycling occurrence"
+}

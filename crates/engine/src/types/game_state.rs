@@ -1948,6 +1948,20 @@ pub struct CastOccurrence {
     pub turn_journal_index: u32,
 }
 
+/// One completed cycling activation, retained for the rest of the game.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CyclingRecord {
+    pub name: String,
+    pub turn: u32,
+}
+
+/// Coordinate of a completed cycle in the activator's game-long history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CyclingOccurrence {
+    pub activator: PlayerId,
+    pub journal_index: usize,
+}
+
 /// CR 602.2 + CR 601.2c: one NON-MANA activated ability that was activated this
 /// turn, with the facts a "the first activated ability you activate each turn
 /// that …" modifier (Professor Hojo) needs, captured when the ability was
@@ -28342,6 +28356,10 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub spells_cast_this_game_by_player: HashMap<PlayerId, im::Vector<SpellCastRecord>>,
+    /// Completed cycling activations in placement order, keyed by activator.
+    #[serde(default)]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
+    pub cycles_completed_this_game_by_player: HashMap<PlayerId, im::Vector<CyclingRecord>>,
     /// Per-player spell cast history this turn.
     /// Each entry records the spell's relevant characteristics at cast time,
     /// enabling data-driven filtered counting at resolution.
@@ -38375,6 +38393,7 @@ impl GameState {
             pending_paradigm_remaining_offers: None,
             spells_cast_this_game: HashMap::new(),
             spells_cast_this_game_by_player: HashMap::new(),
+            cycles_completed_this_game_by_player: HashMap::new(),
             spells_cast_this_turn_by_player: HashMap::new(),
             lands_played_this_turn_by_player: HashMap::new(),
             players_who_searched_library_this_turn: HashSet::new(),
@@ -42319,6 +42338,7 @@ impl GameState {
             pending_paradigm_remaining_offers: _,
             spells_cast_this_game: _,
             spells_cast_this_game_by_player: _,
+            cycles_completed_this_game_by_player: _,
             spells_cast_this_turn_by_player: _,
             lands_played_this_turn_by_player: _,
             players_who_searched_library_this_turn: _,
@@ -43936,6 +43956,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_paradigm_remaining_offers: _,
         spells_cast_this_game: _,
         spells_cast_this_game_by_player: _,
+        cycles_completed_this_game_by_player: _,
         spells_cast_this_turn_by_player: _,
         lands_played_this_turn_by_player: _,
         players_who_searched_library_this_turn: _,
@@ -44645,6 +44666,7 @@ impl PartialEq for GameState {
             && self.pending_paradigm_remaining_offers == other.pending_paradigm_remaining_offers
             && self.spells_cast_this_game == other.spells_cast_this_game
             && self.spells_cast_this_game_by_player == other.spells_cast_this_game_by_player
+            && self.cycles_completed_this_game_by_player == other.cycles_completed_this_game_by_player
             && self.spells_cast_this_turn_by_player == other.spells_cast_this_turn_by_player
             && self.lands_played_this_turn_by_player == other.lands_played_this_turn_by_player
             && self.players_who_searched_library_this_turn

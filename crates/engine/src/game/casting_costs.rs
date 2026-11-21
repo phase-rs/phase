@@ -16283,9 +16283,10 @@ fn finalize_cast_with_phyrexian_choices_inner(
             expected_old_kind: Box::new(expected_old_kind),
             resulting_kind: Box::new(resulting_kind),
             expected_old_paid_facts: expected_old_paid_facts.map(Box::new),
-            resulting_paid_facts: Box::new(resulting_paid_facts),
+            resulting_paid_facts: Some(Box::new(resulting_paid_facts)),
             expected_old_cast_occurrence,
             resulting_cast_occurrence: Some(occurrence),
+            resulting_cycling_occurrence: None,
             cause,
         })
         .expect("resolved stack entry finalize must have a live journal cause");

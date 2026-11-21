@@ -33024,6 +33024,9 @@ pub(crate) fn record_activated_ability_placed(
     // CR 602.2a + CR 702.29a + CR 702.29f: Keep the announced cycling tag
     // even when the discard takes the source out of the zone of its grant.
     let ability_tag = record.ability_tag;
+    // CR 201.2: Use the English card name bound before the discard cost.
+    let cycle = (ability_tag == Some(AbilityTag::Cycling))
+        .then(|| (record.activator, record.source_lki.name.clone()));
     // CR 602.2a + CR 602.5b: the announced activation consumes its own key,
     // read off the placed entry's ability — never re-derived from
     // `(source_id, ability_index)`. Re-deriving post-payment would mis-record
@@ -33075,7 +33078,14 @@ pub(crate) fn record_activated_ability_placed(
     // CR 602.2b + CR 601.2h + CR 601.2i: Publish after payment at engine stack
     // placement. CR 702.29c + CR 702.29e + CR 702.29f: The discard cost of
     // either cycling or typecycling makes this the activator's cycled card.
-    if ability_tag == Some(AbilityTag::Cycling) {
+    if let Some((activator, name)) = cycle {
+        let record = crate::types::game_state::CyclingRecord {
+            name,
+            turn: state.turn_number,
+        };
+        let occurrence =
+            super::ledger::record_completed_cycle(state, activator, record, placed_entry);
+        super::stack::finalize_completed_cycle(state, placed_entry, occurrence);
         events.push(GameEvent::Cycled {
             player_id: player,
             object_id: source_id,

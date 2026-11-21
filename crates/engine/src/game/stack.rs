@@ -10,10 +10,10 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    AutoMayChoice, CastOfferKind, CastingVariant, DepartedStackSpell, ExileLink, ExileLinkKind,
-    GameState, MayTriggerAutoChoiceKey, OwedSpellFinalPart, PendingCounterPostAction,
-    PendingSpellResolution, StackEntry, StackEntryKind, StackPaidSnapshot, TriggerSourceContext,
-    WaitingFor,
+    AutoMayChoice, CastOfferKind, CastingVariant, CyclingOccurrence, DepartedStackSpell, ExileLink,
+    ExileLinkKind, GameState, MayTriggerAutoChoiceKey, OwedSpellFinalPart,
+    PendingCounterPostAction, PendingSpellResolution, StackEntry, StackEntryKind,
+    StackPaidSnapshot, TriggerSourceContext, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TriggerFiring};
 use crate::types::player::PlayerId;
@@ -552,7 +552,43 @@ pub(crate) fn rewrite_stack_object_x(
     }
 }
 
-/// Installs one already-resolved CR 601.2i cast finalization verbatim.
+/// Stamp the just-placed cycling graph after its ledger append.
+pub(crate) fn finalize_completed_cycle(
+    state: &mut GameState,
+    object: ObjectId,
+    occurrence: CyclingOccurrence,
+) {
+    let entry_position = state.stack.len() - 1;
+    let entry = state
+        .stack
+        .back_mut()
+        .expect("cycling activation was just placed");
+    debug_assert_eq!(entry.id, object);
+    let expected_old_kind = Box::new(entry.kind.clone());
+    let StackEntryKind::ActivatedAbility { ability, .. } = &mut entry.kind else {
+        unreachable!("cycling placement is an activated ability");
+    };
+    ability.set_cycling_occurrence_recursive(occurrence);
+    let resulting_kind = Box::new(entry.kind.clone());
+    let cause = state.current_or_begin_rules_execution_node();
+    state
+        .resolved_rules_journal
+        .record_stack_entry_finalize(ResolvedStackEntryFinalizeCommand {
+            object,
+            entry_position,
+            expected_old_kind,
+            resulting_kind,
+            expected_old_paid_facts: None,
+            resulting_paid_facts: None,
+            expected_old_cast_occurrence: None,
+            resulting_cast_occurrence: None,
+            resulting_cycling_occurrence: Some(occurrence),
+            cause,
+        })
+        .expect("cycling finalization must have a live journal cause");
+}
+
+/// Installs a resolved spell or cycling activation finalization.
 ///
 /// CR 601.2i: the recorded finalized entry and paid-facts snapshot are written
 /// back exactly as they were recorded. Nothing is re-derived — in particular the
@@ -600,52 +636,45 @@ pub fn apply_resolved_stack_entry_finalize(
             ResolvedStackEntryFinalizeReplayInvariantError::PaidFactsMismatch(command.object),
         );
     }
-    let object = state.objects.get(&command.object).ok_or(
-        ResolvedStackEntryFinalizeReplayInvariantError::CastOccurrenceMismatch(command.object),
-    )?;
-    if object.cast_occurrence != command.expected_old_cast_occurrence {
-        return Err(
-            ResolvedStackEntryFinalizeReplayInvariantError::CastOccurrenceMismatch(command.object),
-        );
-    }
-    if let Some(occurrence) = command.resulting_cast_occurrence {
-        if !crate::game::ledger::cast_occurrence_is_current(state, occurrence, command.object) {
-            return Err(
-                ResolvedStackEntryFinalizeReplayInvariantError::CastOccurrenceMismatch(
-                    command.object,
-                ),
-            );
-        }
-        let graph_matches = matches!(
-            command.resulting_kind.as_ref(),
-            StackEntryKind::Spell { ability, .. }
-                if ability
-                    .as_deref()
-                    .is_none_or(|ability| ability.cast_occurrence_matches_recursive(occurrence))
-        );
-        if !graph_matches {
-            return Err(
-                ResolvedStackEntryFinalizeReplayInvariantError::CastOccurrenceMismatch(
-                    command.object,
-                ),
-            );
-        }
-    }
+    use ResolvedStackEntryFinalizeReplayInvariantError as Error;
 
+    command.validate_shape()?;
+    if matches!(entry.kind, StackEntryKind::Spell { .. }) {
+        let object = state
+            .objects
+            .get(&command.object)
+            .ok_or(Error::CastOccurrenceMismatch(command.object))?;
+        if object.cast_occurrence != command.expected_old_cast_occurrence
+            || command.resulting_cast_occurrence.is_some_and(|occurrence| {
+                !crate::game::ledger::cast_occurrence_is_current(state, occurrence, command.object)
+            })
+        {
+            return Err(Error::CastOccurrenceMismatch(command.object));
+        }
+    }
+    if let Some(occurrence) = command.resulting_cycling_occurrence {
+        if state
+            .cycles_completed_this_game_by_player
+            .get(&occurrence.activator)
+            .and_then(|history| history.get(occurrence.journal_index))
+            .is_none()
+        {
+            return Err(Error::CyclingOccurrenceMismatch(command.object));
+        }
+    }
     state
         .stack
         .get_mut(command.entry_position)
         .expect("the entry was just read at this position")
         .kind = command.resulting_kind.as_ref().clone();
-    state.stack_paid_facts.insert(
-        command.object,
-        command.resulting_paid_facts.as_ref().clone(),
-    );
-    state
-        .objects
-        .get_mut(&command.object)
-        .expect("the spell object was just validated")
-        .cast_occurrence = command.resulting_cast_occurrence;
+    if let Some(paid) = command.resulting_paid_facts.as_deref() {
+        state.stack_paid_facts.insert(command.object, paid.clone());
+        state
+            .objects
+            .get_mut(&command.object)
+            .expect("the spell object was just validated")
+            .cast_occurrence = command.resulting_cast_occurrence;
+    }
     Ok(())
 }
 
@@ -4873,6 +4902,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         reads_return_result,
         source_id: _,
         cast_occurrence,
+        cycling_occurrence: _,
         source_incarnation,
         announced_source_incarnation,
         trigger_source,
@@ -5136,6 +5166,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         reads_return_result,
         source_id: _,
         cast_occurrence,
+        cycling_occurrence: _,
         source_incarnation: _,
         announced_source_incarnation: _,
         trigger_source: _,
@@ -5378,6 +5409,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         reads_return_result,
         source_id: _,
         cast_occurrence,
+        cycling_occurrence: _,
         source_incarnation: _,
         announced_source_incarnation: _,
         trigger_source: _,
@@ -5730,6 +5762,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         reads_return_result: a_reads_return_result,
         source_id: _,
         cast_occurrence: _,
+        cycling_occurrence: _,
         source_incarnation: _,
         announced_source_incarnation: _,
         trigger_source: _,
@@ -5827,6 +5860,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         reads_return_result: b_reads_return_result,
         source_id: _,
         cast_occurrence: _,
+        cycling_occurrence: _,
         source_incarnation: _,
         announced_source_incarnation: _,
         trigger_source: _,
