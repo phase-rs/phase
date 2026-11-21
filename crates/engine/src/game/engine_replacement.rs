@@ -727,6 +727,16 @@ fn handle_replacement_choice_inner(
         .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::RollDice { .. }))
         .then(|| super::pre_entry_view::PreEntryRulesView::of_pending_roll(state))
         .flatten();
+    let is_combat_replacement = state.pending_replacement.as_ref().is_some_and(|pending| {
+        matches!(
+            pending.proposed,
+            ProposedEvent::Damage {
+                is_combat: true,
+                ..
+            }
+        )
+    });
+    let continue_start = events.len();
     // CR 616.1 + CR 615.5: an answer a parked damage batch awaits is one of its original
     // choices, so the chosen replacement's action or rider waits with the batch's held work.
     let (result, viewed_choice) = if impossible_parked_draw {
@@ -761,6 +771,9 @@ fn handle_replacement_choice_inner(
             ),
         }
     };
+    if !is_combat_replacement {
+        super::effects::fold_awaited_damage_events(state, &events[continue_start..]);
+    }
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
     // multiple eligible lands) re-parked the pending replacement with
@@ -1049,8 +1062,15 @@ fn handle_replacement_choice_inner(
                     if !super::effects::deal_damage::return_answered_portion_to_batch(
                         state, &ctx, &damage,
                     ) {
+                        let damage_start = events.len();
                         let _ =
                             apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
+                        if !is_combat {
+                            super::effects::fold_awaited_damage_events(
+                                state,
+                                &events[damage_start..],
+                            );
+                        }
                     }
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
@@ -1809,9 +1829,11 @@ fn handle_replacement_choice_inner(
                     .is_some_and(|stashed| !stashed.is_combat)
                 && state.active_batch_delivery().is_none()
             {
+                let damage_start = events.len();
                 let outcome = crate::game::effects::deal_damage::drain_pending_damage_post_loss(
                     state, events,
                 );
+                super::effects::fold_awaited_damage_events(state, &events[damage_start..]);
                 if matches!(
                     outcome,
                     crate::game::effects::deal_damage::DamagePostLossDrainOutcome::PausedForReplacement
@@ -1838,9 +1860,11 @@ fn handle_replacement_choice_inner(
                     .is_some_and(|stashed| !stashed.is_combat)
                 && state.active_batch_delivery().is_none()
             {
+                let damage_start = events.len();
                 let outcome = crate::game::effects::deal_damage::drain_pending_damage_post_counter(
                     state, events,
                 );
+                super::effects::fold_awaited_damage_events(state, &events[damage_start..]);
                 if matches!(
                     outcome,
                     crate::game::effects::deal_damage::DamagePostCounterDrainOutcome::PausedForReplacement

@@ -1689,6 +1689,9 @@ fn stash_remaining_damage_chain(
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
     dealt_before_pause: &[GameEvent],
 ) {
+    if ability.sub_ability.is_none() && crate::game::effects::is_damage_continuation_node(ability) {
+        crate::game::effects::fold_awaited_damage_events(state, dealt_before_pause);
+    }
     if let Some(head) = remaining_damage_head(
         state,
         ability,
@@ -1971,7 +1974,7 @@ fn run_damage_batch_phases(
                             outcomes: None,
                         },
                         boundary,
-                        BatchProgress::Replacing,
+                        &[],
                     );
                 }
             }
@@ -2008,7 +2011,7 @@ fn run_damage_batch_phases(
                         outcomes: None,
                     },
                     boundary,
-                    BatchProgress::Replacing,
+                    &[],
                 );
             }
         }
@@ -2022,6 +2025,7 @@ fn run_damage_batch_phases(
     state.damage_event_losses = Some(EventLosses::Recording(outcomes.unwrap_or_default()));
     // Phase C: delivery (CR 120.4c). A delivery that waits on a choice (a lifelink gain's
     // replacements) parks the survivors after it; the parked batch still owns the completion.
+    let dealing_from = events.len();
     for (index, (ctx, event)) in replaced.iter().enumerate() {
         if let ProposedEvent::Damage { target, .. } = event {
             if !recipient_present(state, target) {
@@ -2048,7 +2052,7 @@ fn run_damage_batch_phases(
                     ..ParkedDamageBatch::default()
                 },
                 boundary,
-                BatchProgress::Delivering,
+                &events[dealing_from..],
             );
         }
     }
@@ -2092,7 +2096,7 @@ fn run_damage_batch_phases(
                     ..ParkedDamageBatch::default()
                 },
                 boundary,
-                BatchProgress::Delivering,
+                &events[dealing_from..],
             );
         }
     }
@@ -2491,7 +2495,6 @@ fn in_apnap_order(state: &GameState, mut portions: Vec<BatchPortion>) -> Vec<Bat
 /// raised (an order choice, a delivery choice), on top, and parks the later instructions
 /// beneath it here and reports `Stashed`.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn park_damage_batch(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -2501,25 +2504,8 @@ pub(crate) fn park_damage_batch(
     awaiting: Option<RawDamagePortion>,
     parked: ParkedDamageBatch,
     boundary: ChildStackDepth,
-    progress: BatchProgress,
+    dealt_before_pause: &[GameEvent],
 ) -> Result<DamageTail, EffectError> {
-    // CR 120.4b + CR 120.4c: the batch deals its damage only after every portion is
-    // replaced, so a pause during replacement precedes all of it; the damage its
-    // portions' sources deal once it resumes is its whole result.
-    let tail_result = match progress {
-        BatchProgress::Replacing => {
-            let mut sources: Vec<ObjectId> = replaced
-                .iter()
-                .map(|(ctx, _)| ctx.source_id)
-                .chain(remaining.iter().map(|portion| portion.source))
-                .chain(awaiting.iter().map(|portion| portion.source))
-                .collect();
-            sources.sort_unstable();
-            sources.dedup();
-            PausedDamageResult::BeforeDelivery { sources }
-        }
-        BatchProgress::Delivering => PausedDamageResult::AfterDelivery,
-    };
     let replaced = replaced
         .iter()
         .filter_map(|(ctx, event)| match event {
@@ -2563,91 +2549,15 @@ pub(crate) fn park_damage_batch(
         return Ok(DamageTail::Caller);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
-        let tail = stashed_tail(state, sub, ability, tail_result);
+        let tail = stashed_tail(state, sub, ability, dealt_before_pause);
         state.park_ability_continuation(PendingContinuation::new(Box::new(tail), state));
-    } else if matches!(tail_result, PausedDamageResult::AfterDelivery) {
-        // CR 608.2c: a resumed batch now pausing after dealing part of its damage
-        // already parked its tail awaiting all of it; the part dealt here is in an
-        // action that tail cannot read back.
-        forget_awaited_delivery_of_parked_tail(state, ability);
+    } else if matches!(ability.effect, Effect::ResumeDamageBatch { .. }) {
+        // CR 608.2c: a resumed batch re-pausing mid-delivery folds any portions it
+        // delivered into the already-parked rider awaiting this instruction's completion.
+        crate::game::effects::fold_awaited_damage_events(state, dealt_before_pause);
     }
     state.park_ability_continuation(pending);
     Ok(DamageTail::Stashed)
-}
-
-/// CR 120.4b + CR 120.4c: where a parked two-phase batch stands — still replacing its
-/// portions, with none of its damage dealt, or dealing it.
-#[derive(Clone, Copy)]
-pub(crate) enum BatchProgress {
-    Replacing,
-    Delivering,
-}
-
-/// CR 608.2c + CR 616.1: what the tail a damage pause parks can learn of its
-/// instruction's result (`DamageInstructionResult`).
-enum PausedDamageResult {
-    /// None of the instruction's damage was dealt before the pause. Each of its
-    /// portions is then dealt in the action answering its choices, the one the
-    /// tail resumes in, so the tail awaits the damage these `sources` deal.
-    BeforeDelivery { sources: Vec<ObjectId> },
-    /// Part of it was dealt before the pause, in an action the tail cannot read
-    /// back, so the tail reads no result rather than a part of one.
-    AfterDelivery,
-}
-
-impl PausedDamageResult {
-    /// `dealt_before_pause` is the instruction's own events up to the pause.
-    fn of_portion(dealt_before_pause: &[GameEvent], source: ObjectId) -> Self {
-        if dealt_before_pause
-            .iter()
-            .any(|event| matches!(event, GameEvent::DamageDealt { .. }))
-        {
-            Self::AfterDelivery
-        } else {
-            Self::BeforeDelivery {
-                sources: vec![source],
-            }
-        }
-    }
-}
-
-/// CR 608.2c: does any node of `chain` await a paused damage instruction's delivery?
-fn chain_awaits_damage_delivery(chain: &ResolvedAbility) -> bool {
-    matches!(
-        chain.context.direct_damage_result,
-        Some(DamageInstructionResult::AwaitingDelivery { .. })
-    ) || chain
-        .sub_ability
-        .as_deref()
-        .is_some_and(chain_awaits_damage_delivery)
-}
-
-/// CR 608.2c: the parked tail of `ability`'s batch can no longer read the batch's
-/// whole result, so it reads none.
-fn forget_awaited_delivery_of_parked_tail(state: &mut GameState, ability: &ResolvedAbility) {
-    let Effect::ResumeDamageBatch { .. } = &ability.effect else {
-        return;
-    };
-    if let Some(tail) = state
-        .resolution_stack
-        .ability_continuations_from_top_mut()
-        .map(|pending| pending.chain.as_mut())
-        .find(|chain| chain_awaits_damage_delivery(chain))
-    {
-        forget_awaited_delivery(tail);
-    }
-}
-
-fn forget_awaited_delivery(chain: &mut ResolvedAbility) {
-    if matches!(
-        chain.context.direct_damage_result,
-        Some(DamageInstructionResult::AwaitingDelivery { .. })
-    ) {
-        chain.set_direct_damage_result(None);
-    }
-    if let Some(sub) = chain.sub_ability.as_deref_mut() {
-        forget_awaited_delivery(sub);
-    }
 }
 
 /// CR 616.1 + CR 615.5: run `answer` (an order answer resuming the replacement pipeline) holding
@@ -2849,14 +2759,10 @@ fn remaining_damage_head(
     dealt_before_pause: &[GameEvent],
 ) -> Option<ResolvedAbility> {
     let head = remaining_damage_chain(state, ability, damage_source_id, remaining);
-    let tail = ability.sub_ability.as_ref().map(|sub| {
-        stashed_tail(
-            state,
-            sub,
-            ability,
-            PausedDamageResult::of_portion(dealt_before_pause, damage_source_id),
-        )
-    });
+    let tail = ability
+        .sub_ability
+        .as_ref()
+        .map(|sub| stashed_tail(state, sub, ability, dealt_before_pause));
     match head {
         Some(mut head) => {
             if let Some(tail) = tail {
@@ -2880,7 +2786,9 @@ fn remaining_damage_chain(
     let node = |target, amount| {
         let mut node = build_remaining_damage_node(ability, damage_source_id, target, amount);
         node.trigger_source = ability.trigger_source.clone();
-        keep_chain_identity(state, node, ability)
+        let mut node = keep_chain_identity(state, node, ability);
+        node.context.direct_damage_result = Some(DamageInstructionResult::ContinuationPortion);
+        node
     };
     let mut iter = remaining.into_iter();
     let (first_target, first_amount) = iter.next()?;
@@ -2911,26 +2819,25 @@ fn remaining_damage_chain(
 ///
 /// CR 608.2c + CR 616.1: the tail is this instruction's direct child, so it reads
 /// this instruction's damage result — never one `ability` inherited from an earlier
-/// damage instruction. None of that damage has been dealt when `result` is
-/// `BeforeDelivery`, so the tail awaits it (`DamageInstructionResult::AwaitingDelivery`).
-/// A `sub` that already awaits it is a later portion of an instruction that dealt
-/// its earlier portions in the action now ending: the tail cannot read those back,
-/// so it reads no result.
+/// damage instruction. A tail not yet awaiting delivery starts `AwaitingDelivery`
+/// seeded with `dealt_before_pause`; a continuation portion's tail that already
+/// awaits delivery folds `dealt_before_pause` into its existing accumulator.
 fn stashed_tail(
     state: &mut GameState,
     sub: &ResolvedAbility,
     ability: &ResolvedAbility,
-    result: PausedDamageResult,
+    dealt_before_pause: &[GameEvent],
 ) -> ResolvedAbility {
-    let result = match result {
-        PausedDamageResult::BeforeDelivery { sources } if !chain_awaits_damage_delivery(sub) => {
-            Some(DamageInstructionResult::AwaitingDelivery { sources })
-        }
-        PausedDamageResult::BeforeDelivery { .. } | PausedDamageResult::AfterDelivery => None,
-    };
     let mut tail = sub.clone();
-    forget_awaited_delivery(&mut tail);
-    if crate::game::effects::should_propagate_parent_targets(ability, &tail) {
+    if crate::game::effects::chain_awaits_damage_delivery(&tail) {
+        let snapshots =
+            crate::game::effects::snapshot_damage_dealt_events(state, dealt_before_pause);
+        crate::game::effects::fold_snapshots_into_chain_awaiting_delivery(&mut tail, &snapshots);
+    }
+    let propagate_parent_targets = !state.current_step_targets_hydrated_from_event_context;
+    if propagate_parent_targets
+        && crate::game::effects::should_propagate_parent_targets(ability, &tail)
+    {
         tail.mirror_targets_from(ability);
     }
     crate::game::effects::apply_parent_chain_context(&mut tail, ability, None, state);
@@ -2945,13 +2852,19 @@ fn stashed_tail(
         .is_some_and(|condition| condition.is_instead_override())
     {
         if let Some(base) = tail.else_ability.as_deref_mut() {
-            if crate::game::effects::should_propagate_parent_targets(ability, base) {
+            if propagate_parent_targets
+                && crate::game::effects::should_propagate_parent_targets(ability, base)
+            {
                 base.mirror_targets_from(ability);
             }
             crate::game::effects::apply_parent_chain_context(base, ability, None, state);
         }
     }
-    tail.set_direct_damage_result(result);
+    if !crate::game::effects::chain_awaits_damage_delivery(&tail) {
+        let awaiting =
+            crate::game::effects::new_awaiting_damage_result(state, ability, dealt_before_pause);
+        tail.set_direct_damage_result(Some(awaiting));
+    }
     tail
 }
 
@@ -3240,6 +3153,11 @@ fn stash_remaining_distribution(
             );
         }
         RemainingDamageSplice::BeforeContinuation => {
+            if ability.sub_ability.is_none()
+                && crate::game::effects::is_damage_continuation_node(ability)
+            {
+                crate::game::effects::fold_awaited_damage_events(state, dealt_before_pause);
+            }
             if let Some(head) = remaining_damage_head(
                 state,
                 ability,
@@ -10500,6 +10418,67 @@ mod tests {
                 if *source_id == giant && *t == w2
         )));
         assert!(deal_damage_resolved(&events));
+    }
+
+    /// CR 608.2c + CR 608.2d: When a `DamageTail::Caller` instruction pauses at
+    /// `WaitingFor::DistributeAmong` (`ResolutionCandidates`), `resolve_chain_body`
+    /// seeds `AwaitingDelivery` on the parked rider. Answering via `apply_as_current`
+    /// routes through `resume_resolution_division` -> `fold_awaited_damage_events` ->
+    /// `publish_awaited_damage_result`, so the rider sees the divided total (5).
+    #[test]
+    fn resolution_division_pauses_then_publishes_awaited_damage_result() {
+        let mut state = GameState::new_two_player(42);
+        let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
+        let w1 = division_creature(&mut state, 2, PlayerId(0), 2, 9, true);
+        let w2 = division_creature(&mut state, 3, PlayerId(0), 2, 9, true);
+        let giant = division_creature(&mut state, 4, PlayerId(1), 5, 5, false);
+        crate::game::effects::publish_tracked_set(&mut state, vec![w1, w2]);
+
+        let mut gain_life = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            master,
+            PlayerId(0),
+        );
+        gain_life.sub_link = crate::types::ability::SubAbilityLink::SequentialSibling;
+
+        let mut node = wolves_division_node(giant, master);
+        node.sub_ability = Some(Box::new(gain_life));
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &node, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::DistributeAmong {
+                scope: DistributionScope::ResolutionCandidates { .. },
+                ..
+            }
+        ));
+
+        let result = crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::DistributeAmong {
+                distribution: vec![(TargetRef::Object(w1), 1), (TargetRef::Object(w2), 4)],
+            },
+        )
+        .expect("DistributeAmong answer must succeed");
+
+        assert_eq!(state.objects[&w1].damage_marked, 1);
+        assert_eq!(state.objects[&w2].damage_marked, 4);
+        assert_eq!(state.players[0].life, 25);
+        assert!(result.events.iter().any(|e| matches!(
+            e,
+            GameEvent::LifeChanged {
+                player_id,
+                amount: 5,
+                ..
+            } if *player_id == PlayerId(0)
+        )));
     }
 
     /// V5r siblings (R2-F1): announced-target divisions keep reporting their

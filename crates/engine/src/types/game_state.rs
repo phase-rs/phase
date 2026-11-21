@@ -29732,6 +29732,14 @@ declare_game_state! {
     /// serialized and never part of state equality.
     #[serde(skip)]
     pub(crate) trigger_construction_finisher_ran_this_action: bool,
+    /// True only during the synchronous `resolve_effect_step` window when the
+    /// effect's targets came solely from transient event-context hydration
+    /// (`hydrate_event_context_targets`) rather than declared/parent targets.
+    /// Prevents damage pause stashes (`stashed_tail`) from mirroring those
+    /// transient targets onto a child tail when the synchronous chain walker
+    /// leaves `ability.targets` empty. Never serialized and excluded from equality.
+    #[serde(skip)]
+    pub(crate) current_step_targets_hydrated_from_event_context: bool,
 
     /// CR 601.2h + CR 616.1: Resume a sequential discard cost after a
     /// replacement choice. Cost moves use `pending_cost_move_resume` above.
@@ -38541,6 +38549,7 @@ impl GameState {
             active_accepted_triggered_mana_node: None,
             mana_subresolution_depth: 0,
             trigger_construction_finisher_ran_this_action: false,
+            current_step_targets_hydrated_from_event_context: false,
             pending_discard_for_cost: None,
             pending_cast: None,
             legacy_unrouted_pending_casts: Vec::new(),
@@ -42439,6 +42448,7 @@ impl GameState {
             active_accepted_triggered_mana_node: _,
             mana_subresolution_depth: _,
             trigger_construction_finisher_ran_this_action: _,
+            current_step_targets_hydrated_from_event_context: _,
             pending_discard_for_cost: _,
             pending_cast: _,
             legacy_unrouted_pending_casts: _,
@@ -44101,6 +44111,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_accepted_triggered_mana_node: _,
         mana_subresolution_depth: _,
         trigger_construction_finisher_ran_this_action: _,
+        current_step_targets_hydrated_from_event_context: _,
         pending_discard_for_cost: _,
         pending_cast: _,
         legacy_unrouted_pending_casts: _,

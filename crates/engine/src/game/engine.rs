@@ -16849,13 +16849,15 @@ fn apply_non_priority_pass_action(
                     state.priority_player = active;
                     match unit {
                         DistributionUnit::Damage => {
+                            let damage_start = events.len();
                             effects::deal_damage::resume_resolution_division(
                                 state,
                                 &pending_effect,
                                 &distribution,
                                 &mut events,
                             )
-                            .map_err(|err| EngineError::InvalidAction(err.to_string()))?
+                            .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
+                            effects::fold_awaited_damage_events(state, &events[damage_start..]);
                         }
                         DistributionUnit::EvenSplitDamage
                         | DistributionUnit::Counters(_)

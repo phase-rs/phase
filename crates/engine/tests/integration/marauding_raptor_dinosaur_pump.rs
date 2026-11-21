@@ -542,3 +542,344 @@ fn raptor_does_not_pump_after_a_replacement_ordering_choice_prevents_all() {
         "no Dinosaur was dealt damage this way, so Marauding Raptor must not be pumped"
     );
 }
+
+/// CR 608.2c + CR 616.1 + CR 702.15b: a damage instruction can deal its damage
+/// and THEN pause for a replacement ordering choice on its lifelink life gain
+/// (`Boon Reflection` + `Alhammarret's Archive`). Because the Dinosaur was
+/// already dealt damage before the pause, the resumed rider must still see
+/// that damage and grant +2/+0.
+#[test]
+fn raptor_pumps_when_lifelink_pauses_on_replacement_choice_after_damage_is_dealt() {
+    let Some(db) = load_db() else {
+        eprintln!("skipping: card database absent");
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let raptor = scenario.add_real_card(P0, "Marauding Raptor", Zone::Battlefield, db);
+    let lifelink = scenario.add_real_card(P0, "Lifelink", Zone::Hand, db);
+    scenario.add_real_card(P0, "Boon Reflection", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Alhammarret's Archive", Zone::Battlefield, db);
+    let dino = scenario.add_real_card(P0, ENTERING_DINOSAUR, Zone::Hand, db);
+    let mut pool = vec![ManaUnit::new(ManaType::White, ObjectId(0), false, vec![])];
+    pool.extend(cast_pool(ManaType::Green, 2, 7));
+    scenario.with_mana_pool(P0, pool);
+    let mut runner = scenario.build();
+
+    // Enchant Marauding Raptor with Lifelink.
+    runner.cast(lifelink).target_object(raptor).resolve();
+
+    let mut events = runner.cast(dino).commit().events().to_vec();
+    for _ in 0..20 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            break;
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "expected priority before the lifelink ordering prompt, got {:?}",
+            runner.state().waiting_for
+        );
+        assert!(
+            !runner.state().stack.is_empty(),
+            "the stack emptied without the lifelink gain asking for an order"
+        );
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority must be legal")
+                .events,
+        );
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player, .. } if player == P0
+        ),
+        "expected P0's lifelink replacement ordering prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    // Reach guard: the 2 damage to the Dinosaur was ALREADY dealt before the
+    // lifelink life-gain replacement paused.
+    assert_eq!(runner.state().objects[&dino].damage_marked, 2);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            GameEvent::DamageDealt { source_id, target: TargetRef::Object(target), amount: 2, .. }
+                if *source_id == raptor && *target == dino
+        )),
+        "DamageDealt must precede the lifelink replacement pause, got {events:?}"
+    );
+
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("P0 orders the life-gain replacements")
+            .events,
+    );
+    drain_stack_collecting_events(&mut runner, &mut events);
+
+    assert_eq!(runner.life(P0), 28, "2 lifelink * 2 * 2 = 8 life gained");
+    assert_eq!(runner.state().objects[&dino].damage_marked, 2);
+    assert_eq!(
+        runner.state().objects[&raptor].power,
+        Some(4),
+        "a Dinosaur was dealt damage before the lifelink pause, so Marauding Raptor must be +2/+0"
+    );
+}
+
+/// CR 616.1 + CR 614.9 + CR 608.2c: competing replacements between Furnace of
+/// Rath and Harm's Way pause the Raptor's damage before delivery; choosing Harm's
+/// Way first redirects the 2 damage to `opposing` (or P1), and Furnace doubles
+/// that redirected damage. Returns `(runner, raptor, entering_id, opposing, events)`.
+fn cast_under_furnace_and_harms_way(
+    db: &CardDatabase,
+    entering: &str,
+    entering_color: ManaType,
+    opposing_creature: Option<&str>,
+) -> (
+    GameRunner,
+    ObjectId,
+    ObjectId,
+    Option<ObjectId>,
+    Vec<GameEvent>,
+) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let raptor = scenario.add_real_card(P0, "Marauding Raptor", Zone::Battlefield, db);
+    let furnace = scenario.add_real_card(P0, "Furnace of Rath", Zone::Battlefield, db);
+    let harms_way = scenario.add_real_card(P0, "Harm's Way", Zone::Hand, db);
+    let entering_id = scenario.add_real_card(P0, entering, Zone::Hand, db);
+    let opposing =
+        opposing_creature.map(|name| scenario.add_real_card(P1, name, Zone::Battlefield, db));
+    let mut pool = vec![ManaUnit::new(ManaType::White, ObjectId(0), false, vec![])];
+    pool.extend(cast_pool(entering_color, 2, 6));
+    scenario.with_mana_pool(P0, pool);
+    let mut runner = scenario.build();
+
+    let cast = match opposing {
+        Some(creature) => runner.cast(harms_way).target_objects(&[creature]).resolve(),
+        None => runner.cast(harms_way).target_player(P1).resolve(),
+    };
+    let WaitingFor::DamageSourceChoice { .. } = cast.final_waiting_for() else {
+        panic!("Harm's Way must stop at its source choice");
+    };
+    runner
+        .act(GameAction::ChooseDamageSource { source: raptor })
+        .expect("P0 chooses Marauding Raptor as Harm's Way's source");
+
+    let mut events = runner.cast(entering_id).commit().events().to_vec();
+    for _ in 0..20 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority must be legal")
+                .events,
+        );
+    }
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "Furnace of Rath + Harm's Way must stop at a replacement ordering prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0);
+    // Choose Harm's Way (the one-shot shield) first so all 2 damage redirects
+    // before Furnace doubles.
+    let harms_idx = candidates
+        .iter()
+        .position(|c| c.source_id != furnace)
+        .unwrap_or_else(|| panic!("Harm's Way must be a candidate, got {candidates:?}"));
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index: harms_idx })
+            .expect("P0 orders Harm's Way first")
+            .events,
+    );
+    drain_stack_collecting_events(&mut runner, &mut events);
+    (runner, raptor, entering_id, opposing, events)
+}
+
+#[test]
+fn raptor_replacement_ordering_with_harms_way_redirected_to_player_does_not_pump() {
+    let Some(db) = load_db() else {
+        eprintln!("skipping: card database absent");
+        return;
+    };
+    let (runner, raptor, dino, _, events) =
+        cast_under_furnace_and_harms_way(db, ENTERING_DINOSAUR, ManaType::Green, None);
+
+    assert!(events.iter().any(|e| matches!(
+        e,
+        GameEvent::DamageDealt { source_id, target: TargetRef::Player(player), amount: 4, .. }
+            if *source_id == raptor && *player == P1
+    )));
+    assert_eq!(runner.life(P1), 16);
+    assert_eq!(runner.state().objects[&dino].damage_marked, 0);
+    assert_eq!(runner.state().objects[&raptor].power, Some(2));
+}
+
+#[test]
+fn raptor_replacement_ordering_with_harms_way_redirected_onto_dinosaur_pumps() {
+    let Some(db) = load_db() else {
+        eprintln!("skipping: card database absent");
+        return;
+    };
+    let (runner, raptor, dragon, opposing_dino, _) = cast_under_furnace_and_harms_way(
+        db,
+        ENTERING_NON_DINOSAUR,
+        ManaType::Red,
+        Some(ENTERING_DINOSAUR),
+    );
+    let opposing_dino = opposing_dino.expect("P1's Dinosaur is on the battlefield");
+
+    assert_eq!(runner.state().objects[&dragon].damage_marked, 0);
+    assert_eq!(runner.state().objects[&opposing_dino].damage_marked, 4);
+    assert_eq!(runner.state().objects[&raptor].power, Some(4));
+}
+
+/// CR 701.14a + CR 120.10 + CR 616.1: When `Effect::Fight` (The Last Agni Kai)
+/// pauses for a replacement ordering choice on the fighting subject's damage
+/// (`Furnace of Rath` + `Harm's Way`), `AwaitingDelivery` tracks
+/// `fight_fought_creature` so excess dealt to the *fighting subject* (Grizzly
+/// Bears taking 8 damage = 6 excess) never leaks into the fought-creature excess
+/// channel (Colossal Dreadmaw 6/6 took 4 damage = 0 excess).
+#[test]
+fn fight_replacement_ordering_ignores_subject_excess_and_reads_fought_creature() {
+    let Some(db) = load_db() else {
+        eprintln!("skipping: card database absent");
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let furnace = scenario.add_real_card(P0, "Furnace of Rath", Zone::Battlefield, db);
+    let harms_way = scenario.add_real_card(P0, "Harm's Way", Zone::Hand, db);
+    let agni_kai = scenario.add_real_card(P0, "The Last Agni Kai", Zone::Hand, db);
+    let big_dino = scenario.add_real_card(P1, ENTERING_DINOSAUR, Zone::Battlefield, db);
+    let mut pool = vec![ManaUnit::new(ManaType::White, ObjectId(0), false, vec![])];
+    pool.extend(cast_pool(ManaType::Red, 1, 2));
+    scenario.with_mana_pool(P0, pool);
+    let mut runner = scenario.build();
+
+    let cast = runner.cast(harms_way).target_player(P1).resolve();
+    let WaitingFor::DamageSourceChoice { .. } = cast.final_waiting_for() else {
+        panic!("Harm's Way must stop at its source choice");
+    };
+    runner
+        .act(GameAction::ChooseDamageSource { source: big_dino })
+        .expect("P0 chooses opposing Dinosaur as Harm's Way's source");
+
+    let outcome = runner
+        .cast(agni_kai)
+        .target_objects(&[bears, big_dino])
+        .resolve();
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = outcome.final_waiting_for().clone()
+    else {
+        panic!(
+            "Fight under Furnace + Harm's Way must stop at ReplacementChoice, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(player, P0);
+    let harms_idx = candidates
+        .iter()
+        .position(|c| c.source_id != furnace)
+        .unwrap_or_else(|| panic!("Harm's Way must compete, got {candidates:?}"));
+    let mut events = runner
+        .act(GameAction::ChooseReplacement { index: harms_idx })
+        .expect("P0 orders Harm's Way first")
+        .events;
+    drain_stack_collecting_events(&mut runner, &mut events);
+
+    // Reach guard: Bears took 8 damage (6 excess on the fighting subject).
+    assert!(events.iter().any(|e| matches!(
+        e,
+        GameEvent::DamageDealt { target: TargetRef::Object(target), amount: 8, excess: 6, .. }
+            if *target == bears
+    )));
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Red),
+        0,
+        "fought creature (6/6) took 4 damage (0 excess); fighting subject's 6 excess must not add mana"
+    );
+}
+
+/// Positive counterpart: when the *fought* creature (2/2) takes excess damage
+/// after a replacement ordering choice on the fighting subject (`Furnace` +
+/// `Inner Sanctum`), The Last Agni Kai adds exactly that excess red mana.
+#[test]
+fn fight_replacement_ordering_adds_mana_for_fought_creature_excess() {
+    let Some(db) = load_db() else {
+        eprintln!("skipping: card database absent");
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let big_dino = scenario.add_real_card(P0, ENTERING_DINOSAUR, Zone::Battlefield, db);
+    let furnace = scenario.add_real_card(P0, "Furnace of Rath", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Inner Sanctum", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let agni_kai = scenario.add_real_card(P0, "The Last Agni Kai", Zone::Hand, db);
+    scenario.with_mana_pool(P0, cast_pool(ManaType::Red, 1, 2));
+    let mut runner = scenario.build();
+
+    let outcome = runner
+        .cast(agni_kai)
+        .target_objects(&[big_dino, bears])
+        .resolve();
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = outcome.final_waiting_for().clone()
+    else {
+        panic!(
+            "Fight under Furnace + Inner Sanctum must stop at ReplacementChoice, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(player, P0);
+    let furnace_idx = candidates
+        .iter()
+        .position(|c| c.source_id == furnace)
+        .unwrap_or_else(|| panic!("Furnace must compete, got {candidates:?}"));
+    let mut events = runner
+        .act(GameAction::ChooseReplacement { index: furnace_idx })
+        .expect("P0 orders Furnace first")
+        .events;
+    drain_stack_collecting_events(&mut runner, &mut events);
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            GameEvent::DamageDealt { target: TargetRef::Object(target), amount: 12, excess: 10, .. }
+                if *target == bears
+        )),
+        "expected Bears to take 12 (10 excess), events: {events:?}"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Red),
+        10,
+        "fought creature (2/2) took 12 damage = 10 excess, so The Last Agni Kai must add 10 red mana"
+    );
+}

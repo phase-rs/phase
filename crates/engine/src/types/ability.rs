@@ -1950,9 +1950,47 @@ pub struct SplitDamagePortion {
     pub applied: Vec<AppliedReplacementKey>,
 }
 
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
+}
+
+/// CR 608.2c: Whether a paused damage instruction has dealt damage to zero,
+/// one, or multiple distinct objects so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AwaitedDamageRecipient {
+    /// No object has been dealt damage by this instruction so far.
+    #[default]
+    None,
+    /// Exactly one object incarnation has been dealt damage so far.
+    Single { recipient: ObjectIncarnationRef },
+    /// Two or more distinct objects have been dealt damage, so there is no
+    /// single damaged object referent.
+    Multiple,
+}
+
+impl AwaitedDamageRecipient {
+    /// Record one object incarnation dealt damage by this instruction.
+    pub fn record_object(&mut self, pin: ObjectIncarnationRef) {
+        match *self {
+            Self::None => *self = Self::Single { recipient: pin },
+            Self::Single { recipient } if recipient == pin => {}
+            Self::Single { .. } | Self::Multiple => *self = Self::Multiple,
+        }
+    }
+
+    /// The unique damaged object incarnation, if exactly one was damaged.
+    pub fn single(self) -> Option<ObjectIncarnationRef> {
+        match self {
+            Self::Single { recipient } => Some(recipient),
+            Self::None | Self::Multiple => None,
+        }
+    }
+}
+
 /// CR 608.2c + CR 614.9: what a damage instruction did, as its direct child
 /// reads it (`SpellContext::direct_damage_result`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DamageInstructionResult {
     /// The instruction has dealt its damage. `recipient` is the single object
@@ -1962,11 +2000,26 @@ pub enum DamageInstructionResult {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         recipient: Option<ObjectIncarnationRef>,
     },
-    /// CR 616.1: The instruction paused for a replacement choice before any of
-    /// its damage was dealt, and this child was parked behind it. The damage
-    /// `sources` deal once the instruction resumes is its whole result, and is
-    /// published when this child begins to resolve.
-    AwaitingDelivery { sources: Vec<ObjectId> },
+    /// CR 616.1 + CR 608.2c: The instruction paused before all of its damage
+    /// settled, and this child awaits completion. Accumulates the instruction's
+    /// dealt damage across pauses until this child begins to resolve.
+    AwaitingDelivery {
+        #[serde(default, skip_serializing_if = "is_zero_i32")]
+        amount: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        excess: Option<i32>,
+        #[serde(default)]
+        recipient: AwaitedDamageRecipient,
+        /// CR 701.14a + CR 120.10: When the awaiting parent was `Effect::Fight`,
+        /// its scalar/excess channel tracks only excess dealt to this fought
+        /// creature (`FightExcessOnFoughtCreature`), never the fighting subject.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fight_fought_creature: Option<ObjectId>,
+    },
+    /// Marker on a remaining-recipient continuation node (`build_remaining_damage_node`)
+    /// so `resolve_chain_body` folds its dealt damage into the awaiting rider
+    /// rather than treating it as an independent damage instruction.
+    ContinuationPortion,
 }
 
 /// Casting-time facts that flow with a spell from casting through resolution.
@@ -6385,7 +6438,7 @@ impl ResolvedAbility {
             .is_some_and(|condition| condition.is_instead_override())
         {
             if let Some(base) = self.else_ability.as_deref_mut() {
-                base.context.direct_damage_result = result.clone();
+                base.context.direct_damage_result = result;
             }
         }
         self.context.direct_damage_result = result;

@@ -26,20 +26,20 @@ use crate::types::ability::{
     effect_introduces_per_iteration_referent, effect_introduces_per_player_object_referent,
     effect_parks_reveal_card_choice, filter_refs_parent_target, graveyard_destination_rider,
     is_graveyard_exile_rider_subability, AbilityCondition, AbilityCost, AbilityDefinition,
-    AbilityKind, AbilityUseTally, CardPlayMode, CardTypeSetSource, CastFromZoneDriver,
-    ChosenAttribute, ChosenTargetSlots, CommanderOwnership, ContinuousEffectOnset,
-    ContinuousModification, ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot,
-    CounterKindDomain, DamageInstructionResult, DetachedRemainder, Duration, EachDamageRecipient,
-    Effect, EffectError, EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope,
-    ExtraPhaseRecipient, FilterProp, ForEachCategoryAction, ForwardedResultContext,
-    LibraryShuffleMode, ManaProduction, NameStickerSet, ObjectScope, ObjectSelectionCardinality,
-    OpponentMayScope, PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PtValue,
-    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility,
-    RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
-    SharedQualityRelation, SiblingCondition, SpellContext, StaticDefinition, SubAbilityLink,
-    TapStateChange, TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetReadOrigin,
-    TargetRef, ThisWayCause, TrackedAnaphorSource, TypedFilter, ZoneChoiceCandidateSource,
-    ZoneChoiceChooser, ZoneRef,
+    AbilityKind, AbilityUseTally, AwaitedDamageRecipient, CardPlayMode, CardTypeSetSource,
+    CastFromZoneDriver, ChosenAttribute, ChosenTargetSlots, CommanderOwnership,
+    ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRetargetPermission,
+    CostPaidObjectSnapshot, CounterKindDomain, DamageInstructionResult, DetachedRemainder,
+    Duration, EachDamageRecipient, Effect, EffectError, EffectKind, EffectOutcomeSignal,
+    EffectResolutionResult, EffectScope, ExtraPhaseRecipient, FilterProp, ForEachCategoryAction,
+    ForwardedResultContext, LibraryShuffleMode, ManaProduction, NameStickerSet, ObjectScope,
+    ObjectSelectionCardinality, OpponentMayScope, PlayerFilter, PlayerRelation, PlayerScope,
+    PossessionAxis, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    RepeatContinuation, ResolvedAbility, RevealUntilDisposition, SacrificeCost,
+    SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition, SpellContext,
+    StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
+    TargetDamageSourceBinding, TargetFilter, TargetReadOrigin, TargetRef, ThisWayCause,
+    TrackedAnaphorSource, TypedFilter, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneRef,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackSubject, CombatHistoryScope};
@@ -4202,78 +4202,263 @@ fn referentless_chain_damage_recipient(
         }
         // Published when the parked node begins to resolve
         // (`publish_awaited_damage_result`), before any condition reads it.
-        DamageInstructionResult::AwaitingDelivery { .. } => None,
+        DamageInstructionResult::AwaitingDelivery { .. }
+        | DamageInstructionResult::ContinuationPortion => None,
     }
 }
 
-/// CR 608.2c + CR 616.1: the result of a damage instruction that paused for a
-/// replacement choice before dealing any damage, published when the node parked
-/// behind it begins to resolve — the same amount, excess and recipient the
-/// instruction publishes when it completes without pausing (`resolve_chain_body`).
-/// Furnace of Rath and Temple Altisaur both apply to Marauding Raptor's damage
-/// to an entering Dinosaur, so its controller orders them (CR 616.1) and the
-/// damage is dealt only after that answer; "If a Dinosaur is dealt damage this
-/// way" still reads that damage.
-///
-/// Every portion of that instruction is dealt in the action that answers its last
-/// choice, the one this node resumes in, so `events` holds them all; the
-/// instruction's damage sources tell them apart from anything else that action
-/// did. `None` when `ability` awaits no such result.
-fn publish_awaited_damage_result(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
+/// Captured snapshot of a single `GameEvent::DamageDealt` event, decoupling event
+/// reading (`&GameState`) from mutating parked continuations (`&mut GameState`).
+pub(crate) struct RecordedDamageDealt {
+    target: TargetRef,
+    amount: u32,
+    excess: u32,
+    object_pin: Option<ObjectIncarnationRef>,
+}
+
+/// Snapshot all `DamageDealt` events in `events` along with live object incarnations.
+pub(crate) fn snapshot_damage_dealt_events(
+    state: &GameState,
     events: &[GameEvent],
-) -> Option<Box<ResolvedAbility>> {
-    let Some(DamageInstructionResult::AwaitingDelivery { sources }) =
-        ability.context.direct_damage_result.as_ref()
+) -> Vec<RecordedDamageDealt> {
+    if !events
+        .iter()
+        .any(|event| matches!(event, GameEvent::DamageDealt { .. }))
+    {
+        return Vec::new();
+    }
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamageDealt {
+                target,
+                amount,
+                excess,
+                ..
+            } => {
+                let object_pin = match target {
+                    TargetRef::Object(id) => state
+                        .objects
+                        .get(id)
+                        .map(|obj| ObjectIncarnationRef::of(*id, obj.incarnation)),
+                    TargetRef::Player(_) => None,
+                };
+                Some(RecordedDamageDealt {
+                    target: target.clone(),
+                    amount: *amount,
+                    excess: *excess,
+                    object_pin,
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+pub(crate) fn new_awaiting_damage_result_from_snapshots(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    snapshots: &[RecordedDamageDealt],
+) -> DamageInstructionResult {
+    let fight_fought_creature = if matches!(ability.effect, Effect::Fight { .. }) {
+        fight::resolve_fight_fighters(state, ability)
+            .ok()
+            .flatten()
+            .map(|(_subject, fought)| fought)
+    } else {
+        None
+    };
+    let mut result = DamageInstructionResult::AwaitingDelivery {
+        amount: 0,
+        excess: None,
+        recipient: AwaitedDamageRecipient::None,
+        fight_fought_creature,
+    };
+    fold_snapshots_into_damage_result(&mut result, snapshots);
+    result
+}
+
+/// CR 608.2c + CR 616.1: Build an initial `AwaitingDelivery` result for `ability`
+/// seeded with any `DamageDealt` events emitted before it paused.
+pub(crate) fn new_awaiting_damage_result(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    dealt_before_pause: &[GameEvent],
+) -> DamageInstructionResult {
+    let snapshots = snapshot_damage_dealt_events(state, dealt_before_pause);
+    new_awaiting_damage_result_from_snapshots(state, ability, &snapshots)
+}
+
+/// CR 608.2c: Does `ability` represent a continuation portion of an already-started
+/// damage instruction (`ResumeDamageBatch` or `remaining_damage_chain` node)?
+pub(crate) fn is_damage_continuation_node(ability: &ResolvedAbility) -> bool {
+    matches!(ability.effect, Effect::ResumeDamageBatch { .. })
+        || matches!(
+            ability.context.direct_damage_result,
+            Some(DamageInstructionResult::ContinuationPortion)
+        )
+}
+
+/// CR 608.2c: Does `chain` or any reachable child await a paused damage instruction?
+pub(crate) fn chain_awaits_damage_delivery(chain: &ResolvedAbility) -> bool {
+    matches!(
+        chain.context.direct_damage_result,
+        Some(DamageInstructionResult::AwaitingDelivery { .. })
+    ) || chain
+        .sub_ability
+        .as_deref()
+        .is_some_and(chain_awaits_damage_delivery)
+        || chain
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_awaits_damage_delivery)
+}
+
+/// Fold `snapshots` into an `AwaitingDelivery` result.
+pub(crate) fn fold_snapshots_into_damage_result(
+    result: &mut DamageInstructionResult,
+    snapshots: &[RecordedDamageDealt],
+) {
+    use crate::game::arithmetic::u32_to_i32_saturating;
+    let DamageInstructionResult::AwaitingDelivery {
+        amount,
+        excess,
+        recipient,
+        fight_fought_creature,
+    } = result
+    else {
+        return;
+    };
+    for dealt in snapshots {
+        if let Some(fought) = fight_fought_creature {
+            if matches!(dealt.target, TargetRef::Object(id) if id == *fought) && dealt.excess > 0 {
+                let add = u32_to_i32_saturating(dealt.excess);
+                *amount = amount.saturating_add(add);
+                *excess = Some(excess.unwrap_or(0).saturating_add(add));
+            }
+        } else {
+            *amount = amount.saturating_add(u32_to_i32_saturating(dealt.amount));
+            if dealt.excess > 0 {
+                let add = u32_to_i32_saturating(dealt.excess);
+                *excess = Some(excess.unwrap_or(0).saturating_add(add));
+            }
+        }
+        if let Some(pin) = dealt.object_pin {
+            recipient.record_object(pin);
+        }
+    }
+}
+
+/// Fold `snapshots` into the first `AwaitingDelivery` node found inside `chain`.
+pub(crate) fn fold_snapshots_into_chain_awaiting_delivery(
+    chain: &mut ResolvedAbility,
+    snapshots: &[RecordedDamageDealt],
+) -> bool {
+    if let Some(result @ DamageInstructionResult::AwaitingDelivery { .. }) =
+        chain.context.direct_damage_result.as_mut()
+    {
+        fold_snapshots_into_damage_result(result, snapshots);
+        if chain
+            .condition
+            .as_ref()
+            .is_some_and(|condition| condition.is_instead_override())
+        {
+            let synced = chain.context.direct_damage_result;
+            if let Some(base) = chain.else_ability.as_deref_mut() {
+                base.context.direct_damage_result = synced;
+            }
+        }
+        return true;
+    }
+    if chain
+        .sub_ability
+        .as_deref_mut()
+        .is_some_and(|sub| fold_snapshots_into_chain_awaiting_delivery(sub, snapshots))
+    {
+        return true;
+    }
+    chain
+        .else_ability
+        .as_deref_mut()
+        .is_some_and(|else_ab| fold_snapshots_into_chain_awaiting_delivery(else_ab, snapshots))
+}
+
+fn fold_snapshots_into_stack_awaiting_delivery(
+    state: &mut GameState,
+    snapshots: &[RecordedDamageDealt],
+) {
+    if snapshots.is_empty() {
+        return;
+    }
+    for pending in state.resolution_stack.ability_continuations_from_top_mut() {
+        if fold_snapshots_into_chain_awaiting_delivery(pending.chain.as_mut(), snapshots) {
+            break;
+        }
+    }
+}
+
+/// CR 608.2c + CR 616.1: Fold `DamageDealt` events emitted by a resuming damage
+/// instruction (replacement resume, post-loss/post-counter drain, or resolution-time
+/// division) into the topmost parked rider awaiting that instruction's delivery.
+pub(crate) fn fold_awaited_damage_events(state: &mut GameState, events: &[GameEvent]) {
+    let snapshots = snapshot_damage_dealt_events(state, events);
+    fold_snapshots_into_stack_awaiting_delivery(state, &snapshots);
+}
+
+/// Convert `ability`'s `AwaitingDelivery` into `Dealt { recipient }`, publish
+/// `last_effect_amount` / `last_effect_excess_amount`, and stamp `Dealt` onto
+/// `ability` (and its `else_ability` if an `"instead"` override).
+fn finalize_awaiting_damage_result(
+    state: &mut GameState,
+    ability: &mut ResolvedAbility,
+) -> Option<DamageInstructionResult> {
+    let Some(DamageInstructionResult::AwaitingDelivery {
+        amount,
+        excess,
+        recipient,
+        fight_fought_creature,
+    }) = ability.context.direct_damage_result.as_ref().copied()
     else {
         return None;
     };
-    let delivered: Vec<GameEvent> = events
-        .iter()
-        .filter(|event| {
-            matches!(
-                event,
-                GameEvent::DamageDealt { source_id, .. } if sources.contains(source_id)
-            )
-        })
-        .cloned()
-        .collect();
-    let result = completed_damage_results(state, &delivered);
-    state.last_effect_amount = Some(result.amount);
-    state.last_effect_excess_amount = result.excess;
-    Some(rebound_ability(ability, |owned| {
-        owned.set_direct_damage_result(Some(DamageInstructionResult::Dealt {
-            recipient: result.recipient,
-        }));
-    }))
-}
-
-/// CR 608.2c + CR 120.10: what a completed damage instruction dealt, read from its
-/// `DamageDealt` events — the total, the excess beyond lethal, and the single
-/// object the damage was dealt to.
-struct CompletedDamage {
-    amount: i32,
-    excess: Option<i32>,
-    recipient: Option<ObjectIncarnationRef>,
-}
-
-fn completed_damage_results(state: &GameState, delivered: &[GameEvent]) -> CompletedDamage {
-    use crate::game::arithmetic::{sum_saturating_i32, u32_to_i32_saturating};
-    let amount = sum_saturating_i32(delivered.iter().filter_map(|event| match event {
-        GameEvent::DamageDealt { amount, .. } => Some(u32_to_i32_saturating(*amount)),
-        _ => None,
-    }));
-    let excess = sum_saturating_i32(delivered.iter().filter_map(|event| match event {
-        GameEvent::DamageDealt { excess, .. } => Some(u32_to_i32_saturating(*excess)),
-        _ => None,
-    }));
-    CompletedDamage {
-        amount,
-        excess: (excess > 0).then_some(excess),
-        recipient: damaged_object_context_from_events(state, delivered)
-            .map(|snapshot| ObjectIncarnationRef::of(snapshot.object_id, snapshot.incarnation)),
+    // CR 608.2c: a prevention replacement inside the paused damage instruction
+    // may have stamped `last_effect_count` for its own rider; clear it when the
+    // instruction publishes its completed result so downstream `EventContextAmount`
+    // reads this instruction's amount rather than the shield's prevented count.
+    state.last_effect_count = None;
+    if fight_fought_creature.is_some() {
+        if amount > 0 {
+            state.last_effect_amount = Some(amount);
+        }
+        state.last_effect_excess_amount = excess;
+    } else {
+        state.last_effect_amount = Some(amount);
+        state.last_effect_excess_amount = excess;
     }
+    let dealt = DamageInstructionResult::Dealt {
+        recipient: recipient.single(),
+    };
+    ability.set_direct_damage_result(Some(dealt));
+    Some(dealt)
+}
+
+/// CR 608.2c + CR 616.1: publish the accumulated result of a paused damage
+/// instruction when the node parked behind it begins to resolve — the same amount,
+/// excess and recipient the instruction publishes when it completes without
+/// pausing (`resolve_chain_body`). `None` when `ability` awaits no such result.
+fn publish_awaited_damage_result(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+) -> Option<Box<ResolvedAbility>> {
+    if !matches!(
+        ability.context.direct_damage_result,
+        Some(DamageInstructionResult::AwaitingDelivery { .. })
+    ) {
+        return None;
+    }
+    let mut owned = Box::new(ability.clone());
+    finalize_awaiting_damage_result(state, &mut owned);
+    Some(owned)
 }
 
 /// CR 608.2c: capture a single creature tapped by the parent instruction as the
@@ -5688,12 +5873,14 @@ pub(crate) fn apply_parent_chain_context(
     // CR 616.1 + CR 101.4: so does a parked batch's outstanding work.
     let child_parked_batch = std::mem::take(&mut child.context.parked_damage_batch);
     // CR 616.1 + CR 608.2c: and a node's wait for its paused damage instruction's
-    // delivery (`DamageInstructionResult::AwaitingDelivery`).
-    let child_awaited_damage = child
-        .context
-        .direct_damage_result
-        .take()
-        .filter(|result| matches!(result, DamageInstructionResult::AwaitingDelivery { .. }));
+    // delivery (`DamageInstructionResult::AwaitingDelivery` / `ContinuationPortion`).
+    let child_awaited_damage = child.context.direct_damage_result.take().filter(|result| {
+        matches!(
+            result,
+            DamageInstructionResult::AwaitingDelivery { .. }
+                | DamageInstructionResult::ContinuationPortion
+        )
+    });
     // CR 608.2c + CR 608.2d: the NamedChoice answer handler records this
     // ability's own player choices directly onto the parked continuation,
     // which can run ahead of this hand-off (as with `chosen_players` below),
@@ -5789,7 +5976,12 @@ pub(crate) fn apply_parent_chain_context(
     // of that damage.
     if child_awaited_damage.is_some() {
         child.context.direct_damage_result = child_awaited_damage;
-    } else if !deal_damage::is_multi_event_damage_instruction(&parent.effect) {
+    } else if !deal_damage::is_multi_event_damage_instruction(&parent.effect)
+        || matches!(
+            parent.context.direct_damage_result,
+            Some(DamageInstructionResult::ContinuationPortion)
+        )
+    {
         child.context.direct_damage_result = None;
     }
     // CR 608.2c + CR 609.3: The transient relay names a Dig/ChooseFromZone/
@@ -22539,6 +22731,15 @@ fn publish_player_scope_clause_results(
     let counts_by_player =
         counts_by_player.map(|counts| fill_zero_contributors(counts, zero_fill_domain));
     if !install_previous_effect_counts_by_player(state, counts_by_player, false) {
+        if matches!(
+            scoped_template.effect,
+            Effect::DealDamage { .. }
+                | Effect::DamageAll { .. }
+                | Effect::DamageEachPlayer { .. }
+                | Effect::Fight { .. }
+        ) {
+            state.last_effect_count = None;
+        }
         if let Some(amount) =
             previous_effect_amount_from_events(state, scoped_template, scoped_events)
         {
@@ -26036,7 +26237,7 @@ fn resolve_chain_body(
     // CR 608.2c + CR 616.1: a node parked behind a damage instruction that paused
     // before dealing its damage reads that instruction's result now, before its
     // conditions and quantities do.
-    let awaited_damage_owned = publish_awaited_damage_result(state, ability, events);
+    let awaited_damage_owned = publish_awaited_damage_result(state, ability);
     let ability = awaited_damage_owned.as_deref().unwrap_or(ability);
 
     let mut progress = ResolutionProgress::Complete;
@@ -28422,6 +28623,12 @@ fn resolve_chain_body(
                     {
                         state.resolving_head_payment_origin = head_payment_origin.hand_back();
                     }
+                    let hydrated_only_for_step =
+                        ability.targets.is_empty() && !iter_effective.targets.is_empty();
+                    let prev_hydrated = std::mem::replace(
+                        &mut state.current_step_targets_hydrated_from_event_context,
+                        hydrated_only_for_step,
+                    );
                     let resolved = if ability.repeat_for.is_some() {
                         with_iteration_return_result_occurrence(state, iter_effective, |state| {
                             resolve_effect_step(state, iter_effective, events)
@@ -28429,6 +28636,7 @@ fn resolve_chain_body(
                     } else {
                         resolve_effect_step(state, iter_effective, events)
                     };
+                    state.current_step_targets_hydrated_from_event_context = prev_hydrated;
                     match resolved {
                         Ok(step) => {
                             progress = step.progress;
@@ -28630,6 +28838,18 @@ fn resolve_chain_body(
         counts_by_player,
         preserve_counts_for_next_consumer,
     ) {
+        if matches!(
+            ability.effect,
+            Effect::DealDamage { .. }
+                | Effect::DamageAll { .. }
+                | Effect::DamageEachPlayer { .. }
+                | Effect::Fight { .. }
+        ) {
+            // CR 608.2c: clear any prevention shield's transient `last_effect_count`
+            // stamped mid-instruction so downstream `EventContextAmount` reads this
+            // completed damage instruction's amount instead.
+            state.last_effect_count = None;
+        }
         if let Some(amount) = previous_effect_amount_from_events(state, ability, parent_events) {
             state.last_effect_amount = Some(amount);
             // CR 120.10: stamp the resolution-local excess channel alongside the
@@ -28967,14 +29187,15 @@ fn resolve_chain_body(
     // was actually dealt to (after any redirection), for its direct child's "dealt
     // damage this way" rider. Taken from this instruction's `DamageDealt` events
     // alone, never from another published referent.
-    let damage_result =
-        deal_damage::is_multi_event_damage_instruction(&ability.effect).then(|| {
-            DamageInstructionResult::Dealt {
-                recipient: damaged_object_context_from_events(state, effect_events).map(
-                    |snapshot| ObjectIncarnationRef::of(snapshot.object_id, snapshot.incarnation),
-                ),
-            }
-        });
+    let damage_result = (deal_damage::is_multi_event_damage_instruction(&ability.effect)
+        && !is_damage_continuation_node(ability))
+    .then(|| DamageInstructionResult::Dealt {
+        recipient: damaged_object_context_from_events(state, effect_events)
+            .map(|snapshot| ObjectIncarnationRef::of(snapshot.object_id, snapshot.incarnation)),
+    });
+    let paused_damage_snapshots = (deal_damage::is_multi_event_damage_instruction(&ability.effect)
+        && (is_damage_continuation_node(ability) || progress.is_pending()))
+    .then(|| snapshot_damage_dealt_events(state, effect_events));
     // CR 608.2c + CR 609.3: an instruction that left no referent event still names
     // the object its root instruction announced (`announced_object_context`), for
     // the next instruction only. A later "that card" names what some other
@@ -29225,6 +29446,39 @@ fn resolve_chain_body(
         TailOwnership::Transferred => return Ok(progress),
         TailOwnership::Caller => {}
     }
+
+    // CR 608.2c + CR 616.1: a remaining continuation node of an already-paused damage
+    // instruction (`ResumeDamageBatch` or `ContinuationPortion`) folds its own
+    // `DamageDealt` events into the awaiting rider, and finalizes it when that
+    // rider is the immediate child and the instruction has now finished.
+    let continuation_damage_owned = if is_damage_continuation_node(ability) {
+        let snapshots = paused_damage_snapshots.as_deref().unwrap_or(&[]);
+        if ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(chain_awaits_damage_delivery)
+        {
+            let mut owned = rebound_ability(ability, |owned| {
+                if let Some(sub) = owned.sub_ability.as_deref_mut() {
+                    fold_snapshots_into_chain_awaiting_delivery(sub, snapshots);
+                }
+            });
+            if !progress.is_pending() {
+                if let Some(sub) = owned.sub_ability.as_deref_mut() {
+                    if let Some(dealt) = finalize_awaiting_damage_result(state, sub) {
+                        owned.context.direct_damage_result = Some(dealt);
+                    }
+                }
+            }
+            Some(owned)
+        } else {
+            fold_snapshots_into_stack_awaiting_delivery(state, snapshots);
+            None
+        }
+    } else {
+        None
+    };
+    let ability = continuation_damage_owned.as_deref().unwrap_or(ability);
 
     // CR 706.3b + CR 608.2c: a native die instruction owns its entire table
     // process. Its printed tail cannot inspect a partial aggregate or pass a
@@ -29692,6 +29946,15 @@ fn resolve_chain_body(
                     // CR 608.2c: only unfinished parent work delays this chain;
                     // an enclosing caller's prompt does not suspend this instruction.
                     if progress.is_pending() {
+                        if let Some(snapshots) = paused_damage_snapshots
+                            .as_deref()
+                            .filter(|_| !is_damage_continuation_node(ability))
+                        {
+                            let awaiting = new_awaiting_damage_result_from_snapshots(
+                                state, ability, snapshots,
+                            );
+                            resolved.set_direct_damage_result(Some(awaiting));
+                        }
                         // The shared continuation authority places it relative to
                         // whatever paused (a draw pair, a direct choice).
                         if state.resolution_stack.capture_child_boundary() == child_stack_start
@@ -29786,6 +30049,15 @@ fn resolve_chain_body(
                             }
                         }
                         if progress.is_pending() {
+                            if let Some(snapshots) = paused_damage_snapshots
+                                .as_deref()
+                                .filter(|_| !is_damage_continuation_node(ability))
+                            {
+                                let awaiting = new_awaiting_damage_result_from_snapshots(
+                                    state, ability, snapshots,
+                                );
+                                resolved.set_direct_damage_result(Some(awaiting));
+                            }
                             // CR 608.2c: the tail is a later instruction of the
                             // parent; the shared continuation authority keeps it
                             // outside a paused replacement draw pair.
@@ -29943,6 +30215,13 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
+            if let Some(snapshots) = paused_damage_snapshots
+                .as_deref()
+                .filter(|_| !is_damage_continuation_node(ability))
+            {
+                let awaiting = new_awaiting_damage_result_from_snapshots(state, ability, snapshots);
+                sub_clone.set_direct_damage_result(Some(awaiting));
+            }
             if forwards_battlefield_move(ability) {
                 bind_forwarded_generic_self_ref(&mut sub_clone);
                 let marker = pending_forwarded_zone_result(state, ability.source_id);
@@ -32298,8 +32577,8 @@ fn spell_event_incarnation(state: &GameState, id: ObjectId) -> Option<ObjectInca
 /// the node's own resolution-bound attachment-host recipient; the ability's first object
 /// target (with its announced pin); else, in a chain that declares no referent, the object
 /// the immediately preceding damage instruction actually dealt damage to
-/// (`referentless_chain_damage_recipient`); else, for subject-based triggers that carry no chosen target, the triggering event's
-/// subject. `ObjectScope::EventSource` is the object the
+/// (`referentless_chain_damage_recipient`); else, for subject-based triggers that carry no
+/// chosen target, the triggering event's subject. `ObjectScope::EventSource` is the object the
 /// current trigger event names even when the node also declares a target. Every other
 /// scope has no referent here (the parser never writes one): the condition is false.
 fn resolve_condition_referent(
