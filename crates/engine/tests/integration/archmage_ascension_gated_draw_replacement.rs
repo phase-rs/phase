@@ -130,7 +130,7 @@ fn archmage_below_six_counters_leaves_draw_untouched() {
         "below the gate the draw proceeds normally (+1); got {hand_after_names:?}"
     );
     assert!(
-        hand_after_names.contains(&"Grizzly Bears".to_string()),
+        hand_after_names.iter().any(|i| i == "Grizzly Bears"),
         "the natural top-of-library draw (Grizzly Bears) must enter hand; got {hand_after_names:?}"
     );
 }
@@ -209,11 +209,11 @@ fn archmage_six_counters_accept_tutors_chosen_card_and_replaces_draw() {
          the draw is fully replaced; got {hand_after_names:?}"
     );
     assert!(
-        hand_after_names.contains(&"Sol Ring".to_string()),
+        hand_after_names.iter().any(|i| i == "Sol Ring"),
         "the tutored Sol Ring must be in hand; got {hand_after_names:?}"
     );
     assert!(
-        !hand_after_names.contains(&"Grizzly Bears".to_string()),
+        !hand_after_names.iter().any(|i| i == "Grizzly Bears"),
         "the top-of-library card (Grizzly Bears) must NOT be drawn — the draw was \
          replaced, not supplemented; got {hand_after_names:?}"
     );
@@ -269,7 +269,7 @@ fn archmage_six_counters_decline_falls_through_to_normal_draw() {
         "decline must result in exactly +1 hand card (the natural draw); got {hand_after_names:?}"
     );
     assert!(
-        hand_after_names.contains(&"Grizzly Bears".to_string()),
+        hand_after_names.iter().any(|i| i == "Grizzly Bears"),
         "declining draws the top-of-library card (Grizzly Bears); got {hand_after_names:?}"
     );
     assert!(

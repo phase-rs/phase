@@ -4328,9 +4328,9 @@ mod tests {
         };
         assert_eq!(name, "Ajani's Pridemate");
         assert!(
-            types.contains(&"Creature".to_string())
-                && types.contains(&"Cat".to_string())
-                && types.contains(&"Soldier".to_string()),
+            types.iter().any(|t| t == "Creature")
+                && types.iter().any(|t| t == "Cat")
+                && types.iter().any(|t| t == "Soldier"),
             "catalog core type + subtypes must flow through, got {types:?}"
         );
         // CR 111.10: catalog characteristics fill in for text the effect omitted.
@@ -4373,7 +4373,7 @@ mod tests {
         // Reach-guards: the catalog body still flows through, proving the
         // registry lookup fired rather than a bare-name fallback.
         assert!(
-            types.contains(&"Creature".to_string())
+            types.iter().any(|t| t == "Creature")
                 && types.iter().any(|token_type| token_type == "Food")
                 && types.iter().any(|token_type| token_type == "Golem"),
             "catalog core type + subtypes must flow through, got {types:?}"
@@ -4414,8 +4414,8 @@ mod tests {
         };
 
         assert_eq!(name, "Ooze");
-        assert!(types.contains(&"Creature".to_string()));
-        assert!(types.contains(&"Ooze".to_string()));
+        assert!(types.iter().any(|t| t == "Creature"));
+        assert!(types.iter().any(|t| t == "Ooze"));
         assert_eq!(colors, vec![ManaColor::Green]);
         assert_eq!(power, PtValue::Fixed(7));
         assert_eq!(toughness, PtValue::Fixed(7));
@@ -4445,8 +4445,8 @@ mod tests {
         };
 
         assert_eq!(name, "Ooze");
-        assert!(types.contains(&"Creature".to_string()));
-        assert!(types.contains(&"Ooze".to_string()));
+        assert!(types.iter().any(|t| t == "Creature"));
+        assert!(types.iter().any(|t| t == "Ooze"));
         assert_eq!(colors, vec![ManaColor::Green]);
         assert_eq!(power, PtValue::Fixed(2));
         assert_eq!(toughness, PtValue::Fixed(2));

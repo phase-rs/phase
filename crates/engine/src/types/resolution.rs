@@ -5106,16 +5106,13 @@ impl ResolutionStack {
         let Some(attachment_child) = self.frames.below(post_replacement) else {
             return false;
         };
-        if !matches!(
+        matches!(
             (self.frames.get(attachment_child), self.frames.get(post_replacement)),
             (
                 Some(ResolutionFrame::AbilityContinuation(child)),
                 Some(ResolutionFrame::PostReplacement(_)),
             ) if child.pending.attachment_choice.is_some()
-        ) {
-            return false;
-        }
-        true
+        )
     }
 
     /// CR 608.2c: The continuation that owns the later instructions of the
@@ -13229,6 +13226,7 @@ mod tests {
             exile_tracking: ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,

@@ -5622,7 +5622,14 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
             "shares a color with the most common color among all permanents".into()
         }
         SC::SourceEnteredThisTurn => "source entered this turn".into(),
-        SC::SourceHasDealtDamage => "source has dealt damage".into(),
+        SC::SourceHasDealtDamage { kind } => {
+            let kind = match kind {
+                crate::types::ability::DamageKindFilter::Any => "",
+                crate::types::ability::DamageKindFilter::CombatOnly => "combat ",
+                crate::types::ability::DamageKindFilter::NoncombatOnly => "noncombat ",
+            };
+            format!("source has dealt {kind}damage")
+        }
         SC::SourceExertedThisTurn => "source has been exerted this turn".into(),
         SC::WasCast { zone } => match zone {
             Some(z) => format!("cast from {}", fmt_zone(z)),
@@ -12924,7 +12931,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
             ("SharesColorWithMostCommonColorAmongPermanents", Handled)
         }
         StaticCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
-        StaticCondition::SourceHasDealtDamage => ("SourceHasDealtDamage", Handled),
+        StaticCondition::SourceHasDealtDamage { .. } => ("SourceHasDealtDamage", Handled),
         StaticCondition::SourceExertedThisTurn => ("SourceExertedThisTurn", Handled),
         StaticCondition::WasCast { .. } => ("WasCast", Handled),
         StaticCondition::IsRingBearer => ("IsRingBearer", Handled),
@@ -22418,7 +22425,9 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         }
         let mut face = make_face();
         face.static_abilities.push(definition);
-        assert!(card_face_gaps(&face).contains(&GRAVEYARD_ALTERNATIVE_COST_GAP.to_string()));
+        assert!(card_face_gaps(&face)
+            .iter()
+            .any(|i| i == GRAVEYARD_ALTERNATIVE_COST_GAP));
     }
 
     /// A graveyard permission whose extra cost is a choice can't be paid by the
@@ -22447,7 +22456,9 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         }
         let mut face = make_face();
         face.static_abilities.push(definition);
-        assert!(card_face_gaps(&face).contains(&GRAVEYARD_CHOICE_COST_GAP.to_string()));
+        assert!(card_face_gaps(&face)
+            .iter()
+            .any(|i| i == GRAVEYARD_CHOICE_COST_GAP));
     }
 
     /// A face whose continuous static GRANTS a graveyard permission with an
@@ -24242,8 +24253,8 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let pattern = &top_gap.oracle_patterns[0];
         assert_eq!(pattern.pattern, normalize_oracle_pattern(GUARD));
         assert_eq!(pattern.count, 2);
-        assert!(pattern.example_cards.contains(&"Alpha".to_string()));
-        assert!(pattern.example_cards.contains(&"Beta".to_string()));
+        assert!(pattern.example_cards.iter().any(|i: &String| i == "Alpha"));
+        assert!(pattern.example_cards.iter().any(|i: &String| i == "Beta"));
     }
 
     /// A row whose verdicts carry two distinct phrases contributes to both patterns; a row
@@ -24298,7 +24309,10 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 .unwrap_or_else(|| panic!("no pattern for {phrase:?}"))
         };
         for phrase in ["you control an artifact", "you have no cards in hand"] {
-            assert!(pattern(phrase).example_cards.contains(&"A".to_string()));
+            assert!(pattern(phrase)
+                .example_cards
+                .iter()
+                .any(|i: &String| i == "A"));
         }
         let repeated_key = normalize_oracle_pattern("you have 20 or more life");
         assert_eq!(
@@ -24763,7 +24777,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let mut missing = Vec::new();
         collect_test_ability_missing_parts(&grant_def(None), &mut missing);
         assert!(
-            missing.contains(&"Effect:BodylessBoon".to_string()),
+            missing.iter().any(|i: &String| i == "Effect:BodylessBoon"),
             "bodyless grant must record the structural gap, got {missing:?}"
         );
         let mut control_missing = Vec::new();

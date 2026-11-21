@@ -5,7 +5,8 @@
 //! `crate::<module>`, and every module with an insta snapshot; it may also hold modules from this
 //! range. `no_top_level_test_binaries` enforces that each file here is registered in exactly one
 //! shard root.
-
+// The auto-trait (`Send`) proof for the im-backed `GameState` exceeds the default
+// recursion limit of 128 (a future-incompatibility error on newer toolchains).
 #![recursion_limit = "512"]
 
 pub mod support;
@@ -289,7 +290,9 @@ mod liminal_copy_token_etb_observers;
 mod limited_command_zone;
 mod limited_companion_match_launch;
 mod limited_deck_format_gate;
+mod lingering_modal_land_face;
 mod linked_exile_ltb_return;
+mod linked_exile_return_binding;
 mod living_armor_target_mana_value_1375;
 mod living_conundrum_skip_empty_draw;
 mod living_death_ordering_2932;
@@ -570,6 +573,7 @@ mod printed_damage_prevention_survives_turn;
 mod printed_spell_graveyard_triggers;
 mod proctor_of_potential_restriction;
 mod professor_hojo_activation_cost;
+mod proft_eidetic_memory;
 mod proliferate_time_counters;
 mod proliferate_zero_counter;
 mod promise_of_loyalty;

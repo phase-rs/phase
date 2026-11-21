@@ -5,7 +5,8 @@
 //! through `crate::<module>`, and every module with an insta snapshot; it may also hold modules
 //! from this range. `no_top_level_test_binaries` enforces that each file here is registered in
 //! exactly one shard root.
-
+// The auto-trait (`Send`) proof for the im-backed `GameState` exceeds the default
+// recursion limit of 128 (a future-incompatibility error on newer toolchains).
 #![recursion_limit = "512"]
 
 pub mod support;
@@ -416,6 +417,7 @@ mod issue_10401_off_zone_ability_cost_reduction;
 mod issue_10431_resumed_batch_terminal_completion;
 mod issue_1092_chthonian_nightmare;
 mod issue_11040_darksteel_colossus_mill;
+mod issue_11132_where_x_pt_adjustment;
 mod issue_11133_where_x_pt_clamp;
 mod issue_1120_warden_of_the_grove;
 mod issue_1128_elrond_scry_counter;

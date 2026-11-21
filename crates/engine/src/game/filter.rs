@@ -8076,9 +8076,18 @@ fn filter_inner_for_object(
             } else {
                 Some(*id)
             };
-            set_id
-                .and_then(|sid| state.tracked_object_sets.get(&sid))
-                .is_some_and(|set| set.contains(&object_id))
+            // CR 730.3c + CR 400.7: a reader that can find the new object a merged
+            // permanent became finds all of its components, so a component split at
+            // a member's recorded battlefield departure is in the set too.
+            set_id.is_some_and(|sid| {
+                state
+                    .tracked_object_sets
+                    .get(&sid)
+                    .is_some_and(|set| set.contains(&object_id))
+                    || crate::game::merge::tracked_set_finds_component(
+                        state, sid, object_id, ability, None,
+                    )
+            })
         }
         // CR 701.33 + CR 701.18: Intersection of a tracked set with an inner
         // type filter. Used by Zimone's Experiment to route "X cards revealed
@@ -8113,7 +8122,17 @@ fn filter_inner_for_object(
             };
             let in_set = resolved.is_some_and(|(set_id, set)| {
                 if !set.contains(&object_id) {
-                    return false;
+                    // CR 730.3c + CR 400.7 + CR 608.2c + CR 614.6: a component of a
+                    // merged permanent the producer moved is found with it, and
+                    // inherits its member's producer action (D4); the inner filter
+                    // below still applies to it as to any member.
+                    return crate::game::merge::tracked_set_finds_component(
+                        state,
+                        set_id,
+                        object_id,
+                        ability,
+                        caused_by.as_ref(),
+                    );
                 }
                 // CR 608.2c + CR 614.6: an action-bound consumer ("exiled this
                 // way", "sacrificed this way", …) matches only members whose
@@ -11638,11 +11657,20 @@ fn matches_filter_prop(
             } else {
                 Some(*id)
             };
+            // CR 730.3c + CR 400.7: components of a merged permanent the producer
+            // moved are found with it (see the `TargetFilter::TrackedSet` arm).
             resolved.is_some_and(|sid| {
                 state
                     .tracked_object_sets
                     .get(&sid)
                     .is_some_and(|set| set.contains(&object_id))
+                    || crate::game::merge::tracked_set_finds_component(
+                        state,
+                        sid,
+                        object_id,
+                        source.ability,
+                        None,
+                    )
             })
         }
         // CR 202.2 + CR 709.4b: A split card off the stack has the combined
@@ -30137,6 +30165,7 @@ mod entry_projection_tests {
             exile_tracking: Default::default(),
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,

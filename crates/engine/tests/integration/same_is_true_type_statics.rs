@@ -545,14 +545,16 @@ fn maskwood_nexus_changes_owned_creature_cards_outside_the_battlefield() {
             runner.state().objects[&owned_card]
                 .card_types
                 .subtypes
-                .contains(&subtype.to_string()),
+                .iter()
+                .any(|i| i == subtype),
             "owned hand card must gain {subtype}"
         );
         assert!(
             !runner.state().objects[&opponent_card]
                 .card_types
                 .subtypes
-                .contains(&subtype.to_string()),
+                .iter()
+                .any(|i| i == subtype),
             "opponent hand card must not gain {subtype}"
         );
     }
@@ -600,7 +602,11 @@ fn biotransference_casts_a_creature_spell_as_an_artifact() {
     assert!(token.card_types.core_types.contains(&CoreType::Creature));
     for subtype in ["Necron", "Warrior"] {
         assert!(
-            token.card_types.subtypes.contains(&subtype.to_string()),
+            token
+                .card_types
+                .subtypes
+                .iter()
+                .any(|i: &String| i == subtype),
             "Biotransference's token must have the printed {subtype} subtype: {token:#?}"
         );
     }

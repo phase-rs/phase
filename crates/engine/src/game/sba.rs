@@ -2465,11 +2465,7 @@ fn check_saga_sacrifice(
                     } if *object_id == *id
                 )
             });
-            if pending_lore_event {
-                return false;
-            }
-
-            true
+            !pending_lore_event
         })
         .collect();
 
@@ -4847,6 +4843,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -5028,6 +5025,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,

@@ -2641,7 +2641,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // `OptionalEffectChoice` and `DigBottomOrder` prompts).
     if !state
         .private_look_player
-        .is_some_and(&can_view_private_for_player)
+        .is_some_and(can_view_private_for_player)
     {
         filtered.private_look_ids.clear();
     }
@@ -13706,6 +13706,8 @@ mod tests {
                         amount: 3,
                     },
                 ]),
+                staged_gains: Vec::new(),
+                awaiting_staged_gain: false,
                 batch_events: vec![GameEvent::ZoneChanged {
                     object_id: hidden,
                     from: Some(Zone::Library),

@@ -1,7 +1,6 @@
-// Proving Send/Sync for the merged engine state held by GameSession exceeds
-// rustc's default trait-recursion limit of 128.
-#![recursion_limit = "256"]
-
+// The auto-trait (`Send`) proof for the im-backed `GameState` exceeds the default
+// recursion limit of 128 (a future-incompatibility error on newer toolchains).
+#![recursion_limit = "512"]
 pub mod ai_seats_wire_guard;
 pub mod client_hello_guard;
 pub mod client_message_wire_guard;

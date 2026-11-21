@@ -8245,7 +8245,8 @@ fn live_guidance_finish(s: GameScenario, ids: LiveGuidanceSources) -> GameRunner
     assert!(r.state().objects[&ids.thrull]
         .card_types
         .subtypes
-        .contains(&"Elf".to_string()));
+        .iter()
+        .any(|i| i == "Elf"));
     assert_eq!(
         r.state()
             .objects
@@ -8263,7 +8264,7 @@ fn live_guidance_finish(s: GameScenario, ids: LiveGuidanceSources) -> GameRunner
             .objects
             .values()
             .filter(|o| o.zone == Zone::Battlefield
-                && o.card_types.subtypes.contains(&"Elf".to_string()))
+                && o.card_types.subtypes.iter().any(|i: &String| i == "Elf"))
             .count(),
         1
     );

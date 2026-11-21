@@ -4,7 +4,8 @@
 //! other than `support` through `crate::<module>`, and every module with an insta snapshot; it may
 //! also hold modules from this range. `no_top_level_test_binaries` enforces that each file here is
 //! registered in exactly one shard root.
-
+// The auto-trait (`Send`) proof for the im-backed `GameState` exceeds the default
+// recursion limit of 128 (a future-incompatibility error on newer toolchains).
 #![recursion_limit = "512"]
 
 pub mod support;
@@ -63,6 +64,7 @@ mod runadi_behemoth_caller_etb_counters;
 mod runaway_steam_kin_fewer_than_counters;
 mod runed_halo_chosen_card_name_protection;
 mod runo_stromkirk_reveal_transform_gate;
+mod ruric_thar_magecrusher_hexproof;
 mod s01_current_phase_condition;
 mod s01_excess_damage_followup;
 mod s01_object_property_conditions;
@@ -243,6 +245,7 @@ mod swarm_combat_witness;
 mod swashbuckler_extraordinaire_declined_sacrifice_3179;
 mod swashbuckler_repro_3179_accept;
 mod swords_life_equals_power_counters_2895;
+mod syphon_flesh_merged_sacrifice;
 mod syr_vondam_power_gate;
 mod szadek_combat_damage_to_counters;
 mod taigam_master_opportunist_exiles_cast_spell_749;
@@ -335,6 +338,7 @@ mod top_of_library_object_form_permission;
 mod torch_the_tower_die_exile;
 mod tracked_set_anaphor_quantity_binds;
 mod tracked_set_anaphor_source;
+mod tracked_set_zone_scan_merged;
 mod treasure_map_landmark_transform;
 mod treasured_find_regression;
 mod trench_behemoth_landfall_force_attack;
@@ -408,6 +412,7 @@ mod vannifar_cloak_from_hand;
 mod vanquish_horde_ai_manapayment_wedge;
 mod varragoth_search_top;
 mod veteran_armorsmith_soldier_anthem;
+mod veyran_own_magecraft_doubling;
 mod veyran_storm_source_scope;
 mod victimize_graveyard_recursion_7898;
 mod vigor_regression;
