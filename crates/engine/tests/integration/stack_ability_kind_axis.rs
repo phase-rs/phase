@@ -881,7 +881,7 @@ fn radiant_performer_cast_from_hand_copies_targeted_spell_for_each_target() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let elves = scenario.add_real_card(P0, "Llanowar Elves", Zone::Battlefield, db);
-    let _prodigal = scenario.add_real_card(P0, "Prodigal Sorcerer", Zone::Battlefield, db);
+    let prodigal = scenario.add_real_card(P0, "Prodigal Sorcerer", Zone::Battlefield, db);
     let growth = scenario.add_real_card(P0, "Giant Growth", Zone::Hand, db);
     let radiant = scenario
         .add_creature_to_hand_from_oracle(P0, "Radiant Performer", 2, 2, RADIANT_PERFORMER_ORACLE)
@@ -911,16 +911,81 @@ fn radiant_performer_cast_from_hand_copies_targeted_spell_for_each_target() {
         })
         .expect("Giant Growth must target Llanowar Elves");
 
-    let result = runner.cast(radiant).resolve();
-    assert!(matches!(
-        result.final_waiting_for(),
-        WaitingFor::TriggerTargetSelection { .. }
-    ));
+    // A single legal spell target is auto-selected by the engine, so stage a
+    // second real stack object through the public activation path. Both the
+    // Giant Growth and Prodigal Sorcerer's ability satisfy Radiant Performer's
+    // exact target qualifier; having both makes TriggerTargetSelection
+    // production-reachable without weakening the prompt assertion.
+    let prodigal_index = activated_ability_definitions(runner.state(), prodigal)
+        .into_iter()
+        .find(|(_, ability)| matches!(ability.effect.as_ref(), Effect::DealDamage { .. }))
+        .expect("Prodigal Sorcerer must expose its damage ability")
+        .0;
     runner
+        .act(GameAction::ActivateAbility {
+            source_id: prodigal,
+            ability_index: prodigal_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Prodigal Sorcerer must activate");
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Object(elves)],
+        })
+        .expect("Prodigal Sorcerer must target Llanowar Elves");
+    let prodigal_stack_id = runner
+        .state()
+        .stack
+        .back()
+        .expect("Prodigal Sorcerer's ability must be on the stack")
+        .id;
+
+    let mut committed = runner.cast(radiant).commit();
+    for _ in 0..8 {
+        match committed.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection { .. } => break,
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                committed
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("Radiant Performer's lone ETB trigger should be orderable");
+            }
+            WaitingFor::Priority { .. } => {
+                committed
+                    .act(GameAction::PassPriority)
+                    .expect("priority should pass while Radiant Performer resolves");
+            }
+            other => panic!("unexpected state before Radiant Performer's target prompt: {other:?}"),
+        }
+    }
+    let WaitingFor::TriggerTargetSelection { target_slots, .. } = &committed.state().waiting_for
+    else {
+        panic!(
+            "Radiant Performer must reach TriggerTargetSelection, got {:?}",
+            committed.state().waiting_for
+        );
+    };
+    assert_eq!(
+        target_slots.len(),
+        1,
+        "Radiant Performer declares one target"
+    );
+    let legal = &target_slots[0].legal_targets;
+    assert!(
+        legal.contains(&TargetRef::Object(growth)),
+        "the surfaced trigger prompt must offer Giant Growth: {legal:?}"
+    );
+    assert!(
+        legal.contains(&TargetRef::Object(prodigal_stack_id)),
+        "the surfaced trigger prompt must offer Prodigal Sorcerer's ability: {legal:?}"
+    );
+    committed
         .act(GameAction::ChooseTarget {
             target: Some(TargetRef::Object(growth)),
         })
         .expect("Radiant Performer must choose Giant Growth through GameAction");
+    drop(committed);
     runner.advance_until_stack_empty();
     assert!(matches!(
         runner.state().waiting_for,

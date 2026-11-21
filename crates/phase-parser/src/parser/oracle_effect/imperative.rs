@@ -5395,7 +5395,7 @@ pub(super) fn parse_choose_ast(
             // Consume the complete target phrase before the generic effect
             // parser, whose ordinary target reader only sees the first spell
             // leg of "spell or ability" and drops the qualifier.
-            if let Some((target, remainder)) = nom_on_lower(text, lower, |input| {
+            if let Some((target, remainder)) = nom_on_lower(rest, rest_lower, |input| {
                 let (input, _) = tag("target ").parse(input)?;
                 nom_target::parse_stack_object_target(input)
             }) {
@@ -27808,12 +27808,12 @@ mod tests {
         }
     }
 
-    fn has_filter_property(filter: &TargetFilter, predicate: impl Fn(&FilterProp) -> bool) -> bool {
+    fn has_filter_property(filter: &TargetFilter, predicate: fn(&FilterProp) -> bool) -> bool {
         match filter {
             TargetFilter::Typed(TypedFilter { properties, .. }) => properties.iter().any(predicate),
             TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
                 .iter()
-                .any(|filter| has_filter_property(filter, &predicate)),
+                .any(|filter| has_filter_property(filter, predicate)),
             _ => false,
         }
     }
