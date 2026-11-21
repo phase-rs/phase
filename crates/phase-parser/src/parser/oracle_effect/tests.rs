@@ -4570,6 +4570,28 @@ fn compound_mass_exile_conjunct_carries_exile_forward() {
     }
 }
 
+/// Tested fence: the mass-exile verb reaches only a verbless "all <filter>" conjunct. A possessive
+/// zone conjunct ("their graveyard") after a mass exile stays a strict failure (the pinned
+/// Strategic Betrayal shape: the first leg binds "they" to no player).
+#[test]
+fn compound_mass_exile_possessive_zone_conjunct_stays_an_honest_gap() {
+    let def = parse_effect_chain(
+        "Exile all creatures they control and their graveyard.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::ChangeZoneAll { .. }),
+        "reach guard: first leg is a mass exile, got {:?}",
+        def.effect
+    );
+    let sub = def.sub_ability.as_ref().expect("second leg is chained");
+    assert!(
+        matches!(&*sub.effect, Effect::Unimplemented { .. }),
+        "the possessive-zone conjunct must stay unsupported, got {:?}",
+        sub.effect
+    );
+}
+
 /// Tested fence: a mass RETURN to hand is dispatched with one origin zone inferred from the
 /// whole remainder, so Soulquake's two-zone conjunction ("all creatures on the battlefield
 /// and all creature cards in graveyards") would carry the wrong origin for its first leg.
