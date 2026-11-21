@@ -1,9 +1,12 @@
 //! CR 120.6 + CR 704.5g + CR 702.19b: the single authority for what counts as lethal damage on a
 //! creature.
 //!
-//! Every reader that asks "is this much damage lethal for this creature?" or "how much more must
-//! an attacker assign before it may trample over?" reads this module, so the state-based action,
-//! the combat assignment minimum, excess damage and the AI estimates cannot drift apart.
+//! Readers that ask "is this much damage lethal for this creature?" or "how much more must an
+//! attacker assign before it may trample over?" read this module, so their answers cannot drift
+//! apart. Today those are the combat assignment minimum, the excess-damage reading
+//! (`combat_damage::lethal_damage_needed`) and the combat predictor
+//! (`combat_damage::combat_damage_to_defender`). The lethal-damage state-based action
+//! (`sba::lethal_damage_candidates`) still compares marked damage with toughness directly.
 
 use crate::game::game_object::GameObject;
 use crate::types::game_state::GameState;
@@ -165,5 +168,20 @@ mod tests {
             "lethal damage already marked: a deathtouch attacker owes nothing more"
         );
         assert_eq!(remaining(&state, ObjectId(9_999), false, 0, 0), 1);
+    }
+
+    /// CR 702.19b: marked and committed damage add up. A 4-toughness blocker with 2 marked and 2
+    /// committed this step already has lethal damage, so a later deathtouch trampler owes it 0,
+    /// not the 1 that CR 702.2c would otherwise require.
+    #[test]
+    fn combat_lethal_damage_remaining_sums_marked_and_committed_damage() {
+        let (state, id) = board(4, 2);
+        assert_eq!(remaining(&state, id, true, 0, 2), 0);
+        assert_eq!(remaining(&state, id, false, 0, 2), 0);
+        assert_eq!(
+            remaining(&state, id, true, 0, 1),
+            1,
+            "3 of 4 is not yet lethal: the deathtouch source still owes 1"
+        );
     }
 }
