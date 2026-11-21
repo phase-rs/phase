@@ -225,4 +225,32 @@ describe("GamePage unless-payment card identity", () => {
     expect(await screen.findByText("Revealed Alpha")).toBeInTheDocument();
     expect(screen.queryByText("Revealed Beta")).not.toBeInTheDocument();
   });
+
+  it("displays earlier public sacrifice choices from the scoped unless poll to later payers", async () => {
+    const bear = gameObjectFactory.creature(2, 2).named("Grizzly Bears").withId(CARD_A).build();
+    const state = gameStateFactory.withPlayers(0, 1, 2).withObjects(bear).build();
+    state.pending_player_scope_unless_punishment = {
+      declining_players: [1],
+      payments: [
+        {
+          player: 0,
+          action: "Sacrifice",
+          objects: [{ object_id: CARD_A, incarnation: 0 }],
+        },
+      ],
+    };
+    act(() => {
+      useGameStore.setState({
+        gameId: "unless-poll-choices",
+        gameMode: "online",
+        gameState: state,
+        waitingFor: paymentPrompt(2, null) as never,
+      });
+      useMultiplayerStore.setState({ activePlayerId: 2, isSpectator: false });
+    });
+    render(gamePageTree());
+
+    expect(await screen.findByText("Player 1: Grizzly Bears")).toBeInTheDocument();
+    expect(screen.getByText(/Player 2:/)).toBeInTheDocument();
+  });
 });

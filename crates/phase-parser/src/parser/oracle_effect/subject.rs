@@ -43,11 +43,11 @@ use super::super::oracle_nom::target::{
 };
 use super::super::oracle_quantity;
 use super::super::oracle_static::{
-    classify_block_exception, parse_additive_type_clause_modifications,
-    parse_cant_attack_defended_scope_nom, parse_cant_be_activated_exemption_in_text,
-    parse_chosen_qualifier_subject, parse_continuous_modifications,
-    parse_continuous_subject_filter, parse_static_line, parse_static_line_multi,
-    parse_targeting_bypass_tail, peel_compound_all_quantified_conjuncts,
+    cant_block_object_mode, classify_block_exception, parse_additive_type_clause_modifications,
+    parse_block_object_filter, parse_cant_attack_defended_scope_nom,
+    parse_cant_be_activated_exemption_in_text, parse_chosen_qualifier_subject,
+    parse_continuous_modifications, parse_continuous_subject_filter, parse_static_line,
+    parse_static_line_multi, parse_targeting_bypass_tail, peel_compound_all_quantified_conjuncts,
 };
 use super::super::oracle_target::{
     bare_pronoun_names_ability_source, parse_block_filter_phrase, parse_target,
@@ -6329,6 +6329,8 @@ fn build_continuous_clause(
         return None;
     }
 
+    let affected = static_affected_for_application(&application);
+
     // CR 702.62b + CR 611.2a + CR 611.2c: A "gains suspend" grant onto an exiled
     // card has no turn-scoped expiry — a card stays suspended (exiled, has suspend,
     // has a time counter) until its last time counter is removed (CR 702.62b). CR
@@ -6437,7 +6439,6 @@ fn build_continuous_clause(
         });
     }
 
-    let affected = static_affected_for_application(&application);
     let static_abilities =
         if nom_primitives::scan_contains(&predicate_text.to_lowercase(), "if able") {
             let synthetic_line = format!("Creatures {}.", predicate_text.trim_end_matches('.'));
@@ -8391,6 +8392,12 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
             // `static_definitions` so the targeting check in `targeting.rs::can_target`
             // observes it via active_static_definitions.
             | StaticMode::CantBeTargeted { .. }
+            // CR 509.1b: a granted "can't block <object>" whitelist must
+            // propagate onto the recipient's static_definitions, or the
+            // declaration check never sees it (a resolving effect's grant, e.g.
+            // Immortal Obligation; printed attached restrictions are hosted on
+            // their source instead).
+            | StaticMode::BlockRestriction { .. }
             // CR 611.2c + CR 101.2: a resolved "can't be countered" grant is
             // read live off the transient effect by the counter resolvers, so
             // the TCE must carry the mode as a modification.
@@ -8474,6 +8481,21 @@ fn parse_restriction_list_atom(input: &str) -> OracleResult<'_, Vec<StaticMode>>
         // matches only the bare verb phrase.
         value(vec![StaticMode::CantPhaseIn], tag("phase in")),
     ))
+    .parse(input)
+}
+
+/// CR 509.1b: the "can't block <object>" predicate — negation, then the object
+/// read by the single block-object authority. Self-object forms ("block
+/// ~/this creature/it") are owned by [`parse_restriction_list_atom`], which
+/// runs first; the object authority leaves self-object rejection to its
+/// callers and currently returns `Err` for each of these forms, which
+/// `parse_restriction_modes_cant_block_object_declines` pins. A trailing
+/// rider is left for the caller's all_consuming.
+fn parse_cant_block_object_predicate(input: &str) -> OracleResult<'_, TargetFilter> {
+    preceded(
+        alt((tag("can't block "), tag("cannot block "))),
+        parse_block_object_filter,
+    )
     .parse(input)
 }
 
@@ -8578,6 +8600,18 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
             // all, so the later arms get their try at this predicate.
             BlockFilterPhrase::Unconstrained => {}
         }
+    }
+    // CR 509.1b: "<subject> can't block <object>" is the whitelist "can block
+    // only attackers that are not <object>", for every caller of this shared
+    // function — a source-hosted attached restriction (Burden of Proof's
+    // "can't block Detectives", peeled by `split_trailing_restriction_conjunct`)
+    // and a resolving effect's grant alike. Whole phrase or decline: a
+    // trailing rider ("unless …") or the symmetric "or be blocked by"
+    // conjunction leaves the arm.
+    if let Ok((_, object)) =
+        all_consuming(terminated(parse_cant_block_object_predicate, opt(tag(".")))).parse(lower)
+    {
+        return Some(vec![cant_block_object_mode(object)]);
     }
     // CR 702.18a / CR 702.11b / CR 109.5: "can't be the target of spells or abilities [your opponents control]"
     // is modeled as `CantBeTargeted { who }` (propagated onto the subject via `AddStaticMode`
@@ -13372,6 +13406,153 @@ mod tests {
             )
             .is_some(),
             "reach guard: the arm is live — a readable disjunct still parses"
+        );
+    }
+
+    fn detective_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().subtype("Detective".to_string()))
+    }
+
+    fn cant_block(object: TargetFilter) -> Option<Vec<StaticMode>> {
+        Some(vec![StaticMode::BlockRestriction {
+            filter: TargetFilter::Not {
+                filter: Box::new(object),
+            },
+        }])
+    }
+
+    /// CR 509.1b: "<subject> can't block <object>" is the whitelist "can block
+    /// only attackers that are not <object>" in the shared restriction grammar,
+    /// and a granted `BlockRestriction` propagates onto the recipient.
+    #[test]
+    fn parse_restriction_modes_cant_block_object_is_a_whitelist() {
+        // Burden of Proof's fragment exactly as `split_trailing_restriction_conjunct`
+        // passes it, and its sentence with the terminal period.
+        assert_eq!(
+            parse_restriction_modes("can't block detectives"),
+            cant_block(detective_filter())
+        );
+        assert_eq!(
+            parse_restriction_modes("can't block detectives."),
+            cant_block(detective_filter())
+        );
+        // No printed Oracle text uses "cannot block"; nearest printed card Burden
+        // of Proof, whose verbatim fragment this alters in the negation only. Kept
+        // because the arm shares the negation axis of the list grammar, which
+        // accepts "cannot" for every atom.
+        assert_eq!(
+            parse_restriction_modes("cannot block detectives"),
+            cant_block(detective_filter())
+        );
+        // Immortal Obligation's and Spectral Grasp's wording: the structural
+        // assertion for the controller-relative case (its runtime reading
+        // relative to the installing player is DEFERRED(phase 2)).
+        assert_eq!(
+            parse_restriction_modes("can't block creatures you control"),
+            cant_block(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            ))
+        );
+        // Positive breadth over real cards' object grammar: Hinterland Drake
+        // ("This creature can't block artifact creatures.") and Craterous Stomp's
+        // quoted "This creature can't block Giants or Warriors."
+        assert_eq!(
+            parse_restriction_modes("can't block artifact creatures"),
+            cant_block(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Artifact).with_type(TypeFilter::Creature)
+            ))
+        );
+        assert_eq!(
+            parse_restriction_modes("can't block giants or warriors"),
+            cant_block(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::default().subtype("Giant".to_string())),
+                    TargetFilter::Typed(TypedFilter::default().subtype("Warrior".to_string())),
+                ],
+            })
+        );
+        // CR 509.1b: the granted whitelist must reach the recipient's
+        // static_definitions through `AddStaticMode`.
+        assert!(static_mode_needs_grant_propagation(
+            &StaticMode::BlockRestriction {
+                filter: TargetFilter::Not {
+                    filter: Box::new(detective_filter()),
+                },
+            }
+        ));
+    }
+
+    /// The "can't block <object>" arm reads the whole phrase or declines. Every
+    /// negative is paired with a reach-guard in the same test proving the
+    /// decline comes from the asserted cause, not a dead arm.
+    #[test]
+    fn parse_restriction_modes_cant_block_object_declines() {
+        let has_block_restriction = |modes: &Option<Vec<StaticMode>>| {
+            modes.as_ref().is_some_and(|modes| {
+                modes
+                    .iter()
+                    .any(|mode| matches!(mode, StaticMode::BlockRestriction { .. }))
+            })
+        };
+
+        // (a) Self-object. "can't block this creature" is printed (Screeching
+        // Griffin, Kozilek's Pathfinder: "Target creature can't block this
+        // creature this turn."). "can't block it" is printed too (Battering
+        // Wurm: "Creatures with power less than this creature's power can't
+        // block it."). "can't block ~" is not printed anywhere (nearest printed
+        // card: Screeching Griffin); kept because `parse_restriction_list_atom`
+        // already owns these forms, and this pins that the new arm does not
+        // take them. Their existing `CantBlock`
+        // lowering is NOT asserted correct here.
+        assert!(
+            parse_cant_block_object_predicate("can't block detectives").is_ok(),
+            "reach guard: the combinator is live"
+        );
+        for self_object in [
+            "can't block ~",
+            "can't block this creature",
+            "can't block it",
+        ] {
+            assert!(
+                parse_cant_block_object_predicate(self_object).is_err(),
+                "{self_object:?}: a self-object is not a block object"
+            );
+            assert!(
+                !has_block_restriction(&parse_restriction_modes(self_object)),
+                "{self_object:?}: the new arm must not reach a self-object"
+            );
+        }
+
+        // (b) Rider, Heat Wave's verbatim rider lowercased ("Nonblue creatures
+        // can't block creatures you control unless their controller pays 1 life
+        // for each blocking creature they control.").
+        let rider = "can't block creatures you control unless their controller pays 1 life for each blocking creature they control";
+        let (rest, object) =
+            parse_cant_block_object_predicate(rider).expect("reach guard: the object parses");
+        assert_eq!(
+            rest, " unless their controller pays 1 life for each blocking creature they control",
+            "reach guard: the combinator leaves the rider, so the decline is all_consuming's"
+        );
+        assert_eq!(
+            object,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+        );
+        assert_eq!(parse_restriction_modes(rider), None);
+
+        // (c) Symmetric conjunction, Lost in the Spirit World's quoted token
+        // text ("This token can't block or be blocked by non-Spirit creatures.").
+        let symmetric = "can't block or be blocked by non-spirit creatures";
+        assert!(parse_cant_block_object_predicate(symmetric).is_err());
+        assert_eq!(parse_restriction_modes(symmetric), None);
+        // Reach guard: no printed card has this text (nearest printed card Lost in
+        // the Spirit World, whose quoted token text it alters by removing "or be
+        // blocked by" only), so the decline comes from "or be blocked by", not
+        // the object.
+        assert_eq!(
+            parse_restriction_modes("can't block non-spirit creatures"),
+            cant_block(TargetFilter::Typed(TypedFilter::creature().with_type(
+                TypeFilter::Non(Box::new(TypeFilter::Subtype("Spirit".to_string())))
+            )))
         );
     }
 
