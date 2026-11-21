@@ -5390,6 +5390,20 @@ pub(super) fn parse_choose_ast(
         }
 
         if super::is_choose_as_targeting(rest_lower) {
+            // CR 115.1 + CR 115.9b/c: a choose-target instruction can qualify
+            // the stack object by both kind and the objects/players it targets.
+            // Consume the complete target phrase before the generic effect
+            // parser, whose ordinary target reader only sees the first spell
+            // leg of "spell or ability" and drops the qualifier.
+            if let Some((target, remainder)) = nom_on_lower(text, lower, |input| {
+                let (input, _) = tag("target ").parse(input)?;
+                nom_target::parse_stack_object_target(input)
+            }) {
+                if terminal_punctuation_only(remainder) {
+                    return Some(ChooseImperativeAst::TargetOnly { target });
+                }
+            }
+
             // CR 115.1c + CR 601.2c: "Choose target X and target Y" declares
             // two independent target slots on the same activated/triggered
             // ability. Detect the compound "target ... and target ..." shape
@@ -27781,6 +27795,127 @@ mod tests {
                 panic!("Expected TargetOnly or Reparse for single-target wording, got {other:?}")
             }
         }
+    }
+
+    fn has_stack_leg(filter: &TargetFilter, ability: bool) -> bool {
+        match filter {
+            TargetFilter::StackSpell => !ability,
+            TargetFilter::StackAbility { .. } => ability,
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(|filter| has_stack_leg(filter, ability))
+            }
+            _ => false,
+        }
+    }
+
+    fn has_filter_property(filter: &TargetFilter, predicate: impl Fn(&FilterProp) -> bool) -> bool {
+        match filter {
+            TargetFilter::Typed(TypedFilter { properties, .. }) => properties.iter().any(predicate),
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+                .iter()
+                .any(|filter| has_filter_property(filter, &predicate)),
+            _ => false,
+        }
+    }
+
+    /// SHAPE — CR 115.1 + CR 115.9b: Flavor Judge's exact target clause must
+    /// preserve both stack-object kinds and the "targets a permanent" filter.
+    #[test]
+    fn flavor_judge_choose_target_preserves_spell_ability_and_targets_filter() {
+        let text = "Choose target spell or ability that targets a permanent you control.";
+        let lower = text.to_lowercase();
+        let Some(ChooseImperativeAst::TargetOnly { target }) =
+            parse_choose_ast(text, &lower, &mut ParseContext::default())
+        else {
+            panic!("Flavor Judge's exact target clause must lower to TargetOnly");
+        };
+
+        assert!(matches!(target, TargetFilter::Or { filters } if filters.len() == 2));
+        assert!(
+            has_stack_leg(&target, false),
+            "the spell leg must survive the target qualifier: {target:?}"
+        );
+        assert!(
+            has_stack_leg(&target, true),
+            "the ability leg must survive the target qualifier: {target:?}"
+        );
+        assert!(
+            has_filter_property(&target, |property| matches!(
+                property,
+                FilterProp::Targets { .. }
+            )),
+            "the Targets property must survive: {target:?}"
+        );
+    }
+
+    /// SHAPE — CR 115.1 + CR 115.9c: Radiant Performer's exact target clause
+    /// must preserve both stack-object kinds and both single-target qualifiers.
+    #[test]
+    fn radiant_performer_choose_target_preserves_spell_ability_and_single_target_filters() {
+        let text = "Choose target spell or ability that targets only a single permanent or player.";
+        let lower = text.to_lowercase();
+        let Some(ChooseImperativeAst::TargetOnly { target }) =
+            parse_choose_ast(text, &lower, &mut ParseContext::default())
+        else {
+            panic!("Radiant Performer's exact target clause must lower to TargetOnly");
+        };
+
+        assert!(matches!(target, TargetFilter::Or { filters } if filters.len() == 2));
+        assert!(
+            has_stack_leg(&target, false),
+            "the spell leg must survive the target qualifier: {target:?}"
+        );
+        assert!(
+            has_stack_leg(&target, true),
+            "the ability leg must survive the target qualifier: {target:?}"
+        );
+        assert!(
+            has_filter_property(&target, |property| matches!(
+                property,
+                FilterProp::TargetsOnly { .. }
+            )),
+            "the TargetsOnly property must survive: {target:?}"
+        );
+        assert!(
+            has_filter_property(&target, |property| {
+                matches!(property, FilterProp::HasSingleTarget)
+            }),
+            "the HasSingleTarget property must survive: {target:?}"
+        );
+    }
+
+    /// The exact Wyll's Reversal clause has an unsupported trailing target
+    /// cardinality rider. It must not be claimed by the all-consuming stack
+    /// target arm; the positive `Some` guard proves the ordinary choose path
+    /// still reaches a real AST instead of failing before the boundary check.
+    #[test]
+    fn choose_target_stack_grammar_respects_wyll_reversal_boundary() {
+        let text = "Choose target spell or ability with one or more targets.";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
+            .expect("Wyll's Reversal target clause must reach a choose AST");
+        assert!(
+            !matches!(
+                result,
+                ChooseImperativeAst::TargetOnly {
+                    target: TargetFilter::Or { .. }
+                }
+            ),
+            "the unsupported Wyll's Reversal rider must not be swallowed as a complete Or target"
+        );
+
+        let ordinary = "Choose target creature.";
+        let ordinary_lower = ordinary.to_lowercase();
+        let Some(ChooseImperativeAst::TargetOnly { target }) =
+            parse_choose_ast(ordinary, &ordinary_lower, &mut ParseContext::default())
+        else {
+            panic!("ordinary choose-target text must still reach TargetOnly");
+        };
+        assert!(
+            matches!(target, TargetFilter::Typed(TypedFilter { type_filters, .. })
+                if type_filters.contains(&TypeFilter::Creature)),
+            "ordinary choose target creature must retain its creature filter: {target:?}"
+        );
     }
 
     /// CR 609.7a: Desperate Gambit's "Choose a source you control" must lower to
