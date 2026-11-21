@@ -7734,6 +7734,7 @@ impl LegacyReplacementTailsWire {
                         // The split-slot wire shape predates the CR 614.1a
                         // substitution amount; no damage substitution existed.
                         event_amount: None,
+                        event_amount_fraction: crate::types::ability::HalfFraction::Zero,
                         // The pre-fold split-slot wire shape predates the
                         // CR 109.5 controller slot; a migrated drain falls back
                         // to the affected object's controller, exactly as it did
@@ -11747,6 +11748,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            lifelink_bonus_fraction: Default::default(),
         });
         spell.waiting_for =
             crate::game::replacement::replacement_choice_waiting_for(PlayerId(0), &spell);

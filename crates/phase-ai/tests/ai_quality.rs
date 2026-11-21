@@ -1387,8 +1387,14 @@ fn animate_land_ability() -> AbilityDefinition {
         Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::new(StaticMode::Continuous).modifications(
                 vec![
-                    ContinuousModification::SetPower { value: 3 },
-                    ContinuousModification::SetToughness { value: 3 },
+                    ContinuousModification::SetPower {
+                        value: 3,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::SetToughness {
+                        value: 3,
+                        fraction: Default::default(),
+                    },
                     ContinuousModification::AddType {
                         core_type: CoreType::Creature,
                     },

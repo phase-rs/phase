@@ -496,7 +496,7 @@ fn real_damage_spell_replays_recorded_final_life_delta() {
                 command,
                 ResolvedRulesCommand::PlayerEdit(ResolvedPlayerEditCommand {
                     player: P1,
-                    edit: ResolvedPlayerEdit::Life { delta: -3 },
+                    edit: ResolvedPlayerEdit::Life { delta: -3, .. },
                     ..
                 })
             )
@@ -588,7 +588,13 @@ fn scalar_commands_compose_across_life_energy_counters_and_speed() {
     let mut state = GameState::new_two_player(7);
 
     state
-        .resolve_and_apply_player_edit(P0, ResolvedPlayerEdit::Life { delta: 2 })
+        .resolve_and_apply_player_edit(
+            P0,
+            ResolvedPlayerEdit::Life {
+                delta: 2,
+                fraction: Default::default(),
+            },
+        )
         .unwrap();
     state
         .resolve_and_apply_player_edit(P0, ResolvedPlayerEdit::Energy { delta: 3 })
@@ -1040,7 +1046,10 @@ fn settled_compound_and_successive_wave_retirements_replay_exactly() {
                 a_ref,
                 b_ref,
                 enchanted_condition(),
-                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             )
         } else {
             (
@@ -1049,7 +1058,10 @@ fn settled_compound_and_successive_wave_retirements_replay_exactly() {
                 StaticCondition::And {
                     conditions: vec![enchanted_condition(), power.clone()],
                 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             )
         };
         let first = runner
@@ -1079,7 +1091,10 @@ fn settled_compound_and_successive_wave_retirements_replay_exactly() {
                     P0,
                     Duration::ForAsLongAs { condition: power },
                     TargetFilter::SpecificObject { id: b },
-                    vec![ContinuousModification::AddToughness { value: 1 }],
+                    vec![ContinuousModification::AddToughness {
+                        value: 1,
+                        fraction: Default::default(),
+                    }],
                     None,
                     TransientContinuousEffectBindings {
                         affected_recipient: Some(b_ref),

@@ -337,6 +337,7 @@ mod tests {
         let result = verdict(
             &state,
             WaitingFor::CrewVehicle {
+                contribution_fractions: Default::default(),
                 player: AI,
                 vehicle_id: ObjectId(1),
                 crew_power: 1,

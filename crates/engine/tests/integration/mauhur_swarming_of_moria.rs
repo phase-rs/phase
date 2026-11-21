@@ -130,6 +130,8 @@ fn squirrel_spec() -> TokenSpec {
             supertypes: Vec::new(),
             colors: vec![ManaColor::Green],
             keywords: Vec::new(),
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         },
         script_name: "Squirrel".to_string(),
         static_abilities: Vec::new(),

@@ -333,8 +333,10 @@ fn static_is_anthem(s: &StaticDefinition) -> bool {
     s.modifications.iter().any(|m| {
         matches!(
             m,
-            ContinuousModification::AddPower { value } | ContinuousModification::AddToughness { value }
-            if *value > 0
+            ContinuousModification::AddPower { value, fraction }
+                | ContinuousModification::AddToughness { value, fraction }
+                if engine::types::ability::HalfSigned::from_whole_and_fraction(*value, *fraction)
+                    > engine::types::ability::HalfSigned::ZERO
         )
     })
 }
@@ -466,7 +468,10 @@ mod tests {
     fn anthem_static(target: TargetFilter) -> StaticDefinition {
         StaticDefinition::continuous()
             .affected(target)
-            .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+            .modifications(vec![ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }])
     }
 
     fn deck_entry(face: CardFace) -> DeckEntry {

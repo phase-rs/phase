@@ -2718,6 +2718,7 @@ mod paused_search_audience_tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            lifelink_bonus_fraction: Default::default(),
         });
 
         // The owner parks on the unanswered event.
@@ -9576,7 +9577,10 @@ mod layers_incremental_flush_tests {
                                 zones: vec![Zone::Graveyard],
                             }]),
                     ))
-                    .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                    .modifications(vec![ContinuousModification::AddPower {
+                        value: 1,
+                        fraction: Default::default(),
+                    }]),
             );
         }
         let source = create_object(
@@ -9677,7 +9681,10 @@ mod layers_incremental_flush_tests {
                                 zones: vec![Zone::Graveyard],
                             }]),
                     ))
-                    .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                    .modifications(vec![ContinuousModification::AddPower {
+                        value: 1,
+                        fraction: Default::default(),
+                    }]),
             );
         }
 
@@ -9784,7 +9791,10 @@ mod layers_incremental_flush_tests {
                     .affected(TargetFilter::Typed(
                         TypedFilter::default().with_type(TypeFilter::Creature),
                     ))
-                    .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                    .modifications(vec![ContinuousModification::AddPower {
+                        value: 1,
+                        fraction: Default::default(),
+                    }]),
             );
         }
         let source = create_object(
@@ -9818,7 +9828,10 @@ mod layers_incremental_flush_tests {
                                 zones: vec![Zone::Graveyard],
                             }]),
                     ))
-                    .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                    .modifications(vec![ContinuousModification::AddPower {
+                        value: 1,
+                        fraction: Default::default(),
+                    }]),
             );
         }
 
@@ -9999,6 +10012,8 @@ mod effect_driven_transformed_entry_tests {
                 casting_options: vec![],
                 layout_kind: None,
                 parse_warnings: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             });
         }
 

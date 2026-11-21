@@ -2177,7 +2177,7 @@ fn returned_target_receives_non_additive_animation_bound_to_parent() {
     let mods = &static_abilities[0].modifications;
     assert!(mods
         .iter()
-        .any(|m| matches!(m, ContinuousModification::SetPower { value: 3 })));
+        .any(|m| matches!(m, ContinuousModification::SetPower { value: 3, .. })));
     assert!(mods.iter().any(|m| matches!(
         m,
         ContinuousModification::AddKeyword {

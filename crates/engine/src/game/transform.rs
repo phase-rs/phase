@@ -581,6 +581,8 @@ mod tests {
                 parser: "transform_test".to_string(),
                 line_index: 0,
             }],
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         });
 
         id

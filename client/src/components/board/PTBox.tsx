@@ -15,8 +15,6 @@ interface PTBoxProps {
    * legacy serialized state predates attribution.
    */
   ptSources?: PTContribution[];
-  basePower?: number | null;
-  baseToughness?: number | null;
 }
 
 const COLOR_CLASSES: Record<PTColor, string> = {
@@ -31,15 +29,10 @@ const ptBoxStyle = {
   paddingBlock: "clamp(1px, calc(var(--card-h, 88px) * 0.012), 2px)",
 } as CSSProperties;
 
-function formatTooltip(
-  ptDisplay: PTDisplay,
-  sources: PTContribution[],
-  basePower: number | null | undefined,
-  baseToughness: number | null | undefined,
-): string {
+function formatTooltip(ptDisplay: PTDisplay, sources: PTContribution[]): string {
   const baseLine =
-    basePower != null && baseToughness != null
-      ? `${ptDisplay.power}/${ptDisplay.toughness} (base ${basePower}/${baseToughness})`
+    ptDisplay.base != null
+      ? `${ptDisplay.power}/${ptDisplay.toughness} (base ${ptDisplay.base})`
       : `${ptDisplay.power}/${ptDisplay.toughness}`;
   const lines = [baseLine];
   for (const c of sources) {
@@ -52,12 +45,10 @@ export function PTBox({
   ptDisplay,
   position = "right",
   ptSources,
-  basePower,
-  baseToughness,
 }: PTBoxProps) {
   const title =
     ptSources && ptSources.length > 0
-      ? formatTooltip(ptDisplay, ptSources, basePower, baseToughness)
+      ? formatTooltip(ptDisplay, ptSources)
       : undefined;
   return (
     <div

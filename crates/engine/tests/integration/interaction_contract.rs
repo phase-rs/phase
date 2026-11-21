@@ -886,6 +886,7 @@ fn aggregate_and_multi_target_decisions_publish_no_attachment_fan_pick() {
             crew_power: 2,
             eligible_creatures: vec![attached, other],
             contributions: vec![1, 1],
+            contribution_fractions: Vec::new(),
         };
         bind(state, "gate-crew");
     }

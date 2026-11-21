@@ -112,6 +112,7 @@ fn test_crew_activation_enters_crew_vehicle_state() {
             crew_power,
             eligible_creatures,
             contributions,
+            ..
         } => {
             assert_eq!(player, PlayerId(0));
             assert_eq!(vid, vehicle_id);

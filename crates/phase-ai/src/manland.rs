@@ -163,10 +163,10 @@ pub(crate) fn extract_body(ability: &AbilityDefinition) -> Option<AnimatedBody> 
                     .flat_map(|sa| sa.modifications.iter())
                 {
                     match modification {
-                        ContinuousModification::SetPower { value } => {
+                        ContinuousModification::SetPower { value, .. } => {
                             assign(&mut set_power, *value, &mut conflict)
                         }
-                        ContinuousModification::SetToughness { value } => {
+                        ContinuousModification::SetToughness { value, .. } => {
                             assign(&mut set_toughness, *value, &mut conflict)
                         }
                         ContinuousModification::AddKeyword { keyword } => {
@@ -553,8 +553,14 @@ mod tests {
         let ability = animate_ability(
             1,
             vec![
-                ContinuousModification::SetPower { value: 2 },
-                ContinuousModification::SetToughness { value: 2 },
+                ContinuousModification::SetPower {
+                    value: 2,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::SetToughness {
+                    value: 2,
+                    fraction: Default::default(),
+                },
                 ContinuousModification::AddType {
                     core_type: CoreType::Creature,
                 },
@@ -565,7 +571,13 @@ mod tests {
 
     #[test]
     fn non_animation_ability_is_not_detected() {
-        let ability = animate_ability(1, vec![ContinuousModification::SetPower { value: 5 }]);
+        let ability = animate_ability(
+            1,
+            vec![ContinuousModification::SetPower {
+                value: 5,
+                fraction: Default::default(),
+            }],
+        );
         assert!(!animates_source(&ability));
     }
 
@@ -574,8 +586,14 @@ mod tests {
         let ability = animate_ability(
             2,
             vec![
-                ContinuousModification::SetPower { value: 3 },
-                ContinuousModification::SetToughness { value: 3 },
+                ContinuousModification::SetPower {
+                    value: 3,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::SetToughness {
+                    value: 3,
+                    fraction: Default::default(),
+                },
                 ContinuousModification::AddKeyword {
                     keyword: Keyword::Trample,
                 },
@@ -610,8 +628,14 @@ mod tests {
                 static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
                     .affected(TargetFilter::AttachedTo)
                     .modifications(vec![
-                        ContinuousModification::SetPower { value: 8 },
-                        ContinuousModification::SetToughness { value: 12 },
+                        ContinuousModification::SetPower {
+                            value: 8,
+                            fraction: Default::default(),
+                        },
+                        ContinuousModification::SetToughness {
+                            value: 12,
+                            fraction: Default::default(),
+                        },
                         ContinuousModification::AddType {
                             core_type: CoreType::Creature,
                         },
@@ -638,8 +662,14 @@ mod tests {
             Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
                     .modifications(vec![
-                        ContinuousModification::SetPower { value: 3 },
-                        ContinuousModification::SetToughness { value: 3 },
+                        ContinuousModification::SetPower {
+                            value: 3,
+                            fraction: Default::default(),
+                        },
+                        ContinuousModification::SetToughness {
+                            value: 3,
+                            fraction: Default::default(),
+                        },
                         ContinuousModification::AddType {
                             core_type: CoreType::Creature,
                         },
@@ -654,8 +684,14 @@ mod tests {
             Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
                     .modifications(vec![
-                        ContinuousModification::SetPower { value: 5 },
-                        ContinuousModification::SetToughness { value: 1 },
+                        ContinuousModification::SetPower {
+                            value: 5,
+                            fraction: Default::default(),
+                        },
+                        ContinuousModification::SetToughness {
+                            value: 1,
+                            fraction: Default::default(),
+                        },
                         ContinuousModification::AddType {
                             core_type: CoreType::Creature,
                         },

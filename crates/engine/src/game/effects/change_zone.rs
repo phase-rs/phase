@@ -16161,6 +16161,8 @@ mod tests {
                 casting_options: vec![],
                 layout_kind: None,
                 parse_warnings: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             });
         }
 

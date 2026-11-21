@@ -57,8 +57,8 @@ describe("computePTDisplay", () => {
     const obj = makeGameObject({ power: 3, toughness: 4, base_power: 3, base_toughness: 4 });
     const display = computePTDisplay(obj)!;
 
-    expect(display.power).toBe(3);
-    expect(display.toughness).toBe(4);
+    expect(display.power).toBe("3");
+    expect(display.toughness).toBe("4");
     expect(display.powerColor).toBe("white");
     expect(display.toughnessColor).toBe("white");
   });
@@ -81,7 +81,7 @@ describe("computePTDisplay", () => {
     const obj = makeGameObject({ damage_marked: 2 });
     const display = computePTDisplay(obj)!;
 
-    expect(display.toughness).toBe(2);
+    expect(display.toughness).toBe("2");
     expect(display.toughnessColor).toBe("red");
   });
 
@@ -104,7 +104,69 @@ describe("computePTDisplay", () => {
     const display = computePTDisplay(obj)!;
 
     // damage_marked > 0 takes priority
-    expect(display.toughness).toBe(5);
+    expect(display.toughness).toBe("5");
     expect(display.toughnessColor).toBe("red");
+  });
+
+  // Unhinged half points (Vile Bile 2½/2½, Little Girl ½/½): the engine sends a
+  // `_fraction` beside each whole field, and the label shows the printed value.
+  it("shows exact half-point power and toughness", () => {
+    const obj = makeGameObject({
+      name: "Vile Bile",
+      power: 2,
+      power_fraction: "Half",
+      toughness: 2,
+      toughness_fraction: "Half",
+      base_power: 2,
+      base_power_fraction: "Half",
+      base_toughness: 2,
+      base_toughness_fraction: "Half",
+    });
+    const display = computePTDisplay(obj)!;
+
+    expect(display.power).toBe("2½");
+    expect(display.toughness).toBe("2½");
+    expect(display.base).toBe("2½/2½");
+    expect(display.powerColor).toBe("white");
+    expect(display.toughnessColor).toBe("white");
+  });
+
+  it("shows a half-only value and subtracts exact half-point damage", () => {
+    const girl = computePTDisplay(makeGameObject({
+      power: 0,
+      power_fraction: "Half",
+      toughness: 0,
+      toughness_fraction: "Half",
+      base_power: 0,
+      base_power_fraction: "Half",
+      base_toughness: 0,
+      base_toughness_fraction: "Half",
+    }))!;
+    expect(`${girl.power}/${girl.toughness}`).toBe("½/½");
+
+    // A 3/3 with Vile Bile's 2½ marked has ½ toughness left.
+    const giant = computePTDisplay(makeGameObject({
+      power: 3,
+      toughness: 3,
+      base_power: 3,
+      base_toughness: 3,
+      damage_marked: 2,
+      damage_marked_fraction: "Half",
+    }))!;
+    expect(giant.toughness).toBe("½");
+    expect(giant.toughnessColor).toBe("red");
+  });
+
+  it("compares half-point buffs exactly", () => {
+    // 3 power over a 2½ base is a buff; a whole-only comparison (3 vs 2) agrees,
+    // but 2½ over a 2½ base is not, and 2 under it is a debuff.
+    const pumped = computePTDisplay(makeGameObject({
+      power: 3, base_power: 2, base_power_fraction: "Half",
+    }))!;
+    expect(pumped.powerColor).toBe("green");
+    const shrunk = computePTDisplay(makeGameObject({
+      power: 2, base_power: 2, base_power_fraction: "Half",
+    }))!;
+    expect(shrunk.powerColor).toBe("red");
   });
 });

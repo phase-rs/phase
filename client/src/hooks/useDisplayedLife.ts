@@ -3,8 +3,12 @@ import type { TFunction } from "i18next";
 import type { GameState, PlayerId } from "../adapter/types.ts";
 import { useAnimationStore } from "../stores/animationStore.ts";
 import { useGameStore } from "../stores/gameStore.ts";
+import { formatHalfPointValue, halfPointValue } from "../viewmodel/halfPoints.ts";
 
-/** What a life readout shows: the engine-marked `∞`, or a finite total. */
+/**
+ * What a life readout shows: the engine-marked `∞`, or a finite total. `life` is the
+ * exact total, Unhinged half point included (17½ is `17.5`).
+ */
 export type LifeReadout =
   | { magnitude: "Unbounded" }
   | { magnitude: "Finite"; life: number };
@@ -20,9 +24,10 @@ export function lifeReadout(
   if (gameState?.derived?.life_magnitude?.[String(playerId)] === "Unbounded") {
     return { magnitude: "Unbounded" };
   }
+  const player = gameState?.players.find((candidate) => candidate.id === playerId);
   return {
     magnitude: "Finite",
-    life: gameState?.players.find((player) => player.id === playerId)?.life ?? 0,
+    life: player ? halfPointValue(player.life, player.life_fraction) : 0,
   };
 }
 
@@ -31,7 +36,7 @@ export function formatLifeReadout(readout: LifeReadout): string {
     case "Unbounded":
       return "∞";
     case "Finite":
-      return String(readout.life);
+      return formatHalfPointValue(readout.life);
   }
 }
 

@@ -2015,16 +2015,30 @@ fn matching_damage_received_whole_event_events(
     groups
         .into_iter()
         .filter(|(_, events)| {
+            // CR 120.1: sum the exact amounts so half-point damage counts.
             let sum = events
                 .iter()
                 .map(|(_, event)| match event {
-                    GameEvent::DamageDealt { amount, .. } => *amount,
-                    _ => 0,
+                    GameEvent::DamageDealt {
+                        amount,
+                        amount_fraction,
+                        ..
+                    } => crate::types::ability::HalfMagnitude::from_whole_and_fraction(
+                        *amount,
+                        *amount_fraction,
+                    ),
+                    _ => crate::types::ability::HalfMagnitude::ZERO,
                 })
-                .fold(0u32, u32::saturating_add);
-            threshold
-                .comparator
-                .evaluate(sum as i32, threshold.threshold as i32)
+                .fold(
+                    crate::types::ability::HalfMagnitude::ZERO,
+                    crate::types::ability::HalfMagnitude::saturating_add,
+                );
+            threshold.comparator.evaluate_half_signed(
+                sum.as_signed(),
+                crate::types::ability::HalfSigned::from_whole(
+                    i32::try_from(threshold.threshold).unwrap_or(i32::MAX),
+                ),
+            )
         })
         .map(|(_, events)| events)
         .collect()
@@ -25879,12 +25893,16 @@ pub mod tests {
                 source_amounts: vec![(hero, 2), (other, 3)],
                 total_damage: 5,
                 source_incarnations: vec![],
+                source_amount_fractions: Vec::new(),
+                total_damage_fraction: Default::default(),
             },
             GameEvent::CombatDamageDealtToPlayer {
                 player_id: PlayerId(0),
                 source_amounts: vec![(hero, 1)],
                 total_damage: 1,
                 source_incarnations: vec![],
+                source_amount_fractions: Vec::new(),
+                total_damage_fraction: Default::default(),
             },
         ];
 
@@ -25915,6 +25933,8 @@ pub mod tests {
                 source_amounts: vec![(hero, 2)],
                 total_damage: 2,
                 source_incarnations: vec![],
+                source_amount_fractions: Vec::new(),
+                total_damage_fraction: Default::default(),
             }],
             "the normalized context must retain only matching sources and their total"
         );
@@ -25925,6 +25945,8 @@ pub mod tests {
                 source_amounts: vec![(hero, 1)],
                 total_damage: 1,
                 source_incarnations: vec![],
+                source_amount_fractions: Vec::new(),
+                total_damage_fraction: Default::default(),
             }]
         );
     }
@@ -25992,6 +26014,8 @@ pub mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let event_batch = vec![
             player_one_hit.clone(),
@@ -26003,6 +26027,8 @@ pub mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             },
             GameEvent::DamageDealt {
                 source_id: other,
@@ -26011,6 +26037,8 @@ pub mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             },
             GameEvent::DamageDealt {
                 source_id: hero,
@@ -26019,6 +26047,8 @@ pub mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             },
         ];
 
@@ -26052,6 +26082,8 @@ pub mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             }],
             "a matching noncombat player hit must remain a positive group"
         );
@@ -28041,6 +28073,8 @@ pub mod tests {
                 is_combat,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             };
             collect_pending_triggers(&mut state, &[event])
                 .into_iter()
@@ -28536,8 +28570,14 @@ pub mod tests {
             .affected(TargetFilter::SourceOrPaired)
             .condition(StaticCondition::SourceIsPaired)
             .modifications(vec![
-                ContinuousModification::AddPower { value: 4 },
-                ContinuousModification::AddToughness { value: 4 },
+                ContinuousModification::AddPower {
+                    value: 4,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 4,
+                    fraction: Default::default(),
+                },
             ]);
         let obj = state.objects.get_mut(&source).unwrap();
         obj.static_definitions.push(static_def.clone());
@@ -31270,6 +31310,10 @@ pub mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
         );
 
@@ -35532,6 +35576,8 @@ pub mod tests {
             source_amounts: vec![(attacker_a, 2), (attacker_b, 3)],
             total_damage: 5,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         }];
 
         let DelayedTriggerMatch {
@@ -35781,6 +35827,8 @@ pub mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let events = vec![hit(own_a), hit(theirs), hit(own_b)];
         let DelayedTriggerMatch {
@@ -35838,6 +35886,8 @@ pub mod tests {
                 source_amounts: vec![(attacker_a, 2), (attacker_b, 2)],
                 total_damage: 4,
                 source_incarnations: vec![],
+                source_amount_fractions: Vec::new(),
+                total_damage_fraction: Default::default(),
             },
         )
     }
@@ -36060,6 +36110,8 @@ pub mod tests {
             player_id: opponent,
             amount: -1,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         };
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
@@ -37754,6 +37806,8 @@ pub mod tests {
                 is_combat: true,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             }],
         );
 
@@ -40475,6 +40529,8 @@ pub mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(check_trigger_condition(
             &state,
@@ -40492,6 +40548,8 @@ pub mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(!check_trigger_condition(
             &state,
@@ -40509,6 +40567,8 @@ pub mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(!check_trigger_condition(
             &state,
@@ -40567,6 +40627,8 @@ pub mod tests {
                 source_amounts: vec![(source, 4)],
                 total_damage: 4,
                 source_incarnations: vec![],
+                source_amount_fractions: Vec::new(),
+                total_damage_fraction: Default::default(),
             }];
             let pending = collect_pending_triggers(&mut state, &events);
             assert_eq!(
@@ -40596,6 +40658,8 @@ pub mod tests {
                 source_amounts: vec![(source, 4)],
                 total_damage: 4,
                 source_incarnations: vec![],
+                source_amount_fractions: Vec::new(),
+                total_damage_fraction: Default::default(),
             }];
             let pending = collect_pending_triggers(&mut state, &events);
             assert_eq!(
@@ -40894,6 +40958,8 @@ pub mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
 
         // BUG REGRESSION: must be FALSE — creature A took no excess damage even
@@ -40942,6 +41008,8 @@ pub mod tests {
             is_combat: true,
             excess: 3,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         assert!(
             check_trigger_condition(
@@ -41414,6 +41482,8 @@ pub mod tests {
             player_id,
             amount: -1,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         };
 
         // Reach-guard: with an event that NAMES a player, the arm resolves and
@@ -42151,6 +42221,8 @@ pub mod tests {
                 player_id: PlayerId(1),
                 amount: -1,
                 new_total: crate::types::events::LifeTotalReading::default(),
+                amount_fraction: Default::default(),
+                new_total_fraction: Default::default(),
             },
         );
         assert!(
@@ -44382,6 +44454,8 @@ pub mod tests {
                 casting_options: vec![],
                 layout_kind: None,
                 parse_warnings: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             });
         }
 
@@ -44838,6 +44912,8 @@ pub mod tests {
             player_id: opponent,
             amount: -3,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         };
         state.active_player = controller;
         assert!(!check_trigger_constraint(
@@ -44878,6 +44954,8 @@ pub mod tests {
             player_id: controller,
             amount: -3,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         };
         state.active_player = controller;
         assert!(!check_trigger_constraint(
@@ -52310,6 +52388,8 @@ pub mod tests {
             player_id: PlayerId(0),
             amount: 1,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         });
         for mode in [LoopDetectionMode::Off, LoopDetectionMode::Interactive] {
             for ability in [pr625_sound_ability(), pr625_sibling_mutable_ability()] {
@@ -52355,11 +52435,15 @@ pub mod tests {
             player_id: PlayerId(0),
             amount: -1,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         });
         let ev_b = Some(GameEvent::LifeChanged {
             player_id: PlayerId(1),
             amount: -1,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         });
 
         // OFF arm — must PROMPT.
@@ -52575,11 +52659,15 @@ pub mod tests {
             player_id: PlayerId(0),
             amount: -1,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         });
         let ev_b = Some(GameEvent::LifeChanged {
             player_id: PlayerId(1),
             amount: -1,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         });
         let mut on = setup();
         on.loop_detection = LoopDetectionMode::Interactive;

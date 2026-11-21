@@ -12132,6 +12132,8 @@ fn hearth_elemental_self_cost_reduction_counts_adventures() {
                 casting_options: vec![],
                 layout_kind: Some(crate::types::card::LayoutKind::Adventure),
                 parse_warnings: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             });
         }
     }
@@ -29182,6 +29184,8 @@ fn create_adventure_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId
         casting_options: Vec::new(),
         layout_kind: None,
         parse_warnings: vec![],
+        power_fraction: Default::default(),
+        toughness_fraction: Default::default(),
     });
 
     obj_id
@@ -29277,6 +29281,8 @@ fn create_enchantment_adventure_in_hand(state: &mut GameState, player: PlayerId)
         casting_options: Vec::new(),
         layout_kind: Some(LayoutKind::Adventure),
         parse_warnings: vec![],
+        power_fraction: Default::default(),
+        toughness_fraction: Default::default(),
     });
 
     obj_id
@@ -29365,6 +29371,8 @@ fn create_omen_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
         casting_options: Vec::new(),
         layout_kind: Some(LayoutKind::Omen),
         parse_warnings: vec![],
+        power_fraction: Default::default(),
+        toughness_fraction: Default::default(),
     });
 
     obj_id
@@ -33630,6 +33638,8 @@ fn add_disturb_creature_to_graveyard(
         casting_options: Vec::new(),
         layout_kind: Some(LayoutKind::Transform),
         parse_warnings: vec![],
+        power_fraction: Default::default(),
+        toughness_fraction: Default::default(),
     });
     obj_id
 }
@@ -40029,6 +40039,8 @@ mod mtmte_cast_flow {
             casting_options: Vec::new(),
             layout_kind: Some(LayoutKind::Transform),
             parse_warnings: vec![],
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         }
     }
 
@@ -46600,8 +46612,14 @@ fn bestow_aura_static_buff_applies_to_enchanted_creature() {
                 TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
             ))
             .modifications(vec![
-                ContinuousModification::AddPower { value: 2 },
-                ContinuousModification::AddToughness { value: 2 },
+                ContinuousModification::AddPower {
+                    value: 2,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 2,
+                    fraction: Default::default(),
+                },
             ]);
         Arc::make_mut(&mut obj.base_static_definitions).push(buff);
     }
@@ -46674,8 +46692,14 @@ fn unattached_bestow_creature_does_not_buff_creatures_enchanted_by_other_auras()
                 TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
             ))
             .modifications(vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ]);
         Arc::make_mut(&mut obj.base_static_definitions).push(buff);
     }
@@ -55528,6 +55552,8 @@ fn tinybones_3player_cast_restricted_to_damaged_player_graveyard() {
         source_amounts: vec![],
         total_damage: 1,
         source_incarnations: vec![],
+        source_amount_fractions: Vec::new(),
+        total_damage_fraction: Default::default(),
     });
 
     let ctx = crate::game::filter::FilterContext::neutral();
@@ -57048,6 +57074,8 @@ fn resolution_test_two_spell_faces(
         casting_options: Vec::new(),
         layout_kind: Some(LayoutKind::Modal),
         parse_warnings: vec![],
+        power_fraction: Default::default(),
+        toughness_fraction: Default::default(),
     });
     spell
 }
@@ -58362,6 +58390,8 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
             casting_options: Vec::new(),
             layout_kind: Some(LayoutKind::Transform),
             parse_warnings: vec![],
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         });
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {

@@ -267,6 +267,8 @@ fn contested_game_ball_attacker_gains_control_and_untaps() {
         is_combat: true,
         excess: 0,
         source_incarnation: None,
+        amount_fraction: Default::default(),
+        excess_fraction: Default::default(),
     });
     let attacker_lki = runner.state().objects[&attacker].snapshot_for_mana_spent();
     runner.state_mut().lki_cache.insert(attacker, attacker_lki);
@@ -629,7 +631,7 @@ fn brilliance_otherwise_animation_parses_to_robot_spec() {
     );
     assert!(
         mods.iter()
-            .any(|m| matches!(m, ContinuousModification::SetPower { value } if *value == 3)),
+            .any(|m| matches!(m, ContinuousModification::SetPower { value, .. } if *value == 3)),
         "animation sets base power to 3"
     );
     assert!(
@@ -685,7 +687,7 @@ fn brilliance_otherwise_animates_returned_artifact_as_robot() {
     assert!(
         tce.modifications
             .iter()
-            .any(|m| matches!(m, ContinuousModification::SetPower { value } if *value == 3)),
+            .any(|m| matches!(m, ContinuousModification::SetPower { value, .. } if *value == 3)),
         "returned object is animated with base power 3"
     );
     assert!(
@@ -1816,12 +1818,13 @@ fn princess_fang_gideon_and_argothian_full_cards_parse_semantically() {
         modification,
         ContinuousModification::SetName { .. } | ContinuousModification::SetTextName { .. }
     )));
-    assert!(argothian_mods
-        .iter()
-        .any(|modification| matches!(modification, ContinuousModification::SetPower { value: 0 })));
     assert!(argothian_mods.iter().any(|modification| matches!(
         modification,
-        ContinuousModification::SetToughness { value: 0 }
+        ContinuousModification::SetPower { value: 0, .. }
+    )));
+    assert!(argothian_mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::SetToughness { value: 0, .. }
     )));
     assert!(argothian_mods.iter().any(|modification| matches!(
         modification,

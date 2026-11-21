@@ -10,11 +10,12 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, CastingPermission, ChoiceType, ChosenAttribute, CoinFlipRun,
     CombatDamageScope, ControllerRef, DamageModification, DamageRedirectTarget, DamageTargetFilter,
     DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope,
-    EntryAttackDestination, ManaSpendPermission, PermissionGrantee, PostReplacementContinuation,
-    PreventionAmount, PreventionFormula, QuantityExpr, QuantityModification, QuantityRef,
-    RedirectionLifetime, ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, ResolvedAbility, RoundingMode, ShieldKind, SplitDamagePortion, TapStateChange,
-    TargetFilter, TargetRef,
+    EntryAttackDestination, HalfFraction, HalfMagnitude, HalfSigned, ManaSpendPermission,
+    PermissionGrantee, PostReplacementContinuation, PreventionAmount, PreventionFormula,
+    QuantityExpr, QuantityModification, QuantityRef, RedirectionLifetime,
+    ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    ResolvedAbility, RoundingMode, ShieldKind, SplitDamagePortion, TapStateChange, TargetFilter,
+    TargetRef,
 };
 use crate::types::actions::ReplacementAutoChoice;
 use crate::types::card_type::CoreType;
@@ -1046,7 +1047,8 @@ pub(crate) enum DamageRiderDrain {
 struct ReplacedEventContext {
     source: Option<ObjectId>,
     target: Option<TargetRef>,
-    amount: Option<u32>,
+    /// Exact, so a prevention of 2½ damage owns 2½ (CR 615.5).
+    amount: Option<HalfMagnitude>,
 }
 
 /// CR 614.6: Install a mandatory post-effect's continuation — the replacement's own
@@ -1211,15 +1213,14 @@ fn mandatory_post_drain(
         target: event_target,
         amount: event_amount,
     } = replaced;
-    PostReplacementDrain {
+    let mut drain = PostReplacementDrain {
         status: DrainStatus::Ready(continuation),
         source: Some(source),
         applied,
         event_source,
         event_target,
-        // CR 614.6 + CR 615.5: the amount this replacement replaced or prevented, latched as it
-        // applied (`replaced_event_amount`).
-        event_amount,
+        event_amount: None,
+        event_amount_fraction: HalfFraction::Zero,
         // CR 109.5: "you" in the continuation is the REPLACING ability's
         // controller. Carried beside `source` rather than derived from it,
         // because `source` is the affected object on every zone-change
@@ -1233,7 +1234,11 @@ fn mandatory_post_drain(
         // place of that fallback.
         controller,
         parked_entrants: Vec::new(),
-    }
+    };
+    // CR 614.6 + CR 615.5: the exact amount this replacement replaced or prevented, latched as
+    // it applied (`replaced_event_amount`).
+    drain.set_exact_event_amount(event_amount);
+    drain
 }
 
 /// CR 615.5 + CR 608.2c: where a damage replacement's actions wait: behind a rider of the same
@@ -2764,14 +2769,15 @@ fn damage_modification_for_rid(
 /// replacement applies. A live quantity needs a replacement-controller anchor;
 /// a missing anchor is deliberately a failed application rather than silently
 /// reading player zero's board.
-fn resolve_prevention_formula(
+fn resolve_prevention_formula_exact(
     state: &GameState,
     rid: ReplacementId,
     formula: &PreventionFormula,
-    damage_amount: u32,
-) -> Option<u32> {
+    exact_damage: HalfMagnitude,
+) -> Option<HalfMagnitude> {
     match formula {
-        PreventionFormula::Fixed(value) => Some(*value),
+        PreventionFormula::Fixed(value) if *value == u32::MAX => Some(HalfMagnitude(u64::MAX)),
+        PreventionFormula::Fixed(value) => Some(HalfMagnitude::from_whole(*value)),
         PreventionFormula::Quantity { quantity } => {
             let controller = if rid.source == ObjectId(0) {
                 rid.index_as_usize()
@@ -2783,24 +2789,51 @@ fn resolve_prevention_formula(
                     .get(&rid.source)
                     .map(replacement_source_player)
             }?;
-            Some(
+            Some(HalfMagnitude::from_whole(
                 crate::game::quantity::resolve_quantity(state, quantity, controller, rid.source)
                     .max(0) as u32,
-            )
+            ))
         }
         PreventionFormula::Fraction {
             numerator,
             denominator,
             rounding,
         } => {
-            let product = u64::from(damage_amount).saturating_mul(u64::from(*numerator));
             let denominator = u64::from(denominator.get());
-            let quotient = match rounding {
-                RoundingMode::Down => product / denominator,
-                RoundingMode::Up => product.saturating_add(denominator - 1) / denominator,
-            };
-            Some(quotient.min(u64::from(u32::MAX)) as u32)
+            if exact_damage.has_half() {
+                let product = exact_damage.0.saturating_mul(u64::from(*numerator));
+                let quotient = match rounding {
+                    RoundingMode::Down => product / denominator,
+                    RoundingMode::Up => product.saturating_add(denominator - 1) / denominator,
+                };
+                Some(HalfMagnitude(quotient))
+            } else {
+                let product =
+                    u64::from(exact_damage.whole_floor()).saturating_mul(u64::from(*numerator));
+                let quotient = match rounding {
+                    RoundingMode::Down => product / denominator,
+                    RoundingMode::Up => product.saturating_add(denominator - 1) / denominator,
+                };
+                Some(HalfMagnitude::from_whole(
+                    quotient.min(u64::from(u32::MAX)) as u32
+                ))
+            }
         }
+    }
+}
+
+fn shield_fraction_for_rid(state: &GameState, rid: ReplacementId) -> HalfFraction {
+    if rid.source == ObjectId(0) {
+        state
+            .pending_damage_replacements
+            .get(rid.index_as_usize().unwrap_or(usize::MAX))
+            .map_or(HalfFraction::Zero, |repl| repl.shield_fraction)
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
+            .map_or(HalfFraction::Zero, |repl| repl.shield_fraction)
     }
 }
 
@@ -2946,16 +2979,18 @@ pub(crate) fn accumulate_batch_prevention(
     state: &mut GameState,
     applied_key: AppliedReplacementKey,
     recipient: &TargetRef,
-    prevented_amount: u32,
+    prevented_amount: HalfMagnitude,
 ) -> bool {
-    if prevented_amount == 0 {
+    if prevented_amount == HalfMagnitude::ZERO {
         return false;
     }
     let Some(tally) = state.combat_prevention_tally.as_mut() else {
         return false;
     };
-    *tally.entry((applied_key, recipient.clone())).or_insert(0) +=
-        u32_to_i32_saturating(prevented_amount);
+    let entry = tally
+        .entry((applied_key, recipient.clone()))
+        .or_insert(HalfMagnitude::ZERO);
+    *entry = entry.saturating_add(prevented_amount);
     true
 }
 
@@ -3121,6 +3156,7 @@ fn redirect_damage_event(
     source_id: ObjectId,
     target: TargetRef,
     damage_amount: u32,
+    damage_amount_fraction: HalfFraction,
     is_combat: bool,
     applied: HashSet<AppliedReplacementKey>,
     source_name: Option<String>,
@@ -3130,14 +3166,17 @@ fn redirect_damage_event(
 ) -> ApplyResult {
     // CR 614.5: only a single-opportunity shield spends itself on this event.
     let consume_after_redirect = lifetime.is_one_opportunity();
+    let exact_damage =
+        HalfMagnitude::from_whole_and_fraction(damage_amount, damage_amount_fraction);
     // CR 614.7a: A source that would deal 0 damage deals no damage at all —
     // there is no damage event to redirect. Pass through and do not consume the
     // shield (no opportunity was spent).
-    if damage_amount == 0 {
+    if exact_damage == HalfMagnitude::ZERO {
         return ApplyResult::Modified(ProposedEvent::Damage {
             source_id,
             target,
             amount: damage_amount,
+            amount_fraction: damage_amount_fraction,
             is_combat,
             source_name,
             source_incarnation,
@@ -3155,6 +3194,7 @@ fn redirect_damage_event(
             source_id,
             target,
             amount: damage_amount,
+            amount_fraction: damage_amount_fraction,
             is_combat,
             source_name,
             source_incarnation,
@@ -3177,6 +3217,7 @@ fn redirect_damage_event(
                 source_id,
                 target: new_recipient.unwrap_or(target),
                 amount: damage_amount,
+                amount_fraction: damage_amount_fraction,
                 is_combat,
                 source_name: source_name.clone(),
                 source_incarnation,
@@ -3226,23 +3267,33 @@ fn redirect_damage_event(
             // The invalid continuous pair returned above. A remaining `Next(n)`
             // is therefore a one-opportunity shield and must deplete by the
             // redirected amount (CR 615.7).
-            let redirected_amount = damage_amount.min(n);
-            let remaining_amount = damage_amount.saturating_sub(redirected_amount);
+            let exact_cap =
+                HalfMagnitude::from_whole_and_fraction(n, shield_fraction_for_rid(state, rid));
+            let redirected_exact = exact_damage.min(exact_cap);
+            let remaining_exact = exact_damage.saturating_sub(redirected_exact);
+            let (redirected_amount, redirected_fraction) =
+                redirected_exact.into_whole_and_fraction();
+            let (remaining_amount, remaining_fraction) = remaining_exact.into_whole_and_fraction();
             if consume_after_redirect {
-                if redirected_amount == n {
+                let shield_left = exact_cap.saturating_sub(redirected_exact);
+                if shield_left == HalfMagnitude::ZERO {
                     consume_prevention_shield(state, rid, None);
                 } else {
+                    let (left_whole, left_frac) = shield_left.into_whole_and_fraction();
                     update_redirection_shield(
                         state,
                         rid,
                         recipient,
-                        PreventionAmount::Next(n - redirected_amount),
+                        PreventionAmount::Next(left_whole),
+                        left_frac,
                         lifetime,
                     );
                 }
             }
 
-            if let Some(new_target) = new_recipient.filter(|_| redirected_amount > 0) {
+            if let Some(new_target) =
+                new_recipient.filter(|_| redirected_exact > HalfMagnitude::ZERO)
+            {
                 // CR 614.9 + CR 120.4b + CR 616.1: inside a batch settling its original choices,
                 // the redirected part is another portion of the same damage: the batch carries it
                 // through replacement with the rest, asks its choices in APNAP order and deals it
@@ -3258,16 +3309,18 @@ fn redirect_damage_event(
                         source: source_id,
                         target: new_target,
                         amount: redirected_amount,
+                        amount_fraction: redirected_fraction,
                         is_combat,
                         applied: kept,
                     });
-                    return if remaining_amount == 0 {
+                    return if remaining_exact == HalfMagnitude::ZERO {
                         ApplyResult::Prevented
                     } else {
                         ApplyResult::Modified(ProposedEvent::Damage {
                             source_id,
                             target,
                             amount: remaining_amount,
+                            amount_fraction: remaining_fraction,
                             is_combat,
                             source_name,
                             source_incarnation,
@@ -3279,6 +3332,7 @@ fn redirect_damage_event(
                     source_id,
                     target: new_target,
                     amount: redirected_amount,
+                    amount_fraction: redirected_fraction,
                     is_combat,
                     source_name: source_name.clone(),
                     source_incarnation,
@@ -3299,7 +3353,7 @@ fn redirect_damage_event(
                                 source_id, controller,
                             )
                         });
-                        let _ = super::effects::deal_damage::apply_damage_after_replacement(
+                        let _ = super::effects::deal_damage::apply_damage_after_replacement_exact(
                             state, &ctx, event, is_combat, events,
                         );
                     }
@@ -3313,6 +3367,7 @@ fn redirect_damage_event(
                     source_id,
                     target,
                     amount: damage_amount,
+                    amount_fraction: damage_amount_fraction,
                     is_combat,
                     source_name,
                     source_incarnation,
@@ -3320,13 +3375,14 @@ fn redirect_damage_event(
                 });
             }
 
-            if remaining_amount == 0 {
+            if remaining_exact == HalfMagnitude::ZERO {
                 return ApplyResult::Prevented;
             }
             ApplyResult::Modified(ProposedEvent::Damage {
                 source_id,
                 target,
                 amount: remaining_amount,
+                amount_fraction: remaining_fraction,
                 is_combat,
                 source_name,
                 source_incarnation,
@@ -3352,12 +3408,14 @@ fn damage_done_applier(
             source_id,
             target,
             amount,
+            amount_fraction,
             is_combat,
             source_name,
             source_incarnation,
             applied,
         } = event
         {
+            let exact_amount = HalfMagnitude::from_whole_and_fraction(amount, amount_fraction);
             // CR 615.1a: typed prevention provenance, captured before the match
             // consumes `modification` (the `Plus`/`SetTo` arms move their
             // non-`Copy` payload out). ONLY `PreventionMinus` — the CR 615
@@ -3367,9 +3425,9 @@ fn damage_done_applier(
             // anything.
             let is_minus_prevention =
                 matches!(modification, DamageModification::PreventionMinus { .. });
-            let new_amount = match modification {
-                DamageModification::Double => amount.saturating_mul(2),
-                DamageModification::Triple => amount.saturating_mul(3),
+            let new_exact = match modification {
+                DamageModification::Double => HalfMagnitude(exact_amount.0.saturating_mul(2)),
+                DamageModification::Triple => HalfMagnitude(exact_amount.0.saturating_mul(3)),
                 // CR 614.1a + CR 120 + CR 107.1b: additive damage modification.
                 // The added magnitude is a game quantity resolved each time the
                 // replacement applies, clamped >= 0 (CR 107.1b). A `Fixed` value
@@ -3401,7 +3459,7 @@ fn damage_done_applier(
                         state, &value, controller, rid.source,
                     )
                     .max(0) as u32;
-                    amount.saturating_add(added)
+                    exact_amount.saturating_add(HalfMagnitude::from_whole(added))
                 }
                 // CR 615.1 + CR 614.1a: Saturating subtract — the ONE shared
                 // subtraction authority for both provenances. `Minus` is plain
@@ -3411,25 +3469,29 @@ fn damage_done_applier(
                 // prevent-all sentinel — yields 0 for any amount and is not
                 // consumed; continuous, not shield-style). Only the prevention
                 // provenance does the `DamagePrevented` bookkeeping below.
-                DamageModification::Minus { value } => amount.saturating_sub(value),
+                DamageModification::Minus { value } => {
+                    exact_amount.saturating_sub(HalfMagnitude::from_whole(value))
+                }
                 DamageModification::PreventionMinus { value } => {
-                    let prevented = match resolve_prevention_formula(state, rid, &value, amount) {
-                        Some(prevented) => prevented,
-                        // A formula that needs an unavailable replacement authority
-                        // must not turn into an arbitrary default amount.
-                        None => {
-                            return ApplyResult::Modified(ProposedEvent::Damage {
-                                source_id,
-                                target,
-                                amount,
-                                is_combat,
-                                source_name,
-                                source_incarnation,
-                                applied,
-                            })
-                        }
-                    };
-                    amount.saturating_sub(prevented)
+                    let prevented =
+                        match resolve_prevention_formula_exact(state, rid, &value, exact_amount) {
+                            Some(prevented) => prevented,
+                            // A formula that needs an unavailable replacement authority
+                            // must not turn into an arbitrary default amount.
+                            None => {
+                                return ApplyResult::Modified(ProposedEvent::Damage {
+                                    source_id,
+                                    target,
+                                    amount,
+                                    amount_fraction,
+                                    is_combat,
+                                    source_name,
+                                    source_incarnation,
+                                    applied,
+                                })
+                            }
+                        };
+                    exact_amount.saturating_sub(prevented)
                 }
                 // CR 614.1a: Conditional — if amount < source's power, set to power.
                 // References the replacement source's (rid.source) post-layer power.
@@ -3437,17 +3499,21 @@ fn damage_done_applier(
                     let source_power = state
                         .objects
                         .get(&rid.source)
-                        .and_then(|obj| obj.power)
-                        .unwrap_or(0)
-                        .max(0) as u32;
-                    if amount < source_power {
-                        source_power
+                        .and_then(|obj| obj.exact_power())
+                        .unwrap_or(HalfSigned(0));
+                    let source_exact = if source_power.0 <= 0 {
+                        HalfMagnitude::ZERO
                     } else {
-                        amount
+                        HalfMagnitude(source_power.0 as u64)
+                    };
+                    if exact_amount < source_exact {
+                        source_exact
+                    } else {
+                        exact_amount
                     }
                 }
                 // CR 614.1a: Flat override — replace event amount with `value`.
-                DamageModification::SetTo { value } => value,
+                DamageModification::SetTo { value } => HalfMagnitude::from_whole(value),
                 // CR 614.1a: Life floor — cap damage so target player's life
                 // stays at or above `minimum`. For a player target, computes
                 // `max(0, life_total - minimum)`. For creature targets, no-ops
@@ -3458,19 +3524,22 @@ fn damage_done_applier(
                             .players
                             .iter()
                             .find(|p| p.id == pid)
-                            .map(|p| p.life)
-                            .unwrap_or(0);
-                        if life < minimum {
-                            amount
+                            .map(|p| p.exact_life())
+                            .unwrap_or(HalfSigned(0));
+                        let min_exact = HalfSigned::from_whole(minimum);
+                        if life < min_exact {
+                            exact_amount
                         } else {
-                            let max_damage = life.saturating_sub(minimum).max(0) as u32;
-                            amount.min(max_damage)
+                            let max_damage =
+                                HalfMagnitude(life.0.saturating_sub(min_exact.0).max(0) as u64);
+                            exact_amount.min(max_damage)
                         }
                     } else {
-                        amount
+                        exact_amount
                     }
                 }
             };
+            let (new_amount, new_amount_fraction) = new_exact.into_whole_and_fraction();
             // CR 614.5: Consume a one-shot damage replacement after applying it.
             // The batch ledger retains only successful amount changes.
             if matches!(
@@ -3478,7 +3547,7 @@ fn damage_done_applier(
                 Some(ShieldKind::DamageReplacementOneShot)
             ) {
                 consume_prevention_shield(state, rid, None);
-                if amount > 0 && new_amount != amount {
+                if exact_amount > HalfMagnitude::ZERO && new_exact != exact_amount {
                     record_damage_batch_application(state, applied_key, source_id);
                 }
             }
@@ -3508,8 +3577,9 @@ fn damage_done_applier(
             // (Double, Triple, Plus, SetTo*, LifeFloor) are not prevention and
             // record nothing.
             if is_minus_prevention {
-                let prevented = amount.saturating_sub(new_amount);
-                if prevented > 0 {
+                let prevented = exact_amount.saturating_sub(new_exact);
+                if prevented > HalfMagnitude::ZERO {
+                    let (prevented_whole, prevented_fraction) = prevented.into_whole_and_fraction();
                     let mut accumulated_in_batch = false;
                     if !shield_rider_reflects_per_event(state, rid) {
                         // CR 120.3: key by (shield, RECIPIENT) — see
@@ -3524,12 +3594,13 @@ fn damage_done_applier(
                             events.push(GameEvent::DamagePrevented {
                                 source_id,
                                 target: target.clone(),
-                                amount: prevented,
+                                amount: prevented_whole,
+                                amount_fraction: prevented_fraction,
                             });
                         }
                         // CR 615.5: the prevented-amount handoff for follow-up
                         // continuations — identical to Branch 2's record.
-                        state.last_effect_count = Some(u32_to_i32_saturating(prevented));
+                        state.last_effect_count = Some(u32_to_i32_saturating(prevented_whole));
                     }
                 }
             }
@@ -3537,6 +3608,7 @@ fn damage_done_applier(
                 source_id,
                 target,
                 amount: new_amount,
+                amount_fraction: new_amount_fraction,
                 is_combat,
                 source_name,
                 source_incarnation,
@@ -3561,6 +3633,7 @@ fn damage_done_applier(
             source_id,
             target,
             amount: damage_amount,
+            amount_fraction: damage_amount_fraction,
             is_combat,
             source_name,
             source_incarnation,
@@ -3581,6 +3654,7 @@ fn damage_done_applier(
                 source_id,
                 target,
                 damage_amount,
+                damage_amount_fraction,
                 is_combat,
                 applied,
                 source_name,
@@ -3624,12 +3698,14 @@ fn damage_done_applier(
             source_id,
             target,
             amount: dmg,
+            amount_fraction: dmg_fraction,
             is_combat,
             source_name,
             source_incarnation,
             applied,
         } = event
         {
+            let exact_dmg = HalfMagnitude::from_whole_and_fraction(dmg, dmg_fraction);
             // CR 614.9: Continuous "all damage that would be dealt to you ... is
             // dealt to <recipient> instead" statics parse to a
             // `ShieldKind::Prevention` shield carrying a `redirect_target` filter —
@@ -3660,6 +3736,7 @@ fn damage_done_applier(
                         source_id,
                         target,
                         dmg,
+                        dmg_fraction,
                         is_combat,
                         applied,
                         source_name,
@@ -3680,6 +3757,7 @@ fn damage_done_applier(
                         source_id,
                         target,
                         amount: dmg,
+                        amount_fraction: dmg_fraction,
                         is_combat,
                         source_name,
                         source_incarnation,
@@ -3713,7 +3791,7 @@ fn damage_done_applier(
                     // event in the turn — wrong for the whole "all damage"
                     // family. Leave the shield active so subsequent damage
                     // events in the same turn re-fire the prevention.
-                    prevented_amount = dmg;
+                    prevented_amount = exact_dmg;
                     result = ApplyResult::Prevented;
                     // CR 510.2 + CR 615.7: In a combat-damage batch, route the
                     // prevented amount into the per-shield aggregate keyed by
@@ -3740,23 +3818,27 @@ fn damage_done_applier(
                     // duration-bound (not depletion-based per CR 615.7), so the
                     // shield is never consumed here and re-fires for every damage
                     // event within its lifetime.
-                    let remaining_damage = dmg.min(keep);
-                    prevented_amount = dmg.saturating_sub(remaining_damage);
-                    if prevented_amount == 0 {
+                    let exact_keep = HalfMagnitude::from_whole(keep);
+                    let remaining_exact = exact_dmg.min(exact_keep);
+                    prevented_amount = exact_dmg.saturating_sub(remaining_exact);
+                    if prevented_amount == HalfMagnitude::ZERO {
                         result = ApplyResult::Modified(ProposedEvent::Damage {
                             source_id,
                             target: target.clone(),
                             amount: dmg,
+                            amount_fraction: dmg_fraction,
                             is_combat,
                             source_name,
                             source_incarnation,
                             applied,
                         });
                     } else {
+                        let (rem_whole, rem_frac) = remaining_exact.into_whole_and_fraction();
                         result = ApplyResult::Modified(ProposedEvent::Damage {
                             source_id,
                             target: target.clone(),
-                            amount: remaining_damage,
+                            amount: rem_whole,
+                            amount_fraction: rem_frac,
                             is_combat,
                             source_name,
                             source_incarnation,
@@ -3774,29 +3856,36 @@ fn damage_done_applier(
                 }
                 PreventionAmount::Next(n) => {
                     // CR 615.7: Each 1 damage prevented reduces the remaining shield by 1.
-                    if dmg <= n {
+                    let exact_cap = HalfMagnitude::from_whole_and_fraction(
+                        n,
+                        shield_fraction_for_rid(state, rid),
+                    );
+                    if exact_dmg <= exact_cap {
                         // All damage absorbed — shield may have remaining capacity
-                        prevented_amount = dmg;
-                        let remaining = n - dmg;
-                        if remaining == 0 {
+                        prevented_amount = exact_dmg;
+                        let remaining = exact_cap.saturating_sub(exact_dmg);
+                        if remaining == HalfMagnitude::ZERO {
                             consume_prevention_shield(state, rid, None);
                         } else {
-                            consume_prevention_shield(
+                            let (rem_whole, rem_frac) = remaining.into_whole_and_fraction();
+                            consume_prevention_shield_exact(
                                 state,
                                 rid,
-                                Some(PreventionAmount::Next(remaining)),
+                                Some((PreventionAmount::Next(rem_whole), rem_frac)),
                             );
                         }
                         result = ApplyResult::Prevented;
                     } else {
                         // Damage exceeds shield — reduce damage, consume shield
-                        prevented_amount = n;
-                        let remaining_damage = dmg - n;
+                        prevented_amount = exact_cap;
+                        let remaining_damage = exact_dmg.saturating_sub(exact_cap);
+                        let (rem_whole, rem_frac) = remaining_damage.into_whole_and_fraction();
                         consume_prevention_shield(state, rid, None);
                         result = ApplyResult::Modified(ProposedEvent::Damage {
                             source_id,
                             target: target.clone(),
-                            amount: remaining_damage,
+                            amount: rem_whole,
+                            amount_fraction: rem_frac,
                             is_combat,
                             source_name,
                             source_incarnation,
@@ -3852,12 +3941,17 @@ fn damage_done_applier(
                 && (shield_has_per_event_execute_followup(state, rid)
                     || shield_rider_reflects_per_event(state, rid)
                     || shield_has_inline_runtime_rider(state, rid));
-            if prevented_amount > 0 && (!accumulated_in_batch || per_event_execute_followup) {
+            if prevented_amount > HalfMagnitude::ZERO
+                && (!accumulated_in_batch || per_event_execute_followup)
+            {
+                let (prevented_whole, prevented_fraction) =
+                    prevented_amount.into_whole_and_fraction();
                 if !accumulated_in_batch {
                     events.push(GameEvent::DamagePrevented {
                         source_id,
                         target,
-                        amount: prevented_amount,
+                        amount: prevented_whole,
+                        amount_fraction: prevented_fraction,
                     });
                 }
                 // CR 615.5: Stash the prevented amount as the chain's last effect
@@ -3868,7 +3962,7 @@ fn damage_done_applier(
                 // trigger-resolution window, so `current_trigger_event` is None
                 // and `last_effect_count` is the documented fallback slot
                 // (see `quantity.rs` resolver).
-                state.last_effect_count = Some(u32_to_i32_saturating(prevented_amount));
+                state.last_effect_count = Some(u32_to_i32_saturating(prevented_whole));
             }
 
             return result;
@@ -3899,17 +3993,20 @@ fn damage_done_applier(
             source_id,
             target,
             amount: dmg,
+            amount_fraction: dmg_fraction,
             is_combat,
             source_name,
             source_incarnation,
             applied,
         } = event
         {
-            if dmg == 0 {
+            let exact_dmg = HalfMagnitude::from_whole_and_fraction(dmg, dmg_fraction);
+            if exact_dmg == HalfMagnitude::ZERO {
                 return ApplyResult::Modified(ProposedEvent::Damage {
                     source_id,
                     target,
                     amount: dmg,
+                    amount_fraction: dmg_fraction,
                     is_combat,
                     source_name,
                     source_incarnation,
@@ -3920,7 +4017,7 @@ fn damage_done_applier(
             // accumulator (tuple key + parked-record write-back), not the
             // bare-key inline tally upstream's fork uses.
             let accumulated_in_batch = if !reflects_per_event {
-                accumulate_batch_prevention(state, applied_key, &target, dmg)
+                accumulate_batch_prevention(state, applied_key, &target, exact_dmg)
             } else {
                 false
             };
@@ -3934,6 +4031,7 @@ fn damage_done_applier(
                     source_id,
                     target: target.clone(),
                     amount: dmg,
+                    amount_fraction: dmg_fraction,
                 });
             }
             // CR 615.13 + CR 615.5: only the runtime rider's amount is
@@ -3995,6 +4093,7 @@ pub(crate) fn read_damage_guards(state: &GameState) -> Vec<SettledDamageGuard> {
             source_id: host.id,
             target: TargetRef::Object(host.id),
             amount: 0,
+            amount_fraction: HalfFraction::Zero,
             is_combat: false,
             source_name: None,
             source_incarnation: None,
@@ -4144,11 +4243,26 @@ pub(crate) fn is_damage_substitution(repl: &ReplacementDefinition) -> bool {
 /// CR 614.6 + CR 615.5: the quantity of a replaced event — its damage, life gained or life
 /// lost — captured as a scalar before the applier consumes the event. `None` for every event
 /// with no such amount.
-fn event_quantity(event: &ProposedEvent) -> Option<u32> {
+fn event_quantity(event: &ProposedEvent) -> Option<HalfMagnitude> {
     match event {
-        ProposedEvent::Damage { amount, .. }
-        | ProposedEvent::LifeGain { amount, .. }
-        | ProposedEvent::LifeLoss { amount, .. } => Some(*amount),
+        ProposedEvent::Damage {
+            amount,
+            amount_fraction,
+            ..
+        }
+        | ProposedEvent::LifeGain {
+            amount,
+            amount_fraction,
+            ..
+        }
+        | ProposedEvent::LifeLoss {
+            amount,
+            amount_fraction,
+            ..
+        } => Some(HalfMagnitude::from_whole_and_fraction(
+            *amount,
+            *amount_fraction,
+        )),
         _ => None,
     }
 }
@@ -4222,9 +4336,9 @@ fn damage_shape_prevents(repl: &ReplacementDefinition) -> Option<bool> {
 fn replaced_event_amount(
     state: &GameState,
     rid: ReplacementId,
-    before: Option<u32>,
+    before: Option<HalfMagnitude>,
     outcome: ReplacementOutcome<'_>,
-) -> Option<u32> {
+) -> Option<HalfMagnitude> {
     let def = stored_replacement_definition(state, rid)?;
     let before = before?;
     match def.event {
@@ -4331,6 +4445,14 @@ fn consume_prevention_shield(
     rid: ReplacementId,
     new_amount: Option<PreventionAmount>,
 ) {
+    consume_prevention_shield_exact(state, rid, new_amount.map(|amt| (amt, HalfFraction::Zero)));
+}
+
+fn consume_prevention_shield_exact(
+    state: &mut GameState,
+    rid: ReplacementId,
+    new_amount: Option<(PreventionAmount, HalfFraction)>,
+) {
     let repl = if rid.source == ObjectId(0) {
         rid.index_as_usize()
             .and_then(|i| state.pending_damage_replacements.get_mut(i))
@@ -4343,8 +4465,14 @@ fn consume_prevention_shield(
 
     if let Some(repl) = repl {
         match new_amount {
-            None => repl.is_consumed = true,
-            Some(amt) => repl.shield_kind = ShieldKind::Prevention { amount: amt },
+            None => {
+                repl.is_consumed = true;
+                repl.shield_fraction = HalfFraction::Zero;
+            }
+            Some((amt, frac)) => {
+                repl.shield_kind = ShieldKind::Prevention { amount: amt };
+                repl.shield_fraction = frac;
+            }
         }
     }
 }
@@ -4358,6 +4486,7 @@ fn update_redirection_shield(
     rid: ReplacementId,
     recipient: crate::types::ability::DamageRedirectTarget,
     amount: PreventionAmount,
+    fraction: HalfFraction,
     lifetime: RedirectionLifetime,
 ) {
     let repl = if rid.source == ObjectId(0) {
@@ -4376,6 +4505,7 @@ fn update_redirection_shield(
             amount,
             lifetime,
         };
+        repl.shield_fraction = fraction;
     }
 }
 
@@ -4457,8 +4587,7 @@ fn destroy_applier(
 
     // CR 701.19a: Remove all damage marked on it.
     if let Some(obj) = state.objects.get_mut(&oid) {
-        obj.damage_marked = 0;
-        obj.dealt_deathtouch_damage = false;
+        super::effects::remove_all_damage::heal_marked_damage(obj);
         // CR 701.19b: Tap it.
         obj.tapped = true;
     }
@@ -4518,25 +4647,25 @@ fn apply_shield_counter_replacement(
                 source_id,
                 target,
                 amount,
+                amount_fraction,
                 is_combat,
                 source_name,
                 source_incarnation,
                 applied,
             },
         ) if matches!(target, TargetRef::Object(object_id) if object_id == rid.source) => {
+            let exact_amt = HalfMagnitude::from_whole_and_fraction(amount, amount_fraction);
             let event = ProposedEvent::Damage {
                 source_id,
                 target: target.clone(),
                 amount,
+                amount_fraction,
                 is_combat,
                 source_name,
                 source_incarnation,
                 applied,
             };
 
-            // CR 615.12: Damage that can't be prevented is still subject to the
-            // prevention effect, but no damage is prevented. The shield counter's
-            // additional "remove a counter" effect still happens.
             if is_prevention_disabled(state, &event) {
                 consume_shield_counter(state, rid.source, events);
                 return Ok(event);
@@ -4554,7 +4683,7 @@ fn apply_shield_counter_replacement(
                 state,
                 AppliedReplacementKey::for_event(&event, rid),
                 &target,
-                amount,
+                exact_amt,
             ) {
                 return Err(ApplyResult::Prevented);
             }
@@ -4564,6 +4693,7 @@ fn apply_shield_counter_replacement(
                     source_id,
                     target,
                     amount,
+                    amount_fraction,
                 });
                 Err(ApplyResult::Prevented)
             } else {
@@ -4600,18 +4730,21 @@ fn apply_protection_replacement(
             source_id,
             target,
             amount,
+            amount_fraction,
             is_combat,
             source_name,
             source_incarnation,
             applied,
         } => {
+            let exact_amount = HalfMagnitude::from_whole_and_fraction(amount, amount_fraction);
             // CR 120.8: a 0-damage event is not damage at all — no
             // `DamagePrevented`, no consumption, pass through unmodified.
-            if amount == 0 {
+            if exact_amount == HalfMagnitude::ZERO {
                 return Ok(ProposedEvent::Damage {
                     source_id,
                     target,
                     amount,
+                    amount_fraction,
                     is_combat,
                     source_name,
                     source_incarnation,
@@ -4619,7 +4752,12 @@ fn apply_protection_replacement(
                 });
             }
             crate::game::effects::deal_damage::emit_or_accumulate_protection_prevention(
-                state, source_id, &target, amount, quality, events,
+                state,
+                source_id,
+                &target,
+                exact_amount,
+                quality,
+                events,
             );
             Err(ApplyResult::Prevented)
         }
@@ -4740,8 +4878,7 @@ fn apply_umbra_armor_replacement(
     // CR 702.89a: remove all damage marked on the enchanted permanent. (No tap and
     // no combat removal — that is regeneration, CR 701.19b/c, not umbra armor.)
     if let Some(obj) = state.objects.get_mut(&object_id) {
-        obj.damage_marked = 0;
-        obj.dealt_deathtouch_damage = false;
+        super::effects::remove_all_damage::heal_marked_damage(obj);
     }
 
     // CR 702.89a: destroy this Aura. Routed through the post-replacement destroy so
@@ -5579,82 +5716,114 @@ fn resolve_event_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> 
 }
 
 /// Checked evaluation of a replacement quantity expression: no clamp, no wrap.
+/// Integer view of [`try_resolve_event_replacement_quantity_exact`] for the
+/// whole-number count replacements (an integer event amount yields a whole
+/// result at every step, so the floor is exact).
 fn try_resolve_event_replacement_quantity(
     expr: &QuantityExpr,
     event_count: u32,
 ) -> Result<i32, EventQuantityError> {
+    try_resolve_event_replacement_quantity_exact(expr, HalfMagnitude::from_whole(event_count))
+        .map(HalfSigned::whole_floor)
+}
+
+/// CR 614.1a + CR 608.2c: Checked exact evaluation of a replacement quantity
+/// expression against the proposed event's exact amount — the single arithmetic
+/// authority for oracle-parsed replacement amounts ("you gain twice that much
+/// life instead" applied to a 2½ gain is 5, not 2 × 2 + ½). No clamp, no wrap: a
+/// step whose whole part leaves the engine's `i32` range is an `Overflow`.
+fn try_resolve_event_replacement_quantity_exact(
+    expr: &QuantityExpr,
+    event_amount: HalfMagnitude,
+) -> Result<HalfSigned, EventQuantityError> {
     use EventQuantityError::{NotStatic, Overflow};
+    // A value is representable when its whole part fits the engine's `i32`.
+    fn fit(halves: i64) -> Result<HalfSigned, EventQuantityError> {
+        let whole = halves.div_euclid(2);
+        if whole < i64::from(i32::MIN) || whole > i64::from(i32::MAX) {
+            Err(EventQuantityError::Overflow)
+        } else {
+            Ok(HalfSigned(halves))
+        }
+    }
+    let eval =
+        |inner: &QuantityExpr| try_resolve_event_replacement_quantity_exact(inner, event_amount);
     match expr {
         QuantityExpr::Ref {
             qty: crate::types::ability::QuantityRef::EventContextAmount,
-        } => i32::try_from(event_count).map_err(|_| Overflow),
-        QuantityExpr::Fixed { value } => Ok(*value),
+        } => fit(i64::try_from(event_amount.0).map_err(|_| Overflow)?),
+        QuantityExpr::Fixed { value } => Ok(HalfSigned::from_whole(*value)),
+        // CR 107.1a: a quotient is rounded to a whole number as instructed.
         QuantityExpr::DivideRounded {
             inner,
             divisor,
             rounding,
         } => {
-            let value = try_resolve_event_replacement_quantity(inner, event_count)?;
+            let value = eval(inner)?;
             // A divisor above i32::MAX is not an overflow of the quotient.
             let divisor = i32::try_from((*divisor).max(1)).map_err(|_| NotStatic)?;
-            Ok(match rounding {
+            // Half-point units: dividing by `divisor` divides by `2 * divisor`
+            // to reach a whole quotient.
+            let denominator = i64::from(divisor) * 2;
+            let quotient = match rounding {
                 crate::types::ability::RoundingMode::Up => {
-                    // divisor >= 1, so `divisor - 1` cannot overflow.
-                    value.checked_add(divisor - 1).ok_or(Overflow)? / divisor
+                    // denominator >= 2, so `denominator - 1` cannot overflow.
+                    fit(value.0.checked_add(denominator - 1).ok_or(Overflow)?)?.0 / denominator
                 }
-                crate::types::ability::RoundingMode::Down => value / divisor,
-            })
+                crate::types::ability::RoundingMode::Down => value.0 / denominator,
+            };
+            fit(quotient * 2)
         }
-        QuantityExpr::Offset { inner, offset } => {
-            try_resolve_event_replacement_quantity(inner, event_count)?
-                .checked_add(*offset)
-                .ok_or(Overflow)
-        }
+        QuantityExpr::Offset { inner, offset } => fit(eval(inner)?
+            .0
+            .checked_add(i64::from(*offset) * 2)
+            .ok_or(Overflow)?),
         QuantityExpr::ClampMin { inner, minimum } => {
-            Ok(try_resolve_event_replacement_quantity(inner, event_count)?.max(*minimum))
+            Ok(eval(inner)?.max(HalfSigned::from_whole(*minimum)))
         }
-        QuantityExpr::Multiply { factor, inner } => (*factor)
-            .checked_mul(try_resolve_event_replacement_quantity(inner, event_count)?)
-            .ok_or(Overflow),
+        QuantityExpr::Multiply { factor, inner } => fit(eval(inner)?
+            .0
+            .checked_mul(i64::from(*factor))
+            .ok_or(Overflow)?),
         QuantityExpr::Sum { exprs } => {
-            let mut total = 0i32;
+            let mut total = HalfSigned::ZERO;
             for inner in exprs {
-                total = total
-                    .checked_add(try_resolve_event_replacement_quantity(inner, event_count)?)
-                    .ok_or(Overflow)?;
+                total = fit(total.0.checked_add(eval(inner)?.0).ok_or(Overflow)?)?;
             }
             Ok(total)
         }
         // CR 107.1: the maximum of the computed operand values; empty → 0.
         QuantityExpr::Max { exprs } => {
-            let mut best: Option<i32> = None;
+            let mut best: Option<HalfSigned> = None;
             for inner in exprs {
-                let value = try_resolve_event_replacement_quantity(inner, event_count)?;
+                let value = eval(inner)?;
                 best = Some(best.map_or(value, |b| b.max(value)));
             }
-            Ok(best.unwrap_or(0))
+            Ok(best.unwrap_or(HalfSigned::ZERO))
         }
         // CR 107.1c + CR 608.2d: For replacement quantity resolution, treat
         // `UpTo` transparently as its upper bound — the replacement-effect
         // pipeline does not honor "may pick fewer" semantics (the choice
         // already happened at effect resolution before the replacement fires).
-        QuantityExpr::UpTo { max } => try_resolve_event_replacement_quantity(max, event_count),
+        QuantityExpr::UpTo { max } => eval(max),
         // CR 107.3: `base ^ exponent`. Negative exponents clamp to 0 per
         // CR 107.1b; `checked_pow` reports an overflow instead of saturating.
         QuantityExpr::Power { base, exponent } => {
-            let exp = try_resolve_event_replacement_quantity(exponent, event_count)?.max(0) as u32;
-            base.checked_pow(exp).ok_or(Overflow)
+            let exp = eval(exponent)?.whole_floor().max(0) as u32;
+            base.checked_pow(exp)
+                .map(HalfSigned::from_whole)
+                .ok_or(Overflow)
         }
         // "The difference between A and B" being unsigned is an Oracle
         // templating convention with no dedicated CR number — resolves to the
         // absolute value of the gap. (CR 107.1b is distinct: it clamps a
         // negative result to zero, not the operand-order-independent magnitude
-        // taken here.) The unsigned gap is computed without overflow; only a
-        // gap above i32::MAX is unrepresentable.
+        // taken here.) Only a gap whose whole part is above i32::MAX is
+        // unrepresentable.
         QuantityExpr::Difference { left, right } => {
-            let l = try_resolve_event_replacement_quantity(left, event_count)?;
-            let r = try_resolve_event_replacement_quantity(right, event_count)?;
-            i32::try_from(l.abs_diff(r)).map_err(|_| Overflow)
+            let l = eval(left)?;
+            let r = eval(right)?;
+            fit(l.0.abs_diff(r.0).try_into().map_err(|_| Overflow)?)
         }
         QuantityExpr::Ref { .. } => Err(NotStatic),
     }
@@ -5672,21 +5841,52 @@ enum ScaledQuantity {
     Unrepresentable,
 }
 
-/// Applies `modification` to `amount` with checked `Times` / `Plus`
-/// arithmetic, shared by the life and player-counter/energy appliers.
+/// Applies `modification` to a whole `amount` — the player-counter/energy view
+/// of [`scale_event_quantity_exact`] (a whole amount scales to a whole amount,
+/// `Half` rounding down).
 fn scale_event_quantity(amount: u32, modification: &QuantityModification) -> ScaledQuantity {
-    match *modification {
-        QuantityModification::Times { factor } => amount
-            .checked_mul(factor)
-            .map_or(ScaledQuantity::Unrepresentable, ScaledQuantity::Scaled),
-        QuantityModification::Half => ScaledQuantity::Scaled(amount / 2),
-        QuantityModification::Plus { value } => amount
-            .checked_add(value)
-            .map_or(ScaledQuantity::Unrepresentable, ScaledQuantity::Scaled),
-        QuantityModification::Minus { value } => {
-            ScaledQuantity::Scaled(amount.saturating_sub(value))
+    match scale_event_quantity_exact(HalfMagnitude::from_whole(amount), modification) {
+        ScaledExactQuantity::Scaled(scaled) => ScaledQuantity::Scaled(scaled.whole_floor()),
+        ScaledExactQuantity::Prevented => ScaledQuantity::Prevented,
+        ScaledExactQuantity::Unrepresentable => ScaledQuantity::Unrepresentable,
+    }
+}
+
+/// The result of applying a `QuantityModification` to an exact event quantity.
+enum ScaledExactQuantity {
+    Scaled(HalfMagnitude),
+    /// CR 614.6 + CR 614.7: the modified event never happens.
+    Prevented,
+    /// Engine numeric capacity: a `Times` / `Plus` result whose whole part is
+    /// past `u32`.
+    Unrepresentable,
+}
+
+/// CR 614.1a: Applies `modification` to the proposed event's exact amount with
+/// checked `Times` / `Plus` arithmetic — the single arithmetic authority for
+/// structured life, player-counter and energy replacements. Boon Reflection's
+/// "twice that much life" doubles a 2½ gain to 5; `Half` rounds the exact half
+/// down to a whole number (CR 107.1a).
+fn scale_event_quantity_exact(
+    amount: HalfMagnitude,
+    modification: &QuantityModification,
+) -> ScaledExactQuantity {
+    let fit = |halves: Option<u64>| match halves {
+        Some(halves) if halves / 2 <= u64::from(u32::MAX) => {
+            ScaledExactQuantity::Scaled(HalfMagnitude(halves))
         }
-        QuantityModification::Prevent => ScaledQuantity::Prevented,
+        _ => ScaledExactQuantity::Unrepresentable,
+    };
+    match *modification {
+        QuantityModification::Times { factor } => fit(amount.0.checked_mul(u64::from(factor))),
+        QuantityModification::Half => {
+            ScaledExactQuantity::Scaled(HalfMagnitude::from_halves(amount.0 / 4 * 2))
+        }
+        QuantityModification::Plus { value } => fit(amount.0.checked_add(u64::from(value) * 2)),
+        QuantityModification::Minus { value } => {
+            ScaledExactQuantity::Scaled(amount.saturating_sub(HalfMagnitude::from_whole(value)))
+        }
+        QuantityModification::Prevent => ScaledExactQuantity::Prevented,
     }
 }
 
@@ -5733,57 +5933,49 @@ fn gain_life_applier(
         if let ProposedEvent::LifeGain {
             player_id,
             amount,
+            amount_fraction,
             applied,
         } = event
         {
-            // Engine numeric capacity: a `Times` / `Plus` result past `u32`
-            // is recorded for the settle step instead of clamped.
-            // `Minus` floors at zero, which is not an overflow.
-            let new_amount = match scale_event_quantity(amount, &modification) {
-                ScaledQuantity::Scaled(new_amount) => new_amount,
-                // CR 614.6 + CR 614.7: No life-gain replacement uses Prevent
-                // today (Tainted Remedy converts gain → loss via execute chain),
-                // but the variant composes here for symmetry — fully suppress
-                // the gain event.
-                ScaledQuantity::Prevented => return ApplyResult::Prevented,
-                ScaledQuantity::Unrepresentable => {
+            let exact = HalfMagnitude::from_whole_and_fraction(amount, amount_fraction);
+            let scaled = match scale_event_quantity_exact(exact, &modification) {
+                ScaledExactQuantity::Scaled(scaled) => scaled,
+                ScaledExactQuantity::Prevented => return ApplyResult::Prevented,
+                ScaledExactQuantity::Unrepresentable => {
                     return record_quantity_overflow(
                         state,
                         rid,
                         ProposedEvent::LifeGain {
                             player_id,
                             amount,
+                            amount_fraction,
                             applied,
                         },
                     );
                 }
             };
+            let (amount, amount_fraction) = scaled.into_whole_and_fraction();
             return ApplyResult::Modified(ProposedEvent::LifeGain {
                 player_id,
-                amount: new_amount,
+                amount,
+                amount_fraction,
                 applied,
             });
         }
         // qmod set but event isn't LifeGain — fall through (no-op).
     }
 
-    // Branch 2: parser-emitted `Effect::GainLife { amount: <expr> }` where
-    // `<expr>` describes the *replaced* amount (not a delta). E.g.,
-    // Alhammarret's Archive / Boon Reflection / Rhox Faithmender emit
-    // `Multiply { factor: 2, inner: EventContextAmount }` for "you gain twice
-    // that much life instead". Heron of Hope / Angel of Vitality emit
-    // `Offset { inner: EventContextAmount, offset: 1 }` for "you gain that
-    // much life plus 1 instead". CR 614.1a: the replacement substitutes a
-    // new event (the replaced amount), not an additive delta.
     match gain_life_replacement_amount(state, rid, &event) {
         Ok(Some(new_amount)) => {
             if let ProposedEvent::LifeGain {
                 player_id, applied, ..
             } = event
             {
+                let (amount, amount_fraction) = new_amount.into_whole_and_fraction();
                 return ApplyResult::Modified(ProposedEvent::LifeGain {
                     player_id,
-                    amount: new_amount,
+                    amount,
+                    amount_fraction,
                     applied,
                 });
             }
@@ -5863,8 +6055,13 @@ fn gain_life_replacement_amount(
     state: &GameState,
     rid: ReplacementId,
     event: &ProposedEvent,
-) -> Result<Option<u32>, EventQuantityOverflow> {
-    let ProposedEvent::LifeGain { amount, .. } = event else {
+) -> Result<Option<HalfMagnitude>, EventQuantityOverflow> {
+    let ProposedEvent::LifeGain {
+        amount,
+        amount_fraction,
+        ..
+    } = event
+    else {
         return Ok(None);
     };
 
@@ -5882,11 +6079,16 @@ fn gain_life_replacement_amount(
     }
 
     match &*execute.effect {
+        // CR 614.1a: the replacement amount is computed from the exact
+        // proposed gain (twice a 2½ gain is 5).
         Effect::GainLife { amount: qty, .. } => {
-            match try_resolve_event_replacement_quantity(qty, *amount) {
+            match try_resolve_event_replacement_quantity_exact(
+                qty,
+                HalfMagnitude::from_whole_and_fraction(*amount, *amount_fraction),
+            ) {
                 // A negative result floors at 0 = no gain, which the settle
                 // step already treats as no change.
-                Ok(resolved) => Ok(Some(resolved.max(0) as u32)),
+                Ok(resolved) => Ok(Some(resolved.clamp_non_negative())),
                 Err(EventQuantityError::NotStatic) => Ok(None),
                 Err(EventQuantityError::Overflow) => Err(EventQuantityOverflow),
             }
@@ -5931,32 +6133,34 @@ fn lose_life_applier(
         let ProposedEvent::LifeLoss {
             player_id,
             amount,
+            amount_fraction,
             applied,
         } = event
         else {
             return ApplyResult::Modified(event);
         };
-        // Engine numeric capacity: a `Times` / `Plus` result past `u32` is
-        // recorded for the settle step instead of clamped. `Minus`
-        // floors at zero, which is not an overflow.
-        let new_amount = match scale_event_quantity(amount, &modification) {
-            ScaledQuantity::Scaled(new_amount) => new_amount,
-            ScaledQuantity::Prevented => return ApplyResult::Prevented,
-            ScaledQuantity::Unrepresentable => {
+        let exact = HalfMagnitude::from_whole_and_fraction(amount, amount_fraction);
+        let scaled = match scale_event_quantity_exact(exact, &modification) {
+            ScaledExactQuantity::Scaled(scaled) => scaled,
+            ScaledExactQuantity::Prevented => return ApplyResult::Prevented,
+            ScaledExactQuantity::Unrepresentable => {
                 return record_quantity_overflow(
                     state,
                     rid,
                     ProposedEvent::LifeLoss {
                         player_id,
                         amount,
+                        amount_fraction,
                         applied,
                     },
                 );
             }
         };
+        let (amount, amount_fraction) = scaled.into_whole_and_fraction();
         return ApplyResult::Modified(ProposedEvent::LifeLoss {
             player_id,
-            amount: new_amount,
+            amount,
+            amount_fraction,
             applied,
         });
     }
@@ -5969,6 +6173,7 @@ fn lose_life_applier(
             ProposedEvent::LifeLoss {
                 player_id,
                 amount,
+                amount_fraction,
                 applied,
             },
             Effect::LoseLife {
@@ -5977,17 +6182,21 @@ fn lose_life_applier(
             },
         ) = (&event, &*execute.effect)
         {
-            match try_resolve_event_replacement_quantity(replacement_amount, *amount) {
+            // CR 614.1a: computed from the exact proposed loss.
+            match try_resolve_event_replacement_quantity_exact(
+                replacement_amount,
+                HalfMagnitude::from_whole_and_fraction(*amount, *amount_fraction),
+            ) {
                 Ok(resolved) => {
+                    let (amount, amount_fraction) =
+                        resolved.clamp_non_negative().into_whole_and_fraction();
                     return ApplyResult::Modified(ProposedEvent::LifeLoss {
                         player_id: *player_id,
-                        amount: resolved.max(0) as u32,
+                        amount,
+                        amount_fraction,
                         applied: applied.clone(),
                     });
                 }
-                // The computed quantity exceeds the engine's numeric capacity.
-                // Return explicitly so this arm never depends on the later
-                // fall-through checks.
                 Err(EventQuantityError::Overflow) => {
                     return record_quantity_overflow(state, rid, event);
                 }
@@ -9437,7 +9646,15 @@ fn object_replacement_candidate_applies_on_entry_board(
     // "If you can't, you lose the game." must not run; Daunting Defender applied first leaves
     // nothing for Soul-Scar Mage's -1/-1 counters. The applier is too late: its `Modified`
     // result still stashes the rider.
-    if is_damage_substitution(repl_def) && matches!(event, ProposedEvent::Damage { amount: 0, .. })
+    if is_damage_substitution(repl_def)
+        && matches!(
+            event,
+            ProposedEvent::Damage {
+                amount: 0,
+                amount_fraction: HalfFraction::Zero,
+                ..
+            }
+        )
     {
         return false;
     }
@@ -10453,8 +10670,12 @@ fn find_applicable_replacements_on_entry_board(
         ProposedEvent::Damage {
             target: TargetRef::Object(object_id),
             amount,
+            amount_fraction,
             ..
-        } if *amount > 0 && object_has_shield_counter(state, *object_id) => {
+        } if HalfMagnitude::from_whole_and_fraction(*amount, *amount_fraction)
+            > HalfMagnitude::ZERO
+            && object_has_shield_counter(state, *object_id) =>
+        {
             let rid =
                 shield_counter_replacement_id(*object_id, ShieldCounterReplacementKind::Damage);
             if !event.already_applied(&rid) {
@@ -10493,7 +10714,6 @@ fn find_applicable_replacements_on_entry_board(
     // Amount-gated, so a fully-prevented event draws nothing on re-derive.
     if let ProposedEvent::Damage {
         target,
-        amount,
         source_id,
         source_name,
         source_incarnation,
@@ -10504,8 +10724,10 @@ fn find_applicable_replacements_on_entry_board(
         // prevention parts of applicable effects have no effect — draw no
         // virtual protection candidates, mirroring the definition-matcher
         // `is_prevention_disabled` suppression (no riders are lost: protection
-        // carries no riders).
-        if *amount > 0 && !is_prevention_disabled(state, event) {
+        // carries no riders). Exact: Little Girl's ½ damage is damage to prevent.
+        if event_quantity(event).is_some_and(|exact| !exact.is_zero())
+            && !is_prevention_disabled(state, event)
+        {
             let applicable = match target {
                 TargetRef::Object(object_id) => {
                     match state.objects.get(object_id) {
@@ -11323,7 +11545,13 @@ pub(crate) fn event_is_accounted(event: &ProposedEvent) -> bool {
         // CR 120.3a: the player branch DELEGATES its life write to a companion
         // `LifeLoss`, but keeps `state.damage_dealt_this_turn`. Zero-payload
         // guard: the shield-damage virtual candidate is drawn under `amount > 0`.
-        ProposedEvent::Damage { amount, .. } => *amount > 0,
+        ProposedEvent::Damage {
+            amount,
+            amount_fraction,
+            ..
+        } => {
+            HalfMagnitude::from_whole_and_fraction(*amount, *amount_fraction) > HalfMagnitude::ZERO
+        }
         // CR 121.1: DELEGATES every card to `zone_pipeline::move_object`, but
         // keeps `player.cards_drawn_this_turn`. CR 121.2a: an instruction-stage
         // event writes that ledger through the individual draws it is split
@@ -13082,19 +13310,20 @@ fn apply_single_replacement(
     let replacement_applied = proposed.applied_set().clone();
     let is_damage_event = proposed_damage_source.is_some();
     // CR 609.7b + CR 120.8: Membership requires positive damage actually changed
-    // or prevented. Capture scalar provenance only; do not clone damage events.
+    // or prevented — exact, so Vile Bile's ½ portion to one blocker is positive
+    // damage. Capture scalar provenance only; do not clone damage events.
     let damage_batch_application =
         state
             .damage_batch_ledger
             .as_ref()
-            .and_then(|_| match &proposed {
-                ProposedEvent::Damage {
-                    source_id, amount, ..
-                } if *amount > 0 => Some((
-                    AppliedReplacementKey::for_event(&proposed, rid),
-                    *source_id,
-                    *amount,
-                )),
+            .and_then(|_| match (&proposed, replaced_quantity) {
+                (ProposedEvent::Damage { source_id, .. }, Some(exact)) if !exact.is_zero() => {
+                    Some((
+                        AppliedReplacementKey::for_event(&proposed, rid),
+                        *source_id,
+                        exact,
+                    ))
+                }
                 _ => None,
             });
     // CR 614.5 + CR 609.7b: a one-shot replacement is consumed when it
@@ -13317,13 +13546,10 @@ fn apply_single_replacement(
                     if let Some((key, damage_source, damage_amount)) = damage_batch_application {
                         let changed = match &new_event {
                             ProposedEvent::Damage {
-                                source_id,
-                                target,
-                                amount,
-                                ..
+                                source_id, target, ..
                             } => {
                                 *source_id != damage_source
-                                    || *amount != damage_amount
+                                    || event_quantity(&new_event) != Some(damage_amount)
                                     || Some(target) != proposed_event_target.as_ref()
                             }
                             _ => true,
@@ -14637,6 +14863,7 @@ fn park_entry_controller_choice(
         exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
         excess_recipient: None,
         lifelink_bonus: 0,
+        lifelink_bonus_fraction: crate::types::ability::HalfFraction::Zero,
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
@@ -14814,6 +15041,7 @@ fn park_as_enters_named_choice(
         exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
         excess_recipient: None,
         lifelink_bonus: 0,
+        lifelink_bonus_fraction: crate::types::ability::HalfFraction::Zero,
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
@@ -15145,6 +15373,7 @@ fn park_as_enters_pay_choice(
         exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
         excess_recipient: None,
         lifelink_bonus: 0,
+        lifelink_bonus_fraction: crate::types::ability::HalfFraction::Zero,
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
@@ -16002,6 +16231,7 @@ fn pipeline_loop(
                     // park returns NeedsChoice (the ctx rider isn't known here).
                     excess_recipient: None,
                     lifelink_bonus: 0,
+                    lifelink_bonus_fraction: crate::types::ability::HalfFraction::Zero,
                     // CR 614.12a: first park of this choice — no MayCost has been
                     // paid yet. Set only when re-parking after a paused accept.
                     may_cost_paid: false,
@@ -16080,6 +16310,7 @@ fn pipeline_loop(
                 // returns NeedsChoice (the ctx rider isn't known here).
                 excess_recipient: None,
                 lifelink_bonus: 0,
+                lifelink_bonus_fraction: crate::types::ability::HalfFraction::Zero,
                 // CR 614.12a: distinct-replacement choices carry no MayCost.
                 may_cost_paid: false,
                 may_cost_remaining: None,
@@ -17246,6 +17477,7 @@ fn continue_replacement_impl(
                     // rider applies here.
                     excess_recipient: None,
                     lifelink_bonus: 0,
+                    lifelink_bonus_fraction: crate::types::ability::HalfFraction::Zero,
                     may_cost_paid: true,
                     may_cost_remaining: remaining_cost,
                     delivery_boundary: reparked_delivery_boundary,
@@ -17457,19 +17689,21 @@ fn continue_replacement_impl(
         };
         match (branch, post_effect) {
             (ReplacementBranch::Execute | ReplacementBranch::Decline, Some(def)) => {
-                let drain = PostReplacementDrain {
+                let mut drain = PostReplacementDrain {
                     status: DrainStatus::Ready(PostReplacementContinuation::Template(def)),
                     source: Some(rid.source),
                     applied: proposed.applied_set().clone(),
                     event_source: replaced.source,
                     event_target: replaced.target,
-                    event_amount: replaced.amount,
+                    event_amount: None,
+                    event_amount_fraction: HalfFraction::Zero,
                     // CR 109.5: same split as the mandatory stash — the
                     // zone-change drain rebinds `source` to the entering /
                     // moving object, so the branch's "you" needs its own slot.
                     controller: branch_controller,
                     parked_entrants: Vec::new(),
                 };
+                drain.set_exact_event_amount(replaced.amount);
                 // CR 616.1: a damage batch settling its original choices holds the branch's
                 // action as it holds a mandatory one (`hold_damage_rider`).
                 let drain = match &proposed {
@@ -17797,6 +18031,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            lifelink_bonus_fraction: crate::types::ability::HalfFraction::Zero,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -17942,6 +18177,7 @@ mod tests {
                     source_name: None,
                     source_incarnation: None,
                     applied: HashSet::new(),
+                    amount_fraction: Default::default(),
                 }
             };
             let mut events = Vec::new();
@@ -18025,6 +18261,7 @@ mod tests {
                 DamageAssignment {
                     target: DamageTarget::Object(shielded),
                     amount: 3,
+                    amount_fraction: Default::default(),
                 },
             ),
             (
@@ -18032,6 +18269,7 @@ mod tests {
                 DamageAssignment {
                     target: DamageTarget::Object(shielded),
                     amount: 3,
+                    amount_fraction: Default::default(),
                 },
             ),
         ];
@@ -18243,6 +18481,7 @@ mod tests {
                 source_name: None,
                 source_incarnation: None,
                 applied: HashSet::new(),
+                amount_fraction: Default::default(),
             },
             &mut events,
         );
@@ -19039,6 +19278,8 @@ mod tests {
             casting_options: vec![],
             layout_kind: None,
             parse_warnings: vec![],
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         };
         state.objects.get_mut(&entrant).unwrap().back_face = Some(back_face);
 
@@ -19364,6 +19605,7 @@ mod tests {
                     source_name: None,
                     source_incarnation: None,
                     applied: HashSet::new(),
+                    amount_fraction: Default::default(),
                 },
                 vec![ReplacementEvent::DamageDone, ReplacementEvent::DealtDamage],
             ),
@@ -19382,6 +19624,7 @@ mod tests {
                     player_id: PlayerId(0),
                     amount: 1,
                     applied: HashSet::new(),
+                    amount_fraction: Default::default(),
                 },
                 vec![
                     ReplacementEvent::LoseLife,
@@ -19495,6 +19738,7 @@ mod tests {
                     player_id: PlayerId(0),
                     amount: 1,
                     applied: HashSet::new(),
+                    amount_fraction: Default::default(),
                 },
                 vec![ReplacementEvent::GainLife],
             ),
@@ -20244,6 +20488,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let dmg_candidates = vec![
             ReplacementId {
@@ -20570,6 +20815,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::NeedsChoice(player) = result else {
@@ -20617,6 +20863,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
         assert!(
@@ -20669,6 +20916,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::NeedsChoice(player) = result else {
@@ -20752,6 +21000,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
 
@@ -21034,6 +21283,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            lifelink_bonus_fraction: crate::types::ability::HalfFraction::Zero,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -21100,6 +21350,7 @@ mod tests {
                 exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                 excess_recipient: None,
                 lifelink_bonus: 0,
+                lifelink_bonus_fraction: crate::types::ability::HalfFraction::Zero,
                 may_cost_paid: false,
                 may_cost_remaining: None,
                 delivery_boundary: None,
@@ -21187,6 +21438,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            lifelink_bonus_fraction: crate::types::ability::HalfFraction::Zero,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -21237,6 +21489,7 @@ mod tests {
             player_id: PlayerId(0),
             amount: 3,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
 
         let result = replace_event(&mut state, proposed, &mut events);
@@ -21283,6 +21536,7 @@ mod tests {
             player_id: PlayerId(0),
             amount: 3,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
 
         let result = replace_event(&mut state, proposed, &mut events);
@@ -21306,6 +21560,7 @@ mod tests {
             player_id: PlayerId(0),
             amount,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         }
     }
 
@@ -21314,6 +21569,7 @@ mod tests {
             player_id: PlayerId(1),
             amount,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         }
     }
 
@@ -22049,6 +22305,8 @@ mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: None,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             });
             let event = ProposedEvent::Damage {
                 source_id: ObjectId(11),
@@ -22058,6 +22316,7 @@ mod tests {
                 source_name: None,
                 source_incarnation: None,
                 applied: HashSet::new(),
+                amount_fraction: Default::default(),
             };
             // CR 120.4b + CR 616.1f: only the current proposed damage amount
             // determines applicability, including after other replacements.
@@ -22126,6 +22385,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         assert_eq!(
             settled_damage_guard_reading(&state, &state.objects[&champion], &condition, &event),
@@ -22168,6 +22428,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         state.damage_batch_ledger = Some(Box::new(DamageBatchLedger {
             applications: vec![(
@@ -22576,6 +22837,8 @@ mod tests {
                     supertypes: Vec::new(),
                     colors: Vec::new(),
                     keywords: Vec::new(),
+                    power_fraction: Default::default(),
+                    toughness_fraction: Default::default(),
                 },
                 script_name: "Soldier".to_string(),
                 static_abilities: Vec::new(),
@@ -23507,6 +23770,7 @@ mod tests {
                     event_source: None,
                     event_target: Some(TargetRef::Player(PlayerId(0))),
                     event_amount: None,
+                    event_amount_fraction: crate::types::ability::HalfFraction::Zero,
                     controller: Some(PlayerId(0)),
                     parked_entrants: Vec::new(),
                 },
@@ -23749,11 +24013,13 @@ mod tests {
             player_id: PlayerId(0),
             amount: 3,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let opponent_event = ProposedEvent::LifeGain {
             player_id: PlayerId(1),
             amount: 3,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
 
         assert_eq!(
@@ -24069,7 +24335,9 @@ mod tests {
             MatchedProtectionQuality::Color(ManaColor::Red),
         ];
         let pending = PendingReplacement {
+            lifelink_bonus_fraction: Default::default(),
             proposed: ProposedEvent::Damage {
+                amount_fraction: Default::default(),
                 source_id: ObjectId(9),
                 target: TargetRef::Player(PlayerId(0)),
                 amount: 2,
@@ -24213,6 +24481,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
 
         let result = replace_event(&mut state, proposed, &mut events);
@@ -24284,6 +24553,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
 
         let result = replace_event(&mut state, proposed, &mut events);
@@ -24313,6 +24583,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
 
         let result = replace_event(&mut state, proposed, &mut events);
@@ -24400,6 +24671,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
 
         // The prevention replacement should be skipped
@@ -24438,6 +24710,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
 
         // Non-prevention replacements should still apply
@@ -24496,6 +24769,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
 
         let registry = build_replacement_registry();
@@ -24550,6 +24824,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let rid = ReplacementId {
             source: host,
@@ -24670,6 +24945,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: vec![crate::types::mana::ManaColor::White],
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "w_1_1_soldier".to_string(),
             static_abilities: Vec::new(),
@@ -26518,6 +26795,7 @@ mod tests {
             source_id: ObjectId(50),
             target: TargetRef::Player(PlayerId(1)),
             amount,
+            amount_fraction: HalfFraction::Zero,
             is_combat: false,
             source_name: None,
             source_incarnation: None,
@@ -26663,6 +26941,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
 
         let mut events = Vec::new();
@@ -26692,6 +26971,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         match replace_event(&mut state, combat, &mut events) {
             ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) => {
@@ -26720,6 +27000,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         match replace_event(&mut state, to_own, &mut events) {
             ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) => {
@@ -26971,7 +27252,15 @@ mod tests {
         let left_3 = damage_event(3);
         let left_4 = damage_event(4);
         let left_6 = damage_event(6);
-        let latch = |rid, before, outcome| replaced_event_amount(&state, rid, before, outcome);
+        // Whole inputs latch whole amounts; the half-point cases follow at the end.
+        let latch = |rid, before: Option<u32>, outcome| {
+            replaced_event_amount(&state, rid, before.map(HalfMagnitude::from_whole), outcome).map(
+                |exact| {
+                    assert!(!exact.has_half(), "whole inputs latch a whole amount");
+                    exact.whole_floor()
+                },
+            )
+        };
         fn modified(after: &ProposedEvent) -> ReplacementOutcome<'_> {
             ReplacementOutcome::Modified(after)
         }
@@ -27015,6 +27304,34 @@ mod tests {
         assert_eq!(latch(rid(8), Some(3), ReplacementOutcome::Replaced), None);
         // An event with no quantity owns no amount.
         assert_eq!(latch(rid(1), None, ReplacementOutcome::Replaced), None);
+
+        // CR 615.5: an Unhinged half point stays exact. Preventing all of Vile Bile's 2½ owns
+        // 2½; "prevent the next 3" leaving ½ of 3½ owns 3; leaving 2 of 2½ owns ½.
+        let exact = |halves| Some(HalfMagnitude::from_halves(halves));
+        let mut left_half = damage_event(0);
+        if let ProposedEvent::Damage {
+            amount_fraction, ..
+        } = &mut left_half
+        {
+            *amount_fraction = HalfFraction::Half;
+        }
+        assert_eq!(
+            replaced_event_amount(&state, rid(1), exact(5), ReplacementOutcome::Replaced),
+            exact(5)
+        );
+        assert_eq!(
+            replaced_event_amount(&state, rid(0), exact(7), modified(&left_half)),
+            exact(6)
+        );
+        assert_eq!(
+            replaced_event_amount(&state, rid(2), exact(5), modified(&left_2)),
+            exact(1)
+        );
+        assert_eq!(
+            event_quantity(&left_half),
+            exact(1),
+            "the latch reads the event's half point"
+        );
     }
 
     /// CR 614.1a + CR 614.6: one predicate classifies a damage substitution by the definition's
@@ -27202,7 +27519,7 @@ mod tests {
                     AppliedReplacementKey::object(rid.source, rid.index),
                     TargetRef::Player(PlayerId(1)),
                 ),
-                &2,
+                &HalfMagnitude::from_whole(2),
             )],
             "the prevented amount must accumulate into the batch tally keyed by \
              (shield, recipient), carrying the recipient the damage was headed at"
@@ -27210,27 +27527,35 @@ mod tests {
     }
 
     /// T18: huge damage/prevention amounts must saturate — not wrap — when
-    /// tallied into the `i32` batch ledger. `u32::MAX` accumulates as
-    /// `i32::MAX`; with a bare `as i32` cast it would wrap to `-1`.
+    /// tallied into the batch ledger.
     #[test]
     fn batch_prevention_tally_saturates_huge_amounts() {
         let key = AppliedReplacementKey::object(ObjectId(10), 0);
         let mut state = GameState::new_two_player(42);
         state.combat_prevention_tally = Some(std::collections::HashMap::new());
+        let huge = HalfMagnitude::from_whole(u32::MAX);
         assert!(accumulate_batch_prevention(
             &mut state,
             key,
             &TargetRef::Player(PlayerId(1)),
-            u32::MAX
+            huge
         ));
+        assert!(accumulate_batch_prevention(
+            &mut state,
+            key,
+            &TargetRef::Player(PlayerId(1)),
+            huge
+        ));
+        let tallied = *state
+            .combat_prevention_tally
+            .as_ref()
+            .unwrap()
+            .get(&(key, TargetRef::Player(PlayerId(1))))
+            .unwrap();
         assert_eq!(
-            state
-                .combat_prevention_tally
-                .as_ref()
-                .unwrap()
-                .get(&(key, TargetRef::Player(PlayerId(1)))),
-            Some(&i32::MAX),
-            "a u32::MAX prevention amount must saturate the i32 tally, not wrap to -1"
+            tallied,
+            huge.saturating_add(huge),
+            "a huge prevention amount accumulates without wrapping"
         );
         // Reach-guard: small values still accumulate exactly.
         let mut state = GameState::new_two_player(42);
@@ -27239,7 +27564,7 @@ mod tests {
             &mut state,
             key,
             &TargetRef::Player(PlayerId(1)),
-            3
+            HalfMagnitude::from_whole(3)
         ));
         assert_eq!(
             state
@@ -27247,7 +27572,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .get(&(key, TargetRef::Player(PlayerId(1)))),
-            Some(&3)
+            Some(&HalfMagnitude::from_whole(3))
         );
     }
 
@@ -27410,6 +27735,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let registry = build_replacement_registry();
         let candidates = find_applicable_replacements(&state, &proposed, &registry);
@@ -27437,6 +27763,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let registry = build_replacement_registry();
         let candidates = find_applicable_replacements(&state, &proposed, &registry);
@@ -27476,6 +27803,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let registry = build_replacement_registry();
         let candidates = find_applicable_replacements(&state, &proposed, &registry);
@@ -27511,6 +27839,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         assert!(
             !find_applicable_replacements(&state, &chosen_player_damage, &registry).is_empty(),
@@ -27525,6 +27854,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         assert!(
             find_applicable_replacements(&state, &unchosen_player_damage, &registry).is_empty(),
@@ -27578,6 +27908,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         assert!(
             !find_applicable_replacements(&state, &chosen_permanent_damage, &registry).is_empty(),
@@ -27592,6 +27923,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         assert!(
             find_applicable_replacements(&state, &other_permanent_damage, &registry).is_empty(),
@@ -27885,6 +28217,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            lifelink_bonus_fraction: crate::types::ability::HalfFraction::Zero,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -28578,6 +28911,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let registry = build_replacement_registry();
         assert!(
@@ -28594,6 +28928,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         assert!(
             find_applicable_replacements(&state, &proposed_self, &registry).is_empty(),
@@ -28621,6 +28956,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         assert!(
             find_applicable_replacements(&state2, &proposed_creature, &registry).is_empty(),
@@ -28647,6 +28983,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         assert!(
             !find_applicable_replacements(&state, &proposed_self, &registry).is_empty(),
@@ -28661,6 +28998,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         assert!(
             find_applicable_replacements(&state, &proposed_opponent, &registry).is_empty(),
@@ -29147,6 +29485,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: vec![crate::types::mana::ManaColor::Green],
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Squirrel".to_string(),
             static_abilities: Vec::new(),
@@ -29176,6 +29516,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: vec![crate::types::mana::ManaColor::Green],
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Plant".to_string(),
             static_abilities: Vec::new(),
@@ -29252,6 +29594,8 @@ mod tests {
                     supertypes: Vec::new(),
                     colors: Vec::new(),
                     keywords: Vec::new(),
+                    power_fraction: Default::default(),
+                    toughness_fraction: Default::default(),
                 },
                 script_name: name.to_string(),
                 static_abilities: Vec::new(),
@@ -29344,6 +29688,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: Vec::new(),
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: name.to_string(),
             static_abilities: Vec::new(),
@@ -29574,6 +29920,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: Vec::new(),
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Food".to_string(),
             static_abilities: Vec::new(),
@@ -29916,6 +30264,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: Vec::new(),
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: name.to_string(),
             static_abilities: Vec::new(),
@@ -30169,6 +30519,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: Vec::new(),
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Soldier".to_string(),
             static_abilities: Vec::new(),
@@ -30359,6 +30711,7 @@ mod tests {
             player_id: PlayerId(1),
             amount: 3,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let mut events = Vec::new();
         let result = replace_event(&mut state, proposed, &mut events);
@@ -30426,6 +30779,7 @@ mod tests {
                         player_id: *recipient,
                         amount: 3,
                         applied: HashSet::new(),
+                        amount_fraction: Default::default(),
                     },
                     &mut events,
                 );
@@ -30461,6 +30815,7 @@ mod tests {
                 player_id: PlayerId(1),
                 amount: 3,
                 applied: HashSet::new(),
+                amount_fraction: Default::default(),
             },
             &mut events,
         );
@@ -30491,6 +30846,7 @@ mod tests {
                 player_id: PlayerId(1),
                 amount: 3,
                 applied: HashSet::new(),
+                amount_fraction: Default::default(),
             },
             &mut events,
         );
@@ -30534,6 +30890,7 @@ mod tests {
             player_id: PlayerId(1),
             amount: 3,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let mut events = Vec::new();
         let result = replace_event(&mut state, proposed, &mut events);
@@ -30705,6 +31062,8 @@ mod tests {
                     supertypes: Vec::new(),
                     colors: Vec::new(),
                     keywords: Vec::new(),
+                    power_fraction: Default::default(),
+                    toughness_fraction: Default::default(),
                 },
                 script_name: name.to_string(),
                 static_abilities: Vec::new(),
@@ -30827,6 +31186,8 @@ mod tests {
                     supertypes: Vec::new(),
                     colors: Vec::new(),
                     keywords: Vec::new(),
+                    power_fraction: Default::default(),
+                    toughness_fraction: Default::default(),
                 },
                 script_name: name.to_string(),
                 static_abilities: Vec::new(),
@@ -31012,6 +31373,8 @@ mod tests {
                     supertypes: Vec::new(),
                     colors: Vec::new(),
                     keywords: Vec::new(),
+                    power_fraction: Default::default(),
+                    toughness_fraction: Default::default(),
                 },
                 script_name: "Token".to_string(),
                 static_abilities: Vec::new(),
@@ -31908,6 +32271,7 @@ mod tests {
                     player_id: PlayerId(0),
                     amount: 3,
                     applied: HashSet::new(),
+                    amount_fraction: Default::default(),
                 },
             ),
         ];
@@ -32556,6 +32920,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         assert!(!empty_mana_pool_matcher(&damage, ObjectId(0), &state));
     }
@@ -32584,6 +32949,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         assert!(!(entry.matcher)(&damage, ObjectId(0), &state));
 
@@ -33048,6 +33414,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         assert_eq!(
             find_applicable_replacements(&state, &object_event, &registry),
@@ -33067,6 +33434,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         assert!(
             find_applicable_replacements(&state, &player_event, &registry).is_empty(),
@@ -33120,6 +33488,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         assert!(
             find_applicable_replacements(&state, &land_event, &registry).is_empty(),
@@ -33135,6 +33504,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         assert_eq!(
             find_applicable_replacements(&state, &creature_event, &registry),
@@ -33166,6 +33536,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         assert!(
             find_applicable_replacements(&state, &your_turn_damage, &registry).is_empty(),
@@ -33185,6 +33556,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         assert_eq!(
             find_applicable_replacements(&state, &opp_turn_damage, &registry),
@@ -33346,6 +33718,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: HashSet::new(),
+            amount_fraction: Default::default(),
         };
         let is_our_damage = |event: &ProposedEvent| {
             matches!(
@@ -33434,6 +33807,7 @@ mod tests {
         }
         fn damage_to(source: ObjectId, target: ObjectId) -> ProposedEvent {
             ProposedEvent::Damage {
+                amount_fraction: Default::default(),
                 source_id: source,
                 target: TargetRef::Object(target),
                 amount: 3,

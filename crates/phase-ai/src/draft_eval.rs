@@ -246,10 +246,8 @@ pub fn dominant_colors(color_lists: &[&[String]], min_samples: usize) -> Vec<Str
 
 /// Extract a fixed power/toughness value, ignoring `*` / variable / derived stats.
 fn fixed_pt(pt: &Option<PtValue>) -> Option<i32> {
-    match pt {
-        Some(PtValue::Fixed(v)) => Some(*v),
-        _ => None,
-    }
+    pt.as_ref()
+        .and_then(|pt| pt.exact_fixed().map(|v| v.whole_floor()))
 }
 
 #[cfg(test)]

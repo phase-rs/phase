@@ -374,6 +374,8 @@ mod tests {
             // resolver pre-filters on that authority).
             layout_kind: Some(crate::types::card::LayoutKind::Transform),
             parse_warnings: vec![],
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         });
         id
     }

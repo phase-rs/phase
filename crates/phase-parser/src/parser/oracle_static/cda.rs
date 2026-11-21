@@ -82,8 +82,8 @@ pub(crate) fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDef
         let mut def = StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
             .modifications(vec![
-                ContinuousModification::SetPower { value },
-                ContinuousModification::SetToughness { value },
+                ContinuousModification::set_power(value),
+                ContinuousModification::set_toughness(value),
             ])
             .description(description.to_string());
         if let Some(cond) = condition {

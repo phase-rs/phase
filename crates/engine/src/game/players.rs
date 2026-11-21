@@ -520,6 +520,7 @@ pub fn teammates(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
 /// shared-side key, so a Horde seat never collapses into the survivor pool.
 /// CR 810.9d is the confirming example: a per-team extremum (Repay in Kind)
 /// reads each team's total once, not each member.
+#[cfg(test)]
 pub(crate) fn aggregate_over_teams<I>(
     state: &GameState,
     players: I,
@@ -528,15 +529,33 @@ pub(crate) fn aggregate_over_teams<I>(
 where
     I: IntoIterator<Item = PlayerId>,
 {
+    aggregate_over_teams_exact(state, players, aggregate).whole_floor()
+}
+
+pub(crate) fn aggregate_over_teams_exact<I>(
+    state: &GameState,
+    players: I,
+    aggregate: AggregateFunction,
+) -> crate::types::ability::HalfSigned
+where
+    I: IntoIterator<Item = PlayerId>,
+{
     let mut seen = std::collections::BTreeSet::new();
     let team_totals = players.into_iter().filter_map(|pid| {
         let key = super::topology::shared_life_dedup_key(state, pid);
-        seen.insert(key).then(|| team_life_total(state, pid))
+        seen.insert(key).then(|| exact_team_life_total(state, pid))
     });
     match aggregate {
-        AggregateFunction::Max => team_totals.max().unwrap_or(0),
-        AggregateFunction::Min => team_totals.min().unwrap_or(0),
-        AggregateFunction::Sum => team_totals.sum(),
+        AggregateFunction::Max => team_totals
+            .max()
+            .unwrap_or(crate::types::ability::HalfSigned(0)),
+        AggregateFunction::Min => team_totals
+            .min()
+            .unwrap_or(crate::types::ability::HalfSigned(0)),
+        AggregateFunction::Sum => team_totals
+            .fold(crate::types::ability::HalfSigned(0), |acc, x| {
+                acc.saturating_add(x)
+            }),
     }
 }
 
@@ -556,6 +575,19 @@ pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
         .filter_map(|member| state.players.iter().find(|p| p.id == member))
         .map(|p| p.life)
         .sum()
+}
+
+/// Exact signed half-point team life total (CR 810.9a + Unhinged half-point life).
+pub fn exact_team_life_total(
+    state: &GameState,
+    player: PlayerId,
+) -> crate::types::ability::HalfSigned {
+    super::topology::shared_life_members(state, player)
+        .into_iter()
+        .filter_map(|member| state.players.iter().find(|p| p.id == member))
+        .fold(crate::types::ability::HalfSigned::ZERO, |acc, p| {
+            acc.saturating_add(p.exact_life())
+        })
 }
 
 /// CR 810.10 + CR 810.10a: A player's team's shared poison-counter total.
@@ -648,9 +680,15 @@ impl LossPool {
         if !is_alive(state, player) || super::horde::player_has_no_life_total(state, player) {
             return None;
         }
+        let exact = exact_team_life_total(state, player);
+        let to_threshold = if exact.0 > 0 {
+            exact.0 / 2 + (exact.0 & 1)
+        } else {
+            exact.0 / 2
+        };
         Some(LossPool {
             members: super::topology::shared_life_members(state, player),
-            to_threshold: i64::from(team_life_total(state, player)),
+            to_threshold,
         })
     }
 

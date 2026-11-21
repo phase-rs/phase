@@ -65,6 +65,9 @@ fn drive_until(runner: &mut GameRunner, label: &str, done: impl Fn(&GameRunner) 
                     ref blockers,
                     ..
                 } => GameAction::AssignCombatDamage {
+                    assignments_fraction: Default::default(),
+                    controller_damage_fraction: Default::default(),
+                    trample_damage_fraction: Default::default(),
                     mode: Default::default(),
                     assignments: vec![(blockers[0].blocker_id, total_damage)],
                     trample_damage: 0,

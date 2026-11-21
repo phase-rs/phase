@@ -590,7 +590,10 @@ mod tests {
         let static_anthem = StaticDefinition {
             mode: StaticMode::Continuous,
             affected: Some(attacking_filter),
-            modifications: vec![ContinuousModification::AddPower { value: 1 }],
+            modifications: vec![ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }],
             condition: None,
             per_player_condition: None,
             affected_zone: None,

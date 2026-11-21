@@ -1560,6 +1560,8 @@ fn an_adventure_cast_again_after_exiling_itself_gains_no_adventure_permission_fr
         casting_options: Vec::new(),
         layout_kind: Some(LayoutKind::Adventure),
         parse_warnings: vec![],
+        power_fraction: Default::default(),
+        toughness_fraction: Default::default(),
     });
 
     let has_adventure_permission = |state: &GameState| {
@@ -3785,6 +3787,7 @@ fn markerless_rest(rest: TerminalRest, core_type: CoreType, zone: Zone) -> (Game
                 event_source: None,
                 event_target: None,
                 event_amount: None,
+                event_amount_fraction: engine::types::ability::HalfFraction::Zero,
                 controller: None,
                 parked_entrants: Vec::new(),
             },

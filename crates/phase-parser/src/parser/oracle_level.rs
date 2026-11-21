@@ -111,8 +111,8 @@ pub(crate) fn parse_level_blocks(lines: &[&str], card_name: &str) -> LevelBlocks
                 if let Some((p, t)) = parse_pt_line(next) {
                     consumed_indices.push(i);
                     description_parts.push(next.to_string());
-                    modifications.push(ContinuousModification::SetPower { value: p });
-                    modifications.push(ContinuousModification::SetToughness { value: t });
+                    modifications.push(ContinuousModification::set_power(p));
+                    modifications.push(ContinuousModification::set_toughness(t));
                     i += 1;
                     continue;
                 }

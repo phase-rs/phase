@@ -476,8 +476,14 @@ mod tests {
                     .controller(ControllerRef::You),
             ))
             .modifications(vec![
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::AddToughness {
+                    value: 1,
+                    fraction: Default::default(),
+                },
             ])
     }
 
@@ -684,7 +690,10 @@ mod tests {
                     TypedFilter::new(TypeFilter::Subtype("Elf".to_string()))
                         .controller(ControllerRef::Opponent),
                 ))
-                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }]),
         );
 
         let plain_elf = creature_face("Plain Elf", vec!["Elf"]);

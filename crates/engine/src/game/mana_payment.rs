@@ -8737,7 +8737,10 @@ mod tests {
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
             })
-            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+            .modifications(vec![ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }]);
         let source_id = ObjectId(99);
         let mut source = GameObject::new(
             source_id,

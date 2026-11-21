@@ -6636,6 +6636,7 @@ fn project_action_payload(
             trample_damage,
             controller_damage,
             mode,
+            ..
         } => {
             for (index, (target, amount)) in assignments.iter().enumerate() {
                 push_object_surface(
@@ -6662,7 +6663,7 @@ fn project_action_payload(
                 controller_damage,
             );
         }
-        GameAction::AssignBlockerDamage { assignments } => {
+        GameAction::AssignBlockerDamage { assignments, .. } => {
             for (index, (target, amount)) in assignments.iter().enumerate() {
                 push_object_surface(
                     surfaces,
@@ -11562,6 +11563,7 @@ fn materialize_amount_assignment_response(
                     _ => Err(InteractionReasonCode::MalformedResponse),
                 })
                 .collect::<Result<_, _>>()?,
+            assignments_fraction: Vec::new(),
         },
         AmountAssignmentAction::DistributeAmong => GameAction::DistributeAmong {
             distribution: decoded
@@ -11640,8 +11642,11 @@ fn materialize_damage_assignment_response(
             GameAction::AssignCombatDamage {
                 mode: CombatDamageAssignmentMode::AsThoughUnblocked,
                 assignments: Vec::new(),
+                assignments_fraction: Vec::new(),
                 trample_damage: 0,
+                trample_damage_fraction: Default::default(),
                 controller_damage: 0,
+                controller_damage_fraction: Default::default(),
             },
             InteractionProgress {
                 selected: 0,
@@ -11679,8 +11684,11 @@ fn materialize_damage_assignment_response(
         GameAction::AssignCombatDamage {
             mode: CombatDamageAssignmentMode::Normal,
             assignments: blocker_assignments,
+            assignments_fraction: Vec::new(),
             trample_damage,
+            trample_damage_fraction: Default::default(),
             controller_damage,
+            controller_damage_fraction: Default::default(),
         },
         InteractionProgress {
             selected: assignments.len().min(u32::MAX as usize) as u32,

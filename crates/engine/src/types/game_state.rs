@@ -28,13 +28,13 @@ use super::ability::{
     ControlWindow, CopiableValues, CopyChooseScope, CopyScale, CopyTargetPurpose,
     CostPaidObjectSnapshot, CounterCostSelection, DamageContextSnapshot, DelayedTriggerCondition,
     DelayedTriggerKind, DigRestOrder, DigRestRemainder, DigRestSplitScope, Duration, EffectKind,
-    EntryAttackDestination, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant,
-    LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
-    ReplacementDefinition, ResolvedAbility, ReturnResultId, SearchDestinationSplit,
-    SearchOrderingHint, SearchSelectionConstraint, StackAbilityKind, StaticCondition,
-    TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef,
-    TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
-    TriggerEntry, TriggerGrantProducerKey, TriggerProducerOrigin,
+    EntryAttackDestination, FaceDownProfile, GameRestriction, HalfFraction, HalfMagnitude,
+    HalfSigned, KeywordAction, KickerVariant, LibraryPosition, ModalChoice, PermanentEntryMode,
+    PileSource, QuantityExpr, ReplacementDefinition, ResolvedAbility, ReturnResultId,
+    SearchDestinationSplit, SearchOrderingHint, SearchSelectionConstraint, StackAbilityKind,
+    StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause,
+    TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef,
+    TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey, TriggerProducerOrigin,
 };
 use super::actions::{DebugCardCreationKind, GameAction, ResolveAllScope};
 use super::attribution::ObjectAttribution;
@@ -1087,7 +1087,11 @@ pub struct LKISnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_image_ref: Option<TokenImageRef>,
     pub power: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub power_fraction: HalfFraction,
     pub toughness: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub toughness_fraction: HalfFraction,
     /// CR 208.4b + CR 613.4b: Base power as it last existed in the public zone
     /// (layer-7b value). Threaded so that an LKI snapshot converted to a
     /// `ZoneChangeRecord` (see `matches_target_filter_on_lki_snapshot`)
@@ -1095,9 +1099,13 @@ pub struct LKISnapshot {
     /// than defaulting to 0.
     #[serde(default)]
     pub base_power: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub base_power_fraction: HalfFraction,
     /// CR 208.4b + CR 613.4b: Base toughness as it last existed in the public zone.
     #[serde(default)]
     pub base_toughness: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub base_toughness_fraction: HalfFraction,
     pub mana_value: u32,
     pub controller: PlayerId,
     pub owner: PlayerId,
@@ -1180,6 +1188,28 @@ pub struct LKISnapshot {
     /// pre-existing saved states deserialize to 0, the pre-change read.
     #[serde(default)]
     pub intensity: u32,
+}
+
+impl LKISnapshot {
+    pub fn exact_power(&self) -> Option<HalfSigned> {
+        self.power
+            .map(|p| HalfSigned::from_whole_and_fraction(p, self.power_fraction))
+    }
+
+    pub fn exact_toughness(&self) -> Option<HalfSigned> {
+        self.toughness
+            .map(|t| HalfSigned::from_whole_and_fraction(t, self.toughness_fraction))
+    }
+
+    pub fn exact_base_power(&self) -> Option<HalfSigned> {
+        self.base_power
+            .map(|p| HalfSigned::from_whole_and_fraction(p, self.base_power_fraction))
+    }
+
+    pub fn exact_base_toughness(&self) -> Option<HalfSigned> {
+        self.base_toughness
+            .map(|t| HalfSigned::from_whole_and_fraction(t, self.base_toughness_fraction))
+    }
 }
 
 /// Complete event-time authority for a triggered ability's source.
@@ -2303,8 +2333,12 @@ pub struct ZoneChangeRecord {
     pub trigger_source_context: Option<TriggerSourceContext>,
     /// CR 208.1: Power as of the zone change.
     pub power: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub power_fraction: HalfFraction,
     /// CR 208.1: Toughness as of the zone change.
     pub toughness: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub toughness_fraction: HalfFraction,
     /// CR 208.4b + CR 613.4b: Base power as of the zone change (the layer-7b
     /// value, ignoring +1/+1 counters and non-setting P/T modifiers in layer
     /// 7c). Read by `PtComparison` filters with `scope = Base` on the look-back
@@ -2312,9 +2346,13 @@ pub struct ZoneChangeRecord {
     /// the object has left the battlefield (CR 603.10a).
     #[serde(default)]
     pub base_power: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub base_power_fraction: HalfFraction,
     /// CR 208.4b + CR 613.4b: Base toughness as of the zone change.
     #[serde(default)]
     pub base_toughness: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub base_toughness_fraction: HalfFraction,
     /// CR 105.1 / CR 202.2: Colors as of the zone change.
     pub colors: Vec<ManaColor>,
     /// CR 202.3: Mana value as of the zone change.
@@ -2521,11 +2559,19 @@ struct ZoneChangeRecordWire {
     #[serde(default)]
     trigger_source_context: Option<TriggerSourceContext>,
     power: Option<i32>,
+    #[serde(default)]
+    power_fraction: HalfFraction,
     toughness: Option<i32>,
+    #[serde(default)]
+    toughness_fraction: HalfFraction,
     #[serde(default)]
     base_power: Option<i32>,
     #[serde(default)]
+    base_power_fraction: HalfFraction,
+    #[serde(default)]
     base_toughness: Option<i32>,
+    #[serde(default)]
+    base_toughness_fraction: HalfFraction,
     colors: Vec<ManaColor>,
     mana_value: u32,
     controller: PlayerId,
@@ -2581,9 +2627,13 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             trigger_definitions,
             trigger_source_context,
             power,
+            power_fraction,
             toughness,
+            toughness_fraction,
             base_power,
+            base_power_fraction,
             base_toughness,
+            base_toughness_fraction,
             colors,
             mana_value,
             controller,
@@ -2619,9 +2669,13 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             trigger_definitions,
             trigger_source_context,
             power,
+            power_fraction,
             toughness,
+            toughness_fraction,
             base_power,
+            base_power_fraction,
             base_toughness,
+            base_toughness_fraction,
             colors,
             mana_value,
             controller,
@@ -3089,6 +3143,10 @@ impl ZoneChangeRecord {
             is_suspected: false,
             was_prepared: false,
             departure: ZoneDeparture::Moved,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
+            base_power_fraction: Default::default(),
+            base_toughness_fraction: Default::default(),
         }
     }
 }
@@ -3561,11 +3619,15 @@ pub struct PendingDamagePostLoss {
     /// The post-replacement damage amount (== `primary_amount`: players have
     /// no excess and the excess-redirect rider is creature-only).
     pub actual_amount: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub actual_amount_fraction: HalfFraction,
     pub has_lifelink: bool,
     /// CR 702.15b + CR 120.4a: lifelink already-dealt bonus deferred from an
     /// earlier leg of the same modified event (redirect legs).
     #[serde(default)]
     pub lifelink_bonus: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub lifelink_bonus_fraction: HalfFraction,
     pub stage: DamagePostLossStage,
     /// CR 510.2: a combat leg's post-loss work, owned by the batch remnant
     /// rather than the shared drain (see the struct docs).
@@ -3605,8 +3667,12 @@ pub struct PendingDamagePostCounter {
     pub target: TargetRef,
     /// The post-replacement damage amount.
     pub actual_amount: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub actual_amount_fraction: HalfFraction,
     /// CR 120.4a + CR 120.10: the excess computed before the counters were placed; the resume never recomputes it.
     pub excess: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub excess_fraction: HalfFraction,
     /// CR 510.2: a combat leg's post-counter work, owned by the batch remnant
     /// rather than the shared drain (see the struct docs).
     #[serde(default)]
@@ -3642,6 +3708,8 @@ pub struct DamageRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_incarnation: Option<u64>,
     pub amount: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub amount_fraction: HalfFraction,
     #[serde(default)]
     pub is_combat: bool,
     // CR 608.2i + CR 608.2h: source characteristics snapshot at damage time
@@ -3658,8 +3726,12 @@ pub struct DamageRecord {
     pub source_keywords: Vec<Keyword>,
     #[serde(default)]
     pub source_power: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub source_power_fraction: HalfFraction,
     #[serde(default)]
     pub source_toughness: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub source_toughness_fraction: HalfFraction,
     #[serde(default)]
     pub source_colors: Vec<ManaColor>,
     #[serde(default)]
@@ -3680,6 +3752,8 @@ pub struct DamageRecord {
     /// "was dealt excess damage this turn" intervening-if condition class.
     #[serde(default)]
     pub excess: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub excess_fraction: HalfFraction,
 }
 
 /// The five-field damage event/journal join (CR 400.7 + CR 608.2k).
@@ -3756,6 +3830,7 @@ impl Default for DamageRecord {
             target_incarnation: None,
             source_incarnation: None,
             amount: 0,
+            amount_fraction: HalfFraction::Zero,
             is_combat: false,
             source_name: String::new(),
             source_core_types: Vec::new(),
@@ -3763,13 +3838,16 @@ impl Default for DamageRecord {
             source_supertypes: Vec::new(),
             source_keywords: Vec::new(),
             source_power: None,
+            source_power_fraction: HalfFraction::Zero,
             source_toughness: None,
+            source_toughness_fraction: HalfFraction::Zero,
             source_colors: Vec::new(),
             source_mana_value: 0,
             source_controller_snapshot: PlayerId(0),
             source_owner: PlayerId(0),
             source_zone: Zone::Battlefield,
             excess: 0,
+            excess_fraction: HalfFraction::Zero,
         }
     }
 }
@@ -3800,7 +3878,11 @@ pub struct CounterAddedRecord {
     pub supertypes: Vec<Supertype>,
     pub keywords: Vec<Keyword>,
     pub power: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub power_fraction: HalfFraction,
     pub toughness: Option<i32>,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub toughness_fraction: HalfFraction,
     pub colors: Vec<ManaColor>,
     pub mana_value: u32,
     pub controller: PlayerId,
@@ -3825,7 +3907,9 @@ impl Clone for CounterAddedRecord {
             supertypes,
             keywords,
             power,
+            power_fraction,
             toughness,
+            toughness_fraction,
             colors,
             mana_value,
             controller,
@@ -3844,7 +3928,9 @@ impl Clone for CounterAddedRecord {
             supertypes: supertypes.clone(),
             keywords: keywords.clone(),
             power: *power,
+            power_fraction: *power_fraction,
             toughness: *toughness,
+            toughness_fraction: *toughness_fraction,
             colors: colors.clone(),
             mana_value: *mana_value,
             controller: *controller,
@@ -3975,6 +4061,8 @@ pub struct CommanderDamageEntry {
     pub player: PlayerId,
     pub commander: ObjectId,
     pub damage: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub damage_fraction: HalfFraction,
 }
 
 /// Resume state for an ability chain paused mid-resolution.
@@ -4189,6 +4277,33 @@ pub struct ReplacementActionScope {
     /// The amount of the event the replacement replaced or prevented, bound when the
     /// replacement applied.
     pub amount: i32,
+    /// The Unhinged half point of `amount`; read together through [`Self::exact`].
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub amount_fraction: HalfFraction,
+}
+
+impl ReplacementActionScope {
+    /// A scope owning a whole amount.
+    pub const fn whole(amount: i32) -> Self {
+        Self {
+            amount,
+            amount_fraction: HalfFraction::Zero,
+        }
+    }
+
+    /// A scope owning `exact`, split into its wire fields.
+    pub fn from_exact(exact: HalfSigned) -> Self {
+        let (amount, amount_fraction) = exact.into_whole_and_fraction();
+        Self {
+            amount,
+            amount_fraction,
+        }
+    }
+
+    /// The exact amount the replacement action owns.
+    pub const fn exact(self) -> HalfSigned {
+        HalfSigned::from_whole_and_fraction(self.amount, self.amount_fraction)
+    }
 }
 
 /// CR 118.12 + CR 614.17b: how a resolution-time payment enters the single
@@ -20634,6 +20749,11 @@ pub enum WaitingFor {
         /// the UI MUST sum these values, not raw power, when gating the selection.
         #[serde(default)]
         contributions: Vec<i32>,
+        /// CR 702.122a: the half-point remainder of each contribution, aligned
+        /// with `contributions` (an Unhinged ½-power creature contributes
+        /// `0` + `Half`). Empty when no contribution has a half.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        contribution_fractions: Vec<HalfFraction>,
     },
     /// CR 702.184a: Player must pick another untapped creature they control
     /// to tap as the station ability's cost. The chosen creature's power
@@ -20657,6 +20777,10 @@ pub enum WaitingFor {
         /// aligned index-for-index with `eligible_creatures`.
         #[serde(default)]
         contributions: Vec<i32>,
+        /// CR 702.171a: the half-point remainder of each contribution, aligned
+        /// with `contributions`. Empty when no contribution has a half.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        contribution_fractions: Vec<HalfFraction>,
     },
     ScryChoice {
         player: PlayerId,
@@ -22896,6 +23020,8 @@ pub enum WaitingFor {
         player: PlayerId,
         attacker_id: ObjectId,
         total_damage: u32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        total_damage_fraction: HalfFraction,
         blockers: Vec<DamageSlot>,
         /// Available combat-damage assignment modes for this attacker.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -22923,6 +23049,8 @@ pub enum WaitingFor {
         player: PlayerId,
         blocker_id: ObjectId,
         total_damage: u32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        total_damage_fraction: HalfFraction,
         attackers: Vec<ObjectId>,
     },
     /// CR 601.2d: divide N among the announced targets while a spell or ability
@@ -23169,13 +23297,21 @@ pub enum CombatDamageSubStep {
 pub struct PendingLifelinkGain {
     pub controller: PlayerId,
     pub amount: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub amount_fraction: HalfFraction,
+}
+
+impl PendingLifelinkGain {
+    pub fn exact_amount(self) -> HalfMagnitude {
+        HalfMagnitude::from_whole_and_fraction(self.amount, self.amount_fraction)
+    }
 }
 
 /// CR 510.2 + CR 615.13 + CR 120.3: the in-flight combat-damage prevention
 /// aggregate — prevented amount per shield AND per recipient, for the duration of
 /// one simultaneous batch. `PreventedDamageEntry` is the serialized `Vec` form the
 /// same data takes once the batch is parked or drained.
-pub type CombatPreventionTally = HashMap<(AppliedReplacementKey, TargetRef), i32>;
+pub type CombatPreventionTally = HashMap<(AppliedReplacementKey, TargetRef), HalfMagnitude>;
 
 /// CR 510.2 + CR 615.13 + CR 120.3: one simultaneous combat-damage batch's
 /// prevented amount, per shield AND per RECIPIENT.
@@ -23199,6 +23335,17 @@ pub struct PreventedDamageEntry {
     /// filter.
     pub recipient: TargetRef,
     pub amount: i32,
+    /// Unhinged half-point remainder of the prevented amount (an exception to
+    /// CR 107.1a's integer-only rule); `amount` carries the whole part.
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub amount_fraction: HalfFraction,
+}
+
+impl PreventedDamageEntry {
+    /// The prevented amount with its Unhinged half-point remainder (CR 615.13).
+    pub fn exact_amount(&self) -> HalfMagnitude {
+        HalfMagnitude::from_whole_and_fraction(self.amount.max(0) as u32, self.amount_fraction)
+    }
 }
 
 /// CR 510.2 + CR 616.1: one combat-damage assignment still owed after a
@@ -23227,6 +23374,7 @@ pub struct PendingCombatLeg {
 /// CR 510.2: per-player, per-source combat damage for one step —
 /// `(player, [(source_id, amount)], step_total)`.
 pub type PerPlayerCombatDamage = (PlayerId, Vec<(ObjectId, u32)>, u32);
+pub type PerPlayerCombatDamageFractions = (PlayerId, Vec<(ObjectId, HalfFraction)>, HalfFraction);
 
 /// CR 510.2 + CR 616.1: the unfinished Phase C tail of a combat-damage batch
 /// whose leg paused on a life-loss replacement choice (the Horde damage→mill
@@ -23244,8 +23392,12 @@ pub struct PendingCombatPhaseCRemnant {
     /// CR 119.3 + CR 702.15b: per-source lifelink sums so far, in
     /// first-appearance order — `(source_id, controller, total_dealt)`.
     pub lifelink_by_source: Vec<(ObjectId, PlayerId, u32)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lifelink_by_source_fractions: Vec<(ObjectId, HalfFraction)>,
     /// CR 510.2: per-player, per-source damage so far.
     pub combat_damage_to_players: Vec<PerPlayerCombatDamage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub combat_damage_to_players_fractions: Vec<PerPlayerCombatDamageFractions>,
     /// CR 400.7: each applied source's incarnation.
     pub source_incarnations: Vec<ObjectIncarnationRef>,
 }
@@ -23411,6 +23563,8 @@ pub struct DamageSlot {
     /// Lethal damage threshold. CR 702.2c: With deathtouch, lethal = 1.
     /// Informational for non-trample; enforced before trample excess (CR 702.19b).
     pub lethal_minimum: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub lethal_minimum_fraction: HalfFraction,
 }
 
 /// CR 601.2d / CR 608.2d: when a `WaitingFor::DistributeAmong` division is
@@ -25543,6 +25697,8 @@ pub struct AssignedCombatDamage {
     pub source: crate::types::identifiers::ObjectIncarnationRef,
     pub target: AssignedDamageRecipient,
     pub amount: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub amount_fraction: HalfFraction,
 }
 
 /// Recipient of a frozen combat-damage assignment.
@@ -30125,7 +30281,7 @@ declare_game_state! {
     /// test fails with "missing expected owner". The alias exists only where
     /// clippy's `type_complexity` lint demands one — `replace_combat_damage_batch`'s
     /// return type.
-    pub combat_prevention_tally: Option<HashMap<(AppliedReplacementKey, TargetRef), i32>>,
+    pub combat_prevention_tally: Option<HashMap<(AppliedReplacementKey, TargetRef), HalfMagnitude>>,
     /// CR 510.2 + CR 615.13: which simultaneous batch opened `combat_prevention_tally`: a combat
     /// damage step's (CR 510.2), whose rider pauses settle inside the batch, or a noncombat
     /// instruction's, whose riders wait for its damage. Opened and restored with the tally, so
@@ -32736,6 +32892,12 @@ pub struct PostReplacementDrain {
     #[serde(default)]
     pub event_amount: Option<u32>,
 
+    /// The Unhinged half point of [`Self::event_amount`] (Little Girl's ½ prevented, Vile
+    /// Bile's 2½), carried beside the whole part like every exact amount on the wire. Read
+    /// together through [`Self::exact_event_amount`].
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub event_amount_fraction: HalfFraction,
+
     /// CR 109.5: the player "you" names inside this continuation — the
     /// controller of the object whose ability is doing the replacing.
     ///
@@ -32885,6 +33047,7 @@ impl PostReplacementDrain {
             event_source: None,
             event_target: None,
             event_amount: None,
+            event_amount_fraction: HalfFraction::Zero,
             controller: None,
             parked_entrants: Vec::new(),
         }
@@ -32901,9 +33064,26 @@ impl PostReplacementDrain {
             event_source: None,
             event_target: None,
             event_amount: None,
+            event_amount_fraction: HalfFraction::Zero,
             controller: None,
             parked_entrants: vec![entrant],
         }
+    }
+
+    /// CR 614.6 + CR 615.5: the exact amount this drain's replacement replaced or prevented.
+    pub fn exact_event_amount(&self) -> Option<HalfMagnitude> {
+        self.event_amount
+            .map(|whole| HalfMagnitude::from_whole_and_fraction(whole, self.event_amount_fraction))
+    }
+
+    /// Latch `amount` as the amount this drain's replacement replaced or prevented.
+    pub fn set_exact_event_amount(&mut self, amount: Option<HalfMagnitude>) {
+        let (whole, fraction) = amount.map_or((None, HalfFraction::Zero), |exact| {
+            let (whole, fraction) = exact.into_whole_and_fraction();
+            (Some(whole), fraction)
+        });
+        self.event_amount = whole;
+        self.event_amount_fraction = fraction;
     }
 
     /// The continuation, if it has not been taken for dispatch yet.
@@ -33787,6 +33967,8 @@ pub struct PendingReplacement {
     /// gained on resume. `0` for every parked event that is not such a leg.
     #[serde(default)]
     pub lifelink_bonus: u32,
+    #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+    pub lifelink_bonus_fraction: HalfFraction,
     /// CR 614.12a: set when an optional `MayCost` accept already paid its cost
     /// but the payment paused for an interactive sub-choice (e.g. Mox Diamond's
     /// "discard a land card" with more than one eligible land surfaces a
@@ -36486,12 +36668,24 @@ impl GameState {
                 colors: object.effective_colors(),
                 keywords: object.keywords.clone(),
                 power: object.power,
+                power_fraction: object.power_fraction,
                 toughness: object.toughness,
+                toughness_fraction: object.toughness_fraction,
                 // CR 208.4b + CR 613.4a-b: preserve current base P/T after
                 // characteristic-defining and setting effects for this event
                 // snapshot; counters and later modifiers are excluded.
                 base_power: object.layer_base_power.or(object.base_power),
+                base_power_fraction: if object.layer_base_power.is_some() {
+                    object.layer_base_power_fraction
+                } else {
+                    object.base_power_fraction
+                },
                 base_toughness: object.layer_base_toughness.or(object.base_toughness),
+                base_toughness_fraction: if object.layer_base_toughness.is_some() {
+                    object.layer_base_toughness_fraction
+                } else {
+                    object.base_toughness_fraction
+                },
                 mana_value: object.effective_mana_value(),
                 counters: object.counters.clone(),
                 is_token: object.is_token,
@@ -36620,9 +36814,13 @@ impl GameState {
                 colors: lki.colors.clone(),
                 keywords: lki.keywords.clone(),
                 power: lki.power,
+                power_fraction: lki.power_fraction,
                 toughness: lki.toughness,
+                toughness_fraction: lki.toughness_fraction,
                 base_power: lki.base_power,
+                base_power_fraction: lki.base_power_fraction,
                 base_toughness: lki.base_toughness,
+                base_toughness_fraction: lki.base_toughness_fraction,
                 mana_value: lki.mana_value,
                 counters: lki.counters.clone(),
                 is_token: context.is_some_and(|context| context.is_token),
@@ -37432,26 +37630,37 @@ impl GameState {
             ))?;
 
         match &command.edit {
-            ResolvedPlayerEdit::Life { delta } => {
-                let amount = nonzero_delta_magnitude(*delta)?;
-                let life = player
-                    .life
-                    .checked_add(*delta)
+            ResolvedPlayerEdit::Life { delta, fraction } => {
+                let signed_delta = HalfSigned::from_whole_and_fraction(*delta, *fraction);
+                if signed_delta.is_zero() {
+                    return Err(ResolvedPlayerEditReplayInvariantError::ZeroDelta);
+                }
+                let next_life = player
+                    .exact_life()
+                    .checked_add(signed_delta)
                     .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
-                if *delta > 0 {
-                    let gained = player
-                        .life_gained_this_turn
-                        .checked_add(amount)
+                let (next_life_i32, next_frac) = next_life.into_whole_and_fraction();
+                let mag = HalfMagnitude::from_halves(signed_delta.0.unsigned_abs());
+                if signed_delta.0 > 0 {
+                    let next_gained = player
+                        .exact_life_gained_this_turn()
+                        .checked_add(mag)
                         .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
-                    player.life = life;
-                    player.life_gained_this_turn = gained;
+                    let (gained_u32, gained_frac) = next_gained.into_whole_and_fraction();
+                    player.life = next_life_i32;
+                    player.life_fraction = next_frac;
+                    player.life_gained_this_turn = gained_u32;
+                    player.life_gained_this_turn_fraction = gained_frac;
                 } else {
-                    let lost = player
-                        .life_lost_this_turn
-                        .checked_add(amount)
+                    let next_lost = player
+                        .exact_life_lost_this_turn()
+                        .checked_add(mag)
                         .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
-                    player.life = life;
-                    player.life_lost_this_turn = lost;
+                    let (lost_u32, lost_frac) = next_lost.into_whole_and_fraction();
+                    player.life = next_life_i32;
+                    player.life_fraction = next_frac;
+                    player.life_lost_this_turn = lost_u32;
+                    player.life_lost_this_turn_fraction = lost_frac;
                 }
             }
             ResolvedPlayerEdit::Energy { delta } => {
@@ -41027,9 +41236,13 @@ impl GameState {
                 trigger_definitions,
                 trigger_source_context,
                 power: _,
+                power_fraction: _,
                 toughness: _,
+                toughness_fraction: _,
                 base_power: _,
+                base_power_fraction: _,
                 base_toughness: _,
+                base_toughness_fraction: _,
                 colors: _,
                 mana_value: _,
                 controller: _,
@@ -41562,9 +41775,13 @@ impl GameState {
                 name: _,
                 token_image_ref: _,
                 power: _,
+                power_fraction: _,
                 toughness: _,
+                toughness_fraction: _,
                 base_power: _,
+                base_power_fraction: _,
                 base_toughness: _,
+                base_toughness_fraction: _,
                 mana_value: _,
                 controller: _,
                 owner: _,
@@ -43952,13 +44169,16 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         // is a wrongful CR 104.4b draw.
         && x.phase_status == y.phase_status
         && x.damage_marked == y.damage_marked
+        && x.damage_marked_fraction == y.damage_marked_fraction
         && x.dealt_deathtouch_damage == y.dealt_deathtouch_damage
         && x.attached_to == y.attached_to
         && x.attachments == y.attachments
         && x.paired_with == y.paired_with
         && x.counters == y.counters
         && x.power == y.power
+        && x.power_fraction == y.power_fraction
         && x.toughness == y.toughness
+        && x.toughness_fraction == y.toughness_fraction
         && x.loyalty == y.loyalty
         && x.defense == y.defense
         && x.name == y.name
@@ -45165,7 +45385,13 @@ mod resolved_information_tests {
             .is_none());
 
         state
-            .resolve_and_apply_player_edit(PlayerId(0), ResolvedPlayerEdit::Life { delta: -2 })
+            .resolve_and_apply_player_edit(
+                PlayerId(0),
+                ResolvedPlayerEdit::Life {
+                    delta: -2,
+                    fraction: Default::default(),
+                },
+            )
             .unwrap();
         state
             .resolve_and_apply_information(
@@ -46795,6 +47021,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: Vec::new(),
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Squirrel".to_string(),
             static_abilities: Vec::new(),
@@ -50739,6 +50967,7 @@ mod tests {
             remaining: VecDeque::from(vec![PendingLifelinkGain {
                 controller: PlayerId(1),
                 amount: 3,
+                amount_fraction: Default::default(),
             }]),
             batch_events: vec![persisted_zone_change_event(record)],
             damage_to_players: vec![GameEvent::CombatDamageDealtToPlayer {
@@ -50746,6 +50975,8 @@ mod tests {
                 source_amounts: vec![(ObjectId(9_401), 3)],
                 total_damage: 3,
                 source_incarnations: vec![],
+                source_amount_fractions: Vec::new(),
+                total_damage_fraction: Default::default(),
             }],
             prevention_tally: vec![PreventedDamageEntry {
                 key: AppliedReplacementKey::Object {
@@ -50757,6 +50988,7 @@ mod tests {
                 // silently replaced it would still deserialize.
                 recipient: TargetRef::Player(PlayerId(1)),
                 amount: 2,
+                amount_fraction: HalfFraction::Zero,
             }],
             sub_step: CombatDamageSubStep::Regular,
             replacement: None,
@@ -50818,6 +51050,7 @@ mod tests {
             VecDeque::from(vec![PendingLifelinkGain {
                 controller: PlayerId(1),
                 amount: 3,
+                amount_fraction: Default::default(),
             }]),
             "the owed per-source gains round-trip unchanged"
         );
@@ -50830,6 +51063,7 @@ mod tests {
                 },
                 recipient: TargetRef::Player(PlayerId(1)),
                 amount: 2,
+                amount_fraction: HalfFraction::Zero,
             }],
             "the prevention tally round-trips as a Vec — an enum key is not a JSON map key — \
              and CR 120.3's recipient round-trips WITH it, so a parked batch resumes naming \
@@ -54748,6 +54982,8 @@ mod tests {
             player_id: PlayerId(1),
             amount: -2,
             new_total: crate::types::events::LifeTotalReading::default(),
+            amount_fraction: Default::default(),
+            new_total_fraction: Default::default(),
         };
         state.current_trigger_events = vec![event.clone()];
 
@@ -55499,7 +55735,9 @@ mod tests {
             supertypes: Vec::new(),
             keywords: Vec::new(),
             power: Some(2),
+            power_fraction: HalfFraction::Zero,
             toughness: Some(2),
+            toughness_fraction: HalfFraction::Zero,
             colors: Vec::new(),
             mana_value: 0,
             controller: PlayerId(0),
@@ -56503,6 +56741,10 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             }
         }
 
@@ -56625,6 +56867,10 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             }
         }
 
@@ -57040,6 +57286,10 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             }
         }
 
@@ -57255,6 +57505,8 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 amount: 1,
                 is_combat: false,
                 excess: 0,
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             }),
         );
         state
@@ -58674,6 +58926,8 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                     amount: 1,
                     is_combat: false,
                     excess: 0,
+                    amount_fraction: Default::default(),
+                    excess_fraction: Default::default(),
                 }))
             }
         }
@@ -58863,6 +59117,8 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                         is_combat: false,
                         excess: 0,
                         source_incarnation: Some(named),
+                        amount_fraction: Default::default(),
+                        excess_fraction: Default::default(),
                     }),
                 );
             }
@@ -58876,6 +59132,8 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                         source_amounts: vec![(x, 2)],
                         total_damage: 2,
                         source_incarnations: vec![reference],
+                        source_amount_fractions: Vec::new(),
+                        total_damage_fraction: Default::default(),
                     }),
                 );
             }
@@ -60011,6 +60269,8 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                     is_combat: false,
                     excess: 0,
                     source_incarnation: named,
+                    amount_fraction: Default::default(),
+                    excess_fraction: Default::default(),
                 }),
             );
             state
@@ -60033,6 +60293,8 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                     source_amounts: vec![(x, 2)],
                     total_damage: 2,
                     source_incarnations: vec![ObjectIncarnationRef::of(x, named)],
+                    source_amount_fractions: Vec::new(),
+                    total_damage_fraction: Default::default(),
                 }),
             );
             state
@@ -60394,6 +60656,8 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 is_combat: false,
                 excess: 0,
                 source_incarnation: Some(2 + shift),
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             }),
         );
         (state, source, remembered, selected)
@@ -60849,6 +61113,10 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             }
         }
         fn optional_frame(trigger_events: Vec<GameEvent>) -> ResolutionFrame {
@@ -61172,6 +61440,10 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             was_prepared: false,
             attachments: Vec::new(),
             intensity: 0,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
+            base_power_fraction: Default::default(),
+            base_toughness_fraction: Default::default(),
         };
         let position = |incarnation: u64| {
             let parked = PendingManaAbility {
@@ -61891,6 +62163,8 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             room_halves: None,
             prepare_face: None,
             name_origin: Default::default(),
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         })
     }
 
@@ -65062,6 +65336,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 valid_targets: Vec::new(),
             },
             WaitingFor::CrewVehicle {
+                contribution_fractions: Default::default(),
                 player,
                 vehicle_id: object_id,
                 crew_power: 1,
@@ -65074,6 +65349,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 eligible_creatures: Vec::new(),
             },
             WaitingFor::SaddleMount {
+                contribution_fractions: Default::default(),
                 player,
                 mount_id: object_id,
                 saddle_power: 1,
@@ -65131,6 +65407,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             valid_targets: vec![ObjectId(2), ObjectId(3)],
         };
         let crew = WaitingFor::CrewVehicle {
+            contribution_fractions: Default::default(),
             player: PlayerId(0),
             vehicle_id: ObjectId(1),
             crew_power: 3,
@@ -65143,6 +65420,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             eligible_creatures: vec![ObjectId(2)],
         };
         let saddle = WaitingFor::SaddleMount {
+            contribution_fractions: Default::default(),
             player: PlayerId(0),
             mount_id: ObjectId(1),
             saddle_power: 2,
@@ -65613,6 +65891,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         assert_eq!(
             wf,
             WaitingFor::CrewVehicle {
+                contribution_fractions: Default::default(),
                 player: PlayerId(0),
                 vehicle_id: ObjectId(30),
                 crew_power: 3,
@@ -69008,7 +69287,10 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             PlayerId(0),
             Duration::Permanent,
             TargetFilter::SelfRef,
-            vec![ContinuousModification::AddPower { value: 1 }],
+            vec![ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }],
             None,
             permission.clone(),
         );
@@ -69017,7 +69299,10 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             PlayerId(0),
             Duration::Permanent,
             TargetFilter::SelfRef,
-            vec![ContinuousModification::AddToughness { value: 1 }],
+            vec![ContinuousModification::AddToughness {
+                value: 1,
+                fraction: Default::default(),
+            }],
             None,
             permission,
         );
@@ -69027,7 +69312,10 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             PlayerId(0),
             Duration::Permanent,
             TargetFilter::SelfRef,
-            vec![ContinuousModification::AddPower { value: 2 }],
+            vec![ContinuousModification::AddPower {
+                value: 2,
+                fraction: Default::default(),
+            }],
             None,
             EndEffectPermission {
                 group: other_group,
@@ -69353,6 +69641,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 player_id: PlayerId(0),
                 amount: 1,
                 applied: HashSet::new(),
+                amount_fraction: Default::default(),
             },
             sacrifice_provenance: None,
             candidates: Vec::new(),
@@ -69370,6 +69659,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: policy,
+            lifelink_bonus_fraction: Default::default(),
         }
     }
 

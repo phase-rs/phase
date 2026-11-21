@@ -4104,7 +4104,10 @@ mod tests {
         let mut face = make_creature_face();
         face.static_abilities = vec![StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
-            .modifications(vec![ContinuousModification::AddPower { value: 2 }])];
+            .modifications(vec![ContinuousModification::AddPower {
+                value: 2,
+                fraction: Default::default(),
+            }])];
 
         let obj_id = create_object_from_card_face(&mut state, &face, PlayerId(0));
         let obj = &state.objects[&obj_id];

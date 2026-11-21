@@ -1891,6 +1891,7 @@ mod tests {
             player: PlayerId(2),
             commander: kiki,
             damage: 2,
+            damage_fraction: Default::default(),
         });
         let section = |board: &str| -> String {
             let (_, rest) = board

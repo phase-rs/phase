@@ -215,6 +215,9 @@ fn finish_combat(runner: &mut GameRunner) {
                         assignments,
                         trample_damage: remaining,
                         controller_damage: 0,
+                        assignments_fraction: Vec::new(),
+                        trample_damage_fraction: Default::default(),
+                        controller_damage_fraction: Default::default(),
                     })
                     .expect("the greedy trample assignment must be accepted");
             }

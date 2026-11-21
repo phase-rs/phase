@@ -895,10 +895,12 @@ impl DraftProfile {
             return false;
         };
         let reading = self.reading(card.set_code);
-        let power = match &face.power {
-            Some(PtValue::Fixed(p)) => *p,
-            _ => 0,
-        };
+        let power = face
+            .power
+            .as_ref()
+            .and_then(|power| power.exact_fixed())
+            .map(|power| power.whole_floor())
+            .unwrap_or(0);
         let evasive = is_evasive(face, reading) && power >= EVASIVE_THREAT_POWER;
         match reading {
             RoleReading::Classic => {
@@ -976,8 +978,9 @@ fn is_equipment(face: &CardFace) -> bool {
 /// the game rather than starting small (Kagemaro, First to Suffer).
 fn dominates_combat(face: &CardFace) -> bool {
     match &face.power {
-        Some(PtValue::Fixed(power)) => *power >= DOMINANT_THREAT_POWER,
-        Some(PtValue::Variable(_) | PtValue::Quantity(_)) => true,
+        Some(power) => power
+            .exact_fixed()
+            .is_none_or(|power| power.whole_floor() >= DOMINANT_THREAT_POWER),
         None => false,
     }
 }
@@ -1777,7 +1780,9 @@ fn sacrifice_is_removal(face: &CardFace) -> bool {
 fn modification_lowers_toughness(modification: &ContinuousModification) -> bool {
     matches!(
         modification,
-        ContinuousModification::AddToughness { value } if *value < 0
+        ContinuousModification::AddToughness { value, fraction }
+            if engine::types::ability::HalfSigned::from_whole_and_fraction(*value, *fraction)
+                < engine::types::ability::HalfSigned::ZERO
     ) || matches!(
         modification,
         ContinuousModification::AddDynamicToughness { value } if !quantity_is_non_negative(value)
@@ -4340,7 +4345,10 @@ mod tests {
         self_shrink.static_abilities.push(
             StaticDefinition::new(StaticMode::Continuous)
                 .affected(TargetFilter::SelfRef)
-                .modifications(vec![ContinuousModification::AddToughness { value: -1 }]),
+                .modifications(vec![ContinuousModification::AddToughness {
+                    value: -1,
+                    fraction: Default::default(),
+                }]),
         );
         assert!(!has_removal_static(&self_shrink));
     }

@@ -5286,6 +5286,8 @@ fn target_effect_detail(effect: &Effect) -> TargetEffectDetail {
 fn pt_direction(power: &PtValue, toughness: &PtValue) -> Option<PtDirection> {
     let fixed = |value: &PtValue| match value {
         PtValue::Fixed(amount) => Some(*amount),
+        // A half-point count has the sign of the value it counts.
+        PtValue::HalfPoints(halves) => Some(*halves),
         PtValue::Variable(_) | PtValue::Quantity(_) => None,
     };
     let (power, toughness) = (fixed(power)?, fixed(toughness)?);
@@ -16740,6 +16742,8 @@ mod tests {
             source_amounts: vec![],
             total_damage: 11,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         }];
 
         let mut ability = ResolvedAbility::new(
@@ -27281,6 +27285,10 @@ mod tests {
                 was_prepared: false,
                 attachments: Vec::new(),
                 intensity: 0,
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
+                base_power_fraction: Default::default(),
+                base_toughness_fraction: Default::default(),
             },
             incarnation: 0,
         });

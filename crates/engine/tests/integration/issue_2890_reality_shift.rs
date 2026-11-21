@@ -163,6 +163,10 @@ fn reality_shift_manifest_resolves_via_effect_context_object_snapshot() {
             was_prepared: false,
             attachments: Vec::new(),
             intensity: 0,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
+            base_power_fraction: Default::default(),
+            base_toughness_fraction: Default::default(),
         },
         incarnation: 0,
     });

@@ -106,7 +106,9 @@ fn jace_token_spec(controller: PlayerId, source_id: ObjectId) -> TokenSpec {
         characteristics: TokenCharacteristics {
             display_name: "Jace".to_string(),
             power: None,
+            power_fraction: Default::default(),
             toughness: None,
+            toughness_fraction: Default::default(),
             loyalty: Some(0),
             core_types: vec![CoreType::Planeswalker],
             subtypes: vec!["Jace".to_string()],

@@ -209,6 +209,8 @@ fn back_face_template(name: &str) -> BackFaceData {
         casting_options: vec![],
         layout_kind: Some(engine::types::card::LayoutKind::Transform),
         parse_warnings: vec![],
+        power_fraction: Default::default(),
+        toughness_fraction: Default::default(),
     }
 }
 

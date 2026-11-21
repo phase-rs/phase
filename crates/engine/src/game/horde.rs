@@ -1090,7 +1090,9 @@ fn reveal_library_token(
     let characteristics = TokenCharacteristics {
         display_name: obj.name.clone(),
         power: obj.power,
+        power_fraction: obj.power_fraction,
         toughness: obj.toughness,
+        toughness_fraction: obj.toughness_fraction,
         loyalty: obj.loyalty,
         core_types: obj.card_types.core_types.clone(),
         subtypes: obj.card_types.subtypes.clone(),

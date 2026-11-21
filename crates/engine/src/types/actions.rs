@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::ability::{LibraryPosition, TargetRef};
+use super::ability::{HalfFraction, LibraryPosition, TargetRef};
 use super::counter::CounterType;
 use super::game_state::{
     AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode,
@@ -833,10 +833,16 @@ pub enum GameAction {
         #[serde(default)]
         mode: CombatDamageAssignmentMode,
         assignments: Vec<(ObjectId, u32)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        assignments_fraction: Vec<(ObjectId, HalfFraction)>,
         trample_damage: u32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        trample_damage_fraction: HalfFraction,
         /// CR 702.19c: Damage to PW controller when trample-over-PW spills past loyalty.
         #[serde(default)]
         controller_damage: u32,
+        #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
+        controller_damage_fraction: HalfFraction,
     },
     /// CR 510.1d + CR 702.22k: Assign a blocking creature's combat damage,
     /// divided as the active player chooses, among the creatures it is blocking.
@@ -847,6 +853,8 @@ pub enum GameAction {
     /// attackers it blocks.
     AssignBlockerDamage {
         assignments: Vec<(ObjectId, u32)>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        assignments_fraction: Vec<(ObjectId, HalfFraction)>,
     },
     /// CR 601.2d: Distribute N among targets at casting time.
     DistributeAmong {
@@ -2427,7 +2435,7 @@ impl GameAction {
                 }
             }
             Self::AssignCombatDamage { assignments, .. }
-            | Self::AssignBlockerDamage { assignments } => {
+            | Self::AssignBlockerDamage { assignments, .. } => {
                 for (object_id, _) in assignments {
                     push_related_object_id(&mut ids, *object_id);
                 }

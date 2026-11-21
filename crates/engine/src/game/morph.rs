@@ -296,11 +296,17 @@ pub fn apply_face_down_creature_characteristics(
         FaceDownBody::Noncreature => (profile.power, profile.toughness),
     };
     obj.power = power;
+    obj.power_fraction = crate::types::ability::HalfFraction::Zero;
     obj.toughness = toughness;
+    obj.toughness_fraction = crate::types::ability::HalfFraction::Zero;
     obj.base_power = power;
+    obj.base_power_fraction = crate::types::ability::HalfFraction::Zero;
     obj.base_toughness = toughness;
+    obj.base_toughness_fraction = crate::types::ability::HalfFraction::Zero;
     obj.layer_base_power = power;
+    obj.layer_base_power_fraction = crate::types::ability::HalfFraction::Zero;
     obj.layer_base_toughness = toughness;
+    obj.layer_base_toughness_fraction = crate::types::ability::HalfFraction::Zero;
     obj.card_types = CardType {
         supertypes: vec![],
         core_types,

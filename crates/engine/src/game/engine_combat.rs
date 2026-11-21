@@ -646,6 +646,7 @@ pub(super) fn handle_assign_combat_damage(
     player: PlayerId,
     attacker_id: ObjectId,
     total_damage: u32,
+    total_damage_fraction: crate::types::ability::HalfFraction,
     blockers: &[DamageSlot],
     assignment_modes: &[CombatDamageAssignmentMode],
     trample: Option<TrampleKind>,
@@ -655,10 +656,20 @@ pub(super) fn handle_assign_combat_damage(
     _pw_controller: Option<PlayerId>,
     mode: CombatDamageAssignmentMode,
     assignments: &[(ObjectId, u32)],
+    assignments_fraction: &[(ObjectId, crate::types::ability::HalfFraction)],
     trample_damage: u32,
+    trample_damage_fraction: crate::types::ability::HalfFraction,
     controller_damage: u32,
+    controller_damage_fraction: crate::types::ability::HalfFraction,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    use crate::types::ability::{HalfFraction, HalfMagnitude};
+    let total_exact = HalfMagnitude::from_whole_and_fraction(total_damage, total_damage_fraction);
+    let trample_exact =
+        HalfMagnitude::from_whole_and_fraction(trample_damage, trample_damage_fraction);
+    let controller_exact =
+        HalfMagnitude::from_whole_and_fraction(controller_damage, controller_damage_fraction);
+
     if !assignment_modes.contains(&mode) {
         return Err(EngineError::InvalidAction(format!(
             "Combat damage assignment mode {:?} is not allowed for attacker {:?}",
@@ -667,7 +678,11 @@ pub(super) fn handle_assign_combat_damage(
     }
 
     if mode == CombatDamageAssignmentMode::AsThoughUnblocked {
-        if !assignments.is_empty() || trample_damage > 0 || controller_damage > 0 {
+        if !assignments.is_empty()
+            || !assignments_fraction.is_empty()
+            || trample_exact > HalfMagnitude::ZERO
+            || controller_exact > HalfMagnitude::ZERO
+        {
             return Err(EngineError::InvalidAction(
                 "As-though-unblocked assignment does not use blocker or trample splits".to_string(),
             ));
@@ -688,10 +703,10 @@ pub(super) fn handle_assign_combat_damage(
                     attacker_id
                 ))
             })?;
-        let damage_assignments = super::combat_damage::assign_damage_as_though_unblocked(
+        let damage_assignments = super::combat_damage::assign_damage_as_though_unblocked_exact(
             state,
             &attacker_info,
-            total_damage,
+            total_exact,
             trample,
         );
         if let Some(combat) = &mut state.combat {
@@ -727,22 +742,37 @@ pub(super) fn handle_assign_combat_damage(
         super::combat_damage::compute_pw_loyalty_threshold(state, attacker_info);
     // CR 506.4c + CR 510.1b: ordinary trample cannot assign excess when the
     // permanent relation has ended. Reject before any pending assignment writes.
-    if (trample_damage > 0 || controller_damage > 0) && excess_target.is_none() {
+    if (trample_exact > HalfMagnitude::ZERO || controller_exact > HalfMagnitude::ZERO)
+        && excess_target.is_none()
+    {
         return Err(EngineError::InvalidAction(
             "No current recipient for combat damage excess".to_string(),
         ));
     }
-    let assigned_total: u32 = assignments.iter().map(|(_, amount)| *amount).sum::<u32>()
-        + trample_damage
-        + controller_damage;
+    let fraction_for = |id: ObjectId| -> HalfFraction {
+        assignments_fraction
+            .iter()
+            .find(|(fid, _)| *fid == id)
+            .map_or(HalfFraction::Zero, |(_, f)| *f)
+    };
+    let blocker_exact = |id: ObjectId, whole: u32| -> HalfMagnitude {
+        HalfMagnitude::from_whole_and_fraction(whole, fraction_for(id))
+    };
+    let assigned_total = assignments
+        .iter()
+        .fold(HalfMagnitude::ZERO, |acc, (id, whole)| {
+            acc.saturating_add(blocker_exact(*id, *whole))
+        })
+        .saturating_add(trample_exact)
+        .saturating_add(controller_exact);
     let expected_total = if blockers.is_empty() && trample.is_none() {
-        0
+        HalfMagnitude::ZERO
     } else {
-        total_damage
+        total_exact
     };
     if assigned_total != expected_total {
         return Err(EngineError::InvalidAction(format!(
-            "Damage assignment total {} != expected {}",
+            "Damage assignment total {:?} != expected {:?}",
             assigned_total, expected_total
         )));
     }
@@ -757,13 +787,15 @@ pub(super) fn handle_assign_combat_damage(
         }
     }
 
-    if (trample_damage > 0 || controller_damage > 0) && trample.is_none() {
+    if (trample_exact > HalfMagnitude::ZERO || controller_exact > HalfMagnitude::ZERO)
+        && trample.is_none()
+    {
         return Err(EngineError::InvalidAction(
             "Cannot assign trample damage without trample".to_string(),
         ));
     }
 
-    if controller_damage > 0 {
+    if controller_exact > HalfMagnitude::ZERO {
         let is_valid = trample == Some(TrampleKind::OverPlaneswalkers)
             && pw_controller.is_some()
             && matches!(attack_target, AttackTarget::Planeswalker(_));
@@ -774,38 +806,31 @@ pub(super) fn handle_assign_combat_damage(
         }
 
         let loyalty_threshold = pw_loyalty.unwrap_or(0);
-        if trample_damage < loyalty_threshold {
+        if trample_exact < HalfMagnitude::from_whole(loyalty_threshold) {
             return Err(EngineError::InvalidAction(format!(
-                "Trample over planeswalkers: must assign at least {} to PW before {} to controller",
-                loyalty_threshold, controller_damage
+                "Trample over planeswalkers: must assign at least {} to PW before {:?} to controller",
+                loyalty_threshold, controller_exact
             )));
         }
     }
 
-    // CR 702.19b: lethal-to-all-blockers is a *precondition for assigning excess
-    // to the player/planeswalker/battle* — not an unconditional constraint on a
-    // trampling attacker. "The attacking creature's controller need not assign
-    // lethal damage to all those blocking creatures but in that case can't assign
-    // any damage to the player or planeswalker it's attacking." When no excess is
-    // assigned (trample_damage == 0 && controller_damage == 0), the controller may
-    // divide damage freely among blockers (CR 510.1c), so the per-blocker lethal
-    // minimum does not apply. Gating on actual excess is also what keeps states
-    // legal where the attacker's power is less than the summed lethal of all its
-    // blockers (e.g. 11 power vs six 2-toughness blockers = 12 lethal): assigning
-    // lethal to every blocker is impossible, but assigning all 11 among them with
-    // no trample-through is perfectly legal — and without this gate that attacker
-    // would have NO legal damage assignment, deadlocking combat.
-    if trample.is_some() && (trample_damage > 0 || controller_damage > 0) {
+    if trample.is_some()
+        && (trample_exact > HalfMagnitude::ZERO || controller_exact > HalfMagnitude::ZERO)
+    {
         for slot in blockers {
             let assigned = assignments
                 .iter()
                 .find(|(id, _)| *id == slot.blocker_id)
-                .map(|(_, amount)| *amount)
-                .unwrap_or(0);
-            if assigned < slot.lethal_minimum {
+                .map(|(id, amount)| blocker_exact(*id, *amount))
+                .unwrap_or(HalfMagnitude::ZERO);
+            let lethal_min = HalfMagnitude::from_whole_and_fraction(
+                slot.lethal_minimum,
+                slot.lethal_minimum_fraction,
+            );
+            if assigned < lethal_min {
                 return Err(EngineError::InvalidAction(format!(
-                    "Trample: blocker {:?} must receive at least {} lethal damage before excess to player",
-                    slot.blocker_id, slot.lethal_minimum
+                    "Trample: blocker {:?} must receive at least {:?} lethal damage before excess to player",
+                    slot.blocker_id, lethal_min
                 )));
             }
         }
@@ -813,37 +838,28 @@ pub(super) fn handle_assign_combat_damage(
 
     if let Some(combat) = &mut state.combat {
         for (blocker_id, amount) in assignments {
-            if *amount > 0 {
+            let exact = blocker_exact(*blocker_id, *amount);
+            if exact > HalfMagnitude::ZERO {
                 combat.pending_damage.push((
                     attacker_id,
-                    DamageAssignment {
-                        target: DamageTarget::Object(*blocker_id),
-                        amount: *amount,
-                    },
+                    DamageAssignment::new(DamageTarget::Object(*blocker_id), exact),
                 ));
             }
         }
 
-        if trample_damage > 0 {
+        if trample_exact > HalfMagnitude::ZERO {
             if let Some(target) = excess_target {
-                combat.pending_damage.push((
-                    attacker_id,
-                    DamageAssignment {
-                        target,
-                        amount: trample_damage,
-                    },
-                ));
+                combat
+                    .pending_damage
+                    .push((attacker_id, DamageAssignment::new(target, trample_exact)));
             }
         }
 
-        if controller_damage > 0 {
+        if controller_exact > HalfMagnitude::ZERO {
             if let Some(controller) = pw_controller {
                 combat.pending_damage.push((
                     attacker_id,
-                    DamageAssignment {
-                        target: DamageTarget::Player(controller),
-                        amount: controller_damage,
-                    },
+                    DamageAssignment::new(DamageTarget::Player(controller), controller_exact),
                 ));
             }
         }
@@ -861,28 +877,34 @@ pub(super) fn handle_assign_combat_damage(
 /// CR 510.1d + CR 702.22k: Record the active player's division of a banded
 /// blocker's combat damage among the attackers it's blocking, then re-enter the
 /// combat-damage resolver.
-///
-/// Validation (CR 510.1e — the total assignment is checked, not individual
-/// assignments): the submitted amounts must sum to the blocker's combat power,
-/// and every target must be an attacker the blocker is actually blocking. There
-/// is NO lethal requirement — a blocker divides its damage freely (CR 510.1d).
-///
-/// This handler is the validation boundary for submitted assignments.
 pub(super) fn handle_assign_blocker_damage(
     state: &mut GameState,
-    _player: PlayerId,
     blocker_id: ObjectId,
-    total_damage: u32,
+    total_exact: crate::types::ability::HalfMagnitude,
     attackers: &[ObjectId],
     assignments: &[(ObjectId, u32)],
+    assignments_fraction: &[(ObjectId, crate::types::ability::HalfFraction)],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    // CR 510.1e: the total damage assigned must equal the blocker's combat power.
-    let assigned_total: u32 = assignments.iter().map(|(_, amount)| *amount).sum();
-    if assigned_total != total_damage {
+    use crate::types::ability::{HalfFraction, HalfMagnitude};
+    let fraction_for = |id: ObjectId| -> HalfFraction {
+        assignments_fraction
+            .iter()
+            .find(|(fid, _)| *fid == id)
+            .map_or(HalfFraction::Zero, |(_, f)| *f)
+    };
+    let assigned_total = assignments
+        .iter()
+        .fold(HalfMagnitude::ZERO, |acc, (id, whole)| {
+            acc.saturating_add(HalfMagnitude::from_whole_and_fraction(
+                *whole,
+                fraction_for(*id),
+            ))
+        });
+    if assigned_total != total_exact {
         return Err(EngineError::InvalidAction(format!(
-            "Blocker {:?} damage assignment total {} != combat power {}",
-            blocker_id, assigned_total, total_damage
+            "Blocker {:?} damage assignment total {:?} != combat power {:?}",
+            blocker_id, assigned_total, total_exact
         )));
     }
 
@@ -897,24 +919,15 @@ pub(super) fn handle_assign_blocker_damage(
     }
 
     if let Some(combat) = &mut state.combat {
-        // Record into the per-sub-step resume-skip key so the re-entered blocker
-        // loop in `collect_damage_assignments` skips this blocker. A non-empty
-        // entry is what the skip check keys on; mirror the auto-split bookkeeping.
         let mut recorded: Vec<DamageAssignment> = Vec::new();
         for (attacker_id, amount) in assignments {
-            if *amount > 0 {
-                let da = DamageAssignment {
-                    target: DamageTarget::Object(*attacker_id),
-                    amount: *amount,
-                };
+            let exact = HalfMagnitude::from_whole_and_fraction(*amount, fraction_for(*attacker_id));
+            if exact > HalfMagnitude::ZERO {
+                let da = DamageAssignment::new(DamageTarget::Object(*attacker_id), exact);
                 combat.pending_damage.push((blocker_id, da.clone()));
                 recorded.push(da);
             }
         }
-        // Guard against an all-zero division (would otherwise leave the skip key
-        // empty and re-prompt forever); total_damage > 0 is guaranteed by the
-        // power==0 skip in `collect_damage_assignments`, and the total-equality
-        // check above ensures `recorded` is non-empty here.
         combat.damage_assignments.insert(blocker_id, recorded);
     }
 
@@ -1310,9 +1323,11 @@ mod tests {
             PlayerId(0),
             attacker,
             5,
+            Default::default(),
             &[DamageSlot {
                 blocker_id: blocker,
                 lethal_minimum: 4,
+                lethal_minimum_fraction: Default::default(),
             }],
             &[
                 CombatDamageAssignmentMode::Normal,
@@ -1325,8 +1340,11 @@ mod tests {
             None,
             CombatDamageAssignmentMode::AsThoughUnblocked,
             &[],
+            &[],
             0,
+            Default::default(),
             0,
+            Default::default(),
             &mut events,
         )
         .unwrap();
@@ -1367,9 +1385,11 @@ mod tests {
             PlayerId(0),
             attacker,
             4,
+            Default::default(),
             &[DamageSlot {
                 blocker_id: blocker,
                 lethal_minimum: 4,
+                lethal_minimum_fraction: Default::default(),
             }],
             &[
                 CombatDamageAssignmentMode::Normal,
@@ -1382,8 +1402,11 @@ mod tests {
             None,
             CombatDamageAssignmentMode::AsThoughUnblocked,
             &[],
+            &[],
             0,
+            Default::default(),
             0,
+            Default::default(),
             &mut events,
         )
         .unwrap();
@@ -1423,6 +1446,7 @@ mod tests {
             .map(|&b| DamageSlot {
                 blocker_id: b,
                 lethal_minimum: 2,
+                lethal_minimum_fraction: Default::default(),
             })
             .collect();
         // Lethal to five blockers (10), remainder (1) to the sixth, none to player.
@@ -1438,6 +1462,7 @@ mod tests {
             PlayerId(0),
             attacker,
             11,
+            Default::default(),
             &damage_slots,
             &[CombatDamageAssignmentMode::Normal],
             Some(TrampleKind::Standard),
@@ -1447,8 +1472,11 @@ mod tests {
             None,
             CombatDamageAssignmentMode::Normal,
             &assignments,
+            &[],
             0,
+            Default::default(),
             0,
+            Default::default(),
             &mut events,
         );
 
@@ -1491,9 +1519,11 @@ mod tests {
             PlayerId(0),
             attacker,
             5,
+            Default::default(),
             &[DamageSlot {
                 blocker_id: blocker,
                 lethal_minimum: 2,
+                lethal_minimum_fraction: Default::default(),
             }],
             &[CombatDamageAssignmentMode::Normal],
             Some(TrampleKind::Standard),
@@ -1504,8 +1534,11 @@ mod tests {
             CombatDamageAssignmentMode::Normal,
             // Only 1 to the blocker (under lethal 2), 4 tramples to player — illegal.
             &[(blocker, 1)],
+            &[],
             4,
+            Default::default(),
             0,
+            Default::default(),
             &mut events,
         );
 

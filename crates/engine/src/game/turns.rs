@@ -2296,9 +2296,12 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         player.has_drawn_this_turn = false;
         player.lands_played_this_turn = 0;
         player.life_gained_this_turn = 0;
+        player.life_gained_this_turn_fraction = crate::types::ability::HalfFraction::Zero;
         // CR 603.4: Snapshot life lost before reset for "lost life during their last turn" conditions.
         player.life_lost_last_turn = player.life_lost_this_turn;
+        player.life_lost_last_turn_fraction = player.life_lost_this_turn_fraction;
         player.life_lost_this_turn = 0;
+        player.life_lost_this_turn_fraction = crate::types::ability::HalfFraction::Zero;
         player.energy_paid_or_lost_this_turn = 0;
         player.descended_this_turn = false;
         // CR 603.4: Snapshot draws before reset for "if you drew a card last
@@ -3276,15 +3279,14 @@ fn clear_cleanup_damage(state: &mut GameState, events: &mut Vec<GameEvent>) {
             state
                 .objects
                 .get(id)
-                .map(|obj| obj.damage_marked > 0)
+                .map(|obj| !obj.exact_damage_marked().is_zero())
                 .unwrap_or(false)
         })
         .collect();
 
     for id in to_clear {
         if let Some(obj) = state.objects.get_mut(&id) {
-            obj.damage_marked = 0;
-            obj.dealt_deathtouch_damage = false;
+            crate::game::effects::remove_all_damage::heal_marked_damage(obj);
             events.push(GameEvent::DamageCleared { object_id: id });
         }
     }
@@ -4913,7 +4915,10 @@ mod tests {
                     },
                 },
                 TargetFilter::SpecificObject { id: object_id },
-                vec![ContinuousModification::AddPower { value: 1 }],
+                vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }],
                 None,
             )
             .expect("the fixture's duration begins")
@@ -11453,7 +11458,10 @@ card into your hand at the beginning of your next end step.";
                 PlayerId(0),
                 duration,
                 TargetFilter::SpecificObject { id: foe },
-                vec![ContinuousModification::AddPower { value: 1 }],
+                vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }],
                 None,
             );
         }

@@ -686,17 +686,20 @@ mod tests {
                 player: PlayerId(0),
                 commander: cmdr_a,
                 damage: 12,
+                damage_fraction: Default::default(),
             },
             CommanderDamageEntry {
                 player: PlayerId(0),
                 commander: cmdr_b,
                 damage: 7,
+                damage_fraction: Default::default(),
             },
             // Unrelated entry: someone else's damage — must NOT appear in P0's map.
             CommanderDamageEntry {
                 player: PlayerId(1),
                 commander: ObjectId(9999),
                 damage: 3,
+                damage_fraction: Default::default(),
             },
         ];
 
@@ -731,11 +734,13 @@ mod tests {
                 player: PlayerId(0),
                 commander: partner_a,
                 damage: 6,
+                damage_fraction: Default::default(),
             },
             CommanderDamageEntry {
                 player: PlayerId(0),
                 commander: partner_b,
                 damage: 4,
+                damage_fraction: Default::default(),
             },
         ];
 

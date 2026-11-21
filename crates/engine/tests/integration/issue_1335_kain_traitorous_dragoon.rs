@@ -220,6 +220,8 @@ fn kain_resolve_chain_transfers_control_from_damage_dealt_event() {
         is_combat: true,
         excess: 0,
         source_incarnation: None,
+        amount_fraction: Default::default(),
+        excess_fraction: Default::default(),
     });
 
     let resolved = build_resolved_from_def(execute, kain, PlayerId(0));
@@ -304,6 +306,8 @@ fn kain_stack_trigger_resolution_transfers_control_and_rewards_attacker() {
         is_combat: true,
         excess: 0,
         source_incarnation: None,
+        amount_fraction: Default::default(),
+        excess_fraction: Default::default(),
     };
     process_triggers(&mut state, &[event]);
     drain_order_triggers_with_identity(&mut state);

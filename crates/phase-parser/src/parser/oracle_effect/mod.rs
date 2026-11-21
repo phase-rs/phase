@@ -61679,8 +61679,8 @@ mod additional_phase_recipient_subject_tests {
             assert_eq!(
                 statics[0].modifications,
                 vec![
-                    ContinuousModification::AddPower { value: 1 },
-                    ContinuousModification::AddToughness { value: 1 }
+                    ContinuousModification::add_power(1),
+                    ContinuousModification::add_toughness(1)
                 ]
             );
             assert_eq!(

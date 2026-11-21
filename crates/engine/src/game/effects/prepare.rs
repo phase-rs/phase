@@ -518,8 +518,7 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     // permanent's battlefield state (marked damage, attachment and pairing
     // relationships, entry bookkeeping, combat-assignment flags, face
     // orientation) and none of the alternative forms it was cast or exists in.
-    copy.damage_marked = 0;
-    copy.dealt_deathtouch_damage = false;
+    super::remove_all_damage::heal_marked_damage(copy);
     copy.attached_to = None;
     copy.attachments.clear();
     copy.paired_with = None;
@@ -2686,6 +2685,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: Some(state.objects[&dealer].incarnation),
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
 
         let stale = damage(&state);
@@ -2738,6 +2739,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: Some(dealer_epoch),
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let ability = ResolvedAbility::new(
             Effect::BecomePrepared {
@@ -2985,6 +2988,8 @@ mod tests {
                 casting_options: Vec::new(),
                 layout_kind: Some(LayoutKind::Prepare),
                 parse_warnings: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             }
         }
 

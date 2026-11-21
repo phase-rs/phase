@@ -41,7 +41,10 @@ fn setup(
     if anthem {
         let static_def = StaticDefinition::new(StaticMode::Continuous)
             .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
-            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+            .modifications(vec![ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            }]);
         scenario
             .add_creature(P0, "Self-Destruct Test Anthem", 0, 5)
             .with_static_definition(static_def);

@@ -493,11 +493,26 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::DeclareBlockers { assignments } => {
             bound_list("DeclareBlockers.assignments", assignments.len())?;
         }
-        GameAction::AssignCombatDamage { assignments, .. } => {
+        GameAction::AssignCombatDamage {
+            assignments,
+            assignments_fraction,
+            ..
+        } => {
             bound_list("AssignCombatDamage.assignments", assignments.len())?;
+            bound_list(
+                "AssignCombatDamage.assignments_fraction",
+                assignments_fraction.len(),
+            )?;
         }
-        GameAction::AssignBlockerDamage { assignments } => {
+        GameAction::AssignBlockerDamage {
+            assignments,
+            assignments_fraction,
+        } => {
             bound_list("AssignBlockerDamage.assignments", assignments.len())?;
+            bound_list(
+                "AssignBlockerDamage.assignments_fraction",
+                assignments_fraction.len(),
+            )?;
         }
         GameAction::ReorderHand { order } => {
             bound_list("ReorderHand.order", order.len())?;

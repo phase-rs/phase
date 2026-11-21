@@ -61,8 +61,14 @@ fn the_swarmweaver_compound_subject_anthem_is_not_split() {
     assert_eq!(
         anthem.modifications,
         vec![
-            ContinuousModification::AddPower { value: 1 },
-            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::AddPower {
+                value: 1,
+                fraction: Default::default(),
+            },
+            ContinuousModification::AddToughness {
+                value: 1,
+                fraction: Default::default(),
+            },
             ContinuousModification::AddKeyword {
                 keyword: Keyword::Deathtouch
             },

@@ -146,6 +146,10 @@ fn gandalf_parsed_static_doubles_legendary_reentry_triggers() {
             is_suspected: false,
             was_prepared: false,
             departure: engine::types::game_state::ZoneDeparture::Moved,
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
+            base_power_fraction: Default::default(),
+            base_toughness_fraction: Default::default(),
         }),
     };
 

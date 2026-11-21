@@ -4888,6 +4888,7 @@ fn szadeks_substitution_leaves_a_shared_shield_for_the_other_attacker() {
                     source_id,
                     target: TargetRef::Player(player),
                     amount,
+                    ..
                 } if *player == P1 => Some((*source_id, *amount)),
                 _ => None,
             })

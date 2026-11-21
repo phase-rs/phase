@@ -3,6 +3,7 @@ use engine::ai_support::legal_actions;
 use engine::game::apply_as_current;
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::{HalfFraction, HalfMagnitude};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::zones::Zone;
@@ -185,28 +186,66 @@ fn assert_zone_consistency(state: &GameState) {
 }
 
 fn assert_assign_combat_damage_actions_respect_budget(state: &GameState) {
-    if let WaitingFor::AssignCombatDamage { total_damage, .. } = &state.waiting_for {
+    if let WaitingFor::AssignCombatDamage {
+        total_damage,
+        total_damage_fraction,
+        ..
+    } = &state.waiting_for
+    {
+        // CR 510.1c: the exact budget, including an Unhinged half point.
+        let budget = HalfMagnitude::from_whole_and_fraction(*total_damage, *total_damage_fraction);
         for action in legal_actions(state) {
             if let GameAction::AssignCombatDamage {
                 mode,
                 assignments,
+                assignments_fraction,
                 trample_damage,
+                trample_damage_fraction,
                 controller_damage,
+                controller_damage_fraction,
             } = action
             {
+                let trample =
+                    HalfMagnitude::from_whole_and_fraction(trample_damage, trample_damage_fraction);
+                let controller = HalfMagnitude::from_whole_and_fraction(
+                    controller_damage,
+                    controller_damage_fraction,
+                );
                 match mode {
                     engine::types::game_state::CombatDamageAssignmentMode::Normal => {
-                        let assigned_total: u32 =
-                            assignments.iter().map(|(_, amount)| *amount).sum();
+                        assert!(
+                            assignments_fraction
+                                .iter()
+                                .all(|(id, _)| assignments.iter().any(|(a, _)| a == id)),
+                            "fractional assignments must name an assigned blocker"
+                        );
+                        let fraction_for = |id| {
+                            assignments_fraction
+                                .iter()
+                                .find(|(fid, _)| *fid == id)
+                                .map_or(HalfFraction::Zero, |(_, f)| *f)
+                        };
+                        let assigned_total = assignments
+                            .iter()
+                            .fold(HalfMagnitude::ZERO, |acc, (id, whole)| {
+                                acc.saturating_add(HalfMagnitude::from_whole_and_fraction(
+                                    *whole,
+                                    fraction_for(*id),
+                                ))
+                            })
+                            .saturating_add(trample)
+                            .saturating_add(controller);
                         assert_eq!(
-                            assigned_total + trample_damage + controller_damage,
-                            *total_damage,
-                            "combat damage assignments must spend the full damage budget"
+                            assigned_total, budget,
+                            "combat damage assignments must spend the full exact damage budget"
                         );
                     }
                     engine::types::game_state::CombatDamageAssignmentMode::AsThoughUnblocked => {
                         assert!(
-                            assignments.is_empty() && trample_damage == 0 && controller_damage == 0,
+                            assignments.is_empty()
+                                && assignments_fraction.is_empty()
+                                && trample.is_zero()
+                                && controller.is_zero(),
                             "as-though-unblocked combat damage should not use blocker/trample splits"
                         );
                     }
@@ -271,6 +310,62 @@ proptest! {
 
         exercise_state(state, &picks, step_count);
     }
+}
+
+/// CR 510.1c: Vile Bile (2½/2½) blocked by two 2/2s prompts for a 2½ budget.
+/// Every generated assignment spends exactly 2½ (one carries the half point)
+/// and is reducer-legal.
+#[test]
+fn half_point_assignment_budget_is_spent_exactly() {
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let Some(db) = crate::support::shared_card_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+    let bile = scenario.add_real_card(P0, "Vile Bile", Zone::Battlefield, db);
+    let blocker_a = scenario.add_creature(P1, "Blocker A", 2, 2).id();
+    let blocker_b = scenario.add_creature(P1, "Blocker B", 2, 2).id();
+    let mut runner = scenario.build();
+    runner.pass_both_players();
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(bile, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("declare attackers should succeed");
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![(blocker_a, bile), (blocker_b, bile)],
+        })
+        .expect("declare blockers should succeed");
+    runner.pass_both_players();
+    let state = runner.state().clone();
+    let WaitingFor::AssignCombatDamage {
+        total_damage,
+        total_damage_fraction,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!("expected an assignment prompt, got {:?}", state.waiting_for);
+    };
+    assert_eq!(
+        (*total_damage, *total_damage_fraction),
+        (2, HalfFraction::Half),
+        "the budget is Vile Bile's exact 2½ power"
+    );
+    assert!(
+        legal_actions(&state).iter().any(|action| matches!(
+            action,
+            GameAction::AssignCombatDamage { assignments_fraction, .. }
+                if !assignments_fraction.is_empty()
+        )),
+        "a generated assignment carries the half point"
+    );
+    assert_assign_combat_damage_actions_respect_budget(&state);
+    assert_all_legal_actions_apply(&state);
 }
 
 #[test]

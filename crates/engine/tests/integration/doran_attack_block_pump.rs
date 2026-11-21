@@ -187,8 +187,10 @@ fn doran_pump_uses_current_pt_at_resolution() {
     // A 1/1 attacker carrying its own +0/+2 continuous static (anthem-equivalent
     // self-modification) so its post-layer P/T is 1/3 before combat.
     let mut attacker_builder = scenario.add_creature(P0, "Anthemed Bear", 1, 1);
-    attacker_builder
-        .with_continuous_static(vec![ContinuousModification::AddToughness { value: 2 }]);
+    attacker_builder.with_continuous_static(vec![ContinuousModification::AddToughness {
+        value: 2,
+        fraction: Default::default(),
+    }]);
     let attacker = attacker_builder.id();
 
     let mut runner = scenario.build();

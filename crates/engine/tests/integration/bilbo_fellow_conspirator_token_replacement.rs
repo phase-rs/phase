@@ -58,6 +58,8 @@ fn artifact_token_spec(subtype: &str, controller: PlayerId) -> TokenSpec {
             supertypes: Vec::new(),
             colors: Vec::new(),
             keywords: Vec::new(),
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         },
         script_name: subtype.to_string(),
         static_abilities: Vec::new(),

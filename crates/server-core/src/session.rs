@@ -8959,9 +8959,11 @@ mod tests {
             player: assigning_player,
             attacker_id: attacker,
             total_damage: 5,
+            total_damage_fraction: Default::default(),
             blockers: vec![DamageSlot {
                 blocker_id: blocker,
                 lethal_minimum: 2,
+                lethal_minimum_fraction: Default::default(),
             }],
             assignment_modes: vec![CombatDamageAssignmentMode::Normal],
             trample: Some(engine::game::combat::TrampleKind::Standard),
@@ -8974,8 +8976,11 @@ mod tests {
         let legal_non_candidate = GameAction::AssignCombatDamage {
             mode: CombatDamageAssignmentMode::Normal,
             assignments: vec![(blocker, 5)],
+            assignments_fraction: Vec::new(),
             trample_damage: 0,
+            trample_damage_fraction: Default::default(),
             controller_damage: 0,
+            controller_damage_fraction: Default::default(),
         };
         let (candidates, _, _) = engine_legal_actions_full(&session.state);
         assert!(
@@ -8996,8 +9001,11 @@ mod tests {
                 GameAction::AssignCombatDamage {
                     mode: CombatDamageAssignmentMode::Normal,
                     assignments: vec![(blocker, 4)],
+                    assignments_fraction: Vec::new(),
                     trample_damage: 0,
+                    trample_damage_fraction: Default::default(),
                     controller_damage: 0,
+                    controller_damage_fraction: Default::default(),
                 },
                 None,
             );

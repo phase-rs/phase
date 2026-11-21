@@ -397,8 +397,14 @@ fn station_threshold_static_reapplies_and_spacecraft_becomes_creature() {
                     ContinuousModification::AddType {
                         core_type: CoreType::Creature,
                     },
-                    ContinuousModification::SetPower { value: 5 },
-                    ContinuousModification::SetToughness { value: 5 },
+                    ContinuousModification::SetPower {
+                        value: 5,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::SetToughness {
+                        value: 5,
+                        fraction: Default::default(),
+                    },
                 ])
                 .description("CR 721.2b: Spacecraft is an artifact creature at 8+".to_string()),
         );

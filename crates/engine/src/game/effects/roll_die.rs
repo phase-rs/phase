@@ -1779,6 +1779,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
         let draw = ResolvedAbility::new(
             Effect::Draw {
@@ -1846,6 +1848,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
         let draw = ResolvedAbility::new(
             Effect::Draw {

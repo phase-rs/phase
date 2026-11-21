@@ -1,7 +1,7 @@
 use crate::game::game_object::{ObjectIdentityBindingExt, ObjectIncarnationRefExt};
 use crate::types::ability::{
-    ControllerRef, FilterProp, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
-    TypeFilter, TypedFilter,
+    ControllerRef, FilterProp, HalfMagnitude, HalfSigned, ResolvedAbility, TargetChoiceTiming,
+    TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -3802,42 +3802,81 @@ pub(crate) fn extract_player_from_event(
     }
 }
 
-/// CR 603.7c: Extract a numeric amount from a trigger event.
-/// Returns the quantity relevant to the event type (damage dealt, life changed, etc.).
+/// CR 603.7c: Extract a numeric amount from a trigger event, floored to a whole
+/// number for integer-only consumers. See [`extract_exact_amount_from_event`].
 pub(crate) fn extract_amount_from_event(event: &crate::types::events::GameEvent) -> Option<i32> {
+    extract_exact_amount_from_event(event).map(HalfSigned::whole_floor)
+}
+
+/// CR 603.7c + CR 608.2c: Extract the exact numeric amount from a trigger event.
+/// Returns the quantity relevant to the event type (damage dealt, life changed, etc.),
+/// keeping an Unhinged half-point remainder so "that much damage" / "that much life"
+/// reads the amount the event actually carried (Spitemare dealt 2½ deals 2½).
+pub(crate) fn extract_exact_amount_from_event(
+    event: &crate::types::events::GameEvent,
+) -> Option<HalfSigned> {
     use crate::types::events::GameEvent;
+    let whole = |amount: i32| Some(HalfSigned::from_whole(amount));
     match event {
-        GameEvent::DamageDealt { amount, .. } => Some(*amount as i32),
+        GameEvent::DamageDealt {
+            amount,
+            amount_fraction,
+            ..
+        } => Some(HalfSigned::from_half_magnitude(
+            HalfMagnitude::from_whole_and_fraction(*amount, *amount_fraction),
+        )),
         // CR 615.5: Prevention effects' additional effects refer to the amount of
         // damage that was prevented. Exposing the prevented amount here lets
         // `EventContextAmount` resolve the "for each 1 damage prevented this way"
         // class (Phyrexian Hydra, Vigor, Stormwild Capridor, Hostility) when the
         // post-replacement follow-up resolves.
-        GameEvent::DamagePrevented { amount, .. } => Some(*amount as i32),
-        GameEvent::LifeChanged { amount, .. } => Some(amount.abs()),
-        GameEvent::CardsDrawn { count, .. } => Some(*count as i32),
+        GameEvent::DamagePrevented {
+            amount,
+            amount_fraction,
+            ..
+        } => Some(HalfSigned::from_half_magnitude(
+            HalfMagnitude::from_whole_and_fraction(*amount, *amount_fraction),
+        )),
+        // CR 119.3: "that much life" is the magnitude of the signed change; a
+        // loss of 2½ is stored as `(-3, Half)` and reads 2½, not 3.
+        GameEvent::LifeChanged {
+            amount,
+            amount_fraction,
+            ..
+        } => Some(HalfSigned(
+            HalfSigned::from_whole_and_fraction(*amount, *amount_fraction)
+                .0
+                .abs(),
+        )),
+        GameEvent::CardsDrawn { count, .. } => whole(*count as i32),
         // CR 122.1 + CR 107.1: counter counts are `u32` with no rules maximum;
         // the event keeps the true count and "that many" saturates at
         // `i32::MAX` rather than wrapping negative.
         GameEvent::CounterAdded { count, .. } | GameEvent::CounterRemoved { count, .. } => {
-            Some(crate::game::arithmetic::u32_to_i32_saturating(*count))
+            whole(crate::game::arithmetic::u32_to_i32_saturating(*count))
         }
-        GameEvent::Discarded { .. } => Some(1),
+        GameEvent::Discarded { .. } => whole(1),
         // CR 603.2c: one milled card per event.
-        GameEvent::Milled { .. } => Some(1),
+        GameEvent::Milled { .. } => whole(1),
         // CR 508.1m + CR 603.2c: Batched attack-trigger context stores the
         // attackers that satisfied the trigger subject, so "that many" reads
         // the size of that contextual attack event.
-        GameEvent::AttackersDeclared { attacker_ids, .. } => Some(attacker_ids.len() as i32),
+        GameEvent::AttackersDeclared { attacker_ids, .. } => whole(attacker_ids.len() as i32),
         // CR 706.2 / CR 706.7: the final number of a die roll is its result. Lets
         // `EventContextAmount` resolve "where X is the result" pump effects. The
         // symbolic planar die has no numeric result (`None`, CR 901.9d), so such
         // effects ignore it.
-        GameEvent::DieRolled { result, .. } => result.map(i32::from),
+        GameEvent::DieRolled { result, .. } => result.map(|r| HalfSigned::from_whole(i32::from(r))),
         // CR 120.1 + CR 603.7c: total combat damage dealt to this player by the
         // matching source set. For DamageDoneOnceByController triggers, this is
         // the filtered total stamped by matching_damage_done_once_by_controller_event.
-        GameEvent::CombatDamageDealtToPlayer { total_damage, .. } => Some(*total_damage as i32),
+        GameEvent::CombatDamageDealtToPlayer {
+            total_damage,
+            total_damage_fraction,
+            ..
+        } => Some(HalfSigned::from_half_magnitude(
+            HalfMagnitude::from_whole_and_fraction(*total_damage, *total_damage_fraction),
+        )),
         _ => None,
     }
 }
@@ -4854,6 +4893,8 @@ mod tests {
                 is_combat: false,
                 excess: 0,
                 source_incarnation: Some(3),
+                amount_fraction: Default::default(),
+                excess_fraction: Default::default(),
             },
         ];
         for event in &events {
@@ -5219,6 +5260,8 @@ mod tests {
             source_amounts: vec![(ObjectId(1), 7)],
             total_damage: 7,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         };
         assert_eq!(extract_amount_from_event(&event), Some(7));
     }
@@ -5231,6 +5274,8 @@ mod tests {
             source_amounts: vec![(ObjectId(1), 3)],
             total_damage: 3,
             source_incarnations: vec![],
+            source_amount_fractions: Vec::new(),
+            total_damage_fraction: Default::default(),
         };
         assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
     }
@@ -5530,6 +5575,7 @@ mod tests {
                 event_source: Some(c0),
                 event_target: None,
                 event_amount: None,
+                event_amount_fraction: crate::types::ability::HalfFraction::Zero,
                 controller: None,
                 parked_entrants: Vec::new(),
             },
@@ -5579,6 +5625,7 @@ mod tests {
                 event_target: Some(TargetRef::Object(c1)),
                 event_source: None,
                 event_amount: None,
+                event_amount_fraction: crate::types::ability::HalfFraction::Zero,
                 controller: None,
                 parked_entrants: Vec::new(),
             },
@@ -7693,6 +7740,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let result = extract_player_from_event(&event, &state);
         // Should return the damaged player (PlayerId(1)), not the source's controller.
@@ -7717,6 +7766,8 @@ mod tests {
             is_combat: false,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         };
         let result = extract_player_from_event(&event, &state);
         assert_eq!(result, Some(PlayerId(1)));

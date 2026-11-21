@@ -543,6 +543,8 @@ fn seed_records(state: &mut GameState) {
             controller: P1,
             owner: P1,
             counters: Default::default(),
+            power_fraction: Default::default(),
+            toughness_fraction: Default::default(),
         });
     state
         .damage_dealt_this_turn

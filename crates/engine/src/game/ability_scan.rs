@@ -800,6 +800,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             context: _,
             target: _,
             amount: _,
+            amount_fraction: _,
             is_combat: _,
         }
         | Effect::ResumeDamageBatch {
@@ -8203,6 +8204,7 @@ fn pump_payload_source_counters(payload: Axes) -> Axes {
 fn scan_pt_value(pt: &PtValue, mode: ScanMode) -> Axes<'_> {
     match pt {
         PtValue::Fixed(_) => Axes::NONE,
+        PtValue::HalfPoints(_) => Axes::NONE,
         PtValue::Variable(_) => Axes::NONE,
         PtValue::Quantity(q) => scan_quantity_expr(q, mode),
     }
@@ -9278,6 +9280,7 @@ fn replacement_definition_axes<'a>(
         die_ignore_rule: _,
         planeswalk_scope: _,
         shield_kind: _,
+        shield_fraction: _,
         quantity_modification: _,
         token_owner_scope: _,
         token_owner_redirect: _,
@@ -12256,10 +12259,11 @@ mod tests {
     /// A fixed anthem modification reads nothing (the control for the dynamic case).
     #[test]
     fn fixed_anthem_modification_reads_nothing() {
-        let axes = scan_continuous_modification(
-            &ContinuousModification::AddPower { value: 2 },
-            ScanMode::LoopFirewall,
-        );
+        let cm = ContinuousModification::AddPower {
+            value: 2,
+            fraction: Default::default(),
+        };
+        let axes = scan_continuous_modification(&cm, ScanMode::LoopFirewall);
         assert!(!axes.event && !axes.sibling.is_read() && !axes.projected);
     }
 

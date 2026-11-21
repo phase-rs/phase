@@ -2220,7 +2220,10 @@ mod tests {
             StaticDefinition::continuous()
                 .affected(graveyard_cards())
                 .modifications(vec![
-                    ContinuousModification::AddPower { value: 1 },
+                    ContinuousModification::AddPower {
+                        value: 1,
+                        fraction: Default::default(),
+                    },
                     ContinuousModification::RemoveKeyword {
                         keyword: Keyword::Dredge(1),
                     },
@@ -2239,8 +2242,14 @@ mod tests {
             StaticDefinition::continuous()
                 .affected(TargetFilter::SpecificObject { id: bear_a })
                 .modifications(vec![
-                    ContinuousModification::AddPower { value: 1 },
-                    ContinuousModification::AddToughness { value: 1 },
+                    ContinuousModification::AddPower {
+                        value: 1,
+                        fraction: Default::default(),
+                    },
+                    ContinuousModification::AddToughness {
+                        value: 1,
+                        fraction: Default::default(),
+                    },
                 ]),
         );
         // A granted static wrapping a keyword grant, with two battlefield recipients.
@@ -2282,7 +2291,10 @@ mod tests {
             Duration::UntilEndOfTurn,
             TargetFilter::SpecificObject { id: opt },
             vec![
-                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                },
                 ContinuousModification::AddKeyword {
                     keyword: Keyword::Dredge(5),
                 },
@@ -2294,7 +2306,10 @@ mod tests {
             PlayerId(0),
             Duration::UntilEndOfTurn,
             TargetFilter::SpecificObject { id: bear_a },
-            vec![ContinuousModification::AddPower { value: 2 }],
+            vec![ContinuousModification::AddPower {
+                value: 2,
+                fraction: Default::default(),
+            }],
             None,
         );
 
@@ -2402,7 +2417,10 @@ mod tests {
             source,
             StaticDefinition::continuous()
                 .affected(TargetFilter::SpecificObject { id: bear })
-                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+                .modifications(vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }]),
         );
         push_static(
             &mut state,
@@ -2413,7 +2431,10 @@ mod tests {
                     definition: Box::new(
                         StaticDefinition::continuous()
                             .affected(TargetFilter::SpecificObject { id: bear })
-                            .modifications(vec![ContinuousModification::AddToughness { value: 1 }]),
+                            .modifications(vec![ContinuousModification::AddToughness {
+                                value: 1,
+                                fraction: Default::default(),
+                            }]),
                     ),
                 }]),
         );
@@ -2422,7 +2443,10 @@ mod tests {
             PlayerId(0),
             Duration::UntilEndOfTurn,
             TargetFilter::SpecificObject { id: bear },
-            vec![ContinuousModification::AddPower { value: 2 }],
+            vec![ContinuousModification::AddPower {
+                value: 2,
+                fraction: Default::default(),
+            }],
             None,
         );
         (state, source, bear)

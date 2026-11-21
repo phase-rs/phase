@@ -634,7 +634,10 @@ fn unsupported_copy_exception_rider_keeps_preceding_subtype_out_of_later_copy() 
             ContinuousModification::AddSubtype {
                 subtype: "Dog".to_string(),
             },
-            ContinuousModification::AddPower { value: 3 },
+            ContinuousModification::AddPower {
+                value: 3,
+                fraction: Default::default(),
+            },
         ],
     );
     assert!(state.objects[&first]
@@ -689,7 +692,10 @@ fn unclassifiable_cda_does_not_preserve_an_independent_overridden_cda() {
         &mut state,
         first,
         donor,
-        vec![ContinuousModification::SetPower { value: 7 }],
+        vec![ContinuousModification::SetPower {
+            value: 7,
+            fraction: Default::default(),
+        }],
     );
     assert!(state.objects[&first]
         .card_types
@@ -740,7 +746,10 @@ fn resolution_time_copy_exceptions_survive_layered_fallback_without_leaking_ride
                 count: QuantityExpr::Fixed { value: 1 },
                 if_type: Some(CoreType::Creature),
             },
-            ContinuousModification::AddPower { value: 3 },
+            ContinuousModification::AddPower {
+                value: 3,
+                fraction: Default::default(),
+            },
         ],
     );
     assert_eq!(state.objects[&first].mana_cost, ManaCost::NoCost);

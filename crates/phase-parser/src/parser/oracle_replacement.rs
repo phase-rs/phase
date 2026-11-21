@@ -14358,16 +14358,19 @@ fn token_description_to_spec(
         }
     }
 
-    let fixed_or = |pt: Option<&PtValue>| -> Option<i32> {
-        match pt? {
-            PtValue::Fixed(v) => Some(*v),
+    let exact_or = |pt: Option<&PtValue>| -> (Option<i32>, crate::types::ability::HalfFraction) {
+        match pt.and_then(PtValue::exact_fixed) {
+            Some(exact) => {
+                let (whole, frac) = exact.into_whole_and_fraction();
+                (Some(whole), frac)
+            }
             // Dynamic P/T in an appended spec is not supported by the current
-            // pattern class — fall through to `None` (no P/T on the token).
-            _ => None,
+            // pattern class — fall through to `(None, Zero)` (no P/T on the token).
+            None => (None, crate::types::ability::HalfFraction::Zero),
         }
     };
-    let power = fixed_or(token.power.as_ref());
-    let toughness = fixed_or(token.toughness.as_ref());
+    let (power, power_fraction) = exact_or(token.power.as_ref());
+    let (toughness, toughness_fraction) = exact_or(token.toughness.as_ref());
     let has_pt = power.is_some() || toughness.is_some();
     if has_pt && core_types.is_empty() {
         core_types.push(CoreType::Creature);
@@ -14377,7 +14380,9 @@ fn token_description_to_spec(
         characteristics: crate::types::token_spec::TokenCharacteristics {
             display_name: token.name.clone(),
             power,
+            power_fraction,
             toughness,
+            toughness_fraction,
             loyalty: None,
             core_types,
             subtypes,
@@ -18392,8 +18397,8 @@ mod tests {
         assert_eq!(
             static_abilities[0].modifications,
             vec![
-                ContinuousModification::SetPower { value: 7 },
-                ContinuousModification::SetToughness { value: 7 },
+                ContinuousModification::set_power(7),
+                ContinuousModification::set_toughness(7),
                 ContinuousModification::AddType {
                     core_type: CoreType::Creature
                 },
@@ -18440,8 +18445,8 @@ mod tests {
         assert_eq!(
             static_abilities[0].modifications,
             vec![
-                ContinuousModification::SetPower { value: 4 },
-                ContinuousModification::SetToughness { value: 4 },
+                ContinuousModification::set_power(4),
+                ContinuousModification::set_toughness(4),
                 ContinuousModification::AddType {
                     core_type: CoreType::Creature
                 },
@@ -31032,10 +31037,8 @@ mod tests {
                 name: "Superior Spider-Man".to_string()
             })
         );
-        assert!(additional_modifications.contains(&ContinuousModification::SetPower { value: 4 }));
-        assert!(
-            additional_modifications.contains(&ContinuousModification::SetToughness { value: 4 })
-        );
+        assert!(additional_modifications.contains(&ContinuousModification::set_power(4)));
+        assert!(additional_modifications.contains(&ContinuousModification::set_toughness(4)));
         for subtype in ["Spider", "Human", "Hero"] {
             assert!(
                 additional_modifications.contains(&ContinuousModification::AddSubtype {

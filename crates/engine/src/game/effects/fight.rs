@@ -1,7 +1,7 @@
 use crate::game::effects::deal_damage::{run_object_damage_batch, DamageContext, DamageTail};
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, HalfMagnitude, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -234,14 +234,22 @@ fn resolve_fight(
             .objects
             .get(&source_id)
             .ok_or(EffectError::ObjectNotFound(source_id))?;
-        (obj.power.unwrap_or(0), obj.controller)
+        (
+            obj.exact_power()
+                .map_or(HalfMagnitude::ZERO, |p| p.clamp_non_negative()),
+            obj.controller,
+        )
     };
     let (target_power, target_controller) = {
         let obj = state
             .objects
             .get(&target_id)
             .ok_or(EffectError::ObjectNotFound(target_id))?;
-        (obj.power.unwrap_or(0), obj.controller)
+        (
+            obj.exact_power()
+                .map_or(HalfMagnitude::ZERO, |p| p.clamp_non_negative()),
+            obj.controller,
+        )
     };
 
     // CR 701.14a + CR 608.2f + CR 700.1: "Each of those creatures deals damage equal to its
@@ -257,8 +265,8 @@ fn resolve_fight(
     };
     let mut portions = Vec::new();
     if source_id == target_id {
-        if source_power > 0 {
-            let amount = (source_power as u32).saturating_mul(2);
+        if source_power > HalfMagnitude::ZERO {
+            let amount = HalfMagnitude(source_power.0.saturating_mul(2));
             portions.push(portion(
                 state,
                 source_id,
@@ -268,22 +276,22 @@ fn resolve_fight(
             ));
         }
     } else {
-        if source_power > 0 {
+        if source_power > HalfMagnitude::ZERO {
             portions.push(portion(
                 state,
                 source_id,
                 source_controller,
                 target_id,
-                source_power as u32,
+                source_power,
             ));
         }
-        if target_power > 0 {
+        if target_power > HalfMagnitude::ZERO {
             portions.push(portion(
                 state,
                 target_id,
                 target_controller,
                 source_id,
-                target_power as u32,
+                target_power,
             ));
         }
     }

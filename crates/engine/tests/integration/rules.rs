@@ -386,6 +386,9 @@ fn answer_combat_damage_prompts(
                             assignments,
                             trample_damage,
                             controller_damage: 0,
+                            assignments_fraction: Vec::new(),
+                            trample_damage_fraction: Default::default(),
+                            controller_damage_fraction: Default::default(),
                         })
                         .expect("AssignCombatDamage should succeed")
                         .events,
@@ -407,7 +410,10 @@ fn answer_combat_damage_prompts(
                     .unwrap_or_else(|| even_split(*total_damage, attackers));
                 events.extend(
                     runner
-                        .act(GameAction::AssignBlockerDamage { assignments })
+                        .act(GameAction::AssignBlockerDamage {
+                            assignments,
+                            assignments_fraction: Vec::new(),
+                        })
                         .expect("AssignBlockerDamage should succeed")
                         .events,
                 );

@@ -60,7 +60,10 @@ fn threshold_payoff(name: &str, threshold: i32, lhs: QuantityExpr) -> CardFace {
     let mut face = creature(name);
     face.static_abilities = vec![StaticDefinition::continuous()
         .affected(TargetFilter::SelfRef)
-        .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+        .modifications(vec![ContinuousModification::AddPower {
+            value: 1,
+            fraction: Default::default(),
+        }])
         .condition(StaticCondition::QuantityComparison {
             lhs,
             comparator: Comparator::GE,
@@ -289,7 +292,10 @@ fn static_threshold(comparator: Comparator, lhs: QuantityExpr, rhs: QuantityExpr
     let mut face = creature("Cmp");
     face.static_abilities = vec![StaticDefinition::continuous()
         .affected(TargetFilter::SelfRef)
-        .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+        .modifications(vec![ContinuousModification::AddPower {
+            value: 1,
+            fraction: Default::default(),
+        }])
         .condition(StaticCondition::QuantityComparison {
             lhs,
             comparator,
@@ -381,7 +387,10 @@ fn negated_threshold_is_not_a_payoff() {
     let mut face = creature("Anti-Delirium");
     face.static_abilities = vec![StaticDefinition::continuous()
         .affected(TargetFilter::SelfRef)
-        .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+        .modifications(vec![ContinuousModification::AddPower {
+            value: 1,
+            fraction: Default::default(),
+        }])
         .condition(StaticCondition::Not {
             condition: Box::new(StaticCondition::QuantityComparison {
                 lhs: own_graveyard_types(),
@@ -401,7 +410,10 @@ fn and_takes_the_highest_mandatory_threshold() {
     let mut face = creature("Conjunctive");
     face.static_abilities = vec![StaticDefinition::continuous()
         .affected(TargetFilter::SelfRef)
-        .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+        .modifications(vec![ContinuousModification::AddPower {
+            value: 1,
+            fraction: Default::default(),
+        }])
         .condition(StaticCondition::And {
             conditions: vec![
                 StaticCondition::QuantityComparison {
@@ -428,7 +440,10 @@ fn or_is_a_gate_only_when_every_branch_is_graveyard() {
     let mut all_gy = creature("All Graveyard Or");
     all_gy.static_abilities = vec![StaticDefinition::continuous()
         .affected(TargetFilter::SelfRef)
-        .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+        .modifications(vec![ContinuousModification::AddPower {
+            value: 1,
+            fraction: Default::default(),
+        }])
         .condition(StaticCondition::Or {
             conditions: vec![
                 StaticCondition::QuantityComparison {
@@ -449,7 +464,10 @@ fn or_is_a_gate_only_when_every_branch_is_graveyard() {
     let mut mixed = creature("Mixed Or");
     mixed.static_abilities = vec![StaticDefinition::continuous()
         .affected(TargetFilter::SelfRef)
-        .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+        .modifications(vec![ContinuousModification::AddPower {
+            value: 1,
+            fraction: Default::default(),
+        }])
         .condition(StaticCondition::Or {
             conditions: vec![
                 StaticCondition::QuantityComparison {

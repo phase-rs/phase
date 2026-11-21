@@ -202,14 +202,32 @@ pub(super) fn capture_exit_lki(
     let incarnation = obj.incarnation;
     let lki_copiable_values =
         crate::game::layers::compute_current_copiable_values(state, object_id);
+    let (base_power, base_power_fraction) = obj
+        .exact_layer_base_power()
+        .or_else(|| obj.exact_base_power())
+        .map_or((None, Default::default()), |v| {
+            let (w, f) = v.into_whole_and_fraction();
+            (Some(w), f)
+        });
+    let (base_toughness, base_toughness_fraction) = obj
+        .exact_layer_base_toughness()
+        .or_else(|| obj.exact_base_toughness())
+        .map_or((None, Default::default()), |v| {
+            let (w, f) = v.into_whole_and_fraction();
+            (Some(w), f)
+        });
     let lki = crate::types::game_state::LKISnapshot {
         name: obj.name.clone(),
         token_image_ref: obj.token_image_ref.clone(),
         power: obj.power,
+        power_fraction: obj.power_fraction,
         toughness: obj.toughness,
+        toughness_fraction: obj.toughness_fraction,
         // CR 208.4b + CR 613.4b: keep both current and layer-7b base values.
-        base_power: obj.layer_base_power.or(obj.base_power),
-        base_toughness: obj.layer_base_toughness.or(obj.base_toughness),
+        base_power,
+        base_power_fraction,
+        base_toughness,
+        base_toughness_fraction,
         // CR 202.3d + CR 709.4d + CR 709.5: reuse the zone-aware
         // characteristic readers, including fused spells and unlocked Rooms.
         mana_value: obj.effective_mana_value(),
@@ -6424,6 +6442,8 @@ mod tests {
                 casting_options: vec![],
                 layout_kind: None,
                 parse_warnings: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             });
         }
 
@@ -6493,6 +6513,8 @@ mod tests {
                 casting_options: vec![],
                 layout_kind: None,
                 parse_warnings: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             });
         }
 
@@ -6993,6 +7015,8 @@ mod tests {
                 casting_options: vec![],
                 layout_kind: Some(crate::types::card::LayoutKind::Modal),
                 parse_warnings: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             });
         }
 
@@ -7418,6 +7442,8 @@ mod tests {
                 casting_options: vec![],
                 layout_kind: Some(crate::types::card::LayoutKind::Modal),
                 parse_warnings: vec![],
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             });
         }
         // Apply back face (simulating ChooseModalFace on stack).

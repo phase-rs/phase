@@ -854,6 +854,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: Default::default(),
+            amount_fraction: Default::default(),
         }
     }
 
@@ -1669,6 +1670,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
 
         let replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone)
@@ -1739,6 +1742,8 @@ mod tests {
             is_combat: true,
             excess: 0,
             source_incarnation: None,
+            amount_fraction: Default::default(),
+            excess_fraction: Default::default(),
         });
 
         let replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone)
@@ -1889,6 +1894,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: Default::default(),
+            amount_fraction: Default::default(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) = result else {
@@ -1908,6 +1914,7 @@ mod tests {
             source_name: None,
             source_incarnation: None,
             applied: Default::default(),
+            amount_fraction: Default::default(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) = result else {
@@ -1987,6 +1994,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: Vec::new(),
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Treasure".to_string(),
             static_abilities: Vec::new(),
@@ -2085,6 +2094,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: vec![crate::types::mana::ManaColor::Red],
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Goblin".to_string(),
             static_abilities: Vec::new(),
@@ -2178,6 +2189,8 @@ mod tests {
                 supertypes: Vec::new(),
                 colors: vec![crate::types::mana::ManaColor::Green],
                 keywords: Vec::new(),
+                power_fraction: Default::default(),
+                toughness_fraction: Default::default(),
             },
             script_name: "Saproling".to_string(),
             static_abilities: Vec::new(),

@@ -41,22 +41,40 @@ fn timber_paladin_statics() -> Vec<StaticDefinition> {
             .affected(TargetFilter::SelfRef)
             .condition(aura_count_condition(Comparator::EQ, 1))
             .modifications(vec![
-                ContinuousModification::SetPower { value: 3 },
-                ContinuousModification::SetToughness { value: 3 },
+                ContinuousModification::SetPower {
+                    value: 3,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::SetToughness {
+                    value: 3,
+                    fraction: Default::default(),
+                },
             ]),
         StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
             .condition(aura_count_condition(Comparator::EQ, 2))
             .modifications(vec![
-                ContinuousModification::SetPower { value: 5 },
-                ContinuousModification::SetToughness { value: 5 },
+                ContinuousModification::SetPower {
+                    value: 5,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::SetToughness {
+                    value: 5,
+                    fraction: Default::default(),
+                },
             ]),
         StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
             .condition(aura_count_condition(Comparator::GE, 3))
             .modifications(vec![
-                ContinuousModification::SetPower { value: 10 },
-                ContinuousModification::SetToughness { value: 10 },
+                ContinuousModification::SetPower {
+                    value: 10,
+                    fraction: Default::default(),
+                },
+                ContinuousModification::SetToughness {
+                    value: 10,
+                    fraction: Default::default(),
+                },
             ]),
     ]
 }

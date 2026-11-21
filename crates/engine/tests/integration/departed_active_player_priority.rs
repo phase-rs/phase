@@ -624,6 +624,9 @@ fn assign_combat_damage(runner: &mut GameRunner, assignments: Vec<(ObjectId, u32
             assignments,
             trample_damage: 0,
             controller_damage: 0,
+            assignments_fraction: Vec::new(),
+            trample_damage_fraction: Default::default(),
+            controller_damage_fraction: Default::default(),
         })
         .expect("CR 510.1c: the attacker's controller divides its damage");
 }
@@ -849,6 +852,7 @@ fn a_remaining_teammate_divides_blocker_damage_after_its_active_player_leaves_mi
         runner
             .act(GameAction::AssignBlockerDamage {
                 assignments: vec![(wolves, 2)],
+                assignments_fraction: Vec::new(),
             })
             .expect("CR 702.22k: the active player divides the blocker's damage");
         let battlefield = &runner.state().battlefield;

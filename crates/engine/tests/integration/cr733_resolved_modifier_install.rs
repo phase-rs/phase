@@ -348,7 +348,10 @@ fn retirement_fixture() -> (
                     },
                 },
                 TargetFilter::SpecificObject { id: recipient },
-                vec![ContinuousModification::AddPower { value: 1 }],
+                vec![ContinuousModification::AddPower {
+                    value: 1,
+                    fraction: Default::default(),
+                }],
                 None,
                 TransientContinuousEffectBindings {
                     affected_recipient: Some(recipient_ref),
@@ -524,7 +527,10 @@ fn exact_retirement_validates_the_whole_batch_before_any_mutation() {
     changed.affected_recipient.as_mut().unwrap().incarnation += 1;
     mismatches.push(changed);
     let mut changed = effects[1].clone();
-    changed.modifications = vec![ContinuousModification::AddPower { value: 9 }];
+    changed.modifications = vec![ContinuousModification::AddPower {
+        value: 9,
+        fraction: Default::default(),
+    }];
     mismatches.push(changed);
     let mut changed = effects[1].clone();
     changed.source_name.push_str(" altered");

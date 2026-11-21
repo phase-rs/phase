@@ -120,4 +120,20 @@ describe("lifeReadout", () => {
   it("reads Finite when the snapshot carries no derived views", () => {
     expect(lifeReadout(buildGameState(), 1)).toEqual({ magnitude: "Finite", life: 20 });
   });
+
+  it("reads and formats an exact half-point total", () => {
+    const base = buildGameState();
+    const state = {
+      ...base,
+      players: base.players.map((player, index) =>
+        index === 1 ? { ...player, life: 17, life_fraction: "Half" as const } : player,
+      ),
+    };
+    const readout = lifeReadout(state, 1);
+    expect(readout).toEqual({ magnitude: "Finite", life: 17.5 });
+    expect(formatLifeReadout(readout)).toBe("17½");
+    // −½ is sent as −1 + ½.
+    expect(formatLifeReadout({ magnitude: "Finite", life: -0.5 })).toBe("-½");
+  });
 });
+

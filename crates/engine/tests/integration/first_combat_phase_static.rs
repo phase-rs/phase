@@ -360,7 +360,7 @@ fn full_pass_records_step_reading_conditions_by_carrier() {
                     P0,
                     Duration::UntilEndOfTurn,
                     TargetFilter::SpecificObject { id },
-                    vec![ContinuousModification::AddPower { value: 2 }],
+                    vec![ContinuousModification::AddPower { value: 2, fraction: Default::default(), }],
                     Some(condition),
                 )
                 .is_some());
@@ -412,7 +412,10 @@ fn incremental_pass_keeps_step_reads_it_does_not_remake() {
         .affected(TargetFilter::Typed(
             TypedFilter::creature().controller(ControllerRef::You),
         ))
-        .modifications(vec![ContinuousModification::AddPower { value: 2 }])
+        .modifications(vec![ContinuousModification::AddPower {
+            value: 2,
+            fraction: Default::default(),
+        }])
         .condition(StaticCondition::And {
             conditions: vec![
                 StaticCondition::RecipientMatchesFilter {
