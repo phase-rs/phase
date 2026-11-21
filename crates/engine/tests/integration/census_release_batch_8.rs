@@ -6,7 +6,7 @@
 //!
 //! One group per clause shape. Every group asserts the prompt the engine shows (actor and offered
 //! cards) before the effect, has controls that would fail if the clause counted wrongly (a card the
-//! filter must not offer, a different count, a declined optional step), and ends with an empty stack
+//! filter must not offer, a different count, an empty answer), and ends with an empty stack
 //! and priority.
 use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -91,10 +91,6 @@ fn zone_of(r: &GameRunner, id: ObjectId) -> Zone {
 fn sorted(mut ids: Vec<ObjectId>) -> Vec<ObjectId> {
     ids.sort_by_key(|o| o.0);
     ids
-}
-
-fn life(r: &GameRunner, player: PlayerId) -> i32 {
-    r.state().players[player.0 as usize].life
 }
 
 /// The run finished: nothing is left on the stack and `player` holds priority (a suspended
@@ -376,12 +372,20 @@ fn recruiter_run(pick: impl Fn(&[ObjectId]) -> Vec<ObjectId>) -> (GameRunner, Ve
             cards,
             count,
             up_to,
+            reveal,
+            ordering_hint,
             ..
         } = w
         else {
             return None;
         };
         assert_eq!(*player, P0);
+        assert!(*reveal, "the found cards are revealed");
+        assert_eq!(
+            *ordering_hint,
+            engine::types::ability::SearchOrderingHint::OrderedToLibraryTop,
+            "the prompt carries the \"in any order\" placement"
+        );
         assert_eq!(
             sorted(cards.clone()),
             sorted(goblins.clone()),
