@@ -6986,7 +6986,7 @@ pub(crate) fn inject_controller_you(filter: TargetFilter) -> TargetFilter {
 
 /// CR 102.2 + CR 102.3: Recognize opponent possessive prefixes. Shared
 /// combinator used by zone-count parsing and life-total condition parsing.
-fn parse_opponent_possessive(input: &str) -> OracleResult<'_, ()> {
+pub(crate) fn parse_opponent_possessive(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((
