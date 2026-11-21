@@ -2023,6 +2023,104 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
                 format!("Get {count} {kind} counters")
             }
         }
+        // CR 701.4a: name the behold action and its quality ("Behold a Jace")
+        // so the accept option of an as-enters Behold choice is self-describing.
+        AbilityCost::Behold {
+            filter,
+            action,
+            count,
+            ..
+        } => {
+            let verb = match action {
+                crate::types::ability::BeholdCostAction::ChooseOrReveal => "Behold",
+                crate::types::ability::BeholdCostAction::ExileChosen => "Behold and exile",
+            };
+            let quality = match filter {
+                crate::types::ability::TargetFilter::Typed(typed) => {
+                    match typed.type_filters.as_slice() {
+                        [crate::types::ability::TypeFilter::Subtype(subtype)] => {
+                            Some(subtype.as_str())
+                        }
+                        _ => None,
+                    }
+                }
+                TargetFilter::None
+                | TargetFilter::Any
+                | TargetFilter::Player
+                | TargetFilter::Controller
+                | TargetFilter::SourceController
+                | TargetFilter::ControllerAndControlledPermanents { .. }
+                | TargetFilter::Opponent
+                | TargetFilter::SelfRef
+                | TargetFilter::GrantingObject { .. }
+                | TargetFilter::SourceOrPaired
+                | TargetFilter::Not { .. }
+                | TargetFilter::Or { .. }
+                | TargetFilter::And { .. }
+                | TargetFilter::StackAbility { .. }
+                | TargetFilter::StackSpell
+                | TargetFilter::CastingSpell
+                | TargetFilter::SpecificObject { .. }
+                | TargetFilter::SpecificPlayer { .. }
+                | TargetFilter::PlayerWhoChoseLabel { .. }
+                | TargetFilter::PlayerMatching { .. }
+                | TargetFilter::Neighbor { .. }
+                | TargetFilter::ScopedPlayer
+                | TargetFilter::AttachedTo
+                | TargetFilter::LastCreated
+                | TargetFilter::LastRevealed
+                | TargetFilter::LastZoneChanged
+                | TargetFilter::CostPaidObject
+                | TargetFilter::AmassedArmy
+                | TargetFilter::ChosenCard
+                | TargetFilter::TrackedSet { .. }
+                | TargetFilter::TrackedSetFiltered { .. }
+                | TargetFilter::ChoiceAssignment { .. }
+                | TargetFilter::ExiledBySource
+                | TargetFilter::ExiledCardByIndex { .. }
+                | TargetFilter::TriggeringSpellController
+                | TargetFilter::TriggeringSpellOwner
+                | TargetFilter::TriggeringPlayer
+                | TargetFilter::TriggeringSource
+                | TargetFilter::AttackedPlayerOrPlaneswalker
+                | TargetFilter::EventTarget
+                | TargetFilter::TriggeringSourceController
+                | TargetFilter::EventTargetController
+                | TargetFilter::ParentTarget
+                | TargetFilter::ParentTargetSlot { .. }
+                | TargetFilter::DeclaredPlayer { .. }
+                | TargetFilter::ParentTargetController
+                | TargetFilter::ParentTargetOwner
+                | TargetFilter::AffectedObjectOwner
+                | TargetFilter::SourceChosenPlayer
+                | TargetFilter::OriginalController
+                | TargetFilter::OriginalSource
+                | TargetFilter::PostReplacementSourceController
+                | TargetFilter::PostReplacementDamageSource
+                | TargetFilter::PostReplacementDamageTarget
+                | TargetFilter::PostReplacementDamageTargetOwner
+                | TargetFilter::DefendingPlayer
+                | TargetFilter::HasChosenName
+                | TargetFilter::ChosenDamageSource { .. }
+                | TargetFilter::Named { .. }
+                | TargetFilter::Owner
+                | TargetFilter::AllPlayers
+                => None,
+            };
+            match (quality, *count) {
+                (Some(quality), 1) => {
+                    let article = if quality.starts_with(['A', 'E', 'I', 'O', 'U']) {
+                        "an"
+                    } else {
+                        "a"
+                    };
+                    format!("{verb} {article} {quality}")
+                }
+                (Some(quality), count) => format!("{verb} {count} {quality}s"),
+                (None, 1) => format!("{verb} a matching object"),
+                (None, count) => format!("{verb} {count} matching objects"),
+            }
+        }
         AbilityCost::ManaDynamic { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
@@ -2041,7 +2139,6 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
         | AbilityCost::Exert
         | AbilityCost::Blight { .. }
         | AbilityCost::Reveal { .. }
-        | AbilityCost::Behold { .. }
         | AbilityCost::Composite { .. }
         | AbilityCost::OneOf { .. }
         | AbilityCost::Waterbend { .. }
@@ -15804,7 +15901,31 @@ fn replay_pending_replacement(
     } else {
         None
     };
-    let Some(index) = index else {
+    // CR 118.3 + CR 614.12a: when a MayCost replacement is unpayable, only
+    // declining remains legal, so apply its decline branch without prompting.
+    // No decision is made here, so a forced decline is not recorded as a remembered
+    // answer (it never counts toward the optional-decision tally, CR 732.4).
+    let saved_answer = index;
+    let forced_decline = if saved_answer.is_none() {
+        (|| {
+            let pending = state.pending_replacement.as_ref()?;
+            if !pending.is_optional {
+                return None;
+            }
+            let rid = *pending.candidates.first()?;
+            let replacement = replacement_definition_for_id(state, rid)?;
+            let ReplacementMode::MayCost { cost, .. } = &replacement.mode else {
+                return None;
+            };
+            let payer = pending
+                .choice_player
+                .or_else(|| replacement_choice_player(state, &pending.proposed, rid))?;
+            (!cost.is_payable_for_replacement(state, payer, rid.source)).then_some(1)
+        })()
+    } else {
+        None
+    };
+    let Some(index) = saved_answer.or(forced_decline) else {
         // A nested optional prompt never inherits acceptance from an order.
         if had_tail {
             state.replacement_auto_choice_tail = None;
@@ -15813,11 +15934,14 @@ fn replay_pending_replacement(
     };
     // CR 616.1e + CR 616.1: a replayed answer is still the affected player's choice —
     // whether to apply an optional effect, or which effect applies next.
-    if optional {
-        state
-            .record_remembered_answer(player, crate::game::play_trace::AnswerOptionality::Optional);
-    } else {
-        state.record_point_answer(crate::game::play_trace::AnswerOptionality::Mandatory, point);
+    match saved_answer {
+        // Forced decline: nothing was answered, so nothing is recorded.
+        None => {}
+        Some(_) if optional => state
+            .record_remembered_answer(player, crate::game::play_trace::AnswerOptionality::Optional),
+        Some(_) => {
+            state.record_point_answer(crate::game::play_trace::AnswerOptionality::Mandatory, point)
+        }
     }
     let result = continue_replacement_impl(state, index, events);
     if !matches!(result, ReplacementResult::Execute(_)) {
@@ -19757,6 +19881,56 @@ mod tests {
         };
         assert!(enter_tapped.resolve(false));
         assert_eq!(state.players[0].life, 20);
+    }
+
+    /// Hallowed Fountain — "({T}: Add {W} or {U}.)\nAs this land enters, you may pay 2 life.
+    /// If you don't, it enters tapped." With its controller at 1 life, paying 2 life is
+    /// impossible (CR 118.3 + CR 119.4), so the `MayCost` auto-declines without a prompt
+    /// (CR 614.12a) and the land enters tapped. That forced decline is not an answered
+    /// optional decision: it neither bumps the loop-decision tally nor records a remembered
+    /// answer, and no life is paid.
+    #[test]
+    fn unpayable_may_cost_auto_decline_records_no_remembered_answer() {
+        // Reach guard: a payable cost prompts instead of auto-declining.
+        let mut payable = test_state_with_object(
+            ObjectId(10),
+            Zone::Hand,
+            vec![may_cost_tapped_replacement(2)],
+        );
+        let result = replace_event(
+            &mut payable,
+            ProposedEvent::zone_change(ObjectId(10), Zone::Hand, Zone::Battlefield, None),
+            &mut Vec::new(),
+        );
+        assert!(matches!(
+            result,
+            ReplacementResult::NeedsChoice(PlayerId(0))
+        ));
+
+        // At 1 life, paying 2 life is impossible (CR 118.3 + CR 119.4).
+        let mut state = test_state_with_object(
+            ObjectId(10),
+            Zone::Hand,
+            vec![may_cost_tapped_replacement(2)],
+        );
+        state.players[0].life = 1;
+        let tally_before = state.loop_decision_tally;
+        let result = replace_event(
+            &mut state,
+            ProposedEvent::zone_change(ObjectId(10), Zone::Hand, Zone::Battlefield, None),
+            &mut Vec::new(),
+        );
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange { enter_tapped, .. }) = result
+        else {
+            panic!("expected the decline branch to execute without a prompt, got {result:?}");
+        };
+        assert!(enter_tapped.resolve(false), "the decline branch applies");
+        assert_eq!(state.players[0].life, 1, "no life is paid");
+        assert_eq!(
+            state.loop_decision_tally, tally_before,
+            "a forced decline is not an answered optional decision"
+        );
+        assert_eq!(state.loop_decision_tally.optional, 0);
     }
 
     #[test]
