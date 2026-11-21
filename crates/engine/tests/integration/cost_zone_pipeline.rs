@@ -13868,12 +13868,15 @@ fn targeted_sacrifice_reparks_replacement_before_terminal_effect_resolved() {
 
     let first_resumed = runner
         .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("the first replacement delivers and re-parks the second sacrifice");
+        .expect("the first replacement queues its move and re-parks the second sacrifice");
     assert!(matches!(
         first_resumed.waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
-    assert_eq!(runner.state().objects[&first].zone, Zone::Exile);
+    // CR 616.1: the answer decides how the first permanent moves, but the two
+    // sacrifices are one simultaneous action: nothing moves until the second
+    // permanent's replacements have been consulted too.
+    assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
     assert!(
         !initial_events
@@ -13894,6 +13897,7 @@ fn targeted_sacrifice_reparks_replacement_before_terminal_effect_resolved() {
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("the remaining selected sacrifice and terminal tail resolve");
     assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(runner.state().objects[&first].zone, Zone::Exile);
     assert_eq!(runner.state().objects[&second].zone, Zone::Exile);
     assert_eq!(runner.state().last_effect_count, Some(2));
     assert_eq!(

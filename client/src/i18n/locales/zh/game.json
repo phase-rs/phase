@@ -1690,6 +1690,7 @@
       "defaultEffect": "除非你支付，否则反击",
       "dontPay": "不支付",
       "takeEffect": "承受效应",
+      "priorChoice": "玩家{{id}}：{{choice}}",
       "title": "除非你支付，否则{{effect}}",
       "titleChooseOne": "除非你支付其中一项，否则{{effect}}"
     },

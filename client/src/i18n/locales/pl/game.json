@@ -1351,7 +1351,8 @@
       "title": "{{effect}}, chyba że zapłacisz",
       "titleChooseOne": "{{effect}}, chyba że zapłacisz jeden",
       "dontPay": "Nie płać",
-      "takeEffect": "Przyjmij efekt"
+      "takeEffect": "Przyjmij efekt",
+      "priorChoice": "Gracz {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "Połącz z Arcane?",
