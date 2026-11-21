@@ -1,8 +1,9 @@
 //! Runtime witnesses for the `confirmed-misparses.toml` rows released in batch 6: seven census rows whose cited clauses
 //! the engine already handles, one witness group per clause shape. Every released card is the printed card
 //! (printed cost, type line, P/T and verbatim Oracle text, loaded from the card database through `add_real_card`)
-//! and is driven through the public `GameRunner` actions. Only textless library fillers are synthetic; the support
-//! cards that carry an ability (Murder, Heart of Kiran) are printed cards.
+//! and is driven through the public `GameRunner` actions. Only textless library fillers are synthetic; every support
+//! card, including those that carry an ability (Murder, Heart of Kiran, Lightning Bolt, Shock, the library cards), is a
+//! printed card.
 //!
 //! Each group asserts the prompt the engine shows (actor and offered cards) before the resolved effect, and ends
 //! with an empty stack and priority. Controls (a third legendary creature, a creature card that does not share the
@@ -311,6 +312,7 @@ fn adewale_takes_one_assassin_pirate_or_vehicle_and_bottoms_the_rest() {
         cards,
         selectable_cards,
         keep_count,
+        up_to,
         ..
     } = waiting
     else {
@@ -326,7 +328,9 @@ fn adewale_takes_one_assassin_pirate_or_vehicle_and_bottoms_the_rest() {
         sorted(vec![copter, pirates, assassin]),
         "an Assassin, a Pirate or a Vehicle"
     );
-    assert_eq!(keep_count, 1);
+    // One card is taken. Like every Dig prompt the engine lets the player select none (`up_to`), which also
+    // covers a reveal with no qualifying card; this change does not alter that shared convention.
+    assert_eq!((keep_count, up_to), (1, true));
     runner
         .act(GameAction::SelectCards {
             cards: vec![pirates],
@@ -407,6 +411,32 @@ fn adewale_returns_from_the_graveyard_when_a_vehicle_deals_combat_damage() {
     }
 }
 
+/// Control: only a Vehicle's combat damage brings Adéwalé back; an ordinary creature dealing combat
+/// damage to the player does not.
+#[test]
+fn adewale_stays_in_the_graveyard_when_an_ordinary_creature_deals_combat_damage() {
+    let mut scenario = table();
+    let adewale = scenario.add_real_card(P0, "Adéwalé, Breaker of Chains", Zone::Graveyard, db());
+    let giant = scenario.add_real_card(P0, "Hill Giant", Zone::Battlefield, db());
+    scenario.with_library_top(P0, &["P0 Draw 1", "P0 Draw 2"]);
+    scenario.with_library_top(P1, &["P1 Draw 1", "P1 Draw 2"]);
+    let mut runner = scenario.build();
+    attack_with(&mut runner, &[giant]);
+    runner.combat_damage();
+    assert_eq!(
+        runner.state().players[P1.0 as usize].life,
+        17,
+        "the Hill Giant dealt 3"
+    );
+    let waiting = resolve_stack(&mut runner);
+    assert!(
+        matches!(waiting, WaitingFor::Priority { .. }),
+        "no return offer, got {waiting:?}"
+    );
+    assert_eq!(zone_of(&runner, adewale), Zone::Graveyard);
+    assert_settled(&runner, "Adéwalé control");
+}
+
 // ---------------------------------------------------------------------------------------------
 // "Search your library for <a card>, reveal it, then shuffle and put that card on top." (Loyal Tutor)
 // ---------------------------------------------------------------------------------------------
@@ -416,6 +446,7 @@ fn adewale_returns_from_the_graveyard_when_a_vehicle_deals_combat_damage() {
 /// card on top only by chance (1 in 9 per seed).
 #[test]
 fn loyal_tutor_puts_the_found_planeswalker_on_top_after_the_shuffle() {
+    let mut shuffled_in_some_seed = false;
     for seed in 1..=6u64 {
         let mut scenario = GameScenario::new_n_player(2, seed);
         scenario.at_phase(Phase::PreCombatMain);
@@ -471,8 +502,13 @@ fn loyal_tutor_puts_the_found_planeswalker_on_top_after_the_shuffle() {
             "seed {seed}: the card is still in the library"
         );
         assert_eq!(library[0], chandra, "seed {seed}: the found card is on top");
+        shuffled_in_some_seed |= library[1..] != lib[..8];
         assert_settled(&runner, "Loyal Tutor");
     }
+    assert!(
+        shuffled_in_some_seed,
+        "the rest of the library is shuffled: its order changes in at least one seed"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -525,7 +561,7 @@ fn sublime_archangel_exalted_pumps_a_lone_attacker_once_per_instance() {
     assert_settled(&runner, "Sublime Archangel (lone attacker)");
 }
 
-/// CR 702.83a: "attacks alone" -- with two attackers neither exalted instance triggers.
+/// CR 702.83b: "attacks alone" -- with two attackers neither exalted instance triggers.
 #[test]
 fn sublime_archangel_exalted_does_not_trigger_when_two_creatures_attack() {
     let mut scenario = table();
@@ -577,19 +613,18 @@ fn mnemonic_deluge_copies_the_exiled_card_three_times_and_casts_the_copies() {
             WaitingFor::Priority { .. } => {
                 runner.act(GameAction::PassPriority).expect("pass");
             }
-            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
-                runner
-                    .act(GameAction::ChooseTarget {
-                        target: Some(TargetRef::Player(P1)),
-                    })
-                    .expect("copy targets the opponent");
-            }
-            WaitingFor::OptionalEffectChoice { .. } => {
-                runner
-                    .act(GameAction::DecideOptionalEffect { accept: true })
-                    .expect("cast the copy");
-            }
-            WaitingFor::CopyRetarget { .. } => {
+            WaitingFor::CopyRetarget {
+                player,
+                target_slots,
+                ..
+            } => {
+                assert_eq!(player, P0, "the caster announces the copy's target");
+                assert!(
+                    target_slots[0]
+                        .legal_alternatives
+                        .contains(&TargetRef::Player(P1)),
+                    "any target: the opponent is offered"
+                );
                 runner
                     .act(GameAction::ChooseTarget {
                         target: Some(TargetRef::Player(P1)),
@@ -612,6 +647,16 @@ fn mnemonic_deluge_copies_the_exiled_card_three_times_and_casts_the_copies() {
         }
     }
     assert_eq!(offers, 3, "three copies are offered");
+    let bolts = runner
+        .state()
+        .objects
+        .values()
+        .filter(|o| o.name == "Lightning Bolt")
+        .count();
+    assert_eq!(
+        bolts, 1,
+        "the cast copies ceased to exist: only the exiled original remains"
+    );
     assert_eq!(
         runner.state().players[P1.0 as usize].life,
         11,
@@ -714,6 +759,7 @@ fn bind_to_life_puts_a_creature_card_milled_this_way_onto_the_battlefield() {
     runner
         .act(GameAction::CastPreparedCopy { source: scavenger })
         .expect("cast the prepared copy of Bind to Life");
+    let mut prompted = false;
     let mut guard = 0;
     loop {
         guard += 1;
@@ -723,9 +769,24 @@ fn bind_to_life_puts_a_creature_card_milled_this_way_onto_the_battlefield() {
                 runner.act(GameAction::PassPriority).expect("pass");
             }
             WaitingFor::Priority { .. } => break,
-            WaitingFor::ChooseFromZoneChoice { player, cards, .. }
-            | WaitingFor::EffectZoneChoice { player, cards, .. } => {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                up_to,
+                zone,
+                destination,
+                ..
+            } => {
+                prompted = true;
+                assert_eq!(
+                    (zone, destination),
+                    (Zone::Graveyard, Some(Zone::Battlefield)),
+                    "from the graveyard onto the battlefield"
+                );
                 assert_eq!(player, P0, "the caster chooses the creature");
+                // One card; the engine lets the player take none (`up_to`), as for every "from among them" choice.
+                assert_eq!((count, up_to), (1, true));
                 assert_eq!(
                     sorted(cards),
                     sorted(vec![bears, elves]),
@@ -738,6 +799,7 @@ fn bind_to_life_puts_a_creature_card_milled_this_way_onto_the_battlefield() {
             other => panic!("Bind to Life: unexpected prompt {other:?}"),
         }
     }
+    assert!(prompted, "the creature choice was offered");
     assert_eq!(zone_of(&runner, elves), Zone::Battlefield);
     for milled in [bears, forest, island, plains, swamp, mountain] {
         assert_eq!(
@@ -898,6 +960,15 @@ fn beifongs_bounty_hunters_earthbent_land_returns_tapped_when_it_dies() {
             .core_types
             .contains(&engine::types::card_type::CoreType::Creature),
         "the Forest is a creature"
+    );
+    // X is the dead creature's power (Hill Giant 3), not Beifong's own power (4/4).
+    assert_eq!(
+        runner.state().objects[&forest]
+            .counters
+            .get(&engine::types::counter::CounterType::Plus1Plus1)
+            .copied(),
+        Some(3),
+        "three +1/+1 counters for the 3/3 Hill Giant"
     );
     // Second Murder kills the animated Forest; it dies, so it is returned to the battlefield tapped.
     cast(&mut runner, murder_two);
