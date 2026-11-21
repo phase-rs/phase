@@ -13264,7 +13264,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             &cleaned,
-            NameNormalized(&cleaned),
+            super::NameNormalized(&cleaned),
             &cleaned,
             &granted,
             &evidence,
@@ -13299,7 +13299,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut control_diagnostics = Vec::new();
         super::detect_dynamic_qty(
             &cleaned,
-            NameNormalized(&cleaned),
+            super::NameNormalized(&cleaned),
             &cleaned,
             &control,
             &control_evidence,
@@ -13346,7 +13346,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             cleaned,
-            NameNormalized(cleaned),
+            super::NameNormalized(cleaned),
             cleaned,
             &parsed,
             &evidence,
@@ -13406,7 +13406,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             cleaned,
-            NameNormalized(cleaned),
+            super::NameNormalized(cleaned),
             cleaned,
             &per_counter,
             &per_counter_evidence,
@@ -13420,7 +13420,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut flat_diagnostics = Vec::new();
         super::detect_dynamic_qty(
             cleaned,
-            NameNormalized(cleaned),
+            super::NameNormalized(cleaned),
             cleaned,
             &flat,
             &flat_evidence,
@@ -13548,7 +13548,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             cleaned,
-            NameNormalized(cleaned),
+            super::NameNormalized(cleaned),
             cleaned,
             &parsed,
             &evidence,
@@ -13597,7 +13597,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             single,
-            NameNormalized(single),
+            super::NameNormalized(single),
             single,
             &parsed,
             &evidence,
@@ -13614,7 +13614,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             sibling,
-            sibling,
+            super::NameNormalized(sibling),
             sibling,
             &parsed,
             &evidence,
@@ -13674,9 +13674,11 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             "for each card type, you may put a card of that type from among the revealed \
              cards into your hand. put the rest on the bottom of your library in a random \
              order.",
-            "for each card type, you may put a card of that type from among the revealed \
+            super::NameNormalized(
+                "for each card type, you may put a card of that type from among the revealed \
              cards into your hand. put the rest on the bottom of your library in a random \
              order.",
+            ),
             ATRAXA_GRAND_UNIFIER_ORACLE,
             &parsed,
             &evidence,
@@ -13775,7 +13777,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             ceiling_only,
-            ceiling_only,
+            super::NameNormalized(ceiling_only),
             ceiling_only,
             &parsed,
             &evidence,
@@ -13793,7 +13795,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             second_equal_to,
-            second_equal_to,
+            super::NameNormalized(second_equal_to),
             second_equal_to,
             &parsed,
             &evidence,
@@ -13817,7 +13819,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             two_ceilings,
-            two_ceilings,
+            super::NameNormalized(two_ceilings),
             two_ceilings,
             &parsed,
             &evidence,
@@ -14051,7 +14053,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             cleaned,
-            NameNormalized(cleaned),
+            super::NameNormalized(cleaned),
             cleaned,
             &compound,
             &evidence,
@@ -14073,7 +14075,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut bare_diagnostics = Vec::new();
         super::detect_dynamic_qty(
             cleaned,
-            NameNormalized(cleaned),
+            super::NameNormalized(cleaned),
             cleaned,
             &parsed_with_keywords(vec![Keyword::Ward(WardCost::PayLifeEqualToPower)]),
             &bare,
@@ -14105,7 +14107,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             ward_only,
-            ward_only,
+            super::NameNormalized(ward_only),
             ward_only,
             &parsed,
             &evidence,
@@ -14125,7 +14127,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             second_equal_to,
-            second_equal_to,
+            super::NameNormalized(second_equal_to),
             second_equal_to,
             &parsed,
             &evidence,
@@ -14144,7 +14146,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             second_number_of,
-            second_number_of,
+            super::NameNormalized(second_number_of),
             second_number_of,
             &parsed,
             &evidence,
@@ -14163,7 +14165,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let mut diagnostics = Vec::new();
         super::detect_dynamic_qty(
             second_for_each,
-            second_for_each,
+            super::NameNormalized(second_for_each),
             second_for_each,
             &parsed,
             &evidence,
@@ -16299,7 +16301,14 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let parsed = no_activation_limit_abilities();
         let evidence = UnitEvidence::of(&parsed);
         let mut found = Vec::new();
-        super::detect_dynamic_qty(cleaned, cleaned, cleaned, &parsed, &evidence, &mut found);
+        super::detect_dynamic_qty(
+            cleaned,
+            super::NameNormalized(cleaned),
+            cleaned,
+            &parsed,
+            &evidence,
+            &mut found,
+        );
         assert!(
             found.iter().any(|d| matches!(
                 d,
@@ -16320,7 +16329,14 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         let parsed = repeat_for_without_activation_limit_abilities();
         let evidence = UnitEvidence::of(&parsed);
         let mut found = Vec::new();
-        super::detect_dynamic_qty(cleaned, cleaned, cleaned, &parsed, &evidence, &mut found);
+        super::detect_dynamic_qty(
+            cleaned,
+            super::NameNormalized(cleaned),
+            cleaned,
+            &parsed,
+            &evidence,
+            &mut found,
+        );
         assert!(
             found.iter().any(|d| matches!(
                 d,
@@ -16394,7 +16410,14 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     ) -> bool {
         let evidence = UnitEvidence::of(&parsed);
         let mut found = Vec::new();
-        super::detect_dynamic_qty(cleaned, cleaned, cleaned, &parsed, &evidence, &mut found);
+        super::detect_dynamic_qty(
+            cleaned,
+            super::NameNormalized(cleaned),
+            cleaned,
+            &parsed,
+            &evidence,
+            &mut found,
+        );
         found.iter().any(|d| {
             matches!(d, OracleDiagnostic::SwallowedClause { detector, .. } if detector == "DynamicQty")
         })
