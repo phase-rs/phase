@@ -9985,11 +9985,12 @@ fn try_parse_have_causative(
                     // (`None`) or any other antecedent kind the reading is
                     // unchanged (Browbeat: "Any player may have ~ deal 5 damage
                     // to them").
-                    let target = match ctx.player_antecedents().declared_they {
-                        Some(ControllerRef::DeclaredPlayer { group }) => {
-                            TargetFilter::DeclaredPlayer { group }
-                        }
-                        _ => TargetFilter::Player,
+                    let target = if let Some(ControllerRef::DeclaredPlayer { group }) =
+                        ctx.player_antecedents().declared_they
+                    {
+                        TargetFilter::DeclaredPlayer { group }
+                    } else {
+                        TargetFilter::Player
                     };
                     return Some(parsed_clause(Effect::DealDamage {
                         amount,

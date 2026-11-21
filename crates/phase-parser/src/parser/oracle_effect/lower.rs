@@ -7160,9 +7160,6 @@ pub(super) fn strip_for_each_opponent_who_doesnt(text: &str) -> Option<(String, 
 /// - an undirected `LoseLife { target: None }` → `Some(ScopedPlayer)` — the live
 ///   card data drops the "that player" subject, but inside a decline body an
 ///   undirected life loss IS "that player" by CR 109.5 context.
-///
-/// CR 701.22a + CR 701.25a: scry and surveil act on "your library" — the
-/// recipient player is the keyword action's performer.
 pub(super) fn rebind_decline_body_recipient(effect: &mut Effect) {
     fn rebind(filter: &mut TargetFilter) {
         match filter {
@@ -7182,6 +7179,8 @@ pub(super) fn rebind_decline_body_recipient(effect: &mut Effect) {
         | Effect::Discard { target, .. }
         | Effect::Mill { target, .. }
         | Effect::DealDamage { target, .. }
+        // CR 701.22a + CR 701.25a: scry and surveil act on "your library" — the
+        // recipient is the keyword action's performer.
         | Effect::Scry { target, .. }
         | Effect::Surveil { target, .. } => rebind(target),
         Effect::Token { owner, .. } => rebind(owner),

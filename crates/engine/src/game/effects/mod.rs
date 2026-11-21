@@ -14328,9 +14328,6 @@ fn detach_after_player_scope_local_chain(
     // fan-out after this action has been processed for every player, exactly
     // like its ungated twin (Wheel of Fortune); kept here it would re-enter the
     // driver from every seat.
-    // The gated node's own resolution steps stay with it
-    // (`starts_independent_instruction`), and the fan-out head is never a
-    // per-seat gate (extort, CR 702.101a).
     let next_is_performed_gated = next.player_scope.is_none()
         && next
             .condition
@@ -14428,11 +14425,13 @@ fn detach_after_player_scope_local_chain(
         && !next_is_scoped_search_shuffle_tail;
     // CR 608.2c + CR 118.12: a resolution step of a per-seat gated instruction
     // ("If they don't, they lose 2 life and you draw a card" — Braids's
-    // Frightful Return chapter III; "If they do, untap this creature and remove it from combat" —
-    // Shakedown Heavy) is part of that instruction: it resolves inside the
-    // seat's template and is skipped with its gate when the gate is false
-    // (`starts_independent_instruction`). A child with its OWN `player_scope`
-    // is the next multi-player action (CR 608.2e) and is judged as before.
+    // Frightful Return chapter III; "If they do, untap this creature and
+    // remove it from combat" — Shakedown Heavy) is part of that instruction: it
+    // resolves inside the seat's template and is skipped with its gate when the
+    // gate is false (`starts_independent_instruction`). The fan-out head is
+    // never a per-seat gate (extort, CR 702.101a). A child with its OWN
+    // `player_scope` is the next multi-player action (CR 608.2e) and is judged
+    // as before.
     let next_is_gated_instruction_step = membership == SeatGateMembership::PerSeatGated
         && !starts_independent_instruction(&next)
         && next.player_scope.is_none();
