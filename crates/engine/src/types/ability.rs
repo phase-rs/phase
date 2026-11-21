@@ -2649,6 +2649,19 @@ pub enum KeywordAction {
     },
 }
 
+impl KeywordAction {
+    /// CR 115.1e + CR 702.6a: the targets chosen for this keyword action; only
+    /// equip targets (crew, saddle and station target nothing).
+    pub fn targets(&self) -> Vec<TargetRef> {
+        match self {
+            Self::Equip {
+                target_creature_id, ..
+            } => vec![TargetRef::Object(*target_creature_id)],
+            Self::Crew { .. } | Self::Saddle { .. } | Self::Station { .. } => Vec::new(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Resolved ability -- simplified, zero HashMap
 // ---------------------------------------------------------------------------

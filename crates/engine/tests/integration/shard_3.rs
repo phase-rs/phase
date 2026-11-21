@@ -10,6 +10,7 @@ pub mod support;
 
 mod dark_confidant_upkeep;
 mod dark_depths_thespian_stage;
+mod dark_matter_manipulator;
 mod darkness_crystal_exiled_with_activation_8164;
 mod darksteel_angel_cant_have_counters;
 mod dawnbreak_reclaimer;
