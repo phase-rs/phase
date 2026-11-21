@@ -379,3 +379,166 @@ fn raptor_pumps_when_the_damage_is_redirected_onto_a_dinosaur() {
         "a Dinosaur was dealt damage this way, so Marauding Raptor must be +2/+0"
     );
 }
+
+/// Cast the entering Dinosaur with Furnace of Rath ("If a source would deal
+/// damage to a permanent or player, it deals double that damage to that
+/// permanent or player instead.") and `shield` on the battlefield, then pass
+/// priority until the Raptor's damage stops at the controller's replacement
+/// ordering prompt (CR 616.1). Answers it with the candidate whose source is
+/// `first`, then drains the stack.
+fn cast_dinosaur_through_ordering_choice(
+    db: &CardDatabase,
+    shield: &str,
+    first_is_furnace: bool,
+) -> (GameRunner, ObjectId, ObjectId, Vec<GameEvent>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let raptor = scenario.add_real_card(P0, "Marauding Raptor", Zone::Battlefield, db);
+    let shield_id = scenario.add_real_card(P0, shield, Zone::Battlefield, db);
+    let furnace = scenario.add_real_card(P0, "Furnace of Rath", Zone::Battlefield, db);
+    let dino = scenario.add_real_card(P0, ENTERING_DINOSAUR, Zone::Hand, db);
+    scenario.with_mana_pool(P0, cast_pool(ManaType::Green, 2, 7));
+    let mut runner = scenario.build();
+
+    let mut events = runner.cast(dino).commit().events().to_vec();
+    for _ in 0..20 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            break;
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "expected priority before the ordering prompt, got {:?}",
+            runner.state().waiting_for
+        );
+        assert!(
+            !runner.state().stack.is_empty(),
+            "the stack emptied without the Raptor's damage asking for an order"
+        );
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority must be legal")
+                .events,
+        );
+    }
+    // CR 616.1: two replacements apply to the Raptor's damage to the Dinosaur,
+    // so its controller chooses one to apply first.
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the Raptor's damage must stop at a replacement ordering prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        player, P0,
+        "the Dinosaur's controller orders the replacements"
+    );
+    // Reach guard: the pause is before any damage was dealt.
+    assert_eq!(runner.state().objects[&dino].damage_marked, 0);
+    let pick = if first_is_furnace { furnace } else { shield_id };
+    let index = candidates
+        .iter()
+        .position(|candidate| candidate.source_id == pick)
+        .unwrap_or_else(|| panic!("{pick:?} must be offered, got {candidates:?}"));
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.source_id
+                == if first_is_furnace { shield_id } else { furnace }),
+        "both replacements must compete, got {candidates:?}"
+    );
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("P0 orders the replacements")
+            .events,
+    );
+    drain_stack_collecting_events(&mut runner, &mut events);
+    (runner, raptor, dino, events)
+}
+
+/// CR 616.1 + CR 608.2c: a replacement ordering prompt pauses the Raptor's
+/// damage before it is dealt; the "dealt damage this way" rider is answered by
+/// the damage the resumed instruction actually dealt. Furnace of Rath first
+/// doubles 2 to 4, then Temple Altisaur prevents all but 1 — the Dinosaur is
+/// dealt 1 damage, so the Raptor gets +2/+0.
+#[test]
+fn raptor_pumps_after_a_replacement_ordering_choice_furnace_first() {
+    let Some(db) = load_db() else {
+        eprintln!("skipping: card database absent");
+        return;
+    };
+    let (runner, raptor, dino, events) =
+        cast_dinosaur_through_ordering_choice(db, "Temple Altisaur", true);
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            GameEvent::DamageDealt { source_id, target: TargetRef::Object(target), amount: 1, .. }
+                if *source_id == raptor && *target == dino
+        )),
+        "the resumed damage must deal 1 to the Dinosaur, got {events:?}"
+    );
+    assert_eq!(runner.state().objects[&dino].damage_marked, 1);
+    assert_eq!(
+        runner.state().objects[&raptor].power,
+        Some(4),
+        "the Dinosaur was dealt damage this way, so Marauding Raptor must be +2/+0"
+    );
+}
+
+/// The other order: Temple Altisaur first cuts 2 to 1, then Furnace of Rath
+/// doubles it to 2. The Dinosaur is still dealt damage this way.
+#[test]
+fn raptor_pumps_after_a_replacement_ordering_choice_shield_first() {
+    let Some(db) = load_db() else {
+        eprintln!("skipping: card database absent");
+        return;
+    };
+    let (runner, raptor, dino, _) =
+        cast_dinosaur_through_ordering_choice(db, "Temple Altisaur", false);
+
+    assert_eq!(runner.state().objects[&dino].damage_marked, 2);
+    assert_eq!(
+        runner.state().objects[&raptor].power,
+        Some(4),
+        "the Dinosaur was dealt damage this way, so Marauding Raptor must be +2/+0"
+    );
+}
+
+/// CR 616.1 + CR 615.1a: the same pause-and-resume path where the answered
+/// order still leaves the Dinosaur undamaged — Inner Sanctum ("Prevent all
+/// damage that would be dealt to creatures you control.") prevents the
+/// doubled damage — so no Dinosaur was dealt damage this way and the resumed
+/// rider must not pump.
+#[test]
+fn raptor_does_not_pump_after_a_replacement_ordering_choice_prevents_all() {
+    let Some(db) = load_db() else {
+        eprintln!("skipping: card database absent");
+        return;
+    };
+    let (runner, raptor, dino, events) =
+        cast_dinosaur_through_ordering_choice(db, "Inner Sanctum", true);
+
+    // Reach guard: the resumed damage was prevented, not skipped.
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            GameEvent::DamagePrevented { source_id, target: TargetRef::Object(target), .. }
+                if *source_id == raptor && *target == dino
+        )),
+        "the resumed damage to the Dinosaur must be prevented, got {events:?}"
+    );
+    assert_eq!(runner.state().objects[&dino].damage_marked, 0);
+    assert_eq!(
+        runner.state().objects[&raptor].power,
+        Some(2),
+        "no Dinosaur was dealt damage this way, so Marauding Raptor must not be pumped"
+    );
+}

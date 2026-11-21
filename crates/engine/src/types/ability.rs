@@ -1950,6 +1950,25 @@ pub struct SplitDamagePortion {
     pub applied: Vec<AppliedReplacementKey>,
 }
 
+/// CR 608.2c + CR 614.9: what a damage instruction did, as its direct child
+/// reads it (`SpellContext::direct_damage_result`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum DamageInstructionResult {
+    /// The instruction has dealt its damage. `recipient` is the single object
+    /// it was actually dealt to, after any redirection; `None` when it reached
+    /// only players, was fully prevented, or reached several objects.
+    Dealt {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recipient: Option<ObjectIncarnationRef>,
+    },
+    /// CR 616.1: The instruction paused for a replacement choice before any of
+    /// its damage was dealt, and this child was parked behind it. The damage
+    /// `sources` deal once the instruction resumes is its whole result, and is
+    /// published when this child begins to resolve.
+    AwaitingDelivery { sources: Vec<ObjectId> },
+}
+
 /// Casting-time facts that flow with a spell from casting through resolution.
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -2076,16 +2095,14 @@ pub struct SpellContext {
     /// frame, so inline it widened every recursive frame by its size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_discard_result: Option<Box<DiscardedCardResult>>,
-    /// CR 608.2c + CR 614.9: The single object the immediately preceding damage
-    /// instruction actually dealt damage to, after any redirection — the result
-    /// a slotless "if a [type] is dealt damage this way" rider reads. Stamped
-    /// only by a damage instruction (`None` when its damage reached only
-    /// players, was fully prevented, or reached several objects);
+    /// CR 608.2c + CR 614.9: The result of the immediately preceding damage
+    /// instruction — what a slotless "if a [type] is dealt damage this way"
+    /// rider reads. Stamped only by a damage instruction;
     /// `apply_parent_chain_context` copies it only to that instruction's direct
     /// child and clears it on every other hand-off, so an earlier instruction's
     /// incidental object (a land tapped for a mana payment) never reaches it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub direct_damage_recipient: Option<ObjectIncarnationRef>,
+    pub direct_damage_result: Option<DamageInstructionResult>,
     /// CR 701.20e + CR 608.2c: Exact parent-produced cards forwarded to one
     /// immediate "for each" child. The child uses this snapshot as its
     /// iteration universe instead of an unqualified battlefield census.
@@ -6356,6 +6373,22 @@ impl ResolvedAbility {
         for (_, child) in self.child_links_mut() {
             child.clear_direct_discard_result_recursive();
         }
+    }
+
+    /// CR 608.2c + CR 614.9: Stamp a damage instruction's result onto this node,
+    /// its next instruction, and onto the base clause of an unswapped "instead"
+    /// override, which is that same next instruction.
+    pub fn set_direct_damage_result(&mut self, result: Option<DamageInstructionResult>) {
+        if self
+            .condition
+            .as_ref()
+            .is_some_and(|condition| condition.is_instead_override())
+        {
+            if let Some(base) = self.else_ability.as_deref_mut() {
+                base.context.direct_damage_result = result.clone();
+            }
+        }
+        self.context.direct_damage_result = result;
     }
 
     /// CR 608.2c: Stamp one completed effect result onto exactly the deferred
