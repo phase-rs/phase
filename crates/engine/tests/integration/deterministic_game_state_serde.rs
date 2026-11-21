@@ -2972,7 +2972,7 @@ fn stack_resolution_session_fixture(budget: StackResolutionBudget) -> GameState 
         ],
         cursor: 1,
         representatives: BTreeSet::from([PlayerId(0), PlayerId(2)]),
-        verified_pass_representatives: BTreeSet::new(),
+        verified_pass_owners: BTreeSet::new(),
         budget,
         policy: StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
         auto_pass_overlay: StackResolutionAutoPassOverlay {

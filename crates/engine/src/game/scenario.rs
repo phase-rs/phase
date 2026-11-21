@@ -1681,8 +1681,10 @@ impl GameRunner {
                 && matches!(self.state.waiting_for, WaitingFor::Priority { .. })
                 && self.state.stack.is_empty()
             {
-                pass_events
-                    .extend(apply_as_current(&mut self.state, GameAction::PassPriority)?.events);
+                // CR 805.5b: the whole holding team must pass to leave the
+                // window — passing only the representative stalls a shared
+                // team here with no budget, so this loop would never end.
+                pass_events.extend(self.pass_holding_team()?);
             }
             let mut result = apply_as_current(&mut self.state, action)?;
             pass_events.append(&mut result.events);
@@ -1757,6 +1759,67 @@ impl GameRunner {
         let _ = apply_as_current(&mut self.state, GameAction::PassPriority);
     }
 
+    /// CR 805.5b: pass priority once for the current holder and every living
+    /// teammate, collecting the emitted events.
+    ///
+    /// A team passes only when no member wishes to act, and the engine
+    /// advances a window only after every living player has passed — so a
+    /// driver that passes solely as the current holder stalls on any
+    /// shared-team window (the holder's pass alone never advances it).
+    /// Passing holder + teammates is exactly one current-holder pass in
+    /// individual-turn formats (`teammates` is empty there), so single-seat
+    /// drivers keep their behavior.
+    ///
+    /// CR 723.3 + CR 723.5: each seat's pass is submitted as its authorized
+    /// submitter, so a controlled seat's pass is made by its controller —
+    /// the same mapping `apply_as_current` performs.
+    pub fn pass_holding_team(&mut self) -> Result<Vec<GameEvent>, EngineError> {
+        let holder = match &self.state.waiting_for {
+            WaitingFor::Priority { player } => *player,
+            other => {
+                return Err(EngineError::InvalidAction(format!(
+                    "pass_holding_team needs a Priority window, got {other:?}"
+                )))
+            }
+        };
+        let holding_team = super::topology::team_id(&self.state, holder);
+        let mut seats = vec![holder];
+        seats.extend(super::players::teammates(&self.state, holder));
+        // CR 117.3d + CR 117.4: the holder holds priority, so its pass is
+        // always submitted — even over a pass recorded earlier in the window
+        // (CR 117.5: a trigger put on the stack as a player would receive
+        // priority hands priority back without clearing that record). Skipping the holder would submit nothing and leave every
+        // drain loop spinning on an unchanged window. CR 805.5b: a teammate
+        // that already passed is skipped — its pass stands until a game
+        // action clears it. Collected up front: the filter borrows the pass
+        // records while the submit loop below needs the state mutably.
+        let seats: Vec<PlayerId> = seats
+            .into_iter()
+            .filter(|&seat| seat == holder || !self.state.priority_passes.contains(&seat))
+            .collect();
+        let mut events = Vec::new();
+        for seat in seats {
+            let submitter = super::turn_control::authorized_submitter_for_player(&self.state, seat);
+            events.extend(
+                super::engine::apply(&mut self.state, submitter, GameAction::PassPriority)?.events,
+            );
+            // CR 805.5b + CR 805.8: a submitter outside the team (a whole-team
+            // controller) can complete the team's pass early — stop once the
+            // window leaves the holding team instead of submitting stale
+            // passes into the next team's window and losing these events to
+            // the `?` above.
+            let still_holding = matches!(
+                &self.state.waiting_for,
+                WaitingFor::Priority { player }
+                    if super::topology::team_id(&self.state, *player) == holding_team
+            );
+            if !still_holding {
+                break;
+            }
+        }
+        Ok(events)
+    }
+
     /// Drive `auto_advance` and then drain Upkeep and Draw priority windows so
     /// callers can test PreCombatMain trigger behavior without rebuilding the
     /// "skip empty priority steps" optimization at every call site. Stops as
@@ -1771,8 +1834,9 @@ impl GameRunner {
         let mut waiting = crate::game::turns::auto_advance(&mut self.state, &mut events);
 
         // Drain priority windows until the active player has priority during
-        // PreCombatMain. Each iteration passes both players through one step;
-        // bounded loop guards against unexpected non-priority states.
+        // PreCombatMain. Each iteration passes the holding team through one
+        // step (one seat in individual-turn formats); bounded loop guards
+        // against unexpected non-priority states.
         for _ in 0..8 {
             if self.state.phase == Phase::PreCombatMain {
                 break;
@@ -1780,11 +1844,9 @@ impl GameRunner {
             if !matches!(waiting, WaitingFor::Priority { .. }) {
                 break;
             }
-            let r1 = apply_as_current(&mut self.state, GameAction::PassPriority);
-            let r2 = apply_as_current(&mut self.state, GameAction::PassPriority);
-            match (r1, r2) {
-                (Ok(_), Ok(result)) => waiting = result.waiting_for,
-                _ => break,
+            match self.pass_holding_team() {
+                Ok(_) => waiting = self.state.waiting_for.clone(),
+                Err(_) => break,
             }
         }
         waiting
@@ -1817,15 +1879,14 @@ impl GameRunner {
             if !matches!(waiting, WaitingFor::Priority { .. }) {
                 break;
             }
-            let r1 = apply_as_current(&mut self.state, GameAction::PassPriority);
-            let r2 = apply_as_current(&mut self.state, GameAction::PassPriority);
-            match (r1, r2) {
-                (Ok(first), Ok(result)) => {
-                    events.extend(first.events);
-                    events.extend(result.events);
-                    waiting = result.waiting_for;
+            // CR 805.5b: pass the holding team, not a fixed two seats — a
+            // shared team (or a wider table) needs every living member.
+            match self.pass_holding_team() {
+                Ok(passed) => {
+                    events.extend(passed);
+                    waiting = self.state.waiting_for.clone();
                 }
-                _ => break,
+                Err(_) => break,
             }
         }
         events
@@ -1944,8 +2005,8 @@ impl GameRunner {
             if !matches!(self.state.waiting_for, WaitingFor::Priority { .. }) {
                 break;
             }
-            match apply_as_current(&mut self.state, GameAction::PassPriority) {
-                Ok(result) => events.extend(result.events),
+            match self.pass_holding_team() {
+                Ok(passed) => events.extend(passed),
                 Err(_) => break,
             }
         }
@@ -2004,7 +2065,9 @@ impl GameRunner {
             if self.state.stack.len() < initial_stack_len {
                 break;
             }
-            if apply_as_current(&mut self.state, GameAction::PassPriority).is_err() {
+            // CR 805.5b: the holding team passes together, or a shared-team
+            // window never advances past its representative.
+            if self.pass_holding_team().is_err() {
                 break;
             }
         }
@@ -2053,7 +2116,9 @@ impl GameRunner {
             if self.state.stack.is_empty() {
                 break;
             }
-            if apply_as_current(&mut self.state, GameAction::PassPriority).is_err() {
+            // CR 805.5b: the holding team passes together, or a shared-team
+            // window never advances past its representative.
+            if self.pass_holding_team().is_err() {
                 break;
             }
         }
@@ -4167,8 +4232,11 @@ fn drive_resolution(
                 if runner.state.stack.is_empty() {
                     break;
                 }
-                match runner.act(GameAction::PassPriority) {
-                    Ok(result) => events.extend(result.events),
+                // CR 805.5b: the holding team passes together — passing only
+                // the representative stalls a shared-team window with a live
+                // stack, so the spell under test would never resolve.
+                match runner.pass_holding_team() {
+                    Ok(passed) => events.extend(passed),
                     // An unrepresentable life change is an engine limit, not an
                     // unhandled prompt: the driver must report it rather than
                     // silently stop with a partially resolved effect.

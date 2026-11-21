@@ -2035,6 +2035,16 @@ fn two_hg_session_uses_team_representatives_in_the_live_runner() {
             .representatives,
         [PlayerId(0)].into_iter().collect()
     );
+    // CR 805.5b: P0 passes alone - the active team retains priority until the
+    // teammate passes too.
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+    apply(&mut state, PlayerId(1), GameAction::PassPriority)
+        .expect("active teammate completes the team pass");
     assert!(matches!(
         state.waiting_for,
         WaitingFor::Priority {
@@ -2046,6 +2056,14 @@ fn two_hg_session_uses_team_representatives_in_the_live_runner() {
     let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
     run_auto_pass_loop(&mut state, &mut result)
         .expect("the fixture's auto-pass drive is representable");
+    // The loop passes P2 then stops for the unpassed teammate P3 (no progress
+    // loop); P3's manual pass completes the team and resolves the stack.
+    if !state.stack.is_empty() {
+        let tail = apply(&mut state, PlayerId(3), GameAction::PassPriority)
+            .expect("opposing teammate completes the team pass");
+        result.events.extend(tail.events);
+        result.waiting_for = tail.waiting_for;
+    }
 
     assert!(state.stack.is_empty());
     assert!(state.stack_resolution_session.is_none());
@@ -2394,7 +2412,7 @@ fn install_recheck_session(state: &mut GameState, verified: &[PlayerId]) {
         .stack_resolution_session
         .as_mut()
         .expect("the session was just installed")
-        .verified_pass_representatives
+        .verified_pass_owners
         .extend(verified.iter().copied());
 }
 
@@ -2883,7 +2901,7 @@ fn authorized_limit_does_not_look_past_an_activated_ability() {
             .stack_resolution_session
             .as_mut()
             .expect("the session was just installed")
-            .verified_pass_representatives
+            .verified_pass_owners
             .extend([PlayerId(0), PlayerId(1)]);
         assert_eq!(
             stack_resolution_session_authorized_limit(&inert_above),

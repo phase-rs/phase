@@ -45,8 +45,10 @@ fn mana(types: &[ManaType]) -> Vec<ManaUnit> {
         .collect()
 }
 
+/// CR 805.5b: the holding team passes — every living member that has not yet passed (one seat in
+/// an individual-turn format).
 fn pass(runner: &mut GameRunner) {
-    runner.act(GameAction::PassPriority).expect("pass");
+    runner.pass_holding_team().expect("pass");
 }
 
 fn concede(runner: &mut GameRunner, player: PlayerId) {
@@ -184,7 +186,7 @@ fn archenemy_board() -> GameScenario {
 }
 
 /// CR 805.5b: a team's pass stays the team's when the player who made it leaves and a teammate
-/// remains.
+/// remains. The team passes only once every living member has, so each hero's pass is recorded.
 #[test]
 fn a_team_keeps_its_pass_when_its_representative_leaves() {
     let mut runner = archenemy(archenemy_board());
@@ -197,7 +199,7 @@ fn a_team_keeps_its_pass_when_its_representative_leaves() {
             .iter()
             .copied()
             .collect::<Vec<_>>(),
-        [P1]
+        [P1, P2, P3]
     );
     concede(&mut runner, P1);
     pass(&mut runner);

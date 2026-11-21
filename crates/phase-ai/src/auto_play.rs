@@ -128,20 +128,43 @@ pub struct AiActionsRun {
 }
 
 /// Resolve the next AI-owned decision using the driver's authorization boundary.
+///
+/// CR 805.5a: under shared team turns every living teammate may act when the
+/// team has priority, so an AI teammate is eligible even while the window is
+/// parked on the human representative.
 pub fn eligible_ai_decision(
     state: &GameState,
     ai_players: &HashSet<PlayerId>,
 ) -> Option<(PlayerId, PlayerId)> {
-    state
-        .waiting_for
-        .acting_players()
-        .into_iter()
-        .find_map(|semantic_owner| {
-            let actor = turn_control::authorized_submitter_for_player(state, semantic_owner);
-            ai_players
-                .contains(&actor)
-                .then_some((semantic_owner, actor))
-        })
+    // CR 805.5a: team priority windows list every living member as a decision
+    // owner; other windows list the engine's acting players unchanged.
+    // CR 805.5b: a member who already passed this window has no new decision
+    // until someone acts (which clears passes) — skip them so the driver hands
+    // the window to an unpassed teammate instead of re-prompting the passer
+    // until the safety cap.
+    let owners = turn_control::decision_owners(state);
+    // Only a Priority window records passes; every other window resolves to
+    // the engine's acting players unchanged.
+    let unpassed: Vec<PlayerId> = if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        owners
+            .iter()
+            .copied()
+            .filter(|owner| !state.priority_passes.contains(owner))
+            .collect()
+    } else {
+        owners.clone()
+    };
+    let owners = if unpassed.is_empty() {
+        owners
+    } else {
+        unpassed
+    };
+    owners.into_iter().find_map(|semantic_owner| {
+        let actor = turn_control::authorized_submitter_for_player(state, semantic_owner);
+        ai_players
+            .contains(&actor)
+            .then_some((semantic_owner, actor))
+    })
 }
 
 impl std::ops::Deref for AiActionsRun {
@@ -606,16 +629,18 @@ mod tests {
     };
     use engine::game::engine::{apply, start_game_with_starting_player};
     use engine::game::mulligan::free_reveal_futile_for;
+    use engine::game::topology::shared_poison_members;
     use engine::game::zones::{add_to_zone, create_object, remove_from_zone};
+    use engine::types::ability::EffectKind;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
     };
     use engine::types::actions::MulliganChoice;
     use engine::types::card_type::CoreType;
-    use engine::types::format::FormatConfig;
+    use engine::types::format::{ChallengeDeck, FormatConfig};
     use engine::types::game_state::{
         AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry, StackEntryKind,
-        StackResolutionPolicy, WaitingFor,
+        StackResolutionPolicy, UntapStepProgress, WaitingFor,
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::phase::Phase;
@@ -1180,6 +1205,230 @@ mod tests {
                     "{label}: {reveals} reveals"
                 );
             }
+        }
+    }
+
+    /// CR 805.5a: on a shared survivor turn parked on the human
+    /// representative, AI allies are driven — their actions pass the
+    /// decision-contract gate and apply. Pre-fix, `permits` required the
+    /// semantic owner to be the single holder, so every ally action was
+    /// rejected and the driver stopped with `ApplyFailed`: allies never
+    /// played a land or passed (the Horde idle-allies report).
+    #[test]
+    fn ai_ally_acts_on_shared_survivor_turn() {
+        let rep = PlayerId(1);
+        let ally = PlayerId(2);
+        let ally2 = PlayerId(3);
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::ZombiesHorde.default_ruleset()),
+            4,
+            42,
+        );
+        state.phase = Phase::PreCombatMain;
+        state.active_player = rep;
+        state.priority_player = rep;
+        state.waiting_for = WaitingFor::Priority { player: rep };
+        for (seat, name) in [(ally, "Ally Forest"), (ally2, "Ally2 Forest")] {
+            let forest = create_object(&mut state, CardId(1), seat, name.to_string(), Zone::Hand);
+            state
+                .objects
+                .get_mut(&forest)
+                .expect("created land must exist")
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+            state.players[seat.0 as usize].hand.push_back(forest);
+        }
+
+        let ai_players = HashSet::from([ally, ally2]);
+        let ai_configs = HashMap::from([(ally, AiConfig::default()), (ally2, AiConfig::default())]);
+        let session = AiSession::arc_from_game(&state);
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
+        let run = run_ai_actions(&mut state, &ai_players, &ai_configs, &mut rng, &session);
+
+        assert!(
+            !matches!(run.stop, AiActionsStop::ApplyFailed { .. }),
+            "ally actions must apply, got {:?}",
+            run.stop
+        );
+        let ally_passed = state.priority_passes.contains(&ally);
+        let ally_land_played = state
+            .battlefield
+            .iter()
+            .any(|id| state.objects.get(id).is_some_and(|o| o.controller == ally));
+        assert!(
+            ally_passed || ally_land_played,
+            "the ally must act or pass on its team's turn"
+        );
+
+        // S1 context (labelled, never asserted): Stage 1's unbounded drain
+        // ends this horde fixture's game (`GameOver`), so no same-fixture
+        // Stage-2 presence is asserted here — a presence on the drained
+        // fixture is unachievable. The Stage-2 honesty proof lives in
+        // `ai_ally_pass_records_on_live_team_stack`, on a dedicated live 2HG
+        // fixture, instead.
+    }
+
+    /// CR 805.5b Stage-2 honesty on a live stack: the AI ally's pass records
+    /// on a dedicated 2HG fixture. Stage 1's horde fixture cannot carry this
+    /// proof — its unbounded drain ends the game — so this test parks a live
+    /// window on the human representative with the ally holding an empty hand:
+    /// the ally's only legal action is the pass, and the human rep never
+    /// passes, so unanimous pass is unreachable and the stack must stay.
+    #[test]
+    fn ai_ally_pass_records_on_live_team_stack() {
+        let rep = PlayerId(0);
+        let ally = PlayerId(1);
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 7);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = rep;
+        state.priority_player = rep;
+        state.waiting_for = WaitingFor::Priority { player: rep };
+        push_no_op_stack_entry(&mut state, 91_001);
+        // Layout probe: the 2HG family pools poison per team off the same
+        // `team_members` authority (`topology.rs`), so the public
+        // `shared_poison_members` read-out proves the ally shares the rep's
+        // team. If the 2HG seat layout ever differs, this reds first.
+        assert!(
+            shared_poison_members(&state, rep).contains(&ally),
+            "layout: the ally must share the representative's team"
+        );
+        // Pre-run liveness quartet: a dead fixture must red here, never as a
+        // vacuous post-run green.
+        assert!(
+            state.game_end.is_none(),
+            "the fixture must be live before the driver runs"
+        );
+        assert!(
+            matches!(&state.waiting_for, WaitingFor::Priority { player } if *player == rep),
+            "the window must be parked on the human rep, got {:?}",
+            state.waiting_for
+        );
+        assert!(!state.stack.is_empty(), "the stack must be live");
+        assert!(
+            state.priority_passes.is_empty(),
+            "no passes may be recorded before the driver runs"
+        );
+        // Absence: construction yields empty passes; pre-seeding the ally
+        // reds this and proves the presence below is driver-produced.
+        assert!(
+            !state.priority_passes.contains(&ally),
+            "absence: the ally must hold no pass before the driver runs"
+        );
+        let top_id = state.stack.back().map(|entry| entry.id);
+
+        let ai_players = HashSet::from([ally]);
+        let ai_configs = HashMap::from([(ally, AiConfig::default())]);
+        let session = AiSession::arc_from_game(&state);
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(7);
+        let run = run_ai_actions(&mut state, &ai_players, &ai_configs, &mut rng, &session);
+
+        assert!(
+            !matches!(run.stop, AiActionsStop::ApplyFailed { .. }),
+            "ally stack passes must apply, got {:?}",
+            run.stop
+        );
+        // Presence is `contains`, not equality: the driver's verified-pass
+        // session path may also account the parked representative's window,
+        // while a direct `apply` records exactly the acting teammate. The
+        // test proves the ally's pass records; it does not lock in the
+        // session path's extra record.
+        assert!(
+            state.priority_passes.contains(&ally),
+            "presence: the ally's pass must record on the live stack"
+        );
+        assert_eq!(
+            run.results.len(),
+            1,
+            "exactly the ally's single pass — Stage-2 honesty, not a vacuous green"
+        );
+        assert!(
+            matches!(run.stop, AiActionsStop::NoEligibleAiActor),
+            "clean handoff once no AI seat can act, got {:?}",
+            run.stop
+        );
+        assert!(
+            state.game_end.is_none(),
+            "anti-S1 tripwire: the game must still be live after the run"
+        );
+        assert_eq!(state.stack.len(), 1, "the stack must stay");
+        assert_eq!(
+            state.stack.back().map(|entry| entry.id),
+            top_id,
+            "the same top entry must survive — no resolution ran"
+        );
+    }
+
+    /// U6 hardening (no revert claim): outside `Priority`, an already-passed
+    /// member stays eligible — the unpassed filter lives only on the
+    /// `Priority` arm. Exhaustiveness is compile-time (no fallback arm); this
+    /// pins dispatch parity for one window per family (turn action, step
+    /// choice, resolution choice).
+    #[test]
+    fn non_priority_windows_ignore_pass_records() {
+        let rep = PlayerId(1);
+        let ally = PlayerId(2);
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::ZombiesHorde.default_ruleset()),
+            4,
+            42,
+        );
+        state.phase = Phase::PreCombatMain;
+        state.active_player = rep;
+        state.priority_player = rep;
+        state.priority_passes.insert(ally);
+        state.priority_pass_count = 1;
+        let ai_players = HashSet::from([ally]);
+
+        // Contrast: on `Priority` the passed ally is filtered out, so nobody
+        // is eligible.
+        state.waiting_for = WaitingFor::Priority { player: rep };
+        assert!(
+            eligible_ai_decision(&state, &ai_players).is_none(),
+            "the unpassed filter must hide a passed member on Priority"
+        );
+
+        let windows = [
+            (
+                "DeclareAttackers",
+                WaitingFor::DeclareAttackers {
+                    player: ally,
+                    valid_attacker_ids: Vec::new(),
+                    valid_attack_targets: Vec::new(),
+                    valid_attack_targets_by_attacker: None,
+                    attacker_constraints: Default::default(),
+                },
+            ),
+            (
+                "ChooseUntapSubset",
+                WaitingFor::ChooseUntapSubset {
+                    player: ally,
+                    group: Vec::new(),
+                    max: 1,
+                    progress: UntapStepProgress::AfterTurnBasedActions,
+                },
+            ),
+            (
+                "DiscardChoice",
+                WaitingFor::DiscardChoice {
+                    player: ally,
+                    count: 1,
+                    cards: Vec::new(),
+                    source_id: ObjectId(9),
+                    effect_kind: EffectKind::Discard,
+                    up_to: false,
+                    unless_filter: None,
+                    discard_frame: None,
+                },
+            ),
+        ];
+        for (label, waiting) in windows {
+            state.waiting_for = waiting;
+            assert_eq!(
+                eligible_ai_decision(&state, &ai_players),
+                Some((ally, ally)),
+                "{label} must resolve to the engine's acting players unchanged"
+            );
         }
     }
 }

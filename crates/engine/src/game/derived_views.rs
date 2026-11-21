@@ -722,6 +722,18 @@ pub struct DerivedViews {
     /// when there is no actor or multiple distinct authorized submitters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unique_authorized_submitter: Option<PlayerId>,
+    /// CR 805.5a: the living seats entitled to answer the live priority
+    /// window that have not passed it yet — the parked representative plus
+    /// every unpassed teammate on a shared-team window. Omitted on any
+    /// non-priority window and whenever it would name only the holder
+    /// (always so for individual seats), where consumers fall back to
+    /// `WaitingFor::Priority`'s player. The browser AI scheduler
+    /// drives the AI seats in this list so a teammate stays eligible while
+    /// the window sits on its representative; it mirrors the headless
+    /// driver's owner filter minus the AI membership check, which only the
+    /// client knows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub priority_decision_owners: Vec<PlayerId>,
     /// The authorized viewer's Scry identity, retained when the bounded
     /// interaction projection omits its opportunities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1804,6 +1816,7 @@ fn temporary_cant_be_blocked_source(
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
     let mut views = DerivedViews {
         unique_authorized_submitter: unique_authorized_submitter(state),
+        priority_decision_owners: priority_decision_owners(state),
         scry_prompt_id: viewer
             .and_then(|viewer| crate::game::interaction::scry_prompt_id_for_viewer(state, viewer)),
         blocker_assignment_pairs: blocker_assignment_pairs(state),
@@ -2475,6 +2488,7 @@ pub fn derive_filtered_views(
         _ => Vec::new(),
     };
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    views.priority_decision_owners = priority_decision_owners(authoritative_state);
     // CR 702.24a: whether the prompt continues a payment already begun is read
     // from the payment's parked owner, which the viewer projection drops.
     if let Some(draw) = views.unless_draw_cost.as_mut() {
@@ -2746,6 +2760,30 @@ fn unique_authorized_submitter(state: &GameState) -> Option<PlayerId> {
     submitters.sort_unstable_by_key(|player| player.0);
     submitters.dedup();
     (submitters.len() == 1).then(|| submitters[0])
+}
+
+/// CR 805.5a: the living seats entitled to answer the live priority window
+/// that have not passed it yet. A member who already passed has no new
+/// decision until someone acts (which clears passes), so passed owners are
+/// excluded — the same filter the headless AI driver applies before
+/// choosing a seat.
+///
+/// A list naming only the holder adds nothing to `WaitingFor::Priority`, and
+/// every consumer already falls back to the holder, so it is left empty
+/// (and omitted from the wire). The list is published only when a teammate
+/// can act on the window, which keeps individual-seat updates unchanged.
+fn priority_decision_owners(state: &GameState) -> Vec<PlayerId> {
+    let WaitingFor::Priority { player: holder } = state.waiting_for else {
+        return Vec::new();
+    };
+    let owners: Vec<PlayerId> = crate::game::turn_control::decision_owners(state)
+        .into_iter()
+        .filter(|owner| !state.priority_passes.contains(owner))
+        .collect();
+    if owners == [holder] {
+        return Vec::new();
+    }
+    owners
 }
 
 /// CR 103.1: the starting player of the game this state describes, once it has
@@ -9926,7 +9964,7 @@ mod tests {
             entries: vec![StackResolutionEntryFence::capture(&entry)],
             cursor: 0,
             representatives: BTreeSet::from([PlayerId(0)]),
-            verified_pass_representatives: BTreeSet::new(),
+            verified_pass_owners: BTreeSet::new(),
             budget: StackResolutionBudget::from_legacy_max_resolutions(3),
             policy: StackResolutionPolicy::Committed,
             auto_pass_overlay: StackResolutionAutoPassOverlay {
@@ -10910,5 +10948,53 @@ mod tests {
                 printing: Default::default(),
             }]
         );
+    }
+
+    /// CR 805.5a: the browser scheduler's owner list names every living
+    /// teammate on a parked shared-team window, minus seats that already
+    /// passed — and collapses to the single holder in individual formats.
+    #[test]
+    fn priority_decision_owners_lists_unpassed_teammates_on_a_parked_window() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert_eq!(
+            derive_views(&state, None).priority_decision_owners,
+            vec![PlayerId(0), PlayerId(1)]
+        );
+
+        // A passed member has no new decision until someone acts.
+        state.priority_passes.insert(PlayerId(0));
+        assert_eq!(
+            derive_views(&state, None).priority_decision_owners,
+            vec![PlayerId(1)]
+        );
+
+        // Only the holder left unpassed: the list would repeat the window's
+        // player, so it is omitted and consumers fall back to the holder.
+        state.priority_passes.clear();
+        state.priority_passes.insert(PlayerId(1));
+        assert!(derive_views(&state, None)
+            .priority_decision_owners
+            .is_empty());
+
+        // Non-priority windows carry no owner list.
+        state.waiting_for = WaitingFor::GameOver { winner: None };
+        assert!(derive_views(&state, None)
+            .priority_decision_owners
+            .is_empty());
+
+        // Individual formats never publish a list: the holder is the only
+        // owner, which `WaitingFor::Priority` already names.
+        let mut solo = GameState::new(FormatConfig::standard(), 2, 42);
+        solo.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        assert!(derive_views(&solo, None)
+            .priority_decision_owners
+            .is_empty());
     }
 }

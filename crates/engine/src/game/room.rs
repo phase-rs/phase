@@ -39,38 +39,50 @@ impl PriorityUnlockRoomDoorAnnouncement {
     }
 }
 
-/// Enumerates the active holder's locked Room doors during the normal
-/// main-phase, empty-stack special-action window.
+/// Enumerates the holding team's locked Room doors during the normal
+/// main-phase, empty-stack special-action window: every living teammate's
+/// controlled doors on a shared-team window, otherwise the holder's.
+/// CR 805.5a: the preflight must see each member's doors, not just the
+/// holder's, or it wrongly reads a team window actionless past a teammate's
+/// unlock. The probe applies as the holder, so a teammate's door reads
+/// Indeterminate (fail-closed via the controller check in
+/// `validate_unlock_room_door`), never Actionable-by-the-wrong-seat.
 pub(in crate::game) fn priority_unlock_room_door_announcements(
     state: &GameState,
     principal: &PriorityPrincipal,
 ) -> Vec<PriorityUnlockRoomDoorAnnouncement> {
-    let player = principal.semantic_holder();
-    if state.active_player != player
-        || !state.stack.is_empty()
-        || !matches!(
-            state.phase,
-            crate::types::phase::Phase::PreCombatMain | crate::types::phase::Phase::PostCombatMain
-        )
-    {
-        return Vec::new();
-    }
-    state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|object_id| {
+    let holder = principal.semantic_holder();
+    let members = if super::topology::side_takes_shared_turn(state, holder) {
+        super::topology::team_members(state, holder)
+    } else {
+        vec![holder]
+    };
+    let mut out = Vec::new();
+    for player in members {
+        if !super::restrictions::is_sorcery_speed_window(state, player) {
+            continue;
+        }
+        out.extend(
             state
-                .objects
-                .get(object_id)
-                .is_some_and(|object| object.controller == player)
-        })
-        .flat_map(|object_id| {
-            eligible_doors(state, object_id, DoorLockOp::Unlock)
-                .into_iter()
-                .map(move |(_, door)| PriorityUnlockRoomDoorAnnouncement::new(object_id, door))
-        })
-        .collect()
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|object_id| {
+                    state
+                        .objects
+                        .get(object_id)
+                        .is_some_and(|object| object.controller == player)
+                })
+                .flat_map(|object_id| {
+                    eligible_doors(state, object_id, DoorLockOp::Unlock)
+                        .into_iter()
+                        .map(move |(_, door)| {
+                            PriorityUnlockRoomDoorAnnouncement::new(object_id, door)
+                        })
+                }),
+        );
+    }
+    out
 }
 
 /// CR 709.5 + CR 709.5a: does this type line have the two shared halves? The
@@ -419,13 +431,10 @@ fn validate_unlock_room_door(
     object_id: ObjectId,
     door: RoomDoor,
 ) -> Result<crate::types::mana::ManaCost, EngineError> {
-    if state.active_player != player
-        || !matches!(
-            state.phase,
-            crate::types::phase::Phase::PreCombatMain | crate::types::phase::Phase::PostCombatMain
-        )
-        || !state.stack.is_empty()
-    {
+    // CR 709.5e + CR 805.5a: a main-phase, empty-stack window on the acting
+    // seat's team's turn — any living teammate of the active player, through
+    // the shared sorcery-speed authority, matching the candidate offer.
+    if !super::restrictions::is_sorcery_speed_window(state, player) {
         return Err(EngineError::ActionNotAllowed(
             "Room doors can be unlocked only as a main-phase special action with an empty stack"
                 .to_string(),

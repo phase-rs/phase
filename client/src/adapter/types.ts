@@ -4667,6 +4667,16 @@ export interface DerivedViews {
   /** Chooser-private printed creature types, ranked by deck frequency. */
   named_choice_suggestions?: string[];
   unique_authorized_submitter?: PlayerId;
+  /**
+   * CR 805.5a: living seats entitled to answer the live priority window that
+   * have not passed it yet — the parked representative plus unpassed
+   * teammates on a shared-team window. Absent on non-priority windows, when
+   * it would name only the holder (always so for individual seats), and on
+   * wire paths without derived views; consumers then fall back to
+   * `priority_player`. Mirrors
+   * `engine::game::derived_views::DerivedViews::priority_decision_owners`.
+   */
+  priority_decision_owners?: PlayerId[];
   /** Engine-owned Scry prompt identity for this viewer, independent of opportunities. */
   scry_prompt_id?: InteractionId;
   /** Opaque engine-issued identity of this viewer's prompt, excluding display-only data. */

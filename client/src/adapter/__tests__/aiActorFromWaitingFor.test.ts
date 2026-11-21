@@ -4,6 +4,7 @@ import type { SeatKind } from "../../multiplayer/seatTypes";
 import {
   buildAssistPaymentWaitingFor,
   buildLoopShortcutWaitingFor,
+  buildPriorityWaitingFor,
 } from "../../test/factories/gameStateFactory";
 import { aiActorFromWaitingFor } from "../p2p-adapter";
 
@@ -34,5 +35,23 @@ describe("aiActorFromWaitingFor — LoopShortcut routing (T8)", () => {
 
   it("does not blanket-admit non-player, non-LoopShortcut states (control)", () => {
     expect(aiActorFromWaitingFor(assistPayment, seats, 1)).toBeNull();
+  });
+});
+
+describe("aiActorFromWaitingFor — shared-team priority (CR 805.5a)", () => {
+  const parkedOnHuman = buildPriorityWaitingFor({ data: { player: 0 } });
+
+  it("routes a parked team window to the AI teammate", () => {
+    // Revert-probe target: delete the Priority/decisionOwners branch and
+    // this returns the authorized submitter (0) instead of 1 → fails.
+    expect(aiActorFromWaitingFor(parkedOnHuman, seats, 0, [0, 1])).toBe(1);
+  });
+
+  it("falls back to the authorized submitter without derived owners", () => {
+    expect(aiActorFromWaitingFor(parkedOnHuman, seats, 0)).toBe(0);
+  });
+
+  it("returns null when no owner is an AI seat (control)", () => {
+    expect(aiActorFromWaitingFor(parkedOnHuman, seats, 0, [0])).toBeNull();
   });
 });

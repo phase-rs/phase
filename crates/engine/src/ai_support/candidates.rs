@@ -1024,7 +1024,23 @@ pub fn candidate_actions_broad_with_probe(
         }
         WaitingFor::Priority { player } => {
             crate::game::off_zone_characteristics::with_off_zone_keyword_scope(state, || {
-                priority_actions_with_probe(state, *player, probe)
+                // CR 805.5a: A player may cast a spell, activate an ability, or
+                // take a special action when their team has priority. The window
+                // is parked on the representative, but every living member needs
+                // their own candidates with their own semantic owner. The shared
+                // cast probe belongs to the holder; teammates enumerate without
+                // it (direct castability, same result, no wrong-player reuse).
+                if crate::game::topology::side_takes_shared_turn(state, *player) {
+                    let members = crate::game::topology::team_members(state, *player);
+                    let mut actions = Vec::new();
+                    for member in members {
+                        let member_probe = if member == *player { probe } else { None };
+                        actions.extend(priority_actions_with_probe(state, member, member_probe));
+                    }
+                    actions
+                } else {
+                    priority_actions_with_probe(state, *player, probe)
+                }
             })
         }
         WaitingFor::ManaPayment {
@@ -4643,7 +4659,12 @@ pub(crate) fn priority_actions_with_probe(
     let p = &state.players[player.0 as usize];
     let is_main_phase = matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain);
     let stack_empty = state.stack.is_empty();
-    let is_active = state.active_player == player;
+    // CR 805.4a + CR 805.5a: under the shared team turns option the active
+    // TEAM takes the turn, and any member may act when the team has priority.
+    // Sorcery-speed gates (land, foretell, plot, room unlock) treat every
+    // living teammate of the active player as active, through the shared
+    // membership authority.
+    let is_active = crate::game::restrictions::acts_on_active_turn(state, player);
     let activation_restriction_gates =
         crate::game::restrictions::ActivationRestrictionStaticGates::compute(state);
 
@@ -4655,10 +4676,19 @@ pub(crate) fn priority_actions_with_probe(
         ));
     }
 
+    // CR 805.4c: Each player on a team may play a land during each of that
+    // team's turns. Under shared team turns the allowance is per-player, so a
+    // teammate who has not played their land is still offered theirs after the
+    // representative plays theirs. Mirrors `land_play_allowance_refusal`.
+    let lands_played = if state.format_config.topology().has_shared_team_turns() {
+        p.lands_played_this_turn
+    } else {
+        state.lands_played_this_turn
+    };
     if is_main_phase
         && stack_empty
         && is_active
-        && state.lands_played_this_turn
+        && lands_played
             < state.max_lands_per_turn.saturating_add(
                 crate::game::static_abilities::additional_land_drops(state, player),
             )
@@ -5389,7 +5419,8 @@ pub(crate) fn priority_actions_with_probe(
 
     // CR 702.49: Offer Ninjutsu-family activations during combat
     // CR 702.61a: Ninjutsu is an activated ability — blocked by split second.
-    if !split_second_active && state.active_player == player {
+    // CR 805.5a: any living teammate may act when the team has priority.
+    if !split_second_active && is_active {
         let family_cards = keywords::ninjutsu_family_activatable_sources(state, player);
         for (ninjutsu_object_id, _card_id, variant, cost) in &family_cards {
             let returnable = keywords::returnable_creatures_for_variant(state, player, variant);
@@ -8045,7 +8076,7 @@ mod tests {
     }
 
     #[test]
-    fn two_hg_priority_actions_offer_single_pass_for_team_representative() {
+    fn two_hg_priority_actions_offer_one_pass_per_living_teammate() {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
         state.active_player = PlayerId(0);
         state.priority_player = PlayerId(0);
@@ -8053,18 +8084,28 @@ mod tests {
             player: PlayerId(0),
         };
 
-        let pass_candidates: Vec<_> = candidate_actions(&state)
+        // CR 805.5a + CR 805.5b: every living teammate may act on team
+        // priority, and each pass is recorded individually — one PassPriority
+        // candidate per member, owned by that member.
+        let mut pass_candidates: Vec<_> = candidate_actions(&state)
             .into_iter()
             .filter(|candidate| matches!(candidate.action, GameAction::PassPriority))
             .collect();
-        assert_eq!(pass_candidates.len(), 1);
-        assert_eq!(pass_candidates[0].metadata.actor, Some(PlayerId(0)));
+        pass_candidates.sort_by_key(|candidate| candidate.metadata.semantic_owner);
+        assert_eq!(pass_candidates.len(), 2);
+        assert_eq!(
+            pass_candidates
+                .iter()
+                .map(|candidate| candidate.metadata.semantic_owner)
+                .collect::<Vec<_>>(),
+            vec![Some(PlayerId(0)), Some(PlayerId(1))]
+        );
 
         let pass_actions = crate::ai_support::legal_actions(&state)
             .into_iter()
             .filter(|action| matches!(action, GameAction::PassPriority))
             .count();
-        assert_eq!(pass_actions, 1);
+        assert_eq!(pass_actions, 2);
     }
 
     // CR 702.xxx: Prepare (Strixhaven) — the AI candidate enumerator must
