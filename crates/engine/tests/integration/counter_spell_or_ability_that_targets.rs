@@ -672,7 +672,7 @@ fn diplomatic_escort_ignores_an_equip_whose_creature_was_flickered() {
         legal,
         set(&[live, live2]),
         "CR 115.9b + CR 400.7: the equip's creature left and returned as a new \
-         object, so the equip targets nothing"
+         object, so Diplomatic Escort must ignore that target"
     );
 }
 
