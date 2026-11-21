@@ -23,10 +23,11 @@ use crate::types::game_state::{
     AutoMayChoice, CollectedTriggerContextBatch, DamageRecord, DelayedTrigger,
     DepartingOwnerAfterAuthority, DistributionUnit, GameState, LatchedBatchedTrigger,
     LatchedSuppressTrigger, LogicalZoneChangeGroup, LogicalZoneChangeTerminalOutcome,
-    MayTriggerAutoChoiceKey, MayTriggerOrigin, ProductionOverride, StackEntry, StackEntryKind,
-    StackObjectClass, SubjectIncarnationScope, SyntheticTriggerProvenance,
-    TargetSelectionConstraint, TargetSelectionSlot, TriggerObservationTime, TriggerSourceContext,
-    TriggerSourceRead, WaitingFor, ZoneChangeAnnouncement,
+    MayTriggerAutoChoiceKey, MayTriggerOrigin, PersistedRestoreError, ProductionOverride,
+    StackEntry, StackEntryKind, StackObjectClass, SubjectIncarnationScope,
+    SyntheticTriggerProvenance, TargetSelectionConstraint, TargetSelectionSlot,
+    TriggerObservationTime, TriggerSourceContext, TriggerSourceRead, WaitingFor,
+    ZoneChangeAnnouncement,
 };
 use crate::types::identifiers::{
     DelayedInstallIdentity, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
@@ -234,9 +235,11 @@ pub(crate) enum TriggerPlacementProcess {
     UnderWay,
 }
 
-fn trigger_placement_process_is_fresh(process: &TriggerPlacementProcess) -> bool {
-    matches!(process, TriggerPlacementProcess::Fresh)
-}
+/// The serialized key of `PendingTriggerContext::placement_process`. It is
+/// written on every queued context, so a persisted queue where no context
+/// carries it was written before the mark existed (read by the persisted
+/// decode's legacy-queue flag and by the restore refusal it feeds).
+pub const PLACEMENT_PROCESS_FIELD: &str = "placement_process";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConsumedTriggerEventOccurrence {
@@ -487,8 +490,10 @@ pub struct PendingTriggerContext {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) causes: Vec<GameEvent>,
     /// CR 603.3b: whether this ability belongs to the placement process under
-    /// way (see [`TriggerPlacementProcess`]).
-    #[serde(default, skip_serializing_if = "trigger_placement_process_is_fresh")]
+    /// way (see [`TriggerPlacementProcess`]). Serialized on every context, so a
+    /// saved context without it was written before this field existed
+    /// (`legacy_unmarked_placement_queue` reads that).
+    #[serde(default)]
     pub(crate) placement_process: TriggerPlacementProcess,
 }
 
@@ -10259,12 +10264,26 @@ pub(crate) enum ConstructionSpanOwner {
 /// entry was put on the stack after the carrier began resolving, and an
 /// earlier finisher's entry stays on the stack until a player receives priority.
 fn ability_resolution_is_placing_its_first_ability(state: &GameState) -> bool {
+    abilities_put_on_the_stack_by_resolution(state) == 1
+}
+
+/// CR 603.3b + CR 603.12: an ability's resolution is under way and has put at
+/// least one ability on the stack, so what is queued may include contexts it
+/// joined to a placement process (a legacy save cannot say which).
+fn ability_resolution_has_put_an_ability_on_the_stack(state: &GameState) -> bool {
+    abilities_put_on_the_stack_by_resolution(state) >= 1
+}
+
+/// The ability-class stack entries newer than the resolving ability carrier
+/// (see [`ability_resolution_is_placing_its_first_ability`]); `0` when no
+/// ability is resolving.
+fn abilities_put_on_the_stack_by_resolution(state: &GameState) -> usize {
     let Some(carrier) = state
         .resolving_stack_entry
         .as_ref()
         .filter(|entry| matches!(entry.kind.class(), StackObjectClass::Ability(_)))
     else {
-        return false;
+        return 0;
     };
     state
         .stack
@@ -10273,7 +10292,6 @@ fn ability_resolution_is_placing_its_first_ability(state: &GameState) -> bool {
             matches!(entry.kind.class(), StackObjectClass::Ability(_)) && entry.id > carrier.id
         })
         .count()
-        == 1
 }
 
 /// CR 603.3b + CR 603.12 + CR 309.4c: a triggered ability put on the stack
@@ -10292,6 +10310,69 @@ fn join_mid_resolution_triggers_to_process(state: &mut GameState) {
         if context.placement_process == TriggerPlacementProcess::Fresh {
             context.placement_process = TriggerPlacementProcess::UnderWay;
         }
+    }
+}
+
+/// CR 603.3b: a triggered ability is on the stack. For a save written before
+/// `placement_process` existed, a non-empty queue beneath one may be the tail
+/// of a placement whose paused member that ability is (the finisher's tail
+/// drain was refused, so nothing placed the tail).
+fn triggered_ability_is_on_the_stack(state: &GameState) -> bool {
+    state
+        .stack
+        .iter()
+        .any(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }))
+}
+
+/// CR 603.2 + CR 603.3b: a queued context triggered by an ability triggering
+/// (`GameEvent::AbilityTriggered`). `collect_dispatch_side_effects_into_deferred`
+/// marks exactly these `UnderWay` at queue time, by this same test. It reads
+/// the queued context's events, not the observer's trigger mode: a context
+/// queued by an observer whose cause is another event (Historian's Boon's
+/// final-chapter firing carries the lore-counter event) does not match.
+fn queue_holds_an_ability_triggered_observer(state: &GameState) -> bool {
+    state.deferred_triggers.iter().any(|context| {
+        context
+            .trigger_events
+            .iter()
+            .any(|event| matches!(event, GameEvent::AbilityTriggered { .. }))
+    })
+}
+
+/// CR 603.3b + CR 603.3d + CR 603.12: whether a placement process may be under
+/// way in `state`: an announcement is in flight, an ordering prompt is open,
+/// the deferred drain is parked on an inline triggered-mana pause
+/// (`dispatch_deferred_triggers_in_order` re-parks the stage tail behind it),
+/// an ability's resolution has put at least one ability on the stack
+/// (`join_mid_resolution_triggers_to_process` marks at the first finisher and
+/// nothing unmarks at a later one), a triggered ability is on the stack, or
+/// a queued context carries an `AbilityTriggered` event. Over-approximates on purpose: it is read only for a
+/// save that carries no marks.
+fn placement_may_be_under_way(state: &GameState) -> bool {
+    state.pending_trigger.is_some()
+        || state.pending_trigger_entry.is_some()
+        || state.pending_trigger_order.is_some()
+        || is_accepted_triggered_mana_pause(&state.waiting_for)
+        || ability_resolution_has_put_an_ability_on_the_stack(state)
+        || triggered_ability_is_on_the_stack(state)
+        || queue_holds_an_ability_triggered_observer(state)
+}
+
+/// CR 603.3b: a save written before `placement_process` existed does not record
+/// which queued abilities belong to the placement process under way. Loading
+/// them all as `Fresh` would place a remainder of that process after what
+/// triggered during it, so such a save is refused while a process may be under
+/// way. Consumes the decode-only carrier; always false afterwards.
+pub(crate) fn refuse_legacy_unmarked_placement(
+    state: &mut GameState,
+) -> Result<(), PersistedRestoreError> {
+    if !std::mem::take(&mut state.legacy_unmarked_placement_queue) {
+        return Ok(());
+    }
+    if placement_may_be_under_way(state) {
+        Err(PersistedRestoreError::LegacyTriggerPlacementNotRestorable)
+    } else {
+        Ok(())
     }
 }
 
@@ -62865,15 +62946,18 @@ pub mod tests {
     }
 
     /// CR 603.3b: the placement-process mark survives a serialized pause and is
-    /// skipped while it holds its default; a saved context without it loads as
-    /// a fresh one.
+    /// written for both values, so its absence identifies a context saved before
+    /// the mark existed; such a context loads as a fresh one.
     #[test]
     fn placement_process_mark_round_trips_and_defaults_to_fresh() {
         let state = setup();
         let fresh = auto_inert_gate_context(&state, false);
         assert_eq!(fresh.placement_process, TriggerPlacementProcess::Fresh);
         let fresh_json = serde_json::to_value(&fresh).expect("serializes");
-        assert!(fresh_json.get("placement_process").is_none());
+        assert_eq!(
+            fresh_json.get(PLACEMENT_PROCESS_FIELD),
+            Some(&serde_json::json!("Fresh"))
+        );
         let restored: PendingTriggerContext =
             serde_json::from_value(fresh_json).expect("deserializes");
         assert_eq!(restored, fresh);
@@ -62896,6 +62980,242 @@ pub mod tests {
             .remove("placement_process");
         let loaded: PendingTriggerContext = serde_json::from_value(saved).expect("deserializes");
         assert_eq!(loaded.placement_process, TriggerPlacementProcess::Fresh);
+    }
+
+    /// An ability-class stack entry (an activated ability) with a fresh id.
+    fn activated_ability_entry(state: &mut GameState) -> StackEntry {
+        let id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        StackEntry {
+            id,
+            source_id: id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    id,
+                    PlayerId(0),
+                )),
+            },
+        }
+    }
+
+    fn draw_ability(source: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+    }
+
+    /// The five accepted triggered-mana pauses (`is_accepted_triggered_mana_pause`).
+    fn accepted_triggered_mana_pauses() -> Vec<WaitingFor> {
+        vec![
+            WaitingFor::OptionalEffectChoice {
+                player: PlayerId(0),
+                source_id: ObjectId(1),
+                decision_subject_id: None,
+                description: None,
+                may_trigger_key: None,
+                same_card_may_trigger_choice_available: false,
+            },
+            WaitingFor::OpponentMayChoice {
+                player: PlayerId(1),
+                decision_subject_id: None,
+                source_id: ObjectId(1),
+                description: None,
+                remaining: Vec::new(),
+            },
+            WaitingFor::RepeatDecision {
+                player: PlayerId(0),
+                ability: Box::new(draw_ability(ObjectId(1))),
+            },
+            WaitingFor::ReplacementChoice {
+                player: PlayerId(0),
+                candidate_count: 2,
+                candidates: Vec::new(),
+                kind: Default::default(),
+                last_applied_decides: false,
+                remember_identity: None,
+            },
+            WaitingFor::ChooseManaColor {
+                player: PlayerId(0),
+                choice: crate::types::game_state::ManaChoicePrompt::SingleColor {
+                    options: vec![ManaType::Black, ManaType::Red],
+                },
+                context: crate::types::game_state::ManaChoiceContext::ResolvingEffect(Box::new(
+                    draw_ability(ObjectId(1)),
+                )),
+            },
+        ]
+    }
+
+    /// CR 603.3b + CR 603.3d + CR 603.12: each carrier a placement process can
+    /// leave in a save reads as a placement that may be under way on its own,
+    /// and the near misses (a spell or activated ability alone on the stack, a
+    /// queue of ordinary contexts, the mana-payment resume carrier) do not.
+    #[test]
+    fn placement_may_be_under_way_is_each_carrier() {
+        let priority = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let base = || {
+            let mut state = setup();
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+            state
+        };
+        assert!(!placement_may_be_under_way(&base()), "nothing is under way");
+
+        // An announcement in flight.
+        let mut state = base();
+        let trigger = make_draw_pending_trigger(&mut state, "Announced", PlayerId(0));
+        state.pending_trigger = Some(Box::new(trigger.pending));
+        assert!(placement_may_be_under_way(&state), "pending_trigger");
+        let mut state = base();
+        state.pending_trigger_entry = Some(ObjectId(77));
+        assert!(placement_may_be_under_way(&state), "pending_trigger_entry");
+
+        // An ordering prompt.
+        let mut state = base();
+        state.pending_trigger_order = Some(crate::types::game_state::PendingTriggerOrder {
+            groups: Vec::new(),
+            resume_after_ordering: None,
+        });
+        assert!(placement_may_be_under_way(&state), "pending_trigger_order");
+
+        // An inline triggered-mana pause, each accepted pause kind.
+        for pause in accepted_triggered_mana_pauses() {
+            let mut state = base();
+            state.waiting_for = pause.clone();
+            assert!(placement_may_be_under_way(&state), "{pause:?}");
+        }
+
+        // An ability's resolution that has put one, then two, abilities on the
+        // stack (activated entries, so the triggered-ability term stays false).
+        let mut state = base();
+        let carrier = activated_ability_entry(&mut state);
+        state.resolving_stack_entry = Some(carrier);
+        assert!(
+            !placement_may_be_under_way(&state),
+            "an ability carrier with nothing above it"
+        );
+        let first = activated_ability_entry(&mut state);
+        state.stack.push_back(first);
+        assert!(placement_may_be_under_way(&state), "one ability above it");
+        let second = activated_ability_entry(&mut state);
+        state.stack.push_back(second);
+        assert!(placement_may_be_under_way(&state), "two abilities above it");
+
+        // A spell carrier with an ability above it is not an ability's resolution.
+        let mut state = base();
+        install_resolving_sorcery_carrier(&mut state);
+        let above = activated_ability_entry(&mut state);
+        state.stack.push_back(above);
+        assert!(
+            !placement_may_be_under_way(&state),
+            "a spell carrier with an ability above it"
+        );
+
+        // A triggered ability on the stack.
+        let mut state = base();
+        let trigger = make_draw_pending_trigger(&mut state, "On the stack", PlayerId(0));
+        push_pending_trigger_to_stack(&mut state, trigger.pending, &mut Vec::new());
+        assert!(
+            state
+                .stack
+                .iter()
+                .any(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })),
+            "reach: the stack holds a triggered ability"
+        );
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(placement_may_be_under_way(&state), "a triggered ability");
+
+        // A spell, or an activated ability, alone on the stack.
+        let mut state = base();
+        let spell = install_resolving_sorcery_carrier(&mut state);
+        let entry = state.resolving_stack_entry.take().expect("installed");
+        assert_eq!(entry.id, spell);
+        state.stack.push_back(entry);
+        assert!(!placement_may_be_under_way(&state), "a spell alone");
+        let mut state = base();
+        let entry = activated_ability_entry(&mut state);
+        state.stack.push_back(entry);
+        assert!(
+            !placement_may_be_under_way(&state),
+            "an activated ability alone"
+        );
+
+        // A queued observer of an ability triggering, and ordinary contexts.
+        let mut state = base();
+        let mut observer = make_draw_pending_trigger(&mut state, "Observer", PlayerId(0));
+        let fixture_shaped = auto_inert_gate_context(&state, false);
+        assert!(
+            !fixture_shaped.trigger_events.is_empty()
+                && fixture_shaped
+                    .trigger_events
+                    .iter()
+                    .all(|event| matches!(event, GameEvent::ZoneChanged { .. })),
+            "reach: the ordinary context has a zone-change cause"
+        );
+        state.deferred_triggers = vec![fixture_shaped.clone()];
+        assert!(
+            !placement_may_be_under_way(&state),
+            "a queue of ordinary contexts"
+        );
+        observer.trigger_events = vec![GameEvent::AbilityTriggered {
+            stack_entry: None,
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            origin: TriggeredAbilityOrigin::SourceAbility,
+            causes: Vec::new(),
+        }];
+        state.deferred_triggers.push(observer);
+        assert!(placement_may_be_under_way(&state), "a queued observer");
+
+        // The mana-payment resume carrier alone is not a placement.
+        let mut state = base();
+        let node = crate::types::resolved_commands::RulesExecutionNodeRef::TriggeredMana(
+            crate::types::resolved_commands::SettlementNodeOrdinal(3),
+        );
+        state.pending_triggered_mana_resume = Some(triggered_mana_sidecar(&mut state, node));
+        assert_eq!(state.waiting_for, priority);
+        assert!(
+            !placement_may_be_under_way(&state),
+            "the triggered-mana resume carrier"
+        );
+    }
+
+    /// CR 603.3b: the restore step reads the predicate only for a save flagged
+    /// as written before the placement-process mark existed, and consumes the
+    /// flag either way.
+    #[test]
+    fn legacy_unmarked_placement_refusal_reads_only_flagged_saves() {
+        let mut state = setup();
+        state.pending_trigger_entry = Some(ObjectId(77));
+        assert!(refuse_legacy_unmarked_placement(&mut state).is_ok());
+
+        state.legacy_unmarked_placement_queue = true;
+        assert_eq!(
+            refuse_legacy_unmarked_placement(&mut state),
+            Err(PersistedRestoreError::LegacyTriggerPlacementNotRestorable)
+        );
+        assert!(!state.legacy_unmarked_placement_queue, "consumed");
+
+        state.pending_trigger_entry = None;
+        state.legacy_unmarked_placement_queue = true;
+        assert!(refuse_legacy_unmarked_placement(&mut state).is_ok());
+        assert!(!state.legacy_unmarked_placement_queue, "consumed");
     }
 
     /// Row 10b — the subtype-defended restriction scope never matches a

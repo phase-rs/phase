@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "PendingTriggerContext gains placement_process (TriggerPlacementProcess), the CR 603.3b placement-process marker, serialized in GameState.deferred_triggers and pending_trigger_order groups while UnderWay; an older peer drops it silently and merges a paused placement process with abilities that triggered during it"
+  "reason": "PendingTriggerContext gains placement_process (TriggerPlacementProcess), the CR 603.3b placement-process marker, serialized on every context in GameState.deferred_triggers and pending_trigger_order groups (Fresh included); an older peer drops it silently and merges a paused placement process with abilities that triggered during it. A persisted save whose queue carries no placement_process key was written before the field existed; such a save paused while a placement may be under way is refused at restore (RESTORE_INCOMPATIBLE_TRIGGER_PLACEMENT)."
 }

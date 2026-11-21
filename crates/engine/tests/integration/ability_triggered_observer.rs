@@ -42,7 +42,7 @@
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::trigger_index::reindex_object_triggers;
-use engine::game::triggers::PendingTriggerContext;
+use engine::game::triggers::{PendingTriggerContext, PLACEMENT_PROCESS_FIELD};
 use engine::game::visibility::{
     filter_events_for_viewer, filter_state_for_viewer, HIDDEN_CARD_NAME,
 };
@@ -55,7 +55,8 @@ use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, TriggeredAbilityOrigin};
 use engine::types::game_state::{
     ActionResult, AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerAutoChoiceSelector,
-    MayTriggerOrigin, StackEntryKind, StackObjectClass, WaitingFor,
+    MayTriggerOrigin, PersistedGameState, PersistedRestoreError, PersistedRestoreFinalization,
+    StackEntryKind, StackObjectClass, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -2383,13 +2384,25 @@ fn queued_matching(state: &GameState, pick: Pick) -> usize {
 }
 
 /// Round-trip the live state through its serialized form at a pause and keep
-/// playing from the restored copy. Returns whether the serialized queue or
-/// order groups carried a placement-process mark.
+/// playing from the restored copy. Returns whether a serialized context of the
+/// queue or the order groups was marked as a member of the placement process
+/// under way.
 fn round_trip_state(runner: &mut GameRunner) -> bool {
     let json = serde_json::to_string(runner.state()).expect("the state serializes");
     let restored: GameState = serde_json::from_str(&json).expect("the state deserializes");
     *runner.state_mut() = restored;
-    json.contains("\"placement_process\"")
+    queued_contexts(runner.state()).any(queued_under_way)
+}
+
+/// Every queued context: the deferred queue, then the order groups.
+fn queued_contexts(state: &GameState) -> impl Iterator<Item = &PendingTriggerContext> {
+    state.deferred_triggers.iter().chain(
+        state
+            .pending_trigger_order
+            .iter()
+            .flat_map(|order| order.groups.iter())
+            .flat_map(|group| group.triggers.iter()),
+    )
 }
 
 fn tts_legal_targets(runner: &GameRunner) -> Vec<TargetRef> {
@@ -3127,6 +3140,12 @@ fn finisher_collected_trigger_goes_after_both_parts_at_an_order_prompt() {
     );
     assert_eq!(runner.state().deferred_triggers.len(), 1);
     assert!(triggered_stack_sources(runner.state()).contains(&warden));
+    assert!(
+        runner.state().pending_trigger_order.is_some()
+            && matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }),
+        "reach: the order prompt is the wait"
+    );
+    assert_stripped_save_is_refusable(&runner, "the second-part order prompt");
     let marked = round_trip_state(&mut runner);
     order_by_identity(&mut runner, &[Pick::Observing(proctor, warden)]);
 
@@ -3211,6 +3230,7 @@ fn finisher_collected_crime_waits_beside_a_chosen_remainder() {
                 "{what}: the goad's firing is queued"
             );
         }
+        assert_stripped_save_is_refusable(&runner, &what);
         let marked = round_trip_state(&mut runner);
         let result = select(&mut runner, vec![object(goblin)]);
         if let Some(ascension) = ascension {
@@ -3569,6 +3589,16 @@ fn choose_storeroom(runner: &mut GameRunner, carrier: StackObjectClass) -> Objec
 /// asked, and Lost Mine of Phandelver at Goblin Lair. Dungeon Map's venture is
 /// activated and resolving.
 fn dungeon_map_venture(p1_tar_pit: bool) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
+    let (mut runner, map, hama, tar_pit, theirs) = dungeon_map_board(p1_tar_pit);
+    activate_dungeon_map(&mut runner, map);
+    (runner, hama, tar_pit, theirs)
+}
+
+/// The Dungeon Map board before the venture is activated: (runner, Dungeon
+/// Map, Hama Pashar, P0's Tar Pit Warrior, P1's Tar Pit Warrior).
+fn dungeon_map_board(
+    p1_tar_pit: bool,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId, Option<ObjectId>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let hama = scenario
@@ -3588,6 +3618,11 @@ fn dungeon_map_venture(p1_tar_pit: bool) -> (GameRunner, ObjectId, ObjectId, Opt
     colorless_pool(&mut scenario, 3);
     let mut runner = scenario.build();
     set_dungeon(&mut runner, 1);
+    (runner, map, hama, tar_pit, theirs)
+}
+
+/// Activate Dungeon Map's venture and pass until it asks for its room.
+fn activate_dungeon_map(runner: &mut GameRunner, map: ObjectId) {
     runner
         .act(GameAction::ActivateAbility {
             source_id: map,
@@ -3595,7 +3630,7 @@ fn dungeon_map_venture(p1_tar_pit: bool) -> (GameRunner, ObjectId, ObjectId, Opt
             payment_mode: Default::default(),
         })
         .expect("Dungeon Map's venture is activated as a sorcery");
-    pass_until_resolution_choice(&mut runner);
+    pass_until_resolution_choice(runner);
     assert!(
         runner
             .state()
@@ -3604,7 +3639,6 @@ fn dungeon_map_venture(p1_tar_pit: bool) -> (GameRunner, ObjectId, ObjectId, Opt
             .is_some_and(|entry| entry.source_id == map),
         "Dungeon Map's ability is resolving"
     );
-    (runner, hama, tar_pit, theirs)
 }
 
 /// CR 603.3b + CR 603.2d + CR 309.4c + CR 603.3d: Hama Pashar makes Storeroom's
@@ -3630,6 +3664,7 @@ fn doubled_room_instances_are_placed_before_what_the_first_instance_triggered() 
     assert_eq!(queued.len(), 1, "the second instance is queued");
     assert_eq!(queued[0].pending.source_id, room);
     assert!(!queued_under_way(&queued[0]), "queued as a fresh context");
+    assert_stripped_save_is_refusable(&runner, "the first room instance");
     round_trip_state(&mut runner);
     let result = select(&mut runner, vec![object(tar_pit)]);
     assert!(
@@ -3704,6 +3739,8 @@ fn second_room_instance_places_both_becomes_target_triggers_in_apnap_order() {
         "Dungeon Map's ability is still resolving"
     );
     assert_not_first_ability_of_an_ability_resolution(&runner, "the second instance");
+    assert_fresh_only_queue_save_restores(&runner, theirs);
+    assert_stripped_save_is_refusable(&runner, "the second room instance");
     round_trip_state(&mut runner);
     select(&mut runner, vec![object(ours)]);
 
@@ -4043,6 +4080,7 @@ fn earlier_targeted_trigger_of_a_resolution_places_both_becomes_target_triggers_
         "Bolg's ETB is still resolving"
     );
     assert_not_first_ability_of_an_ability_resolution(&runner, "the Myr's trigger");
+    assert_stripped_save_is_refusable(&runner, "Perilous Myr's trigger");
     round_trip_state(&mut runner);
     select(&mut runner, vec![object(ours)]);
 
@@ -4387,4 +4425,703 @@ fn spell_resolution_reflexive_batch_orders_an_earlier_and_a_later_trigger_togeth
         "CR 603.3b: P0's chosen order puts the Tomb below Planar Void: {:?}",
         stack_reading(state)
     );
+}
+
+// A save written before queued triggered abilities recorded their placement
+// process (CR 603.3b) cannot say which queued abilities are the remainder of
+// the process under way. The persisted restore refuses such a save while a
+// placement may be under way; a save written now carries the record on every
+// queued ability and restores exactly.
+
+const CHARMING_PRINCE: &str = "When this creature enters, choose one —\n• Scry 2.\n• You gain 3 life.\n• Exile another target creature you own. Return it to the battlefield under your control at the beginning of the next end step.";
+const BOGARDAN_HELLKITE: &str = "Flash\nFlying\nWhen this creature enters, it deals 5 damage divided as you choose among any number of targets.";
+
+/// The stable prefix of the legacy placement refusal's message.
+const LEGACY_PLACEMENT_REFUSAL: &str = "RESTORE_INCOMPATIBLE_TRIGGER_PLACEMENT:";
+
+/// Visit every queued context object (`deferred_triggers` and the
+/// `pending_trigger_order` groups) of every serialized state in `wire`,
+/// whichever envelope holds it.
+fn for_each_wire_context(
+    wire: &mut serde_json::Value,
+    visit: &mut dyn FnMut(&mut serde_json::Map<String, serde_json::Value>),
+) {
+    match wire {
+        serde_json::Value::Object(object) => {
+            if let Some(contexts) = object
+                .get_mut("deferred_triggers")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                contexts
+                    .iter_mut()
+                    .filter_map(serde_json::Value::as_object_mut)
+                    .for_each(&mut *visit);
+            }
+            if let Some(groups) = object
+                .get_mut("pending_trigger_order")
+                .and_then(|order| order.get_mut("groups"))
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                groups
+                    .iter_mut()
+                    .filter_map(|group| group.get_mut("triggers"))
+                    .filter_map(serde_json::Value::as_array_mut)
+                    .flat_map(|contexts| contexts.iter_mut())
+                    .filter_map(serde_json::Value::as_object_mut)
+                    .for_each(&mut *visit);
+            }
+            for (key, child) in object.iter_mut() {
+                if key != "deferred_triggers" && key != "pending_trigger_order" {
+                    for_each_wire_context(child, visit);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                for_each_wire_context(child, visit);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
+/// How many queued contexts `wire` holds, and how many carry the
+/// placement-process key.
+fn wire_queue_census(wire: &serde_json::Value) -> (usize, usize) {
+    let mut wire = wire.clone();
+    let (mut contexts, mut keyed) = (0, 0);
+    for_each_wire_context(&mut wire, &mut |context| {
+        contexts += 1;
+        keyed += usize::from(context.contains_key(PLACEMENT_PROCESS_FIELD));
+    });
+    (contexts, keyed)
+}
+
+/// What a writer from before the placement-process record wrote: the same
+/// wire with the key removed from every queued context.
+fn legacy_stripped(wire: &mut serde_json::Value) {
+    for_each_wire_context(wire, &mut |context| {
+        context.remove(PLACEMENT_PROCESS_FIELD);
+    });
+}
+
+/// The trusted persisted wire the production writer produces.
+fn capture_wire(state: &GameState) -> serde_json::Value {
+    serde_json::to_value(PersistedGameState::capture(state.clone()))
+        .expect("the persisted state serializes")
+}
+
+/// The raw persisted wire.
+fn raw_wire(state: &GameState) -> serde_json::Value {
+    serde_json::to_value(PersistedGameState::Raw(Box::new(state.clone())))
+        .expect("the persisted state serializes")
+}
+
+/// The production restore: decode, prepare, finalize.
+fn restore_persisted(wire: serde_json::Value) -> Result<GameState, PersistedRestoreError> {
+    serde_json::from_value::<PersistedGameState>(wire)
+        .expect("the persisted wire decodes")
+        .into_game_state()
+}
+
+/// The production restore's preparation stage alone (the refusal runs there).
+fn prepare_persisted(wire: serde_json::Value) -> Result<(), PersistedRestoreError> {
+    serde_json::from_value::<PersistedGameState>(wire)
+        .expect("the persisted wire decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+        .map(|_| ())
+}
+
+/// CR 603.3b: `wire`, stripped as a pre-record writer would have written it,
+/// is refused by the production restore with the typed incompatibility.
+fn assert_legacy_wire_refused(mut wire: serde_json::Value, what: &str) {
+    legacy_stripped(&mut wire);
+    let (contexts, keyed) = wire_queue_census(&wire);
+    assert!(
+        contexts > 0,
+        "{what}: reach: the stripped save holds a queue"
+    );
+    assert_eq!(keyed, 0, "{what}: reach: no queued context carries the key");
+    let error = restore_persisted(wire).expect_err("a pre-record save paused mid-placement");
+    assert_eq!(
+        error,
+        PersistedRestoreError::LegacyTriggerPlacementNotRestorable,
+        "{what}"
+    );
+    assert!(
+        error.to_string().starts_with(LEGACY_PLACEMENT_REFUSAL),
+        "{what}: {error}"
+    );
+}
+
+/// CR 603.3b: at a pause whose queue is not empty, the production save
+/// restores, and the same save without the placement-process record is
+/// refused, on both persisted wires.
+fn assert_stripped_save_is_refusable(runner: &GameRunner, what: &str) {
+    let state = runner.state();
+    assert!(
+        queued_contexts(state).next().is_some(),
+        "{what}: reach: the save holds a queue"
+    );
+    for wire in [capture_wire(state), raw_wire(state)] {
+        let (contexts, keyed) = wire_queue_census(&wire);
+        assert_eq!(
+            contexts, keyed,
+            "{what}: every queued context carries the key"
+        );
+        restore_persisted(wire.clone())
+            .unwrap_or_else(|error| panic!("{what}: the production save restores, got {error:?}"));
+        assert_legacy_wire_refused(wire, what);
+    }
+}
+
+/// CR 603.3b: a production save whose queue holds only `Fresh` contexts,
+/// paused at a construction prompt, carries the record and restores.
+fn assert_fresh_only_queue_save_restores(runner: &GameRunner, queued_source: ObjectId) {
+    let state = runner.state();
+    assert_eq!(state.deferred_triggers.len(), 1);
+    assert_eq!(state.deferred_triggers[0].pending.source_id, queued_source);
+    assert!(!queued_contexts(state).any(queued_under_way));
+    let wire = capture_wire(state);
+    let queue = &wire_state(&wire)["deferred_triggers"];
+    assert_eq!(
+        queue[0][PLACEMENT_PROCESS_FIELD],
+        serde_json::json!("Fresh"),
+        "the fresh context's record is written"
+    );
+    restore_persisted(wire).expect("a fresh-only queue at a construction prompt restores");
+}
+
+/// The serialized state object inside a persisted wire, whichever envelope.
+fn wire_state(wire: &serde_json::Value) -> &serde_json::Value {
+    fn find(value: &serde_json::Value) -> Option<&serde_json::Value> {
+        match value {
+            serde_json::Value::Object(object) if object.contains_key("deferred_triggers") => {
+                Some(value)
+            }
+            serde_json::Value::Object(object) => object.values().find_map(find),
+            serde_json::Value::Array(values) => values.iter().find_map(find),
+            _ => None,
+        }
+    }
+    find(wire).expect("the wire holds a serialized state")
+}
+
+/// The witness board: P0's The Eldest Reborn about to reach chapter III,
+/// Deepmuck Desperado and (when asked) Historian's Boon; a creature card in
+/// each graveyard, so chapter III asks for its target. Returns the runner at
+/// that prompt, with (reborn, boon, deepmuck, P1's card).
+fn eldest_reborn_target_prompt(
+    with_boon: bool,
+) -> (GameRunner, ObjectId, Option<ObjectId>, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Plains", "Plains", "Plains"]);
+    scenario.with_library_top(P1, &["Plains", "Plains", "Plains", "Plains"]);
+    let boon = with_boon.then(|| {
+        scenario
+            .add_enchantment_from_oracle(P0, "Historian's Boon", HISTORIANS_BOON)
+            .id()
+    });
+    let reborn = saga_on_battlefield(
+        &mut scenario,
+        "The Eldest Reborn",
+        engine::types::mana::ManaCost::generic(5),
+        THE_ELDEST_REBORN,
+    );
+    let deepmuck = scenario
+        .add_creature_from_oracle(P0, "Deepmuck Desperado", 2, 4, DEEPMUCK_DESPERADO)
+        .id();
+    let ours = scenario
+        .add_creature_to_graveyard(P0, "Raging Goblin", 1, 1)
+        .id();
+    let theirs = scenario
+        .add_creature_to_graveyard(P1, "Raging Goblin", 1, 1)
+        .id();
+    let mut runner = scenario.build();
+    advance_to_p0_next_precombat_main(&mut runner);
+    assert_eq!(lore(&runner, reborn), 3);
+    assert_tts(
+        &runner,
+        Some(reborn),
+        &[object(ours), object(theirs)],
+        "chapter III",
+    );
+    (runner, reborn, boon, deepmuck, theirs)
+}
+
+/// CR 603.3b + CR 700.13 + CR 714.2e: The Eldest Reborn's chapter III waits for
+/// its target with Historian's Boon's second-part trigger parked behind it. A
+/// production save there restores and finishes III, Boon, then the crime
+/// trigger. The same save without the placement-process record cannot tell
+/// Boon (the remainder of the process) from what the target choice will
+/// trigger, so it is refused rather than loaded into the wrong order.
+#[test]
+fn legacy_save_paused_at_a_placement_target_choice_is_refused() {
+    let (runner, reborn, boon, deepmuck, theirs) = eldest_reborn_target_prompt(true);
+    let boon = boon.expect("the board has Historian's Boon");
+    assert_eq!(queued_matching(runner.state(), Pick::Of(boon)), 1);
+    assert!(
+        runner
+            .state()
+            .deferred_triggers
+            .iter()
+            .filter(|ctx| ctx.pending.source_id == boon)
+            .all(queued_under_way),
+        "reach: Boon is parked as the process's later part"
+    );
+
+    let restored =
+        restore_persisted(capture_wire(runner.state())).expect("the production save restores");
+    let mut restored = GameRunner::from_state(restored);
+    select(&mut restored, vec![object(theirs)]);
+    assert_completion_boundary(&restored, "the restored save");
+    assert_triggered_stack(
+        restored.state(),
+        &[Pick::Of(reborn), Pick::Of(boon), Pick::Of(deepmuck)],
+        "CR 603.3b: III, Boon, then the crime trigger",
+    );
+
+    assert_legacy_wire_refused(capture_wire(runner.state()), "trusted wire");
+    assert_legacy_wire_refused(raw_wire(runner.state()), "raw wire");
+}
+
+/// CR 603.3b + CR 700.13: the same target prompt with nothing queued behind it
+/// restores from a save without the record, and plays on: III, then the crime
+/// trigger.
+#[test]
+fn legacy_save_paused_at_a_target_choice_with_an_empty_queue_restores() {
+    let (runner, reborn, _, deepmuck, theirs) = eldest_reborn_target_prompt(false);
+    assert!(runner.state().deferred_triggers.is_empty());
+    let mut wire = capture_wire(runner.state());
+    legacy_stripped(&mut wire);
+    let restored = restore_persisted(wire).expect("an empty queue has nothing to misplace");
+    let mut restored = GameRunner::from_state(restored);
+    select(&mut restored, vec![object(theirs)]);
+    assert_completion_boundary(&restored, "the restored save");
+    assert_triggered_stack(
+        restored.state(),
+        &[Pick::Of(reborn), Pick::Of(deepmuck)],
+        "III, then the crime trigger",
+    );
+}
+
+/// The board of the mode and division rows: P0's Soul Warden and `name` (cast
+/// at no cost), whose enter trigger is ordered first; Soul Warden's trigger
+/// from the same event waits in the queue.
+fn cast_with_soul_warden(name: &str, oracle: &str, power: i32) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let warden = scenario
+        .add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN)
+        .id();
+    let spell = scenario
+        .add_creature_to_hand_from_oracle(P0, name, power, power, oracle)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    cast_and_resolve(&mut runner, spell);
+    if matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }) {
+        order_by_identity(&mut runner, &[Pick::Of(spell)]);
+    }
+    (runner, spell, warden)
+}
+
+/// CR 603.3b + CR 603.3c: Charming Prince's enter trigger waits for its mode
+/// with Soul Warden's trigger queued behind it; a save there without the
+/// record is refused.
+#[test]
+fn legacy_save_paused_at_a_placement_mode_choice_is_refused() {
+    let (runner, prince, warden) = cast_with_soul_warden("Charming Prince", CHARMING_PRINCE, 2);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::AbilityModeChoice { source_id, .. } if source_id == prince
+        ),
+        "reach: Charming Prince's trigger asks for its mode, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().deferred_triggers.len(), 1);
+    assert_eq!(queued_matching(runner.state(), Pick::Of(warden)), 1);
+    assert_stripped_save_is_refusable(&runner, "the mode choice");
+}
+
+/// CR 603.3b + CR 601.2d + CR 603.3d: Bogardan Hellkite's enter trigger waits
+/// for its division with Soul Warden's trigger queued behind it; a save there
+/// without the record is refused.
+#[test]
+fn legacy_save_paused_at_a_placement_division_is_refused() {
+    let (mut runner, hellkite, warden) =
+        cast_with_soul_warden("Bogardan Hellkite", BOGARDAN_HELLKITE, 5);
+    assert_tts(
+        &runner,
+        Some(hellkite),
+        &tts_legal_targets(&runner),
+        "the Hellkite",
+    );
+    select(&mut runner, vec![TargetRef::Player(P1), object(warden)]);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DistributeAmong {
+                scope: engine::types::game_state::DistributionScope::AnnouncedTargets,
+                ..
+            }
+        ),
+        "reach: the Hellkite's trigger asks for its division, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().deferred_triggers.len(), 1);
+    assert_eq!(queued_matching(runner.state(), Pick::Of(warden)), 1);
+    assert_stripped_save_is_refusable(&runner, "the division");
+}
+
+/// Replace the serialized state's `field` in a raw wire.
+fn graft(wire: &mut serde_json::Value, field: &str, value: serde_json::Value) {
+    wire.as_object_mut()
+        .expect("a raw wire is the state object")
+        .insert(field.to_string(), value);
+}
+
+/// The no-placement carriers of a raw wire read as nothing under way: no
+/// announcement, no order prompt, no triggered-mana pause, no ability
+/// resolution under way.
+fn assert_no_placement_carrier(wire: &serde_json::Value, what: &str) {
+    for field in [
+        "pending_trigger",
+        "pending_trigger_entry",
+        "pending_trigger_order",
+    ] {
+        assert!(
+            wire.get(field).is_none_or(serde_json::Value::is_null),
+            "{what}: {field} is unset"
+        );
+    }
+    assert!(
+        wire.get("resolving_stack_entry")
+            .is_none_or(serde_json::Value::is_null),
+        "{what}: no resolution is under way"
+    );
+    assert_eq!(wire["waiting_for"]["type"], "Priority", "{what}");
+}
+
+fn wire_stack_holds_a_triggered_ability(wire: &serde_json::Value) -> bool {
+    wire["stack"]
+        .as_array()
+        .expect("the stack serializes as an array")
+        .iter()
+        .any(|entry| entry["kind"]["type"] == "TriggeredAbility")
+}
+
+fn wire_queue_holds_an_ability_triggered_event(wire: &serde_json::Value) -> bool {
+    wire["deferred_triggers"]
+        .as_array()
+        .expect("the queue serializes as an array")
+        .iter()
+        .flat_map(|context| context["trigger_events"].as_array().into_iter().flatten())
+        .any(|event| event["type"] == "AbilityTriggered")
+}
+
+/// An idle save of a board: `Priority`, nothing on the stack, nothing queued
+/// and no resolution under way. The graft rows move a paused save's queue
+/// into it, so the state around the queue is a real save with nothing under
+/// way rather than a later save with fields removed by hand (emptying a later
+/// save's stack would orphan its `stack_trigger_firings`).
+fn idle_wire(runner: &GameRunner, what: &str) -> serde_json::Value {
+    let state = runner.state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && state.stack.is_empty()
+            && state.resolving_stack_entry.is_none()
+            && queued_contexts(state).next().is_none(),
+        "{what}: reach: the board is idle, got {:?}",
+        state.waiting_for
+    );
+    raw_wire(state)
+}
+
+/// CR 603.3b: a save without the record whose queue sits beneath a triggered
+/// ability on the stack may be the remainder of a placement whose paused
+/// member that ability is, so it is refused; the same queue in an idle save
+/// of the same board restores. Every state is a real save of the Dungeon Map
+/// board; the paused save's queue is moved into the save taken once the
+/// resolution completes (whose resolution carrier is then cleared) and into
+/// the board's idle save.
+///
+/// The save taken once the resolution completes keeps Dungeon Map's ability
+/// as the resolution carrier at `Priority`, with the room abilities above it.
+/// With the queue moved in and the carrier left set it is refused too, by the
+/// term that reads an ability's resolution that has put an ability on the
+/// stack: a legacy save at `Priority` whose resolution carrier is still set
+/// with at least one ability above it and a non-empty queue is refused.
+#[test]
+fn legacy_queue_beneath_a_triggered_ability_is_refused() {
+    let (mut runner, map, _, ours, theirs) = dungeon_map_board(true);
+    let theirs = theirs.expect("P1 controls a Tar Pit Warrior");
+    let idle = idle_wire(&runner, "before the venture");
+    activate_dungeon_map(&mut runner, map);
+    choose_storeroom(
+        &mut runner,
+        StackObjectClass::Ability(StackAbilityKind::Activated),
+    );
+    select(&mut runner, vec![object(theirs)]);
+    assert_eq!(queued_matching(runner.state(), Pick::Of(theirs)), 1);
+    let mut paused = raw_wire(runner.state());
+    legacy_stripped(&mut paused);
+    let queue = paused["deferred_triggers"].clone();
+    select(&mut runner, vec![object(ours)]);
+    assert_completion_boundary(&runner, "after the second instance");
+
+    let mut grafted = raw_wire(runner.state());
+    graft(&mut grafted, "deferred_triggers", queue.clone());
+    assert_eq!(wire_queue_census(&grafted), (1, 0), "reach");
+
+    // As written: the activated ability is still the resolution carrier, with
+    // abilities it put on the stack above it.
+    let state = runner.state();
+    let carrier = state
+        .resolving_stack_entry
+        .as_ref()
+        .expect("reach: Dungeon Map's ability is still the resolution carrier");
+    assert_eq!(
+        carrier.kind.class(),
+        StackObjectClass::Ability(StackAbilityKind::Activated),
+        "reach: the carrier is the activated ability"
+    );
+    assert!(
+        state.stack.iter().any(
+            |entry| matches!(entry.kind.class(), StackObjectClass::Ability(_))
+                && entry.id > carrier.id
+        ),
+        "reach: the resolution has put an ability on the stack"
+    );
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(
+        prepare_persisted(grafted.clone()),
+        Err(PersistedRestoreError::LegacyTriggerPlacementNotRestorable),
+        "the carrier left set refuses the save"
+    );
+
+    // The carrier cleared: only the triggered abilities on the stack remain.
+    graft(
+        &mut grafted,
+        "resolving_stack_entry",
+        serde_json::Value::Null,
+    );
+    assert_no_placement_carrier(&grafted, "the grafted save");
+    assert!(wire_stack_holds_a_triggered_ability(&grafted), "reach");
+    assert!(
+        !wire_queue_holds_an_ability_triggered_event(&grafted),
+        "reach"
+    );
+    assert_eq!(
+        prepare_persisted(grafted),
+        Err(PersistedRestoreError::LegacyTriggerPlacementNotRestorable)
+    );
+
+    // The same queue with nothing on the stack.
+    let mut grafted = idle;
+    graft(&mut grafted, "deferred_triggers", queue);
+    assert_no_placement_carrier(&grafted, "the idle save");
+    assert!(!wire_stack_holds_a_triggered_ability(&grafted), "reach");
+    assert_eq!(wire_queue_census(&grafted), (1, 0), "reach");
+    assert_eq!(prepare_persisted(grafted), Ok(()));
+}
+
+/// CR 603.2 + CR 603.3b: a save without the record that queues an observer of
+/// an ability triggering is refused; with the observed event removed from the
+/// queued contexts it restores. The observer is Firebender Ascension's firing
+/// for the goad, queued while Iroh's mentor waits for its target, moved into
+/// the board's idle save. The typed observer is installed by hand, as the
+/// board's other rows do, so this is the shape a save takes once the parser
+/// emits such observers.
+#[test]
+fn legacy_queue_holding_an_ability_triggered_observer_is_refused() {
+    let RemainderBoard {
+        mut runner,
+        ascension,
+        iroh,
+        zuko,
+        azula,
+        goblin,
+        racketeer,
+        deepmuck,
+        theirs,
+    } = remainder_board(true, 2);
+    let ascension = ascension.expect("the board has Firebender Ascension");
+    let idle = idle_wire(&runner, "before the attack");
+    attack(&mut runner, &[iroh, zuko, azula, goblin, racketeer]);
+    let (g, m, z) = (Pick::Of(racketeer), Pick::Of(iroh), Pick::Of(zuko));
+    let a1 = Pick::OfWithout(azula, "lose 1 life");
+    let a2 = Pick::OfWith(azula, "lose 1 life");
+    order_by_identity(&mut runner, &[g, m, a1, a2, z]);
+    select(&mut runner, vec![object(theirs[0])]);
+    assert_tts(
+        &runner,
+        Some(iroh),
+        &[object(zuko), object(goblin)],
+        "the mentor",
+    );
+    assert_eq!(
+        queued_matching(runner.state(), Pick::Observing(ascension, racketeer)),
+        1,
+        "reach: the goad's firing is queued"
+    );
+    assert_eq!(queued_matching(runner.state(), Pick::Of(deepmuck)), 1);
+    let mut paused = raw_wire(runner.state());
+    legacy_stripped(&mut paused);
+
+    let mut grafted = idle;
+    graft(
+        &mut grafted,
+        "deferred_triggers",
+        paused["deferred_triggers"].clone(),
+    );
+    assert_no_placement_carrier(&grafted, "the grafted save");
+    assert!(!wire_stack_holds_a_triggered_ability(&grafted), "reach");
+    assert!(
+        wire_queue_holds_an_ability_triggered_event(&grafted),
+        "reach"
+    );
+    assert!(
+        grafted["deferred_triggers"]
+            .as_array()
+            .expect("the queue serializes as an array")
+            .iter()
+            .any(|context| context["pending"]["source_id"] == serde_json::json!(ascension.0)),
+        "reach: Firebender Ascension's firing is queued"
+    );
+    assert_eq!(wire_queue_census(&grafted).1, 0, "reach: no key");
+    assert_eq!(
+        prepare_persisted(grafted.clone()),
+        Err(PersistedRestoreError::LegacyTriggerPlacementNotRestorable)
+    );
+
+    for context in grafted["deferred_triggers"]
+        .as_array_mut()
+        .expect("the queue serializes as an array")
+    {
+        context["trigger_events"]
+            .as_array_mut()
+            .expect("a queued context has trigger events")
+            .retain(|event| event["type"] != "AbilityTriggered");
+    }
+    assert!(!wire_queue_holds_an_ability_triggered_event(&grafted));
+    assert!(
+        grafted["deferred_triggers"]
+            .as_array()
+            .expect("the queue serializes as an array")
+            .iter()
+            .any(|context| context["trigger_events"]
+                .as_array()
+                .is_some_and(|events| !events.is_empty())),
+        "reach: a queued context keeps a trigger event"
+    );
+    let (contexts, keyed) = wire_queue_census(&grafted);
+    assert!(
+        contexts > 0 && keyed == 0,
+        "reach: the queue stays, unmarked"
+    );
+    assert_eq!(prepare_persisted(grafted), Ok(()));
+}
+
+/// A committed state that holds a queue was written without the record, and
+/// reads as nothing under way on every term of the restore refusal.
+fn assert_committed_queue_reads_nothing_under_way(state: &serde_json::Value, what: &str) {
+    let queue = state["deferred_triggers"]
+        .as_array()
+        .expect("the committed state has a queue");
+    assert!(!queue.is_empty(), "{what}: reach: the queue is not empty");
+    assert!(
+        queue
+            .iter()
+            .all(|context| context.get(PLACEMENT_PROCESS_FIELD).is_none()),
+        "{what}: reach: no queued context carries the record"
+    );
+    for field in [
+        "pending_trigger",
+        "pending_trigger_entry",
+        "pending_trigger_order",
+    ] {
+        assert!(
+            state.get(field).is_none_or(serde_json::Value::is_null),
+            "{what}: {field} is unset"
+        );
+    }
+    let waiting = state["waiting_for"]["type"]
+        .as_str()
+        .expect("the wait is tagged");
+    assert!(
+        ![
+            "OptionalEffectChoice",
+            "OpponentMayChoice",
+            "RepeatDecision",
+            "ReplacementChoice",
+            "ChooseManaColor",
+        ]
+        .contains(&waiting),
+        "{what}: the wait {waiting} is not a triggered-mana pause"
+    );
+    assert!(
+        !wire_stack_holds_a_triggered_ability(state),
+        "{what}: no triggered ability is on the stack"
+    );
+    assert!(
+        !wire_queue_holds_an_ability_triggered_event(state),
+        "{what}: no observer is queued"
+    );
+    let is_ability = |kind: &serde_json::Value| {
+        kind["type"] == "ActivatedAbility" || kind["type"] == "TriggeredAbility"
+    };
+    let carrier_is_ability = is_ability(&state["resolving_stack_entry"]["kind"]);
+    let abilities_above = state["stack"]
+        .as_array()
+        .expect("the stack serializes as an array")
+        .iter()
+        .filter(|entry| is_ability(&entry["kind"]))
+        .count();
+    assert!(
+        !carrier_is_ability || abilities_above == 0,
+        "{what}: no ability's resolution has put an ability on the stack"
+    );
+}
+
+fn committed_fixture(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/integration/fixtures")
+        .join(name)
+}
+
+/// CR 603.3b: the two committed Mycoloth saves hold a queue written without the
+/// record, during a spell's and an activated ability's resolution, with
+/// nothing being placed. The restore admits them, as before.
+#[test]
+fn committed_mycoloth_saves_with_an_unmarked_queue_are_admitted() {
+    for name in [
+        "mycoloth_devour_wedge_turn15.json.gz",
+        "mycoloth_devour_wedge_turn20.json.gz",
+    ] {
+        let path = committed_fixture(name);
+        let bytes = std::fs::read(&path).expect("the committed save is readable");
+        let projected =
+            crate::issue_8024_terminal_rest_captures::projected_capture_snapshot(&bytes);
+        assert_committed_queue_reads_nothing_under_way(&projected, name);
+        crate::committed_dump_walk::restore_committed(&path)
+            .unwrap_or_else(|error| panic!("{name}: the committed save restores, got {error}"));
+    }
+}
+
+/// CR 603.3b: the committed Ureni save holds a queue written without the record
+/// during a triggered ability's resolution, with nothing being placed. The
+/// restore admits it past the placement refusal and still refuses it, as
+/// before, for its unsettled resolution.
+#[test]
+fn committed_ureni_save_with_an_unmarked_queue_passes_the_placement_refusal() {
+    let capture = crate::raw_resolution_stack_restore::repaired_capture();
+    assert_committed_queue_reads_nothing_under_way(&capture, "ureni");
+    let error = prepare_persisted(capture).expect_err("the save stays refused");
+    assert_eq!(error, PersistedRestoreError::UnsettledPriorityResolution);
 }
