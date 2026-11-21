@@ -4995,6 +4995,18 @@ fn filter_is_unionable(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 608.2c: The distributive adverb closes the subject of a coordinated
+/// player predicate. The subject application supplies the announced count.
+pub(super) fn has_distributive_player_subject(text: &str) -> bool {
+    extract_subject_text(text).is_some_and(|subject| {
+        let subject = subject.to_ascii_lowercase();
+        nom_primitives::scan_at_word_boundaries(&subject, |input| {
+            all_consuming(tag::<_, _, OracleError<'_>>("each")).parse(input)
+        })
+        .is_some()
+    })
+}
+
 pub(super) fn parse_leading_subject_application(
     text: &str,
     ctx: &mut ParseContext,
@@ -6317,6 +6329,8 @@ fn build_continuous_clause(
         return None;
     }
 
+    let affected = static_affected_for_application(&application);
+
     // CR 702.62b + CR 611.2a + CR 611.2c: A "gains suspend" grant onto an exiled
     // card has no turn-scoped expiry — a card stays suspended (exiled, has suspend,
     // has a time counter) until its last time counter is removed (CR 702.62b). CR
@@ -6425,7 +6439,6 @@ fn build_continuous_clause(
         });
     }
 
-    let affected = static_affected_for_application(&application);
     let static_abilities =
         if nom_primitives::scan_contains(&predicate_text.to_lowercase(), "if able") {
             let synthetic_line = format!("Creatures {}.", predicate_text.trim_end_matches('.'));

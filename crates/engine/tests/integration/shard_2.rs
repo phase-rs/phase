@@ -46,6 +46,7 @@ mod ajani_strength_of_the_pride;
 mod akroan_horse;
 mod alania_divergent_storm;
 mod alchemists_gift_pump_modal_keyword_choice;
+mod algorithmic_ferocity;
 mod all_creatures_chosen_type_static_9566;
 mod all_player_library_wheel;
 mod altcast_plural_instances;
