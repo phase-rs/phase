@@ -8390,8 +8390,9 @@ fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> 
 ///
 /// CR 113.3b / CR 113.3c: `kind: None` (both kinds legal) is CORRECT here and
 /// is not a dropped axis. Every call site is gated to a phrase that names both
-/// kinds or none: `parse_counter_ast` (this file) requires
-/// "activated or triggered ability" or mass-mode bare "abilities", and both
+/// kinds or none: `parse_counter_ast` (this file) reaches it in mass mode, and
+/// in single-target mode only for an "activated or triggered ability" phrase
+/// `parse_stack_object_target` refuses; both
 /// `oracle_effect::mod` sites require the same phrase. A kind-narrowing counter
 /// phrase ("counter target triggered ability …", Consign to Memory) never
 /// reaches here — it is routed to
@@ -13403,16 +13404,6 @@ pub(super) fn parse_counter_ast(
     }
     let abilities_match = nom_primitives::scan_contains(rest, "activated or triggered ability")
         || (mass_consumed && abilities_head(rest).is_ok());
-    if abilities_match {
-        // CR 118.12: Parse "unless pays" even for ability counters.
-        let unless_pay = parse_counter_unless_pay(rest)?;
-        return Some(ZoneCounterImperativeAst::Counter {
-            target: stack_ability_filter_from_text(rest),
-            source_rider: None,
-            unless_pay,
-            all: mass_consumed,
-        });
-    }
 
     // CR 701.6a + CR 115.1: "Counter target <stack-object phrase>" where the
     // phrase is a multi-way disjunction of spells and/or activated/triggered
@@ -13421,18 +13412,28 @@ pub(super) fn parse_counter_ast(
     // "activated ability" disjunct (it is not a card type) and silently drops
     // the noncreature restriction, yielding a degenerate empty-`type_filters`
     // stack filter. Strip the leading "target " token (nom `tag`, not string
-    // matching) and try the dedicated stack-object combinator first; it
-    // composes the ability-kind axis with an optional restricted-spell tail.
+    // matching) and try the dedicated stack-object combinator; it composes the
+    // ability-kind axis with an optional restricted-spell tail and the
+    // trailing controller / "that targets" qualifier.
     let stack_phrase = opt(tag::<_, _, OracleError<'_>>("target "))
         .parse(rest)
         .map(|(after, _)| after)
         .unwrap_or(rest);
-    if let Ok((_, stack_target)) =
-        crate::parser::oracle_nom::target::parse_stack_object_target(stack_phrase)
-    {
+    let stack_target = crate::parser::oracle_nom::target::parse_stack_object_target(stack_phrase)
+        .ok()
+        .map(|(_, target)| target);
+    // Single-target mode prefers the grammar so a qualifier after "activated
+    // or triggered ability" is kept (Nimble Obstructionist).
+    let target = if abilities_match && (mass_consumed || stack_target.is_none()) {
+        Some(stack_ability_filter_from_text(rest))
+    } else {
+        stack_target
+    };
+    if let Some(target) = target {
+        // CR 118.12: Parse "unless pays" even for ability counters.
         let unless_pay = parse_counter_unless_pay(rest)?;
         return Some(ZoneCounterImperativeAst::Counter {
-            target: stack_target,
+            target,
             source_rider: None,
             unless_pay,
             all: mass_consumed,

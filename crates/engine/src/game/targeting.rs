@@ -3884,7 +3884,7 @@ fn add_stack_abilities(
         if entry.id == source_id {
             continue; // Don't target yourself
         }
-        if stack_ability_matches_filter(entry, filter, source_controller) {
+        if stack_ability_matches_filter(state, entry, filter, source_controller, source_id) {
             targets.push(TargetRef::Object(entry.id));
         }
     }
@@ -3939,13 +3939,13 @@ fn stack_entry_matches_filter_with_context(
 ) -> bool {
     match &entry.kind {
         StackEntryKind::Spell { .. } => {
-            stack_spell_entry_matches_filter(state, entry, filter, source_id, target_ctx)
+            stack_spell_entry_matches_filter(state, entry, filter, target_ctx)
         }
         StackEntryKind::ActivatedAbility { .. }
         | StackEntryKind::TriggeredAbility { .. }
         | StackEntryKind::KeywordAction { .. } => {
             filter_targets_stack_abilities(filter)
-                && stack_ability_matches_filter(entry, filter, source_controller)
+                && stack_ability_matches_filter(state, entry, filter, source_controller, source_id)
         }
         // CR 112.1 + CR 113.3b: combat damage on the stack is neither a spell
         // nor an ability, so no filter can name it — not as a target and not as
@@ -3959,9 +3959,11 @@ fn stack_entry_matches_filter_with_context(
 }
 
 fn stack_ability_matches_filter(
+    state: &GameState,
     entry: &StackEntry,
     filter: &TargetFilter,
     source_controller: PlayerId,
+    source_id: ObjectId,
 ) -> bool {
     match filter {
         TargetFilter::StackAbility {
@@ -4021,17 +4023,35 @@ fn stack_ability_matches_filter(
                     })
                 }),
                 FilterProp::InZone { zone } => *zone == Zone::Stack,
+                // CR 115.9b / CR 115.9c: "that targets [only] …" reads the
+                // entry's chosen targets through the shared stack-target authority.
+                FilterProp::Targets { filter } => super::filter::stack_entry_targets_satisfy(
+                    state,
+                    entry.id,
+                    source_id,
+                    Some(source_controller),
+                    filter,
+                    false,
+                ),
+                FilterProp::TargetsOnly { filter } => super::filter::stack_entry_targets_satisfy(
+                    state,
+                    entry.id,
+                    source_id,
+                    Some(source_controller),
+                    filter,
+                    true,
+                ),
                 _ => true,
             })
         }
-        TargetFilter::And { filters } => filters
-            .iter()
-            .all(|filter| stack_ability_matches_filter(entry, filter, source_controller)),
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|filter| stack_ability_matches_filter(entry, filter, source_controller)),
+        TargetFilter::And { filters } => filters.iter().all(|filter| {
+            stack_ability_matches_filter(state, entry, filter, source_controller, source_id)
+        }),
+        TargetFilter::Or { filters } => filters.iter().any(|filter| {
+            stack_ability_matches_filter(state, entry, filter, source_controller, source_id)
+        }),
         TargetFilter::Not { filter } => {
-            !stack_ability_matches_filter(entry, filter, source_controller)
+            !stack_ability_matches_filter(state, entry, filter, source_controller, source_id)
         }
         TargetFilter::Any => true,
         _ => false,
@@ -4143,7 +4163,7 @@ fn add_stack_spells(
         if entry.id == source_id {
             continue;
         }
-        if !stack_spell_entry_matches_filter(state, entry, filter, source_id, target_ctx) {
+        if !stack_spell_entry_matches_filter(state, entry, filter, target_ctx) {
             continue;
         }
 
@@ -4263,7 +4283,6 @@ fn stack_spell_entry_matches_filter(
     state: &GameState,
     entry: &StackEntry,
     filter: &TargetFilter,
-    source_id: ObjectId,
     target_ctx: &super::filter::FilterContext,
 ) -> bool {
     if !matches!(entry.kind, StackEntryKind::Spell { .. }) {
@@ -4271,9 +4290,6 @@ fn stack_spell_entry_matches_filter(
     }
 
     let single_target = super::filter::single_target_count(filter);
-    let targets_only_constraint = super::filter::extract_targets_only(filter);
-    let targets_constraint = super::filter::extract_targets(filter);
-    let source_controller_opt = state.objects.get(&source_id).map(|o| o.controller);
     let targets = entry
         .ability()
         .map(super::ability_utils::declared_targets_in_chain)
@@ -4284,44 +4300,17 @@ fn stack_spell_entry_matches_filter(
         return false;
     }
 
-    let bare_ctx = super::filter::FilterContext::from_source(state, source_id);
-    // CR 115.9c: "that targets only [X]" — all targets must match the constraint filter.
-    if let Some(ref constraint) = targets_only_constraint {
-        if targets.is_empty()
-            || !targets.iter().all(|t| match t {
-                TargetRef::Object(id) => {
-                    super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
-                }
-                TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
-                    state,
-                    constraint,
-                    *pid,
-                    source_controller_opt,
-                    Some(source_id),
-                ),
-            })
-        {
-            return false;
-        }
+    // CR 115.9b / CR 115.9c: "that targets [only] [X]", with "you" read from
+    // `target_ctx` — the looking ability's controller (CR 109.5).
+    if super::filter::extract_targets_only(filter).is_some_and(|constraint| {
+        !super::filter::entry_targets_satisfy(state, entry, target_ctx, &constraint, true)
+    }) {
+        return false;
     }
-    // CR 115.9b: "that targets [X]" — at least one target must match (.any() semantics).
-    if let Some(ref constraint) = targets_constraint {
-        if targets.is_empty()
-            || !targets.iter().any(|t| match t {
-                TargetRef::Object(id) => {
-                    super::filter::matches_target_filter(state, *id, constraint, &bare_ctx)
-                }
-                TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
-                    state,
-                    constraint,
-                    *pid,
-                    source_controller_opt,
-                    Some(source_id),
-                ),
-            })
-        {
-            return false;
-        }
+    if super::filter::extract_targets(filter).is_some_and(|constraint| {
+        !super::filter::entry_targets_satisfy(state, entry, target_ctx, &constraint, false)
+    }) {
+        return false;
     }
 
     stack_spell_matches_filter(state, entry.id, filter, target_ctx)
@@ -5055,6 +5044,7 @@ mod tests {
             },
         };
 
+        let state = GameState::new_two_player(42);
         let filter = |id: PlayerId| TargetFilter::StackAbility {
             controller: Some(ControllerRef::SpecificPlayer { id }),
             tag: None,
@@ -5063,12 +5053,12 @@ mod tests {
 
         // The snapshot naming this entry's controller matches...
         assert!(
-            stack_ability_matches_filter(&entry, &filter(controller), other),
+            stack_ability_matches_filter(&state, &entry, &filter(controller), other, ObjectId(0)),
             "a snapshot naming the entry's controller matches"
         );
         // ...and one naming anybody else does not.
         assert!(
-            !stack_ability_matches_filter(&entry, &filter(other), other),
+            !stack_ability_matches_filter(&state, &entry, &filter(other), other, ObjectId(0)),
             "a snapshot naming a different player does not match"
         );
         // Reach guard: the pre-existing scopes are unaffected. The entry is
@@ -5076,6 +5066,7 @@ mod tests {
         // "an opponent controls it".
         assert!(
             stack_ability_matches_filter(
+                &state,
                 &entry,
                 &TargetFilter::StackAbility {
                     controller: Some(ControllerRef::Opponent),
@@ -5083,6 +5074,7 @@ mod tests {
                     kind: None,
                 },
                 other,
+                ObjectId(0),
             ),
             "the Opponent scope still matches"
         );
