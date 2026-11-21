@@ -23335,14 +23335,14 @@ pub struct PreventedDamageEntry {
     /// filter.
     pub recipient: TargetRef,
     pub amount: i32,
-    /// Unhinged half-point remainder of the prevented amount (CR 107.1a);
-    /// `amount` carries the whole part.
+    /// Unhinged half-point remainder of the prevented amount (an exception to
+    /// CR 107.1a's integer-only rule); `amount` carries the whole part.
     #[serde(default, skip_serializing_if = "HalfFraction::is_zero")]
     pub amount_fraction: HalfFraction,
 }
 
 impl PreventedDamageEntry {
-    /// The prevented amount with its half-point remainder (CR 107.1a).
+    /// The prevented amount with its Unhinged half-point remainder (CR 615.13).
     pub fn exact_amount(&self) -> HalfMagnitude {
         HalfMagnitude::from_whole_and_fraction(self.amount.max(0) as u32, self.amount_fraction)
     }
