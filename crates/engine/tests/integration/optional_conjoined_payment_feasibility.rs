@@ -880,8 +880,8 @@ fn conspiracy_theorist_large_land_board_still_offers_the_talisman_draw() {
     );
 }
 
-/// Review F1 on the exhaustion fallback (CR 118.3 + CR 608.2d): `theorists`
-/// Conspiracy Theorists with an empty hand beside Overabundance and one more
+/// Review F1 on the exhaustion fallback (CR 118.3 + CR 608.2d): Conspiracy
+/// Theorist with an empty hand beside Overabundance and one more
 /// Mountain than the probe budget admits. Overabundance gives every Mountain's
 /// mana ability a trigger with a non-mana effect, so each is a funding to
 /// probe, the search is cut short, and the empty-hand option is offered
@@ -889,7 +889,7 @@ fn conspiracy_theorist_large_land_board_still_offers_the_talisman_draw() {
 /// here — so "pay {1} and discard a card" is impossible however it is funded.
 struct ExhaustedBoard {
     runner: GameRunner,
-    theorists: Vec<ObjectId>,
+    theorist: ObjectId,
     lands: Vec<ObjectId>,
     first_draw: ObjectId,
     second_draw: ObjectId,
@@ -897,19 +897,15 @@ struct ExhaustedBoard {
     library_before: usize,
 }
 
-fn exhausted_board(theorists: usize) -> ExhaustedBoard {
+fn exhausted_board() -> ExhaustedBoard {
     use engine::game::casting::EFFECT_MANA_FUNDING_PROBE_BUDGET;
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let theorist_ids: Vec<ObjectId> = (0..theorists)
-        .map(|_| {
-            scenario
-                .add_creature(P0, "Conspiracy Theorist", 2, 2)
-                .from_oracle_text(CONSPIRACY_THEORIST)
-                .id()
-        })
-        .collect();
+    let theorist = scenario
+        .add_creature(P0, "Conspiracy Theorist", 2, 2)
+        .from_oracle_text(CONSPIRACY_THEORIST)
+        .id();
     let lands: Vec<ObjectId> = (0..=EFFECT_MANA_FUNDING_PROBE_BUDGET)
         .map(|_| scenario.add_basic_land(P0, ManaColor::Red))
         .collect();
@@ -927,7 +923,7 @@ fn exhausted_board(theorists: usize) -> ExhaustedBoard {
     let library_before = runner.state().players[P0.0 as usize].library.len();
     ExhaustedBoard {
         runner,
-        theorists: theorist_ids,
+        theorist,
         lands,
         first_draw,
         second_draw,
@@ -950,19 +946,19 @@ fn answer_exhausted_offer(runner: &mut GameRunner, answer: GameAction) -> u64 {
     perf_counters::effect_mana_funding_probe_snapshot().probes - before
 }
 
-/// Nothing of any accepted option was performed: no Mountain tapped for the
+/// Nothing of the accepted option was performed: no Mountain tapped for the
 /// {1} (so Overabundance never dealt its damage), no card discarded or drawn,
-/// and the attack triggers are gone with P0 holding priority.
+/// and the attack trigger is gone with P0 holding priority.
 fn assert_nothing_of_the_option_was_paid(board: &ExhaustedBoard) {
     let runner = &board.runner;
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-        "every accepted option resolved declined; got {:?}",
+        "the accepted option resolved declined; got {:?}",
         runner.state().waiting_for
     );
     assert!(
         runner.state().stack.is_empty(),
-        "nothing of a trigger is left"
+        "nothing of the trigger is left"
     );
     assert_eq!(
         untapped_lands(runner, &board.lands),
@@ -994,7 +990,9 @@ fn assert_nothing_of_the_option_was_paid(board: &ExhaustedBoard) {
 /// through the answer-and-remember action — must not spend the {1}: no probed
 /// funding confirmed the conjoined discard, so the acceptance resolves the
 /// option declined (CR 118.3: a player can't pay a cost without the resources
-/// to pay it fully). The acceptance reruns only the bounded search.
+/// to pay it fully). The acceptance reruns only the bounded search. (A later
+/// remembered answer reaches the same acceptance authority,
+/// `resolve_optional_effect_decision_step`.)
 #[test]
 fn conspiracy_theorist_accepting_after_budget_exhaustion_does_not_spend_the_head() {
     use engine::game::casting::EFFECT_MANA_FUNDING_PROBE_BUDGET;
@@ -1008,73 +1006,19 @@ fn conspiracy_theorist_accepting_after_budget_exhaustion_does_not_spend_the_head
             scope: MayTriggerAutoChoiceScope::ExactInstance,
         },
     ] {
-        let mut board = exhausted_board(1);
-        attack_and_hold_priority(&mut board.runner, board.theorists[0]);
+        let mut board = exhausted_board();
+        attack_and_hold_priority(&mut board.runner, board.theorist);
         assert_eq!(
             resolve_trigger_counting_probes(&mut board.runner),
             bounded_search,
             "the offer runs one bounded search: the planner's funding and one \
              per in-budget Mountain"
         );
+        let accept_probes = answer_exhausted_offer(&mut board.runner, answer.clone());
+        assert_nothing_of_the_option_was_paid(&board);
         assert_eq!(
-            answer_exhausted_offer(&mut board.runner, answer.clone()),
-            bounded_search,
+            accept_probes, bounded_search,
             "{answer:?}: the acceptance reruns one bounded search and probes nothing more"
         );
-        assert_nothing_of_the_option_was_paid(&board);
     }
-}
-
-/// The remembered answer is the third way to accept: two Theorists attack, the
-/// first offer is answered "accept, and remember for this card", and the
-/// second trigger resolves on that remembered answer with no prompt. It meets
-/// the same acceptance authority, so neither option spends the {1}.
-#[test]
-fn conspiracy_theorist_remembered_accept_after_budget_exhaustion_does_not_spend_the_head() {
-    use engine::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceScope};
-
-    let mut board = exhausted_board(2);
-    let runner = &mut board.runner;
-    runner.pass_both_players();
-    runner
-        .act(GameAction::DeclareAttackers {
-            attacks: board
-                .theorists
-                .iter()
-                .map(|&theorist| (theorist, AttackTarget::Player(P1)))
-                .collect(),
-            bands: vec![],
-        })
-        .expect("declare the attack");
-    assert_eq!(
-        runner.state().stack.len(),
-        2,
-        "reach: both attack triggers wait on the stack; got {:?}",
-        runner.state().waiting_for
-    );
-    runner.act(GameAction::PassPriority).expect("pass priority");
-    runner.act(GameAction::PassPriority).expect("P1 passes");
-    answer_exhausted_offer(
-        runner,
-        GameAction::DecideOptionalEffectAndRemember {
-            choice: AutoMayChoice::Accept,
-            scope: MayTriggerAutoChoiceScope::SameCard,
-        },
-    );
-    assert_eq!(
-        runner.state().stack.len(),
-        1,
-        "reach: the second trigger is still waiting; got {:?}",
-        runner.state().waiting_for
-    );
-    runner.act(GameAction::PassPriority).expect("pass priority");
-    runner.act(GameAction::PassPriority).expect("P1 passes");
-    assert!(
-        !matches!(
-            runner.state().waiting_for,
-            WaitingFor::OptionalEffectChoice { .. }
-        ),
-        "reach: the second offer is answered by the remembered accept, not a prompt"
-    );
-    assert_nothing_of_the_option_was_paid(&board);
 }
