@@ -6614,9 +6614,9 @@ mod tests {
         let state = runner.state();
         assert_eq!(state.players.len(), 4);
         assert_eq!(state.seat_order.len(), 4);
-        for i in 0..4 {
-            assert_eq!(state.players[i].id, PlayerId(i as u8));
-            assert_eq!(state.players[i].life, 20);
+        for (i, player) in state.players.iter().enumerate() {
+            assert_eq!(player.id, PlayerId(i as u8));
+            assert_eq!(player.life, 20);
         }
     }
 

@@ -1136,7 +1136,9 @@ fn unmodeled_ward_cost_is_a_parse_gap_not_a_free_ward() {
             obj.abilities
         );
         assert!(
-            unimplemented_mechanics(obj).contains(&"Effect: unknown".to_string()),
+            unimplemented_mechanics(obj)
+                .iter()
+                .any(|i| i == "Effect: unknown"),
             "{ward_line}: {:?}",
             unimplemented_mechanics(obj)
         );

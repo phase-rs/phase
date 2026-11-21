@@ -9973,10 +9973,7 @@ pub(crate) fn driving_resources_non_decreasing_carried(
             .map(|o| o.damage_marked as u64)
             .sum()
     };
-    if damage_total(current) > damage_total(prior) {
-        return false;
-    }
-    true
+    damage_total(current) <= damage_total(prior)
 }
 
 /// CR 602.5c: the ability a usage key names, re-derived by acquisition

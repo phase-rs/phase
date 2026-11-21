@@ -14054,19 +14054,16 @@ fn where_x_is_demonstrative_target_creature_stat(where_x: WhereXBinding<'_>) -> 
         return false;
     };
     let expression = expression.trim().trim_end_matches('.').to_ascii_lowercase();
-    // The `if` condition scopes the parser temporary so it drops at the end of
-    // condition evaluation (before the owned `expression` string), avoiding the
+    // The `let` scopes the parser temporary so it drops at the end of the
+    // statement (before the owned `expression` string), avoiding the
     // tail-position borrow that an `is_ok()` return expression would create.
-    if all_consuming(preceded(
+    let matched = all_consuming(preceded(
         tag::<_, _, OracleError<'_>>("that creature's "),
         alt((tag("power"), tag("toughness"))),
     ))
     .parse(expression.as_str())
-    .is_ok()
-    {
-        return true;
-    }
-    false
+    .is_ok();
+    matched
 }
 
 /// CR 608.2c: Rebind a power/toughness reference scoped `from` inside a

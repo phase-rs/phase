@@ -2226,7 +2226,8 @@ mod tests {
         assert!(estimate
             .coverage
             .unresolved
-            .contains(&"Armageddon".to_string()));
+            .iter()
+            .any(|i| i == "Armageddon"));
         assert_eq!(estimate.tier, CommanderBracketTier::Optimized);
     }
 

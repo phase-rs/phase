@@ -577,7 +577,7 @@ fn cost_type_choice_options_redacted_for_opponent_viewer() {
     // that reveals a hand-beholdable type.
     match s.runner.state().waiting_for.clone() {
         WaitingFor::CostTypeChoice { options, .. } => assert!(
-            options.contains(&"Elf".to_string()),
+            options.iter().any(|i: &String| i == "Elf"),
             "precondition: CostTypeChoice offers the hand-derived type Elf: {options:?}"
         ),
         other => panic!("expected CostTypeChoice, got {other:?}"),
@@ -587,7 +587,7 @@ fn cost_type_choice_options_redacted_for_opponent_viewer() {
     let caster_view = filter_state_for_viewer(s.runner.state(), P0);
     match caster_view.waiting_for {
         WaitingFor::CostTypeChoice { ref options, .. } => assert!(
-            options.contains(&"Elf".to_string()),
+            options.iter().any(|i: &String| i == "Elf"),
             "caster must retain the full option list: {options:?}"
         ),
         ref other => panic!("expected CostTypeChoice in caster view, got {other:?}"),

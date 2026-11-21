@@ -1034,11 +1034,11 @@ fn b2_zurs_weirding_replacement_leaves_no_dispatching_drain() {
         .filter_map(|id| runner.state().objects.get(id).map(|o| o.name.clone()))
         .collect();
     assert!(
-        p1_graveyard.contains(&"Grizzly Bears".to_string()),
+        p1_graveyard.iter().any(|i| i == "Grizzly Bears"),
         "reach-guard: accepting must bin the revealed card in its owner's graveyard, got {p1_graveyard:?}"
     );
     assert!(
-        !p1_hand.contains(&"Grizzly Bears".to_string()),
+        !p1_hand.iter().any(|i| i == "Grizzly Bears"),
         "reach-guard: the binned card must not reach the drawing player's hand, got {p1_hand:?}"
     );
     assert_eq!(

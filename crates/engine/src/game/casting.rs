@@ -23276,7 +23276,7 @@ fn target_dependent_reduction_makes_payable(
             {
                 continue;
             }
-            if payable(&priced) || with_defiler.as_ref().is_some_and(&defiler_payable) {
+            if payable(&priced) || with_defiler.as_ref().is_some_and(defiler_payable) {
                 return true;
             }
             checked.push((priced, with_defiler));

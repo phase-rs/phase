@@ -3879,8 +3879,8 @@ mod tests {
         let (mut session, _) = test_session(2);
         session.status = DraftStatus::Deckbuilding;
 
-        for seat in 0..2 {
-            session.pools[seat] = (0..42)
+        for (seat, pool) in session.pools.iter_mut().enumerate().take(2) {
+            *pool = (0..42)
                 .map(|i| DraftCardInstance {
                     instance_id: format!("s{seat}-card-{i}"),
                     name: format!("Card {i}"),
@@ -4071,8 +4071,8 @@ mod tests {
             },
         ];
         session.status = DraftStatus::Deckbuilding;
-        for seat in 0..2 {
-            session.pools[seat] = (0..42)
+        for (seat, pool) in session.pools.iter_mut().enumerate().take(2) {
+            *pool = (0..42)
                 .map(|i| DraftCardInstance {
                     instance_id: format!("s{seat}-card-{i}"),
                     name: format!("Card {i}"),
@@ -4168,8 +4168,8 @@ mod tests {
     fn premier_pod_reaches_pairing_then_match_in_progress() {
         let (mut session, _) = test_session(2);
         session.status = DraftStatus::Deckbuilding;
-        for seat in 0..2 {
-            session.pools[seat] = (0..42)
+        for (seat, pool) in session.pools.iter_mut().enumerate().take(2) {
+            *pool = (0..42)
                 .map(|i| DraftCardInstance {
                     instance_id: format!("s{seat}-card-{i}"),
                     name: format!("Card {i}"),
@@ -4372,8 +4372,8 @@ mod tests {
     fn swiss_pairings_include_bot_filled_seats() {
         let (mut session, _) = test_session(8);
         session.status = DraftStatus::Deckbuilding;
-        for seat in 2..8 {
-            session.seats[seat] = DraftSeat::Bot {
+        for (seat, slot) in session.seats.iter_mut().enumerate().take(8).skip(2) {
+            *slot = DraftSeat::Bot {
                 name: format!("Bot {seat}"),
             };
         }

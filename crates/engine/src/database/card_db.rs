@@ -2430,14 +2430,14 @@ mod tests {
         let vocab = db.creature_type_vocabulary();
 
         assert!(
-            vocab.contains(&"Saproling".to_string()),
+            vocab.iter().any(|i| i == "Saproling"),
             "Saproling must appear (token-only creature type)"
         );
         assert!(
-            vocab.contains(&"Golem".to_string()),
+            vocab.iter().any(|i| i == "Golem"),
             "Golem must appear (multi-core-type creature)"
         );
-        assert!(vocab.contains(&"Bear".to_string()));
+        assert!(vocab.iter().any(|i| i == "Bear"));
         // Sorted.
         let mut sorted = vocab.to_vec();
         sorted.sort();
@@ -2491,11 +2491,11 @@ mod tests {
         let db = CardDatabase::from_json_str(&json).unwrap();
         let vocab = db.creature_type_vocabulary();
         assert!(
-            vocab.contains(&"Faerie".to_string()),
+            vocab.iter().any(|i| i == "Faerie"),
             "Faerie must appear from a Tribal-only face (no Creature core type)"
         );
         assert!(
-            vocab.contains(&"Elf".to_string()),
+            vocab.iter().any(|i| i == "Elf"),
             "Elf must appear from a Kindred-only face (no Creature core type)"
         );
     }
@@ -2554,19 +2554,19 @@ mod tests {
         let db = CardDatabase::from_json_str(&json).unwrap();
         let vocab = db.creature_type_vocabulary();
         assert!(
-            vocab.contains(&"Dryad".to_string()),
+            vocab.iter().any(|i| i == "Dryad"),
             "Dryad is a creature type and must survive, got {vocab:?}"
         );
         assert!(
-            vocab.contains(&"Construct".to_string()),
+            vocab.iter().any(|i| i == "Construct"),
             "Construct is a creature type and must survive, got {vocab:?}"
         );
         assert!(
-            !vocab.contains(&"Forest".to_string()),
+            !vocab.iter().any(|i| i == "Forest"),
             "Forest is a land type (appears on a pure Land face) — must not leak, got {vocab:?}"
         );
         assert!(
-            !vocab.contains(&"Equipment".to_string()),
+            !vocab.iter().any(|i| i == "Equipment"),
             "Equipment is an artifact type (appears on a pure Artifact face) — must not leak, got {vocab:?}"
         );
     }

@@ -19573,7 +19573,12 @@ fn handle_equip_activation(
             "You don't control this equipment".to_string(),
         ));
     }
-    if !obj.card_types.subtypes.contains(&"Equipment".to_string()) {
+    if !obj
+        .card_types
+        .subtypes
+        .iter()
+        .any(|i: &String| i == "Equipment")
+    {
         return Err(EngineError::InvalidAction(
             "Object is not an equipment".to_string(),
         ));
@@ -19795,7 +19800,12 @@ fn handle_crew_activation(
             "You don't control this Vehicle".to_string(),
         ));
     }
-    if !obj.card_types.subtypes.contains(&"Vehicle".to_string()) {
+    if !obj
+        .card_types
+        .subtypes
+        .iter()
+        .any(|i: &String| i == "Vehicle")
+    {
         return Err(EngineError::InvalidAction(
             "Object is not a Vehicle".to_string(),
         ));
