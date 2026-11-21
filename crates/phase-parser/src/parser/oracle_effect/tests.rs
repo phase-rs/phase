@@ -105903,6 +105903,58 @@ fn search_this_way_guard_rung_does_not_widen() {
     }
 }
 
+/// The two sentences above are constructed: no printed card says "an opponent searches their library this way"
+/// or "you searched your library this way" (MTGJSON 5.3.0+20261115 has no hit for either). The printed neighbours of
+/// the clause are pinned here with their verbatim Oracle text: Auditore Ambush ("they", a targeted player's
+/// search) and Boldwyr Heavyweights ("each player who searched", past tense) keep an unguarded `Shuffle`, and
+/// Prishe's Wanderings (a "when you search your library this way" reflexive trigger) is not turned into a
+/// guard either. Each has a reach guard: the parse still carries its `Shuffle` or its counter effect.
+#[test]
+fn search_this_way_guard_rung_leaves_printed_neighbours_alone() {
+    let cases: [(&str, &str, &[&str], &[&str], &str, &str); 3] = [
+        (
+            "Auditore Ambush",
+            "Choose one or both \u{2014}\n\u{2022} Return target creature to its owner's hand.\n\u{2022} Target player searches their library and/or graveyard for a card named Ezio, Blade of Vengeance, reveals it, and puts it into their hand. If they search their library this way, they shuffle.",
+            &["Sorcery"],
+            &[],
+            "\"Shuffle\"",
+            "reach guard: the modal ability parsed a Shuffle",
+        ),
+        (
+            "Boldwyr Heavyweights",
+            "Trample\nWhen this creature enters, each opponent may search their library for a creature card and put it onto the battlefield. Then each player who searched their library this way shuffles.",
+            &["Creature"],
+            &["Giant", "Warrior"],
+            "\"Shuffle\"",
+            "reach guard: the trigger parsed a Shuffle",
+        ),
+        (
+            "Prishe's Wanderings",
+            "Search your library for a basic land card or Town card, put it onto the battlefield tapped, then shuffle. When you search your library this way, put a +1/+1 counter on target creature you control.",
+            &["Instant"],
+            &[],
+            "\"PutCounter\"",
+            "reach guard: the reflexive trigger parsed its counter effect",
+        ),
+    ];
+    for (name, text, types, subtypes, reach, reach_msg) in cases {
+        let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+        let subtypes: Vec<String> = subtypes.iter().map(|t| t.to_string()).collect();
+        let parsed = parse_oracle_text(text, name, &[], &types, &subtypes);
+        let json = serde_json::to_string(&parsed).expect("serialize parsed abilities");
+        assert!(
+            // allow-noncombinator: test assertion scans serialized AST JSON, not parsing dispatch
+            json.contains(reach),
+            "{name}: {reach_msg}"
+        );
+        assert!(
+            // allow-noncombinator: test assertion scans serialized AST JSON, not parsing dispatch
+            !json.contains("\"ScopedPlayerMatches\""),
+            "{name}: the printed neighbour must not gain a PerformedActionThisWay guard"
+        );
+    }
+}
+
 /// CR 603.2b + CR 608.2c + CR 611.2a + CR 702.1d: the shared-predicate
 /// condition and the "same is true" continuation must remain typed all the way
 /// through the real card parser. The class census was generated with:

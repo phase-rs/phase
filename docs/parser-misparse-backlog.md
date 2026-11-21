@@ -86,7 +86,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2368/4492 ≈ 52.7% of all misparse appearances; the top 10 cover 3341/4492 ≈ 74.4%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
+> The top **5** root causes cover 2368/4492 ≈ 52.7% of all misparse appearances; the top 10 cover 3341/4492 ≈ 74.4%. Fix these first. Row order is the original ranking; row 7 has since dropped below row 8 (204 and 207 cards) as cards were fixed.
 
 ## Full card lists per root cause
 
