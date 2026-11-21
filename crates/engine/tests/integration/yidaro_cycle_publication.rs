@@ -6,7 +6,11 @@ use engine::game::keywords::object_has_effective_keyword_kind;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{AbilityTag, Effect, ResolvedAbility, TargetFilter, TargetRef};
+use engine::types::ability::{
+    AbilityTag, ChosenAttribute, ControllerRef, CountScope, CyclingHistoryWindow, Effect,
+    FilterProp, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
@@ -353,6 +357,8 @@ fn v2_granted_slivercycling_after_discard() {
         let (_, finalize_position, finalize) =
             assert_placement(runner.state(), search, &expected[0], 0);
         assert_history(runner.state(), &expected);
+        let reader = ResolvedAbility::new(Effect::NoOp, vec![], card, P0);
+        assert_cycle_windows(runner.state(), &reader, CountScope::Controller, [1, 1]);
         assert_eq!(cycle_command_counts(runner.state()), (1, 1));
         if second_grant {
             assert_granted_replay_contract(runner.state(), finalize);
@@ -1821,5 +1827,525 @@ fn assert_granted_replay_contract(state: &GameState, finalize: &ResolvedStackEnt
             .iter()
             .all(|node| node.cycling_occurrence.is_none()));
         assert_history(&restored, &[]);
+    }
+}
+
+fn read_cycles(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    scope: CountScope,
+    window: CyclingHistoryWindow,
+    filter: Option<TargetFilter>,
+) -> i32 {
+    engine::game::quantity::resolve_quantity_with_targets(
+        state,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::CardsCycled {
+                scope,
+                window,
+                filter,
+            },
+        },
+        ability,
+    )
+}
+
+fn assert_cycle_windows(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    scope: CountScope,
+    expected: [i32; 2],
+) {
+    assert_eq!(
+        [
+            CyclingHistoryWindow::ThisTurn,
+            CyclingHistoryWindow::ThisGame
+        ]
+        .map(|window| read_cycles(state, ability, scope.clone(), window, None)),
+        expected,
+        "{scope:?}",
+    );
+}
+
+fn return_with_raise_dead(runner: &mut GameRunner, spell: ObjectId, target: ObjectId) {
+    let card_id = runner.state().objects[&spell].card_id;
+    act(
+        runner,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    );
+    let WaitingFor::TargetSelection {
+        player: P0,
+        selection,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("expected Raise Dead's graveyard target");
+    };
+    assert!(selection
+        .current_legal_targets
+        .contains(&TargetRef::Object(target)));
+    act(
+        runner,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(target)),
+        },
+    );
+    passes(runner);
+    priority(runner);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(zone(runner, target), Zone::Hand);
+}
+
+#[test]
+fn phase3_v1_counts_repeated_cycles_across_turn_windows() {
+    let mut scenario = main_phase();
+    let wraith = street_wraith(&mut scenario);
+    let later = street_wraith(&mut scenario);
+    let raise_dead = printed(&mut scenario, P0, "Raise Dead", Zone::Hand);
+    printed(&mut scenario, P0, "Sidewinder Sliver", Zone::Graveyard);
+    let draws =
+        ["Forest", "Mountain", "Island"].map(|name| scenario.add_card_to_library_top(P0, name));
+    scenario.add_card_to_library_top(P1, "Island");
+    scenario.with_mana_pool(P0, mana(ManaType::Black, 1));
+    let mut runner = scenario.build();
+    let ability = ResolvedAbility::new(Effect::NoOp, vec![], wraith, P0);
+    let turn = runner.state().turn_number;
+    assert_cycle_windows(runner.state(), &ability, CountScope::Controller, [0, 0]);
+    let first = cycle_wraith(&mut runner, wraith);
+    let record = cycle_record("Street Wraith", turn);
+    assert_placement(runner.state(), first, &record, 0);
+    assert_cycle_windows(runner.state(), &ability, CountScope::Controller, [1, 1]);
+    resolve_cycle_draw(&mut runner, draws[2]);
+    let discarded = runner.state().objects[&wraith].snapshot_for_zone_change(
+        wraith,
+        Some(Zone::Graveyard),
+        Zone::Hand,
+    );
+    return_with_raise_dead(&mut runner, raise_dead, wraith);
+    let returned = runner.state().objects[&wraith].snapshot_for_zone_change(
+        wraith,
+        Some(Zone::Hand),
+        Zone::Graveyard,
+    );
+    assert_ne!(
+        discarded
+            .trigger_source_context()
+            .unwrap()
+            .identity
+            .reference,
+        returned
+            .trigger_source_context()
+            .unwrap()
+            .identity
+            .reference
+    );
+
+    // The same physical card has a new incarnation. Check the new activation
+    // directly because the per-turn activation journal also holds its prior cycle.
+    let index = wraith_index(&runner, wraith);
+    let life = runner.life(P0);
+    let events = act(
+        &mut runner,
+        activation(wraith, index, CastPaymentMode::Auto),
+    );
+    assert_eq!(runner.life(P0), life - 2);
+    assert_cycle(&events, wraith);
+    let second = activation_entry(&runner, wraith);
+    assert_placement(runner.state(), second, &record, 1);
+    assert_cycle_windows(runner.state(), &ability, CountScope::Controller, [2, 2]);
+    resolve_cycle_draw(&mut runner, draws[1]);
+
+    advance_turn(&mut runner);
+    assert_eq!(runner.state().turn_number, turn + 1);
+    assert_eq!(runner.state().active_player, P1);
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ) {
+        act(&mut runner, GameAction::PassPriority);
+    }
+    priority(&runner);
+    assert!(runner.state().stack.is_empty());
+    assert_cycle_windows(runner.state(), &ability, CountScope::Controller, [0, 2]);
+    let third = cycle_wraith(&mut runner, later);
+    assert_placement(
+        runner.state(),
+        third,
+        &cycle_record("Street Wraith", turn + 1),
+        2,
+    );
+    assert_cycle_windows(runner.state(), &ability, CountScope::Controller, [1, 3]);
+    resolve_cycle_draw(&mut runner, draws[0]);
+}
+
+fn priority_for(runner: &mut GameRunner, seat: PlayerId, player_count: usize) {
+    for _ in 0..player_count {
+        let WaitingFor::Priority { player } = runner.state().waiting_for else {
+            panic!("expected priority while rotating to {seat:?}");
+        };
+        if player == seat {
+            return;
+        }
+        act(runner, GameAction::PassPriority);
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == seat)
+    );
+}
+
+fn cycle_population(
+    mut scenario: GameScenario,
+    player_count: usize,
+) -> (GameRunner, [ObjectId; 3], GameEvent) {
+    scenario.at_phase(Phase::PreCombatMain);
+    let seats = [P0, P1, PlayerId(2)];
+    let sources =
+        seats.map(|seat| printed(&mut scenario, seat, "Sidewinder Sliver", Zone::Battlefield));
+    let cards = seats.map(|seat| {
+        (0..=usize::from(seat.0))
+            .map(|_| printed(&mut scenario, seat, "Street Wraith", Zone::Hand))
+            .collect::<Vec<_>>()
+    });
+    for n in 0..player_count {
+        scenario.with_library_top(PlayerId(n as u8), &["Island"; 5]);
+    }
+    let mut runner = scenario.build();
+    let mut last_cycle = None;
+    for (seat, cards) in seats.into_iter().zip(cards) {
+        for (journal_index, card) in cards.into_iter().enumerate() {
+            if runner
+                .state()
+                .format_config
+                .topology()
+                .has_shared_team_turns()
+                && seat == P1
+            {
+                // The live pass path rotates between team representatives.
+                // Set up the teammate as the acting seat in the team's window.
+                priority_for(&mut runner, P0, player_count);
+                let state = runner.state_mut();
+                state.priority_player = seat;
+                state.waiting_for = WaitingFor::Priority { player: seat };
+            } else {
+                priority_for(&mut runner, seat, player_count);
+            }
+            let paid_life =
+                |runner: &GameRunner| engine::game::players::team_life_total(runner.state(), seat);
+            let life_before = paid_life(&runner);
+            let index = wraith_index(&runner, card);
+            let events = act(&mut runner, activation(card, index, CastPaymentMode::Auto));
+            assert_eq!(paid_life(&runner), life_before - 2);
+            assert_eq!(cycle_events(&events), [(seat, card)]);
+            last_cycle = events
+                .into_iter()
+                .find(|event| matches!(event, GameEvent::Cycled { .. }));
+            assert_eq!(zone(&runner, card), Zone::Graveyard);
+            let entry = runner
+                .state()
+                .stack
+                .front()
+                .expect("paid cycling activation");
+            assert_eq!(entry.controller, seat);
+            assert!(
+                matches!(entry.kind, StackEntryKind::ActivatedAbility { source_id, .. } if source_id == card)
+            );
+            assert_eq!(
+                entry.ability().unwrap().cycling_occurrence,
+                Some(CyclingOccurrence {
+                    activator: seat,
+                    journal_index
+                }),
+            );
+            assert_eq!(
+                runner.state().cycles_completed_this_game_by_player[&seat][journal_index],
+                cycle_record("Street Wraith", runner.state().turn_number),
+            );
+            for _ in 0..player_count {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                act(&mut runner, GameAction::PassPriority);
+            }
+            assert!(runner.state().stack.is_empty());
+            let WaitingFor::Priority { player } = runner.state().waiting_for else {
+                panic!("cycling draw must return to priority");
+            };
+            assert_eq!(player, P0);
+        }
+    }
+    (
+        runner,
+        sources,
+        last_cycle.expect("last player's completed cycle"),
+    )
+}
+
+#[test]
+fn phase3_v2_counts_teammates_departed_seats_and_bound_players() {
+    use engine::types::format::FormatConfig;
+    let other = PlayerId(2);
+    let (team, sources, _) = cycle_population(
+        GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42),
+        4,
+    );
+    let observer = |source| ResolvedAbility::new(Effect::NoOp, vec![], source, P0);
+    let ability = observer(sources[0]);
+    for (scope, n) in [
+        (CountScope::Controller, 1),
+        (CountScope::All, 6),
+        (CountScope::Opponents, 3),
+    ] {
+        assert_cycle_windows(team.state(), &ability, scope, [n, n]);
+    }
+
+    let (mut runner, sources, event) = cycle_population(
+        GameScenario::new_with_format(FormatConfig::free_for_all(), 3, 42),
+        3,
+    );
+    let mut ability = observer(sources[2]);
+    assert_eq!(runner.state().objects[&ability.source_id].owner, other);
+    ability.original_controller = Some(P1);
+    for scope in [
+        CountScope::Controller,
+        CountScope::Owner,
+        CountScope::ScopedPlayer,
+    ] {
+        assert_cycle_windows(runner.state(), &ability, scope, [2, 2]);
+    }
+    runner.state_mut().current_trigger_event = Some(event);
+    assert_cycle_windows(runner.state(), &ability, CountScope::ScopedPlayer, [3, 3]);
+    ability.scoped_player = Some(P0);
+    assert_cycle_windows(runner.state(), &ability, CountScope::ScopedPlayer, [1, 1]);
+    runner.state_mut().current_trigger_event = None;
+
+    for (source, chosen) in [(sources[0], P0), (sources[1], other)] {
+        let choices = runner.state_mut().chosen_attributes_mut(source).unwrap();
+        choices.push(ChosenAttribute::Player(chosen));
+        assert_eq!(choices.as_slice(), &[ChosenAttribute::Player(chosen)]);
+    }
+    let capture = |state: &GameState, source| {
+        state.objects[&source]
+            .snapshot_for_zone_change(source, Some(Zone::Battlefield), Zone::Battlefield)
+            .trigger_source_context()
+            .unwrap()
+            .clone()
+    };
+    let mut ability = observer(sources[0]);
+    for (bound, n) in [(Some(sources[1]), 3), (Some(sources[0]), 1), (None, 1)] {
+        ability.trigger_source = bound.map(|source| capture(runner.state(), source));
+        assert_cycle_windows(
+            runner.state(),
+            &ability,
+            CountScope::SourceChosenPlayer,
+            [n, n],
+        );
+    }
+    ability.source_id = sources[2];
+    assert_cycle_windows(
+        runner.state(),
+        &ability,
+        CountScope::SourceChosenPlayer,
+        [0, 0],
+    );
+
+    let ability = observer(sources[0]);
+    priority_for(&mut runner, P1, 3);
+    act(&mut runner, GameAction::Concede { player_id: P1 });
+    assert!(runner.state().players[1].is_eliminated);
+    // CR 800.4a: the departed player's permanent has left the game.
+    assert!(runner
+        .state()
+        .objects
+        .get(&sources[1])
+        .is_none_or(|object| object.zone != Zone::Battlefield));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    for (scope, n) in [
+        (CountScope::Controller, 1),
+        (CountScope::All, 6),
+        (CountScope::Opponents, 5),
+    ] {
+        assert_cycle_windows(runner.state(), &ability, scope, [n, n]);
+    }
+    let turn = runner.state().turn_number;
+    advance_turn(&mut runner);
+    assert_eq!(runner.state().turn_number, turn + 1);
+    assert_eq!(runner.state().active_player, other);
+    for (scope, n) in [
+        (CountScope::Controller, 1),
+        (CountScope::All, 6),
+        (CountScope::Opponents, 5),
+    ] {
+        assert_cycle_windows(runner.state(), &ability, scope, [0, n]);
+    }
+}
+
+#[test]
+fn phase3_v3_counts_recorded_names_and_excludes_ordinary_discard() {
+    const YIDARO: &str = "Yidaro, Wandering Monster";
+    let mut scenario = main_phase();
+    let first = printed(&mut scenario, P0, YIDARO, Zone::Hand);
+    let second = printed(&mut scenario, P0, YIDARO, Zone::Hand);
+    let discard = printed(&mut scenario, P0, YIDARO, Zone::Hand);
+    let wraith = street_wraith(&mut scenario);
+    let raise_dead = printed(&mut scenario, P0, "Raise Dead", Zone::Hand);
+    printed(&mut scenario, P0, "Sidewinder Sliver", Zone::Graveyard);
+    let looting = printed(&mut scenario, P0, "Faithless Looting", Zone::Hand);
+    scenario.with_library_top(
+        P0,
+        &["Island", "Mountain", "Forest", "Plains", "Swamp", "Island"],
+    );
+    let swamp = scenario.add_basic_land(P0, ManaColor::Black);
+    scenario.with_mana_pool(P0, mana(ManaType::Red, 5));
+    let mut runner = scenario.build();
+    let ability = ResolvedAbility::new(Effect::NoOp, vec![], first, P0);
+    let named = |name: &str| TypedFilter {
+        type_filters: vec![],
+        controller: None,
+        properties: vec![FilterProp::Named { name: name.into() }],
+    };
+    let count = |runner: &GameRunner, filter| {
+        read_cycles(
+            runner.state(),
+            &ability,
+            CountScope::Controller,
+            CyclingHistoryWindow::ThisGame,
+            filter,
+        )
+    };
+    let turn = runner.state().turn_number;
+    for (index, card) in [first, second].into_iter().enumerate() {
+        let index_on_card = wraith_index(&runner, card);
+        let events = act(
+            &mut runner,
+            activation(card, index_on_card, CastPaymentMode::Auto),
+        );
+        assert_cycle(&events, card);
+        assert_eq!(zone(&runner, card), Zone::Graveyard);
+        let entry = runner.state().stack.iter().find(|entry| {
+            matches!(entry.kind, StackEntryKind::ActivatedAbility { source_id, .. } if source_id == card)
+        }).expect("Yidaro's paid cycle under its trigger");
+        assert_eq!(entry.controller, P0);
+        assert_eq!(
+            entry.ability().unwrap().cycling_occurrence,
+            Some(CyclingOccurrence {
+                activator: P0,
+                journal_index: index
+            }),
+        );
+        assert_eq!(
+            runner.state().cycles_completed_this_game_by_player[&P0][index],
+            cycle_record(YIDARO, turn),
+        );
+        assert_eq!(
+            count(&runner, Some(TargetFilter::Typed(named(YIDARO)))),
+            index as i32 + 1
+        );
+        for _ in 0..runner.state().stack.len() {
+            passes(&mut runner);
+        }
+        priority(&runner);
+        assert!(runner.state().stack.is_empty());
+        if index == 0 {
+            if zone(&runner, card) == Zone::Graveyard {
+                tap_land(&mut runner, swamp);
+                return_with_raise_dead(&mut runner, raise_dead, card);
+            }
+            assert_ne!(zone(&runner, card), Zone::Graveyard);
+            assert_eq!(count(&runner, Some(TargetFilter::Typed(named(YIDARO)))), 1);
+        }
+    }
+    let entry = cycle_wraith(&mut runner, wraith);
+    assert_placement(
+        runner.state(),
+        entry,
+        &cycle_record("Street Wraith", turn),
+        2,
+    );
+    passes(&mut runner);
+    priority(&runner);
+    assert!(runner.state().stack.is_empty());
+    runner.cast(looting).commit();
+    let mut events = passes(&mut runner);
+    let WaitingFor::DiscardChoice {
+        player: P0,
+        source_id,
+        count: 2,
+        cards,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("expected Faithless Looting to ask for two cards");
+    };
+    assert_eq!(*source_id, looting);
+    assert!(cards.contains(&discard));
+    let other = *cards
+        .iter()
+        .find(|&&card| card != discard)
+        .expect("second discard");
+    events.extend(act(
+        &mut runner,
+        GameAction::SelectCards {
+            cards: vec![discard, other],
+        },
+    ));
+    assert!(events
+        .iter()
+        .any(|event| discard_subject(event) == Some((P0, discard))));
+    assert!(cycle_events(&events).is_empty());
+    assert_eq!(zone(&runner, discard), Zone::Graveyard);
+    priority(&runner);
+    assert!(runner.state().stack.is_empty());
+    assert_history(
+        runner.state(),
+        &[
+            cycle_record(YIDARO, turn),
+            cycle_record(YIDARO, turn),
+            cycle_record("Street Wraith", turn),
+        ],
+    );
+    assert_eq!(count(&runner, None), 3);
+    for (name, expected) in [
+        (YIDARO, 2),
+        ("yidaro, wandering monster", 2),
+        ("Homing Sliver", 0),
+    ] {
+        assert_eq!(
+            count(&runner, Some(TargetFilter::Typed(named(name)))),
+            expected
+        );
+    }
+    for unsupported in [
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            ..named(YIDARO)
+        }),
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            ..named(YIDARO)
+        }),
+        TargetFilter::Typed(named(YIDARO).properties(vec![
+            FilterProp::Named {
+                name: YIDARO.into(),
+            },
+            FilterProp::NonToken,
+        ])),
+        TargetFilter::Typed(named("")),
+        TargetFilter::Not {
+            filter: Box::new(TargetFilter::Typed(named(YIDARO))),
+        },
+    ] {
+        assert_eq!(count(&runner, Some(unsupported)), 0);
     }
 }

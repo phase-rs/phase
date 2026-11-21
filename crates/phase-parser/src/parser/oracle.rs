@@ -2361,6 +2361,7 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::SpellsCast { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. }
+        | QuantityRef::CardsCycled { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. } => filter
             .as_ref()
             .is_some_and(|filter| target_filter_uses_filter_prop(filter, pred)),

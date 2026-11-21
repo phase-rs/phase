@@ -104,7 +104,7 @@ use crate::types::ability::FilterProp;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AttachCardinality, AttachSelection, AttachmentReferent,
     AttackSubject, AttackedYouScope, CardTypeSetSource, CombatRelationSubject,
-    ContinuousModification, ControllerRef, Duration, Effect, EffectScope, GuessSubject,
+    ContinuousModification, ControllerRef, CountScope, Duration, Effect, EffectScope, GuessSubject,
     KeeperConstraint, LibraryInstructionActor, ModalChoice, MultiTargetSpec, NameStickerSet,
     ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
     ReciprocalZoneChoiceRole, RepeatContinuation, ReplacementDefinition, ResolvedAbility,
@@ -2399,6 +2399,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
@@ -7360,6 +7361,18 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         QuantityRef::CardsDrawnThisTurn { player: _ }
         | QuantityRef::CardsDrawnLastTurn { player: _ }
         | QuantityRef::CardsDiscardedThisTurn { .. } => reads_player_of(StateKind::JournalCards),
+        QuantityRef::CardsCycled { scope, window: _, filter } => {
+            if crate::game::filter::cycling_history_filter_name(filter.as_ref()).is_err() {
+                return RwProfile::empty();
+            }
+            // CR 603.3b + CR 608.2h: This reads a player journal, with a per-source
+            // binding only when the scope uses that source's persisted player choice.
+            let mut profile = reads_player_of(StateKind::JournalCards);
+            if matches!(scope, CountScope::SourceChosenPlayer) {
+                profile.bind_per_member();
+            }
+            profile
+        }
         QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::OpponentSpellsCastSinceLastTurn { player: _ }
@@ -11568,6 +11581,68 @@ mod poison_condition_rw_tests {
                 static_profile, expected,
                 "the static sibling arm records the same player read ({player:?})"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod cycling_quantity_rw_tests {
+    use super::*;
+    use crate::types::ability::{Comparator, CyclingHistoryWindow};
+    use crate::types::{identifiers::ObjectId, player::PlayerId};
+
+    #[test]
+    fn phase3_v5_cycling_footprint_tracks_only_the_player_journal_and_bound_choice() {
+        let name = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller: None,
+            properties: vec![FilterProp::Named {
+                name: "Yidaro, Wandering Monster".into(),
+            }],
+        });
+        let fixed = |value| QuantityExpr::Fixed { value };
+        let profiles = |lhs: QuantityExpr| {
+            let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+            ability.condition = Some(AbilityCondition::QuantityCheck {
+                lhs: lhs.clone(),
+                comparator: Comparator::GE,
+                rhs: fixed(4),
+            });
+            let trigger = TriggerCondition::QuantityComparison {
+                lhs,
+                comparator: Comparator::GE,
+                rhs: fixed(2),
+            };
+            [
+                ability_rw_profile(&ability),
+                trigger_condition_rw_profile(&trigger),
+            ]
+        };
+        for (window, filter) in [
+            (CyclingHistoryWindow::ThisGame, Some(name)),
+            (CyclingHistoryWindow::ThisTurn, None),
+        ] {
+            for (scope, bound) in [
+                (CountScope::Controller, false),
+                (CountScope::SourceChosenPlayer, true),
+            ] {
+                for profile in profiles(QuantityExpr::Ref {
+                    qty: QuantityRef::CardsCycled {
+                        scope,
+                        window,
+                        filter: filter.clone(),
+                    },
+                }) {
+                    assert_eq!(profile.reads_player, KindSet::one(StateKind::JournalCards));
+                    assert_eq!(profile.reads_member_bound(), bound);
+                    assert!(!profile.legacy_batch_prompt());
+                    assert!(!profile.reads_event_live);
+                    assert!(!profile.writes_event_object.any());
+                }
+            }
+        }
+        for profile in profiles(fixed(0)) {
+            assert_eq!(profile, RwProfile::empty());
         }
     }
 }

@@ -5506,6 +5506,8 @@ macro_rules! history_members {
             /// Each player's graveyard (CR 404.1), read as a count of its cards. The comparand
             /// compares the zone itself, so no cover equalizes it; only its readers are recorded.
             PlayerGraveyards,
+            /// Dependency marker for the completed cycling ledger, outside history equalization.
+            CompletedCyclingHistory,
         }
 
         impl HistoryMember {
@@ -5541,7 +5543,7 @@ macro_rules! history_members {
                         equalize_field(&mut into.lki_copiable_values, &from.lki_copiable_values)
                             || records
                     }
-                    HistoryMember::PlayerGraveyards => false,
+                    HistoryMember::PlayerGraveyards | HistoryMember::CompletedCyclingHistory => false,
                 }
             }
 
@@ -5562,6 +5564,7 @@ macro_rules! history_members {
                         rise(&prior.tracked_object_sets, &current.tracked_object_sets)
                     }
                     HistoryMember::LastKnownRecords => rise(&prior.lki_cache, &current.lki_cache),
+                    HistoryMember::CompletedCyclingHistory => 0,
                     HistoryMember::PlayerGraveyards => prior
                         .players
                         .iter()
@@ -5581,6 +5584,7 @@ macro_rules! history_members {
                     HistoryMember::TrackedObjectSets => true,
                     HistoryMember::LastKnownRecords => false,
                     HistoryMember::PlayerGraveyards => true,
+                    HistoryMember::CompletedCyclingHistory => false,
                 }
             }
         }

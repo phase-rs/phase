@@ -18026,6 +18026,7 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         // re-scope, so only the `Some` arm can diverge.
         QuantityRef::ZoneCardCount { filter, .. }
         | QuantityRef::SpellsCast { filter, .. }
+        | QuantityRef::CardsCycled { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. } => {
             filter.as_ref().is_some_and(filter_binding_diverges)

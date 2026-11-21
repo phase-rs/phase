@@ -4009,6 +4009,25 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             acc = acc.or(scan_player_scope(player));
             acc
         }
+        QuantityRef::CardsCycled {
+            scope,
+            window,
+            filter,
+        } => {
+            if crate::game::filter::cycling_history_filter_name(filter.as_ref()).is_err() {
+                return Axes::NONE;
+            }
+            let mut acc = Axes::history_of(HistoryMember::CompletedCyclingHistory)
+                .or(scan_count_scope(scope));
+            // Resource projection clears the completed cycling ledger.
+            acc.projected = true;
+            match window {
+                crate::types::ability::CyclingHistoryWindow::ThisTurn => {
+                    acc.or(Axes::history_of(HistoryMember::TurnNumber))
+                }
+                crate::types::ability::CyclingHistoryWindow::ThisGame => acc,
+            }
+        }
         QuantityRef::SpellsCastThisGame { scope, filter } => {
             let mut acc = Axes {
                 event: false,
@@ -15683,5 +15702,83 @@ mod poison_condition_scan_tests {
                 "the static sibling arm reads no other axis ({player:?})"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cycling_quantity_scan_tests {
+    use super::*;
+    use crate::types::ability::{Comparator, CyclingHistoryWindow, TypedFilter};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+
+    #[test]
+    fn phase3_v5_cycling_dependencies_reach_the_loop_firewall() {
+        let name = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller: None,
+            properties: vec![FilterProp::Named {
+                name: "Yidaro, Wandering Monster".into(),
+            }],
+        });
+        let quantity = |window, filter| QuantityExpr::Ref {
+            qty: QuantityRef::CardsCycled {
+                scope: CountScope::Controller,
+                window,
+                filter,
+            },
+        };
+        let fixed = |value| QuantityExpr::Fixed { value };
+        let ability = |lhs| {
+            let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+            ability.condition = Some(AbilityCondition::QuantityCheck {
+                lhs,
+                comparator: Comparator::GE,
+                rhs: fixed(4),
+            });
+            ability
+        };
+        let trigger = |lhs| TriggerCondition::QuantityComparison {
+            lhs,
+            comparator: Comparator::GE,
+            rhs: fixed(2),
+        };
+        let yidaro = ability(quantity(CyclingHistoryWindow::ThisGame, Some(name)));
+        let phoenix = trigger(quantity(CyclingHistoryWindow::ThisTurn, None));
+        assert!(ability_reads_projected_resource(&yidaro));
+        assert!(trigger_condition_reads_projected_resource(&phoenix));
+        assert!(!ability_reads_projected_resource(&ability(fixed(0))));
+        assert!(!trigger_condition_reads_projected_resource(&trigger(
+            fixed(0)
+        )));
+        assert!(resolved_ability_history(&yidaro).reads(HistoryMember::CompletedCyclingHistory));
+        assert!(trigger_condition_history(&phoenix).reads(HistoryMember::CompletedCyclingHistory));
+        for (window, reads_turn) in [
+            (CyclingHistoryWindow::ThisTurn, true),
+            (CyclingHistoryWindow::ThisGame, false),
+        ] {
+            let lhs = quantity(window, None);
+            for history in [
+                resolved_ability_history(&ability(lhs.clone())),
+                trigger_condition_history(&trigger(lhs)),
+            ] {
+                assert!(history.reads(HistoryMember::CompletedCyclingHistory));
+                assert_eq!(history.reads(HistoryMember::TurnNumber), reads_turn);
+            }
+        }
+        assert_eq!(
+            resolved_ability_history(&ability(fixed(0))),
+            HistoryReads::NONE
+        );
+        assert_eq!(
+            trigger_condition_history(&trigger(fixed(0))),
+            HistoryReads::NONE
+        );
+        let malformed = ability(quantity(
+            CyclingHistoryWindow::ThisTurn,
+            Some(TargetFilter::Any),
+        ));
+        assert!(!ability_reads_projected_resource(&malformed));
+        assert_eq!(resolved_ability_history(&malformed), HistoryReads::NONE);
     }
 }

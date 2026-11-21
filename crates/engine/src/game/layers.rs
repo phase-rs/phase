@@ -4985,6 +4985,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::TokensCreatedThisTurn { .. }
@@ -5250,6 +5251,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         QuantityRef::ZoneCardCount { filter, .. }
         | QuantityRef::SpellsCast { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
+        | QuantityRef::CardsCycled { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. } => {
             filter.as_ref().is_some_and(target_filter_reads_life_total)

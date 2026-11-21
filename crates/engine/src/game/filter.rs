@@ -3460,6 +3460,7 @@ fn quantity_ref_contains_input(
         | QuantityRef::SpellsCast { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. }
+        | QuantityRef::CardsCycled { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. } => filter.as_ref().is_some_and(|inner| {
             scalar_filter(inner, object_information_available, slot_context)
                 || filter_contains_input(
@@ -12125,6 +12126,24 @@ pub(crate) fn object_has_no_abilities(obj: &GameObject) -> bool {
         && obj.trigger_definitions.is_empty()
         && obj.replacement_definitions.is_empty()
         && obj.static_definitions.is_empty()
+}
+
+/// Accepts only a literal name from the recorded cycling snapshot.
+pub(crate) fn cycling_history_filter_name(
+    filter: Option<&TargetFilter>,
+) -> Result<Option<&str>, ()> {
+    match filter {
+        None => Ok(None),
+        Some(TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller: None,
+            properties,
+        })) if type_filters.is_empty() => match properties.as_slice() {
+            [FilterProp::Named { name }] if !name.is_empty() => Ok(Some(name)),
+            _ => Err(()),
+        },
+        Some(_) => Err(()),
+    }
 }
 
 /// CR 201.2a: objects with a common name have the same name. The Oracle parser
