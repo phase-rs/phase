@@ -592,6 +592,13 @@ pub(crate) fn eliminate_players(
         })
         .flatten();
 
+    // CR 800.4a + CR 725.4 (Matt R7-F3): the designation holder AT DEPARTURE,
+    // captured before any `do_eliminate` runs succession. The control-effect
+    // prune below judges a designation-anchored transient by the recipient it
+    // was actually giving control to — reading the live designation after
+    // succession would see the successor and wrongly keep an effect that was
+    // giving the leaver control.
+    let pre_elimination_monarch = state.monarch;
     // CR 603.10a + CR 603.3a: the observers of the departure as they were
     // immediately before it. The leaving players' objects leave the game in the
     // same event that ends their control effects (CR 800.4a); a look-back
@@ -625,7 +632,7 @@ pub(crate) fn eliminate_players(
     // control and exile anything still under a leaver's control. Runs ONCE over
     // the full `leaving_set` — the retain+sweep scope is what makes a co-leaver's
     // steal of a survivor's object revert instead of being over-exiled.
-    end_control_effects_for_leaving_players(state, &leaving_set, events);
+    end_control_effects_for_leaving_players(state, &leaving_set, pre_elimination_monarch, events);
 
     // CR 800.4a, third and fourth steps, in the rule's own order: "Then, if that
     // player controlled any objects on the stack not represented by cards, those
@@ -640,75 +647,70 @@ pub(crate) fn eliminate_players(
     // neither answers nor remains an eligible future chooser. Preserve the
     // aggregate for the surviving seats, advancing past a departed current
     // prompt instead of leaving a serialized choice owned by a non-player.
-    if let Some(mut pending) = state.pending_player_scope_unless_payment.take() {
-        let original_controller = pending
-            .pending_effect
-            .original_controller
-            .unwrap_or(pending.pending_effect.controller);
-        if leaving_set.contains(&original_controller) {
-            // CR 800.4a: The resolving instruction leaves with its original
-            // controller. A previously-recorded decline cannot create tokens
-            // for a player no longer in the game, and its per-payer prompt
-            // must not outlive the abandoned aggregate.
-            let aggregate_prompt_is_live = match &state.waiting_for {
-                WaitingFor::UnlessPayment { pending_effect, .. }
-                | WaitingFor::WardSacrificeChoice { pending_effect, .. } => {
-                    pending_effect.source_id == pending.pending_effect.source_id
-                }
-                WaitingFor::ReplacementChoice { .. } => state
-                    .pending_replacement
-                    .as_ref()
-                    .and_then(|replacement| replacement.sacrifice_provenance.as_ref())
-                    .is_some_and(|provenance| provenance.player_id == pending.current_player),
-                _ => false,
-            };
-            if aggregate_prompt_is_live {
-                // The only parked replacement at this point belongs to the
-                // aggregate's current payer. Once its controller leaves, the
-                // aggregate cannot resume through that payer's choice.
-                state.pending_replacement = None;
-                state.replacement_may_cost_paused = false;
-                super::replacement::abandon_post_replacement_continuation(state);
-                state.waiting_for = WaitingFor::Priority {
-                    player: players::next_player(state, original_controller),
-                };
-            }
-        } else {
+    // CR 608.2m: the source's controller leaving does not end the poll — the
+    // instruction has started to resolve and continues fully; the surviving
+    // payers still answer and their recorded sacrifices are made, and the
+    // tokens owed to a departed controller are not created (CR 800.4b).
+    let token_unless_poll = match state.pending_player_scope_unless_payment.take() {
+        Some(mut pending) => {
             pending
                 .remaining_players
                 .retain(|player| !leaving_set.contains(player));
-            if leaving_set.contains(&pending.current_player) {
-                if let Some((next, rest)) = pending.remaining_players.split_first() {
-                    pending.current_player = *next;
-                    pending.remaining_players = rest.to_vec();
-                    state.waiting_for = WaitingFor::UnlessPayment {
-                        player: pending.current_player,
-                        cost: pending.cost.clone(),
-                        pending_effect: pending.pending_effect.clone(),
-                        trigger_event: None,
-                        effect_description: None,
-                        remaining: Vec::new(),
-                        affected_object: None,
-                        repeat: None,
-                    };
-                    state.pending_player_scope_unless_payment = Some(pending);
-                } else {
-                    // The departed prompt contributes no new decline, but earlier
-                    // surviving decliners still owe the source controller one
-                    // aggregate token batch. Reinstall then settle through the
-                    // regular terminal-payment authority so `waiting_for` cannot
-                    // retain this eliminated player's stale prompt.
-                    state.pending_player_scope_unless_payment = Some(pending);
-                    crate::game::engine_payment_choices::settle_eliminated_player_scope_token_unless_payment(
-                        state, events,
-                    )
-                    .expect("eliminated final payer must settle a token-unless aggregate");
-                }
-            } else {
+            if !leaving_set.contains(&pending.current_player) {
                 state.pending_player_scope_unless_payment = Some(pending);
+                super::engine_resolution_choices::DepartureSettlement::NotSettled
+            } else if let Some((next, rest)) = pending.remaining_players.split_first() {
+                pending.current_player = *next;
+                pending.remaining_players = rest.to_vec();
+                state.waiting_for = WaitingFor::UnlessPayment {
+                    player: pending.current_player,
+                    cost: pending.cost.clone(),
+                    pending_effect: pending.pending_effect.clone(),
+                    trigger_event: None,
+                    effect_description: None,
+                    remaining: Vec::new(),
+                    affected_object: None,
+                    repeat: None,
+                };
+                state.pending_player_scope_unless_payment = Some(pending);
+                super::engine_resolution_choices::DepartureSettlement::NotSettled
+            } else {
+                // The departed prompt contributes no new decline, but earlier
+                // surviving decliners still owe the source controller one
+                // aggregate token batch. Reinstall then settle through the
+                // regular terminal-payment authority so `waiting_for` cannot
+                // retain this eliminated player's stale prompt.
+                state.pending_player_scope_unless_payment = Some(pending);
+                crate::game::engine_payment_choices::settle_eliminated_player_scope_token_unless_payment(
+                    state, events,
+                )
+                .expect("eliminated final payer must settle a token-unless aggregate");
+                super::engine_resolution_choices::DepartureSettlement::Settled
             }
         }
-    }
+        None => super::engine_resolution_choices::DepartureSettlement::NotSettled,
+    };
+
+    // CR 800.4a + CR 101.4 + CR 608.2m: reconcile an open player-scope unless
+    // poll before the generic dead-actor repoint below: a departed seat makes
+    // no further choice and pays nothing, the surviving seats' answers stand,
+    // and the next surviving seat is asked (or the poll settles). A departed
+    // controller's instruction has started to resolve and goes on resolving.
+    let scoped_unless_poll = match crate::game::scoped_unless_poll::reconcile_departures(
+        state,
+        &leaving_set,
+        events,
+    ) {
+        Ok(settlement) => settlement,
+        Err(error) => {
+            tracing::error!(%error, "player-scope unless poll was not reconciled after a departure");
+            debug_assert!(
+                false,
+                "player-scope unless poll was not reconciled after a departure: {error}"
+            );
+            super::engine_resolution_choices::DepartureSettlement::NotSettled
+        }
+    };
 
     // CR 704.3 + CR 104.4a: a SINGLE game-over check after all simultaneous
     // eliminations — so a finish where every remaining player lost at once
@@ -768,6 +770,8 @@ pub(crate) fn eliminate_players(
         state.pending_player_scope_sacrifice_choice = None;
         // CR 104.1: nor is a player-scope return owed to a finished game.
         state.pending_player_scope_choice = None;
+        // CR 104.1: nor is a player-scope unless poll.
+        state.pending_player_scope_unless_punishment = None;
         super::turns::abandon_phase_begin_choice(state);
         state.waiting_for = WaitingFor::GameOver { winner };
     } else {
@@ -1122,6 +1126,17 @@ pub(crate) fn eliminate_players(
                     resolution_player_choice,
                     super::engine_resolution_choices::DepartureSettlement::NotSettled
                 )
+                && matches!(
+                    scoped_unless_poll,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
+                && matches!(
+                    token_unless_poll,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
+                // CR 608.2m: a surviving player still owes a poll an answer.
+                && state.pending_player_scope_unless_punishment.is_none()
+                && state.pending_player_scope_unless_payment.is_none()
                 && state
                     .resolving_stack_entry
                     .as_ref()
@@ -1561,20 +1576,42 @@ fn mark_left_game_departures_simultaneous(
 fn end_control_effects_for_leaving_players(
     state: &mut GameState,
     leaving_set: &HashSet<PlayerId>,
+    pre_elimination_monarch: Option<PlayerId>,
     events: &mut Vec<GameEvent>,
 ) {
-    use crate::types::ability::ContinuousModification;
+    use crate::types::ability::{ContinuousModification, Designation};
     use crate::types::identifiers::ObjectId;
 
-    // CR 800.4a: any effect giving a LEAVING player control of an object ends.
-    // Prune every single-mod ChangeController TCE controlled by any leaver, over
-    // the FULL leaving_set (symmetric with the sweep below), so a co-leaver's
-    // steal of a survivor's object reverts rather than being over-exiled.
+    // CR 800.4a: any effect giving a LEAVING player control of an object ends,
+    // over the FULL leaving_set (symmetric with the sweep below), so a
+    // co-leaver's steal of a survivor's object reverts rather than being
+    // over-exiled.
     state.transient_continuous_effects.retain(|e| {
-        !(leaving_set.contains(&e.controller)
+        // Plain steal: the recipient IS the installer, so a leaver-controlled
+        // ChangeController TCE ends with its controller.
+        let plain_steal_gives_leaver_control = leaving_set.contains(&e.controller)
             && e.modifications
                 .iter()
-                .any(|m| matches!(m, ContinuousModification::ChangeController)))
+                .any(|m| matches!(m, ContinuousModification::ChangeController));
+        // CR 800.4a + CR 611.2a + CR 725.5 (Matt R7-F3): a
+        // designation-anchored TCE gives control to the LIVE holder (the layer
+        // arm reads the designation, never `e.controller`), so departure
+        // treatment keys on the holder AT DEPARTURE (captured before
+        // succession), not the installer. A surviving holder — or a vacant
+        // throne, which gives nobody control — keeps the transient for its
+        // stated duration; a leaving holder ends it. Whole-TCE prune, matching
+        // the plain-steal half: one effect, one lifetime. Exhaustive over
+        // `Designation`: a future leaf breaks the build here by design.
+        let designation_gives_leaver_control = e.modifications.iter().any(|m| match m {
+            ContinuousModification::ChangeControllerToDesignation { designation } => {
+                let holder = match designation {
+                    Designation::Monarch => pre_elimination_monarch,
+                };
+                holder.is_some_and(|h| leaving_set.contains(&h))
+            }
+            _ => false,
+        });
+        !(plain_steal_gives_leaver_control || designation_gives_leaver_control)
     });
 
     // CR 611.2c + CR 614.1a: a resolved token-controller redirect ("each token
@@ -1894,7 +1931,6 @@ fn do_eliminate(
     // CR 800.4a + CR 616.1: Capture the parked replacement chooser before
     // cast-abandonment teardown can replace its prompt with priority.
     let leaving_is_latched_chooser = state.waiting_for.acting_player() == Some(player);
-
     abandon_source_bound_resolution_prompt(state, player, leaving_set, events);
     retire_pending_zone_change_contexts_owned_by(state, player, &owned_after);
     abandon_change_zone_family_for_controller(state, player, leaving_set, events);
@@ -2305,6 +2341,15 @@ fn do_eliminate(
                 player_id: new_monarch,
             });
         }
+        // CR 611.3a + CR 725.4 + CR 725.5: succession (or vacancy, when nobody
+        // is left) can flip live monarch-reading statics — escalate iff any
+        // such static is live. Covers both the `None` and the succession
+        // branches above; the outer `if` already gates on the leaver having
+        // been the monarch.
+        super::layers::mark_layers_full_if_dimension_read_live(
+            state,
+            super::layers::LayerInvalidationDimension::Monarch,
+        );
     }
 
     // CR 726.4: If the player who has the initiative leaves the game,
@@ -2862,6 +2907,7 @@ fn retire_parked_resolution_work(state: &mut GameState) {
     state.payment_transaction_replay = false;
     state.payment_transaction_just_handled = false;
     state.pending_player_scope_unless_payment = None;
+    state.pending_player_scope_unless_punishment = None;
     state.pending_player_scope_sacrifice_choice = None;
     state.pending_player_scope_choice = None;
     state.pending_mass_library_order_choice = None;

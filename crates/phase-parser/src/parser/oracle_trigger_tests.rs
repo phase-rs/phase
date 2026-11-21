@@ -32,6 +32,7 @@ use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
 use crate::types::phase::{PhaseGroup, TurnSegment};
+use crate::types::player::PlayerCounterKind;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::zones::Zone;
@@ -2316,6 +2317,75 @@ fn parse_kookus_named_creature_condition_preserves_literal_name_and_body() {
             .any(|static_ability| static_ability.mode == StaticMode::MustAttack)),
         other => panic!("expected must-attack continuation, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_jadar_decayed_intervening_if_hoists_keyword_filter() {
+    let parsed = parse_oracle_text(
+        "At the beginning of your end step, if you control no creatures with decayed, create a 2/2 black Zombie creature token with decayed.",
+        "Jadar, Ghoulcaller of Nephalia",
+        &[],
+        &[],
+        &[],
+    );
+    let trigger = parsed.triggers.first().expect("Jadar trigger");
+    let condition = trigger
+        .condition
+        .as_ref()
+        .expect("intervening-if condition");
+    match condition {
+        TriggerCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        } => match filter {
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::You),
+                properties,
+            }) => {
+                assert!(type_filters.contains(&TypeFilter::Creature));
+                assert!(properties.iter().any(|property| matches!(
+                    property,
+                    FilterProp::WithKeyword {
+                        value: Keyword::Decayed
+                    }
+                )));
+                assert!(properties.iter().any(|property| matches!(
+                    property,
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield
+                    }
+                )));
+            }
+            other => {
+                panic!("expected your battlefield creatures-with-decayed filter, got {other:?}")
+            }
+        },
+        other => panic!("expected zero-creatures-with-decayed condition, got {other:?}"),
+    }
+    assert!(trigger
+        .execute
+        .as_ref()
+        .and_then(|execute| execute.condition.as_ref())
+        .is_none());
+}
+
+#[test]
+fn without_keyword_suffix_preserves_following_clause_delimiter() {
+    let text = "without flying, create a token";
+    let (properties, consumed) =
+        crate::types::text_grammar::parse_without_keyword_suffix(text).expect("keyword suffix");
+    assert!(matches!(
+        properties.as_slice(),
+        [FilterProp::WithoutKeyword {
+            value: Keyword::Flying
+        }]
+    ));
+    assert_eq!(&text[consumed..], ", create a token");
 }
 
 #[test]
@@ -9294,6 +9364,51 @@ fn wick_etb_post_effect_if_stays_on_execute_with_otherwise() {
     );
 }
 
+#[test]
+fn radgull_lowers_a_resolution_time_player_counter_branch() {
+    let abilities = parse_oracle_text(
+        "Flying\nWhenever this creature deals combat damage to a player, that player gets two rad counters if they don't have any rad counters. Otherwise, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
+        "Vexing Radgull",
+        &["Flying".to_owned()],
+        &["Creature".to_owned()],
+        &[],
+    );
+    let [trigger] = abilities.triggers.as_slice() else {
+        panic!("expected exactly one combat damage trigger");
+    };
+    assert_eq!(trigger.mode, TriggerMode::DamageDone);
+    assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+    assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+    assert!(trigger.condition.is_none());
+    let execute = trigger.execute.as_deref().expect("counter instruction");
+    assert_eq!(
+        execute.effect.as_ref(),
+        &Effect::GivePlayerCounter {
+            counter_kind: PlayerCounterKind::Rad,
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::TriggeringPlayer,
+        }
+    );
+    assert_eq!(
+        execute.condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Rad,
+                    scope: CountScope::ScopedPlayer,
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        })
+    );
+    assert!(execute.player_scope.is_none());
+    assert!(execute.sub_ability.is_none());
+    let otherwise = execute.else_ability.as_deref().expect("paired Otherwise");
+    assert_eq!(*otherwise.effect, Effect::Proliferate);
+    assert_no_unimplemented(execute);
+}
+
 /// CR 603.4: A post-effect `if` ("draw a card if Y") is NOT an
 /// intervening-`if` — that rule applies only to an `if` that immediately
 /// follows the trigger condition ("When X, if Y, Z"). Such a trailing `if`
@@ -11976,17 +12091,20 @@ fn doran_attack_block_pump_resolves_pt_difference() {
             "Doran, Besieged by Time",
         );
     let exec = def.execute.as_ref().expect("execute must be Some");
-    let expected = QuantityExpr::Difference {
-        left: Box::new(QuantityExpr::Ref {
-            qty: QuantityRef::Power {
-                scope: ObjectScope::Recipient,
-            },
+    let expected = QuantityExpr::ClampMin {
+        inner: Box::new(QuantityExpr::Difference {
+            left: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Recipient,
+                },
+            }),
+            right: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Recipient,
+                },
+            }),
         }),
-        right: Box::new(QuantityExpr::Ref {
-            qty: QuantityRef::Toughness {
-                scope: ObjectScope::Recipient,
-            },
-        }),
+        minimum: 0,
     };
     match &*exec.effect {
         Effect::Pump {
@@ -32648,6 +32766,119 @@ fn source_counter_state_trigger_chain_typed_referent_keeps_parent_target() {
     );
 }
 
+/// CR 608.2c + CR 115.1d: "tap target creature … and put a stun counter on it"
+/// puts the counter on the announced target even when the trigger subject is a
+/// typed non-source object — the entering land (Grappling Kraken), "this
+/// creature or another enchantment you control" (Fear of Sleep Paralysis) or the
+/// equipped creature (Mjölnir, Storm Hammer). Verbatim MTGJSON Oracle text,
+/// keywords, types and subtypes. Reverting the typed-referent continuation pin in
+/// `try_split_targeted_compound` exports `PutCounter { target: SelfRef }`.
+#[test]
+fn typed_trigger_subject_compound_stun_counter_binds_the_tapped_target() {
+    /// A verbatim MTGJSON card and the trigger modes whose chains are checked.
+    struct CardRow<'a> {
+        name: &'a str,
+        oracle: &'a str,
+        keywords: &'a [&'a str],
+        types: &'a [&'a str],
+        subtypes: &'a [&'a str],
+        modes: &'a [TriggerMode],
+    }
+    let cards = [
+        CardRow {
+            name: "Grappling Kraken",
+            oracle: "Landfall — Whenever a land you control enters, tap target creature an opponent controls and put a stun counter on it. (If a permanent with a stun counter would become untapped, remove one from it instead.)",
+            keywords: &["Landfall"],
+            types: &["Creature"],
+            subtypes: &["Kraken"],
+            modes: &[TriggerMode::ChangesZone],
+        },
+        CardRow {
+            name: "Fear of Sleep Paralysis",
+            oracle: "Flying\nEerie — Whenever this creature or another enchantment you control enters and whenever you fully unlock a Room, tap up to one target creature and put a stun counter on it.\nStun counters can't be removed from permanents your opponents control. (They won't untap if they have stun counters.)",
+            keywords: &["Eerie", "Flying"],
+            types: &["Enchantment", "Creature"],
+            subtypes: &["Nightmare"],
+            // The `FullyUnlock` half was already `ParentTarget`; asserted as
+            // the sibling of the typed-subject `ChangesZone` half.
+            modes: &[TriggerMode::ChangesZone, TriggerMode::FullyUnlock],
+        },
+        CardRow {
+            name: "Mjölnir, Storm Hammer",
+            oracle: "When Mjölnir enters, attach it to target legendary creature you control.\nWhenever equipped creature attacks, tap target creature defending player controls and put a stun counter on it. Then Mjölnir deals damage to each opponent equal to the number of tapped creatures that opponent controls.\nEquip {4}",
+            keywords: &["Equip"],
+            types: &["Artifact"],
+            subtypes: &["Equipment"],
+            modes: &[TriggerMode::Attacks],
+        },
+    ];
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    for CardRow {
+        name,
+        oracle,
+        keywords,
+        types,
+        subtypes,
+        modes,
+    } in cards
+    {
+        let parsed = parse_oracle_text(
+            oracle,
+            name,
+            &owned(keywords),
+            &owned(types),
+            &owned(subtypes),
+        );
+        for mode in modes {
+            let trigger = parsed
+                .triggers
+                .iter()
+                .find(|t| t.mode == *mode)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{name}: expected a {mode:?} trigger, got {:?}",
+                        parsed.triggers
+                    )
+                });
+            let effects = trigger_chain_effects(trigger);
+            assert!(
+                effects.iter().any(|effect| matches!(
+                    effect,
+                    Effect::SetTapState {
+                        target: TargetFilter::Typed(_),
+                        ..
+                    }
+                )),
+                "{name} {mode:?}: reach guard — the chain must tap the announced \
+                 typed target, got {effects:?}"
+            );
+            assert!(
+                effects.iter().any(|effect| matches!(
+                    effect,
+                    Effect::PutCounter {
+                        counter_type: CounterType::Stun,
+                        target: TargetFilter::ParentTarget,
+                        ..
+                    }
+                )),
+                "{name} {mode:?}: the stun counter must go on the tapped target \
+                 (ParentTarget), got {effects:?}"
+            );
+            assert!(
+                !effects.iter().any(|effect| matches!(
+                    effect,
+                    Effect::PutCounter {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                )),
+                "{name} {mode:?}: no counter may land on the ability's source, \
+                 got {effects:?}"
+            );
+        }
+    }
+}
+
 // --- Compound trigger tests ---
 
 #[test]
@@ -42520,6 +42751,712 @@ fn becomes_target_object_controller_antecedent_fails_closed() {
     }
 }
 
+// Phase 3 (call-aid-34a46f), commit 1 — base characterization of the
+// "at the beginning of combat on <opponent-possessive> turn" family. CR 603.1
+// + CR 500.1: each family card's Oracle licenses ONLY opponents' BeginCombat
+// steps, but at base the suffix scan matches only "on your turn", so all five
+// parse `constraint: None` (branch (b)). Every family/guard test asserts BOTH
+// the trigger-line parse AND the full-text parse — the oracle_trigger.rs:2164
+// `modifiers.constraint.or(def.constraint)` precedence adds nothing at base.
+
+/// CR 603.1 + CR 500.1: Sentinel of the Eternal Watch licenses only
+/// opponents' turns, and the suffix arm routes both legs to
+/// `OnlyDuringOpponentsTurn`.
+#[test]
+fn sentinel_begin_combat_routes_to_opponents_turn() {
+    use crate::types::ability::TriggerConstraint;
+    let line = "At the beginning of combat on each opponent's turn, tap target creature that player controls.";
+    let def = parse_trigger_line(line, "Sentinel of the Eternal Watch");
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Sentinel trigger line must route to OnlyDuringOpponentsTurn"
+    );
+
+    let parsed = parse_oracle_text(
+        "Vigilance (Attacking doesn't cause this creature to tap.)\nAt the beginning of combat on each opponent's turn, tap target creature that player controls.",
+        "Sentinel of the Eternal Watch",
+        &["Vigilance".to_string()],
+        &["Creature".to_string()],
+        &["Giant".to_string(), "Soldier".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(Phase::BeginCombat))
+        .expect("Sentinel full text must yield its BeginCombat trigger");
+    assert_eq!(
+        trigger.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Sentinel full text must route to OnlyDuringOpponentsTurn"
+    );
+}
+
+/// CR 603.1 + CR 500.1 (canary): Citadel Siege's Khans mode routes to
+/// `OnlyDuringYourTurn` and its Dragons mode to `OnlyDuringOpponentsTurn`.
+/// One-description rule: Khans is triggers[0], Dragons is triggers[1].
+#[test]
+fn citadel_siege_mode_split_khans_your_turn_dragons_opponents_turn() {
+    use crate::types::ability::TriggerConstraint;
+    let khans = parse_trigger_line(
+        "At the beginning of combat on your turn, put two +1/+1 counters on target creature you control.",
+        "Citadel Siege",
+    );
+    assert_eq!(khans.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        khans.constraint,
+        Some(TriggerConstraint::OnlyDuringYourTurn),
+        "Citadel Khans line already parses YourTurn at base"
+    );
+    let dragons = parse_trigger_line(
+        "At the beginning of combat on each opponent's turn, tap target creature that player controls.",
+        "Citadel Siege",
+    );
+    assert_eq!(dragons.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        dragons.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Citadel Dragons line must route to OnlyDuringOpponentsTurn"
+    );
+
+    let parsed = parse_oracle_text(
+        "As this enchantment enters, choose Khans or Dragons.\n• Khans — At the beginning of combat on your turn, put two +1/+1 counters on target creature you control.\n• Dragons — At the beginning of combat on each opponent's turn, tap target creature that player controls.",
+        "Citadel Siege",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    assert_eq!(
+        parsed.triggers.len(),
+        2,
+        "Citadel full text must yield exactly the two mode triggers"
+    );
+    assert_eq!(
+        parsed.triggers[0].constraint,
+        Some(TriggerConstraint::OnlyDuringYourTurn),
+        "Citadel triggers[0] (Khans) stays YourTurn"
+    );
+    assert_eq!(
+        parsed.triggers[1].constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Citadel triggers[1] (Dragons) must route to OnlyDuringOpponentsTurn"
+    );
+}
+
+/// CR 603.1 + CR 500.1: Fight or Flight licenses only opponents' turns, and
+/// the suffix arm routes both legs to `OnlyDuringOpponentsTurn`.
+#[test]
+fn fight_or_flight_begin_combat_routes_to_opponents_turn() {
+    use crate::types::ability::TriggerConstraint;
+    let line = "At the beginning of combat on each opponent's turn, separate all creatures that player controls into two piles. Only creatures in the pile of their choice can attack this turn.";
+    let def = parse_trigger_line(line, "Fight or Flight");
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Fight or Flight trigger line must route to OnlyDuringOpponentsTurn"
+    );
+
+    let parsed = parse_oracle_text(
+        line,
+        "Fight or Flight",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(Phase::BeginCombat))
+        .expect("Fight or Flight full text must yield its BeginCombat trigger");
+    assert_eq!(
+        trigger.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Fight or Flight full text must route to OnlyDuringOpponentsTurn"
+    );
+}
+
+/// CR 603.1 + CR 500.1: Web of Inertia licenses only opponents' turns, and
+/// the suffix arm routes both legs to `OnlyDuringOpponentsTurn`.
+#[test]
+fn web_of_inertia_begin_combat_routes_to_opponents_turn() {
+    use crate::types::ability::TriggerConstraint;
+    let line = "At the beginning of combat on each opponent's turn, that player may exile a card from their graveyard. If the player doesn't, creatures they control can't attack you this turn.";
+    let def = parse_trigger_line(line, "Web of Inertia");
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Web of Inertia trigger line must route to OnlyDuringOpponentsTurn"
+    );
+
+    let parsed = parse_oracle_text(
+        line,
+        "Web of Inertia",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(Phase::BeginCombat))
+        .expect("Web of Inertia full text must yield its BeginCombat trigger");
+    assert_eq!(
+        trigger.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Web of Inertia full text must route to OnlyDuringOpponentsTurn"
+    );
+}
+
+/// CR 603.1 + CR 500.1: Champions of Minas Tirith licenses only opponents'
+/// turns, and the suffix arm routes both legs to `OnlyDuringOpponentsTurn`
+/// (the already-parsed IsMonarch intervening-if is orthogonal and out of
+/// scope).
+#[test]
+fn champions_begin_combat_routes_to_opponents_turn() {
+    use crate::types::ability::TriggerConstraint;
+    let line = "At the beginning of combat on each opponent's turn, if you're the monarch, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat.";
+    let def = parse_trigger_line(line, "Champions of Minas Tirith");
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Champions trigger line must route to OnlyDuringOpponentsTurn"
+    );
+
+    let parsed = parse_oracle_text(
+        "When this creature enters, you become the monarch.\nAt the beginning of combat on each opponent's turn, if you're the monarch, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat.",
+        "Champions of Minas Tirith",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Soldier".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(Phase::BeginCombat))
+        .expect("Champions full text must yield its BeginCombat trigger");
+    assert_eq!(
+        trigger.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Champions full text must route to OnlyDuringOpponentsTurn"
+    );
+}
+
+/// Guard (UNCHANGED in commit 2): Kitt Kanto's "each player's turn" stem is
+/// absent from the turn-spec table, so it stays `null` — every turn, licensed.
+#[test]
+fn kitt_kanto_each_player_turn_stays_null_at_base() {
+    let line = "At the beginning of combat on each player's turn, you may tap two untapped creatures you control. When you do, target creature that player controls gets +2/+2 and gains trample until end of turn. Goad that creature.";
+    let def = parse_trigger_line(line, "Kitt Kanto, Mayhem Diva");
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        def.constraint, None,
+        "Kitt Kanto must stay null (every turn is licensed)"
+    );
+
+    let parsed = parse_oracle_text(
+        "When Kitt Kanto enters, create a 1/1 green and white Citizen creature token.\nAt the beginning of combat on each player's turn, you may tap two untapped creatures you control. When you do, target creature that player controls gets +2/+2 and gains trample until end of turn. Goad that creature.",
+        "Kitt Kanto, Mayhem Diva",
+        &[],
+        &["Creature".to_string()],
+        &["Cat".to_string(), "Bard".to_string(), "Druid".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(Phase::BeginCombat))
+        .expect("Kitt full text must yield its BeginCombat trigger");
+    assert_eq!(
+        trigger.constraint, None,
+        "Kitt Kanto full text must stay null"
+    );
+}
+
+/// Guard (UNCHANGED in commit 2): Overencumbered's "enchanted opponent's turn"
+/// stem is absent from the turn-spec table, so it stays `null` — the opponent
+/// constraint would be WRONG here (enchanted turn, not all opponents' turns).
+#[test]
+fn overencumbered_enchanted_opponent_turn_stays_null_at_base() {
+    let line = "At the beginning of combat on enchanted opponent's turn, that player may pay {1} for each artifact they control. If they don't, creatures can't attack this combat.";
+    let def = parse_trigger_line(line, "Overencumbered");
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        def.constraint, None,
+        "Overencumbered must stay null (enchanted turn, not opponents' turns)"
+    );
+
+    let parsed = parse_oracle_text(
+        "Enchant opponent\nWhen this Aura enters, enchanted opponent creates a Clue token, a Food token, and a Junk token.\nAt the beginning of combat on enchanted opponent's turn, that player may pay {1} for each artifact they control. If they don't, creatures can't attack this combat.",
+        "Overencumbered",
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(Phase::BeginCombat))
+        .expect("Overencumbered full text must yield its BeginCombat trigger");
+    assert_eq!(
+        trigger.constraint, None,
+        "Overencumbered full text must stay null"
+    );
+}
+
+/// Row-8 second-caller guard (UNCHANGED in commit 2): Tolls of War reaches
+/// `parse_turn_constraint` through the sacrifice path, whose stripped body
+/// never carries the `"on "` prefix the commit-2 arm requires — so the stored
+/// `OncePerTurn` ("triggers only once each turn") must not flip.
+#[test]
+fn tolls_of_war_sacrifice_trigger_stores_once_per_turn() {
+    use crate::types::ability::{TriggerConstraint, TriggerLimitSpend};
+    let parsed = parse_oracle_text(
+        "When this enchantment enters, create a Clue token. (It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")\nWhenever you sacrifice a permanent during your turn, create a 1/1 white Ally creature token. This ability triggers only once each turn.",
+        "Tolls of War",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Sacrificed)
+        .expect("Tolls of War full text must yield its sacrifice trigger");
+    assert_eq!(
+        trigger.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering,
+        }),
+        "Tolls of War sacrifice trigger must store OncePerTurn"
+    );
+}
+
+/// Row-4 corpus pin (UNCHANGED in commit 2): Abhorrent Oculus — the "each
+/// opponent's" stem routes via the possessive-prefix path. Reminder text
+/// dropped; the trigger clause is verbatim.
+#[test]
+fn abhorrent_oculus_each_opponent_upkeep_constraint_pinned() {
+    use crate::types::ability::TriggerConstraint;
+    let def = parse_trigger_line(
+        "At the beginning of each opponent's upkeep, manifest dread.",
+        "Abhorrent Oculus",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Abhorrent Oculus must stay OnlyDuringOpponentsTurn"
+    );
+}
+
+/// Row-4 corpus pin (UNCHANGED in commit 2): Archfiend of Depravity — the
+/// "each opponent's" stem routes via the possessive-prefix path.
+#[test]
+fn archfiend_of_depravity_each_opponent_end_step_constraint_pinned() {
+    use crate::types::ability::TriggerConstraint;
+    let def = parse_trigger_line(
+        "At the beginning of each opponent's end step, that player chooses up to two creatures they control, then sacrifices the rest.",
+        "Archfiend of Depravity",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::End));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Archfiend of Depravity must stay OnlyDuringOpponentsTurn"
+    );
+}
+
+/// Row-4 corpus pin (UNCHANGED in commit 2): Because I Have Willed It — the
+/// "your opponents'" stem routes via the possessive-prefix path.
+#[test]
+fn because_i_have_willed_it_opponents_end_step_constraint_pinned() {
+    use crate::types::ability::TriggerConstraint;
+    let def = parse_trigger_line(
+        "At the beginning of your opponents' end step, if they cast four or more spells this turn, abandon this scheme.",
+        "Because I Have Willed It",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::End));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Because I Have Willed It must stay OnlyDuringOpponentsTurn"
+    );
+}
+
+/// Row-4 corpus pin (UNCHANGED in commit 2): Bow to My Command — the "your
+/// opponents'" stem routes via the possessive-prefix path.
+#[test]
+fn bow_to_my_command_opponents_end_step_constraint_pinned() {
+    use crate::types::ability::TriggerConstraint;
+    let def = parse_trigger_line(
+        "At the beginning of your opponents' end step, they may tap any number of untapped creatures they control with total power 8 or greater. If they do, abandon this scheme.",
+        "Bow to My Command",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::End));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Bow to My Command must stay OnlyDuringOpponentsTurn"
+    );
+}
+
+/// Row-4 corpus pin (UNCHANGED in commit 2): Breath of the Sleepless — the
+/// "during an opponent's" stem routes via the during path.
+#[test]
+fn breath_of_the_sleepless_during_opponent_turn_constraint_pinned() {
+    use crate::types::ability::TriggerConstraint;
+    let def = parse_trigger_line(
+        "Whenever you cast a creature spell during an opponent's turn, tap up to one target creature.",
+        "Breath of the Sleepless",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Breath of the Sleepless must stay OnlyDuringOpponentsTurn"
+    );
+}
+
+/// Row-4 corpus pin (UNCHANGED in commit 2): Brineborn Cutthroat — the "during
+/// an opponent's" stem routes via the during path.
+#[test]
+fn brineborn_cutthroat_during_opponent_turn_constraint_pinned() {
+    use crate::types::ability::TriggerConstraint;
+    let def = parse_trigger_line(
+        "Whenever you cast a spell during an opponent's turn, put a +1/+1 counter on this creature.",
+        "Brineborn Cutthroat",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "Brineborn Cutthroat must stay OnlyDuringOpponentsTurn"
+    );
+}
+
+/// CR 118.12 + CR 107.3c + CR 508.1c (unit 3b): Champions of Minas Tirith's
+/// third-party may-pay + decline routes to `unless_pay` (payer
+/// `TriggeringPlayer`, cost `ManaDynamic` over the payer's hand) with the
+/// decline restriction as the body — and the base `PayCost` production is
+/// fully supplanted (asserted absent, not just shadowed).
+#[test]
+fn champions_may_pay_decline_routes_to_unless_pay() {
+    use crate::types::ability::{
+        GameRestriction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
+        TriggerConstraint, UnlessPayModifier,
+    };
+    use crate::types::triggers::AttackTargetFilter;
+    let line = "At the beginning of combat on each opponent's turn, if you're the monarch, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat.";
+    let def = parse_trigger_line(line, "Champions of Minas Tirith");
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+        "phase-3 routing intact"
+    );
+    assert!(
+        matches!(def.condition, Some(TriggerCondition::IsMonarch { .. })),
+        "IsMonarch intervening-if intact, got {:?}",
+        def.condition
+    );
+    assert!(
+        !def.optional,
+        "the 'may' is the opponent's payment choice, never trigger optionality"
+    );
+    let UnlessPayModifier { cost, payer } = def.unless_pay.as_ref().expect("unless_pay set");
+    assert_eq!(*payer, TargetFilter::TriggeringPlayer);
+    assert_eq!(
+        cost,
+        &AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            },
+        },
+        "'their hand' rebinds to the payer's hand"
+    );
+    let execute = def.execute.as_deref().expect("execute present");
+    assert!(
+        !execute.optional,
+        "the 'may' is the opponent's payment choice, never controller optionality"
+    );
+    assert_eq!(execute.duration, Some(Duration::UntilEndOfCombat));
+    assert_eq!(
+        execute.effect.as_ref(),
+        &Effect::AddRestriction {
+            restriction: GameRestriction::ProhibitActivity {
+                source: crate::types::identifiers::ObjectId(0),
+                affected_players: RestrictionPlayerScope::ScopedPlayer,
+                expiry: RestrictionExpiry::EndOfCombat,
+                activity: ProhibitedActivity::Attack {
+                    defended: AttackTargetFilter::Player,
+                    protected_player: None,
+                    protected_scope: None,
+                },
+            },
+        }
+    );
+    assert!(
+        execute.sub_ability.is_none(),
+        "no PayCost root and no decline sub remain: PayCost fully supplanted, got {:?}",
+        execute.sub_ability
+    );
+}
+
+/// CR 118.12 (unit 3b): the full-Oracle Champions text carries the same
+/// unless_pay + restriction shape on its BeginCombat trigger.
+#[test]
+fn champions_full_text_may_pay_decline_shape() {
+    let parsed = parse_oracle_text(
+        "When this creature enters, you become the monarch.\nAt the beginning of combat on each opponent's turn, if you're the monarch, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat.",
+        "Champions of Minas Tirith",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Soldier".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(Phase::BeginCombat))
+        .expect("Champions full text must yield its BeginCombat trigger");
+    let modifier = trigger.unless_pay.as_ref().expect("unless_pay set");
+    assert_eq!(modifier.payer, TargetFilter::TriggeringPlayer);
+    assert!(
+        matches!(modifier.cost, AbilityCost::ManaDynamic { .. }),
+        "cost is ManaDynamic, got {:?}",
+        modifier.cost
+    );
+    let execute = trigger.execute.as_ref().expect("execute present");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::AddRestriction { .. }),
+        "consequence is AddRestriction, got {:?}",
+        execute.effect
+    );
+    assert!(execute.sub_ability.is_none(), "no PayCost root remains");
+}
+
+/// Hostile (unit 3b): Overencumbered's static-cost sibling ("may pay {1} for
+/// each artifact", no {X}-where-X) must NOT route here — its base
+/// PayCost + GenericEffect shape and null constraint stand unchanged.
+#[test]
+fn overencumbered_static_cost_stays_generic_chain() {
+    let line = "At the beginning of combat on enchanted opponent's turn, that player may pay {1} for each artifact they control. If they don't, creatures can't attack this combat.";
+    let def = parse_trigger_line(line, "Overencumbered");
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert_eq!(
+        def.constraint, None,
+        "Overencumbered must stay null (enchanted turn, not opponents' turns)"
+    );
+    assert_eq!(
+        def.unless_pay, None,
+        "static-cost may-pay must not route to unless_pay"
+    );
+    let execute = def.execute.as_deref().expect("execute present");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::PayCost { .. }),
+        "base PayCost production intact, got {:?}",
+        execute.effect
+    );
+}
+
+/// Hostile (unit 3b): the "unless"-voice trigger production (Esper Sentinel)
+/// is unchanged — unless_pay via the unless path, Draw body, no restriction.
+#[test]
+fn esper_sentinel_unless_voice_unchanged() {
+    let line = "Whenever an opponent casts their first noncreature spell each turn, draw a card unless that player pays {X}, where X is this creature's power.";
+    let def = parse_trigger_line(line, "Esper Sentinel");
+    let modifier = def
+        .unless_pay
+        .as_ref()
+        .expect("unless-voice unless_pay intact");
+    assert!(
+        matches!(modifier.cost, AbilityCost::ManaDynamic { .. }),
+        "unless-voice ManaDynamic intact, got {:?}",
+        modifier.cost
+    );
+    let execute = def.execute.as_deref().expect("execute present");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Draw { .. }),
+        "unless-voice Draw body intact, got {:?}",
+        execute.effect
+    );
+    assert!(
+        !matches!(execute.effect.as_ref(), Effect::AddRestriction { .. }),
+        "the decline arm must not steal unless-voice triggers"
+    );
+}
+
+/// Hostile (unit 3b): Primordial Ooze's controller-voice decline ("you may
+/// pay {X} ... If you don't") stays on its base production — the arm's
+/// third-party subject grammar must not match controller voice.
+#[test]
+fn primordial_ooze_controller_decline_stays_off_arm() {
+    let parsed = parse_oracle_text(
+        "This creature attacks each combat if able.\nAt the beginning of your upkeep, put a +1/+1 counter on this creature. Then you may pay {X}, where X is the number of +1/+1 counters on it. If you don't, tap this creature and it deals X damage to you.",
+        "Primordial Ooze",
+        &[],
+        &["Creature".to_string()],
+        &["Ooze".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.phase == Some(Phase::Upkeep))
+        .expect("Ooze upkeep trigger must parse (reach-guard)");
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert!(
+        trigger.execute.is_some(),
+        "Ooze body must parse (reach-guard)"
+    );
+    assert_eq!(
+        trigger.unless_pay, None,
+        "controller-voice decline must not route to unless_pay"
+    );
+}
+
+/// Class axis (unit 3b): the arm accepts any where-X quantity — a target-free
+/// quantity (source power) passes the payer rebind untouched while the
+/// decline restriction still builds. Synthetic grammar probe (no printed
+/// member pairs power-X with a decline restriction today).
+#[test]
+fn may_pay_decline_accepts_non_hand_quantity() {
+    let line = "At the beginning of combat on each opponent's turn, that opponent may pay {X}, where X is this creature's power. If they don't, they can't attack you this combat.";
+    let def = parse_trigger_line(line, "Unit 3b Probe");
+    let modifier = def.unless_pay.as_ref().expect("unless_pay set");
+    assert_eq!(modifier.payer, TargetFilter::TriggeringPlayer);
+    assert!(
+        matches!(
+            modifier.cost,
+            AbilityCost::ManaDynamic {
+                quantity: QuantityExpr::Ref {
+                    qty: QuantityRef::Power { .. },
+                },
+            }
+        ),
+        "target-free power quantity passes through, got {:?}",
+        modifier.cost
+    );
+    let execute = def.execute.as_deref().expect("execute present");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::AddRestriction { .. }),
+        "consequence still builds, got {:?}",
+        execute.effect
+    );
+}
+
+/// Class axis (unit 3b): the "that player's hand" possessive rebinds to the
+/// payer exactly like "their hand". Synthetic grammar probe.
+#[test]
+fn may_pay_decline_rebinds_that_player_hand() {
+    let line = "At the beginning of combat on each opponent's turn, that opponent may pay {X}, where X is the number of cards in that player's hand. If they don't, they can't attack you this combat.";
+    let def = parse_trigger_line(line, "Unit 3b Probe");
+    let modifier = def.unless_pay.as_ref().expect("unless_pay set");
+    assert_eq!(
+        modifier.cost,
+        AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            },
+        },
+        "'that player's hand' rebinds to the payer's hand, got {:?}",
+        modifier.cost
+    );
+}
+
+/// Class axis (unit 3b, fix round 1): a player-scoped member OUTSIDE the
+/// original 3-arm enumeration rebinds through the exhaustive
+/// `player_scope_mut` authority. `CardsDiscardedThisTurn` in Target form
+/// (Dream Salvage's "target opponent discarded this turn" — CR 701.9 +
+/// CR 115.1) is covered by neither the old match nor the sibling event
+/// table; without the authority rewrite it keeps `Target` and resolves to 0
+/// with no player target. Synthetic grammar probe.
+#[test]
+fn may_pay_decline_rebinds_discarded_this_turn() {
+    let line = "At the beginning of combat on each opponent's turn, that opponent may pay {X}, where X is the number of cards target opponent discarded this turn. If they don't, they can't attack you this combat.";
+    let def = parse_trigger_line(line, "Unit 3b Probe");
+    let modifier = def.unless_pay.as_ref().expect("unless_pay set");
+    assert_eq!(
+        modifier.cost,
+        AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Ref {
+                qty: QuantityRef::CardsDiscardedThisTurn {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            },
+        },
+        "'target opponent discarded this turn' rebinds to the payer, got {:?}",
+        modifier.cost
+    );
+}
+
+/// Guard (unit 3b): the arm requires full consumption — trailing text after
+/// the consequence declines the arm and the generic chain takes the body
+/// (base PayCost behavior).
+#[test]
+fn may_pay_decline_requires_full_consumption() {
+    let line = "At the beginning of combat on each opponent's turn, if you're the monarch, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat. Draw a card.";
+    let def = parse_trigger_line(line, "Unit 3b Probe");
+    assert_eq!(def.unless_pay, None, "trailing text must decline the arm");
+    let execute = def.execute.as_deref().expect("execute present");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::PayCost { .. }),
+        "generic-chain fallback intact, got {:?}",
+        execute.effect
+    );
+}
+
+/// Alternation (unit 3b): the "pays" voice routes identically to "may pay".
+/// Synthetic grammar probe (no printed pays+decline trigger member today).
+#[test]
+fn pays_voice_routes_to_unless_pay() {
+    let line = "At the beginning of combat on each opponent's turn, that player pays {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat.";
+    let def = parse_trigger_line(line, "Unit 3b Probe");
+    let modifier = def.unless_pay.as_ref().expect("unless_pay set");
+    assert_eq!(modifier.payer, TargetFilter::TriggeringPlayer);
+    assert!(
+        matches!(modifier.cost, AbilityCost::ManaDynamic { .. }),
+        "cost is ManaDynamic, got {:?}",
+        modifier.cost
+    );
+    let execute = def.execute.as_deref().expect("execute present");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::AddRestriction { .. }),
+        "consequence is AddRestriction, got {:?}",
+        execute.effect
+    );
+}
+
+/// Guard (unit 3b): duration is a required discriminator — a bare "can't
+/// attack" decline declines the arm (no expiry could be honestly stamped).
+#[test]
+fn may_pay_decline_requires_combat_duration() {
+    let line = "At the beginning of combat on each opponent's turn, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you.";
+    let def = parse_trigger_line(line, "Unit 3b Probe");
+    assert_eq!(
+        def.unless_pay, None,
+        "duration-less decline must decline the arm"
+    );
+    assert!(
+        def.execute.is_some(),
+        "body still parses via the generic chain (reach-guard)"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // CR 508.4: the defender a token instruction names ("attacking that player",
 // "attacking that opponent") is carried on the parsed effect.
@@ -45482,7 +46419,7 @@ fn where_x_its_characteristic_binds_trigger_event_object() {
 /// #7851 preservation, CR 201.5 + CR 113.7: an explicit self-reference
 /// ("Ratatwotwo's power", "this creature's power") names the ability's source
 /// even when the trigger's "it" names another object; the rung never touches
-/// it and no clamp is added. Verbatim Oracle text. Ratatwotwo's trigger mode
+/// it, and each pump slot carries only the CR 107.1b floor. Verbatim Oracle text. Ratatwotwo's trigger mode
 /// stays `TriggerMode::Unknown`, but its body's "it" is still the trigger
 /// event's object (its Pump target is `TriggeringSource`, asserted below), so
 /// the characteristic rung is active and the explicit "Ratatwotwo's power" must
@@ -45526,7 +46463,12 @@ fn where_x_explicit_self_reference_keeps_source_under_event_subject() {
         // Reach guard: the self-reference was read at all.
         assert!(!scopes.is_empty(), "{name}: no power reference parsed");
         assert!(scopes.iter().all(|scope| *scope == source), "{name}: {scopes:?}");
-        assert!(!types.iter().any(|t| t == "ClampMin"), "{name}: {types:?}");
+        let pump_slots = if event_object_body { 2 } else { 0 };
+        assert_eq!(
+            types.iter().filter(|t| *t == "ClampMin").count(),
+            pump_slots,
+            "{name}: {types:?}"
+        );
     }
 }
 
@@ -45582,12 +46524,11 @@ fn where_x_its_characteristic_keeps_source_on_self_and_phase_triggers() {
     assert!(scopes.iter().all(|scope| *scope == anaphoric), "{scopes:?}");
 }
 
-/// #7851 containment, CR 107.1b: the zero clamp is confined to an X the
-/// characteristic rung bound. A signed pump whose X is a count (Altar of the
-/// Goyf) or a difference (Doran, Besieged by Time) under a non-self attack
-/// trigger is nonnegative already and gains no `ClampMin`. Verbatim Oracle text.
+/// CR 107.1b: every where-X feeding a signed pump is floored at zero once, at
+/// the root, whatever bound it: a count (Altar of the Goyf) or a difference
+/// (Doran, Besieged by Time). Verbatim Oracle text.
 #[test]
-fn where_x_pump_clamp_is_confined_to_rung_bound_characteristic() {
+fn where_x_pump_clamp_wraps_every_signed_x() {
     for (name, text, types, subtypes, expected_node) in [
         (
             "Altar of the Goyf",
@@ -45626,18 +46567,23 @@ fn where_x_pump_clamp_is_confined_to_rung_bound_characteristic() {
         // Reach guard: the pump amount was found and bound to a dynamic quantity.
         assert_eq!(slots.len(), 2, "{name}: {slots:?}");
         for (label, value) in &slots {
+            let QuantityExpr::ClampMin { inner, minimum: 0 } = value else {
+                panic!("{name} {label}: {value:?}");
+            };
             let mut types = Vec::new();
             walk_serialized_types(
                 &serde_json::to_value(value).unwrap(),
                 &mut Vec::new(),
                 &mut types,
             );
-            assert!(
-                types.iter().any(|t| t == expected_node),
+            assert_eq!(
+                types.iter().filter(|t| *t == "ClampMin").count(),
+                1,
                 "{name} {label}: {value:?}"
             );
-            assert!(
-                !types.iter().any(|t| t == "ClampMin"),
+            assert_eq!(
+                serde_json::to_value(inner.as_ref()).unwrap()["type"],
+                expected_node,
                 "{name} {label}: {value:?}"
             );
         }

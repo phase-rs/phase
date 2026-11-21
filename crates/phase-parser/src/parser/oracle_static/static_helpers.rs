@@ -1897,6 +1897,9 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        // Attack-pair endpoints are absolute player refs, not the designation
+        // anaphor: nothing to rebind, like its last-turn analog above.
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
@@ -2264,6 +2267,10 @@ pub(crate) fn accept_enforceable_condition(
 ///   `"gets +N/+M as long as X"` / `"has <keyword> as long as X"` grant branch,
 ///   and the whole-predicate `Continuous` default beneath it that carries the
 ///   trailing `"unless"` rider (Heroic Defiance).
+/// - `oracle_static::grammar::parse_enchanted_equipped_predicate`'s PATTERN 3b
+///   source-hosted restriction companion, which gates a peeled "Otherwise"
+///   restriction conjunct on the complement of the head condition (Burden of
+///   Proof).
 pub(crate) fn attach_gated_condition(
     def: &mut StaticDefinition,
     condition: StaticCondition,

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::game::ability_utils::append_to_sub_chain;
 use crate::game::effects::counters;
@@ -22,12 +22,12 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DamageBatchLedger, DamageRecord, DistributionScope, EventLosses, GameState, HeldBatchRider,
-    LKISnapshot, PendingContinuation, PendingDamagePostCounter, ResidentDrainPolicy, RiderTiming,
-    TriggerSourceRead, WaitingFor,
+    CombatPreventionTally, DamageBatchKind, DamageBatchLedger, DamageRecord, DistributionScope,
+    EventLosses, GameState, HeldBatchRider, PendingContinuation, PendingDamagePostCounter,
+    PreventedDamageEntry, ResidentDrainPolicy, RiderTiming, TriggerSourceRead, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
-use crate::types::keywords::{Keyword, KeywordKind};
+use crate::types::keywords::{Keyword, KeywordKind, MatchedProtectionQuality};
 use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::{CounterCause, ProposedEvent};
 use crate::types::resolution::ChildStackDepth;
@@ -520,28 +520,33 @@ pub(crate) enum DamageResult {
 /// object protection, and player protection-from-everything checks that run
 /// *before* the CR 614/615 replacement pipeline.
 ///
-/// Returns `Some(ProposedEvent::Damage)` to proceed into the replacement
-/// pipeline, or `None` when the damage is fully gated (the gate has already
-/// pushed a `DamagePrevented` event where the rules require one). Shared by the
-/// single-source `apply_damage_to_target` path and the combat-damage batch path
-/// so both run identical pre-pipeline gating.
+/// Classifies the damage without emitting: `Proposed` proceeds into the
+/// replacement pipeline (protections included — the pipeline publishes one
+/// virtual candidate per applicable quality and lets materiality choose or
+/// auto-apply, Matt R14-MED), and `Gated` drops fully gated damage silently.
+/// Shared by the single-source `apply_damage_to_target` path and the
+/// combat-damage batch path so both run identical pre-pipeline gating.
+pub(crate) enum DamageGateOutcome {
+    Proposed(ProposedEvent),
+    Gated,
+}
+
 pub(crate) fn pre_replacement_damage_gate(
     state: &GameState,
     ctx: &DamageContext,
     target: &TargetRef,
     amount: u32,
     is_combat: bool,
-    events: &mut Vec<GameEvent>,
-) -> Option<ProposedEvent> {
+) -> DamageGateOutcome {
     // CR 104.1: "A game ends immediately when a player wins": once an earlier recipient of the
     // same instruction ended the game (Flame Rift's 4 to its caster under Nefarious Lich, "If
     // you can't, you lose the game"), no later damage event exists to replace or deal.
     if state.game_end.is_some() {
-        return None;
+        return DamageGateOutcome::Gated;
     }
     // CR 120.8: If a source would deal 0 damage, it does not deal damage at all.
     if amount == 0 {
-        return None;
+        return DamageGateOutcome::Gated;
     }
 
     // CR 120.2: Source-side "can't deal damage" prohibition. The source deals
@@ -551,7 +556,7 @@ pub(crate) fn pre_replacement_damage_gate(
         ctx.source_id,
         "CantDealDamage",
     ) {
-        return None;
+        return DamageGateOutcome::Gated;
     }
 
     // CR 120.1: Target-side "can't be dealt damage" prohibition (objects only;
@@ -562,65 +567,65 @@ pub(crate) fn pre_replacement_damage_gate(
             *target_obj_id,
             "CantBeDealtDamage",
         ) {
-            return None;
+            return DamageGateOutcome::Gated;
         }
     }
 
-    let proposed = ProposedEvent::Damage {
+    // CR 616.1 (Matt R10-F1, R11-F1, R14-MED): applicable protections —
+    // one quality or many — route through the replacement-candidate/choice
+    // authority in combat exactly as out of it; the gate never claims a
+    // protection directly. A lone quality used to return `Protected` here,
+    // which silently defeated a competing amount-changer (Furnace of Rath
+    // never got its CR 616.1 order against a single protection). Now the
+    // event always proposes and the pipeline publishes one virtual
+    // candidate per applicable quality: a lone quality with no competitors
+    // auto-applies through the same prevention emission, while a crowded
+    // field parks an ordering choice. A CR 616.1 ordering choice is not a
+    // priority window, so CR 510.2 simultaneity is not violated by pausing
+    // the batch: the combat driver parks its remaining events, prompts the
+    // affected player, and resumes through the same choice authority as
+    // the noncombat path.
+
+    DamageGateOutcome::Proposed(ProposedEvent::Damage {
         source_id: ctx.source_id,
         target: target.clone(),
         amount,
         is_combat,
+        source_name: ctx.source_name.clone(),
+        source_incarnation: ctx.source_incarnation,
         applied: HashSet::new(),
-    };
-    // CR 615.12: protection's prevention is a prevention effect, so damage that can't be
-    // prevented (Stomp: "Damage can't be prevented this turn.") passes it by.
-    if replacement::damage_prevention_disabled(state, &proposed) {
-        return Some(proposed);
-    }
+    })
+}
 
-    // CR 702.16b + CR 702.16e + CR 608.2h: Protection prevents damage from sources
-    // with the matching quality. Emits DamagePrevented so "when damage is prevented"
-    // triggers can fire.
-    if let TargetRef::Object(target_obj_id) = target {
-        if let Some(target_obj) = state.objects.get(target_obj_id) {
-            let source_obj = state.objects.get(&ctx.source_id);
-            if keywords::protection_prevents_from_with_source_name(
-                target_obj,
-                source_obj,
-                ctx.source_name.as_deref(),
-            ) {
-                events.push(GameEvent::DamagePrevented {
-                    source_id: ctx.source_id,
-                    target: target.clone(),
-                    amount,
-                });
-                return None;
-            }
-        }
-    }
-
-    // CR 702.16e + CR 615.1 + CR 608.2h: "All damage that would be dealt to [a player with
-    // protection from the damage source] is prevented." Mirror the object-
-    // protection gate above for player targets. Emits DamagePrevented so
-    // prevention-triggered abilities still observe the event.
-    if let TargetRef::Player(player_id) = target {
-        if crate::game::static_abilities::player_protection_from_with_source_name(
+/// CR 702.16e + CR 615.13 (Matt F4, keyed by ability in R8-F1): publish
+/// one protection prevention the gate classified. Inside a simultaneous
+/// batch (live tally) it joins the batch aggregate under the protection key
+/// for the matched quality, so one application per (quality, recipient)
+/// publishes at the boundary; sequential damage (no live tally) keeps its
+/// immediate per-event emission so "when damage is prevented" triggers still
+/// observe the event.
+pub(crate) fn emit_or_accumulate_protection_prevention(
+    state: &mut GameState,
+    source_id: ObjectId,
+    target: &TargetRef,
+    amount: u32,
+    quality: MatchedProtectionQuality,
+    events: &mut Vec<GameEvent>,
+) {
+    if state.combat_prevention_tally.is_some() {
+        super::super::replacement::accumulate_batch_prevention(
             state,
-            *player_id,
-            Some(ctx.source_id),
-            ctx.source_name.as_deref(),
-        ) {
-            events.push(GameEvent::DamagePrevented {
-                source_id: ctx.source_id,
-                target: target.clone(),
-                amount,
-            });
-            return None;
-        }
+            crate::types::proposed_event::AppliedReplacementKey::Protection { quality },
+            target,
+            amount,
+        );
+    } else {
+        events.push(GameEvent::DamagePrevented {
+            source_id,
+            target: target.clone(),
+            amount,
+        });
     }
-
-    Some(proposed)
 }
 
 pub(crate) fn apply_damage_to_target(
@@ -631,10 +636,9 @@ pub(crate) fn apply_damage_to_target(
     is_combat: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<DamageResult, EffectError> {
-    let Some(proposed) =
-        pre_replacement_damage_gate(state, ctx, &target, amount, is_combat, events)
-    else {
-        return Ok(DamageResult::Applied(0));
+    let proposed = match pre_replacement_damage_gate(state, ctx, &target, amount, is_combat) {
+        DamageGateOutcome::Proposed(proposed) => proposed,
+        DamageGateOutcome::Gated => return Ok(DamageResult::Applied(0)),
     };
 
     match replacement::replace_event(state, proposed, events) {
@@ -710,21 +714,13 @@ fn park_damage_context(state: &mut GameState, ctx: &DamageContext) {
 /// planeswalker, and battle, its excess damage is the greatest calculated
 /// amount among those types.
 ///
-/// The planeswalker/battle axes measure against the loyalty/defense the
-/// permanent had BEFORE the damage was dealt, so callers pass the values
-/// captured before any loyalty/defense removal — never a live post-mutation
-/// read. Shared by the inline path (which captured them at the top of
-/// `apply_damage_after_replacement`) and the wither/infect post-counter core
-/// (which receives them as parameters, or from the pause stash on resume), so
-/// there is one calculation of excess, not a second copy that rereads live
-/// state.
+/// Called before any result of this damage is applied, so every axis reads the
+/// permanent before the damage (CR 120.4a / CR 120.10).
 fn damage_excess_beyond_lethal(
     state: &GameState,
     target: &TargetRef,
     actual_amount: u32,
     has_deathtouch: bool,
-    loyalty_before: Option<u32>,
-    defense_before: Option<u32>,
 ) -> u32 {
     match target {
         TargetRef::Object(obj_id) => state
@@ -733,36 +729,28 @@ fn damage_excess_beyond_lethal(
             .map(|obj| {
                 let mut excess = 0;
 
-                if obj.card_types.core_types.contains(&CoreType::Creature) {
-                    if let Some(toughness) = obj.toughness {
-                        // damage_marked already includes actual_amount.
-                        let damage_before = obj.damage_marked.saturating_sub(actual_amount);
-                        let lethal = if has_deathtouch {
-                            // CR 702.2c: Any nonzero damage from deathtouch = lethal.
-                            if damage_before == 0 {
-                                1u32
-                            } else {
-                                0
-                            }
-                        } else {
-                            (toughness as u32).saturating_sub(damage_before)
-                        };
-                        excess = excess.max(actual_amount.saturating_sub(lethal));
-                    }
+                if obj.card_types.core_types.contains(&CoreType::Creature)
+                    && obj.toughness.is_some()
+                {
+                    // CR 120.4a: lethal counts damage already marked, and is 1 from a deathtouch source.
+                    let lethal = crate::game::combat_damage::lethal_damage_needed(
+                        state,
+                        *obj_id,
+                        has_deathtouch,
+                    );
+                    excess = excess.max(actual_amount.saturating_sub(lethal));
                 }
 
                 if obj.card_types.core_types.contains(&CoreType::Planeswalker) {
                     // CR 120.10: Excess for a planeswalker = damage beyond the
-                    // loyalty it had before the damage was dealt (passed in —
-                    // loyalty counters have since been removed).
-                    excess = excess.max(actual_amount.saturating_sub(loyalty_before.unwrap_or(0)));
+                    // loyalty it had before the damage was dealt.
+                    excess = excess.max(actual_amount.saturating_sub(obj.loyalty.unwrap_or(0)));
                 }
 
                 if obj.card_types.core_types.contains(&CoreType::Battle) {
                     // CR 120.10: Excess for a battle = damage beyond the defense it
-                    // had before the damage was dealt (passed in — defense
-                    // counters have since been removed).
-                    excess = excess.max(actual_amount.saturating_sub(defense_before.unwrap_or(0)));
+                    // had before the damage was dealt.
+                    excess = excess.max(actual_amount.saturating_sub(obj.defense.unwrap_or(0)));
                 }
 
                 excess
@@ -794,12 +782,7 @@ pub(crate) fn apply_damage_after_replacement(
         return DamageResult::Applied(0);
     };
 
-    // CR 120.10: Excess damage to a planeswalker/battle is measured against its
-    // loyalty/defense *before* this damage was dealt. Damage application removes
-    // those counters (clamping at 0), which destroys the pre-hit value, so capture
-    // it here before mutating. (Creatures mark — not clamp — damage, so their
-    // excess is reconstructed from `damage_marked` below.)
-    let (is_creature, is_planeswalker, is_battle, loyalty_before, defense_before) = match t {
+    let (is_creature, is_planeswalker, is_battle) = match t {
         TargetRef::Object(obj_id) => state
             .objects
             .get(obj_id)
@@ -808,13 +791,48 @@ pub(crate) fn apply_damage_after_replacement(
                     obj.card_types.core_types.contains(&CoreType::Creature),
                     obj.card_types.core_types.contains(&CoreType::Planeswalker),
                     obj.card_types.core_types.contains(&CoreType::Battle),
-                    obj.loyalty,
-                    obj.defense,
                 )
             })
-            .unwrap_or((false, false, false, None, None)),
-        TargetRef::Player(_) => (false, false, false, None, None),
+            .unwrap_or((false, false, false)),
+        TargetRef::Player(_) => (false, false, false),
     };
+
+    // CR 120.4a + CR 120.10: single excess calculation, before any result of
+    // this damage is applied.
+    let excess = damage_excess_beyond_lethal(state, t, actual_amount, ctx.has_deathtouch);
+
+    // CR 120.4a: an excess-redirect rider modifies the damage event so that only
+    // the lethal portion is dealt to the permanent and the excess is dealt to its
+    // controller *instead* (redirected below), NOT on top. Without this, a 4-damage
+    // hit on a 2-toughness creature would mark 4 on the creature AND deal 2 to the
+    // controller (6 total); the rules-correct outcome is 2 marked + 2 redirected
+    // (4 total). Reduce the primary hit to the lethal portion for the creature's
+    // marked damage, DamageDealt event, and damage record; lifelink and the return
+    // value keep `actual_amount` because the total damage dealt is unchanged.
+    // CR 120.4a "that creature's controller": the rider only redirects when the
+    // damaged permanent is a creature (real class cards all read "target creature").
+    let redirect_excess = if is_creature
+        && matches!(
+            (ctx.excess_recipient, &t),
+            (
+                Some(ExcessRecipient::TargetController {
+                    source_keyword: None
+                }),
+                TargetRef::Object(_)
+            )
+        ) {
+        excess
+    } else {
+        0
+    };
+    let primary_amount = actual_amount.saturating_sub(redirect_excess);
+    // CR 120.4a: when the excess is redirected, the creature was dealt only its
+    // lethal portion — it was NOT "dealt excess damage" (the excess went to its
+    // controller instead). Report zero excess on the creature's event and record
+    // so "was dealt excess damage" triggers (Maarika, Rith, Aegar, …) do not
+    // fire on the creature. Without a rider `redirect_excess == 0`, so this is the
+    // normal computed `excess` (e.g. plain overkill still reports its excess).
+    let primary_excess = excess.saturating_sub(redirect_excess);
 
     match t {
         TargetRef::Object(obj_id) => {
@@ -864,7 +882,7 @@ pub(crate) fn apply_damage_after_replacement(
                     ctx.controller,
                     *obj_id,
                     CounterType::Minus1Minus1,
-                    actual_amount,
+                    primary_amount,
                     // CR 614.16: combat wither/infect is a turn-based-action
                     // placement (`Other`); non-combat is a resolving effect.
                     if is_combat {
@@ -875,18 +893,16 @@ pub(crate) fn apply_damage_after_replacement(
                     events,
                 ) {
                     // CR 120.3d + CR 616.1: stash the post-counter remainder
-                    // (the target, amount, context snapshot, and the CR 120.10
-                    // pre-damage loyalty/defense captured above — loyalty
-                    // removal already ran ahead of this arm) so the resume
-                    // runs it exactly once. Combat-flagged for the batch
-                    // remnant, which the combat resume consumes; the shared
-                    // funnel drain skips combat stashes.
+                    // (the target, amount, context snapshot, and the excess
+                    // computed above) so the resume runs it exactly once.
+                    // Combat-flagged for the batch remnant, which the combat
+                    // resume consumes; the shared funnel drain skips combat
+                    // stashes.
                     state.pending_damage_post_counter = Some(Box::new(PendingDamagePostCounter {
                         ctx: DamageContextSnapshot::from(ctx),
                         target: (*t).clone(),
                         actual_amount,
-                        loyalty_before,
-                        defense_before,
+                        excess,
                         is_combat,
                     }));
                     return DamageResult::NeedsChoice;
@@ -899,8 +915,7 @@ pub(crate) fn apply_damage_after_replacement(
                     ctx,
                     t,
                     actual_amount,
-                    loyalty_before,
-                    defense_before,
+                    excess,
                     is_combat,
                     events,
                 ) {
@@ -932,9 +947,9 @@ pub(crate) fn apply_damage_after_replacement(
             } else if is_creature {
                 if let Some(target_obj) = state.objects.get_mut(obj_id) {
                     // CR 120.3e: Damage to a creature marks damage.
-                    target_obj.damage_marked += actual_amount;
-                    // CR 702.2b: Track deathtouch for SBA lethal-damage check.
-                    if ctx.has_deathtouch {
+                    target_obj.damage_marked += primary_amount;
+                    // CR 702.2b + CR 120.8: only nonzero damage from a deathtouch source is recorded for CR 704.5h.
+                    if ctx.has_deathtouch && actual_amount > 0 {
                         target_obj.dealt_deathtouch_damage = true;
                     }
                 }
@@ -1057,62 +1072,6 @@ pub(crate) fn apply_damage_after_replacement(
                     events,
                 );
                 return DamageResult::NeedsChoice;
-            }
-        }
-    }
-
-    // CR 120.10: single excess calculation (shared with the wither/infect
-    // post-counter core): the loyalty/defense axes measure against the values
-    // captured above, before any counter removal.
-    let excess = damage_excess_beyond_lethal(
-        state,
-        t,
-        actual_amount,
-        ctx.has_deathtouch,
-        loyalty_before,
-        defense_before,
-    );
-
-    // CR 120.4a: an excess-redirect rider modifies the damage event so that only
-    // the lethal portion is dealt to the permanent and the excess is dealt to its
-    // controller *instead* (redirected below), NOT on top. Without this, a 4-damage
-    // hit on a 2-toughness creature would mark 4 on the creature AND deal 2 to the
-    // controller (6 total); the rules-correct outcome is 2 marked + 2 redirected
-    // (4 total). Reduce the primary hit to the lethal portion for the creature's
-    // marked damage, DamageDealt event, and damage record; lifelink and the return
-    // value keep `actual_amount` because the total damage dealt is unchanged.
-    // CR 120.4a "that creature's controller": the rider only redirects when the
-    // damaged permanent is a creature (real class cards all read "target creature").
-    let redirect_excess = if is_creature
-        && matches!(
-            (ctx.excess_recipient, &t),
-            (
-                Some(ExcessRecipient::TargetController {
-                    source_keyword: None
-                }),
-                TargetRef::Object(_)
-            )
-        ) {
-        excess
-    } else {
-        0
-    };
-    let primary_amount = actual_amount.saturating_sub(redirect_excess);
-    // CR 120.4a: when the excess is redirected, the creature was dealt only its
-    // lethal portion — it was NOT "dealt excess damage" (the excess went to its
-    // controller instead). Report zero excess on the creature's event and record
-    // so "was dealt excess damage" triggers (Maarika, Rith, Aegar, …) do not
-    // fire on the creature. Without a rider `redirect_excess == 0`, so this is the
-    // normal computed `excess` (e.g. plain overkill still reports its excess).
-    let primary_excess = excess.saturating_sub(redirect_excess);
-    if redirect_excess > 0 {
-        if let TargetRef::Object(obj_id) = &t {
-            // Only the marked-damage path over-marks above; wither/infect deal
-            // -1/-1 counters instead (no excess-redirect card uses them).
-            if !ctx.has_wither && !ctx.has_infect {
-                if let Some(o) = state.objects.get_mut(obj_id) {
-                    o.damage_marked = o.damage_marked.saturating_sub(redirect_excess);
-                }
             }
         }
     }
@@ -1435,19 +1394,20 @@ pub(crate) fn emit_damage_dealt_and_record(
     is_combat: bool,
     events: &mut Vec<GameEvent>,
 ) {
-    events.push(GameEvent::DamageDealt {
-        source_id,
-        target: target.clone(),
-        amount: record_amount,
-        is_combat,
-        excess: record_excess,
-        // CR 400.7: the incarnation captured with the damage context, as the
-        // damage record below uses.
-        source_incarnation,
-    });
-
-    // CR 120.1: Record damage for "was dealt damage by" condition queries.
+    // CR 120.8: damage reduced to 0 is not dealt, so it raises no event and leaves no record.
     if dealt_amount > 0 {
+        events.push(GameEvent::DamageDealt {
+            source_id,
+            target: target.clone(),
+            amount: record_amount,
+            is_combat,
+            excess: record_excess,
+            // CR 400.7: the incarnation captured with the damage context, as the
+            // damage record below uses.
+            source_incarnation,
+        });
+
+        // CR 120.1: Record damage for "was dealt damage by" condition queries.
         let target_controller = match target {
             TargetRef::Player(player_id) => *player_id,
             TargetRef::Object(object_id) => state
@@ -1574,6 +1534,28 @@ pub(crate) fn emit_damage_dealt_and_record(
     }
 }
 
+/// CR 120.2a + CR 120.2b + CR 611.3a + CR 707.2a + CR 400.11b: whether anything
+/// the game can bring into play reads a per-kind damage history. Every object
+/// in any zone counts, and so does every card outside the game that an effect
+/// can fetch (a Wish from the sideboard, a companion): those live as
+/// `DeckEntry`s in `deck_pools`, not in `state.objects`.
+fn game_has_damage_kind_reader(state: &GameState) -> bool {
+    let reads = |def: &crate::types::ability::StaticDefinition| {
+        def.condition
+            .as_ref()
+            .is_some_and(|condition| condition.reads_damage_kind())
+    };
+    state.objects.values().any(|obj| {
+        obj.static_definitions.iter_all().any(reads)
+            || obj.base_static_definitions.iter().any(reads)
+    }) || state.deck_pools.iter().any(|pool| {
+        pool.current_sideboard
+            .iter()
+            .chain(pool.current_companion.iter())
+            .any(|entry| entry.card.static_abilities.iter().any(reads))
+    })
+}
+
 /// Restore-time reconstruction of `GameObject::dealt_damage_kinds` for a save
 /// written before the per-kind latch existed. Called once from
 /// `PersistedGameState::prepare_for_restore`, before printed-face reapply and
@@ -1620,16 +1602,7 @@ pub(crate) fn recover_legacy_dealt_damage_kinds(
     // ability later (a copy of Ruric Thar), but the source must already be in
     // the game (any zone), so one pass over every object decides for the whole
     // restore. A game with no kind reader loads as it always did.
-    let kind_reader_in_game = state.objects.values().any(|obj| {
-        obj.static_definitions
-            .iter_all()
-            .chain(obj.base_static_definitions.iter())
-            .any(|def| {
-                def.condition
-                    .as_ref()
-                    .is_some_and(|condition| condition.reads_damage_kind())
-            })
-    });
+    let kind_reader_in_game = game_has_damage_kind_reader(state);
     let mut changed = false;
     for id in candidates {
         let Some(obj) = state.objects.get(&id) else {
@@ -1812,21 +1785,14 @@ pub(crate) enum PostCounterFlow {
 /// into `lifelink_by_source` at park time and drains via the lifelink tail;
 /// running the inline lifelink here would gain twice).
 ///
-/// CR 120.10 captured-values contract: the planeswalker/battle excess axes
-/// measure against the loyalty/defense from BEFORE the damage was dealt. The
-/// inline call runs after loyalty/defense removal, and both resume paths run
-/// later still, so all three pass the pre-damage values in — never a live
-/// reread. (Counter placement itself does not touch loyalty/defense; the
-/// creature axis still reads post-counter state, exactly like the inline
-/// path.)
+/// CR 120.10: `excess` was computed before the counters were placed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn wither_infect_post_counter_core(
     state: &mut GameState,
     ctx: &DamageContext,
     target: &TargetRef,
     actual_amount: u32,
-    loyalty_before: Option<u32>,
-    defense_before: Option<u32>,
+    excess: u32,
     is_combat: bool,
     events: &mut Vec<GameEvent>,
 ) -> PostCounterFlow {
@@ -1843,24 +1809,13 @@ pub(crate) fn wither_infect_post_counter_core(
     if let TargetRef::Object(obj_id) = target {
         if is_creature {
             if let Some(target_obj) = state.objects.get_mut(obj_id) {
-                // CR 702.2b: Track deathtouch for SBA lethal-damage check.
-                if ctx.has_deathtouch {
+                // CR 702.2b + CR 120.8: only nonzero damage from a deathtouch source is recorded for CR 704.5h.
+                if ctx.has_deathtouch && actual_amount > 0 {
                     target_obj.dealt_deathtouch_damage = true;
                 }
             }
         }
     }
-
-    // CR 120.10: single excess calculation, shared with the inline path — the
-    // loyalty/defense axes use the passed pre-damage values, not live state.
-    let excess = damage_excess_beyond_lethal(
-        state,
-        target,
-        actual_amount,
-        ctx.has_deathtouch,
-        loyalty_before,
-        defense_before,
-    );
 
     // CR 120.4a: an excess-redirect rider modifies the damage event so that only
     // the lethal portion is dealt to the permanent and the excess is dealt to its
@@ -1894,17 +1849,6 @@ pub(crate) fn wither_infect_post_counter_core(
     // fire on the creature. Without a rider `redirect_excess == 0`, so this is the
     // normal computed `excess` (e.g. plain overkill still reports its excess).
     let primary_excess = excess.saturating_sub(redirect_excess);
-    if redirect_excess > 0 {
-        if let TargetRef::Object(obj_id) = target {
-            // Only the marked-damage path over-marks above; wither/infect deal
-            // -1/-1 counters instead (no excess-redirect card uses them).
-            if !ctx.has_wither && !ctx.has_infect {
-                if let Some(o) = state.objects.get_mut(obj_id) {
-                    o.damage_marked = o.damage_marked.saturating_sub(redirect_excess);
-                }
-            }
-        }
-    }
 
     emit_damage_dealt_and_record(
         state,
@@ -2011,15 +1955,13 @@ pub(crate) fn drain_pending_damage_post_counter(
         return DamagePostCounterDrainOutcome::Settled;
     };
     let ctx = DamageContext::from(stashed.ctx);
-    // CR 120.10: the resume passes the STASHED pre-damage values — never a
-    // live reread (loyalty/defense removal already ran before the park).
+    // CR 120.10: the resume passes the stashed excess, never a recompute.
     match wither_infect_post_counter_core(
         state,
         &ctx,
         &stashed.target,
         stashed.actual_amount,
-        stashed.loyalty_before,
-        stashed.defense_before,
+        stashed.excess,
         stashed.is_combat,
         events,
     ) {
@@ -2290,9 +2232,44 @@ fn run_damage_batch(
     // CR 104.4a: this batch owns how an effect-stated loss settles while it runs; an enclosing
     // batch's answer is restored when it returns.
     let enclosing = state.damage_event_losses.replace(EventLosses::Immediate);
+    // CR 615.13: so does its prevention tally (opened in Phase B); a batch nested in this one
+    // (a rider's damage) aggregates on its own, and the enclosing tally is restored.
+    let enclosing_tally = state.combat_prevention_tally.take();
+    let enclosing_tally_batch = state.prevention_tally_batch.take();
     let result = run_damage_batch_phases(state, ability, kind, replaced, portions, parked, events);
+    state.combat_prevention_tally = enclosing_tally;
+    state.prevention_tally_batch = enclosing_tally_batch;
     state.damage_event_losses = enclosing;
     result
+}
+
+/// CR 615.13: open a noncombat batch's prevention tally on what it has prevented so far.
+fn open_batch_prevention_tally(state: &mut GameState, entries: &[PreventedDamageEntry]) {
+    state.combat_prevention_tally = Some(tally_map_from_record_entries(entries));
+    state.prevention_tally_batch = Some(DamageBatchKind::Noncombat);
+}
+
+/// CR 615.13: close the batch's prevention tally, as the entries a park carries or the
+/// publication fires.
+fn take_batch_prevention_tally(state: &mut GameState) -> Vec<PreventedDamageEntry> {
+    state.prevention_tally_batch = None;
+    state
+        .combat_prevention_tally
+        .take()
+        .map(crate::game::combat_damage::sorted_prevention_entries)
+        .unwrap_or_default()
+}
+
+/// CR 615.13: fold parked entries back into a live tally, summing duplicate pairs. A resumed
+/// batch re-accumulates onto its parked prefix through this.
+pub(crate) fn tally_map_from_record_entries(
+    entries: &[PreventedDamageEntry],
+) -> CombatPreventionTally {
+    let mut map = HashMap::new();
+    for entry in entries {
+        *map.entry((entry.key, entry.recipient.clone())).or_insert(0) += entry.amount;
+    }
+    map
 }
 
 /// The phases of [`run_damage_batch`].
@@ -2310,6 +2287,7 @@ fn run_damage_batch_phases(
         held,
         split,
         outcomes,
+        prevention_tally,
     } = parked;
     let mut split: std::collections::VecDeque<SplitDamagePortion> = split.into();
     // CR 104.1: "A game ends immediately when a player wins": a batch resumed after the game
@@ -2318,6 +2296,10 @@ fn run_damage_batch_phases(
         return Ok(DamageTail::Caller);
     }
     let boundary = state.resolution_stack.capture_child_boundary();
+    // CR 615.13 + CR 120.3: a prevention effect applying to the batch's simultaneous damage is
+    // one application, so Phase B accumulates what each shield prevents for each recipient
+    // instead of publishing it per portion. A resumed batch reopens the tally it parked.
+    open_batch_prevention_tally(state, &prevention_tally);
     // CR 614.6 + CR 615.5 + CR 616.1: while the batch settles its original replacement choices,
     // a replacement's action or rider is held in the batch's ledger, not run between them.
     if let Some(ledger) = state.damage_batch_ledger.as_mut() {
@@ -2341,7 +2323,7 @@ fn run_damage_batch_phases(
         let next = match portions.pop_front() {
             Some(portion) => Some(portion),
             None => match split.pop_front() {
-                Some(part) => match split_portion(state, ability, part, events) {
+                Some(part) => match split_portion(state, ability, part) {
                     Some(portion) => Some(portion),
                     // CR 702.16e: the new recipient's protection prevented it.
                     None => continue,
@@ -2385,11 +2367,13 @@ fn run_damage_batch_phases(
                 amount,
             } => {
                 // CR 120.8 / CR 702.16: the per-portion pre-replacement gate.
-                let Some(proposed) =
-                    pre_replacement_damage_gate(state, &ctx, &target, amount, false, events)
-                else {
-                    continue;
-                };
+                // CR 702.16e + CR 615.13 (Matt F4, R14-MED): protections propose
+                // into the pipeline, whose applier joins the live batch tally.
+                let proposed =
+                    match pre_replacement_damage_gate(state, &ctx, &target, amount, false) {
+                        DamageGateOutcome::Proposed(proposed) => proposed,
+                        DamageGateOutcome::Gated => continue,
+                    };
                 (ctx, proposed)
             }
         };
@@ -2424,6 +2408,7 @@ fn run_damage_batch_phases(
                 if replacement::damage_batch_has_paused_rider(state) {
                     let remaining = park_waiting(&portions, waiting, &mut split);
                     let held = take_held_riders(state);
+                    let prevention_tally = take_batch_prevention_tally(state);
                     return park_damage_batch(
                         state,
                         ability,
@@ -2436,6 +2421,7 @@ fn run_damage_batch_phases(
                             held,
                             split: split.into(),
                             outcomes: None,
+                            prevention_tally,
                         },
                         boundary,
                     );
@@ -2458,6 +2444,7 @@ fn run_damage_batch_phases(
                 state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
                 let remaining = park_waiting(&portions, waiting, &mut split);
                 let held = take_held_riders(state);
+                let prevention_tally = take_batch_prevention_tally(state);
                 return park_damage_batch(
                     state,
                     ability,
@@ -2470,6 +2457,7 @@ fn run_damage_batch_phases(
                         held,
                         split: split.into(),
                         outcomes: None,
+                        prevention_tally,
                     },
                     boundary,
                 );
@@ -2478,6 +2466,9 @@ fn run_damage_batch_phases(
     }
     // CR 616.1: every original choice is made; what the batch held runs after its damage.
     let held = take_held_riders(state);
+    // CR 615.13 + CR 614.6: the tally stays open through delivery and the substitution actions,
+    // which are the modified event itself (Jade Monolith's "that source deals that damage to you
+    // instead"), and closes before the prevention riders that follow the event (CR 615.5).
     // CR 104.4a + CR 614.6 + CR 120.4: the damage and the substitution actions are one
     // simultaneous event, so a player who loses to an effect in it (a lifelink gain drawn into
     // Laboratory Maniac's win, Nefarious Lich's "If you can't, you lose the game") is recorded and
@@ -2498,6 +2489,7 @@ fn run_damage_batch_phases(
         }
         if matches!(delivered, DamageResult::NeedsChoice) {
             let outcomes = take_event_outcomes(state);
+            let prevention_tally = take_batch_prevention_tally(state);
             return park_damage_batch(
                 state,
                 ability,
@@ -2508,6 +2500,7 @@ fn run_damage_batch_phases(
                 ParkedDamageBatch {
                     held,
                     outcomes,
+                    prevention_tally,
                     ..ParkedDamageBatch::default()
                 },
                 boundary,
@@ -2525,9 +2518,12 @@ fn run_damage_batch_phases(
         held.into()
     };
     let mut settled = false;
+    // CR 615.13: what the batch prevented, once its event is complete.
+    let mut prevention: Option<Vec<PreventedDamageEntry>> = None;
     while let Some(rider) = held.pop_front() {
         if rider.timing == RiderTiming::AfterEvent && !settled {
             settled = true;
+            prevention = Some(take_batch_prevention_tally(state));
             if settle_event_losses(state, events) {
                 return Ok(DamageTail::Caller);
             }
@@ -2541,6 +2537,9 @@ fn run_damage_batch_phases(
         // CR 608.2c: the rider left its prompt standing; the rest of the batch waits beneath it.
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             let outcomes = take_event_outcomes(state);
+            let prevention_tally = prevention
+                .take()
+                .unwrap_or_else(|| take_batch_prevention_tally(state));
             return park_damage_batch(
                 state,
                 ability,
@@ -2551,14 +2550,51 @@ fn run_damage_batch_phases(
                 ParkedDamageBatch {
                     held: held.into(),
                     outcomes,
+                    prevention_tally,
                     ..ParkedDamageBatch::default()
                 },
                 boundary,
             );
         }
     }
+    let prevention = prevention.unwrap_or_else(|| take_batch_prevention_tally(state));
     if !settled && settle_event_losses(state, events) {
         return Ok(DamageTail::Caller);
+    }
+    // CR 615.13 + CR 615.5: the batch's prevention publishes once, after its damage: one
+    // `DamagePrevented` per (shield, recipient), and each shield's rider once, against what it
+    // prevented across the batch.
+    if !prevention.is_empty() {
+        let outcome = crate::game::combat_damage::fire_batch_prevention_riders(
+            state,
+            &prevention,
+            events,
+            true,
+        );
+        // CR 104.1: a rider that ended the game ends the batch.
+        if state.game_end.is_some() {
+            return Ok(DamageTail::Caller);
+        }
+        // CR 608.2c: a rider left its prompt standing; the later shields wait beneath it.
+        if let crate::game::combat_damage::BatchRiderDrainOutcome::Paused { published_entries } =
+            outcome
+        {
+            let mut remainder = prevention;
+            remainder.drain(..published_entries.min(remainder.len()));
+            return park_damage_batch(
+                state,
+                ability,
+                kind,
+                &[],
+                Vec::new(),
+                None,
+                ParkedDamageBatch {
+                    prevention_tally: remainder,
+                    ..ParkedDamageBatch::default()
+                },
+                boundary,
+            );
+        }
     }
     events.push(GameEvent::EffectResolved {
         kind,
@@ -2626,6 +2662,8 @@ fn portion_event(portion: &BatchPortion) -> ProposedEvent {
             target: target.clone(),
             amount: *amount,
             is_combat: false,
+            source_name: ctx.source_name.clone(),
+            source_incarnation: ctx.source_incarnation,
             applied: HashSet::new(),
         },
     }
@@ -2638,6 +2676,8 @@ fn split_event(part: &SplitDamagePortion) -> ProposedEvent {
         target: part.target.clone(),
         amount: part.amount,
         is_combat: part.is_combat,
+        source_name: None,
+        source_incarnation: None,
         applied: part.applied.iter().copied().collect(),
     }
 }
@@ -2659,6 +2699,7 @@ fn park_waiting(
             amount,
             is_combat,
             applied,
+            ..
         } = event
         {
             if applied.is_empty() {
@@ -2699,18 +2740,14 @@ fn split_portion(
     state: &GameState,
     ability: &ResolvedAbility,
     part: SplitDamagePortion,
-    events: &mut Vec<GameEvent>,
 ) -> Option<BatchPortion> {
     let ctx = DamageContext::from_source(state, part.source)
         .unwrap_or_else(|| DamageContext::fallback(part.source, ability.controller));
-    let mut event = pre_replacement_damage_gate(
-        state,
-        &ctx,
-        &part.target,
-        part.amount,
-        part.is_combat,
-        events,
-    )?;
+    let DamageGateOutcome::Proposed(mut event) =
+        pre_replacement_damage_gate(state, &ctx, &part.target, part.amount, part.is_combat)
+    else {
+        return None;
+    };
     if let ProposedEvent::Damage { applied, .. } = &mut event {
         *applied = part.applied.into_iter().collect();
     }
@@ -2770,6 +2807,7 @@ fn take_pending_damage_choice(
         amount,
         is_combat,
         applied,
+        ..
     } = &pending.proposed
     else {
         return None;
@@ -2802,16 +2840,16 @@ fn deferred_portion(
         .unwrap_or_else(|| DamageContext::fallback(choice.source, ability.controller));
     ctx.excess_recipient = choice.excess_recipient;
     ctx.lifelink_bonus = choice.lifelink_bonus;
-    BatchPortion::Gated {
-        ctx,
-        event: ProposedEvent::Damage {
-            source_id: choice.source,
-            target: choice.target,
-            amount: choice.amount,
-            is_combat: choice.is_combat,
-            applied: choice.applied.into_iter().collect(),
-        },
-    }
+    let event = ProposedEvent::Damage {
+        source_id: choice.source,
+        target: choice.target,
+        amount: choice.amount,
+        is_combat: choice.is_combat,
+        source_name: ctx.source_name.clone(),
+        source_incarnation: ctx.source_incarnation,
+        applied: choice.applied.into_iter().collect(),
+    };
+    BatchPortion::Gated { ctx, event }
 }
 
 /// CR 101.4: a player's place in APNAP order (`players::apnap_order`); a player who left sorts
@@ -2995,6 +3033,9 @@ pub(crate) fn park_damage_batch(
         ability,
     );
     let mut node = node;
+    // CR 113.7a + CR 608.2h: the parked members resume through the parent's latch,
+    // filtered per member (`member_damage_context`), exactly as they were built.
+    node.trigger_source = ability.trigger_source.clone();
     node.context.parked_damage_batch =
         (parked != ParkedDamageBatch::default()).then(|| Box::new(parked));
     let pending = PendingContinuation::new(Box::new(node), state);
@@ -3053,19 +3094,37 @@ pub(crate) fn hold_riders_for_awaited_portion<T>(
         held_riders: Some(Vec::new()),
         ..ledger
     }));
+    // CR 615.13: the answered portion's prevention is part of its batch's one application, so
+    // the answer accumulates onto the tally the batch parked.
+    let parked_tally = awaiting_batch(state, source)
+        .and_then(|batch| batch.context.parked_damage_batch.as_deref())
+        .map(|parked| tally_map_from_record_entries(&parked.prevention_tally))
+        .unwrap_or_default();
+    let enclosing_tally = state.combat_prevention_tally.replace(parked_tally);
+    let enclosing_tally_batch = state
+        .prevention_tally_batch
+        .replace(DamageBatchKind::Noncombat);
     let result = answer(state);
+    let prevention_tally = take_batch_prevention_tally(state);
+    state.combat_prevention_tally = enclosing_tally;
+    state.prevention_tally_batch = enclosing_tally_batch;
     let held = take_held_riders(state);
     // CR 614.9: a capped redirect the answer applied splits a portion off into the batch too.
     let split = take_split_portions(state);
     state.damage_batch_ledger = saved;
-    if !held.is_empty() || !split.is_empty() {
-        if let Some(batch) = awaiting_batch(state, source) {
+    if let Some(batch) = awaiting_batch(state, source) {
+        if batch.context.parked_damage_batch.is_some()
+            || !held.is_empty()
+            || !split.is_empty()
+            || !prevention_tally.is_empty()
+        {
             let parked = batch
                 .context
                 .parked_damage_batch
                 .get_or_insert_with(Default::default);
             parked.held.extend(held);
             parked.split.extend(split);
+            parked.prevention_tally = prevention_tally;
         }
     }
     result
@@ -3169,6 +3228,8 @@ pub(crate) fn resolve_resume_damage_batch(
                 target: portion.target.clone(),
                 amount: portion.amount,
                 is_combat: portion.is_combat,
+                source_name: ctx.source_name.clone(),
+                source_incarnation: ctx.source_incarnation,
                 applied: HashSet::new(),
             };
             (ctx, event)
@@ -3177,8 +3238,15 @@ pub(crate) fn resolve_resume_damage_batch(
     let portions = remaining
         .iter()
         .map(|portion| BatchPortion::Ungated {
-            ctx: DamageContext::from_source(state, portion.source)
-                .unwrap_or_else(|| DamageContext::fallback(portion.source, ability.controller)),
+            // CR 120.1 + CR 608.2h: a parked member resumes through the same read it
+            // was built with (`member_damage_context`), so batch-time and resume-time
+            // reads agree.
+            ctx: member_damage_context(
+                state,
+                portion.source,
+                ability.controller,
+                &ability.trigger_source,
+            ),
             target: portion.target.clone(),
             amount: portion.amount,
         })
@@ -3780,6 +3848,11 @@ pub fn resolve_post_replacement(
         target,
         amount,
         is_combat,
+        // Post-replacement continuations never re-derive candidates
+        // (`apply_damage_after_replacement` applies directly), so the
+        // snapshot-restored context — which carries no name — is exact here.
+        source_name: ctx.source_name.clone(),
+        source_incarnation: ctx.source_incarnation,
         applied: HashSet::new(),
     };
 
@@ -3809,72 +3882,56 @@ pub fn resolve_post_replacement(
 ///   battlefield last-known name.
 ///
 /// When absent (e.g. activated abilities), the ability's own source is read through
-/// its activation stamp (`damage_context_for_stamp`): the live object only while it
-/// is still the announced incarnation, else that incarnation's exit LKI.
+/// its pinned announcement epoch: the live object only while it is still that
+/// incarnation, else that incarnation's exit LKI.
 fn damage_context_from_ability(state: &GameState, ability: &ResolvedAbility) -> DamageContext {
-    let source_read = ability
-        .trigger_source
-        .as_ref()
-        .map(|source| source.source_read(state));
-
-    match source_read {
-        Some(TriggerSourceRead::ExactLive(obj)) => {
-            let mut ctx = DamageContext::from_source(state, obj.id)
-                .unwrap_or_else(|| DamageContext::fallback(obj.id, obj.controller));
-            ctx.source_name = Some(obj.name.clone());
-            ctx
-        }
-        Some(TriggerSourceRead::Latched(latched)) => {
-            // CR 608.2h + CR 400.7: the captured observation, not the object now
-            // occupying the id, supplies the source's characteristics. Prefer
-            // the exact-incarnation exit snapshot over the trigger-time snapshot.
-            let lki = crate::game::filter::exit_lki_for_incarnation(
-                state,
-                latched.identity.reference.object_id,
-                latched.identity.reference.incarnation,
-            )
-            .unwrap_or(&latched.lki);
-            damage_context_from_lki(
-                ability.source_id,
-                latched.identity.reference.incarnation,
-                lki,
-            )
-        }
-        None => {
-            // CR 113.7a + CR 400.7: an activated ability exists independently of
-            // its source; the announced incarnation (else the stack-placement
-            // one) is the object that deals the damage.
-            let mut ctx = damage_context_for_stamp(
-                state,
-                ability.source_id,
-                ability.controller,
-                ability
-                    .announced_source_incarnation
-                    .or(ability.source_incarnation),
-            );
-            if ctx.source_name.is_none() {
-                ctx.source_name = state
-                    .objects
-                    .get(&ability.source_id)
-                    .map(|o| o.name.clone());
-            }
-            ctx
-        }
-    }
+    damage_context_for_subject(
+        state,
+        ability.source_id,
+        ability.controller,
+        ability.trigger_source.as_ref(),
+        // CR 608.2h + CR 400.7: the pinned announcement epoch first (pre-cost,
+        // the epoch the damage source had as the ability was announced), the
+        // post-cost stack-push epoch second. Plot never stack-pushes, so a
+        // plotted grant carries only the announcement epoch.
+        ability
+            .announced_source_incarnation
+            .or(ability.source_incarnation),
+    )
 }
 
-/// CR 608.2h + CR 702.15c: the damage context of a departed source incarnation,
-/// read from its last known information: controller, name, creature-ness, and
-/// the keywords that change how its damage is dealt (deathtouch, lifelink,
-/// wither, infect, toxic).
-fn damage_context_from_lki(
-    source_id: ObjectId,
+/// CR 608.2h + CR 702.16 + CR 113.7a: subject-parameterized damage-source
+/// authority behind [`damage_context_from_ability`]. Batch members resolve
+/// through this with the parent latch filtered to the member (see
+/// [`trigger_latch_for_member`]), so batch-time and resume-time reads use the
+/// same inputs and can never disagree.
+/// CR 608.2h + CR 400.7: the live read of the exact observed incarnation.
+/// Shared by the trigger-latch `ExactLive` arm and the activated
+/// pinned-incarnation read so both agree by construction.
+fn exact_live_damage_context(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+) -> DamageContext {
+    let mut ctx = DamageContext::from_source(state, obj.id)
+        .unwrap_or_else(|| DamageContext::fallback(obj.id, obj.controller));
+    ctx.source_name = Some(obj.name.clone());
+    ctx
+}
+
+/// CR 608.2h + CR 400.7: the departed-source read — the captured observation,
+/// not the object now occupying the id, supplies the source's
+/// characteristics. Prefers the exact-incarnation exit snapshot over the
+/// capture-time snapshot. Shared by the trigger-latch `Latched` arm and the
+/// activated pinned-incarnation read so batch-time and resume-time reads use
+/// the same inputs and can never disagree.
+fn latched_damage_context(
+    subject_id: ObjectId,
     incarnation: u64,
-    lki: &LKISnapshot,
+    lki: &crate::types::game_state::LKISnapshot,
 ) -> DamageContext {
     // allow-raw-authority: reading characteristic snapshot from departed-source LKI
     let has_keyword = |kind: KeywordKind| lki.keywords.iter().any(|k| k.kind() == kind);
-    let mut ctx = DamageContext::fallback(source_id, lki.controller);
+    let mut ctx = DamageContext::fallback(subject_id, lki.controller);
     ctx.source_incarnation = Some(incarnation);
     ctx.source_name = Some(lki.name.clone());
     ctx.source_is_creature = lki.card_types.contains(&CoreType::Creature);
@@ -3893,42 +3950,126 @@ fn damage_context_from_lki(
     ctx
 }
 
-/// CR 400.7 + CR 608.2h + CR 113.7a + CR 702.15c: the damage context of the
-/// source incarnation `stamp` names (the activation's announced incarnation,
-/// or one captured when a damage event parked).
-/// - No stamp: the live object (`from_source`), else `fallback` with
-///   `fallback_controller` — unstamped spells and nodes read as before.
-/// - The live object is still that incarnation: the live object.
-/// - Otherwise the source left its zone since (a new object, CR 400.7): the
-///   stamped incarnation's exit last known information.
-/// - No exact record survives (a hidden-zone departure, a ceased token): fail
-///   closed — the damage is still dealt from that exact incarnation, by
-///   `fallback_controller`, with no keyword riders; a later object at the same
-///   id never answers in its place.
-pub(crate) fn damage_context_for_stamp(
+fn damage_context_for_subject(
     state: &GameState,
-    source_id: ObjectId,
-    fallback_controller: PlayerId,
-    stamp: Option<u64>,
+    subject_id: ObjectId,
+    controller: PlayerId,
+    trigger_source: Option<&crate::types::game_state::TriggerSourceContext>,
+    pinned_incarnation: Option<u64>,
 ) -> DamageContext {
-    let live = state.objects.get(&source_id);
-    let Some(incarnation) = stamp else {
-        return DamageContext::from_source(state, source_id)
-            .unwrap_or_else(|| DamageContext::fallback(source_id, fallback_controller));
-    };
-    if live.is_some_and(|obj| obj.incarnation == incarnation) {
-        if let Some(ctx) = DamageContext::from_source(state, source_id) {
-            return ctx;
+    let source_read = trigger_source.map(|source| source.source_read(state));
+
+    match source_read {
+        Some(TriggerSourceRead::ExactLive(obj)) => exact_live_damage_context(state, obj),
+        Some(TriggerSourceRead::Latched(latched)) => {
+            // CR 608.2h + CR 400.7: prefer the exact-incarnation exit snapshot
+            // over the trigger-time snapshot.
+            let exit = crate::game::filter::exit_lki_for_incarnation(
+                state,
+                latched.identity.reference.object_id,
+                latched.identity.reference.incarnation,
+            );
+            latched_damage_context(
+                subject_id,
+                latched.identity.reference.incarnation,
+                exit.unwrap_or(&latched.lki),
+            )
         }
-    }
-    match filter::exit_lki_for_incarnation(state, source_id, incarnation) {
-        Some(lki) => damage_context_from_lki(source_id, incarnation, lki),
         None => {
-            let mut ctx = DamageContext::fallback(source_id, fallback_controller);
-            ctx.source_incarnation = Some(incarnation);
+            // CR 608.2h + CR 400.7: an activated ability's pinned incarnation.
+            // While the source is still that incarnation the live object
+            // answers (the pre-pin `None`-arm behavior, exact). Once it
+            // departs, the pinned incarnation's exit last-known information
+            // answers — the same read the `Latched` arm performs. With no
+            // surviving exit record (a hidden-zone departure records none)
+            // the incarnation cannot be affirmed and the read degrades to the
+            // live fallback, exactly where the old `None` regime did.
+            if let Some(pinned) = pinned_incarnation {
+                if let Some(obj) = state.objects.get(&subject_id) {
+                    if obj.incarnation == pinned {
+                        return exact_live_damage_context(state, obj);
+                    }
+                }
+                if let Some(lki) =
+                    crate::game::filter::exit_lki_for_incarnation(state, subject_id, pinned)
+                {
+                    return latched_damage_context(subject_id, pinned, lki);
+                }
+                // CR 400.7: no exact record survives (a hidden-zone departure,
+                // a ceased token) and the id now names a different object. The
+                // damage is still dealt by the pinned incarnation: fail closed
+                // with its identity, the fallback controller and no keyword
+                // riders, never the object now at the id.
+                if state
+                    .objects
+                    .get(&subject_id)
+                    .is_none_or(|obj| obj.incarnation != pinned)
+                {
+                    let mut ctx = DamageContext::fallback(subject_id, controller);
+                    ctx.source_incarnation = Some(pinned);
+                    return ctx;
+                }
+            }
+            let mut ctx = DamageContext::from_source(state, subject_id)
+                .unwrap_or_else(|| DamageContext::fallback(subject_id, controller));
+            if ctx.source_name.is_none() {
+                ctx.source_name = state.objects.get(&subject_id).map(|o| o.name.clone());
+            }
             ctx
         }
     }
+}
+
+/// CR 120.1 + CR 608.2h: the trigger latch a batch member keeps — the parent's
+/// latch when it names the member itself (the trigger object IS this damage
+/// source, so its LKI is this member's LKI), `None` otherwise (the latch names
+/// a different object, and the resume authority prefers it over the node's own
+/// id — inheriting it would rebuild the member with the trigger object's
+/// characteristics). Batch entry building and parked-node resume both filter
+/// through this, so the two reads agree by construction.
+fn trigger_latch_for_member(
+    trigger_source: &Option<crate::types::game_state::TriggerSourceContext>,
+    member_id: ObjectId,
+) -> Option<crate::types::game_state::TriggerSourceContext> {
+    trigger_source
+        .as_ref()
+        .filter(|latch| latch.identity.reference.object_id == member_id)
+        .cloned()
+}
+
+/// CR 400.7 + CR 608.2h + CR 702.15c: the damage context of the source
+/// incarnation a parked damage event captured (`park_damage_context`), read
+/// through the same pinned-incarnation authority as an activated ability's
+/// announced source (`damage_context_for_subject`). `None` = not captured (a
+/// record saved before the field existed): the live read, exactly as before.
+pub(crate) fn damage_context_for_pinned_incarnation(
+    state: &GameState,
+    source_id: ObjectId,
+    fallback_controller: PlayerId,
+    pinned_incarnation: Option<u64>,
+) -> DamageContext {
+    damage_context_for_subject(
+        state,
+        source_id,
+        fallback_controller,
+        None,
+        pinned_incarnation,
+    )
+}
+
+/// CR 120.1 + CR 608.2h: a batch member's damage context — latch-derived when
+/// the trigger latch names the member, otherwise read from the member itself.
+fn member_damage_context(
+    state: &GameState,
+    member_id: ObjectId,
+    controller: PlayerId,
+    trigger_source: &Option<crate::types::game_state::TriggerSourceContext>,
+) -> DamageContext {
+    let latch = trigger_latch_for_member(trigger_source, member_id);
+    // CR 120.1: each-source batch members are target objects, not the ability
+    // source — no announcement epoch of their own travels here, so no pinned
+    // read applies; `None` preserves today's live-or-latch behavior exactly.
+    damage_context_for_subject(state, member_id, controller, latch.as_ref(), None)
 }
 
 /// CR 120.2b: the object that deals a single-source `DealDamage` node's damage,
@@ -4294,13 +4435,13 @@ fn resolve_each_target_power_damage(
 
     // --- Phase A: Collect proposed damage events (no application yet). ---
     // CR 120.8 / CR 702.16: per-source pre-replacement gate. Fully gated sources
-    // (0 damage, protection, prohibition) contribute nothing; the gate already
-    // emitted any required DamagePrevented.
+    // (0 damage, prohibition) contribute nothing; protection proposes into the
+    // pipeline, which publishes its prevention with the batch's (CR 615.13).
     let mut entries: Vec<(usize, &DamageContext)> = Vec::with_capacity(batch.len());
     let mut proposed_events: Vec<ProposedEvent> = Vec::with_capacity(batch.len());
     for (idx, (_, ctx, amt)) in batch.iter().enumerate() {
-        if let Some(proposed) =
-            pre_replacement_damage_gate(state, ctx, &recipient, *amt, false, events)
+        if let DamageGateOutcome::Proposed(proposed) =
+            pre_replacement_damage_gate(state, ctx, &recipient, *amt, false)
         {
             entries.push((idx, ctx));
             proposed_events.push(proposed);
@@ -5316,9 +5457,14 @@ fn resolve_each_deals_equal_to_power_portions(
         .filter_map(|&source_id| {
             let power = object_power_with_lki(state, source_id);
             (power > 0).then(|| BatchPortion::Ungated {
-                // CR 120.1: each source creature is the source of its own damage.
-                ctx: DamageContext::from_source(state, source_id)
-                    .unwrap_or_else(|| DamageContext::fallback(source_id, ability.controller)),
+                // CR 120.1: each source creature is the source of its own damage
+                // (latch-derived when the trigger latch names the source).
+                ctx: member_damage_context(
+                    state,
+                    source_id,
+                    ability.controller,
+                    &ability.trigger_source,
+                ),
                 target: TargetRef::Object(recipient_id),
                 amount: power as u32,
             })
@@ -5475,8 +5621,12 @@ fn resolve_each_source_deals_damage_portions(
         if amt == 0 {
             continue;
         }
-        let ctx = DamageContext::from_source(state, source_id)
-            .unwrap_or_else(|| DamageContext::fallback(source_id, ability.controller));
+        let ctx = member_damage_context(
+            state,
+            source_id,
+            ability.controller,
+            &ability.trigger_source,
+        );
         match recipient {
             EachDamageRecipient::Shared(_) => {
                 for recip in &shared_recipients {
@@ -7074,6 +7224,8 @@ mod tests {
                 target: TargetRef::Object(victim),
                 amount: 1,
                 is_combat: true,
+                source_name: None,
+                source_incarnation: None,
                 applied: HashSet::new(),
             };
             let mut events = Vec::new();
@@ -7145,6 +7297,8 @@ mod tests {
                 target: TargetRef::Player(P0),
                 amount: 1,
                 is_combat: false,
+                source_name: None,
+                source_incarnation: None,
                 applied: HashSet::new(),
             };
             let mut events = Vec::new();
@@ -7204,6 +7358,8 @@ mod tests {
             target: TargetRef::Player(PlayerId(0)),
             amount,
             is_combat,
+            source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();
@@ -7402,7 +7558,8 @@ mod tests {
             "a newly recorded kind must dirty layers even though Any was already set"
         );
 
-        // CR 120.8: zero amount - the event is still pushed, nothing is recorded.
+        // CR 120.8: zero amount - damage reduced to 0 is not dealt, so no event
+        // is pushed and nothing is recorded.
         let mut state = GameState::new_two_player(42);
         let zero = sticky_damage_source(&mut state, 9402, Zone::Battlefield);
         flush_layers(&mut state);
@@ -7421,7 +7578,7 @@ mod tests {
                 &mut events,
             );
         }
-        assert_eq!(events.len(), 2, "reach-guard: both events pushed");
+        assert!(events.is_empty(), "zero damage raises no event");
         assert!(state.damage_dealt_this_turn.is_empty());
         assert_eq!(sticky_kinds(&state, zero), (false, false, false));
         assert_damage_stores_agree(&state, zero);
@@ -7817,6 +7974,8 @@ mod tests {
             target: TargetRef::Object(target),
             amount: 2,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();
@@ -7863,6 +8022,8 @@ mod tests {
             target: TargetRef::Object(target),
             amount: 1,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();
@@ -7917,6 +8078,8 @@ mod tests {
                 target: TargetRef::Player(PlayerId(1)),
                 amount: 2,
                 is_combat,
+                source_name: None,
+                source_incarnation: None,
                 applied: HashSet::new(),
             };
             let mut events = Vec::new();
@@ -7997,6 +8160,8 @@ mod tests {
             target: TargetRef::Object(target),
             amount: 2,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();
@@ -8026,6 +8191,8 @@ mod tests {
             target: TargetRef::Player(PlayerId(1)),
             amount: 2,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: HashSet::new(),
         };
         let mut events = Vec::new();
@@ -8290,6 +8457,161 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, GameEvent::DamageDealt { .. })),
             "must not emit DamageDealt for prevented damage"
+        );
+    }
+
+    /// CR 616.1 (Matt R11-F1): overlapping protections (two-plus applicable
+    /// qualities) route through the replacement-candidate/choice authority in
+    /// combat exactly as out of it — the gate PROPOSES. A single applicable
+    /// quality still claims directly everywhere: no choice exists.
+    ///
+    /// REVERT PROBE: restore either `is_combat ||` exemption — the
+    /// `Proposed` assertions below fail (the overlap claims silently).
+    #[test]
+    fn combat_protection_overlap_proposes_single_quality_claims() {
+        use crate::types::ability::ControllerRef;
+        use crate::types::ability::{ChosenAttribute, StaticDefinition, TypedFilter};
+        use crate::types::card_type::CoreType;
+        use crate::types::keywords::{Keyword, ProtectionTarget};
+        use crate::types::mana::ManaColor;
+        use crate::types::statics::StaticMode;
+
+        fn pairing(source_colors: Vec<ManaColor>) -> (GameState, DamageContext, ObjectId) {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(10),
+                PlayerId(0),
+                "Source".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.color = source_colors;
+            obj.card_types.core_types.push(CoreType::Creature);
+            let ctx = DamageContext::fallback(source, PlayerId(0));
+            (state, ctx, source)
+        }
+
+        // Object scope, two qualities: propose in combat.
+        let (mut state, ctx, _) = pairing(vec![ManaColor::Red, ManaColor::Green]);
+        let warded = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Warded".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&warded).unwrap().keywords.extend([
+            Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)),
+            Keyword::Protection(ProtectionTarget::Color(ManaColor::Green)),
+        ]);
+        assert!(
+            matches!(
+                pre_replacement_damage_gate(&state, &ctx, &TargetRef::Object(warded), 3, true,),
+                DamageGateOutcome::Proposed(_)
+            ),
+            "a two-quality combat overlap must propose into the pipeline"
+        );
+
+        // Object scope, one quality: propose in combat (Matt R14-MED). The
+        // pipeline publishes the lone quality as a virtual candidate and
+        // auto-applies it when nothing competes; the gate never claims it
+        // directly, so a competing amount-changer still gets its CR 616.1
+        // order.
+        let (mut state, ctx, _) = pairing(vec![ManaColor::Red]);
+        let guarded = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(1),
+            "Guarded".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&guarded)
+            .unwrap()
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)));
+        assert!(
+            matches!(
+                pre_replacement_damage_gate(&state, &ctx, &TargetRef::Object(guarded), 3, true,),
+                DamageGateOutcome::Proposed(_)
+            ),
+            "a single quality proposes into the pipeline in combat"
+        );
+
+        // Player scope, two qualities: propose in combat. Grants are
+        // `PlayerProtection` statics (color qualities are inert at the player
+        // level; only the `Everything` transient arm reads that table).
+        let (mut state, ctx, _) = pairing(vec![ManaColor::Red]);
+        let grantor = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Shelter".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&grantor)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::CardType(CoreType::Creature));
+        for quality in [
+            ProtectionTarget::FromPlayer(ControllerRef::Opponent),
+            ProtectionTarget::ChosenCardType,
+        ] {
+            state
+                .objects
+                .get_mut(&grantor)
+                .unwrap()
+                .static_definitions
+                .push(
+                    StaticDefinition::new(StaticMode::PlayerProtection(quality)).affected(
+                        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                    ),
+                );
+        }
+        assert!(
+            matches!(
+                pre_replacement_damage_gate(&state, &ctx, &TargetRef::Player(PlayerId(1)), 3, true,),
+                DamageGateOutcome::Proposed(_)
+            ),
+            "a two-quality player-scope combat overlap must propose into the pipeline"
+        );
+
+        // Player scope, one quality: propose in combat (Matt R14-MED). The
+        // pipeline publishes the lone quality as a virtual candidate and
+        // auto-applies it when nothing competes; the gate never claims it
+        // directly, so a competing amount-changer still gets its CR 616.1
+        // order.
+        let (mut state, ctx, _) = pairing(vec![ManaColor::Red]);
+        let grantor = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Shelter".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&grantor)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::PlayerProtection(ProtectionTarget::FromPlayer(
+                    ControllerRef::Opponent,
+                )))
+                .affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            );
+        assert!(
+            matches!(
+                pre_replacement_damage_gate(&state, &ctx, &TargetRef::Player(PlayerId(1)), 3, true,),
+                DamageGateOutcome::Proposed(_)
+            ),
+            "a single player-scope quality proposes into the pipeline in combat"
         );
     }
 
@@ -12414,24 +12736,23 @@ mod attacked_referent_recipient_tests {
         old
     }
 
-    /// CR 400.7 + CR 608.2h + CR 702.15c: `damage_context_for_stamp`. (a) no
-    /// stamp: the live object. (b) the stamp names the live incarnation: the
-    /// live object. (c) the source was blinked since the stamp, and the new
-    /// object lost its keywords: the stamped incarnation's exit LKI (old
-    /// incarnation, LKI keywords, LKI controller) — never the new object.
-    /// (d) no exact record survives: fail closed — the stamped incarnation,
-    /// the fallback controller, no keyword riders.
+    /// CR 400.7 + CR 608.2h + CR 702.15c: `damage_context_for_subject` with a
+    /// pinned incarnation. (a) no pin: the live object. (b) the pin names the
+    /// live incarnation: the live object. (c) the source was blinked since the
+    /// pin, and the new object lost its keywords: the pinned incarnation's exit
+    /// LKI (old incarnation, LKI keywords, LKI controller) — never the new
+    /// object.
     #[test]
-    fn damage_context_for_stamp_reads_the_stamped_incarnation() {
+    fn pinned_damage_context_reads_the_pinned_incarnation() {
         let mut state = GameState::new_two_player(42);
         let id = keyworded_creature(&mut state, 7);
         let live = state.objects[&id].incarnation;
 
         // (a) + (b)
-        for stamp in [None, Some(live)] {
-            let ctx = damage_context_for_stamp(&state, id, PlayerId(1), stamp);
-            assert_eq!(ctx.source_incarnation, Some(live), "stamp={stamp:?}");
-            assert!(ctx.has_lifelink && ctx.has_deathtouch, "stamp={stamp:?}");
+        for pin in [None, Some(live)] {
+            let ctx = damage_context_for_subject(&state, id, PlayerId(1), None, pin);
+            assert_eq!(ctx.source_incarnation, Some(live), "pin={pin:?}");
+            assert!(ctx.has_lifelink && ctx.has_deathtouch, "pin={pin:?}");
         }
 
         // (c)
@@ -12441,23 +12762,16 @@ mod attacked_referent_recipient_tests {
             obj.keywords.clear();
             obj.controller = PlayerId(1);
         }
-        let ctx = damage_context_for_stamp(&state, id, PlayerId(1), Some(old));
+        let ctx = damage_context_for_subject(&state, id, PlayerId(1), None, Some(old));
         assert_eq!(ctx.source_incarnation, Some(old), "(c) the old incarnation");
         assert!(ctx.has_lifelink && ctx.has_deathtouch, "(c) LKI keywords");
         assert_eq!(ctx.controller, PlayerId(0), "(c) LKI controller");
         assert!(ctx.source_is_creature);
-        let live_ctx = damage_context_for_stamp(&state, id, PlayerId(1), None);
+        let live_ctx = damage_context_for_subject(&state, id, PlayerId(1), None, None);
         assert!(
             !live_ctx.has_lifelink,
             "(c) control: the new object has none"
         );
-
-        // (d)
-        state.lki_by_incarnation.clear();
-        let ctx = damage_context_for_stamp(&state, id, PlayerId(0), Some(old));
-        assert_eq!(ctx.source_incarnation, Some(old), "(d) exact identity kept");
-        assert_eq!(ctx.controller, PlayerId(0), "(d) the fallback controller");
-        assert!(!ctx.has_lifelink && !ctx.has_deathtouch, "(d) fail closed");
     }
 
     /// CR 113.7a + CR 400.7: the remaining-recipient continuation nodes of an

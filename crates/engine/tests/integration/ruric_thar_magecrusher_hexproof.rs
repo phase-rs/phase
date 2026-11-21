@@ -1991,6 +1991,40 @@ fn s3_mirror_kind_reader_elsewhere_in_the_game_refuses_the_restore() {
     assert_ambiguous_refusal(try_restore(json, &db), bear);
 }
 
+/// S3-wish - the kind reader is outside the game. Ruric Thar sits in a
+/// player's sideboard (CR 400.11a), where a Wish effect can fetch it
+/// (CR 400.11b); it is a `DeckEntry` in `deck_pools`, not a `GameObject`. The
+/// creature with unprovable history is still refused: the fetched Ruric could
+/// be copied onto it (CR 707.2a + CR 611.3a).
+#[test]
+fn s3_wish_kind_reader_in_the_sideboard_refuses_the_restore() {
+    let db = ruric_face_db();
+    let mut scenario = base_scenario();
+    let bear = scenario.add_creature(P0, "Old Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    run_combat(&mut runner, &[bear], &[]);
+    pass_to_next_turn(&mut runner);
+    flush_layers(runner.state_mut());
+    let mut pre = runner.state().clone();
+    let ruric_face = db.get_face_by_name(RURIC_NAME).expect("Ruric face");
+    let mut pool = engine::types::game_state::PlayerDeckPool {
+        player: P0,
+        ..Default::default()
+    };
+    pool.current_sideboard = std::sync::Arc::new(vec![
+        engine::game::deck_loading::DeckEntry::from_resolved_face(&db, ruric_face, 1),
+    ]);
+    pre.deck_pools.push(pool);
+    assert!(pre.objects_that_dealt_damage.contains(&bear));
+    assert!(
+        pre.objects.values().all(|obj| obj.name != RURIC_NAME),
+        "the reader is outside the game"
+    );
+    let (json, stripped) = old_format_save(&pre);
+    assert_eq!(stripped, 1);
+    assert_ambiguous_refusal(try_restore(json, &db), bear);
+}
+
 /// S4 - a current-format save restores unchanged (the recovery's trigger is an
 /// EMPTY latch on an Any-set member), and restoring a migrated old save a
 /// second time is a no-op. A Ruric with no damage history is untouched.

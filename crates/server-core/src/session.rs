@@ -3259,6 +3259,168 @@ mod tests {
         assert_eq!(token2.len(), 32);
     }
 
+    #[test]
+    fn native_session_delivers_assigned_basic_art_on_play_and_reconnect() {
+        use engine::types::actions::MulliganChoice;
+        use engine::types::card_type::{CoreType, Supertype};
+        use engine::types::{phase::Phase, zones::Zone};
+        use serde_json::{json, to_value};
+
+        let mut face = make_deck().main_deck.remove(0).card;
+        face.card_type.supertypes = vec![Supertype::Basic];
+        assert!(face.card_type.core_types.contains(&CoreType::Land));
+        face.scryfall_oracle_id = Some("b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6".into());
+        let mut forest = to_value(face).unwrap();
+        forest["legalities"] = json!({"standard": "legal"});
+        let db =
+            Arc::new(CardDatabase::from_json_str(&json!({"forest": forest}).to_string()).unwrap());
+        let (mut manager, code) = seated_room(&db, &name_deck("Forest", 60));
+
+        let (guest_token, id, card_id, expected) = {
+            let mut session = manager.try_session(&code).unwrap();
+            session.start_game(&db).expect("both decks start");
+            let tokens = session.player_tokens.clone();
+            let WaitingFor::ChooseStartingPlayer { player, .. } = session.state.waiting_for else {
+                panic!("expected starting-player choice");
+            };
+            session
+                .handle_action(
+                    &tokens[usize::from(player.0)],
+                    GameAction::ChooseStartingPlayer {
+                        player: PlayerId(0),
+                    },
+                )
+                .unwrap();
+            assert!(matches!(
+                session.state.waiting_for,
+                WaitingFor::MulliganDecision { .. }
+            ));
+            let id = *session.state.players[0].hand.front().expect("opening hand");
+            let key = id.0.to_string();
+            let card_id = session.state.objects[&id].card_id;
+            let owner = to_value(filter_state_for_player(&session.state, PlayerId(0))).unwrap();
+            let guest = to_value(filter_state_for_player(&session.state, PlayerId(1))).unwrap();
+            let private = &guest["objects"][&key];
+            assert!(private.is_object());
+            assert_eq!(owner["objects"][&key]["name"], "Forest");
+            assert_eq!(owner["objects"][&key]["card_id"], card_id.0);
+            let printing = &owner["objects"][&key]["printing"];
+            let collector = printing["collector_number"]
+                .as_str()
+                .expect("assigned collector");
+            assert!(matches!(collector, "272" | "273"));
+            let expected = json!({
+                "set_code": "m21", "collector_number": collector, "automatic_art_catalog_version": 1
+            });
+            for field in ["printing", "base_printing"] {
+                assert_eq!(owner["objects"][&key][field], expected);
+                assert!(private.get(field).is_none());
+            }
+            for token in &tokens {
+                session
+                    .handle_action(
+                        token,
+                        GameAction::MulliganDecision {
+                            choice: MulliganChoice::Keep,
+                        },
+                    )
+                    .unwrap();
+            }
+            for _ in 0..8 {
+                if session.state.phase == Phase::PreCombatMain {
+                    break;
+                }
+                let WaitingFor::Priority { player } = session.state.waiting_for else {
+                    panic!("expected priority on the way to main phase");
+                };
+                session
+                    .handle_action(&tokens[usize::from(player.0)], GameAction::PassPriority)
+                    .unwrap();
+            }
+            let (broadcast, ..) = session
+                .handle_action(
+                    &tokens[0],
+                    GameAction::PlayLand {
+                        object_id: id,
+                        card_id,
+                    },
+                )
+                .expect("host plays the stamped land");
+            assert_eq!(broadcast.objects[&id].zone, Zone::Battlefield);
+            for seat in [PlayerId(0), PlayerId(1)] {
+                let wire = to_value(filter_state_for_player(&broadcast, seat)).unwrap();
+                let public = &wire["objects"][&key];
+                assert_eq!(public["name"], "Forest");
+                assert_eq!(public["card_id"], card_id.0);
+                for field in ["printing", "base_printing"] {
+                    assert_eq!(public[field], expected);
+                }
+            }
+            session.mark_disconnected(PlayerId(1));
+            (tokens[1].clone(), id, card_id, expected)
+        };
+        manager.record_disconnect(&code, PlayerId(1), std::time::Instant::now());
+        let restored = handle_reconnect(&mut manager, &code, &guest_token).expect("guest rejoins");
+        assert_eq!(restored.objects[&id].zone, Zone::Battlefield);
+        let wire = to_value(restored).unwrap();
+        let public = &wire["objects"][id.0.to_string()];
+        assert_eq!(public["name"], "Forest");
+        assert_eq!(public["card_id"], card_id.0);
+        for field in ["printing", "base_printing"] {
+            assert_eq!(public[field], expected);
+        }
+    }
+
+    #[test]
+    fn native_session_serializes_marked_art_only_for_disclosed_faces() {
+        use engine::game::zones::create_object;
+        use engine::types::{display_only::DisplayOnly, identifiers::CardId, zones::Zone};
+
+        let mut mgr = SessionManager::new();
+        let (code, host_token) = mgr.create_game(make_deck(), None);
+        let (guest_token, _) = join_game(&mut mgr, &code, make_deck(), None).unwrap();
+        let marked = serde_json::json!({
+            "set_code":"m21","collector_number":"272","automatic_art_catalog_version":1
+        });
+        let [public, hand, foretold] = {
+            let mut session = mgr.try_session(&code).unwrap();
+            [Zone::Battlefield, Zone::Hand, Zone::Exile].map(|zone| {
+                let id = create_object(
+                    &mut session.state,
+                    CardId(271),
+                    PlayerId(0),
+                    "Forest".into(),
+                    zone,
+                );
+                let object = session.state.objects.get_mut(&id).unwrap();
+                if zone == Zone::Exile {
+                    object.face_down = true;
+                    object.foretold = true;
+                }
+                let printing = serde_json::from_value(marked.clone()).unwrap();
+                object.printing = DisplayOnly::new(Some(std::sync::Arc::new(printing)));
+                object.base_printing = object.printing.clone();
+                id
+            })
+        };
+        for (token, sees_hand) in [(&host_token, true), (&guest_token, false)] {
+            let state = handle_reconnect(&mut mgr, &code, token).unwrap();
+            let wire = serde_json::to_value(state).unwrap();
+            for carrier in ["printing", "base_printing"] {
+                assert_eq!(wire["objects"][public.0.to_string()][carrier], marked);
+                for id in [hand, foretold] {
+                    let private = &wire["objects"][id.0.to_string()];
+                    assert!(private.is_object());
+                    if sees_hand {
+                        assert_eq!(private[carrier], marked);
+                    } else {
+                        assert!(private.get(carrier).is_none());
+                    }
+                }
+            }
+        }
+    }
+
     /// `GameState::new` leaves `interaction_session_id` as `None`, and while it is
     /// unset every `derive_viewer_interaction` call returns `AuthorityUnbound` with
     /// zero opportunities. Nothing self-heals it: `ensure_interaction_authority`
@@ -10209,10 +10371,7 @@ mod tests {
             section: DeckSection::MainDeck,
             name: "Forest".to_string(),
             count: 1,
-            printing: CardPrinting {
-                set_code: "lea".to_string(),
-                collector_number: "294".to_string(),
-            },
+            printing: CardPrinting::owner("lea", "294"),
         }];
 
         let resolver = ConvertingResolver;

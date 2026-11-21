@@ -4851,6 +4851,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         protection_does_not_remove: a_protection_does_not_remove,
         room_door: a_room_door,
         granting_object: a_granting_object,
+        bound_actor: a_bound_actor,
     } = a;
     let StaticDefinition {
         mode: b_mode,
@@ -4870,6 +4871,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         protection_does_not_remove: b_protection_does_not_remove,
         room_door: b_room_door,
         granting_object: b_granting_object,
+        bound_actor: b_bound_actor,
     } = b;
     a_mode == b_mode
         && a_affected == b_affected
@@ -4887,6 +4889,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         && a_protection_does_not_remove == b_protection_does_not_remove
         && a_room_door == b_room_door
         && a_granting_object == b_granting_object
+        && a_bound_actor == b_bound_actor
 }
 
 /// Do two parses CONSUME the same thing? Compares everything the ENGINE READS and
@@ -9438,7 +9441,9 @@ fn is_anaphoric_entry_counters_clause(sentence: &str) -> bool {
 /// with an optional source-keyword condition such as Ram Through's "If the
 /// creature you control has trample" prefix. The body remains the same
 /// CR 120.4a redirect; only the source-keyword gate is optional.
-fn parse_excess_damage_to_controller_rider(input: &str) -> OracleResult<'_, Option<KeywordKind>> {
+pub(crate) fn parse_excess_damage_to_controller_rider(
+    input: &str,
+) -> OracleResult<'_, Option<KeywordKind>> {
     /// CR 608.2c + CR 702: Parse the source-referential keyword gate.
     fn parse_source_keyword_condition(input: &str) -> OracleResult<'_, KeywordKind> {
         // This is not parse_inner_condition: Ram Through's definite phrase

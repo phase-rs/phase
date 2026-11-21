@@ -1424,6 +1424,7 @@ fn ward_multi_sacrifice_payment_reparks_each_replacement_before_effect_resolved(
         )),
         remaining: 1,
         min_total_power: Some(2),
+        trigger_event: None,
     };
 
     let initial = runner
@@ -1533,6 +1534,7 @@ fn ward_sequential_sacrifice_payment_reprompts_only_after_replacement_resolves()
         )),
         remaining: 2,
         min_total_power: None,
+        trigger_event: None,
     };
 
     let initial = runner
@@ -1644,6 +1646,7 @@ fn ward_sacrifice_payment_completes_synchronously_without_replacements() {
         )),
         remaining: 1,
         min_total_power: Some(2),
+        trigger_event: None,
     };
     let aggregate = aggregate_runner
         .act(GameAction::SelectCards {
@@ -1689,6 +1692,7 @@ fn ward_sacrifice_payment_completes_synchronously_without_replacements() {
         )),
         remaining: 2,
         min_total_power: None,
+        trigger_event: None,
     };
     let first = sequential_runner
         .act(GameAction::SelectCards {
@@ -13866,12 +13870,15 @@ fn targeted_sacrifice_reparks_replacement_before_terminal_effect_resolved() {
 
     let first_resumed = runner
         .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("the first replacement delivers and re-parks the second sacrifice");
+        .expect("the first replacement queues its move and re-parks the second sacrifice");
     assert!(matches!(
         first_resumed.waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
-    assert_eq!(runner.state().objects[&first].zone, Zone::Exile);
+    // CR 616.1: the answer decides how the first permanent moves, but the two
+    // sacrifices are one simultaneous action: nothing moves until the second
+    // permanent's replacements have been consulted too.
+    assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
     assert!(
         !initial_events
@@ -13892,6 +13899,7 @@ fn targeted_sacrifice_reparks_replacement_before_terminal_effect_resolved() {
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("the remaining selected sacrifice and terminal tail resolve");
     assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(runner.state().objects[&first].zone, Zone::Exile);
     assert_eq!(runner.state().objects[&second].zone, Zone::Exile);
     assert_eq!(runner.state().last_effect_count, Some(2));
     assert_eq!(

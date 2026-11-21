@@ -9,6 +9,7 @@ use super::{
     mana_transform::*, restriction::*, same_is_true::*, type_change::*,
 };
 use crate::parser::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
+use crate::types::ability::Designation;
 use crate::types::statics::ProhibitionScope;
 
 /// CR 201.5: Consume a self-reference subject — `~` (produced by
@@ -1496,6 +1497,38 @@ pub(crate) fn parse_static_line_inner(
                     StaticDefinition::continuous()
                         .affected(TargetFilter::Typed(tf))
                         .modifications(vec![ContinuousModification::ChangeController])
+                        .description(text.to_string()),
+                );
+            }
+        }
+    }
+
+    // --- "The monarch controls enchanted creature" (Fealty to the Realm pattern) ---
+    // CR 303.4e + CR 613.1b + CR 725.5: Aura-based DESIGNATION-anchored
+    // control. Structural twin of the Control Magic arm above — same affected
+    // filter (`parse_type_phrase_folding` + `EnchantedBy`, so any future
+    // "monarch controls enchanted X" printing parses with no new code), but
+    // the controller source is the live monarch
+    // (`ChangeControllerToDesignation`), not the Aura's controller.
+    // Fail-closed: a non-empty remainder (extra clause after the type phrase)
+    // falls through to honest-Unimplemented, never a partial control grant.
+    if let Some(type_word) = nom_tag_lower(
+        tp.lower.trim_end_matches('.'),
+        tp.lower.trim_end_matches('.'),
+        "the monarch controls enchanted ",
+    ) {
+        let (type_filter, remainder) = parse_type_phrase_folding(type_word);
+        if remainder.is_empty() {
+            if let TargetFilter::Typed(mut tf) = type_filter {
+                tf.properties.push(FilterProp::EnchantedBy);
+                return Some(
+                    StaticDefinition::continuous()
+                        .affected(TargetFilter::Typed(tf))
+                        .modifications(vec![
+                            ContinuousModification::ChangeControllerToDesignation {
+                                designation: Designation::Monarch,
+                            },
+                        ])
                         .description(text.to_string()),
                 );
             }
@@ -3989,8 +4022,13 @@ pub(crate) fn parse_static_line_inner(
     //
     // Cause classification by phrasing:
     // - "being dealt damage causes" / "dealt damage causes" — Wayta, Trainer
-    //   Prodigy (ControlledCreatureDealtDamage).
+    //   Prodigy (ControlledCreature { DealtDamage }); "becoming the target of"
+    //   — Valiant Emberkin (BecameTarget); "dealing combat damage to a player
+    //   causes" — Felix Five-Boots (DealsCombatDamageToPlayer).
     // - "attacking causes" — Isshin, Two Heavens as One (CreatureAttacking).
+    // - "you gaining life causes" / "a player drawing a card causes" — Dr.
+    //   Beverly Crusher, Krang, the All-Powerful (PlayerAction); "turning a
+    //   face-down permanent face up causes" — Panoptic Projektor (TurnedFaceUp).
     // - "entering" / "enters the battlefield" / "enters" — Panharmonicon-class
     //   (EntersBattlefield). Panharmonicon itself names "artifact or creature
     //   entering", so both CoreTypes qualify; narrower wordings ("creature
@@ -4032,14 +4070,40 @@ pub(crate) fn parse_static_line_inner(
             }
             // An unqualified "a spell" leaves core_types empty = any spell.
             TriggerCause::ControllerCastOrCopiedSpell { core_types }
+        } else if nom_primitives::scan_contains(tp.lower, "becoming the target of") {
+            // CR 603.2d + CR 115.1: "a creature you control becoming the target
+            // of a spell or ability causes" (Valiant Emberkin).
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::BecameTarget,
+            }
+        } else if nom_primitives::scan_contains(
+            tp.lower,
+            "a creature you control dealing combat damage to a player causes",
+        ) {
+            // CR 603.2d + CR 510.2: "a creature you control dealing combat
+            // damage to a player causes" (Felix Five-Boots).
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealsCombatDamageToPlayer,
+            }
         } else if nom_primitives::scan_contains(tp.lower, "being dealt damage causes")
             || nom_primitives::scan_contains(tp.lower, "dealt damage causes")
         {
-            TriggerCause::ControlledCreatureDealtDamage
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealtDamage,
+            }
         } else if nom_primitives::scan_contains(tp.lower, "attacking causes") {
             TriggerCause::CreatureAttacking
         } else if nom_primitives::scan_contains(tp.lower, "dying causes") {
             TriggerCause::CreatureDying
+        } else if let Some(cause) = parse_player_action_cause(tp.lower) {
+            cause
+        } else if nom_primitives::scan_preceded(tp.lower, |i| {
+            tag::<_, _, OracleError<'_>>("turning a face-down permanent face up causes ").parse(i)
+        })
+        .is_some()
+        {
+            // CR 116.2b + CR 708.8: Panoptic Projektor.
+            TriggerCause::TurnedFaceUp
         } else if let Some(cause) = parse_battlefield_transition_cause(tp.lower) {
             cause
         } else if nom_primitives::scan_contains(tp.lower, "entering")
@@ -4066,7 +4130,30 @@ pub(crate) fn parse_static_line_inner(
                 core_types.push(CoreType::Planeswalker);
             }
             // Empty core_types (e.g. "a permanent entering") means any type.
-            TriggerCause::EntersBattlefield { core_types }
+            // CR 603.2d: "another permanent entering" (The Fish Brewer) is not
+            // caused by the doubler's own entering.
+            let entrant = if tag::<_, _, OracleError<'_>>("if another ")
+                .parse(tp.lower)
+                .is_ok()
+            {
+                CausingObject::OtherThanDoubler
+            } else {
+                CausingObject::Any
+            };
+            TriggerCause::EntersBattlefield {
+                core_types,
+                entrant,
+            }
+        } else if nom_primitives::scan_preceded(tp.lower, |i| {
+            tag::<_, _, OracleError<'_>>("causes a triggered ability").parse(i)
+        })
+        .is_some()
+        {
+            // CR 603.2d: a printed cause clause no arm above types must not
+            // degrade to the unrestricted `Any`, which would double triggers
+            // the clause excludes (the doubler's own included). Decline so the
+            // line stays a flagged gap.
+            return None;
         } else {
             TriggerCause::Any
         };
@@ -4189,6 +4276,36 @@ fn parse_zone_change_qualifiers(lower: &str) -> Vec<ZoneChangeQualifier> {
         qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Planeswalker));
     }
     qualifiers
+}
+
+/// CR 603.2d: "<player> <action> causes" — a doubler's player-action cause:
+/// "you gaining life causes" (Dr. Beverly Crusher, CR 119.3) or "a player
+/// drawing a card causes" (Krang, the All-Powerful, CR 121.1). The player and
+/// the action are independent axes.
+fn parse_player_action_cause(lower: &str) -> Option<TriggerCause> {
+    let (_, (player, action), _) = nom_primitives::scan_preceded(lower, |i| {
+        terminated(
+            (
+                terminated(
+                    alt((
+                        value(
+                            PlayerRelation::Controller,
+                            tag::<_, _, OracleError<'_>>("you"),
+                        ),
+                        value(PlayerRelation::All, tag("a player")),
+                    )),
+                    tag(" "),
+                ),
+                alt((
+                    value(PlayerCauseAction::GainedLife, tag("gaining life")),
+                    value(PlayerCauseAction::DrewCard, tag("drawing a card")),
+                )),
+            ),
+            tag(" causes "),
+        )
+        .parse(i)
+    })?;
+    Some(TriggerCause::PlayerAction { player, action })
 }
 
 /// CR 603.6a + CR 603.6c: Parse Gandalf-class battlefield transition causes.

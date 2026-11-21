@@ -1384,7 +1384,8 @@
       "title": "{{effect}} Unless You Pay",
       "titleChooseOne": "{{effect}} Unless You Pay One",
       "dontPay": "Don’t Pay",
-      "takeEffect": "Take the Effect"
+      "takeEffect": "Take the Effect",
+      "priorChoice": "Player {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "Splice onto Arcane?",
@@ -1593,7 +1594,6 @@
     },
     "search": {
       "title": "Search Library",
-      "instructionWithTitle": "{{title}}: {{instruction}}",
       "subtitleExact_one": "Choose {{count}} card",
       "subtitleExact_other": "Choose {{count}} cards",
       "subtitleUpTo_one": "Choose up to {{count}} card",
@@ -2064,7 +2064,8 @@
     "scrollLeft": "Scroll left",
     "scrollRight": "Scroll right",
     "confirm": "Confirm",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Adventure",
@@ -2636,6 +2637,9 @@
     "partitionSubtitle": "Separate your creatures into two piles. {{chooser}} will choose one.",
     "partitionSubtitleRemaining_one": "Separate your creatures into two piles. {{chooser}} will choose one. ({{count}} more player after you)",
     "partitionSubtitleRemaining_other": "Separate your creatures into two piles. {{chooser}} will choose one. ({{count}} more players after you)",
+    "partitionInstruction": "{{chooser}} chooses one",
+    "partitionInstructionRemaining_one": "{{chooser}} chooses one ({{count}} more player after you)",
+    "partitionInstructionRemaining_other": "{{chooser}} chooses one ({{count}} more players after you)",
     "pileALabel": "Pile A:",
     "pileBLabel": "Pile B:",
     "pileAria": "{{name}} — pile {{pile}}",

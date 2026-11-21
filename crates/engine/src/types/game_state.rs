@@ -937,6 +937,47 @@ mod legacy_trigger_definition_ref_map {
     }
 }
 
+/// CR 615.13 + CR 120.3: legacy save bridge for the parked-batch
+/// prevention tally. Before recipient tracking, the tally serialized as
+/// `(key, amount)` tuples with no damage recipient; the current shape
+/// names the recipient per entry. An EMPTY legacy tally migrates exactly
+/// (nothing was prevented, so there is nothing to attribute); a POPULATED
+/// legacy tally is rejected with an explicit diagnosis — its recipients
+/// cannot be recovered and must not be guessed (a wrong recipient would
+/// fire a shield's rider against damage meant for someone else). The shape
+/// change carries a protocol version bump (the `full` and `wire` surfaces);
+/// this bridge governs what a legacy payload that still reaches the
+/// deserializer becomes: only saves suspended mid-batch with a populated
+/// tally are affected, and they fail LOUDLY at the restore boundary
+/// instead of deserializing into a misattributed batch.
+fn deserialize_prevention_tally_with_legacy_reject<'de, D>(
+    deserializer: D,
+) -> Result<Vec<PreventedDamageEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Current(PreventedDamageEntry),
+        Legacy((AppliedReplacementKey, i32)),
+    }
+    let mut out = Vec::new();
+    for entry in Vec::<Wire>::deserialize(deserializer)? {
+        match entry {
+            Wire::Current(current) => out.push(current),
+            Wire::Legacy((key, amount)) => {
+                return Err(serde::de::Error::custom(format!(
+                    "legacy prevention tally entry (key={key:?}, amount={amount}) names \
+                     no damage recipient; saves suspended mid-batch before recipient \
+                     tracking cannot resume",
+                )))
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Deserializes the object store and validates the one legacy trigger shape
 /// that can be materialized without guessing: a complete ordered payload list
 /// proven by the persisted printed base slots. Runtime copied/granted payloads
@@ -3573,12 +3614,7 @@ pub enum DamagePostLossStage {
 /// lifelink share was already folded into `lifelink_by_source` at park time),
 /// so the post-replacement funnel never drains it directly. The snapshot
 /// carries source identity/incarnation (CR 400.7), controller (CR 702.15b),
-/// keywords, and `lifelink_bonus`; the pre-damage loyalty/defense below ride
-/// alongside it (CR 120.10 measures planeswalker/battle excess against the
-/// values *before* the damage was dealt, and loyalty removal already ran by
-/// park time). Creature excess still recomputes from post-counter state at
-/// resume (toughness/`damage_marked` are untouched by the counter placement),
-/// so the resumed record matches the never-paused path on both axes.
+/// keywords, and `lifelink_bonus`; the `excess` below rides alongside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingDamagePostCounter {
     /// CR 400.7: the damage context at pause time (source identity/incarnation,
@@ -3588,15 +3624,8 @@ pub struct PendingDamagePostCounter {
     pub target: TargetRef,
     /// The post-replacement damage amount.
     pub actual_amount: u32,
-    /// CR 120.10: the target's loyalty *before* the damage was dealt, captured
-    /// before loyalty removal (which runs ahead of the wither arm). `None`
-    /// when the target is not a planeswalker (or has no loyalty field).
-    #[serde(default)]
-    pub loyalty_before: Option<u32>,
-    /// CR 120.10: the target's defense *before* the damage was dealt, captured
-    /// before defense removal. `None` when the target is not a battle.
-    #[serde(default)]
-    pub defense_before: Option<u32>,
+    /// CR 120.4a + CR 120.10: the excess computed before the counters were placed; the resume never recomputes it.
+    pub excess: u32,
     /// CR 510.2: a combat leg's post-counter work, owned by the batch remnant
     /// rather than the shared drain (see the struct docs).
     #[serde(default)]
@@ -7037,7 +7066,7 @@ pub struct PendingMassLibraryOrderChoice {
 /// battlefield to its owner's graveyard.
 /// Per-player sacrifice choices for one simultaneous instruction such as
 /// "each player sacrifices a creature."
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PendingPlayerScopeSacrificeChoice {
     /// The scoped sacrifice ability template. The current chooser is rebound
     /// onto a clone before each prompt is built.
@@ -7105,6 +7134,96 @@ pub struct PendingPlayerScopeUnlessPayment {
     pub current_player: PlayerId,
     /// The typed sacrifice cost is retained to re-emit the next existing prompt.
     pub cost: AbilityCost,
+    /// CR 101.4: the sacrifices the paying seats chose, pinned to the
+    /// permanents they were (CR 400.7). Nothing is sacrificed until the last
+    /// seat has answered; then the batch and the tokens happen together.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub payments: Vec<PlayerScopeUnlessSelection>,
+}
+
+/// CR 101.4 + CR 118.12a: The action a seat chose to avert a scoped unless
+/// instruction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlayerScopeUnlessAction {
+    Sacrifice,
+    Discard,
+}
+
+/// CR 101.4 + CR 118.12a: One seat's recorded payment choice in an open
+/// player-scope unless poll. Nothing moves until the last seat has answered.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerScopeUnlessSelection {
+    pub player: PlayerId,
+    pub action: PlayerScopeUnlessAction,
+    pub objects: Vec<ObjectIncarnationRef>,
+}
+
+/// CR 101.4 + CR 118.12a: An APNAP poll for a player-scoped "[instruction]
+/// unless [that player] [sacrifices / discards ...]" instruction.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PendingPlayerScopeUnlessPunishment {
+    /// The scoped ability template, re-entered at settlement for decliners.
+    pub ability: Box<ResolvedAbility>,
+    /// The seat whose prompt is currently live.
+    pub current_player: PlayerId,
+    /// Remaining seats in APNAP order.
+    pub remaining_players: Vec<PlayerId>,
+    /// Seats that declined (will suffer the instruction at settlement).
+    pub declining_players: Vec<PlayerId>,
+    /// Seats that chose to pay, with their pinned selections.
+    pub payments: Vec<PlayerScopeUnlessSelection>,
+    /// Multi-pick buffer for the current seat while `remaining > 1`.
+    pub current_picks: Vec<ObjectIncarnationRef>,
+    /// Trigger event captured when the poll opened, restored at settlement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_event: Option<GameEvent>,
+}
+
+/// CR 101.4 + CR 118.12a: Settling payload for a completed player-scope unless
+/// poll, preserved across any CR 616.1 replacement pause on a chosen discard.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlayerScopeUnlessSettlement {
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    pub discards: Vec<(PlayerId, ObjectIncarnationRef)>,
+    pub sacrifices: Vec<(PlayerId, Vec<ObjectIncarnationRef>)>,
+    /// What happens to the players who declined, after every payment. `None`
+    /// when nothing is owed (an aggregate token instruction nobody declined).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub punishment: Option<Box<ResolvedAbility>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_event: Option<GameEvent>,
+}
+
+/// CR 101.4 + CR 701.21a: A single sacrifice move whose outer and inner
+/// replacement passes already ran while all co-sacrificed permanents remained on
+/// the battlefield, queued for simultaneous delivery.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PendingSacrificeDelivery {
+    pub sacrifice: PendingSacrificeMove,
+    /// CR 614.6: the post-replacement work the consult installed for this move
+    /// (Kalitas, Traitor of Ghet's "create a 2/2 black Zombie"). Each queued
+    /// move keeps its own, so consulting the next move cannot displace it, and
+    /// it runs when this move is delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rider: Option<PostReplacementDrain>,
+}
+
+/// CR 701.21a: The approved shape of a consulted sacrifice move.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PendingSacrificeMove {
+    Sacrifice {
+        object_id: ObjectId,
+        player_id: PlayerId,
+        zone_event: ProposedEvent,
+    },
+    InnerPrevented {
+        object_id: ObjectId,
+        player_id: PlayerId,
+    },
+    DirectMove {
+        zone_event: ProposedEvent,
+    },
 }
 
 /// CR 101.4 + CR 701.21a: Accumulated terminal state for a simultaneous
@@ -7112,7 +7231,7 @@ pub struct PendingPlayerScopeUnlessPayment {
 /// The individual choice queue can become empty while the final proposed
 /// sacrifice is still awaiting replacement resolution, so this state must be
 /// carried independently of the remaining selections.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PendingPlayerScopeSacrificeCompletion {
     /// Every permanent announced for this sacrifice action. The ids scope
     /// event-derived bookkeeping to this batch when a replacement resumes.
@@ -7167,6 +7286,17 @@ pub struct PendingPlayerScopeSacrificeCompletion {
     /// on the same typed batch when the selected sacrifice pauses.
     #[serde(default)]
     pub propagate_parent_context: bool,
+    /// CR 101.4: Pre-consulted sacrifice moves awaiting delivery after every
+    /// co-sacrificed permanent in the batch has cleared replacement consult.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_deliveries: Vec<PendingSacrificeDelivery>,
+    /// CR 101.4 + CR 616.1: the sacrifice whose replacement consult a CR 616.1
+    /// choice interrupted, before every selection was consulted. Answering
+    /// that choice only finishes this sacrifice's consult: its approved move
+    /// joins `pending_deliveries`, and nothing moves until the rest of the
+    /// batch has been consulted too. `None` while the batch is delivering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consult_pause: Option<PendingSacrificeProvenance>,
 }
 
 /// CR 702.110b + CR 701.21a + CR 616.1: A per-sacrifice consequence carried
@@ -9614,6 +9744,8 @@ pub enum CopyEntryResumeStage {
     ChoiceSettled,
     /// The acquired choice paused before counter evaluation.
     BeforeCounters(Box<CopyEntryPendingCounters>),
+    /// The liminal proposal settled the copied replacements before entering.
+    ReplacementsSettled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -9759,12 +9891,14 @@ pub enum PendingCounterPostAction {
         entry_events: TokenEntryEventEmission,
     },
     /// CR 707.2 + CR 122.6a: create the rest of a liminal copy batch after a
-    /// committed token's counter pause. A liminal batch has no creation counters
-    /// and each token's scheduled counters are its own, so none is carried.
+    /// committed token's counter pause. Carry the creation seed, not the
+    /// counters earned by the committed token's own entry.
     ContinueLiminalCopyTokenBatch {
         owner: PlayerId,
         copy: Box<CopyTokenSpec>,
         enter_tapped: EtbTapState,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(CounterType, u32)>,
         remaining_count: u32,
     },
     /// CR 400.7 + CR 616.1: realize the token battlefield entry parked in
@@ -11240,6 +11374,11 @@ pub enum PendingCostMoveResume {
         player: PlayerId,
         pending_effect: Box<ResolvedAbility>,
         resume: WardSacrificePaymentResume,
+        /// CR 608.2k: the Ward prompt's trigger-event snapshot,
+        /// carried across the pause so a shortfalling resume settles unpaid
+        /// with the same "that spell" context the offer had.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_event: Option<GameEvent>,
     },
     ReplacementMayCost {
         source_id: ObjectId,
@@ -11409,6 +11548,9 @@ pub enum PendingCostMoveResume {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         departure_record_indices: Vec<usize>,
     },
+    /// CR 101.4 + CR 118.12a + CR 616.1: A settled player-scope unless poll
+    /// whose cost discard paused on a replacement choice.
+    PlayerScopeUnlessSettlement(Box<PlayerScopeUnlessSettlement>),
 }
 
 /// CR 702.37e: The kind of cost move being performed to turn a permanent face up.
@@ -11478,6 +11620,7 @@ impl PendingCostMoveResume {
             | Self::LoyaltyActivation { .. }
             | Self::CounterAdditionUnlessPayment { .. }
             | Self::RandomDiscardUnlessPayment(_)
+            | Self::PlayerScopeUnlessSettlement(_)
             | Self::TurnFaceUpCostMove { .. } => None,
         }
     }
@@ -11517,7 +11660,8 @@ impl PendingCostMoveResume {
             | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
             | PendingCostMoveResume::UnlessBouncePayment { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
-            | PendingCostMoveResume::RandomDiscardUnlessPayment(_) => false,
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(_)
+            | PendingCostMoveResume::PlayerScopeUnlessSettlement(_) => false,
         }
     }
 
@@ -11556,6 +11700,7 @@ impl PendingCostMoveResume {
             | PendingCostMoveResume::LoyaltyActivation { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
             | PendingCostMoveResume::RandomDiscardUnlessPayment(_)
+            | PendingCostMoveResume::PlayerScopeUnlessSettlement(_)
             | PendingCostMoveResume::TurnFaceUpCostMove { .. } => None,
         }
     }
@@ -12325,6 +12470,7 @@ impl GameState {
                 | PendingCostMoveResume::LoyaltyActivation { .. }
                 | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                 | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                | PendingCostMoveResume::PlayerScopeUnlessSettlement(..)
                 | PendingCostMoveResume::TurnFaceUpCostMove { .. } => None,
             },
             PendingCastOwner::DiscardForCost => match self.pending_discard_for_cost.as_deref()? {
@@ -12374,6 +12520,7 @@ impl GameState {
                 | PendingCostMoveResume::LoyaltyActivation { .. }
                 | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                 | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                | PendingCostMoveResume::PlayerScopeUnlessSettlement(..)
                 | PendingCostMoveResume::TurnFaceUpCostMove { .. } => None,
             },
             PendingCastOwner::DiscardForCost => {
@@ -12787,6 +12934,11 @@ fn visit_cost_move_resume_events(
         }
         PendingCostMoveResume::RandomDiscardUnlessPayment(resume) => {
             if let Some(event) = resume.trigger_event.as_mut() {
+                f(event);
+            }
+        }
+        PendingCostMoveResume::PlayerScopeUnlessSettlement(settlement) => {
+            if let Some(event) = settlement.trigger_event.as_mut() {
                 f(event);
             }
         }
@@ -14216,7 +14368,7 @@ pub enum ReplacementChoiceKind {
 pub enum ReplacementAutoChoiceIdentity {
     Definition {
         source: ObjectIncarnationRef,
-        index: usize,
+        index: u64,
         definition: Box<crate::types::ability::ReplacementDefinition>,
         /// CR 615.5: the shield's runtime continuation, held by value so identity is the
         /// inline definition and never a handle (allocation history).
@@ -22225,6 +22377,13 @@ pub enum WaitingFor {
         /// reaches zero.
         #[serde(default)]
         min_total_power: Option<i32>,
+        /// CR 608.2k: the trigger event the Ward counter reads
+        /// "that spell" / "that ability" from when the payment shortfalls and
+        /// the Ward settles unpaid — snapshot at offer (the resolving trigger
+        /// has left the stack by answer time, and the ambient event is gone
+        /// once the payer elects to pay).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_event: Option<GameEvent>,
     },
     /// CR 118.12: Player must choose permanent(s) to return to hand as unless cost.
     UnlessBounceChoice {
@@ -23258,6 +23417,36 @@ pub struct PendingLifelinkGain {
     pub amount: u32,
 }
 
+/// CR 510.2 + CR 615.13 + CR 120.3: the in-flight combat-damage prevention
+/// aggregate — prevented amount per shield AND per recipient, for the duration of
+/// one simultaneous batch. `PreventedDamageEntry` is the serialized `Vec` form the
+/// same data takes once the batch is parked or drained.
+pub type CombatPreventionTally = HashMap<(AppliedReplacementKey, TargetRef), i32>;
+
+/// CR 510.2 + CR 615.13 + CR 120.3: one simultaneous combat-damage batch's
+/// prevented amount, per shield AND per RECIPIENT.
+///
+/// The recipient is carried, never re-derived. A shield's own
+/// `damage_target_filter` is a PREDICATE over recipients ("damage that would be
+/// dealt to you and creatures you control"), not the recipient of any particular
+/// event, so one shield routinely prevents damage for several recipients in one
+/// CR 510.2 simultaneous batch. CR 120.3 makes "player or permanent" a
+/// load-bearing property of a damage event, so the aggregate must name the
+/// recipient the pipeline actually prevented damage for.
+///
+/// CR 615.13 still fixes the TRIGGER COUNT at one per prevention application:
+/// `fire_batch_prevention_riders` groups these by `key` and fires each shield's
+/// CR 615.5 rider exactly once, against the group's total.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreventedDamageEntry {
+    pub key: AppliedReplacementKey,
+    /// CR 120.3: the actual damage recipient, threaded from the replacement
+    /// applier that prevented the damage rather than inferred from the shield's
+    /// filter.
+    pub recipient: TargetRef,
+    pub amount: i32,
+}
+
 /// CR 510.2 + CR 616.1: one combat-damage assignment still owed after a
 /// Phase C pause, with its post-Phase-B survivor. Owned (unlike the borrowed
 /// `BatchEntry`) so the batch remnant round-trips through saves and AI
@@ -23375,8 +23564,13 @@ pub struct PendingCombatLifelink {
     /// CR 615.5 + CR 615.13: each shield's aggregate prevented amount, so the
     /// completion tail can fire every rider exactly once against the amount THIS
     /// batch prevented. A `Vec` rather than the producer's `HashMap`: an enum key
-    /// is not a JSON map key, and the record is serialized.
-    pub prevention_tally: Vec<(AppliedReplacementKey, i32)>,
+    /// is not a JSON map key, and the record is serialized. CR 120.3: the
+    /// RECIPIENT rides along in each entry, because one shield's filter is a
+    /// predicate over recipients and a single batch routinely prevents damage for
+    /// several of them; the entries are sorted so each shield's recipients stay
+    /// contiguous and the CR 615.5 rider can still fire once per shield.
+    #[serde(deserialize_with = "deserialize_prevention_tally_with_legacy_reject")]
+    pub prevention_tally: Vec<PreventedDamageEntry>,
     /// CR 510.4: which sub-step owns this batch. Snapshotted because
     /// `combat.first_strike_done` mutates during the resume.
     pub sub_step: CombatDamageSubStep,
@@ -26170,6 +26364,34 @@ impl<'de> Deserialize<'de> for LiminalEntrant {
     }
 }
 
+/// CR 616.1c + CR 614.12: a liminal token entrant's own as-enters copy that has been chosen and
+/// placed on the entrant while the remaining entry replacements are rediscovered against it. Held
+/// on the entry across a prompt that rediscovery raises, so the answer resumes the selected
+/// copy's entry completion (copy chain, acquired entry counters, birth record) instead of
+/// abandoning it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenCopySettlement {
+    pub target_id: ObjectId,
+    /// The resolved copy effect (with the token's copy exceptions folded in) applied after the
+    /// entry commits.
+    pub ability: ResolvedAbility,
+    /// The one-shot entry-counter exceptions held out of `ability`.
+    pub held_exceptions: Vec<ContinuousModification>,
+    /// The entrant as it was before the chosen copy was placed on it.
+    pub original: LiminalEntrant,
+    /// The chosen copy's copiable values and display, for a birth that the copy redirects.
+    pub copy_values: Box<CopiableValues>,
+    pub copy_display: crate::game::game_object::DisplayIdentity,
+    /// The incarnation of the object the copy was chosen from (CR 400.7), the copy effect's
+    /// duration subject.
+    pub copy_incarnation: ObjectIncarnationRef,
+    pub staged_name: String,
+    /// `Some(n)`: the chosen copy's acquired entry replacements are offered with the entrant's
+    /// own, which keep their indices as the first `n` staged definitions (CR 707.5). `None`:
+    /// the entry finisher settles them after the entrant enters.
+    pub superseded_replacements: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiminalEntry {
     pub object: LiminalEntrant,
@@ -26201,6 +26423,9 @@ pub struct LiminalEntry {
         serialize_with = "crate::types::deterministic_serde::hash_set"
     )]
     pub replacement_applied: HashSet<AppliedReplacementKey>,
+    /// CR 616.1c: see [`TokenCopySettlement`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_settlement: Option<Box<TokenCopySettlement>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -28635,6 +28860,23 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_set")]
     pub attacked_defenders_this_turn: HashMap<PlayerId, HashSet<PlayerId>>,
+    /// CR 508.6: For each attacking player, the set of players they attacked
+    /// DIRECTLY this turn — `AttackTarget::Player(p)` declarations only, with
+    /// NO CR 508.5 defending-player collapse. A planeswalker/battle attack
+    /// records nothing here (its target is not a player), so this ledger
+    /// answers retrospective "attacked you" predicates exactly as the
+    /// Faramir, Prince of Ithilien ruling (2023-06-16) requires:
+    /// "Attacking a planeswalker you control or battle you're protecting
+    /// doesn't count as attacking you." The sibling
+    /// `attacked_defenders_this_turn` keeps serving defending-player and
+    /// explicit-disjunct consumers (Sandswirl Wanderglyph's "or a
+    /// planeswalker you control" relies on the collapse). Recorded in
+    /// `combat::commit_attack_declaration`, cleared at turn reset beside the
+    /// sibling. PlayerId-keyed, so removal-proof by construction — same
+    /// argument as the collapsed ledger.
+    #[serde(default)]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_set")]
+    pub attacked_players_directly_this_turn: HashMap<PlayerId, HashSet<PlayerId>>,
     /// CR 508.6: For each player, the defending players they declared
     /// attackers against during that player's MOST RECENT completed turn.
     /// Snapshotted from `attacked_defenders_this_turn` at cleanup
@@ -28994,6 +29236,10 @@ declare_game_state! {
     /// across one-seat sacrifice choices and replacement pauses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_player_scope_unless_payment: Option<Box<PendingPlayerScopeUnlessPayment>>,
+    /// CR 101.4 + CR 118.12a: APNAP poll for a player-scoped unless
+    /// instruction whose seats all answer before anything moves or resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_player_scope_unless_punishment: Option<Box<PendingPlayerScopeUnlessPunishment>>,
     /// CR 608.2c + CR 701.9a: a discard instruction parked by a
     /// replacement-application choice. See [`PendingDiscardBatch`], whose doc
     /// records why CR 616.1 does not govern this path.
@@ -30139,19 +30385,33 @@ declare_game_state! {
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
-    /// CR 510.2 + CR 615.5: Transient per-shield combat-damage prevention tally.
-    /// Set to `Some(empty)` by `replace_combat_damage_batch` for one simultaneous
-    /// combat-damage batch. Continuous all-damage and one-shot prevention shields
-    /// accumulate amounts under their `AppliedReplacementKey`; the combat resolver
-    /// fires each aggregate runtime rider once with the total.
-    /// `ShieldKind::PreventionOneShot` (Awe Strike) emits real per-recipient
-    /// source/recipient `DamagePrevented` events separately. `Prevention { All }`
-    /// with `consume_on_apply` (Impulsive Maneuvers' lose branch) uses the
-    /// continuous-All path and emits its aggregate event at the rider boundary.
-    /// Always `None` at every `apply()` boundary, so this execution-local field
-    /// is excluded from serialization and structural equality.
+    /// CR 510.2 + CR 615.7: Transient per-shield combat-damage prevention tally.
+    /// Set to `Some(empty)` by `apply_combat_damage` for the duration of one
+    /// simultaneous combat-damage batch. While `Some`, the `Prevention::All`
+    /// branch of the damage-replacement applier accumulates each prevented
+    /// amount into this map (keyed by the shield's `ReplacementId` AND the
+    /// CR 120.3 recipient the damage was headed at) instead of stamping
+    /// `last_effect_count` per source. After the batch, the combat resolver reads
+    /// the aggregate to emit one `DamagePrevented` per recipient and fire each
+    /// shield's `runtime_execute` rider exactly once (CR 615.13). Always `None`
+    /// at every `apply()` boundary, so it is excluded from serialization and
+    /// structural equality.
     #[serde(skip)]
-    pub combat_prevention_tally: Option<HashMap<AppliedReplacementKey, i32>>,
+    ///
+    /// Spelled out rather than written as the `CombatPreventionTally` alias on
+    /// purpose: `deterministic_game_state_serde`'s owner census parses this file
+    /// with `syn` and classifies every field whose declared type names `HashMap`.
+    /// Behind an alias the field vanishes from that census and the exhaustiveness
+    /// test fails with "missing expected owner". The alias exists only where
+    /// clippy's `type_complexity` lint demands one — `replace_combat_damage_batch`'s
+    /// return type.
+    pub combat_prevention_tally: Option<HashMap<(AppliedReplacementKey, TargetRef), i32>>,
+    /// CR 510.2 + CR 615.13: which simultaneous batch opened `combat_prevention_tally`: a combat
+    /// damage step's (CR 510.2), whose rider pauses settle inside the batch, or a noncombat
+    /// instruction's, whose riders wait for its damage. Opened and restored with the tally, so
+    /// execution-local and excluded from serialization and equality like it.
+    #[serde(skip)]
+    pub(crate) prevention_tally_batch: Option<DamageBatchKind>,
     /// CR 510.2 + CR 700.1 + CR 615.8 + CR 611.3a: what one simultaneous damage batch has
     /// settled. Only this ledger is suspended during independent follow-ups, then restored
     /// before the next portion; the prevention tally remains active. Restored to its prior
@@ -30178,6 +30438,13 @@ declare_game_state! {
 pub(crate) enum EventLosses {
     Recording(crate::types::ability::EventOutcomes),
     Immediate,
+}
+
+/// CR 510.2 + CR 615.13: the kind of simultaneous damage batch whose prevention tally is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DamageBatchKind {
+    Combat,
+    Noncombat,
 }
 
 /// The map-backed history entries `copy` does not share with `original`, a nested causes map
@@ -31483,6 +31750,15 @@ fn visit_cost_move_resume_chains<'a>(
             &resume.pending_effect,
             SuspendedChainEvent::Bound(resume.trigger_event.as_ref()),
         ),
+        PendingCostMoveResume::PlayerScopeUnlessSettlement(settlement) => settlement
+            .punishment
+            .as_deref()
+            .map_or(Ok(()), |punishment| {
+                f(
+                    punishment,
+                    SuspendedChainEvent::Bound(settlement.trigger_event.as_ref()),
+                )
+            }),
         PendingCostMoveResume::CollectEvidencePayment { resume, .. } => {
             visit_collect_evidence_resume_chains(resume, f)
         }
@@ -32062,6 +32338,12 @@ fn visit_suspended_chains<'a>(
     if let Some(payment) = state.pending_player_scope_unless_payment.as_deref() {
         suspended(&payment.pending_effect, SuspendedChainEvent::Ambient)?;
     }
+    if let Some(poll) = state.pending_player_scope_unless_punishment.as_deref() {
+        suspended(
+            &poll.ability,
+            SuspendedChainEvent::Bound(poll.trigger_event.as_ref()),
+        )?;
+    }
     // CR 608.2f + CR 701.9a: a discard paused mid fan-out resumes the clause for
     // the remaining players and then its outer chain, in the current resolution.
     if let Some(fan_out) = state
@@ -32557,6 +32839,15 @@ pub struct TransientContinuousEffect {
     /// Giant Growth") survives the source's zone change.
     #[serde(default)]
     pub source_name: String,
+    /// CR 109.5 + CR 701.21a: the installer-resolved actor this effect's
+    /// prohibition binds (`StaticDefinition::bound_actor` lowered through
+    /// install). `Some(player)` = installer-bound player bar (Call for Aid):
+    /// only that player is barred. `None` = object characteristic (Stilt-Man
+    /// grants, printed bars): every actor is barred. Rides inside the
+    /// journaled install command. Serde-defaulted: in-flight historical
+    /// effects predate installer-bound producers and stay object-wide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_actor: Option<PlayerId>,
 }
 
 /// CR 701.50a + CR 614.5 + CR 616.1f: deferred "then that creature connives"
@@ -34602,6 +34893,7 @@ impl GameState {
                 | PendingCostMoveResume::LoyaltyActivation { .. }
                 | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                 | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                | PendingCostMoveResume::PlayerScopeUnlessSettlement(..)
                 | PendingCostMoveResume::TurnFaceUpCostMove { .. } => false,
             });
         let deferred_life = self
@@ -38172,8 +38464,29 @@ impl GameState {
 
     /// CR 508.6: True if `attacker` declared one or more creatures attacking
     /// `defender` this turn (reads the per-turn attacked-defenders ledger).
+    /// SCOPE GUARD: this is the CR 508.5-COLLAPSED read (planeswalker/battle
+    /// attacks resolve to the defending player) — correct only for
+    /// defending-player and explicit-disjunct consumers. Retrospective
+    /// "attacked you" predicates without such a disjunct (Faramir) must use
+    /// `has_attacked_player_directly_this_turn` instead.
     pub fn has_attacked(&self, attacker: PlayerId, defender: PlayerId) -> bool {
         self.attacked_defenders_this_turn
+            .get(&attacker)
+            .is_some_and(|defenders| defenders.contains(&defender))
+    }
+
+    /// CR 508.6 + Faramir ruling 2023-06-16: True if `attacker` declared one
+    /// or more creatures attacking `defender` DIRECTLY this turn — the
+    /// `AttackTarget` was the player, not a planeswalker they control or a
+    /// battle they protect (those record nothing in
+    /// `attacked_players_directly_this_turn`). Backs
+    /// `AbilityCondition::PlayerAttackedPlayer`.
+    pub fn has_attacked_player_directly_this_turn(
+        &self,
+        attacker: PlayerId,
+        defender: PlayerId,
+    ) -> bool {
+        self.attacked_players_directly_this_turn
             .get(&attacker)
             .is_some_and(|defenders| defenders.contains(&defender))
     }
@@ -38649,6 +38962,7 @@ impl GameState {
             players_attacked_this_turn: HashSet::new(),
             attacking_creatures_this_turn: HashMap::new(),
             attacked_defenders_this_turn: HashMap::new(),
+            attacked_players_directly_this_turn: HashMap::new(),
             attacked_defenders_last_turn: Box::default(),
             creature_attacked_defenders_this_turn: HashMap::new(),
             creature_blocked_attackers_this_turn: HashSet::new(),
@@ -38701,6 +39015,7 @@ impl GameState {
             pending_player_scope_sacrifice_choice: None,
             pending_player_scope_choice: None,
             pending_player_scope_unless_payment: None,
+            pending_player_scope_unless_punishment: None,
             pending_discard_batch: None,
             pending_hero_event: None,
             pending_horde_reveal: None,
@@ -38833,6 +39148,7 @@ impl GameState {
             combat_prevention_tally: None,
             damage_batch_ledger: None,
             damage_event_losses: None,
+            prevention_tally_batch: None,
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),
             commander_declined_zone_return: HashSet::new(),
@@ -38960,6 +39276,24 @@ impl GameState {
         else {
             return false;
         };
+        // CR 702.82a: counters earned by this entrant's own replacement belong to
+        // its entry event, not the pristine batch payload used by later entrants.
+        if let Some(PendingLiminalEntryResume::Token {
+            source_id,
+            event:
+                crate::types::proposed_event::ProposedEvent::TokenEntry {
+                    entry_ref,
+                    enter_with_counters,
+                    ..
+                },
+            ..
+        }) = self.pending_liminal_entry_resume.as_mut()
+        {
+            if *source_id == id && *entry_ref == id {
+                enter_with_counters.push((counter_type, count));
+                return true;
+            }
+        }
         // The commit folds this list into the entry's counter pass in order, so
         // appending is what puts these counters after any the creating effect
         // already specified — CR 702.104a's "an ADDITIONAL N +1/+1 counters".
@@ -39395,6 +39729,7 @@ impl GameState {
             None,
             TransientContinuousEffectBindings::default(),
             None,
+            None,
         )
     }
 
@@ -39420,6 +39755,7 @@ impl GameState {
             condition,
             None,
             bindings,
+            None,
             None,
         )
     }
@@ -39454,10 +39790,12 @@ impl GameState {
             Some(end_permission),
             TransientContinuousEffectBindings::default(),
             None,
+            None,
         )
     }
 
     /// CR 611.2a + CR 113.7a + CR 400.7: `creating_ability` is the ability whose resolution creates this effect; an `UntilEvent` deadline is matched against that ability's own source (see `TransientContinuousEffect::duration_event_source`). When `Some`, `source_id` is that ability's source. Only `effect.rs::install_transient`, the GenericEffect installer, passes it. Every other install passes `None`: the three public wrappers and `add_simultaneous_transient_continuous_effects`, and through them static, replacement, cost and rules-generated installs and the other ability-driven effect handlers. These latch the live source, else its terminal battlefield departure.
+    /// CR 109.5 + CR 701.21a: `bound_actor` is the installer-resolved actor a prohibition binds (`StaticDefinition::bound_actor` lowered through install); `None` is an object-wide bar.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add_transient_continuous_effect_inner(
         &mut self,
@@ -39469,6 +39807,7 @@ impl GameState {
         condition: Option<StaticCondition>,
         end_permission: Option<EndEffectPermission>,
         bindings: TransientContinuousEffectBindings,
+        bound_actor: Option<PlayerId>,
         creating_ability: Option<&ResolvedAbility>,
     ) -> Option<u64> {
         debug_assert!(creating_ability.is_none_or(|ability| ability.source_id == source_id));
@@ -39490,6 +39829,7 @@ impl GameState {
                 condition,
                 end_permission,
                 bindings,
+                bound_actor,
                 creating_ability,
             )
         })
@@ -39529,6 +39869,7 @@ impl GameState {
                     None,
                     None,
                     bindings,
+                    None,
                     None,
                 );
             }
@@ -39581,6 +39922,7 @@ impl GameState {
         condition: Option<StaticCondition>,
         end_permission: Option<EndEffectPermission>,
         bindings: TransientContinuousEffectBindings,
+        bound_actor: Option<PlayerId>,
         creating_ability: Option<&ResolvedAbility>,
     ) -> u64 {
         let id = self.next_continuous_effect_id;
@@ -39679,6 +40021,7 @@ impl GameState {
                 end_permission,
                 granting_object: bindings.granting_object,
                 source_name,
+                bound_actor,
             },
             expected_installed_count: self.transient_continuous_effects.len(),
             resulting_next_continuous_effect_id: self.next_continuous_effect_id,
@@ -42573,6 +42916,7 @@ impl GameState {
             player_actions_this_turn: _,
             players_attacked_this_step: _,
             players_attacked_this_turn: _,
+            attacked_players_directly_this_turn: _,
             attacking_creatures_this_turn: _,
             attacked_defenders_this_turn: _,
             attacked_defenders_last_turn: _,
@@ -42714,6 +43058,7 @@ impl GameState {
             combat_prevention_tally: _,
             damage_batch_ledger: _,
             damage_event_losses: _,
+            prevention_tally_batch: _,
             liminal_entries: _,
             pending_liminal_entry_resume: _,
             entering_aura_authority: _,
@@ -42721,6 +43066,7 @@ impl GameState {
             pending_player_scope_sacrifice_choice: _,
             pending_player_scope_choice: _,
             pending_player_scope_unless_payment: _,
+            pending_player_scope_unless_punishment: _,
             pending_discard_batch: _,
             pending_exile_from_top_until: _,
             pending_mass_library_order_choice: _,
@@ -44203,6 +44549,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         players_attacked_this_turn: _,
         attacking_creatures_this_turn: _,
         attacked_defenders_this_turn: _,
+        attacked_players_directly_this_turn: _,
         attacked_defenders_last_turn: _,
         creature_attacked_defenders_this_turn: _,
         creature_blocked_attackers_this_turn: _,
@@ -44390,6 +44737,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         combat_prevention_tally: _,
         damage_batch_ledger: _,
         damage_event_losses: _,
+        prevention_tally_batch: _,
         // Post-rebase upstream additions (v0.21.x: #5515 discover + liminal mechanic).
         // Strict-compared by eq_except_growable's GameState PartialEq reuse (fail-safe:
         // a differing value is correctly not a fixed-point repeat); object-growth loops
@@ -44435,6 +44783,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_player_scope_sacrifice_choice: _,
         pending_player_scope_choice: _,
         pending_player_scope_unless_payment: _,
+        pending_player_scope_unless_punishment: _,
         pending_discard_batch: _,
         pending_hero_event: _,
         pending_horde_reveal: _,
@@ -44913,6 +45262,8 @@ impl PartialEq for GameState {
             && self.players_attacked_this_turn == other.players_attacked_this_turn
             && self.attacking_creatures_this_turn == other.attacking_creatures_this_turn
             && self.attacked_defenders_this_turn == other.attacked_defenders_this_turn
+            && self.attacked_players_directly_this_turn
+                == other.attacked_players_directly_this_turn
             && self.attacked_defenders_last_turn == other.attacked_defenders_last_turn
             && self.creature_attacked_defenders_this_turn
                 == other.creature_attacked_defenders_this_turn
@@ -44963,6 +45314,8 @@ impl PartialEq for GameState {
             && self.pending_player_scope_choice == other.pending_player_scope_choice
             && self.pending_player_scope_unless_payment
                 == other.pending_player_scope_unless_payment
+            && self.pending_player_scope_unless_punishment
+                == other.pending_player_scope_unless_punishment
             && self.pending_discard_batch == other.pending_discard_batch
             && self.pending_damage_post_loss == other.pending_damage_post_loss
             && self.pending_damage_post_counter == other.pending_damage_post_counter
@@ -46658,6 +47011,7 @@ mod tests {
         let projection = TokenProjection::materialize(state.objects[&object_id].clone());
         check(
             |attack_destination| LiminalEntry {
+                copy_settlement: None,
                 object: LiminalEntrant::Token(projection.clone()),
                 name: "Goblin".to_string(),
                 source_id: object_id,
@@ -46758,6 +47112,7 @@ mod tests {
                 remaining: vec![PositionedTokenBatch {
                     position: 1,
                     batch: TokenBatch {
+                        redirected_to: None,
                         owner: PlayerId(0),
                         spec: Box::new(spec),
                         copy: None,
@@ -48603,6 +48958,7 @@ mod tests {
             granting_object: None,
             duration_event_source: None,
             source_name: String::new(),
+            bound_actor: None,
         };
         let mut legacy = serde_json::to_value(effect).expect("effect serializes");
         legacy["duration_subject"] = serde_json::json!(9);
@@ -50081,12 +50437,9 @@ mod tests {
             .objects
             .get_mut(&id)
             .expect("fixture object exists")
-            .printing = DisplayOnly::new(printing.map(|tag| {
-            SharedPrinting::new(CardPrinting {
-                set_code: tag.to_string(),
-                collector_number: "7".to_string(),
-            })
-        }));
+            .printing = DisplayOnly::new(
+            printing.map(|tag| SharedPrinting::new(CardPrinting::owner(tag, "7"))),
+        );
         let record = state.objects[&id].snapshot_for_zone_change(
             id,
             Some(Zone::Battlefield),
@@ -50696,13 +51049,17 @@ mod tests {
                 total_damage: 3,
                 source_incarnations: vec![],
             }],
-            prevention_tally: vec![(
-                AppliedReplacementKey::Object {
+            prevention_tally: vec![PreventedDamageEntry {
+                key: AppliedReplacementKey::Object {
                     source: ObjectId(9_402),
                     index: 0,
                 },
-                2,
-            )],
+                // CR 120.3: a PLAYER recipient, which is exactly the axis the
+                // round trip below must preserve — a `TargetRef::Object` that
+                // silently replaced it would still deserialize.
+                recipient: TargetRef::Player(PlayerId(1)),
+                amount: 2,
+            }],
             sub_step: CombatDamageSubStep::Regular,
             replacement: None,
             phase_c_remnant: None,
@@ -50768,14 +51125,79 @@ mod tests {
         );
         assert_eq!(
             parked.prevention_tally,
-            vec![(
-                AppliedReplacementKey::Object {
+            vec![PreventedDamageEntry {
+                key: AppliedReplacementKey::Object {
                     source: ObjectId(9_402),
                     index: 0,
                 },
-                2,
-            )],
-            "the prevention tally round-trips as a Vec — an enum key is not a JSON map key"
+                recipient: TargetRef::Player(PlayerId(1)),
+                amount: 2,
+            }],
+            "the prevention tally round-trips as a Vec — an enum key is not a JSON map key — \
+             and CR 120.3's recipient round-trips WITH it, so a parked batch resumes naming \
+             the player the damage was headed at rather than re-deriving one at drain time"
+        );
+    }
+
+    /// MED-4 populated old-save fixture: a parked batch whose tally uses
+    /// the pre-recipient `(key, amount)` tuple encoding must be rejected
+    /// with the explicit diagnosis — its recipients cannot be recovered
+    /// and must not be guessed.
+    #[test]
+    fn legacy_populated_prevention_tally_is_rejected_with_diagnosis() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 19;
+        let record = persisted_zone_change_record(ObjectId(9_401), 19, 0);
+        let parked = parked_combat_lifelink(record);
+        let mut value = serde_json::to_value(&*parked).expect("fixture serializes");
+        let key_json = serde_json::to_value(AppliedReplacementKey::Object {
+            source: ObjectId(9_402),
+            index: 0,
+        })
+        .expect("key serializes");
+        value["prevention_tally"] = serde_json::json!([[key_json, 2]]);
+        let err = serde_json::from_value::<PendingCombatLifelink>(value)
+            .expect_err("a populated legacy tally must not load");
+        let message = err.to_string();
+        assert!(
+            message.contains("no damage recipient"),
+            "the rejection must name the missing recipient, got: {message}"
+        );
+    }
+
+    /// MED-4 compat pin: an EMPTY legacy tally (`[]`, the only shape a
+    /// save written outside a suspended batch can carry) loads as an empty
+    /// current tally — only populated suspended batches are affected.
+    #[test]
+    fn legacy_empty_prevention_tally_loads_as_empty() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 19;
+        let record = persisted_zone_change_record(ObjectId(9_401), 19, 0);
+        let parked = parked_combat_lifelink(record);
+        let mut value = serde_json::to_value(&*parked).expect("fixture serializes");
+        value["prevention_tally"] = serde_json::json!([]);
+        let restored = serde_json::from_value::<PendingCombatLifelink>(value)
+            .expect("an empty tally must load");
+        assert!(
+            restored.prevention_tally.is_empty(),
+            "an empty legacy tally migrates to an empty current tally"
+        );
+    }
+
+    /// MED-4 current round-trip control: populated CURRENT-shape tallies
+    /// pass the bridge unchanged (recipient intact).
+    #[test]
+    fn current_prevention_tally_round_trips_through_bridge() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 19;
+        let record = persisted_zone_change_record(ObjectId(9_401), 19, 0);
+        let parked = parked_combat_lifelink(record);
+        let value = serde_json::to_value(&*parked).expect("fixture serializes");
+        let restored = serde_json::from_value::<PendingCombatLifelink>(value)
+            .expect("a current tally must load");
+        assert_eq!(
+            restored.prevention_tally, parked.prevention_tally,
+            "current entries (recipient included) survive the bridge"
         );
     }
 
@@ -62348,6 +62770,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         later.next_object_id = base.next_object_id + 5;
         later.next_return_result_occurrence_id = base.next_return_result_occurrence_id + 5;
 
+        assert!(base.is_loop_comparable() && later.is_loop_comparable());
         assert!(
             loop_states_equal(&base.normalize_for_loop(), &later.normalize_for_loop()),
             "states differing only in volatile counters must confirm as a repeat"
@@ -63068,6 +63491,32 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         assert!(
             !loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
             "a tapped-vs-untapped object difference must NOT confirm (no wrongful draw)"
+        );
+    }
+
+    /// CR 104.4b + CR 508.6: the direct-attack ledger is rule-relevant
+    /// resolution state — `AbilityCondition::PlayerAttackedPlayer` reads it to
+    /// choose Faramir's draw versus tokens — so two states differing ONLY in
+    /// it must NOT compare equal, through `PartialEq` and through its
+    /// `loop_states_equal` consumer alike. Revert-failing: dropping the
+    /// `attacked_players_directly_this_turn` conjunct from
+    /// `impl PartialEq for GameState` makes all three assertions fail.
+    #[test]
+    fn direct_attack_ledger_compared_in_state_equality() {
+        let a = GameState::new_two_player(7);
+        let mut b = a.clone();
+        b.attacked_players_directly_this_turn
+            .entry(PlayerId(0))
+            .or_default()
+            .insert(PlayerId(1));
+        assert_ne!(a, b, "reach guard: the raw positions differ");
+        assert!(
+            !loop_states_equal(&a, &b),
+            "states differing only in direct-attack history must NOT confirm (no wrongful draw)"
+        );
+        assert!(
+            loop_states_equal(&a, &a.clone()),
+            "identical states must confirm as a repeat"
         );
     }
 
@@ -70892,6 +71341,7 @@ mod restored_exact_attack_authority_tests {
                             declining_players: vec![],
                             current_player: P0,
                             cost: AbilityCost::Tap,
+                            payments: Vec::new(),
                         }));
                     state.waiting_for.clone()
                 }

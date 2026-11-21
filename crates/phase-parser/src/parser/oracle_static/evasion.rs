@@ -7,6 +7,7 @@ use crate::parser::oracle_ir::ast::AnaphorNumber;
 use crate::parser::oracle_nom::defender_exception;
 use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
 use crate::parser::oracle_nom::target::{controller_phrase_among_mixed_case, ControllerPhrase};
+use crate::parser::oracle_target::scope_target_spell_phrase;
 #[allow(unused_imports)]
 use crate::types::ability::AttachmentReferent;
 
@@ -198,6 +199,9 @@ fn doubler_source_is_restrictive(filter: &TargetFilter) -> bool {
                 || !tf.properties.is_empty()
         }
         TargetFilter::Or { filters } => filters.iter().all(doubler_source_is_restrictive),
+        // CR 112.1: a stack-scoped "spell" clause excludes every permanent.
+        TargetFilter::StackSpell => true,
+        TargetFilter::And { filters } => filters.iter().any(doubler_source_is_restrictive),
         // CR 603.2d: "a triggered ability of ~" names the doubler's own source
         // object — a self-reference that narrows to exactly one permanent, so it
         // is restrictive (Cloud, Midgar Mercenary).
@@ -237,7 +241,13 @@ fn parse_doubler_disjunct(phrase: &str) -> (TargetFilter, &str) {
     {
         return (filter, rest);
     }
-    parse_type_phrase_folding(phrase)
+    let (filter, rest) = parse_type_phrase_folding(phrase);
+    // CR 112.1 + CR 603.2d: "a colorless spell you control" (Echoes of
+    // Eternity) names an object on the stack. Scope it there, or the disjunct
+    // also matches a battlefield permanent with the same characteristics,
+    // including the doubler itself.
+    let consumed = &phrase[..phrase.len() - rest.len()];
+    (scope_target_spell_phrase(filter, consumed), rest)
 }
 
 pub(crate) fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {

@@ -25,12 +25,14 @@
 use engine::game::replacement::{replace_event, ReplacementResult};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{AbilityKind, DamageTargetFilter, DamageTargetPlayerScope, TargetRef};
-use engine::types::game_state::WaitingFor;
+use engine::types::actions::GameAction;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::proposed_event::ProposedEvent;
+use engine::types::zones::Zone;
 
 // Verbatim Oracle text (data/card-data.json).
 const MERCENARIES: &str = "{3}: The next time this creature would deal damage to you this turn, \
@@ -62,6 +64,8 @@ fn damage_from(source: ObjectId, target: TargetRef, amount: u32) -> ProposedEven
         target,
         amount,
         is_combat: false,
+        source_name: None,
+        source_incarnation: None,
         applied: Default::default(),
     }
 }
@@ -181,5 +185,94 @@ fn opponent_activated_shield_scopes_to_activator_not_source_controller() {
     assert!(
         matches!(to_activator, ReplacementResult::Prevented),
         "Mercenaries' damage to P1 (the activator, 'you') must be prevented, got {to_activator:?}"
+    );
+}
+
+// Verbatim Oracle text (data/mtgjson/AtomicCards.json).
+const EXCAVATION: &str =
+    "{1}, Sacrifice a land: Draw a card. Any player may activate this ability.";
+
+/// Discriminating guard: when the OPPONENT (P1) activates the controller's
+/// (P0's) Excavation, "Draw a card" resolves for the ACTIVATOR (P1, CR
+/// 602.2a), not the source's controller (P0). The narrow departure pin keeps
+/// `controller`/`original_controller` on the activator, so every
+/// `Controller`-relative consumer follows P1; restoring the broad
+/// `set_trigger_source_recursive` helper overwrites both from the source's
+/// live controller and redirects the draw to P0 (revert-flip).
+#[test]
+fn any_player_draw_follows_the_activator_not_the_source_controller() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let excav = scenario
+        .add_enchantment_from_oracle(P0, "Excavation", EXCAVATION)
+        .id();
+    let land = scenario.add_basic_land(P1, ManaColor::Green);
+    scenario.add_card_to_library_top(P1, "Draw Fodder");
+    let mut runner = scenario.build();
+
+    // P1 (the opponent) activates the ability. Give P1 priority on their own
+    // turn and fund the {1} cost. Activation is legal for P1 only because
+    // "Any player may activate this ability" sets `activator_filter = All`.
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    add_mana(&mut runner, P1, 1);
+
+    let p0_hand_before = runner.state().players[0].hand.len();
+    let p1_hand_before = runner.state().players[1].hand.len();
+
+    let idx = activated_ability_index(&runner, excav);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: excav,
+            ability_index: idx,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P1 must be able to activate P0's Excavation (any-player gate)");
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => break,
+            WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("auto mana payment must continue");
+            }
+            WaitingFor::PayCost { .. } => {
+                runner
+                    .act(GameAction::SelectCards { cards: vec![land] })
+                    .expect("sacrificing P1's land must succeed");
+            }
+            other => panic!("unexpected prompt while paying: {other:?}"),
+        }
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Excavation's ability is on the stack after P1 pays"
+    );
+    runner.advance_until_stack_empty();
+    assert!(
+        runner.state().stack.is_empty(),
+        "the stack is empty after resolution"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete at Priority, got {}",
+        runner.waiting_for_kind()
+    );
+    assert_eq!(
+        runner.state().objects[&land].zone,
+        Zone::Graveyard,
+        "reach-guard: P1 paid the land sacrifice"
+    );
+    assert_eq!(
+        runner.state().players[1].hand.len(),
+        p1_hand_before + 1,
+        "the ACTIVATOR (P1) draws the card"
+    );
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        p0_hand_before,
+        "the source controller (P0) draws nothing"
     );
 }
