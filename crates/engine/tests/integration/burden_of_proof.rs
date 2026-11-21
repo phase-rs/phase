@@ -14,6 +14,12 @@
 //!     declaration in which the creature blocks a Detective is illegal; it may
 //!     block any attacker that is not a Detective. "Detectives" names no
 //!     controller, so nothing here is controller-relative.
+//!   * The restriction is an effect of the Aura's own static ability
+//!     (CR 509.1b + CR 611.3a), not an ability of the enchanted creature, so a
+//!     later "Creatures lose all abilities" (layer 6, CR 613.1f) does not end
+//!     it. Dress Down (MTGJSON): "Flash / When this enchantment enters, draw a
+//!     card. / Creatures lose all abilities. / At the beginning of the end
+//!     step, sacrifice this enchantment."
 //!
 //! Ruling: "Once a Detective has been blocked, attaching Burden of Proof to a
 //! creature blocking it won't cause that Detective to become unblocked." The
@@ -43,6 +49,7 @@ use engine::types::zones::Zone;
 const BURDEN_OF_PROOF: &str = "Flash\nEnchant creature\nEnchanted creature gets +2/+2 as long as it's a Detective you control. Otherwise, it has base power and toughness 1/1 and can't block Detectives.";
 const VENGEFUL_TRACKER: &str =
     "Whenever an opponent sacrifices an artifact, this creature deals 2 damage to them.";
+const DRESS_DOWN: &str = "Flash\nWhen this enchantment enters, draw a card.\nCreatures lose all abilities.\nAt the beginning of the end step, sacrifice this enchantment.";
 const BLOCK_RESTRICTION_ERROR: &str = "can block only creatures matching the block restriction";
 
 /// Vengeful Tracker: Human Detective, 2/2.
@@ -87,6 +94,17 @@ fn add_burden_of_proof(scenario: &mut GameScenario) -> ObjectId {
         .id()
 }
 
+/// Dress Down ({1}{U}) in P0's hand.
+fn add_dress_down(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_enchantment_to_hand_from_oracle(P0, "Dress Down", DRESS_DOWN)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 1,
+        })
+        .id()
+}
+
 /// CR 601.2 + CR 608.3c: cast the Aura on `host` and resolve it, then check the
 /// cast completed: empty stack, a priority window, the Aura on the battlefield.
 fn cast_burden_of_proof_on(runner: &mut GameRunner, aura: ObjectId, host: ObjectId) {
@@ -115,6 +133,11 @@ fn block_restrictions(runner: &GameRunner, id: ObjectId) -> Vec<StaticMode> {
         .collect()
 }
 
+/// The block restrictions the Aura itself hosts (its own static abilities).
+fn aura_block_restrictions(runner: &GameRunner, aura: ObjectId) -> Vec<StaticMode> {
+    block_restrictions(runner, aura)
+}
+
 /// CR 509.1b: "can't block Detectives" is the whitelist "can block only
 /// non-Detectives".
 fn cant_block_detectives() -> StaticMode {
@@ -135,6 +158,50 @@ fn to_declare_blockers(runner: &GameRunner, attacker: ObjectId, defender: Player
     combat
         .declare_attackers(&[(attacker, AttackTarget::Player(defender))])
         .expect("the attack must be legal");
+    combat.pass_both_players();
+    match &combat.state().waiting_for {
+        WaitingFor::DeclareBlockers { player, .. } => assert_eq!(*player, defender),
+        other => panic!(
+            "expected the declare-blockers prompt, got {:?}",
+            other.variant_name()
+        ),
+    }
+    combat
+}
+
+/// Like [`to_declare_blockers`], but P0 casts `flash` (CR 702.8a) in the
+/// declare-attackers priority window (CR 508.2) and resolves it before both
+/// players pass to the defender's declare-blockers prompt (CR 509.1).
+fn to_declare_blockers_after_flash(
+    runner: &GameRunner,
+    attacker: ObjectId,
+    defender: PlayerId,
+    flash: ObjectId,
+) -> GameRunner {
+    let mut combat = GameRunner::from_state(runner.state().clone());
+    combat.advance_to_combat();
+    combat
+        .declare_attackers(&[(attacker, AttackTarget::Player(defender))])
+        .expect("the attack must be legal");
+    assert!(
+        matches!(
+            combat.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "the declare-attackers step must open a priority window, got {:?}",
+        combat.state().waiting_for.variant_name()
+    );
+    combat.cast(flash).resolve();
+    combat.advance_until_stack_empty();
+    let state = combat.state();
+    assert!(state.stack.is_empty(), "the flash spell must have resolved");
+    assert_eq!(state.phase, Phase::DeclareAttackers);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete to a priority window, got {:?}",
+        state.waiting_for.variant_name()
+    );
+    assert_eq!(state.objects[&flash].zone, Zone::Battlefield);
     combat.pass_both_players();
     match &combat.state().waiting_for {
         WaitingFor::DeclareBlockers { player, .. } => assert_eq!(*player, defender),
@@ -184,9 +251,12 @@ fn otherwise_the_enchanted_creature_cannot_block_detectives() {
     // Reach guard: the Otherwise def is live. CR 613.4b: base P/T 1/1.
     assert_eq!(power_toughness(&runner, bears_a), (Some(1), Some(1)));
     assert_eq!(
-        block_restrictions(&runner, bears_a),
-        vec![cant_block_detectives()],
-        "the Otherwise def must graft the whitelist onto the enchanted creature"
+        aura_block_restrictions(&runner, aura),
+        vec![cant_block_detectives()]
+    );
+    assert!(
+        block_restrictions(&runner, bears_a).is_empty(),
+        "the restriction is the Aura's effect, not an ability grafted onto the creature"
     );
 
     // Window 1: the Detective attacks.
@@ -284,8 +354,12 @@ fn an_opponents_detective_it_enchants_cannot_block_detectives() {
     // Reach guard: the Otherwise def is live on the opponent's Detective.
     assert_eq!(power_toughness(&runner, p1_tracker), (Some(1), Some(1)));
     assert_eq!(
-        block_restrictions(&runner, p1_tracker),
+        aura_block_restrictions(&runner, aura),
         vec![cant_block_detectives()]
+    );
+    assert!(
+        block_restrictions(&runner, p1_tracker).is_empty(),
+        "the restriction is the Aura's effect, not an ability grafted onto the creature"
     );
 
     let detective_attack = to_declare_blockers(&runner, p0_tracker, P1);
@@ -303,4 +377,80 @@ fn an_opponents_detective_it_enchants_cannot_block_detectives() {
     );
     // Paired positive: the prompt is real.
     assert!(valid.contains(&p1_bears), "{valid:?}");
+}
+
+/// P1-V4 (maintainer review F1): P0's Aura on P1's non-Detective, then P0
+/// flashes in Dress Down before blockers. CR 613.1f: "Creatures lose all
+/// abilities" removes the creatures' abilities, but the restriction is the
+/// Aura's effect (CR 509.1b + CR 611.3a), so the enchanted creature still
+/// can't block a Detective and may still block a non-Detective. The Aura's
+/// controller (P0) is not the enchanted creature's controller (P1, CR 303.4e).
+#[test]
+fn a_later_lose_all_abilities_effect_does_not_end_the_otherwise_restriction() {
+    let mut scenario = base_scenario();
+    // Two more Islands: {1}{U} for Burden of Proof and {1}{U} for Dress Down.
+    scenario.add_basic_land(P0, ManaColor::Blue);
+    scenario.add_basic_land(P0, ManaColor::Blue);
+    let tracker = add_vengeful_tracker(&mut scenario, P0);
+    let p0_bears = add_grizzly_bears(&mut scenario, P0);
+    let bears_a = add_grizzly_bears(&mut scenario, P1);
+    let bears_b = add_grizzly_bears(&mut scenario, P1);
+    let aura = add_burden_of_proof(&mut scenario);
+    let dress_down = add_dress_down(&mut scenario);
+    let mut runner = scenario.build();
+    cast_burden_of_proof_on(&mut runner, aura, bears_a);
+
+    // Pre-guard: the Tracker has its printed trigger before Dress Down.
+    assert!(
+        !runner.state().objects[&tracker]
+            .trigger_definitions
+            .is_empty(),
+        "the Tracker's printed trigger must be present before Dress Down"
+    );
+
+    // Window 1: the Detective attacks; Dress Down resolves before blockers.
+    let detective_attack = to_declare_blockers_after_flash(&runner, tracker, P1, dress_down);
+    // Reach guards. CR 613.1f: Dress Down is in force.
+    assert!(
+        detective_attack.state().objects[&tracker]
+            .trigger_definitions
+            .is_empty(),
+        "Dress Down must have removed the Tracker's trigger"
+    );
+    // CR 613.4b: the Otherwise def is the Aura's effect and survives.
+    assert_eq!(
+        power_toughness(&detective_attack, bears_a),
+        (Some(1), Some(1))
+    );
+    let valid = valid_blockers(&detective_attack);
+    // CR 509.1b: the enchanted creature still can't block a Detective.
+    assert!(
+        !valid.contains(&bears_a),
+        "the enchanted creature must not be offered against a Detective after Dress Down: {valid:?}"
+    );
+    let refused = try_block(&detective_attack, bears_a, tracker)
+        .expect_err("blocking a Detective must be illegal after Dress Down");
+    assert!(
+        refused.contains(BLOCK_RESTRICTION_ERROR),
+        "the refusal must come from the block restriction: {refused}"
+    );
+    // Paired positive: the prompt is real and the defender has a legal block.
+    assert!(valid.contains(&bears_b), "{valid:?}");
+    assert_eq!(try_block(&detective_attack, bears_b, tracker), Ok(()));
+
+    // Window 2: a non-Detective attacks. CR 509.1b: the whitelist admits it.
+    let bears_attack = to_declare_blockers_after_flash(&runner, p0_bears, P1, dress_down);
+    assert!(
+        bears_attack.state().objects[&tracker]
+            .trigger_definitions
+            .is_empty(),
+        "Dress Down must have removed the Tracker's trigger"
+    );
+    assert_eq!(power_toughness(&bears_attack, bears_a), (Some(1), Some(1)));
+    let valid = valid_blockers(&bears_attack);
+    assert!(
+        valid.contains(&bears_a),
+        "the enchanted creature may block a non-Detective after Dress Down: {valid:?}"
+    );
+    assert_eq!(try_block(&bears_attack, bears_a, p0_bears), Ok(()));
 }

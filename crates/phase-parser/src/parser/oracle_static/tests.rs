@@ -43562,8 +43562,10 @@ fn edgar_exile_permission_tapped_rider_declines() {
 const BURDEN_OF_PROOF_ORACLE: &str = "Flash\nEnchant creature\nEnchanted creature gets +2/+2 as long as it's a Detective you control. Otherwise, it has base power and toughness 1/1 and can't block Detectives.";
 
 /// CR 509.1b + CR 613.4b + CR 109.5: Burden of Proof's Otherwise branch sets the
-/// enchanted creature's base P/T to 1/1 (layer 7b) and grants the "can't block
-/// Detectives" whitelist, carried by `AddStaticMode` onto the enchanted creature.
+/// enchanted creature's base P/T to 1/1 (layer 7b), and its "can't block
+/// Detectives" whitelist is an effect of the Aura's static ability, hosted on
+/// the Aura under the same Otherwise gate (CR 509.1b + CR 611.3a). It is not an
+/// ability granted at layer 6 (CR 613.1f), so no def carries `AddStaticMode`.
 /// Before the fix "can't block Detectives" was dropped with no parse warning.
 #[test]
 fn burden_of_proof_otherwise_branch_cannot_block_detectives() {
@@ -43584,15 +43586,16 @@ fn burden_of_proof_otherwise_branch_cannot_block_detectives() {
                 .controller(ControllerRef::You),
         ),
     };
+    let line = "Enchanted creature gets +2/+2 as long as it's a Detective you control. Otherwise, it has base power and toughness 1/1 and can't block Detectives.";
     assert_eq!(
         parsed.statics.len(),
-        2,
-        "expected the +2/+2 def and the Otherwise def, got {:?}",
+        3,
+        "expected the +2/+2 def, the Otherwise def and the Aura-hosted restriction, got {:?}",
         parsed.statics
     );
     for def in &parsed.statics {
-        assert_eq!(def.mode, StaticMode::Continuous);
         assert_eq!(def.affected, Some(enchanted_creature.clone()));
+        assert_eq!(def.description.as_deref(), Some(line));
     }
 
     // Reach guard: the "as long as" def is the condition's other outcome.
@@ -43601,6 +43604,7 @@ fn burden_of_proof_otherwise_branch_cannot_block_detectives() {
         .iter()
         .find(|def| def.condition.as_ref() == Some(&detective_you_control))
         .expect("the +2/+2 def gated on a Detective you control");
+    assert_eq!(detective_def.mode, StaticMode::Continuous);
     assert_eq!(
         detective_def.modifications,
         vec![
@@ -43615,25 +43619,46 @@ fn burden_of_proof_otherwise_branch_cannot_block_detectives() {
     let otherwise_def = parsed
         .statics
         .iter()
-        .find(|def| def.condition.as_ref() == Some(&otherwise))
+        .find(|def| {
+            def.mode == StaticMode::Continuous && def.condition.as_ref() == Some(&otherwise)
+        })
         .expect("the Otherwise def gated on the negated condition");
-    // CR 509.1b: "can't block Detectives" is the whitelist "can block only
-    // non-Detectives"; "Detectives" names no controller.
+    // CR 613.4b: the Otherwise def only sets base P/T.
     assert_eq!(
         otherwise_def.modifications,
         vec![
             ContinuousModification::SetPower { value: 1 },
             ContinuousModification::SetToughness { value: 1 },
-            ContinuousModification::AddStaticMode {
-                mode: StaticMode::BlockRestriction {
-                    filter: TargetFilter::Not {
-                        filter: Box::new(TargetFilter::Typed(
-                            TypedFilter::default().subtype("Detective".to_string())
-                        )),
-                    },
-                },
-            },
         ]
+    );
+
+    // CR 509.1b: "can't block Detectives" is the whitelist "can block only
+    // non-Detectives"; "Detectives" names no controller. CR 611.3a: it is the
+    // Aura's own static, under the same Otherwise gate.
+    let cant_block_detectives = StaticMode::BlockRestriction {
+        filter: TargetFilter::Not {
+            filter: Box::new(TargetFilter::Typed(
+                TypedFilter::default().subtype("Detective".to_string()),
+            )),
+        },
+    };
+    let restriction_def = parsed
+        .statics
+        .iter()
+        .find(|def| def.mode == cant_block_detectives)
+        .expect("the Aura-hosted block restriction");
+    assert_eq!(restriction_def.condition.as_ref(), Some(&otherwise));
+    assert!(restriction_def.modifications.is_empty());
+
+    // CR 613.1f: nothing is granted at layer 6, so a later ability-removing
+    // effect cannot erase the restriction.
+    assert!(
+        parsed.statics.iter().all(|def| !def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddStaticMode { .. }))),
+        "no def may carry AddStaticMode, got {:?}",
+        parsed.statics
     );
     assert!(
         parsed.parse_warnings.is_empty(),

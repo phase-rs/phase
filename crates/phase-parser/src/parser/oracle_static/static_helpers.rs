@@ -2264,6 +2264,10 @@ pub(crate) fn accept_enforceable_condition(
 ///   `"gets +N/+M as long as X"` / `"has <keyword> as long as X"` grant branch,
 ///   and the whole-predicate `Continuous` default beneath it that carries the
 ///   trailing `"unless"` rider (Heroic Defiance).
+/// - `oracle_static::grammar::parse_enchanted_equipped_predicate`'s PATTERN 3b
+///   source-hosted restriction companion, which gates a peeled "Otherwise"
+///   restriction conjunct on the complement of the head condition (Burden of
+///   Proof).
 pub(crate) fn attach_gated_condition(
     def: &mut StaticDefinition,
     condition: StaticCondition,

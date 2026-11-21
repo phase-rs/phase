@@ -8354,8 +8354,9 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
             | StaticMode::CantBeTargeted { .. }
             // CR 509.1b: a granted "can't block <object>" whitelist must
             // propagate onto the recipient's static_definitions, or the
-            // declaration check never sees it (Burden of Proof's static grant;
-            // a resolving effect's grant).
+            // declaration check never sees it (a resolving effect's grant, e.g.
+            // Immortal Obligation; printed attached restrictions are hosted on
+            // their source instead).
             | StaticMode::BlockRestriction { .. }
             // CR 611.2c + CR 101.2: a resolved "can't be countered" grant is
             // read live off the transient effect by the counter resolvers, so
@@ -8562,7 +8563,8 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     }
     // CR 509.1b: "<subject> can't block <object>" is the whitelist "can block
     // only attackers that are not <object>", for every caller of this shared
-    // function — a static grant (Burden of Proof: "can't block Detectives")
+    // function — a source-hosted attached restriction (Burden of Proof's
+    // "can't block Detectives", peeled by `split_trailing_restriction_conjunct`)
     // and a resolving effect's grant alike. Whole phrase or decline: a
     // trailing rider ("unless …") or the symmetric "or be blocked by"
     // conjunction leaves the arm.
@@ -13290,7 +13292,7 @@ mod tests {
     /// and a granted `BlockRestriction` propagates onto the recipient.
     #[test]
     fn parse_restriction_modes_cant_block_object_is_a_whitelist() {
-        // Burden of Proof's fragment exactly as `push_grant_clause_modifications`
+        // Burden of Proof's fragment exactly as `split_trailing_restriction_conjunct`
         // passes it, and its sentence with the terminal period.
         assert_eq!(
             parse_restriction_modes("can't block detectives"),

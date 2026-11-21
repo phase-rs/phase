@@ -717,6 +717,40 @@ pub(crate) fn attached_grant_unmodeled_conjunct_residual(
         .description(residual_text.to_string())
 }
 
+/// CR 611.3 + CR 611.3a: the restriction modes an attached ("enchanted/equipped
+/// creature") predicate hosts on its Aura/Equipment source. Targeting
+/// prohibitions are excluded: they keep their condition and companion grants
+/// through the shared suffix/composition path.
+fn attached_restriction_modes(predicate_lower: &str) -> Option<Vec<StaticMode>> {
+    parse_restriction_modes(predicate_lower).filter(|modes| {
+        !modes
+            .iter()
+            .any(|mode| matches!(mode, StaticMode::CantBeTargeted { .. }))
+    })
+}
+
+/// CR 509.1b + CR 611.3a: peel a terminal "and can't/cannot <restriction>"
+/// conjunct off an attached predicate ("has base power and toughness 1/1 and
+/// can't block Detectives" — Burden of Proof's Otherwise tail). The
+/// restriction is an effect of the source's static ability, not an ability
+/// the creature gains (CR 613.1f), so it is hosted on the source like every
+/// other attached restriction. The remainder must be one whole restriction
+/// that `parse_restriction_modes` reads; anything else declines.
+fn split_trailing_restriction_conjunct<'a>(
+    predicate: &TextPair<'a>,
+) -> Option<(TextPair<'a>, Vec<StaticMode>)> {
+    let (before, _, rest) = nom_primitives::scan_preceded(predicate.lower, |i| {
+        terminated(
+            tag::<_, _, OracleError<'_>>("and "),
+            peek(alt((tag("can't "), tag("cannot ")))),
+        )
+        .parse(i)
+    })?;
+    let modes = attached_restriction_modes(rest.trim_end().trim_end_matches('.'))?;
+    let (head, _) = predicate.split_at(before.len());
+    Some((head.trim_end(), modes))
+}
+
 /// CR 509.1b + CR 604.1 + CR 611.3a + CR 613.1f: Enchanted/equipped predicate dispatch.
 pub(crate) fn parse_enchanted_equipped_predicate(
     predicate: &str,
@@ -776,16 +810,37 @@ pub(crate) fn parse_enchanted_equipped_predicate(
                     } else {
                         tail_orig.trim().to_string()
                     };
-                if let Some(mut companion) =
-                    parse_continuous_gets_has(&tail_predicate, affected.clone(), description)
-                {
+                let tail_lower = tail_predicate.to_lowercase();
+                let tail_pair = TextPair::new(&tail_predicate, &tail_lower);
+                // CR 509.1b + CR 611.3a: a trailing restriction conjunct of the
+                // Otherwise tail is hosted on the source under the same complement
+                // gate (Burden of Proof's "… and can't block Detectives"); it must not
+                // ride the companion's modifications as a layer-6 grant, which a later
+                // ability-removing effect would erase (CR 613.1f).
+                let (continuous_tail, restriction_modes) =
+                    split_trailing_restriction_conjunct(&tail_pair)
+                        .unwrap_or((tail_pair, Vec::new()));
+                if let Some(mut companion) = parse_continuous_gets_has(
+                    continuous_tail.original,
+                    affected.clone(),
+                    description,
+                ) {
                     // CR 611.3a + CR 613.1f: companion is the strict complement gate
                     // of the head's effective condition. Mutually exclusive so the
                     // two clauses never apply simultaneously.
-                    companion.condition = Some(StaticCondition::Not {
+                    let otherwise = StaticCondition::Not {
                         condition: Box::new(head_condition),
-                    });
-                    return vec![primary, companion];
+                    };
+                    companion.condition = Some(otherwise.clone());
+                    let mut defs = vec![primary, companion];
+                    for mode in restriction_modes {
+                        let mut restriction = StaticDefinition::new(mode)
+                            .affected(affected.clone())
+                            .description(description.to_string());
+                        attach_gated_condition(&mut restriction, otherwise.clone(), head);
+                        defs.push(restriction);
+                    }
+                    return defs;
                 }
             }
         }
@@ -852,13 +907,7 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     // and let the line fall through to a SelfRef combat lock on the Aura source.
     // CR 611.3a: targeting prohibitions retain their condition and companion
     // grants through the shared suffix/composition path below.
-    if let Some(modes) =
-        parse_restriction_modes(pred_lower.trim().trim_end_matches('.')).filter(|modes| {
-            !modes
-                .iter()
-                .any(|mode| matches!(mode, StaticMode::CantBeTargeted { .. }))
-        })
-    {
+    if let Some(modes) = attached_restriction_modes(pred_lower.trim().trim_end_matches('.')) {
         return modes
             .into_iter()
             .map(|mode| {
@@ -2975,5 +3024,79 @@ mod tests {
     fn promote_nested_ability_quotes_leaves_unquoted_bodies_unchanged() {
         let body = "Creatures you control have flying";
         assert_eq!(promote_nested_ability_quotes(body), body);
+    }
+
+    /// CR 509.1b + CR 611.3a: the peel accepts exactly a terminal "and
+    /// can't/cannot <restriction>" conjunct that `parse_restriction_modes`
+    /// reads whole, and declines every other attached tail.
+    #[test]
+    fn split_trailing_restriction_conjunct_peels_and_declines() {
+        use super::{
+            attached_restriction_modes, parse_continuous_gets_has, parse_restriction_modes,
+            split_trailing_restriction_conjunct, FilterProp, StaticMode, TargetFilter, TextPair,
+            TypedFilter,
+        };
+        use crate::types::statics::ProhibitionScope;
+
+        // Burden of Proof's Otherwise tail, from its verbatim line after
+        // PATTERN 3b's "it has " → "has " rewrite.
+        let original = "has base power and toughness 1/1 and can't block Detectives.";
+        let lower = original.to_lowercase();
+        let (head, modes) = split_trailing_restriction_conjunct(&TextPair::new(original, &lower))
+            .expect("the terminal restriction conjunct is peeled");
+        assert_eq!(head.original, "has base power and toughness 1/1");
+        assert_eq!(head.lower, "has base power and toughness 1/1");
+        assert_eq!(
+            modes,
+            vec![StaticMode::BlockRestriction {
+                filter: TargetFilter::Not {
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::default().subtype("Detective".to_string()),
+                    )),
+                },
+            }]
+        );
+        // The original case is kept on the head the caller re-parses.
+        let original_case = "Has Base Power and Toughness 1/1 and can't block Detectives.";
+        let lower_case = original_case.to_lowercase();
+        let (head, _) =
+            split_trailing_restriction_conjunct(&TextPair::new(original_case, &lower_case))
+                .expect("the peel is case-insensitive");
+        assert_eq!(head.original, "Has Base Power and Toughness 1/1");
+
+        let affected =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
+
+        // (i) Hunter's Blowgun's Otherwise tail ("Otherwise, it has reach."):
+        // no conjunct, so the peel declines.
+        let blowgun = "has reach.";
+        assert!(
+            parse_continuous_gets_has(blowgun, affected.clone(), blowgun).is_some(),
+            "reach guard: the tail is a live continuous tail"
+        );
+        assert!(split_trailing_restriction_conjunct(&TextPair::new(blowgun, blowgun)).is_none());
+
+        // (ii) Bonds of Faith's Otherwise tail ("Otherwise, it can't attack or
+        // block."): a restriction, but not an "and " conjunct.
+        let bonds = "can't attack or block.";
+        assert_eq!(
+            parse_restriction_modes("can't attack or block"),
+            Some(vec![StaticMode::CantAttack, StaticMode::CantBlock]),
+            "reach guard: the restriction itself parses"
+        );
+        assert!(split_trailing_restriction_conjunct(&TextPair::new(bonds, bonds)).is_none());
+
+        // (iii) Shielding Plax's predicate ("Enchanted creature can't be the
+        // target of spells or abilities your opponents control."): targeting
+        // prohibitions stay on the shared composition path.
+        let plax = "can't be the target of spells or abilities your opponents control";
+        assert_eq!(
+            parse_restriction_modes(plax),
+            Some(vec![StaticMode::CantBeTargeted {
+                who: ProhibitionScope::Opponents,
+            }]),
+            "reach guard: the targeting prohibition parses"
+        );
+        assert!(attached_restriction_modes(plax).is_none());
     }
 }
