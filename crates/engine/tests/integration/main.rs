@@ -211,6 +211,7 @@ mod lathiel_end_step_counters_repro;
 mod layer_boundary_census;
 mod layer_two_control_change_triggers;
 mod leyline_tyrant_pay_any_red_damage;
+mod lost_in_the_maze;
 mod lost_monarch_combat_damage_by_type_intervening_if;
 mod mana_ability_mana_payment_window;
 mod mana_burn;
