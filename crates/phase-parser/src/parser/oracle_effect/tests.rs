@@ -105911,28 +105911,24 @@ fn search_this_way_guard_rung_does_not_widen() {
 /// guard either. Each has a reach guard: the parse still carries its `Shuffle` or its counter effect.
 #[test]
 fn search_this_way_guard_rung_leaves_printed_neighbours_alone() {
-    let cases: [(&str, &str, &[&str], &[&str], &str, &str); 2] = [
+    let cases = [
         (
             "Auditore Ambush",
             "Choose one or both \u{2014}\n\u{2022} Return target creature to its owner's hand.\n\u{2022} Target player searches their library and/or graveyard for a card named Ezio, Blade of Vengeance, reveals it, and puts it into their hand. If they search their library this way, they shuffle.",
-            &["Sorcery"],
-            &[],
+            "Sorcery",
             "\"Shuffle\"",
             "reach guard: the modal ability parsed a Shuffle",
         ),
         (
             "Prishe's Wanderings",
             "Search your library for a basic land card or Town card, put it onto the battlefield tapped, then shuffle. When you search your library this way, put a +1/+1 counter on target creature you control.",
-            &["Instant"],
-            &[],
+            "Instant",
             "\"PutCounter\"",
             "reach guard: the reflexive trigger parsed its counter effect",
         ),
     ];
-    for (name, text, types, subtypes, reach, reach_msg) in cases {
-        let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
-        let subtypes: Vec<String> = subtypes.iter().map(|t| t.to_string()).collect();
-        let parsed = parse_oracle_text(text, name, &[], &types, &subtypes);
+    for (name, text, card_type, reach, reach_msg) in cases {
+        let parsed = parse_oracle_text(text, name, &[], &[card_type.to_string()], &[]);
         let json = serde_json::to_string(&parsed).expect("serialize parsed abilities");
         assert!(
             // allow-noncombinator: test assertion scans serialized AST JSON, not parsing dispatch
