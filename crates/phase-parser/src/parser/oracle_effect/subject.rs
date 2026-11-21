@@ -6329,6 +6329,8 @@ fn build_continuous_clause(
         return None;
     }
 
+    let affected = static_affected_for_application(&application);
+
     // CR 702.62b + CR 611.2a + CR 611.2c: A "gains suspend" grant onto an exiled
     // card has no turn-scoped expiry — a card stays suspended (exiled, has suspend,
     // has a time counter) until its last time counter is removed (CR 702.62b). CR
@@ -6437,7 +6439,6 @@ fn build_continuous_clause(
         });
     }
 
-    let affected = static_affected_for_application(&application);
     let static_abilities =
         if nom_primitives::scan_contains(&predicate_text.to_lowercase(), "if able") {
             let synthetic_line = format!("Creatures {}.", predicate_text.trim_end_matches('.'));
