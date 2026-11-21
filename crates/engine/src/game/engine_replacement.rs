@@ -423,18 +423,6 @@ pub(super) fn handle_replacement_choice(
         state.waiting_for = waiting_for.clone();
         return Ok(waiting_for);
     }
-    // CR 101.4 + CR 616.1: the choice decides one sacrifice of a simultaneous
-    // batch that is still being consulted. Its move waits with the batch instead
-    // of happening now; the generic dispatcher below would deliver it at once.
-    if effects::player_scope_sacrifice_consult_awaits_replacement_choice(state) {
-        let waiting_for = answer_player_scope_sacrifice_consult(state, index, events)?;
-        return Ok(settle_replacement_choice_wait(
-            state,
-            events,
-            action_event_start,
-            waiting_for,
-        ));
-    }
     resolve_pending_replacement(state, events, |state, events| {
         super::replacement::continue_replacement(state, index, events)
     })
@@ -456,11 +444,28 @@ fn validate_replacement_choice_index(state: &GameState, index: usize) -> Result<
     Ok(())
 }
 
+/// CR 616.1: settle the parked replacement through `operation`: the chooser's
+/// answer, or what a departure decides for it (a reconsultation of the changed
+/// event, or an unpaid cost whose payer left).
 fn resolve_pending_replacement(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     operation: impl FnOnce(&mut GameState, &mut Vec<GameEvent>) -> super::replacement::ReplacementResult,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 101.4 + CR 616.1: the choice decides one sacrifice of a simultaneous
+    // batch that is still being consulted. Its move waits with the batch instead
+    // of happening now, however the choice is settled; the generic dispatcher
+    // below would deliver it at once, before the rest of the batch is consulted.
+    if effects::player_scope_sacrifice_consult_awaits_replacement_choice(state) {
+        let action_event_start = events.len();
+        let waiting_for = answer_player_scope_sacrifice_consult(state, events, operation)?;
+        return Ok(settle_replacement_choice_wait(
+            state,
+            events,
+            action_event_start,
+            waiting_for,
+        ));
+    }
     // CR 616.1: retire the answered prompt once, before any nested consultation.
     let placeholder = WaitingFor::Priority {
         player: state.active_player,
@@ -869,18 +874,19 @@ fn settle_replacement_choice_wait(
         .unwrap_or(waiting_for)
 }
 
-/// CR 101.4 + CR 616.1: answer the replacement choice that interrupted a
-/// simultaneous sacrifice batch's consult, then continue the batch: consult the
-/// remaining selections, deliver every approved move together, and resume the
-/// instruction's later work through the common priority boundary (CR 608.2c).
-/// The batch's events stay in this action's buffer for the post-action
-/// pipeline's trigger scan (CR 603.2).
+/// CR 101.4 + CR 616.1: settle the replacement choice that interrupted a
+/// simultaneous sacrifice batch's consult through `operation`, then continue
+/// the batch: consult the remaining selections, deliver every approved move
+/// together, and resume the instruction's later work through the common
+/// priority boundary (CR 608.2c). The batch's events stay in the caller's
+/// buffer for its trigger scan (CR 603.2): the post-action pipeline for an
+/// answer, the departure settlement for a departure.
 fn answer_player_scope_sacrifice_consult(
     state: &mut GameState,
-    index: usize,
     events: &mut Vec<GameEvent>,
+    operation: impl FnOnce(&mut GameState, &mut Vec<GameEvent>) -> super::replacement::ReplacementResult,
 ) -> Result<WaitingFor, EngineError> {
-    match effects::answer_player_scope_sacrifice_consult(state, index, events) {
+    match effects::answer_player_scope_sacrifice_consult(state, events, operation) {
         effects::PlayerScopeSacrificeConsultAnswer::NeedsChoice => {
             return Ok(state.waiting_for.clone());
         }

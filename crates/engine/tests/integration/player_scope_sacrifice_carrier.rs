@@ -772,6 +772,53 @@ fn a_batch_paused_on_a_departed_choosers_replacement_ordering_resumes() {
     assert_settled(runner.state());
 }
 
+/// T6b. CR 101.4 + CR 616.1 + CR 800.4a: P0 and P1 each sacrifice their Dauthi
+/// Voidwalker ("If a card would be put into an opponent's graveyard from
+/// anywhere, instead exile it with a void counter on it."). The batch is
+/// paused on P0's ordering of P1's Voidwalker and P2's Rest in Peace when P2
+/// leaves, taking Rest in Peace with them. The departure settles P0's choice,
+/// but the move waits with the batch: P1's sacrifice is still consulted while
+/// P0's Voidwalker is on the battlefield, so both are exiled with void counters.
+#[test]
+fn a_departure_that_settles_a_living_choosers_ordering_keeps_the_batch_simultaneous() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let blood = scenario.add_real_card(P0, "Innocent Blood", Zone::Hand, db());
+    scenario.with_mana_pool(P0, mana(ManaType::Black, 1));
+    let w0 = scenario.add_real_card(P0, "Dauthi Voidwalker", Zone::Battlefield, db());
+    let w1 = scenario.add_real_card(P1, "Dauthi Voidwalker", Zone::Battlefield, db());
+    scenario.add_real_card(P2, "Rest in Peace", Zone::Battlefield, db());
+    let mut runner = scenario.build();
+
+    runner.cast(blood).commit();
+    pass_until_a_prompt(&mut runner);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == P0),
+        "reach: P0 orders P1's Voidwalker and Rest in Peace, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone(&runner, w0), Zone::Battlefield);
+    assert_eq!(zone(&runner, w1), Zone::Battlefield);
+
+    let mut events = concede(&mut runner, P2);
+    events.extend(run_until_settled(&mut runner, answer_replacements));
+
+    let void = CounterType::Generic("void".to_string());
+    for (walker, owner) in [(w0, "P0"), (w1, "P1")] {
+        assert_eq!(sacrificed_count(&events, walker), 1);
+        let object = &runner.state().objects[&walker];
+        assert_eq!(
+            object.zone,
+            Zone::Exile,
+            "{owner}'s Voidwalker is exiled by its opponent's co-sacrificed Voidwalker"
+        );
+        assert_eq!(object.counters.get(&void).copied(), Some(1));
+    }
+    assert_eq!(zone(&runner, blood), Zone::Graveyard);
+    assert_eq!(stack_resolved_count(&events, blood), 1);
+    assert_settled(runner.state());
+}
+
 struct MoldervineBoard {
     runner: GameRunner,
     blood: ObjectId,

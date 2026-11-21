@@ -24731,17 +24731,21 @@ pub(crate) enum PlayerScopeSacrificeConsultAnswer {
 }
 
 /// CR 101.4 + CR 616.1: answer the replacement choice that interrupted the
-/// batch's consult. CR 616.1 lets the affected player choose the replacement,
+/// batch's consult, through `operation` (the chooser's answer, or a departure's
+/// reconsultation). CR 616.1 lets the affected player choose the replacement,
 /// but the choice only decides how this permanent's move will happen: the
 /// approved move joins the batch's `pending_deliveries`, so every chosen
 /// permanent is still consulted while every co-sacrificed permanent is on the
 /// battlefield, and the batch then happens at once (CR 101.4).
 pub(crate) fn answer_player_scope_sacrifice_consult(
     state: &mut GameState,
-    index: usize,
     events: &mut Vec<GameEvent>,
+    operation: impl FnOnce(
+        &mut GameState,
+        &mut Vec<GameEvent>,
+    ) -> crate::game::replacement::ReplacementResult,
 ) -> PlayerScopeSacrificeConsultAnswer {
-    let consult = crate::game::sacrifice::consult_answered_sacrifice(state, index, events);
+    let consult = crate::game::sacrifice::consult_answered_sacrifice(state, events, operation);
     if let crate::game::sacrifice::SacrificeConsult::NeedsChoice(choice_player) = consult {
         state.waiting_for =
             crate::game::replacement::replacement_choice_waiting_for(choice_player, state);
