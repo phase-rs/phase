@@ -7636,6 +7636,16 @@ pub(crate) fn static_condition_to_ability_condition(
                     filter: filter.clone(),
                 }),
             }),
+            // CR 113.6c + CR 608.2c: preserve the negated source-zone gate
+            // through the same exact filter shape as the affirmative bridge.
+            StaticCondition::SourceInZone { zone } => Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        properties: vec![FilterProp::InZone { zone: *zone }],
+                        ..Default::default()
+                    }),
+                }),
+            }),
             // CR 702.171b + CR 601.2b: "~ isn't saddled" → the source does NOT
             // match the saddled-designation filter. Mirrors the affirmative
             // `SourceIsSaddled` bridge (the source's saddled status is a runtime
@@ -7675,6 +7685,16 @@ pub(crate) fn static_condition_to_ability_condition(
                 filter: filter.clone(),
             })
         }
+        // CR 113.6b + CR 608.2c: a source-zone predicate is an effect-time
+        // source filter with exactly one `InZone` property. Keep this bridge
+        // narrow: other `SourceMatchesFilter` shapes have their own semantics
+        // and must not be generalized through the zone axis.
+        StaticCondition::SourceInZone { zone } => Some(AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::InZone { zone: *zone }],
+                ..Default::default()
+            }),
+        }),
         StaticCondition::SourceIsTapped => Some(AbilityCondition::SourceIsTapped),
         // CR 702.171b + CR 601.2b: Bridge the source's saddled designation to the
         // effect-resolution seam. The static-layer predicate (`SourceIsSaddled`)
@@ -7810,7 +7830,6 @@ pub(crate) fn static_condition_to_ability_condition(
         // CR 509.1b: recipient-scoped block-evasion gate; no effect-resolution
         // (`AbilityCondition`) equivalent — lowering returns `None`.
         | StaticCondition::RecipientAttackingOwnerTarget { .. }
-        | StaticCondition::SourceInZone { .. }
         | StaticCondition::DefendingPlayerControls { .. }
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceIsEquipped
@@ -7965,6 +7984,28 @@ pub fn ability_condition_to_static_condition(ac: &AbilityCondition) -> Option<St
                 .map(ability_condition_to_static_condition)
                 .collect::<Option<Vec<_>>>()?,
         }),
+
+        // CR 113.6b + CR 603.4: invert only the exact source-zone filter
+        // emitted above. A typed filter with any additional type, controller,
+        // or property axis remains an ordinary `SourceMatchesFilter` and is
+        // intentionally not generalized into `SourceInZone`.
+        AbilityCondition::SourceMatchesFilter {
+            filter:
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    properties,
+                }),
+        } if type_filters.is_empty()
+            && controller.is_none()
+            && properties.len() == 1
+            && matches!(properties.first(), Some(FilterProp::InZone { .. })) =>
+        {
+            let [FilterProp::InZone { zone }] = properties.as_slice() else {
+                unreachable!("guarded by the exact single InZone property check")
+            };
+            Some(StaticCondition::SourceInZone { zone: *zone })
+        }
 
         // Casting-context conditions — read `SpellContext` / cast history at
         // resolution time; no continuous-evaluation (`StaticCondition`)
@@ -11140,6 +11181,98 @@ mod tests {
             strip_suffix_conditional(original, &mut ParseContext::default());
         assert_eq!(condition, None);
         assert_eq!(remainder, original);
+    }
+
+    /// CR 113.6b + CR 603.4: the source-zone bridge is deliberately exact,
+    /// and the delayed intervening-if path can recover the trigger-layer zone
+    /// condition from it. Recursive negation remains intact.
+    #[test]
+    fn source_in_zone_bridge_inverse_and_delayed_trigger_shape() {
+        for zone in [
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Zone::Exile,
+            Zone::Hand,
+            Zone::Library,
+            Zone::Command,
+        ] {
+            let static_condition = StaticCondition::SourceInZone { zone };
+            let expected_filter = TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::InZone { zone }],
+                ..Default::default()
+            });
+            let ability_condition = AbilityCondition::SourceMatchesFilter {
+                filter: expected_filter.clone(),
+            };
+            assert_eq!(
+                static_condition_to_ability_condition(
+                    &static_condition,
+                    &mut ParseContext::default()
+                ),
+                Some(ability_condition.clone()),
+                "affirmative source-zone bridge for {zone:?}"
+            );
+            assert_eq!(
+                ability_condition_to_static_condition(&ability_condition),
+                Some(static_condition.clone()),
+                "exact source-zone inverse for {zone:?}"
+            );
+            assert_eq!(
+                crate::parser::oracle_trigger::static_condition_to_trigger_condition(
+                    &static_condition
+                ),
+                Some(crate::types::ability::TriggerCondition::SourceInZone { zone }),
+                "delayed_intervening_if must recover TriggerCondition::SourceInZone for {zone:?}"
+            );
+
+            let negated_static = StaticCondition::Not {
+                condition: Box::new(static_condition.clone()),
+            };
+            let negated_ability = AbilityCondition::Not {
+                condition: Box::new(ability_condition.clone()),
+            };
+            assert_eq!(
+                static_condition_to_ability_condition(
+                    &negated_static,
+                    &mut ParseContext::default()
+                ),
+                Some(negated_ability.clone()),
+                "negated source-zone bridge for {zone:?}"
+            );
+            assert_eq!(
+                ability_condition_to_static_condition(&negated_ability),
+                Some(negated_static.clone()),
+                "negated source-zone inverse for {zone:?}"
+            );
+            assert_eq!(
+                crate::parser::oracle_trigger::static_condition_to_trigger_condition(
+                    &negated_static
+                ),
+                Some(crate::types::ability::TriggerCondition::Not {
+                    condition: Box::new(crate::types::ability::TriggerCondition::SourceInZone {
+                        zone,
+                    }),
+                }),
+                "negated delayed intervening-if trigger for {zone:?}"
+            );
+        }
+
+        let broader = AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    },
+                    FilterProp::Token,
+                ],
+                ..Default::default()
+            }),
+        };
+        assert_eq!(
+            ability_condition_to_static_condition(&broader),
+            None,
+            "an extra property must not generalize through SourceInZone"
+        );
     }
 
     #[test]

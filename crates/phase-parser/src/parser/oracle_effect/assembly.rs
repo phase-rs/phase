@@ -3992,6 +3992,24 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                 };
                 let lifted_repeat_for = std::mem::take(&mut inner.repeat_for);
                 let lifted_player_scope = std::mem::take(&mut inner.player_scope);
+                // CR 603.4 + CR 603.7a: a source-zone intervening-if names
+                // the delayed source at fire and resolution time. Keep only
+                // the exact `SourceMatchesFilter { Typed([InZone]) }` bridge
+                // on the delayed payload; every other condition retains the
+                // established outer-wrapper lift above.
+                let keep_source_zone_condition_on_payload = lifted_condition
+                    .as_ref()
+                    .and_then(ability_condition_to_static_condition)
+                    .is_some_and(|condition| match condition {
+                        StaticCondition::SourceInZone { .. } => true,
+                        StaticCondition::Not { condition } => {
+                            matches!(condition.as_ref(), StaticCondition::SourceInZone { .. })
+                        }
+                        _ => false,
+                    });
+                if keep_source_zone_condition_on_payload {
+                    inner.condition = lifted_condition.clone();
+                }
                 // CR 608.2c: The `CreateDelayedTrigger` wrapper — not its payload —
                 // is the node that occupies this clause's slot in the parent's
                 // `sub_ability` chain, so it must carry the clause's `sub_link`
@@ -4017,7 +4035,9 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                     },
                 );
                 current.reads_return_result = delayed_return_reader;
-                current.condition = lifted_condition;
+                current.condition = (!keep_source_zone_condition_on_payload)
+                    .then_some(lifted_condition)
+                    .flatten();
                 current.optional = lifted_optional;
                 current.optional_for = lifted_optional_for;
                 current.repeat_for = lifted_repeat_for;
