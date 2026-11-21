@@ -389,9 +389,9 @@ pub(super) fn resume_active_draw_sequences(
 /// CR 616.1 + CR 510.2 + CR 702.15b: the CR 616.1 round trip, plus the one turn-based
 /// action that can be parked waiting on it.
 ///
-/// A simultaneous combat-damage batch (CR 510.2) parks in `state.pending_combat_lifelink`
-/// when a lifelink life gain meets two or more co-applicable replacements. This is the only
-/// boundary that knows where THIS action's events begin, and the resumed `LifeChanged` must
+/// A simultaneous combat-damage batch (CR 510.2) parks in
+/// `state.pending_combat_lifelink` (lifelink gain ordering, or its replacement pass). This is the
+/// only boundary that knows where THIS action's events begin, and the resumed `LifeChanged` must
 /// join the batch's own CR 603.3b trigger batch — so the anchor is a LOCAL captured here, and
 /// the drain lives here rather than in `engine::resume_pending_continuation_if_priority`,
 /// which has no such anchor. Stored on the record it would be a persisted index into a
@@ -8981,6 +8981,8 @@ mod tests {
             target: crate::types::ability::TargetRef::Object(target),
             amount: 0,
             is_combat: false,
+            source_name: None,
+            source_incarnation: None,
             applied: std::collections::HashSet::new(),
         };
         let mut events = Vec::new();

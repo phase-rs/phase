@@ -4,7 +4,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
 use nom::combinator::{
-    all_consuming, eof, map, map_opt, map_parser, not, opt, peek, rest, value, verify,
+    all_consuming, eof, map, map_opt, map_parser, not, opt, peek, recognize, rest, value, verify,
 };
 use nom::multi::many0;
 use nom::sequence::{delimited, preceded, terminated};
@@ -15,7 +15,7 @@ use super::super::oracle_nom::duration::{
     parse_duration, parse_for_as_long_as_condition, parse_until_source_exiles_another_card_body,
 };
 use super::super::oracle_nom::enters_under::{
-    parse_leading_control_clause, ControlClausePossessor,
+    parse_control_clause, parse_leading_control_clause, ControlClausePossessor,
 };
 use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
@@ -8477,7 +8477,14 @@ fn bare_dealt_damage_relative_clause_owns_suffix(input: &str) -> bool {
 /// The player is a placeholder rewritten from `binding` at delayed-trigger
 /// creation; "on your next turn" skips the creation turn's step, and
 /// CR 608.2c: "that player" is the owner of the object the parent moved.
-fn parse_player_next_step_suffix(input: &str) -> OracleResult<'_, DelayedTriggerCondition> {
+///
+/// CR 608.2c + CR 108.3: "their" after an owner control clause names that owner
+/// (Phytotitan). The control clause is the pronoun's antecedent and stays part
+/// of the instruction, so the returned `usize` is the length of the retained
+/// antecedent prefix (`0` for every other form).
+fn parse_player_next_step_suffix(
+    input: &str,
+) -> OracleResult<'_, (usize, DelayedTriggerCondition)> {
     use crate::types::ability::{DelayedTriggerPlayerBinding, TurnGate};
     // A grouped name ("main phase") is two steps, so it is left to the table.
     let step = || {
@@ -8489,47 +8496,76 @@ fn parse_player_next_step_suffix(input: &str) -> OracleResult<'_, DelayedTrigger
             },
         )
     };
-    let (rest, (binding, gate, phase)) = terminated(
-        preceded(
-            tag("at the beginning of "),
-            alt((
-                map(preceded(tag("your next "), step()), |phase| {
+    let player_next_step = preceded(
+        tag("at the beginning of "),
+        alt((
+            map(preceded(tag("your next "), step()), |phase| {
+                (
+                    DelayedTriggerPlayerBinding::Controller,
+                    TurnGate::None,
+                    phase,
+                )
+            }),
+            map(preceded(tag("that player's next "), step()), |phase| {
+                (
+                    DelayedTriggerPlayerBinding::ParentTargetOwner,
+                    TurnGate::None,
+                    phase,
+                )
+            }),
+            map(
+                delimited(tag("the "), step(), tag(" on your next turn")),
+                |phase| {
                     (
                         DelayedTriggerPlayerBinding::Controller,
-                        TurnGate::None,
+                        TurnGate::AfterCreationTurn,
                         phase,
                     )
-                }),
-                map(preceded(tag("that player's next "), step()), |phase| {
-                    (
-                        DelayedTriggerPlayerBinding::ParentTargetOwner,
-                        TurnGate::None,
-                        phase,
-                    )
-                }),
-                map(
-                    delimited(tag("the "), step(), tag(" on your next turn")),
-                    |phase| {
-                        (
-                            DelayedTriggerPlayerBinding::Controller,
-                            TurnGate::AfterCreationTurn,
-                            phase,
-                        )
+                },
+            ),
+        )),
+    );
+    // CR 608.2c + CR 108.3: "their" after an owner control clause names that owner (Phytotitan).
+    let owner_their = map(
+        (
+            recognize(terminated(
+                verify(
+                    parse_control_clause,
+                    |possessor: &ControlClausePossessor| {
+                        *possessor == ControlClausePossessor::Owner
                     },
                 ),
+                tag(" "),
             )),
+            preceded(tag("at the beginning of their next "), step()),
         ),
+        |(antecedent, phase): (&str, Phase)| {
+            (
+                antecedent.len(),
+                (
+                    DelayedTriggerPlayerBinding::ParentTargetOwner,
+                    TurnGate::None,
+                    phase,
+                ),
+            )
+        },
+    );
+    let (rest, (kept, (binding, gate, phase))) = terminated(
+        alt((map(player_next_step, |shape| (0, shape)), owner_their)),
         eof,
     )
     .parse(input)?;
     Ok((
         rest,
-        DelayedTriggerCondition::AtNextPhaseForPlayer {
-            phase,
-            player: crate::types::player::PlayerId(0),
-            gate,
-            binding,
-        },
+        (
+            kept,
+            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase,
+                player: crate::types::player::PlayerId(0),
+                gate,
+                binding,
+            },
+        ),
     ))
 }
 
@@ -8545,13 +8581,15 @@ fn parse_player_next_step_suffix(input: &str) -> OracleResult<'_, DelayedTrigger
 /// `RestrictionScope::SourcesControlledBy` placeholder pattern.
 pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerCondition>) {
     let lower = text.to_lowercase();
-    if let Some((offset, condition, _)) = nom_primitives::scan_last_at_word_boundaries_with_offset(
-        &lower,
-        parse_player_next_step_suffix,
-    )
-    .filter(|(offset, ..)| *offset > 0)
+    if let Some((offset, (kept, condition), _)) =
+        nom_primitives::scan_last_at_word_boundaries_with_offset(
+            &lower,
+            parse_player_next_step_suffix,
+        )
+        .filter(|(offset, ..)| *offset > 0)
     {
-        let end = text.len() - (lower.len() - offset);
+        // The retained antecedent (`kept`) stays in the instruction text.
+        let end = text.len() - (lower.len() - (offset + kept));
         return (text[..end].trim_end_matches(',').trim(), Some(condition));
     }
     for (suffix, condition) in [
@@ -8786,6 +8824,22 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                     turn: None,
                 },
                 tag("at the beginning of that turn's end step, "),
+            ),
+            // CR 608.2c + CR 603.7a: "at the beginning of that player's next
+            // end step, " -- the player-anaphor prefix twin of the suffix arm in
+            // `strip_temporal_suffix` (Wanderer shape in trailing position).
+            // Table default is `ParentTargetOwner`; a Choose(Player|Opponent)
+            // antecedent rebinds to `ChosenPlayer` at the call site (Faramir).
+            // Textually distinct from the "that turn's end step" arm above
+            // ("player's" vs "turn's"), so neither shadows the other.
+            value(
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::End,
+                    player: crate::types::player::PlayerId(0),
+                    gate: crate::types::ability::TurnGate::None,
+                    binding: crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner,
+                },
+                tag("at the beginning of that player's next end step, "),
             ),
             // CR 505.1 + CR 603.7a: "your next main phase" → PreCombatMain.
             // PlayerId(0) rewritten to ability.controller at resolve time
@@ -13929,7 +13983,9 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::RemoveManaCost => {}
+        | ContinuousModification::RemoveManaCost
+        // No dynamic quantity to rebind: scalar designation payload only.
+        | ContinuousModification::ChangeControllerToDesignation { .. } => {}
     }
 }
 
@@ -14033,7 +14089,9 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::RemoveManaCost => {}
+        | ContinuousModification::RemoveManaCost
+        // No dynamic quantity to rebind: scalar designation payload only.
+        | ContinuousModification::ChangeControllerToDesignation { .. } => {}
     }
 }
 

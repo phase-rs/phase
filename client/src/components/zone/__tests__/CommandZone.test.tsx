@@ -477,6 +477,31 @@ describe("CommandZone owner-printing groups", () => {
     return state;
   }
 
+  it("partitions captured Forest art by provenance when enabled", () => {
+    const owner = { set_code: "m21", collector_number: "272" };
+    const automatic = { ...owner, automatic_art_catalog_version: 1 };
+    const state = seedPrintings([owner, automatic], true, true);
+    for (const id of [700, 701]) {
+      const source = state.objects[id].emblem_source!;
+      source.name = "Forest";
+      source.printed_ref = { oracle_id: "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6", face_name: "Forest" };
+    }
+    render(<CommandZone playerId={0} />);
+    const members = () => screen.getAllByTestId("emblem-card").map((chip) => chip.dataset.groupedIds);
+    expect(members()).toEqual(["700", "701"]);
+    act(() => usePreferencesStore.getState().setShowOwnerPrintings(false));
+    expect(members()).toEqual(["700 701"]);
+    fireEvent.click(screen.getByTestId("emblem-card"));
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "ActivateAbility", data: { source_id: 701, ability_index: 0 },
+    });
+    act(() => {
+      seedPrintings([automatic, automatic], true, true);
+      usePreferencesStore.getState().setShowOwnerPrintings(true);
+    });
+    expect(members()).toEqual(["700 701"]);
+  });
+
   it("partitions captured source A/A/B before admission and preserves sibling activation through a live cycle", async () => {
     const state = seedPrintings([printingA, { collector_number: "1", set_code: "own" }, printingB], true, true);
     const { container } = render(<CommandZone playerId={0} />);

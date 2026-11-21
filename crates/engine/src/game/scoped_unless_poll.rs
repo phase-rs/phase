@@ -215,6 +215,7 @@ pub(crate) fn answer(
         .as_deref()
         .expect("the poll is live while its prompt is answered");
     let pending_effect = effects::bind_scoped_seat(&poll.ability, poll.ability.controller, player);
+    let trigger_event = poll.trigger_event.clone();
     // CR 614.17b: a player can't choose to pay a cost that includes an event
     // that can't happen.
     if crate::game::costs::resolution_cost_includes_impossible_event(
@@ -238,6 +239,7 @@ pub(crate) fn answer(
         player,
         cost,
         &pending_effect,
+        trigger_event.as_ref(),
     )? {
         UnlessSelectionPrep::Prompt(wf) => {
             state.waiting_for = *wf;
@@ -287,6 +289,10 @@ pub(crate) fn record_sacrifice_pick(
             pending_effect,
             remaining: remaining - 1,
             min_total_power: None,
+            trigger_event: state
+                .pending_player_scope_unless_punishment
+                .as_deref()
+                .and_then(|poll| poll.trigger_event.clone()),
         };
         return Ok(state.waiting_for.clone());
     }
