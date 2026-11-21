@@ -2777,7 +2777,6 @@ face = [
   { key = "wild mongrel", class = "wrong_duration", clauses = ["and becomes the color of your choice until end of turn."] },
   { key = "wild ricochet", class = "wrong_object", clauses = ["Then copy that spell."] },
   { key = "wildfire devils", class = "wrong_player", clauses = ["That player exiles an instant or sorcery card from their graveyard.", "You may cast the copy without paying its mana cost."] },
-  { key = "will of the abzan", class = "wrong_player", clauses = ["Any number of target opponents each sacrifice a creature with the greatest power among creatures that player controls and lose 3 life."] },
   { key = "will of the naga", class = "wrong_player", clauses = ["Those creatures don't untap during their controller's next untap step."] },
   { key = "willbound quill", class = "dropped_qualifier", clauses = ["Actualize — Whenever you cast a spell that isn't from your starting deck, copy that spell."] },
   { key = "willie lumpkin, postman", class = "wrong_duration", clauses = ["If they do, that player can't attack you or permanents you control during their next turn."] },
