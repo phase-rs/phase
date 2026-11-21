@@ -1385,11 +1385,8 @@ pub(crate) fn is_blocked_by_cant_play_lands(
 
         player_affected
             && match land_filter {
-                Some(filter) => super::filter::matches_target_filter(
-                    state,
-                    land_obj.id,
-                    filter,
-                    &super::filter::FilterContext {
+                Some(filter) => {
+                    let ctx = super::filter::FilterContext {
                         source_id: *source,
                         source_controller,
                         ability: None,
@@ -1404,8 +1401,20 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                         declared_slot_view: None,
                         granting_object: None,
                         pre_entry_battlefield: None,
-                    },
-                ),
+                    };
+                    // CR 712.12 + CR 101.2: a spell//land modal card is played
+                    // as its land back face, so the prohibition is read on that
+                    // face. One face-evaluation path for discovery and for the
+                    // submitted play; the real object is not mutated.
+                    match super::engine::land_face_played(land_obj) {
+                        Some(face) => super::filter::matches_target_filter_on_object(
+                            state, &face, filter, &ctx,
+                        ),
+                        None => {
+                            super::filter::matches_target_filter(state, land_obj.id, filter, &ctx)
+                        }
+                    }
+                }
                 None => true,
             }
     })

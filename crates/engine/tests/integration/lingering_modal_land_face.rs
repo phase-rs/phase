@@ -15,7 +15,7 @@ use engine::ai_support::legal_actions;
 use engine::game::engine::apply;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::TargetRef;
+use engine::types::ability::{ChoiceType, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
@@ -652,4 +652,248 @@ fn a_static_exile_permission_plays_the_modal_land_back_face() {
     assert_eq!(played.zone, Zone::Battlefield);
     assert_eq!(played.name, "Bala Ged Sanctuary");
     assert_eq!(lands_played(runner.state(), P0), 1);
+}
+
+// CR 201.4d + CR 712.12 + CR 101.2: Conjurer's Ban ("lands with the chosen name
+// can't be played") over the exiled modal card. The land that would be played is
+// the back face, so a name chosen for the back face stops the play and a name
+// chosen for the front face does not (CR 712.12: the played face is the land
+// face; the Bala Ged Recovery ruling: consider only the characteristics of the
+// face you're playing).
+
+/// Cast Conjurer's Ban naming `named`, answering the name prompt, and resolve it.
+/// Asserts the prompt's actor and that the printed choice is a card name.
+fn resolve_conjurers_ban_naming(runner: &mut GameRunner, ban: ObjectId, named: &str) {
+    let card_id = runner.state().objects[&ban].card_id;
+    let mut result = runner
+        .act(GameAction::CastSpell {
+            object_id: ban,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: Default::default(),
+        })
+        .expect("casting Conjurer's Ban");
+    let mut named_once = false;
+    for _ in 0..16 {
+        let action = match &result.waiting_for {
+            WaitingFor::NamedChoice {
+                player,
+                choice_type,
+                options,
+                ..
+            } => {
+                assert_eq!(*player, P0, "the caster names the card");
+                assert!(
+                    matches!(choice_type, ChoiceType::CardName { .. }),
+                    "a card name is chosen, not {choice_type:?}"
+                );
+                assert!(
+                    options.is_empty() || options.iter().any(|option| option == named),
+                    "the name {named:?} is a legal answer: {options:?}"
+                );
+                assert!(!named_once, "named exactly once");
+                named_once = true;
+                GameAction::ChooseOption {
+                    choice: named.to_string(),
+                }
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            other => panic!("unexpected prompt while resolving Conjurer's Ban: {other:?}"),
+        };
+        result = runner.act(action).expect("answering a prompt");
+    }
+    assert!(named_once, "Conjurer's Ban asked for a name");
+    assert!(runner.state().stack.is_empty(), "Conjurer's Ban resolved");
+}
+
+/// The witness ends settled: nothing on the stack and P0 holding priority.
+fn assert_settled(state: &GameState) {
+    assert!(state.stack.is_empty(), "settled: empty stack");
+    assert!(
+        matches!(&state.waiting_for, WaitingFor::Priority { player } if *player == P0),
+        "settled: P0 has priority, got {:?}",
+        state.waiting_for
+    );
+}
+
+struct BanBoard {
+    runner: GameRunner,
+    recovery: ObjectId,
+    forest_in_batch: ObjectId,
+}
+
+/// P0 in the precombat main phase: Conjurer's Ban naming `named` resolved, then
+/// either Light Up the Stage resolved over Bala Ged Recovery and a Forest
+/// (`Zone::Exile`) or Bala Ged Recovery sitting in the hand (`Zone::Hand`).
+fn ban_board(named: &str, recovery_zone: Zone) -> Option<BanBoard> {
+    let db = load_db()?;
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    for _ in 0..3 {
+        s.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    }
+    s.add_real_card(P0, "Plains", Zone::Battlefield, db);
+    s.add_real_card(P0, "Swamp", Zone::Battlefield, db);
+    add_fillers(&mut s);
+    let ban = s.add_real_card(P0, "Conjurer's Ban", Zone::Hand, db);
+    let stage = (recovery_zone == Zone::Exile)
+        .then(|| s.add_real_card(P0, "Light Up the Stage", Zone::Hand, db));
+    let recovery = s.add_real_card(
+        P0,
+        "Bala Ged Recovery",
+        if recovery_zone == Zone::Hand {
+            Zone::Hand
+        } else {
+            Zone::Library
+        },
+        db,
+    );
+    let forest_in_batch = s.add_real_card(P0, "Forest", Zone::Library, db);
+    let mut runner = s.build();
+    // Production fills the nameable set from the card database at game start;
+    // CR 201.4d lets a player name a back face, so its name must be in the set.
+    runner.state_mut().all_card_names = db.card_names().into();
+    resolve_conjurers_ban_naming(&mut runner, ban, named);
+    if let Some(stage) = stage {
+        put_on_top(&mut runner, P0, forest_in_batch);
+        put_on_top(&mut runner, P0, recovery);
+        runner.cast(stage).resolve();
+    }
+    // Settled: nothing on the stack and P0 holds priority.
+    let state = runner.state();
+    assert!(state.stack.is_empty(), "reach guard: empty stack");
+    assert!(
+        matches!(&state.waiting_for, WaitingFor::Priority { player } if *player == P0),
+        "reach guard: P0 has priority, got {:?}",
+        state.waiting_for
+    );
+    assert_eq!(state.phase, Phase::PreCombatMain, "reach guard: main phase");
+    assert_eq!(state.objects[&recovery].zone, recovery_zone, "reach guard");
+    assert_eq!(lands_played(state, P0), 0, "reach guard: land drop unused");
+    assert_eq!(
+        state.restrictions.len(),
+        2,
+        "reach guard: Conjurer's Ban armed its cast and land prohibitions"
+    );
+    Some(BanBoard {
+        runner,
+        recovery,
+        forest_in_batch,
+    })
+}
+
+/// F1: naming the back face (Bala Ged Sanctuary) stops the exiled modal card's
+/// land play, at discovery and at submission, and a refusal changes nothing.
+#[test]
+fn naming_the_land_back_face_suppresses_and_rejects_its_exile_land_play() {
+    let Some(b) = ban_board("Bala Ged Sanctuary", Zone::Exile) else {
+        return;
+    };
+    let state = b.runner.state();
+    assert!(
+        offers_play_land(state, b.forest_in_batch),
+        "control: the batch's other land is still offered under the same grant"
+    );
+    assert!(
+        !offers_play_land(state, b.recovery),
+        "the land back face is named: its land play is not offered"
+    );
+    assert_refused_and_unchanged(
+        state,
+        P0,
+        play_land_action(state, b.recovery),
+        "Bala Ged Sanctuary is named, so it can't be played",
+    );
+    assert_settled(state);
+}
+
+/// Naming the front face (Bala Ged Recovery) does not stop the land back face
+/// from being played: only the played face's name counts.
+#[test]
+fn naming_the_front_face_still_permits_the_land_back_face_from_exile() {
+    let Some(mut b) = ban_board("Bala Ged Recovery", Zone::Exile) else {
+        return;
+    };
+    let state = b.runner.state();
+    assert!(
+        offers_play_land(state, b.recovery),
+        "Recovery is named, but the face played is Sanctuary: offered"
+    );
+    assert!(
+        !offers_cast(state, b.recovery),
+        "the cast prohibition on the named front face is in force"
+    );
+    let action = play_land_action(state, b.recovery);
+    b.runner.act(action).expect("playing the land back face");
+    let state = b.runner.state();
+    let played = &state.objects[&b.recovery];
+    assert_eq!(played.zone, Zone::Battlefield);
+    assert_eq!(played.name, "Bala Ged Sanctuary", "the back face entered");
+    assert_eq!(lands_played(state, P0), 1, "one land drop spent");
+    assert_settled(state);
+}
+
+/// Negative sibling: a name that is on neither face of the modal card leaves its
+/// land play alone, while the named plain land is stopped (the per-face check
+/// does not turn into a blanket ban on the exiled batch).
+#[test]
+fn naming_another_card_stops_only_that_exiled_land() {
+    let Some(b) = ban_board("Forest", Zone::Exile) else {
+        return;
+    };
+    let state = b.runner.state();
+    assert!(
+        !offers_play_land(state, b.forest_in_batch),
+        "the named Forest can't be played"
+    );
+    assert!(
+        offers_play_land(state, b.recovery),
+        "the modal card's land face is not named"
+    );
+    assert_refused_and_unchanged(
+        state,
+        P0,
+        play_land_action(state, b.forest_in_batch),
+        "the named Forest can't be played",
+    );
+    assert_settled(state);
+}
+
+/// The shared authority also serves a modal card in hand: naming the back face
+/// stops its land play, naming the front face does not.
+#[test]
+fn naming_the_land_back_face_stops_the_hand_land_play_and_naming_the_front_does_not() {
+    let Some(sanctuary_named) = ban_board("Bala Ged Sanctuary", Zone::Hand) else {
+        return;
+    };
+    let state = sanctuary_named.runner.state();
+    assert!(
+        !offers_play_land(state, sanctuary_named.recovery),
+        "Sanctuary is named: the hand land play is not offered"
+    );
+    assert_refused_and_unchanged(
+        state,
+        P0,
+        play_land_action(state, sanctuary_named.recovery),
+        "Bala Ged Sanctuary is named, so it can't be played from hand",
+    );
+    assert_settled(state);
+    let Some(mut recovery_named) = ban_board("Bala Ged Recovery", Zone::Hand) else {
+        return;
+    };
+    let state = recovery_named.runner.state();
+    assert!(
+        offers_play_land(state, recovery_named.recovery),
+        "Recovery is named, but the face played is Sanctuary: offered from hand"
+    );
+    let action = play_land_action(state, recovery_named.recovery);
+    recovery_named
+        .runner
+        .act(action)
+        .expect("playing the land back face from hand");
+    let played = &recovery_named.runner.state().objects[&recovery_named.recovery];
+    assert_eq!(played.zone, Zone::Battlefield);
+    assert_eq!(played.name, "Bala Ged Sanctuary");
+    assert_settled(recovery_named.runner.state());
 }

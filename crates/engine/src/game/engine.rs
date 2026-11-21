@@ -18517,6 +18517,42 @@ pub(crate) fn modal_land_face_election_available(
     })
 }
 
+/// CR 712.12 + CR 712.8a: whether playing `obj` as a land puts its modal land
+/// BACK face onto the battlefield without a further choice — a spell//land
+/// modal double-faced card whose face election is still open. A land//land card
+/// is not covered: its played face is chosen at `ModalFaceChoice`. The single
+/// predicate shared by the special action's auto-election in `handle_play_land`
+/// and by [`land_face_played`], so the face a land play commits and the face its
+/// restrictions are read against cannot drift apart.
+pub(crate) fn land_play_elects_back_face(obj: &crate::game::game_object::GameObject) -> bool {
+    !obj.cast_face_committed
+        && modal_land_face_election_available(obj)
+        && !obj
+            .card_types
+            .core_types
+            .contains(&crate::types::card_type::CoreType::Land)
+}
+
+/// CR 712.12 + CR 101.2 + CR 201.4d: the face a land play of `obj` would
+/// present once elected, as a detached clone, or `None` when the play uses the
+/// object as it stands. CR 712.12 has the player choose the land face before
+/// putting it onto the battlefield, and the Bala Ged Recovery ruling says only
+/// the characteristics of the face being played count — so a "lands with the
+/// chosen name can't be played" prohibition (Conjurer's Ban) is judged on the
+/// land face's name, not on the front face the object presents in hand or exile
+/// (CR 712.8a). The clone shares the real object's zone, owner and links; the
+/// real object is never mutated, so a refused play leaves the state untouched.
+pub(crate) fn land_face_played(
+    obj: &crate::game::game_object::GameObject,
+) -> Option<crate::game::game_object::GameObject> {
+    if !land_play_elects_back_face(obj) {
+        return None;
+    }
+    let mut projected = obj.clone();
+    elect_modal_land_back_face(&mut projected);
+    Some(projected)
+}
+
 /// CR 305.2a + CR 305.2b + CR 305.3 + CR 305.9 + CR 805.4c: whether an effect
 /// that instructs `player` to play `object_id` as it resolves can be followed:
 /// the object is a land card outside the battlefield and stack, it is that
@@ -18878,7 +18914,7 @@ fn handle_play_land(
             });
         }
 
-        if land_face_election && !front_is_land {
+        if land_play_elects_back_face(obj) {
             // CR 712.12: Only back face is a land — auto-swap (player already chose "play as land")
             elect_modal_land_back_face(state.objects.get_mut(&object_id).unwrap());
         }
