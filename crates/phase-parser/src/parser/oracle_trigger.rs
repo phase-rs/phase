@@ -94,9 +94,10 @@ use crate::types::ability::{
     ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope, ProhibitedActivity,
     PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     RestrictionExpiry, RestrictionPlayerScope, SacrificeAggregateStat, SacrificeCost,
-    SacrificeRequirement, SharedQuality, SpentColor, StaticCondition, TapCreaturesRequirement,
-    TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    TriggerLimitSpend, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause, ZoneRef,
+    SacrificeRequirement, SharedQuality, SourceExclusion, SpentColor, StaticCondition,
+    TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TriggerLimitSpend, TypeFilter, TypedFilter, UnlessPayModifier,
+    ZoneChangeClause, ZoneRef,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -8698,6 +8699,48 @@ impl IfExtraction {
     }
 }
 
+/// CR 508.1a + CR 508.4: These conditions refer to declared attackers in the
+/// current combat, including creatures subsequently removed from combat.
+fn parse_attacked_this_combat_condition(input: &str) -> OracleResult<'_, TriggerCondition> {
+    use super::oracle_nom::condition::parse_ge_threshold;
+
+    let count_condition = |exclude_source, count| TriggerCondition::AttackersDeclaredCount {
+        subject: AttackersDeclaredCountSubject::CurrentCombat { exclude_source },
+        comparator: Comparator::GE,
+        count,
+    };
+    let source = map(
+        preceded(
+            tag("~"),
+            opt(preceded(
+                tag(" and "),
+                terminated(parse_ge_threshold, tag("other creatures")),
+            )),
+        ),
+        move |count| match count {
+            None => TriggerCondition::SourceAttackedThisCombat,
+            Some(count) => TriggerCondition::And {
+                conditions: vec![
+                    TriggerCondition::SourceAttackedThisCombat,
+                    count_condition(SourceExclusion::Exclude, count),
+                ],
+            },
+        },
+    );
+    let creatures = map(
+        terminated(parse_ge_threshold, tag("creatures")),
+        move |count| count_condition(SourceExclusion::Include, count),
+    );
+    preceded(
+        tag("if "),
+        terminated(
+            alt((source, creatures)),
+            pair(tag(" attacked this combat"), peek(alt((tag(","), eof)))),
+        ),
+    )
+    .parse(input)
+}
+
 fn extract_if_condition_with_card_name(
     text: &str,
     card_name: &str,
@@ -9120,17 +9163,11 @@ fn extract_if_condition_with_card_name(
         );
     }
 
-    // CR 400.7 + CR 508.1 + CR 603.4: source-combat history is a distinct
-    // grammar production, not a card-text table entry. The scanner applies the
-    // nom production at word boundaries so a leading intervening-if is retained
-    // while later sentence-local conditionals remain outside this function.
-    if let Some((prefix, _, rest)) = scan_preceded(&lower, |i| {
-        tag::<_, _, OracleError<'_>>("if ~ attacked this combat").parse(i)
-    }) {
-        let clause_len = lower.len() - prefix.len() - rest.len();
+    // CR 603.4: Only a leading if-clause gates the trigger and its resolution.
+    if let Ok((rest, condition)) = parse_attacked_this_combat_condition(&lower) {
         return IfExtraction::hoisted(
-            strip_condition_clause(text, prefix.len(), clause_len),
-            TriggerCondition::SourceAttackedThisCombat,
+            strip_condition_clause(text, 0, lower.len() - rest.len()),
+            condition,
         );
     }
 
