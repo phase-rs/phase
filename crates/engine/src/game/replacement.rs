@@ -11241,6 +11241,15 @@ impl ReplacementPromptCauses {
     pub(crate) const fn is_empty(self) -> bool {
         self.0 == 0
     }
+
+    /// CR 616.1: the pipeline can open a PLAYER choice on this event: an
+    /// optional candidate, or two or more competing candidates whose order is
+    /// material. A lone mandatory modifier (`MandatoryBodyContinuation`) never
+    /// prompts. `effects/token.rs`' batch gate reads it too.
+    pub(crate) const fn may_open_player_choice(self) -> bool {
+        self.contains(ReplacementPromptCause::OptionalCandidate)
+            || self.contains(ReplacementPromptCause::OrderingMaterial)
+    }
 }
 
 /// CR 614.1a + CR 616.1: can the live replacement pipeline open a player choice
@@ -14637,6 +14646,7 @@ fn park_entry_controller_choice(
         exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
         excess_recipient: None,
         lifelink_bonus: 0,
+        source_incarnation: None,
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
@@ -14814,6 +14824,7 @@ fn park_as_enters_named_choice(
         exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
         excess_recipient: None,
         lifelink_bonus: 0,
+        source_incarnation: None,
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
@@ -15145,6 +15156,7 @@ fn park_as_enters_pay_choice(
         exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
         excess_recipient: None,
         lifelink_bonus: 0,
+        source_incarnation: None,
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
@@ -15998,10 +16010,12 @@ fn pipeline_loop(
                     exile_controller: None,
                     exile_duration: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
-                    // CR 120.4a: set by `apply_damage_to_target` right after this
-                    // park returns NeedsChoice (the ctx rider isn't known here).
+                    // CR 120.4a + CR 400.7: set by `deal_damage::park_damage_context`
+                    // (called by every non-combat damage park site; the ctx riders
+                    // aren't known here).
                     excess_recipient: None,
                     lifelink_bonus: 0,
+                    source_incarnation: None,
                     // CR 614.12a: first park of this choice — no MayCost has been
                     // paid yet. Set only when re-parking after a paused accept.
                     may_cost_paid: false,
@@ -16076,10 +16090,12 @@ fn pipeline_loop(
                 exile_controller: None,
                 exile_duration: None,
                 exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
-                // CR 120.4a: set by `apply_damage_to_target` right after this park
-                // returns NeedsChoice (the ctx rider isn't known here).
+                // CR 120.4a + CR 400.7: set by `deal_damage::park_damage_context`
+                // (called by every non-combat damage park site; the ctx riders
+                // aren't known here).
                 excess_recipient: None,
                 lifelink_bonus: 0,
+                source_incarnation: None,
                 // CR 614.12a: distinct-replacement choices carry no MayCost.
                 may_cost_paid: false,
                 may_cost_remaining: None,
@@ -17246,6 +17262,7 @@ fn continue_replacement_impl(
                     // rider applies here.
                     excess_recipient: None,
                     lifelink_bonus: 0,
+                    source_incarnation: None,
                     may_cost_paid: true,
                     may_cost_remaining: remaining_cost,
                     delivery_boundary: reparked_delivery_boundary,
@@ -17801,6 +17818,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: state.ingress_life_policy(),
+            source_incarnation: None,
             settled_damage_guards: Vec::new(),
         };
         assert_eq!(pending_replacement_option_count(&state, &pending), 2);
@@ -21034,6 +21052,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -21100,6 +21119,7 @@ mod tests {
                 exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                 excess_recipient: None,
                 lifelink_bonus: 0,
+                source_incarnation: None,
                 may_cost_paid: false,
                 may_cost_remaining: None,
                 delivery_boundary: None,
@@ -21187,6 +21207,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -24078,6 +24099,7 @@ mod tests {
                 source_incarnation: None,
                 applied: HashSet::new(),
             },
+            source_incarnation: None,
             sacrifice_provenance: None,
             candidates: qualities.map(protection_replacement_id).to_vec(),
             search_found_candidates: Vec::new(),
@@ -27885,6 +27907,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,

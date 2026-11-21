@@ -242,6 +242,7 @@ mod claim_jumper_repeat;
 mod cleanup_control_reversion_triggers;
 mod cleanup_discard_trigger_pipeline;
 mod cleave_text_changing_cost;
+mod clever_concealment_convoke_color_9117;
 mod client_wire_viewer_projection;
 mod clone_copy_artillery_halo_lki;
 mod clone_copy_modal_artillery_halo_lki;
