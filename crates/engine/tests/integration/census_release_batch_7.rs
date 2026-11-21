@@ -14,8 +14,9 @@
 //! Every card is the printed card (printed cost, type line, P/T and verbatim Oracle text, loaded
 //! from the card database through `add_real_card`) driven through the public cast, pass-priority,
 //! choose-target and select-cards actions of `GameRunner`. Every support card is a printed card too.
-//! Each witness asserts the prompt it is shown (actor and options), answers it with a
-//! discriminating choice, asserts the downstream effect and ends with an empty stack at `Priority`.
+//! The prompts the engine shows (who chooses, from which options) are asserted for every card, the
+//! cards' choices are answered discriminatingly, the downstream effect is asserted and every
+//! witness ends with an empty stack at `Priority`.
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -36,8 +37,8 @@ fn db() -> &'static engine::database::card_db::CardDatabase {
     shared_card_db().expect("the committed integration card fixture is present")
 }
 
-/// Pool mana for every printed cost used below (CR 106.4), so that a cast pays exactly its printed
-/// cost and never taps a land the test needs untapped.
+/// Pool mana for the printed costs used below (CR 106.4): casts are paid from the pool, so no land
+/// a test needs untapped is tapped.
 fn pool() -> Vec<ManaUnit> {
     exact_pool(&[
         (ManaType::White, 8),
@@ -167,18 +168,26 @@ fn shown(wf: &WaitingFor) -> Option<Shown> {
 struct Plan {
     /// Targets, taken as the prompts for them come: the first still-legal entry answers each slot.
     targets: Vec<TargetRef>,
-    /// Answer to every "you may" prompt.
+    /// Answer to an `OptionalEffectChoice` ("you may"), should one be shown.
     accept: bool,
     /// Cards chosen at an object-selection prompt (those of them that are offered), in this order.
     picks: Vec<ObjectId>,
     /// Every selection prompt that was shown, in order.
     prompts: Vec<Shown>,
+    /// Every target prompt that was shown, in order: who announced it and what was legal.
+    target_prompts: Vec<(PlayerId, Vec<TargetRef>)>,
 }
 
 fn plan_answer(plan: &mut Plan, wf: &WaitingFor) -> Option<GameAction> {
     match wf {
-        WaitingFor::TargetSelection { selection, .. }
-        | WaitingFor::TriggerTargetSelection { selection, .. } => {
+        WaitingFor::TargetSelection {
+            player, selection, ..
+        }
+        | WaitingFor::TriggerTargetSelection {
+            player, selection, ..
+        } => {
+            plan.target_prompts
+                .push((*player, selection.current_legal_targets.clone()));
             let at = plan
                 .targets
                 .iter()
@@ -190,8 +199,8 @@ fn plan_answer(plan: &mut Plan, wf: &WaitingFor) -> Option<GameAction> {
         WaitingFor::OptionalEffectChoice { .. } => Some(GameAction::DecideOptionalEffect {
             accept: plan.accept,
         }),
-        // CR 702.51a: a convoke window; with no more creatures to tap, passing finalizes the cost
-        // from the pool.
+        // CR 702.51a: a convoke window; passing declines further convoke taps and finalizes the
+        // cost from the pool.
         WaitingFor::ManaPayment { .. } => Some(GameAction::PassPriority),
         _ => {
             let prompt = shown(wf)?;
@@ -328,7 +337,16 @@ fn prowler_declining_the_land_puts_a_counter_on_it() {
     let (mut r, t) = prowler_table(true);
     let mut plan = Plan::default();
     cast_plan(&mut r, "prowler decline", t.spell, &mut plan);
-    assert_eq!(plan.prompts.len(), 1, "the choice was offered");
+    assert_eq!(
+        plan.prompts,
+        vec![Shown {
+            actor: P0,
+            cards: vec![t.land],
+            min: 0,
+            max: 1,
+        }],
+        "the choice was offered, over the milled land only"
+    );
     assert_eq!(
         zone_of(&r, t.land),
         Zone::Graveyard,
@@ -420,7 +438,16 @@ fn grab_run(r: &mut GameRunner, g: &Grab, pick: Option<ObjectId>) -> Shown {
         ..Plan::default()
     };
     cast_plan(r, "cache grab", g.spell, &mut plan);
-    assert_eq!(plan.prompts.len(), 1, "exactly one choice was offered");
+    assert_eq!(
+        plan.prompts,
+        vec![Shown {
+            actor: P0,
+            cards: sorted(vec![g.island, g.bears, g.squirrel]),
+            min: 0,
+            max: 1,
+        }],
+        "exactly one choice, over the milled permanent cards only: the Shock is not offered"
+    );
     plan.prompts.remove(0)
 }
 
@@ -566,6 +593,9 @@ fn congregation_puts_the_three_found_creatures_on_top_in_the_chosen_order() {
 #[test]
 fn congregation_may_find_fewer_than_three() {
     let g = congregation_run(&[1]);
+    assert_eq!(g.search.actor, P0);
+    assert_eq!(g.search.cards, sorted(g.creatures.to_vec()));
+    assert_eq!((g.search.min, g.search.max), (0, 3), "up to three");
     let lib = library(&g.r, P0);
     assert_eq!(lib[0], g.creatures[1], "the one found creature is on top");
     assert_eq!(lib.len(), 6);
@@ -575,6 +605,35 @@ fn congregation_may_find_fewer_than_three() {
 // ---- Shape 3: "Enchanted creature gets +0/+2 for each other creature you control." (Conclave's
 // Blessing). The count excludes the enchanted creature and the opponent's creatures, and includes
 // tapped ones (CR 702.51a: convoke taps them to pay). ----
+/// "Enchant creature": P0 announces one target slot, and every creature on the battlefield (the
+/// opponent's included) is legal.
+fn assert_enchant_creature_prompt(plan: &Plan, r: &GameRunner) {
+    let mut creatures: Vec<TargetRef> = r
+        .state()
+        .objects
+        .values()
+        .filter(|o| {
+            o.zone == Zone::Battlefield && o.card_types.core_types.contains(&CoreType::Creature)
+        })
+        .map(|o| TargetRef::Object(o.id))
+        .collect();
+    creatures.sort_by_key(|t| match t {
+        TargetRef::Object(o) => o.0,
+        TargetRef::Player(p) => u64::from(p.0),
+    });
+    assert_eq!(plan.target_prompts.len(), 1, "one target prompt");
+    let (actor, mut legal) = plan.target_prompts[0].clone();
+    legal.sort_by_key(|t| match t {
+        TargetRef::Object(o) => o.0,
+        TargetRef::Player(p) => u64::from(p.0),
+    });
+    assert_eq!(actor, P0);
+    assert_eq!(
+        legal, creatures,
+        "every creature on the battlefield is a legal enchant target"
+    );
+}
+
 #[test]
 fn conclaves_blessing_counts_the_other_creatures_you_control() {
     let (mut r, (aura, bears, opp)) = table(|s| {
@@ -591,6 +650,7 @@ fn conclaves_blessing_counts_the_other_creatures_you_control() {
         ..Plan::default()
     };
     cast_plan(&mut r, "blessing", aura, &mut plan);
+    assert_enchant_creature_prompt(&plan, &r);
     assert_eq!(zone_of(&r, aura), Zone::Battlefield);
     assert_eq!(
         power_toughness(&r, bears),
@@ -635,6 +695,7 @@ fn conclaves_blessing_convoked_counts_tapped_creatures_too() {
         },
         _ => plan_answer(&mut plan, wf),
     });
+    assert_enchant_creature_prompt(&plan, &r);
     for c in others {
         assert!(r.state().objects[&c].tapped, "convoked: tapped to pay");
     }
@@ -694,6 +755,11 @@ fn maneuver_run(sacrifice: usize) -> (GameRunner, Vec<ObjectId>, Vec<Shown>) {
         ..Plan::default()
     };
     cast_plan(&mut r, "maneuver", spell, &mut plan);
+    assert_eq!(
+        plan.target_prompts,
+        vec![(P1, vec![TargetRef::Player(P0), TargetRef::Player(P1)])],
+        "P1 announces the one target player slot"
+    );
     let mut all = attackers.clone();
     all.push(idle);
     (r, all, plan.prompts)
