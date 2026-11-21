@@ -5,6 +5,10 @@
 // MEASURED, not assumed — the alternative already in this tree is `test_support.rs` / `support.rs`,
 // twin files kept equal by a comment asking a human to remember.
 #![recursion_limit = "512"]
+// Debug builds of this crate's large dispatch functions allocate stack frames above
+// clippy's 512 KB `large_unopt_stack_frames` default. Test threads run with
+// RUST_MIN_STACK = 16 MiB (.cargo/config.toml) and server runtime threads with 32 MiB.
+#![allow(clippy::large_unopt_stack_frames)]
 #[path = "../../src/source_census.rs"]
 mod source_census;
 

@@ -181,7 +181,7 @@ fn pool_is_the_casters_whole_graveyard_not_just_the_milled_cards() {
     // exactly the three milled cards and these were never offered.
     for buried in ["Buried Alpha", "Buried Beta", "Buried Gamma"] {
         assert!(
-            first_pool.contains(&buried.to_string()),
+            first_pool.iter().any(|i: &String| i == buried),
             "{buried} is a creature card in the caster's graveyard and must be offered; \
              pool was {first_pool:?}"
         );

@@ -114,6 +114,10 @@ fn cybership_combat_damage_manifests_top_two_under_controller() {
         assert_eq!(obj.toughness, Some(2));
         assert!(obj.card_types.core_types.contains(&CoreType::Creature));
         assert!(obj.card_types.core_types.contains(&CoreType::Artifact));
-        assert!(obj.card_types.subtypes.contains(&"Cyberman".to_string()));
+        assert!(obj
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Cyberman"));
     }
 }

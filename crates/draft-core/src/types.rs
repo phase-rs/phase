@@ -1418,9 +1418,7 @@ impl SeatFlags {
     }
 
     pub fn clear(&mut self) {
-        for flag in &mut self.0 {
-            *flag = false;
-        }
+        self.0.fill(false);
     }
 
     pub fn len(&self) -> usize {

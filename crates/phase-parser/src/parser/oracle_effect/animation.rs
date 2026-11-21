@@ -1766,11 +1766,11 @@ mod test_den_bugbear {
 
         // Type list must include Creature and Hydra.
         assert!(
-            spec.types.contains(&"Creature".to_string()),
+            spec.types.iter().any(|t| t == "Creature"),
             "must include Creature"
         );
         assert!(
-            spec.types.contains(&"Hydra".to_string()),
+            spec.types.iter().any(|t| t == "Hydra"),
             "must include Hydra"
         );
 
@@ -1825,7 +1825,7 @@ mod test_den_bugbear {
             panic!("dynamic_power must be Ref(CostXPaid)");
         }
         assert!(
-            spec.types.contains(&"Creature".to_string()),
+            spec.types.iter().any(|t| t == "Creature"),
             "must infer Creature"
         );
     }
@@ -1848,11 +1848,11 @@ mod test_den_bugbear {
             spec.keywords
         );
         assert!(
-            spec.types.contains(&"Creature".to_string()),
+            spec.types.iter().any(|t| t == "Creature"),
             "must include Creature"
         );
         assert!(
-            spec.types.contains(&"Plant".to_string()),
+            spec.types.iter().any(|t| t == "Plant"),
             "must include Plant"
         );
     }
@@ -2002,12 +2002,12 @@ mod test_den_bugbear {
 
         // Type list must include Creature and Elemental.
         assert!(
-            spec.types.contains(&"Creature".to_string()),
+            spec.types.iter().any(|t| t == "Creature"),
             "must include Creature, got: {:?}",
             spec.types
         );
         assert!(
-            spec.types.contains(&"Elemental".to_string()),
+            spec.types.iter().any(|t| t == "Elemental"),
             "must include Elemental, got: {:?}",
             spec.types
         );

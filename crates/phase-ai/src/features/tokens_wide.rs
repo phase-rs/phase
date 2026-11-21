@@ -676,7 +676,8 @@ mod tests {
         assert!(
             feature
                 .payoff_names
-                .contains(&"Llanowar Elves Clone".to_string()),
+                .iter()
+                .any(|i| i == "Llanowar Elves Clone"),
             "payoff_names should include the generator's name"
         );
     }
@@ -688,9 +689,7 @@ mod tests {
             .push(anthem_static(creature_you_control_filter()));
         let feature = detect(&[deck_entry(face)]);
         assert!(
-            feature
-                .anthem_names
-                .contains(&"Glorious Anthem".to_string()),
+            feature.anthem_names.iter().any(|i| i == "Glorious Anthem"),
             "anthem_names should include the anthem's name"
         );
     }

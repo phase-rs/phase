@@ -42217,7 +42217,7 @@ impl GameState {
         for reference in self.triggers_fired_this_game.iter() {
             collect_reference(reference, &mut present, &mut grants);
         }
-        for (reference, _) in self.trigger_fire_counts_this_turn.iter() {
+        for reference in self.trigger_fire_counts_this_turn.keys() {
             collect_reference(reference, &mut present, &mut grants);
         }
         for (reference, _) in self.triggers_fired_this_turn_per_opponent.iter() {
