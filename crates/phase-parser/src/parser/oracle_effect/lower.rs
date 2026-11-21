@@ -13341,10 +13341,19 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
     // that creature's power" announces `TargetFilter::Any`, which names no
     // creature for the demonstrative to bind to, so it keeps `CostPaidObject`
     // and still reads the sacrificed creature.
-    let rebind_magnitude_target_anaphor = where_x_is_demonstrative_target_creature_stat(where_x)
-        && effect
-            .target_filter()
-            .is_some_and(target_filter_names_creature);
+    let referent = where_x_target_referent(where_x);
+    let pt_rebind_from = referent
+        .filter(|referent| match referent {
+            TargetReferent::Demonstrative => effect
+                .target_filter()
+                .is_some_and(target_filter_names_creature),
+            // CR 608.2c: "its power" in the where-clause of "target creature gets
+            // +X/…" names the clause subject, the announced target, not the source.
+            TargetReferent::SubjectPronoun => {
+                matches!(effect, Effect::Pump { target, .. } if target_filter_names_creature(target))
+            }
+        })
+        .map(TargetReferent::provisional_scope);
     // CR 107.3c: set when the clause DEFINES X but the definition is not
     // representable. Recorded here and converted to a gap node after the match
     // (the arms hold a mutable borrow of `effect`'s fields).
@@ -13414,8 +13423,8 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
         | Effect::SkipNextTurn { count: amount, .. }
         | Effect::Surveil { count: amount, .. } => {
             bind_where_x_quantity(amount, where_x, &mut unbound_where_x);
-            if rebind_magnitude_target_anaphor {
-                rebind_cost_paid_object_pt_to_target(amount);
+            if let Some(from) = pt_rebind_from {
+                rebind_pt_scope_to_target(amount, from);
             }
         }
         // CR 705.1: the flip count of an `Exactly` run is the where-X slot; an
@@ -13423,8 +13432,8 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
         Effect::FlipCoins { flips, .. } => {
             if let Some(amount) = flips.count_expr_mut() {
                 bind_where_x_quantity(amount, where_x, &mut unbound_where_x);
-                if rebind_magnitude_target_anaphor {
-                    rebind_cost_paid_object_pt_to_target(amount);
+                if let Some(from) = pt_rebind_from {
+                    rebind_pt_scope_to_target(amount, from);
                 }
             }
         }
@@ -13658,9 +13667,9 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
                 }
                 _ => unbound_where_x = where_x.expression.map(str::to_string),
             }
-            if rebind_magnitude_target_anaphor {
-                rebind_cost_paid_object_pt_value_to_target(power);
-                rebind_cost_paid_object_pt_value_to_target(toughness);
+            if let Some(from) = pt_rebind_from {
+                rebind_pt_value_scope_to_target(power, from);
+                rebind_pt_value_scope_to_target(toughness, from);
             }
         }
         Effect::PreventDamage {
@@ -13710,16 +13719,17 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
             // Xenagos, God of Revels), so a "that creature" anaphor in the
             // where-clause is the chosen target, not a cost/trigger referent.
             let target_based = target.is_some();
-            // CR 608.2c: "that creature's power"/"toughness" in the where-clause
-            // of a *targeted* grant is the target anaphor. The shared quantity
-            // grammar lowers the context-free phrase to `CostPaidObject` (its
-            // triggered-ability sense); on a targeted grant it must instead read
-            // the chosen recipient, so rebind that scope to `Target` here at the
-            // lowering seam. Gating on the demonstrative anaphor keeps a genuine
-            // participle cost referent ("the sacrificed creature's power",
-            // `CostPaidObject`) untouched.
-            let rebind_target_anaphor =
-                target_based && where_x_is_demonstrative_target_creature_stat(where_x);
+            // CR 608.2c: "that creature's power"/"toughness" or "its power"/
+            // "toughness" in the where-clause of a *targeted* grant names the
+            // chosen recipient. The shared quantity grammar lowers the
+            // demonstrative to `CostPaidObject` (its triggered-ability sense)
+            // and the pronoun to `Source`, so the referent's provisional scope
+            // is rebound to `Target` here at the lowering seam. Gating on the
+            // referent keeps a genuine participle cost referent ("the sacrificed
+            // creature's power") and an explicit self-reference untouched.
+            let rebind_from = referent
+                .filter(|_| target_based)
+                .map(TargetReferent::provisional_scope);
             for static_def in static_abilities.iter_mut() {
                 if let Some(condition) = static_def.condition.as_mut() {
                     apply_where_x_static_condition(
@@ -13746,8 +13756,8 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
                         where_x,
                         &mut unbound_where_x,
                     );
-                    if rebind_target_anaphor {
-                        rebind_target_anaphor_continuous_modification(modification);
+                    if let Some(from) = rebind_from {
+                        rebind_target_anaphor_continuous_modification(modification, from);
                     }
                 }
             }
@@ -13981,6 +13991,50 @@ fn apply_where_x_continuous_modification(
     }
 }
 
+/// CR 608.2c: the where-X phrase that names a targeted clause's announced
+/// recipient, keyed by the scope the shared quantity grammar provisionally gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetReferent {
+    /// "that creature's power"/"toughness".
+    Demonstrative,
+    /// "its"/"his"/"her"/"their power"/"toughness" — the clause subject.
+    SubjectPronoun,
+}
+
+impl TargetReferent {
+    fn provisional_scope(self) -> ObjectScope {
+        match self {
+            TargetReferent::Demonstrative => ObjectScope::CostPaidObject,
+            TargetReferent::SubjectPronoun => ObjectScope::Source,
+        }
+    }
+}
+
+/// CR 608.2c: classify a where-X definition as a target referent. Explicit
+/// self-references ("this creature's power", "~'s power") are not pronouns and
+/// return `None`, so they keep `Source`.
+fn where_x_target_referent(where_x: WhereXBinding<'_>) -> Option<TargetReferent> {
+    if where_x_is_demonstrative_target_creature_stat(where_x) {
+        return Some(TargetReferent::Demonstrative);
+    }
+    let expression = where_x
+        .expression?
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let parsed = all_consuming(|i| {
+        nom_quantity::parse_pronoun_characteristic_ref_with_scope(i, ObjectScope::Source)
+    })
+    .parse(expression.as_str())
+    .ok()
+    .map(|(_, qty)| qty);
+    matches!(
+        parsed,
+        Some(QuantityRef::Power { .. } | QuantityRef::Toughness { .. })
+    )
+    .then_some(TargetReferent::SubjectPronoun)
+}
+
 /// CR 608.2c: Does the where-clause definition read "that creature's power" /
 /// "that creature's toughness" — the bare demonstrative anaphor to the grant's
 /// chosen target? `parse_event_context_refs` lowers this context-free phrase to
@@ -14011,14 +14065,17 @@ fn where_x_is_demonstrative_target_creature_stat(where_x: WhereXBinding<'_>) -> 
     false
 }
 
-/// CR 608.2c: Rebind a `ObjectScope::CostPaidObject` power/toughness reference
-/// inside a continuous modification's dynamic value to `ObjectScope::Target`.
-/// Applied only on a targeted grant whose where-clause is the demonstrative
-/// target anaphor (`where_x_is_demonstrative_target_creature_stat`), so the
-/// "that creature's power"/"toughness" pump (Xenagos, God of Revels) reads the
-/// announced recipient instead of the trigger/cost referent slot. Mirrors the
-/// modification coverage of `apply_where_x_continuous_modification`.
-fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousModification) {
+/// CR 608.2c: Rebind a power/toughness reference scoped `from` inside a
+/// continuous modification's dynamic value to `ObjectScope::Target`.
+/// Applied only on a targeted grant whose where-clause names the target
+/// (`where_x_target_referent`), so the "that creature's power" pump (Xenagos,
+/// God of Revels) and the "its power" pump (Fatal Frenzy) read the announced
+/// recipient. Mirrors the modification coverage of
+/// `apply_where_x_continuous_modification`.
+fn rebind_target_anaphor_continuous_modification(
+    modification: &mut ContinuousModification,
+    from: ObjectScope,
+) {
     match modification {
         ContinuousModification::SetDynamicPower { value, .. }
         | ContinuousModification::SetDynamicToughness { value, .. }
@@ -14027,7 +14084,7 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::AddDynamicPower { value, .. }
         | ContinuousModification::AddDynamicToughness { value, .. }
         | ContinuousModification::AddDynamicKeyword { value, .. } => {
-            rebind_cost_paid_object_pt_to_target(value);
+            rebind_pt_scope_to_target(value, from);
         }
         ContinuousModification::AddCounterOnEnter { .. }
         | ContinuousModification::SetStartingLoyalty { .. } => {}
@@ -14087,16 +14144,16 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
     }
 }
 
-/// Retarget a `ObjectScope::CostPaidObject` power/toughness `QuantityRef` within
-/// a `QuantityExpr` to `ObjectScope::Target`, recursing through every composite
+/// Retarget a power/toughness `QuantityRef` scoped `from` within a
+/// `QuantityExpr` to `ObjectScope::Target`, recursing through every composite
 /// arm. Only the per-object power/toughness refs are rewritten; every other
-/// reference (object counts, mana value, non-`CostPaidObject` scopes) is left
-/// as-is so unrelated where-X bindings are never disturbed.
-pub(super) fn rebind_cost_paid_object_pt_to_target(expr: &mut QuantityExpr) {
+/// reference (object counts, mana value, other scopes) is left as-is so
+/// unrelated where-X bindings are never disturbed.
+pub(super) fn rebind_pt_scope_to_target(expr: &mut QuantityExpr, from: ObjectScope) {
     match expr {
         QuantityExpr::Ref {
             qty: QuantityRef::Power { scope } | QuantityRef::Toughness { scope },
-        } if *scope == ObjectScope::CostPaidObject => {
+        } if *scope == from => {
             *scope = ObjectScope::Target;
         }
         QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
@@ -14108,27 +14165,27 @@ pub(super) fn rebind_cost_paid_object_pt_to_target(expr: &mut QuantityExpr) {
         | QuantityExpr::Power {
             exponent: inner, ..
         } => {
-            rebind_cost_paid_object_pt_to_target(inner);
+            rebind_pt_scope_to_target(inner, from);
         }
         QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
             for inner in exprs {
-                rebind_cost_paid_object_pt_to_target(inner);
+                rebind_pt_scope_to_target(inner, from);
             }
         }
         QuantityExpr::Difference { left, right } => {
-            rebind_cost_paid_object_pt_to_target(left);
-            rebind_cost_paid_object_pt_to_target(right);
+            rebind_pt_scope_to_target(left, from);
+            rebind_pt_scope_to_target(right, from);
         }
     }
 }
 
-/// CR 613.4c: `PtValue` counterpart of [`rebind_cost_paid_object_pt_to_target`].
+/// CR 613.4c: `PtValue` counterpart of [`rebind_pt_scope_to_target`].
 /// A layer-7 pump magnitude is a `PtValue`, whose only quantity-bearing form is
 /// `PtValue::Quantity`; a fixed or placeholder magnitude carries no object scope
 /// to rebind. Exhaustive so a new `PtValue` form has to be classified here.
-fn rebind_cost_paid_object_pt_value_to_target(value: &mut PtValue) {
+fn rebind_pt_value_scope_to_target(value: &mut PtValue, from: ObjectScope) {
     match value {
-        PtValue::Quantity(expr) => rebind_cost_paid_object_pt_to_target(expr),
+        PtValue::Quantity(expr) => rebind_pt_scope_to_target(expr, from),
         PtValue::Fixed(_) | PtValue::Variable(_) => {}
     }
 }
