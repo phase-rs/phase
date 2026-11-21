@@ -11572,6 +11572,8 @@ mod tests {
                             amount: 3,
                         },
                     ]),
+                    staged_gains: Vec::new(),
+                    awaiting_staged_gain: false,
                     batch_events: Vec::new(),
                     damage_to_players: Vec::new(),
                     prevention_tally: Vec::new(),

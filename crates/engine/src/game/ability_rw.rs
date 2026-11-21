@@ -2213,7 +2213,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceIsEquipped
@@ -7896,7 +7896,7 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsEnchanted

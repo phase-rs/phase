@@ -30783,7 +30783,10 @@ fn bridge_and_with_unmappable_returns_none() {
 fn bridge_unmappable_variants_return_none() {
     assert!(static_condition_to_trigger_condition(&StaticCondition::IsRingBearer).is_none());
     assert!(
-        static_condition_to_trigger_condition(&StaticCondition::SourceHasDealtDamage).is_none()
+        static_condition_to_trigger_condition(&StaticCondition::SourceHasDealtDamage {
+            kind: DamageKindFilter::Any
+        })
+        .is_none()
     );
 }
 
@@ -46703,4 +46706,47 @@ fn or_split_carries_shared_adjunct_to_bare_leg() {
         let legs = parse_trigger_lines(line, name);
         assert_eq!(legs[0].description.as_deref(), Some(first_leg), "{name}");
     }
+}
+
+/// CR 603.4 + CR 608.2h: The draw threshold gates the trigger, and the
+/// counter quantity reads the controller's draw count when it resolves.
+#[test]
+fn proft_eidetic_memory_hoists_draw_gate_and_binds_counter_quantity() {
+    let def = parse_trigger_line(
+        "At the beginning of combat on your turn, if you've drawn more than one card this turn, put X +1/+1 counters on target creature you control, where X is the number of cards you've drawn this turn minus one.",
+        "Proft's Eidetic Memory",
+    );
+    let draws = QuantityExpr::Ref {
+        qty: QuantityRef::CardsDrawnThisTurn {
+            player: PlayerScope::Controller,
+        },
+    };
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: draws.clone(),
+            comparator: Comparator::GT,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        })
+    );
+    let execute = def.execute.as_deref().expect("counter payoff");
+    assert_no_unimplemented(execute);
+    assert_eq!(
+        execute.effect.as_ref(),
+        &Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Offset {
+                inner: Box::new(draws),
+                offset: -1,
+            },
+            target: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                properties: vec![],
+            }),
+        }
+    );
 }
