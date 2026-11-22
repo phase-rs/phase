@@ -684,7 +684,6 @@ fn combatant_has_regeneration_shield(object: &GameObject) -> bool {
         .any(|replacement| replacement.shield_kind == ShieldKind::Regeneration)
 }
 
-#[allow(dead_code)] // Reachable only through the deferred crate-visible assessment API.
 fn damage_is_not_fixed(
     state: &GameState,
     context: &DamageContext,
@@ -1579,16 +1578,15 @@ pub fn combat_damage_to_defender(
         .collect();
 
     let mut to_player = 0;
-    // CR 510.2: the damage the attacker deals each blocker in the first-strike step, which stays
-    // marked into the regular step (CR 120.6), and the creatures that step's state-based actions
-    // destroy.
-    let mut first_step_to_blockers: Vec<(ObjectId, u32)> = Vec::new();
+    // CR 510.2: the damage marked during the first-strike step carries into the
+    // regular step (CR 120.6), after state-based actions remove any destroyed creatures.
+    let mut first_step_hits = Vec::new();
     let mut departed: Vec<ObjectId> = Vec::new();
 
     // CR 702.4b: the first combat damage step exists at all only if some
     // participant has first or double strike.
     if attacker_strikes_first || !first_strike_blockers.is_empty() {
-        let mut hits: Vec<PredictedHit> = Vec::new();
+        let mut assignments = Vec::new();
         if attacker_strikes_first {
             // A hypothetical single-attacker exchange: no other attacker has committed damage.
             let slots = owed_slots(blockers.iter().map(|&bid| {
@@ -1604,36 +1602,50 @@ pub fn combat_damage_to_defender(
             }));
             let step = assign_step_to_defender(&slots, power, has_trample);
             to_player += step.to_player;
-            hits.extend(step.to_blockers.iter().map(|&(id, amount)| PredictedHit {
-                id,
-                amount,
-                deathtouch: has_deathtouch && amount > 0,
+            assignments.extend(step.to_blockers.into_iter().map(|(id, amount)| {
+                (
+                    attacker_id,
+                    DamageAssignment {
+                        target: DamageTarget::Object(id),
+                        amount,
+                    },
+                )
             }));
-            first_step_to_blockers = step.to_blockers;
         }
         // CR 702.7b: first-striking blockers assign now, and can kill the attacker
         // before it ever reaches the regular step.
         // CR 510.1a + CR 613.11: same authority for the blockers — a first-striking
         // Doran-style blocker kills the attacker with its toughness, and one that
         // assigns no combat damage cannot kill it at all.
-        let first_strike_damage: u32 = first_strike_blockers
+        assignments.extend(first_strike_blockers.iter().map(|blocker| {
+            (
+                blocker.id,
+                DamageAssignment {
+                    target: DamageTarget::Object(attacker_id),
+                    amount: combat_damage_amount(blocker),
+                },
+            )
+        }));
+        // The creatures this step can damage: the blockers when the attacker strikes first,
+        // and the attacker itself.
+        let struck: &[ObjectId] = if attacker_strikes_first {
+            blockers
+        } else {
+            &[]
+        };
+        let mut hits: Vec<PredictedHit> = struck
             .iter()
-            .map(|b| combat_damage_amount(b))
-            .sum();
-        let deathtouch_damage: u32 = first_strike_blockers
-            .iter()
-            .filter(|b| b.has_keyword(&Keyword::Deathtouch))
-            .map(|b| combat_damage_amount(b))
-            .sum();
-        // CR 702.7b + CR 702.2b: first-striking blockers destroy the attacker only through
-        // damage they actually assign: nonzero deathtouch damage, or marked plus first-strike
-        // damage that is lethal.
-        hits.push(PredictedHit {
-            id: attacker_id,
-            amount: first_strike_damage,
-            deathtouch: deathtouch_damage > 0,
-        });
+            .copied()
+            .chain(std::iter::once(attacker_id))
+            .map(|id| PredictedHit {
+                id,
+                amount: 0,
+                deathtouch: false,
+            })
+            .collect();
+        forecast_first_step_hits(state, &assignments, &mut hits);
         departed = first_step_departures(state, &hits);
+        first_step_hits = hits;
     }
 
     // CR 702.4b: the attacker assigns in the regular step if it has double strike,
@@ -1648,10 +1660,10 @@ pub fn combat_damage_to_defender(
                 .iter()
                 .filter(|bid| !departed.contains(bid))
                 .map(|&bid| {
-                    let first_step = first_step_to_blockers
+                    let first_step = first_step_hits
                         .iter()
-                        .find(|&&(id, _)| id == bid)
-                        .map_or(0, |&(_, amount)| amount);
+                        .find(|hit| hit.id == bid)
+                        .map_or(0, |hit| hit.amount);
                     let owed = state.objects.get(&bid).map_or(1, |obj| {
                         lethal_damage::lethal_damage_still_owed(
                             state,
@@ -1727,6 +1739,60 @@ struct PredictedHit {
     id: ObjectId,
     amount: u32,
     deathtouch: bool,
+}
+
+/// CR 510.2 + CR 615.6 + CR 702.16e: fills `hits` with the damage a forecast first-strike step
+/// deals each combatant, through the same simultaneous prevention and replacement pipeline as
+/// combat (protection granted after blocks, for example). The game is copied and the step run
+/// on the copy only when some assignment's damage is not fixed; if that copy stops for a
+/// player's choice, or no assignment is modified, the assigned amounts are the estimate.
+fn forecast_first_step_hits(
+    state: &GameState,
+    assignments: &[(ObjectId, DamageAssignment)],
+    hits: &mut [PredictedHit],
+) {
+    let needs_preview = assignments.iter().any(|(source, assignment)| {
+        let DamageTarget::Object(target) = assignment.target else {
+            return false;
+        };
+        DamageContext::from_source(state, *source).is_some_and(|context| {
+            damage_is_not_fixed(
+                state,
+                &context,
+                &TargetRef::Object(target),
+                assignment.amount,
+            )
+        })
+    });
+    if needs_preview {
+        let mut preview = state.clone();
+        if let CombatDamageBatch::Complete(_) =
+            apply_combat_damage(&mut preview, assignments, CombatDamageSubStep::FirstStrike)
+        {
+            for hit in hits {
+                if let (Some(before), Some(after)) =
+                    (state.objects.get(&hit.id), preview.objects.get(&hit.id))
+                {
+                    hit.amount = after.damage_marked.saturating_sub(before.damage_marked);
+                    hit.deathtouch = after.dealt_deathtouch_damage;
+                }
+            }
+            return;
+        }
+    }
+    for (source, assignment) in assignments {
+        let DamageTarget::Object(target) = assignment.target else {
+            continue;
+        };
+        if let Some(hit) = hits.iter_mut().find(|hit| hit.id == target) {
+            hit.amount = hit.amount.saturating_add(assignment.amount);
+            hit.deathtouch |= assignment.amount > 0
+                && state
+                    .objects
+                    .get(source)
+                    .is_some_and(|object| object.has_keyword(&Keyword::Deathtouch));
+        }
+    }
 }
 
 /// The blockers with the lethal damage owed to each, cheapest kill first. The sort is stable,

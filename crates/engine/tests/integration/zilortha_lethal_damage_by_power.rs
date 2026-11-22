@@ -28,13 +28,13 @@ use engine::game::coverage::unimplemented_mechanics;
 use engine::game::engine::EngineError;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{ControllerRef, TargetFilter, TargetRef, TypedFilter};
+use engine::types::ability::{ChoiceType, ControllerRef, TargetFilter, TargetRef, TypedFilter};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CombatDamageAssignmentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::keywords::Keyword;
-use engine::types::mana::ManaCost;
+use engine::types::keywords::{Keyword, ProtectionTarget};
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
@@ -827,12 +827,16 @@ fn fully_redirected_infect_damage_deals_the_creature_nothing() {
 /// P0's Ghalta, Primal Hunger (12/12, "Trample") wearing Battle Mastery, cast onto it from P0's
 /// hand, against P1's Zilortha and `partner` (a textless P1 creature). Returns the runner,
 /// Ghalta, Zilortha and the partner.
-fn ghalta_board(partner: (&str, i32, i32)) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+fn ghalta_board(
+    partner: (&str, i32, i32),
+    defender: impl FnOnce(&mut GameScenario),
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut scenario = board();
     let ghalta = scenario
         .add_creature(P0, "Ghalta, Primal Hunger", 12, 12)
         .as_legendary()
         .from_oracle_text_with_keywords(&["Trample"], GHALTA)
+        .with_color(vec![ManaColor::Green])
         .id();
     let mastery = scenario
         .add_spell_to_hand(P0, "Battle Mastery", false)
@@ -844,6 +848,7 @@ fn ghalta_board(partner: (&str, i32, i32)) -> (GameRunner, ObjectId, ObjectId, O
     let z = zilortha(&mut scenario, P1);
     let (name, power, toughness) = partner;
     let partner = scenario.add_creature(P1, name, power, toughness).id();
+    defender(&mut scenario);
     let mut runner = scenario.build();
 
     cast_at(&mut runner, mastery, ghalta);
@@ -874,7 +879,7 @@ fn assign_split(runner: &mut GameRunner, assignments: Vec<(ObjectId, u32)>, tram
 /// on the declared block before any damage, agrees: 12.
 #[test]
 fn first_strike_death_of_zilortha_returns_survivors_to_toughness() {
-    let (mut runner, ghalta, z, yargle) = ghalta_board(("Yargle, Glutton of Urborg", 9, 3));
+    let (mut runner, ghalta, z, yargle) = ghalta_board(("Yargle, Glutton of Urborg", 9, 3), |_| {});
     let p1_life = runner.life(P1);
 
     attack_and_block(&mut runner, &[ghalta], &[(z, ghalta), (yargle, ghalta)]);
@@ -916,7 +921,7 @@ fn first_strike_death_of_zilortha_returns_survivors_to_toughness() {
 /// agrees: 9.
 #[test]
 fn first_strike_survivor_owes_its_toughness_after_zilortha_dies() {
-    let (mut runner, ghalta, z, ceratops) = ghalta_board(("Quakestrider Ceratops", 12, 8));
+    let (mut runner, ghalta, z, ceratops) = ghalta_board(("Quakestrider Ceratops", 12, 8), |_| {});
     let p1_life = runner.life(P1);
 
     attack_and_block(&mut runner, &[ghalta], &[(z, ghalta), (ceratops, ghalta)]);
@@ -944,4 +949,116 @@ fn first_strike_survivor_owes_its_toughness_after_zilortha_dies() {
     finish_combat(&mut runner);
     assert_eq!(runner.life(P1), p1_life - 9);
     assert_eq!(zone(&runner, ceratops), Zone::Graveyard);
+}
+
+#[test]
+fn zilortha_protected_after_blocks_stays_in_double_strike_forecast() {
+    let mut mother = None;
+    let (mut runner, ghalta, z, yargle) = ghalta_board(
+        ("Yargle, Glutton of Urborg", 9, 3),
+        |scenario| {
+            mother = Some(
+                scenario
+                    .add_creature_from_oracle(
+                        P1,
+                        "Mother of Runes",
+                        1,
+                        1,
+                        "{T}: Target creature you control gains protection from the color of your choice until end of turn.",
+                    )
+                    .with_color(vec![ManaColor::White])
+                    .id(),
+            );
+        },
+    );
+    let mother = mother.expect("Mother of Runes is on the battlefield");
+    let p1_life = runner.life(P1);
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(ghalta, AttackTarget::Player(P1))])
+        .unwrap();
+    for _ in 0..4 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass to blockers");
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareBlockers { player: P1, .. }
+    ));
+    runner
+        .declare_blockers(&[(z, ghalta), (yargle, ghalta)])
+        .unwrap();
+
+    // CR 509.2: the defender can activate Mother of Runes in the blockers step.
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    runner.act(GameAction::PassPriority).unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    let outcome = runner.activate(mother, 0).target_object(z).resolve();
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::NamedChoice { player: P1, choice_type: ChoiceType::Color { .. }, options, source: Some(source), .. }
+            if options.iter().any(|option| option == "Green")
+                && source.prompt.identity.reference.object_id == mother
+    ));
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Green".into(),
+        })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        runner.state().objects[&z].has_keyword(&Keyword::Protection(ProtectionTarget::Color(
+            ManaColor::Green
+        ),))
+    );
+    assert_eq!(
+        runner.state().objects[&ghalta].color,
+        vec![ManaColor::Green]
+    );
+    let forecast = combat_damage_to_defender(runner.state(), ghalta, &[z, yargle]);
+
+    // CR 702.19b: protection does not change the lethal damage owed for assignment.
+    runner.combat_damage();
+    assert_eq!(prompt_minimum(&runner, z), 7);
+    assert_eq!(prompt_minimum(&runner, yargle), 9);
+    assign_split(&mut runner, vec![(z, 7), (yargle, 5)], 0);
+    runner.combat_damage();
+
+    // CR 702.16e + CR 120.6: Zilortha takes no damage, and Yargle keeps its 5 marked.
+    assert_eq!(zone(&runner, z), Zone::Battlefield);
+    assert_eq!(marked(&runner, z), 0);
+    assert_eq!(zone(&runner, yargle), Zone::Battlefield);
+    assert_eq!(marked(&runner, yargle), 5);
+    assert_eq!(prompt_minimum(&runner, z), 7);
+    assert_eq!(prompt_minimum(&runner, yargle), 4);
+    assign_split(&mut runner, vec![(z, 7), (yargle, 4)], 1);
+    finish_combat(&mut runner);
+
+    // CR 702.19b + CR 704.5g: 1 tramples over and Yargle has lethal damage by power.
+    let actual = p1_life - runner.life(P1);
+    assert_eq!(actual, 1);
+    assert_eq!(zone(&runner, z), Zone::Battlefield);
+    assert_eq!(zone(&runner, yargle), Zone::Graveyard);
+    assert_eq!(
+        forecast, actual,
+        "forecast must match the actual trample damage"
+    );
 }
