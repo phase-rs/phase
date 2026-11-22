@@ -20850,12 +20850,12 @@ fn check_trigger_constraint_with_ref(
         }
         // CR 121.2: Use the ordinal stamped onto the individual draw event
         // rather than the final per-turn count after a multi-card draw batch.
-        TriggerConstraint::NthDrawThisTurn { n } => {
+        TriggerConstraint::NthDrawThisTurn { n, comparator } => {
             let nth_in_turn = match event {
                 Some(GameEvent::CardDrawn { nth_in_turn, .. }) => *nth_in_turn,
                 _ => return false,
             };
-            nth_in_turn == *n
+            comparator.evaluate(nth_in_turn as i32, *n as i32)
         }
         // CR 716.2a: "When this Class becomes level N" — fire only at the specified level.
         // CR 716.2d: an absent stored level reads as 1 (`GameObject::level`).
@@ -38643,7 +38643,10 @@ pub mod tests {
             trigger.valid_target = Some(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::You),
             ));
-            trigger.constraint = Some(TriggerConstraint::NthDrawThisTurn { n: 3 });
+            trigger.constraint = Some(TriggerConstraint::NthDrawThisTurn {
+                n: 3,
+                comparator: Comparator::EQ,
+            });
             trigger.execute = Some(Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
@@ -39905,7 +39908,10 @@ pub mod tests {
         state.players[1].cards_drawn_this_turn = 4;
 
         let mut trig_def = make_trigger(TriggerMode::Drawn);
-        trig_def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n: 2 });
+        trig_def.constraint = Some(TriggerConstraint::NthDrawThisTurn {
+            n: 2,
+            comparator: Comparator::EQ,
+        });
 
         let controller = PlayerId(0);
         let event = GameEvent::CardDrawn {
