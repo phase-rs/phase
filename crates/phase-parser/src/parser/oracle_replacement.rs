@@ -36232,10 +36232,11 @@ mod tests {
                     );
                 }
                 (
-                    ContinuousModification::AddStaticMode { mode },
+                    ContinuousModification::GrantStaticAbility { definition },
                     ExpectedGrant::CanAttack,
                 ) => {
-                    assert_eq!(*mode, StaticMode::CanAttackWithDefender);
+                    assert_eq!(definition.affected, Some(TargetFilter::SelfRef));
+                    assert_eq!(definition.mode, StaticMode::CanAttackWithDefender);
                 }
                 (other, _) => panic!("{card}: wrong grant shape, got {other:?}"),
             }

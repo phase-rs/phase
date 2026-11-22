@@ -2544,10 +2544,27 @@ fn effect_has_no_value_outside_combat(effect: &Effect) -> bool {
 fn modification_rides_a_trick(modification: &ContinuousModification) -> bool {
     modification_is_bound_to_combat(modification)
         || modification_is_creature_type_rider(modification)
-        || matches!(
-            modification,
-            ContinuousModification::AddStaticMode { mode } if static_mode_is_bound_to_combat(mode)
-        )
+        || match modification {
+            ContinuousModification::AddStaticMode { mode } => static_mode_is_bound_to_combat(mode),
+            ContinuousModification::GrantStaticAbility { definition }
+                if definition.has_legacy_static_mode_shape() =>
+            {
+                match &definition.mode {
+                    StaticMode::CantAttack => matches!(
+                        definition.attack_defended,
+                        Some(engine::types::triggers::AttackTargetFilter::Owner)
+                    ),
+                    StaticMode::CantBlock
+                    | StaticMode::MustAttack
+                    | StaticMode::BlockRestriction { .. }
+                    | StaticMode::CantBeBlocked
+                    | StaticMode::CantBeBlockedByMoreThan { .. }
+                    | StaticMode::CanAttackWithDefender => true,
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
 }
 
 /// CR 508.1c + CR 508.1d + CR 509.1b + CR 509.1c: the restrictions and requirements read as
@@ -3417,6 +3434,42 @@ mod temporary_combat_modifier_tests {
 
     fn beside_a_pump(effect: &Effect) -> CombatBinding {
         CombatBinding::of_resolution(&[&bare_pump(), effect])
+    }
+
+    #[test]
+    fn printed_backup_grant_is_not_a_combat_only_rider() {
+        use engine::game::scenario::{GameScenario, P0};
+        use engine::types::ability::AbilityTag;
+
+        let mut scenario = GameScenario::new();
+        let kavu = scenario.add_creature_from_oracle(
+            P0,
+            "Chomping Kavu",
+            3,
+            3,
+            r#"Backup 1 (When this creature enters, put a +1/+1 counter on target creature. If that's another creature, it gains the following ability until end of turn.)
+This creature can't be blocked by creatures with power 2 or less."#,
+        ).id();
+        let runner = scenario.build();
+        let backup = runner.state().objects[&kavu]
+            .base_trigger_definitions
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .find(|ability| ability.ability_tag == Some(AbilityTag::Backup))
+            .expect("synthesized Backup trigger");
+        let rider = backup.sub_ability.as_deref().expect("Backup grant");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = rider.effect.as_ref()
+        else {
+            panic!("expected Backup's continuous grant");
+        };
+        assert!(static_abilities.iter().flat_map(|definition| &definition.modifications).any(
+            |modification| matches!(modification, ContinuousModification::GrantStaticAbility { definition }
+                if definition.affected == Some(TargetFilter::SelfRef)
+                    && matches!(definition.mode, StaticMode::CantBeBlockedBy { .. }))
+        ));
+        assert_eq!(beside_a_pump(&rider.effect), CombatBinding::Partial);
     }
 
     /// The riders read in full: every attack and block static of CR 508.1c, CR 508.1d, CR 509.1b
@@ -6530,4 +6583,18 @@ mod controller_value_tests {
         let pump = r#"{"kind":"Spell","effect":{"type":"Pump","power":{"type":"Fixed","value":2},"toughness":{"type":"Fixed","value":0},"target":{"type":"SelfRef"}},"duration":"UntilEndOfTurn"}"#;
         assert_eq!(reading(value_at(pump, 20)), Reading::Nothing);
     }
+}
+
+#[test]
+fn full_steam_ahead_reaches_the_combat_rider_reader() {
+    let parsed = engine::parser::oracle::parse_oracle_text(
+        r#"Until end of turn, each creature you control gets +2/+2 and gains trample and "This creature can't be blocked by more than one creature.""#,
+        "Full Steam Ahead",
+        &[],
+        &["Sorcery".into()],
+        &[],
+    );
+    let effect = &parsed.abilities.first().expect("parsed spell").effect;
+    assert!(!effect_is_combat_trick_payload(effect));
+    assert!(effect_has_no_value_outside_combat(effect));
 }

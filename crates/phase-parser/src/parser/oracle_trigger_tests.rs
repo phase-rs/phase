@@ -40398,9 +40398,9 @@ fn ogre_marauder_attack_trigger_carries_defending_player_unless_sacrifice() {
             .iter()
             .any(|s| s.modifications.iter().any(|m| matches!(
                 m,
-                ContinuousModification::AddStaticMode {
-                    mode: StaticMode::CantBeBlocked
-                }
+                ContinuousModification::GrantStaticAbility { definition }
+                    if definition.affected == Some(TargetFilter::SelfRef)
+                        && definition.mode == StaticMode::CantBeBlocked
             ))),
         "the grant must add StaticMode::CantBeBlocked, got {statics:?}"
     );

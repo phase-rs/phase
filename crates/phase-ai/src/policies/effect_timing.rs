@@ -699,6 +699,86 @@ mod tests {
         .cost(cost)
     }
 
+    #[test]
+    fn migrated_printed_evasion_does_not_enter_the_bare_timing_gate() {
+        use engine::parser::oracle::parse_oracle_text;
+        let bare = whirler_ability();
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = bare.effect.as_ref()
+        else {
+            panic!("expected existing bare timing fixture");
+        };
+        assert!(bare_cant_be_blocked(&static_abilities[0]));
+        for (name, oracle, card_type) in [
+            (
+                "Surge Engine",
+                r#"Defender
+{U}: This creature loses defender and gains "This creature can't be blocked."
+{2}{U}: This creature becomes blue and has base power and toughness 5/4. Activate only if this creature doesn't have defender.
+{4}{U}{U}: Draw three cards. Activate only if this creature is blue and only once."#,
+                "Creature",
+            ),
+            (
+                "Vronos, Masked Inquisitor",
+                r#"[+1]: Up to two other target planeswalkers you control phase out at the beginning of the next end step. (Treat them and anything attached to them as though they don't exist until your next turn.)
+[−2]: For each opponent, return up to one target nonland permanent that player controls to its owner's hand.
+[−7]: Target artifact you control becomes a 9/9 Construct artifact creature and gains vigilance, indestructible, and "This creature can't be blocked.""#,
+                "Planeswalker",
+            ),
+            (
+                "Wilson, Subtle Bear",
+                r#"Reach, trample
+Ward {2}
+Wilson, Subtle Bear can't be blocked.
+{1}{G}{U}, Exile Wilson from your graveyard: Target creature you control perpetually gains "This creature can't be blocked." Activate only as a sorcery."#,
+                "Creature",
+            ),
+            (
+                "Ogre Marauder",
+                r#"Whenever this creature attacks, it gains "this creature can't be blocked" until end of turn unless defending player sacrifices a creature of their choice."#,
+                "Creature",
+            ),
+        ] {
+            let parsed = parse_oracle_text(oracle, name, &[], &[card_type.into()], &[]);
+            let mut found = false;
+            let mut check = |effect: &Effect| {
+                if let Effect::GenericEffect {
+                    static_abilities, ..
+                } = effect
+                {
+                    for outer in static_abilities {
+                        if outer
+                            .modifications
+                            .iter()
+                            .any(|modification| match modification {
+                                ContinuousModification::GrantStaticAbility { definition } => {
+                                    definition.mode == StaticMode::CantBeBlocked
+                                }
+                                ContinuousModification::AddStaticMode { mode } => {
+                                    *mode == StaticMode::CantBeBlocked
+                                }
+                                _ => false,
+                            })
+                        {
+                            found = true;
+                            assert_eq!(outer.mode, StaticMode::Continuous, "{name}");
+                            assert!(!bare_cant_be_blocked(outer), "{name}");
+                        }
+                    }
+                }
+                std::ops::ControlFlow::Continue(())
+            };
+            for ability in &parsed.abilities {
+                let _ = engine::types::ability_visit::visit_ability_def(ability, &mut check);
+            }
+            for trigger in &parsed.triggers {
+                let _ = engine::types::ability_visit::visit_trigger(trigger, &mut check);
+            }
+            assert!(found, "{name}: parsed evasion payload");
+        }
+    }
+
     fn whirler_ability() -> AbilityDefinition {
         cant_be_blocked_ability(
             TargetFilter::ParentTarget,

@@ -1773,12 +1773,16 @@ fn temporary_cant_be_blocked_source(
             .find(|effect| effect.id == *id)?;
         (effect.duration == Duration::UntilEndOfTurn
             && crate::game::layers::transient_effect_is_live(state, effect)
-            && matches!(
-                effect.modifications.get(*mod_index),
+            && match effect.modifications.get(*mod_index) {
                 Some(ContinuousModification::AddStaticMode {
-                    mode: StaticMode::CantBeBlocked
-                })
-            ))
+                    mode: StaticMode::CantBeBlocked,
+                }) => true,
+                Some(ContinuousModification::GrantStaticAbility { definition }) => {
+                    definition.has_legacy_static_mode_shape()
+                        && definition.mode == StaticMode::CantBeBlocked
+                }
+                _ => false,
+            })
         .then(|| {
             state
                 .objects

@@ -54,23 +54,6 @@ const HADES_ORACLE: &str = "Vigilance\n\
     Echo of the Lost — During your turn, you may play cards from your graveyard.\n\
     If a card or token would be put into your graveyard from anywhere, exile it instead.";
 
-/// Kethis, the Hidden Hand — its quoted grant is carried as
-/// `ContinuousModification::AddStaticMode { mode: GraveyardCastPermission }`,
-/// which `swallow_check::static_carries_optional_modification` does not yet
-/// recognize, so the Optional_YouMay warning must survive (conservative-red).
-const KETHIS_ORACLE: &str = "Legendary spells you cast cost {1} less to cast.\n\
-    Exile two legendary cards from your graveyard: Until end of turn, each legendary card \
-     in your graveyard gains \"You may play this card from your graveyard.\"";
-
-/// Case of the Uneaten Feast — the Solved-ability quoted grant has the same
-/// `AddStaticMode { GraveyardCastPermission }` shape as Kethis's.
-const CASE_OF_THE_UNEATEN_FEAST_ORACLE: &str = "Whenever a creature you control enters, \
-     you gain 1 life.\n\
-     To solve — You've gained 5 or more life this turn. (If unsolved, solve at the \
-     beginning of your end step.)\n\
-     Solved — Sacrifice this Case: Creature cards in your graveyard gain \"You may cast \
-     this card from your graveyard\" until end of turn.";
-
 /// Drach'Nyen — a five-word flavor word ("Echo of the First Murder", CR 207.2d)
 /// whose label also begins with the `echo` keyword-cost prefix. The wider
 /// flavor-word cap (six words) must keep claiming the line as a trigger, and the
@@ -152,27 +135,6 @@ fn tree_has_unimplemented(parsed: &ParsedAbilities) -> bool {
             .replacements
             .iter()
             .any(|replacement| visit_replacement(replacement, &mut visitor).is_break())
-}
-
-/// Is the unit's rules-bearing graveyard permission carried as
-/// `ContinuousModification::AddStaticMode { mode: GraveyardCastPermission }`
-/// anywhere in the ability tree (the residual Kethis/Case shape)?
-fn carries_add_static_mode_graveyard_permission(parsed: &ParsedAbilities) -> bool {
-    parsed.abilities.iter().any(|def| match &*def.effect {
-        Effect::GenericEffect {
-            static_abilities, ..
-        } => static_abilities.iter().any(|definition| {
-            definition.modifications.iter().any(|modification| {
-                matches!(
-                    modification,
-                    ContinuousModification::AddStaticMode {
-                        mode: StaticMode::GraveyardCastPermission { .. }
-                    }
-                )
-            })
-        }),
-        _ => false,
-    })
 }
 
 /// CR 601.2a: an illegal proposed cast is rejected and the card stays put.
@@ -383,43 +345,116 @@ fn hades_graveyard_play_permission_is_limited_to_your_turns() {
     assert_cast_rejected(&mut runner, second);
 }
 
-/// CR 207.2d + CR 604.2 + CR 305.1: the quoted grants on Kethis and Case of the
-/// Uneaten Feast are carried as `ContinuousModification::AddStaticMode`, which
-/// `static_carries_optional_modification` does not yet recognize — so their
-/// Optional_YouMay warnings must survive and keep the cards demoted.
-/// Conservative-red by design: the fix's scope deliberately excludes the
-/// `AddStaticMode` recognition arm, and dropping these warnings without that arm
-/// would be a false green.
+/// SHAPE and published coverage fence for the graveyard object-grant gap.
 #[test]
 fn kethis_and_case_of_the_uneaten_feast_stay_red_honest() {
-    for (oracle, name, types) in [
-        (KETHIS_ORACLE, "Kethis, the Hidden Hand", &["Creature"][..]),
+    use engine::database::card_db::CardDatabase;
+    use engine::game::coverage::{analyze_coverage, GapDiagnosis};
+    use engine::types::confirmed_misparse::{ConfirmedMisparses, MisparseClass};
+    use engine::types::CardFace;
+
+    let fixture = crate::support::shared_card_db().expect("fixture database");
+    let mut faces = std::collections::BTreeMap::new();
+    for (key, name, oracle, play_mode) in [
         (
-            CASE_OF_THE_UNEATEN_FEAST_ORACLE,
+            "kethis, the hidden hand",
+            "Kethis, the Hidden Hand",
+            r#"Legendary spells you cast cost {1} less to cast.
+Exile two legendary cards from your graveyard: Until end of turn, each legendary card in your graveyard gains "You may play this card from your graveyard.""#,
+            CardPlayMode::Play,
+        ),
+        (
+            "case of the uneaten feast",
             "Case of the Uneaten Feast",
-            &["Enchantment"][..],
+            r#"Whenever a creature you control enters, you gain 1 life.
+To solve — You've gained 5 or more life this turn. (If unsolved, solve at the beginning of your end step.)
+Solved — Sacrifice this Case: Creature cards in your graveyard gain "You may cast this card from your graveyard" until end of turn."#,
+            CardPlayMode::Cast,
         ),
     ] {
+        let face = fixture.get_face_by_name(name).expect("fixture face");
+        assert_eq!(face.oracle_text.as_deref(), Some(oracle));
+        let types = face
+            .card_type
+            .core_types
+            .iter()
+            .map(|ty| format!("{ty:?}"))
+            .collect::<Vec<_>>();
         let parsed = parse_oracle_text(
             oracle,
             name,
             &keyword_input(),
-            &types.iter().map(|ty| (*ty).to_string()).collect::<Vec<_>>(),
-            &[],
-        );
-        // Reach guard: the quoted grant IS parsed, as a typed permission carried by
-        // `AddStaticMode` — the unit is not short-circuited by an Unimplemented, so
-        // the surviving warning is a verdict on that carrier.
-        assert!(
-            carries_add_static_mode_graveyard_permission(&parsed),
-            "{name}: the AddStaticMode {{ GraveyardCastPermission }} carrier must be present"
+            &types,
+            &face.card_type.subtypes,
         );
         assert!(
-            has_swallowed_detector(&parsed, "Optional_YouMay"),
-            "{name}'s AddStaticMode-carried grant is not recognized as an optionality \
-             carrier yet and must stay red: {:?}",
-            parsed.parse_warnings
+            parsed
+                .abilities
+                .iter()
+                .any(|ability| match ability.effect.as_ref() {
+                    Effect::GenericEffect {
+                        static_abilities, ..
+                    } => static_abilities.iter().any(|outer| {
+                        outer.modifications.iter().any(|modification| matches!(
+                    modification,
+                    ContinuousModification::GrantStaticAbility { definition }
+                        if definition.affected == Some(TargetFilter::SelfRef)
+                            && definition.active_zones == [Zone::Graveyard]
+                            && matches!(
+                                definition.mode,
+                                StaticMode::GraveyardCastPermission { play_mode: mode, .. }
+                                    if mode == play_mode
+                            )
+                ))
+                    }),
+                    _ => false,
+                }),
+            "{name}: full quoted permission"
         );
+        assert!(!tree_has_unimplemented(&parsed), "{name}");
+        assert!(
+            !has_swallowed_detector(&parsed, "Optional_YouMay"),
+            "{name}"
+        );
+        faces.insert(key, face.clone());
+    }
+
+    fn report(
+        faces: &std::collections::BTreeMap<&str, CardFace>,
+    ) -> engine::game::coverage::CoverageSummary {
+        let db = CardDatabase::from_json_str(&serde_json::to_string(faces).unwrap()).unwrap();
+        analyze_coverage(&db)
+    }
+
+    let list = ConfirmedMisparses::committed();
+    list.stamp_all(faces.iter_mut().map(|(key, face)| (*key, face)));
+    let published = report(&faces);
+    assert_eq!(published.cards.len(), faces.len());
+    for card in published.cards {
+        let key = card.card_face_key.as_deref().expect("exact export key");
+        let clause = faces[key]
+            .oracle_text
+            .as_deref()
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap();
+        assert!(!card.supported, "{key}");
+        assert!(card.gap_details.iter().any(|gap| {
+            gap.handler == "Misparse:missing_effect"
+                && gap.diagnoses.iter().any(|diagnosis| matches!(
+                    diagnosis,
+                    GapDiagnosis::Misparse { class: MisparseClass::MissingEffect, clause: diagnosed }
+                        if diagnosed == clause
+                ))
+        }), "{key}: {:?}", card.gap_details);
+    }
+
+    ConfirmedMisparses::empty().stamp_all(faces.iter_mut().map(|(key, face)| (*key, face)));
+    let unfenced = report(&faces);
+    assert_eq!(unfenced.cards.len(), faces.len());
+    for card in unfenced.cards {
+        assert!(card.supported, "{}: {:?}", card.card_name, card.gap_details);
     }
 }
 
@@ -617,4 +652,67 @@ fn grants_extra_vote_session_forces_the_extra_ballot() {
         "all ballots cast — the session resolves, got {:?}",
         runner.waiting_for_kind()
     );
+}
+
+#[test]
+fn published_coverage_keeps_the_five_existing_quoted_grant_gaps() {
+    use engine::database::{
+        card_db::CardDatabase, mtgjson::AtomicCard, synthesis::build_oracle_face,
+    };
+    use engine::game::coverage::analyze_coverage;
+    use engine::types::confirmed_misparse::ConfirmedMisparses;
+    use std::collections::BTreeMap;
+    let cases = [
+        (
+            "elrond of the white council",
+            "unrecognized_clause_head",
+            r#"{"colorIdentity": ["G", "U"], "colors": ["G", "U"], "identifiers": {"scryfallOracleId": "5ae4a172-b846-4ec2-8178-a8b762134bfe"}, "layout": "normal", "manaCost": "{3}{G}{U}", "manaValue": 5.0, "name": "Elrond of the White Council", "power": "3", "subtypes": ["Elf", "Noble"], "supertypes": ["Legendary"], "text": "Secret council — When Elrond enters, each player secretly votes for fellowship or aid, then those votes are revealed. For each fellowship vote, the voter chooses a creature they control. You gain control of each creature chosen this way, and they gain \"This creature can't attack its owner.\" Then for each aid vote, put a +1/+1 counter on each creature you control.", "toughness": "3", "type": "Legendary Creature — Elf Noble", "types": ["Creature"]}"#,
+        ),
+        (
+            "incite hysteria",
+            "Misparse:wrong_object",
+            r#"{"colorIdentity": ["R"], "colors": ["R"], "identifiers": {"scryfallOracleId": "0a992ad5-136f-482d-8390-fdfe745fe764"}, "layout": "normal", "manaCost": "{2}{R}", "manaValue": 3.0, "name": "Incite Hysteria", "subtypes": [], "supertypes": [], "text": "Radiance — Until end of turn, target creature and each other creature that shares a color with it gain \"This creature can't block.\"", "type": "Sorcery", "types": ["Sorcery"]}"#,
+        ),
+        (
+            "richlau, headmaster",
+            "unbound_subject",
+            r#"{"colorIdentity": ["U", "W"], "colors": ["U", "W"], "identifiers": {"scryfallOracleId": "71be14da-e907-4316-9e74-f085f37d3e6a"}, "layout": "normal", "manaCost": "{1}{W}{U}", "manaValue": 3.0, "name": "Richlau, Headmaster", "power": "2", "subtypes": ["Human", "Advisor"], "supertypes": ["Legendary"], "text": "At the beginning of your end step, you may pay {1}. When you do, target artifact card in your graveyard perpetually gains \"This spell costs {1} less to cast.\" If it's a creature or Vehicle card, it perpetually gets +2/+2. Put it into your library second from the top.", "toughness": "4", "type": "Legendary Creature — Human Advisor", "types": ["Creature"]}"#,
+        ),
+        (
+            "scalar scholar",
+            "Misparse:dropped_qualifier",
+            r#"{"colorIdentity": ["G", "U"], "colors": ["G", "U"], "identifiers": {"scryfallOracleId": "c87e6bee-5e27-45e5-b59e-72e0343f7e3d"}, "layout": "normal", "manaCost": "{G}{U}", "manaValue": 2.0, "name": "Scalar Scholar", "power": "2", "subtypes": ["Salamander", "Wizard"], "supertypes": [], "text": "Increment\nWhen this creature enters, each card you own with {X} in its mana cost perpetually gains \"This spell costs {1} less to cast.\"", "toughness": "2", "type": "Creature — Salamander Wizard", "types": ["Creature"]}"#,
+        ),
+        (
+            "teferi's contingency",
+            "Misparse:missing_effect",
+            r#"{"colorIdentity": ["U", "W"], "colors": ["U", "W"], "identifiers": {"scryfallOracleId": "ecf0f7f7-6940-4618-9a13-ca4ae09694e3"}, "layout": "normal", "manaCost": "{W}{U}{U}", "manaValue": 3.0, "name": "Teferi's Contingency", "subtypes": [], "supertypes": [], "text": "Counter target spell. Each card in its controller's graveyard, hand, and library with the same name as that spell perpetually gains \"This spell costs {2} more to cast.\"", "type": "Instant", "types": ["Instant"]}"#,
+        ),
+    ];
+    let mut faces = cases
+        .iter()
+        .map(|&(key, _, input)| {
+            let atomic: AtomicCard = serde_json::from_str(input).unwrap();
+            (key, build_oracle_face(&atomic, None))
+        })
+        .collect::<BTreeMap<_, _>>();
+    ConfirmedMisparses::committed().stamp_all(faces.iter_mut().map(|(key, face)| (*key, face)));
+    let db = CardDatabase::from_json_str(&serde_json::to_string(&faces).unwrap()).unwrap();
+    let coverage = analyze_coverage(&db);
+    assert_eq!(coverage.cards.len(), cases.len());
+    for (key, expected, _) in cases {
+        let card = coverage
+            .cards
+            .iter()
+            .find(|card| card.card_face_key.as_deref() == Some(key))
+            .expect("reported exact face key");
+        assert!(!card.supported, "{key}");
+        assert!(
+            card.gap_details
+                .iter()
+                .any(|gap| gap.handler.contains(expected)),
+            "{key}: {:?}",
+            card.gap_details
+        );
+    }
 }

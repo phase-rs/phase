@@ -6647,6 +6647,7 @@ fn gutter_grime_token_static_description_names_the_creator() {
 /// token, equip attaches it, and the granted ability is activated and resolved.
 mod toggo_rock {
     use super::{find_effect, sacrifice_target, GUTTER_GRIME, PLACEHOLDER, TOGGO};
+    use engine::game::filter::{matches_target_filter, FilterContext};
     use engine::game::game_object::AttachTarget;
     use engine::game::game_object::ObjectIncarnationRefExt;
     use engine::game::layers::evaluate_layers;
@@ -6658,9 +6659,12 @@ mod toggo_rock {
     use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
     use engine::types::mana::{ManaType, ManaUnit};
     use engine::types::phase::Phase;
+    use engine::types::statics::StaticMode;
     use engine::types::zones::Zone;
 
     const TOGGO_NAME: &str = "Toggo, Goblin Weaponsmith";
+
+    const TOGGO_GRANT: &str = "\"Equipped creature has '{1}, {T}, Sacrifice Rock: This creature deals 2 damage to any target'\"";
 
     fn colorless(n: usize) -> Vec<ManaUnit> {
         (0..n)
@@ -6987,7 +6991,6 @@ mod toggo_rock {
     /// its creator; the token clause does not lower (honest red).
     #[test]
     fn token_own_ability_grant_naming_the_token_does_not_lower() {
-        const TOGGO_GRANT: &str = "\"Equipped creature has '{1}, {T}, Sacrifice Rock: This creature deals 2 damage to any target'\"";
         let own_ability_grant = TOGGO.replace(
             TOGGO_GRANT,
             "\"{T}: Target creature gains '{1}, Sacrifice Rock: This creature deals 2 damage to any target' until end of turn.\"",
@@ -7018,13 +7021,12 @@ mod toggo_rock {
         }
     }
 
-    /// CR 111.3 + CR 201.5a: a quoted grant body that is a simple restriction collapses
-    /// into the token static's own fields, which the creation stamp binds to the creator;
-    /// a token-name reference there would be bound to the creator, so the token clause
-    /// does not lower (honest red).
+    /// CR 111.3 + CR 201.5a: a direct quoted-static grant that is a simple restriction
+    /// keeps the creator's frame (`token_static_creator_grant`), so a token-name
+    /// reference there would be bound to the creator and the token clause does not
+    /// lower (honest red).
     #[test]
     fn token_static_own_field_naming_the_token_does_not_lower() {
-        const TOGGO_GRANT: &str = "\"Equipped creature has '{1}, {T}, Sacrifice Rock: This creature deals 2 damage to any target'\"";
         let grant_to_another = TOGGO.replace(
             TOGGO_GRANT,
             "\"Equipped creature has 'This creature can't be blocked by artifacts other than Rock.'\"",
@@ -7058,5 +7060,53 @@ mod toggo_rock {
         assert!(trigger_lowers_token(&parsed), "{parsed:#?}");
         let json = serde_json::to_string(&parsed).expect("ParsedAbilities serializes");
         assert!(json.contains("\"type\":\"GrantingObject"), "{json}");
+    }
+
+    /// CR 111.3 + CR 201.5a: the creator-named restriction binds to the creator at token
+    /// creation, so the equipped creature can be blocked by the creator but not the Rock.
+    /// No printed card has this quoted restriction pattern; Toggo, Goblin Weaponsmith is
+    /// the closest printed example. The test keeps the creator binding the token static
+    /// had before quoted statics kept their full definition.
+    #[test]
+    fn equipped_creatures_quoted_restriction_names_the_token_creator() {
+        let oracle = TOGGO.replace(
+            TOGGO_GRANT,
+            "\"Equipped creature has 'This creature can't be blocked by artifacts other than Foo Smith.'\"",
+        );
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(P0, colorless(4));
+        let creator = scenario
+            .add_creature_from_oracle(P0, "Foo Smith", 2, 2, &oracle)
+            .as_artifact_creature()
+            .id();
+        let bearer = scenario.add_creature(P0, "Bearer", 2, 2).id();
+        let forest = scenario.add_land_to_hand(P0, "Forest").id();
+        let mut runner = scenario.build();
+
+        play_forest(&mut runner, forest);
+        let created = rocks(&runner);
+        assert_eq!(created.len(), 1, "reach-guard: landfall created one Rock");
+        let rock = created[0];
+        equip(&mut runner, rock, bearer);
+
+        let state = runner.state();
+        assert_resolved(&state.waiting_for, state.stack.is_empty());
+        let (restriction, filter) = state.objects[&bearer]
+            .static_definitions
+            .iter_all()
+            .find_map(|definition| match &definition.mode {
+                StaticMode::CantBeBlockedBy { filter } => Some((definition, filter)),
+                _ => None,
+            })
+            .expect("the equipped creature has the granted blocking restriction");
+        assert_eq!(
+            restriction.granting_object,
+            Some(ObjectIncarnationRef::from_object(&state.objects[&creator])),
+            "the restriction names the creator's incarnation"
+        );
+        let context = FilterContext::from_source(state, bearer);
+        assert!(!matches_target_filter(state, creator, filter, &context));
+        assert!(matches_target_filter(state, rock, filter, &context));
     }
 }

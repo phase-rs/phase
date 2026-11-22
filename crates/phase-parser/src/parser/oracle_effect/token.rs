@@ -18,7 +18,8 @@ use crate::types::ability::{
     TokenAttackDestination, TypeFilter,
 };
 use crate::types::ability_visit::{
-    nested_definitions_name_granter, own_fields_name_granter, token_static_grants_to_itself,
+    nested_definitions_name_granter, own_fields_name_granter, token_static_creator_grant,
+    token_static_grants_to_itself,
 };
 use crate::types::card_type::Supertype;
 use crate::types::keywords::Keyword;
@@ -1516,6 +1517,10 @@ fn push_parsed_statics(
     if token_refs > 0
         && defs.iter().any(|d| {
             own_fields_name_granter(d)
+                || d.modifications
+                    .iter()
+                    .filter_map(token_static_creator_grant)
+                    .any(own_fields_name_granter)
                 || (token_static_grants_to_itself(d) && nested_definitions_name_granter(d))
         })
     {

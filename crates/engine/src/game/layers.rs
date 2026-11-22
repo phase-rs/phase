@@ -42,7 +42,7 @@ use crate::types::ability::{
 };
 use crate::types::ability_visit::{
     each_granter_symbol, granter_symbols_mut, names_unbound_granter, own_fields_name_granter,
-    token_static_grants_to_itself, DefinitionNode, DefinitionNodeMut,
+    token_static_creator_grant, token_static_grants_to_itself, DefinitionNode, DefinitionNodeMut,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
@@ -9142,16 +9142,27 @@ pub(crate) fn stamp_static_granter(def: &mut StaticDefinition, granter: ObjectIn
 /// static that grants to the token itself carries the token's own quoted abilities, so
 /// its whole tree names the creator. Any other static binds only its own fields; its
 /// nested definitions are grants to other objects, left unbound until the token applies
-/// them at layer 6 (CR 613.1f) and `stamp_grant` binds them to the token. The parser
-/// refuses a token body whose references would land in the other frame.
+/// them at layer 6 (CR 613.1f) and `stamp_grant` binds them to the token, except a
+/// direct quoted-static grant in the creator's frame ([`token_static_creator_grant`]),
+/// which binds to the creator here. The parser refuses a token body whose references
+/// would land in the other frame.
 pub(crate) fn stamp_token_static_creator(
     def: &mut StaticDefinition,
     creator: ObjectIncarnationRef,
 ) {
     if token_static_grants_to_itself(def) {
         stamp_static_granter(def, creator);
-    } else if own_fields_name_granter(def) {
-        stamp_granter(creator)(DefinitionNodeMut::Static(def));
+    } else {
+        if own_fields_name_granter(def) {
+            stamp_granter(creator)(DefinitionNodeMut::Static(def));
+        }
+        for modification in &mut def.modifications {
+            if token_static_creator_grant(modification).is_some()
+                && grant_names_granter(modification)
+            {
+                stamp_grant(modification, creator);
+            }
+        }
     }
 }
 
