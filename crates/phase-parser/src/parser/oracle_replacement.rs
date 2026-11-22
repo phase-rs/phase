@@ -39847,7 +39847,7 @@ mod opposition_agent_parser_tests {
             "CR 615.1a: recipient must include both creatures and planeswalkers you control"
         );
 
-        // CR 615.1a + CR 609.7b: Light of Sanction's trailing "by sources you control"
+        // CR 615.1a + CR 609.7c: Light of Sanction's trailing "by sources you control"
         // ends the recipient phrase and is read as the damage source, so the shield is
         // scoped on BOTH axes (recipient: creatures you control; source: sources you
         // control) instead of dropping either restriction.
