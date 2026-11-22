@@ -581,3 +581,87 @@ fn quark_whole_card_has_no_coverage_gap() {
         card_face_gaps(face)
     );
 }
+
+/// CR 118.3 + CR 701.21a + CR 601.2g: whether a spell is offered as castable
+/// is decided before any payment is attempted, from the mana the player could
+/// make. A Treasure token under Quark can't be sacrificed, so it can't pay for
+/// Lightning Bolt ({R}); the nontoken Treasure Buried Treasure, with the same
+/// printed mana ability, can (the control, same board shape otherwise).
+#[test]
+fn spell_is_offered_only_when_a_sacrifice_legal_treasure_can_pay() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let offers_cast = |runner: &GameRunner, spell: ObjectId| {
+        let (_, _, grouped) = legal_actions_full(runner.state());
+        grouped.get(&spell).is_some_and(|actions| {
+            actions.iter().any(
+                |a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == spell),
+            )
+        })
+    };
+
+    // Control: Quark out, only the nontoken Treasure to pay for the Bolt.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    let quark = scenario.add_real_card(P0, "Quark, Humble Proprietor", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Buried Treasure", Zone::Battlefield, db);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    scenario.with_library_top(P0, &["Island"]);
+    let mut runner = scenario.build();
+    assert_quark_prohibition(&runner, quark);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert!(
+        offers_cast(&runner, bolt),
+        "control: a nontoken Treasure can pay for Lightning Bolt under Quark"
+    );
+
+    // Same shape, but the only Treasure is Quark's own token.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    let quark = scenario.add_real_card(P0, "Quark, Humble Proprietor", Zone::Battlefield, db);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    scenario.with_library_top(P0, &["Island"]);
+    let mut runner = scenario.build();
+    assert_quark_prohibition(&runner, quark);
+    runner.advance_to_upkeep();
+    runner.advance_until_stack_empty();
+    let treasure = treasure_token(&runner);
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert!(on_battlefield(&runner, treasure), "REACH: the token is out");
+    assert!(
+        !offers_cast(&runner, bolt),
+        "a Treasure token Quark bars from being sacrificed cannot pay for Lightning Bolt"
+    );
+}
+
+/// CR 118.3 + CR 701.21a: `player_cant_sacrifice_as_cost` is the shared
+/// authority the cost-payability gates (planning-mode readiness, the
+/// self-sacrifice payment arms, Ward-style payments) read. It reports Quark's
+/// prohibition for the Treasure token, not for the nontoken Treasure Buried
+/// Treasure beside it, and not for a player Quark's static does not scope.
+#[test]
+fn sacrifice_cost_authority_reads_quarks_prohibition_per_permanent_and_player() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    let quark = scenario.add_real_card(P0, "Quark, Humble Proprietor", Zone::Battlefield, db);
+    let buried = scenario.add_real_card(P0, "Buried Treasure", Zone::Battlefield, db);
+    scenario.with_library_top(P0, &["Island"]);
+    let mut runner = scenario.build();
+    assert_quark_prohibition(&runner, quark);
+    runner.advance_to_upkeep();
+    runner.advance_until_stack_empty();
+    let treasure = treasure_token(&runner);
+    let state = runner.state();
+    assert!(
+        engine::game::static_abilities::player_cant_sacrifice_as_cost(state, P0, treasure),
+        "Quark's controller can't pay a sacrifice cost with a Treasure token"
+    );
+    assert!(
+        !engine::game::static_abilities::player_cant_sacrifice_as_cost(state, P0, buried),
+        "control: a nontoken Treasure is outside the 'Treasure tokens' filter"
+    );
+    assert!(
+        !engine::game::static_abilities::player_cant_sacrifice_as_cost(state, P1, treasure),
+        "control: 'You can't sacrifice' scopes Quark's controller only"
+    );
+}
