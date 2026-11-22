@@ -1,10 +1,10 @@
 //! Final authority for composable per-event ledger facts.
 
 use crate::game::game_object::ObjectIncarnationRefExt;
-use crate::types::ability::TriggerDefinitionRef;
+use crate::types::ability::{AbilityTag, TriggerDefinitionRef};
 use crate::types::game_state::{
     AbilityActivationRecord, AbilityUsageKey, CastOccurrence, CyclingOccurrence, CyclingRecord,
-    GameState, SpellCastRecord,
+    GameState, SpellCastRecord, StackEntryKind,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -353,14 +353,20 @@ pub fn apply_resolved_ledger_edit(
                 .cycles_completed_this_game_by_player
                 .get(player)
                 .map_or(0, im::Vector::len);
-            // CR 602.2a: The player who activated the ability controls it on the stack.
-            let controls_entry = state
-                .stack
-                .iter()
-                .any(|entry| entry.id == *stack_entry && entry.controller == *player);
+            // CR 602.2a + CR 702.29a: The entry is a cycling activation, and the
+            // player who activated it controls it on the stack.
+            let is_activators_cycle = state.stack.iter().any(|entry| {
+                entry.id == *stack_entry
+                    && entry.controller == *player
+                    && matches!(
+                        &entry.kind,
+                        StackEntryKind::ActivatedAbility { ability, .. }
+                            if ability.context.ability_tag == Some(AbilityTag::Cycling)
+                    )
+            });
             if actual != *expected_history_len
                 || ledger_edit_is_invalid(&command.edit)
-                || !controls_entry
+                || !is_activators_cycle
             {
                 return Err(
                     ResolvedLedgerEditReplayInvariantError::CompletedCyclePreconditionMismatch,
