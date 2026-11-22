@@ -165,26 +165,17 @@ fn type_filter_references_subtype(filter: &TypeFilter) -> bool {
 }
 
 pub(crate) fn split_leading_conditional(text: &str) -> Option<(String, String)> {
-    let folded = text.to_ascii_lowercase();
-    if let Some(guard) = parse_leading_conditional_prefix(&folded) {
-        if nom_condition::parse_named_cycling_head(guard).is_ok() {
-            let guard_start = folded.len() - guard.len();
-            let (_, comma) = nom_on_lower(
-                &text[guard_start..],
-                guard,
-                nom_condition::parse_named_game_cycling_condition,
-            )?;
-            let (body, _) = tag::<_, _, OracleError<'_>>(",").parse(comma).ok()?;
-            let body = body.trim();
-            return (!body.is_empty()).then(|| {
-                let guard_end = text.len() - comma.len();
-                (text[..guard_end].trim().to_owned(), body.to_owned())
-            });
-        }
-    }
-
     let lower = text.to_lowercase();
     let prefix_rest = parse_leading_conditional_prefix(&lower)?;
+    if nom_condition::parse_named_cycling_head(prefix_rest).is_ok() {
+        let (comma, _) = nom_condition::parse_named_game_cycling_condition(prefix_rest).ok()?;
+        let comma = TextPair::new(text, &lower).original_remainder(comma)?;
+        let guard = text.strip_suffix(comma)?; // allow-noncombinator: split at the TextPair-mapped comma
+        let (body, _) = tag::<_, _, OracleError<'_>>(",").parse(comma).ok()?;
+        let body = body.trim();
+        return (!body.is_empty()).then(|| (guard.trim().to_owned(), body.to_owned()));
+    }
+
     let condition_start_idx = lower.len() - prefix_rest.len();
 
     let mut paren_depth = 0u32;

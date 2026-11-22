@@ -338,7 +338,7 @@ pub fn apply_resolved_ledger_edit(
             player,
             record,
             expected_history_len,
-            ..
+            stack_entry,
         } => {
             if !state
                 .players
@@ -353,7 +353,15 @@ pub fn apply_resolved_ledger_edit(
                 .cycles_completed_this_game_by_player
                 .get(player)
                 .map_or(0, im::Vector::len);
-            if actual != *expected_history_len || ledger_edit_is_invalid(&command.edit) {
+            // CR 602.2a: The player who activated the ability controls it on the stack.
+            let controls_entry = state
+                .stack
+                .iter()
+                .any(|entry| entry.id == *stack_entry && entry.controller == *player);
+            if actual != *expected_history_len
+                || ledger_edit_is_invalid(&command.edit)
+                || !controls_entry
+            {
                 return Err(
                     ResolvedLedgerEditReplayInvariantError::CompletedCyclePreconditionMismatch,
                 );

@@ -1439,6 +1439,40 @@ fn assert_cycle_apply_rejections(
     );
     assert_eq!(prefix.cycles_completed_this_game_by_player[&P0].len(), 1);
 
+    let mut paired = serde_json::to_value(journal).unwrap();
+    let cycle =
+        &mut paired["entries"][second_edit]["command"]["LedgerEdit"]["edit"]["CompletedCycle"];
+    cycle["player"] = serde_json::to_value(P1).unwrap();
+    cycle["expected_history_len"] = 0.into();
+
+    let occurrence = Some(CyclingOccurrence {
+        activator: P1,
+        journal_index: 0,
+    });
+    let mut paired_finalize = finalize.as_ref().clone();
+    paired_finalize.resulting_cycling_occurrence = occurrence;
+    let root = activated_graph(&mut paired_finalize.resulting_kind);
+    assert!(root.sub_ability.is_none());
+    root.cycling_occurrence = occurrence;
+    paired["entries"][second_finalize]["command"]["StackEntryFinalize"] =
+        serde_json::to_value(paired_finalize).unwrap();
+
+    let paired: ResolvedRulesJournal =
+        serde_json::from_value(paired).expect("paired edit and finalizer pass decode validation");
+    let Some(ResolvedRulesCommand::LedgerEdit(paired_edit)) =
+        &paired.entries()[second_edit].command
+    else {
+        panic!("second cycle ledger command");
+    };
+    assert_eq!(prefix.stack[finalize.entry_position].controller, P0);
+    let mut state = prefix.clone();
+    assert_eq!(
+        apply_resolved_ledger_edit(&mut state, paired_edit),
+        Err(LedgerError::CompletedCyclePreconditionMismatch),
+        "paired corruption credits a player who did not activate the ability"
+    );
+    assert_no_cycle_replay_mutation(&prefix, &state);
+
     for (label, expected) in [
         (
             "wrong prefix",
