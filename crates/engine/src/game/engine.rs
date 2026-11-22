@@ -24859,7 +24859,7 @@ mod bounded_offer_conjunct_tests {
                 3,
             ),
             (format!("is_repeated_optional{}payment(", '_'), 2),
-            (format!("optional_prompt{}player(", '_'), 2),
+            (format!("optional_prompt{}player(", '_'), 3),
             // The boolean wrapper and the reason-returning authority are ONE gate
             // family, counted in the same census: the wrapper is the authority's
             // `.is_some()`, and the decline route in `resolve_chain_body` reads the
@@ -24943,7 +24943,10 @@ mod bounded_offer_conjunct_tests {
              driver dispatch, and \
              `resolve_chain_body`'s `CastFromZone` decline probe — every one of them selects a \
              DRIVER rather than opening an up-front window — plus `offer_repeated_payment`, \
-             which only names who is asked a driver's per-iteration offer, so a NEW site is a \
+             which only names who is asked a driver's per-iteration offer, and \
+             `optional_rider_chooser`, which only names who a combat prevention rider's \
+             \"may\" would ask so Phase D orders the choices in APNAP order (CR 101.4), so a \
+             NEW site is a \
              decision to adjudicate here and not a number to move. Within the gate family \
              itself, moving a site between the wrapper spelling (`optional_effect_is_infeasible`) \
              and the reason spelling (`optional_effect_infeasibility`) is not a count change.\

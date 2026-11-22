@@ -11476,36 +11476,45 @@ impl ReplacementPromptCauses {
     }
 }
 
-/// CR 616.1: visit the possible choosers of this event's replacement
-/// menu and any optional replacements on it, using the live prompt routing.
+/// CR 101.4 + CR 616.1f: a replacement prompt gates the choices its answer
+/// may create. Visit that chooser before projecting any follow-up events.
 pub(crate) fn visit_proposed_event_choosers(
     state: &GameState,
     event: &ProposedEvent,
     visit: &mut impl FnMut(PlayerId),
-) {
+) -> bool {
     let registry = replacement_registry();
     let candidates = find_applicable_replacements(state, event, registry);
-    let ordering_matters =
-        candidates.len() >= 2 && replacement_ordering_is_material(state, &candidates, event);
-    if let Some(player) = replacement_order_choice_player(state, event).filter(|_| ordering_matters)
+    if is_counter_placement_event(event) && counter_placement_prevention_applies(state, &candidates)
     {
+        return false;
+    }
+    let choosable = choosable_replacement_candidates(state, event, candidates.clone());
+    let chooser = match choosable.as_slice() {
+        [candidate] if replacement_is_optional(state, *candidate) => {
+            replacement_choice_player(state, event, *candidate)
+        }
+        [_, _, ..] if replacement_ordering_is_material(state, &choosable, event) => {
+            replacement_order_choice_player(state, event)
+        }
+        _ => None,
+    };
+    if let Some(player) = chooser {
         visit(player);
+        return true;
     }
     for candidate in candidates {
-        let definition = replacement_definition_for_id(state, candidate);
-        if let Some(player) = replacement_choice_player(state, event, candidate)
-            .filter(|_| definition.is_none_or(|def| replacement_mode_is_optional(&def.mode)))
-        {
-            visit(player);
-        }
-        let Some(definition) = definition else {
+        let Some(definition) = replacement_definition_for_id(state, candidate) else {
             continue;
         };
-        match event {
+        if replacement_mode_is_optional(&definition.mode) {
+            continue;
+        }
+        let prompted = match event {
             ProposedEvent::LifeGain {
                 player_id, amount, ..
             } if plain_life_gain_draw(state, *player_id, candidate, definition) => {
-                visit_draw_event_choosers(state, *player_id, *amount, visit);
+                visit_draw_event_choosers(state, *player_id, *amount, visit)
             }
             ProposedEvent::Draw {
                 player_id, stage, ..
@@ -11517,19 +11526,21 @@ pub(crate) fn visit_proposed_event_choosers(
                 if let Effect::Draw { target, .. } = execute.effect.as_ref() {
                     // CR 121.2a: a multi-card instruction can substitute draws
                     // for another player, whose individual draw has its own chooser.
-                    if *stage == DrawEventStage::Instruction
+                    *stage == DrawEventStage::Instruction
                         && draw_head_draws_for_other_player(target, controller, *player_id)
-                    {
-                        visit_draw_event_choosers(state, controller, 1, visit);
-                    }
+                        && visit_draw_event_choosers(state, controller, 1, visit)
                 } else {
                     let resolved = build_resolved_from_def(execute, candidate.source, controller);
-                    visit_draw_fanout_choosers(state, &resolved, *player_id, visit);
+                    visit_draw_fanout_choosers(state, &resolved, *player_id, visit)
                 }
             }
-            _ => {}
+            _ => false,
+        };
+        if prompted {
+            return true;
         }
     }
+    false
 }
 
 /// CR 121.2 + CR 616.1: project the draw instruction and individual delivery stages.
@@ -11538,17 +11549,10 @@ pub(crate) fn visit_draw_event_choosers(
     player_id: PlayerId,
     count: u32,
     visit: &mut impl FnMut(PlayerId),
-) {
-    let individual = ProposedEvent::Draw {
-        player_id,
-        count: 1,
-        stage: DrawEventStage::Individual,
-        applied: HashSet::new(),
-    };
-    visit_proposed_event_choosers(state, &individual, visit);
-    // A one-card draw cannot use the multi-card substitution path above.
-    if count > 1 {
-        visit_proposed_event_choosers(
+) -> bool {
+    // The instruction settles before any individual draw is proposed.
+    if count > 1
+        && visit_proposed_event_choosers(
             state,
             &ProposedEvent::Draw {
                 player_id,
@@ -11557,8 +11561,20 @@ pub(crate) fn visit_draw_event_choosers(
                 applied: HashSet::new(),
             },
             visit,
-        );
+        )
+    {
+        return true;
     }
+    visit_proposed_event_choosers(
+        state,
+        &ProposedEvent::Draw {
+            player_id,
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        },
+        visit,
+    )
 }
 
 /// CR 608.2d + CR 101.4: a draw substitute can address its "may" to
@@ -11568,7 +11584,7 @@ fn visit_draw_fanout_choosers(
     ability: &ResolvedAbility,
     drawer: PlayerId,
     visit: &mut impl FnMut(PlayerId),
-) {
+) -> bool {
     use crate::types::ability::OpponentMayScope;
     if let Some(scope) = ability.optional_for.filter(|_| ability.optional) {
         let excluded = match scope {
@@ -11576,17 +11592,20 @@ fn visit_draw_fanout_choosers(
             OpponentMayScope::AnyPlayer => None,
             OpponentMayScope::AnyOtherPlayer => Some(drawer),
         };
-        for player in super::players::apnap_order(state) {
-            if Some(player) != excluded
-                && !super::effects::offered_seat_cannot_accept(state, ability, player)
-            {
-                visit(player);
-            }
+        if let Some(player) = super::players::apnap_order(state)
+            .into_iter()
+            .find(|&player| {
+                Some(player) != excluded
+                    && !super::effects::offered_seat_cannot_accept(state, ability, player)
+            })
+        {
+            visit(player);
+            return true;
         }
     }
-    for (_, child) in ability.child_links() {
-        visit_draw_fanout_choosers(state, child, drawer, visit);
-    }
+    ability
+        .child_links()
+        .any(|(_, child)| visit_draw_fanout_choosers(state, child, drawer, visit))
 }
 
 /// CR 614.1a + CR 616.1: can the live replacement pipeline open a player choice

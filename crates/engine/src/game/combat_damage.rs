@@ -2071,20 +2071,19 @@ fn reorder_ranked_slots<T: Clone>(items: &mut [T], rank: impl Fn(&T) -> Option<u
 }
 
 /// CR 616.1 + CR 101.4 + CR 702.15b: the APNAP rank of a lifelink gain's
-/// earliest possible chooser. A gain's replacement order belongs to the
-/// gaining player, but its substitute can address another player.
+/// first prompt. A gain's replacement order belongs to the gaining player.
+/// A substitute can address another player when the gain itself has no prompt.
 /// A gain with no rank keeps its slot and is staged ahead of a leg only when
 /// its owner is the player that leg damages.
 fn lifelink_gain_rank(state: &GameState, controller: PlayerId, amount: u32) -> Option<usize> {
     use crate::game::effects::life;
     use crate::game::topology::apnap_team_rank;
     let event = life::proposed_life_gain(state, controller, amount)?;
-    let mut earliest = None;
+    let mut first = None;
     replacement::visit_proposed_event_choosers(state, &event, &mut |player| {
-        let rank = apnap_team_rank(state, player);
-        earliest = Some(earliest.map_or(rank, |current: usize| current.min(rank)));
+        first = Some(apnap_team_rank(state, player));
     });
-    earliest.or_else(|| {
+    first.or_else(|| {
         life::life_gain_may_prompt(state, controller, amount)
             .then(|| apnap_team_rank(state, controller))
     })

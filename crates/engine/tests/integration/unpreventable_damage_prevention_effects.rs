@@ -7434,6 +7434,104 @@ enum DrawReplacement {
     ZursWeirding,
 }
 
+/// CR 101.4 + CR 616.1f: P2's draw order gates any offer Zur's Weirding could
+/// make to P0. P1's poison order is outstanding before that offer can exist.
+#[test]
+fn poison_order_precedes_draw_order_that_gates_an_earlier_seats_offer() {
+    const ELF: &str = "Infect (This creature deals damage to creatures in the form of -1/-1 counters and to players in the form of poison counters.)";
+    const VORINCLEX: &str = "Trample, haste\nIf you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
+
+    let p2 = PlayerId(2);
+    let mut scenario = three_player_rider_board();
+    let elf = creature_with_keywords(&mut scenario, P0, "Glistener Elf", (1, 1), &["Infect"], ELF);
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let nighthawk = creature_with_keywords(
+        &mut scenario,
+        p2,
+        "Vampire Nighthawk",
+        (2, 3),
+        &["Flying", "Deathtouch", "Lifelink"],
+        VAMPIRE_NIGHTHAWK,
+    );
+    let vorinclex = [P0, P1].map(|player| {
+        creature_with_keywords(
+            &mut scenario,
+            player,
+            "Vorinclex, Monstrous Raider",
+            (6, 6),
+            &["Trample", "Haste"],
+            VORINCLEX,
+        )
+    });
+    scenario.add_enchantment_from_oracle(p2, "Nefarious Lich", NEFARIOUS_LICH);
+    let abundance = scenario
+        .add_enchantment_from_oracle(p2, "Abundance", ABUNDANCE)
+        .id();
+    let weirding = scenario
+        .add_enchantment_from_oracle(p2, "Zur's Weirding", ZURS_WEIRDING)
+        .id();
+    let mut runner = scenario.build();
+    let hand_before = hand_size(&runner, p2);
+
+    to_the_first_combat_prompt(
+        &mut runner,
+        &[
+            (elf, AttackTarget::Player(P1)),
+            (bears, AttackTarget::Player(p2)),
+        ],
+        p2,
+        &[(nighthawk, bears)],
+    );
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected the poison order, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        *player, P1,
+        "P1 must order poison before P2 orders draw replacements"
+    );
+    assert_eq!(candidates.len(), 2);
+    assert!(vorinclex
+        .iter()
+        .all(|source| candidates.iter().any(|c| c.source_id == *source)));
+    let index = candidates
+        .iter()
+        .position(|c| c.source_id == vorinclex[0])
+        .unwrap();
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("order poison replacements");
+
+    let mut draw_orders = 0;
+    let mut accept = answering_abundance(true);
+    let events = finish_the_combat_answering(&mut runner, |state| {
+        assert_eq!(state.waiting_for.acting_player(), Some(p2));
+        if let WaitingFor::ReplacementChoice { candidates, .. } = &state.waiting_for {
+            if candidates.iter().any(|c| c.source_id == weirding) {
+                draw_orders += 1;
+                assert_eq!(candidates.len(), 2);
+                return GameAction::ChooseReplacement {
+                    index: candidates
+                        .iter()
+                        .position(|c| c.source_id == abundance)
+                        .unwrap(),
+                };
+            }
+        }
+        accept(state)
+    });
+    assert_batch_settled(&runner);
+    assert_eq!(draw_orders, 2);
+    assert_eq!(runner.state().players[1].poison_counters, 1);
+    assert_eq!(hand_size(&runner, p2) - hand_before, 2);
+    assert_eq!(cards_drawn(&events, p2), 0);
+}
+
 fn lifelink_substitute_and_poison_order(draw_replacement: DrawReplacement) {
     const ALMS_COLLECTOR: &str = "Flash\nIf an opponent would draw two or more cards, instead you and that player each draw a card.";
     const VAMPIRE_OF_THE_DIRE_MOON: &str = "Deathtouch (Any amount of damage this deals to a creature is enough to destroy it.)\nLifelink (Damage dealt by this creature also causes you to gain that much life.)";

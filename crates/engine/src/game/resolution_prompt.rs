@@ -575,9 +575,8 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         || a.else_ability.as_deref().is_some_and(chain_offers_choice)
 }
 
-/// CR 101.4 + CR 616.1: rank a prevention continuation by its earliest possible
-/// chooser. The whole shield runs as one aggregate, so use the earliest rank
-/// to avoid delaying that player's choice behind a later player's shield.
+/// CR 101.4 + CR 616.1f: rank a prevention continuation by its first prompt.
+/// The rider's own choice gates its event, and that event gates the chain.
 /// This reads the current board before dispatch, including live event recipients.
 pub(crate) fn prevention_rider_choice_rank(
     state: &GameState,
@@ -590,16 +589,16 @@ pub(crate) fn prevention_rider_choice_rank(
     use crate::types::game_state::PendingCounterAddition;
     use crate::types::proposed_event::CounterPlacement;
 
-    let mut earliest = usize::MAX;
-    let mut consider = |player| earliest = earliest.min(rank(player));
     if rider.optional || rider.optional_for.is_some() {
-        if let Some(player) = effects::optional_prompt_player(state, rider) {
-            consider(player);
+        if let Some(player) = effects::optional_rider_chooser(state, rider) {
+            return rank(player);
         }
     } else if node_modifiers_offer_choice(rider) || effect_offers_choice(&rider.effect) {
-        consider(rider.controller);
+        return rank(rider.controller);
     }
 
+    let mut earliest = usize::MAX;
+    let mut consider = |player| earliest = earliest.min(rank(player));
     let quantity = |expr| {
         crate::game::quantity::resolve_quantity_with_targets(state, expr, rider).max(0) as u32
     };
@@ -712,16 +711,14 @@ pub(crate) fn prevention_rider_choice_rank(
         _ => {}
     });
 
-    for (_, child) in rider.child_links() {
-        earliest = earliest.min(prevention_rider_choice_rank(
-            state,
-            child,
-            amount,
-            event_source,
-            rank,
-        ));
+    if earliest != usize::MAX {
+        return earliest;
     }
-    earliest
+    rider
+        .child_links()
+        .map(|(_, child)| prevention_rider_choice_rank(state, child, amount, event_source, rank))
+        .min()
+        .unwrap_or(usize::MAX)
 }
 
 /// CR 608.2d + CR 118.12: can this one node's executable modifiers (its
