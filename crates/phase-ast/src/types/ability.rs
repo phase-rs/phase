@@ -4888,6 +4888,16 @@ pub enum ProhibitedActivity {
         /// battlefield. `None` preserves the legacy source-controller lookup.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         protected_player: Option<PlayerId>,
+        /// CR 109.5 + CR 608.2c: scope-SELECTION for the protected player,
+        /// resolved by `add_restriction::fill_runtime_fields` at creation.
+        /// `None` is the legacy contract (snapshot the resolving ability's
+        /// controller — the controller-relative "you"); every shipped user
+        /// carries `None`. `Some(ParentTargetedPlayer)` snapshots the
+        /// spell/ability's already-chosen player target instead (Call for
+        /// Aid's "that player" anaphor reuses the declared target slot without
+        /// declaring a second one).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protected_scope: Option<RestrictionPlayerScope>,
     },
     /// CR 116.2a + CR 305.1 + CR 601.2a: Prohibit *playing* (casting a spell OR
     /// playing a land) cards located in `zone` for the affected players.
@@ -6384,8 +6394,24 @@ pub enum DelayedTriggerPlayerBinding {
     /// step" — the exiled permanent may belong to any player, so "that
     /// player" (its owner, CR 400.3) is resolved from the parent target, or
     /// else the object the parent moved, at delayed-trigger creation, not
-    /// assumed to be the controller.
+    /// assumed to be the controller. Phytotitan's "their next upkeep" after
+    /// "under its owner's control" has neither, so the owner is read from the
+    /// payload's creation referent: the object its creation event moved.
     ParentTargetOwner,
+    /// CR 603.7a + CR 608.2c: "that player's next [phase]" where "that
+    /// player" anaphorically refers to a player CHOSEN earlier in the same
+    /// resolution — not the ability's controller and not a target's owner.
+    /// Faramir, Prince of Ithilien: "At the beginning of your end step,
+    /// choose an opponent. At the beginning of that player's next end step,
+    /// …" — "that player" is the chosen opponent, resolved from the
+    /// resolving ability's `chosen_players[index]` (the resolution-scoped
+    /// list the `NamedChoice` answer handler appends to) at delayed-trigger
+    /// creation. Bare `index: u8` mirrors `ControllerRef::ChosenPlayer`;
+    /// the delayed ability also stamps a `TargetRef::Player` so the fired
+    /// body can read the chosen player via `PlayerScope::Target`. A missing
+    /// index fails closed (creation is skipped) — never a controller
+    /// fallback.
+    ChosenPlayer { index: u8 },
 }
 
 impl DelayedTriggerPlayerBinding {
@@ -7865,16 +7891,12 @@ pub enum FilterProp {
     /// for each transformed permanent you control"). Mirrors `FaceDown`/`Tapped`:
     /// a per-object battlefield state read from `GameObject::transformed`.
     Transformed,
-    /// CR 115.9c: Matches stack entries whose targets ALL satisfy the given filter.
-    /// Used for "that targets only ~", "that targets only a single creature you control", etc.
-    /// Permissive at the per-object filter level; validated against the stack entry's actual
-    /// targets by trigger matchers and retarget effects.
+    /// CR 115.9c: Used for "that targets only ~", "that targets only a single creature you control", etc.
     TargetsOnly {
         filter: Box<TargetFilter>,
     },
     /// CR 115.9b: Matches stack entries that have at least one target satisfying the filter.
     /// Used for "that targets ~", "that targets you", etc. (.any() semantics).
-    /// Contrast with TargetsOnly (CR 115.9c) which requires ALL targets to match (.all()).
     Targets {
         filter: Box<TargetFilter>,
     },
@@ -8231,6 +8253,22 @@ impl TypedFilter {
             .iter()
             .any(|tf| !matches!(tf, TypeFilter::Card | TypeFilter::Any))
             || !self.properties.is_empty()
+    }
+
+    /// Whether best-effort target parsing retained no standalone selection constraint.
+    ///
+    /// CR 115.1a + CR 115.1c: a target phrase describes the affected object or
+    /// player. An empty filter or `Another` alone does not preserve that
+    /// description; the latter only excludes a relative referent. CR 115.4:
+    /// damage-target wording has its own domain, which this filter alone
+    /// cannot establish. Every other property remains a real constraint.
+    pub fn lacks_standalone_selection_constraint(&self) -> bool {
+        self.type_filters.is_empty()
+            && self.controller.is_none()
+            && self
+                .properties
+                .iter()
+                .all(|property| *property == FilterProp::Another)
     }
 
     pub fn normalized(mut self) -> Self {
@@ -12403,7 +12441,13 @@ pub enum PlayerScope {
 /// static condition's player anchor without changing its serialized shape.
 /// CR 725.5 gives the monarch a vacancy rule that CR 726 does not give the
 /// initiative; a future designation must receive its own runtime answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The same axis also anchors a continuous effect's controller source
+/// (`ContinuousModification::ChangeControllerToDesignation`), which is why
+/// the enum carries a tagged serde shape even though no condition serializes
+/// it directly. New leaves arrive here — never as sibling
+/// `ContinuousModification` variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum Designation {
     Monarch,
 }
@@ -15851,7 +15895,7 @@ pub enum CopyChooseScope {
 
 /// CR 102.1 / CR 102.2 / CR 109.5: Relative player set for player filters that
 /// compose with an independent condition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PlayerRelation {
     /// The controller of the effect or quantity.
@@ -17587,11 +17631,13 @@ impl Comparator {
     }
 }
 
-/// CR 508.1 / CR 508.1b: Subject axis for counting members of a triggering
-/// `AttackersDeclared` event.
+/// CR 508.1a + CR 508.1b: Subject axis for counting declared attackers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AttackersDeclaredCountSubject {
+    /// CR 508.1a + CR 508.4: Count creatures declared as attackers in this combat,
+    /// optionally excluding the source's observed incarnation (CR 400.7).
+    CurrentCombat { exclude_source: SourceExclusion },
     /// Count attackers whose controller matches `scope` relative to the trigger
     /// controller. `filter` is the optional condition-level type axis (CR
     /// 508.1): when `Some(f)`, only attackers whose object matches `f` are
@@ -18123,6 +18169,23 @@ pub enum StaticCondition {
         #[serde(default, skip_serializing_if = "AttackedYouScope::is_any_player")]
         scope: AttackedYouScope,
     },
+    /// CR 508.6: True when the `attacker` player declared one or more
+    /// creatures attacking the `defender` player this turn ("if they didn't
+    /// attack you that turn" — Faramir, Prince of Ithilien; the nom arm
+    /// emits attacker `ChosenPlayer` as an anaphor-kind placeholder and
+    /// defender `You`, and the S2 bridge lowers this to
+    /// `AbilityCondition::PlayerAttackedPlayer { attacker: Target,
+    /// defender: Controller }` wrapped in `Not`). Parser-axis params
+    /// (`ControllerRef`, precedent: `WasStartingPlayer { controller }`).
+    /// Reads the UNCOLLAPSED `attacked_players_directly_this_turn` ledger —
+    /// a planeswalker/battle attack does NOT count as attacking its
+    /// controller (Faramir ruling 2023-06-16) — never the collapsed
+    /// `attacked_defenders_this_turn` that serves defending-player and
+    /// explicit-disjunct consumers.
+    PlayerAttackedPlayer {
+        attacker: ControllerRef,
+        defender: ControllerRef,
+    },
     /// CR 701.27: True when any opponent has at least this many poison counters.
     OpponentPoisonAtLeast {
         count: u32,
@@ -18201,15 +18264,26 @@ pub enum StaticCondition {
     /// CR 400.7: True when the source permanent entered the battlefield this turn.
     /// Used for "as long as this [permanent] entered this turn" conditional statics.
     SourceEnteredThisTurn,
-    /// CR 120.1 + CR 120.3/120.6 + CR 702.11b + CR 613.1f: True once the source
-    /// permanent has actually dealt damage (combat or noncombat) since it entered
-    /// the battlefield. Sticky per-object flag (set on the first nonzero amount of
-    /// damage actually dealt per CR 120.3/120.6, not the would-be amount of CR
-    /// 120.1a; reset when the object leaves the battlefield). Used as a Layer 6
-    /// (CR 613.1f) ability-adding gate for "has hexproof if it hasn't dealt damage
-    /// yet" (Palladia-Mors, the Ruiner; Karakyk Guardian). The "hasn't" negation
-    /// wraps this in `StaticCondition::Not`.
-    SourceHasDealtDamage,
+    /// CR 120.1 + CR 120.3 + CR 120.8 + CR 702.11b + CR 613.1f: True once the
+    /// source permanent has actually dealt damage of the selected `kind` since it
+    /// entered the battlefield. Sticky per-object flag (set on the first nonzero
+    /// amount of damage actually dealt, not the would-be amount of CR 120.1a;
+    /// CR 120.8: zero damage is not dealt; CR 400.7: reset when the object leaves
+    /// the battlefield). Used as a Layer 6 (CR 613.1f) ability-adding gate for
+    /// "has hexproof if it hasn't dealt damage yet" (Palladia-Mors, the Ruiner;
+    /// Karakyk Guardian) and "has hexproof as long as they haven't dealt combat
+    /// damage yet" (Ruric Thar, Magecrusher). The "hasn't" negation wraps this in
+    /// `StaticCondition::Not`.
+    SourceHasDealtDamage {
+        /// CR 120.2a / CR 120.2b: which damage class counts. `Any` (the default,
+        /// and what the former unit-variant record deserializes to) accepts both
+        /// and is elided on serialization so the existing wire shape is unchanged.
+        #[serde(
+            default = "default_damage_kind",
+            skip_serializing_if = "is_default_damage_kind"
+        )]
+        kind: DamageKindFilter,
+    },
     /// CR 701.43b: The source has been exerted during the current turn.
     SourceExertedThisTurn,
     /// CR 601.2 + CR 611.3a: True when the source permanent was cast (its
@@ -18436,7 +18510,7 @@ impl StaticCondition {
             | StaticCondition::DuringOpponentsTurn
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
-            | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceHasDealtDamage { .. }
             | StaticCondition::SourceExertedThisTurn
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
@@ -18461,6 +18535,7 @@ impl StaticCondition {
             | StaticCondition::EnchantedIsFaceDown
             | StaticCondition::AdditionalCostPaid
             | StaticCondition::CastingAsVariant { .. }
+            | StaticCondition::PlayerAttackedPlayer { .. }
             | StaticCondition::FirstCombatPhaseOfTurn
             | StaticCondition::None => None,
         }
@@ -18477,6 +18552,44 @@ impl StaticCondition {
         self.any_leaf(|leaf| {
             leaf.designation_anchor()
                 .is_some_and(|(designation, scope)| !answerable(designation, scope))
+        })
+    }
+
+    /// CR 109.4 + CR 115.1: true when any leaf is a `PlayerAttackedPlayer`
+    /// whose attacker or defender is unanswerable inside the layer pipeline
+    /// (no resolving ability): a resolution-scoped `ChosenPlayer`
+    /// placeholder (reads `ResolvedAbility.chosen_players`), or a
+    /// target-relative `TargetPlayer`/`TargetOpponent` (reads the first
+    /// declared player target — `Undeclared` with no ability). Either way
+    /// the leaf is false for the wrong reason, so the entry gate must refuse
+    /// the whole condition before `Not` can invert it — mirrors
+    /// `has_unanswerable_designation_anchor` (whole tree via `any_leaf`, so
+    /// nesting under `And`/`Or`/`Not` cannot bypass). The refusal covers
+    /// the resolution-scoped endpoint, the target-relative pair (see the
+    /// LEGALITY-SCOPE PAIR note on `ControllerRef`), and the group-tagged
+    /// endpoint (Matt R9-LOW: `DeclaredPlayer` reads live targeting state,
+    /// so a hand-built leaf naming it would be admitted with no producer to
+    /// answer it); chain/event endpoints fail closed in the layer arm but
+    /// have no producer for this leaf and stay out of the predicate.
+    pub fn has_unanswerable_attack_endpoint(&self) -> bool {
+        self.any_leaf(|leaf| {
+            matches!(
+                leaf,
+                StaticCondition::PlayerAttackedPlayer { attacker, defender }
+                    if matches!(
+                        attacker,
+                        ControllerRef::ChosenPlayer { .. }
+                            | ControllerRef::TargetPlayer
+                            | ControllerRef::TargetOpponent
+                            | ControllerRef::DeclaredPlayer { .. }
+                    ) || matches!(
+                        defender,
+                        ControllerRef::ChosenPlayer { .. }
+                            | ControllerRef::TargetPlayer
+                            | ControllerRef::TargetOpponent
+                            | ControllerRef::DeclaredPlayer { .. }
+                    )
+            )
         })
     }
 
@@ -18551,7 +18664,7 @@ impl StaticCondition {
             | StaticCondition::DuringOpponentsTurn
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
-            | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceHasDealtDamage { .. }
             | StaticCondition::SourceExertedThisTurn
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
@@ -18574,6 +18687,7 @@ impl StaticCondition {
             | StaticCondition::SourceIsPaired
             | StaticCondition::SourceInZone { .. }
             | StaticCondition::EnchantedIsFaceDown
+            | StaticCondition::PlayerAttackedPlayer { .. }
             | StaticCondition::FirstCombatPhaseOfTurn
             | StaticCondition::None => None,
         }
@@ -18607,7 +18721,7 @@ impl StaticCondition {
     /// Engine limitation, not CR-mandated: the ACCEPTANCE PREDICATE — can this
     /// condition ever be satisfied at `mode`'s enforcement point?
     ///
-    /// The union of the two rejection classes, and the single authority both
+    /// The union of the three rejection classes, and the single authority both
     /// consumers read:
     ///
     /// - `oracle_static::static_helpers::gate_static_condition` — the PARSER
@@ -18630,6 +18744,13 @@ impl StaticCondition {
         self.requires_unavailable_continuation(mode)
             || self
                 .has_unanswerable_designation_anchor(|_, scope| mode.binds_designation_scope(scope))
+            // CR 109.4 (Matt R2-F4, widened by R7-F2): a resolution-scoped
+            // `ChosenPlayer` or target-relative endpoint has no answer inside
+            // the layer pipeline (no resolving ability), so the runtime entry
+            // gate refuses the whole tree — the admission predicate must
+            // refuse it too, or the card ships reported as supported while
+            // its gate is inert.
+            || self.has_unanswerable_attack_endpoint()
     }
 
     /// True when this condition (or a Boolean sub-condition of it, at ANY
@@ -18789,7 +18910,7 @@ impl StaticCondition {
             | StaticCondition::DuringOpponentsTurn
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
-            | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceHasDealtDamage { .. }
             | StaticCondition::SourceExertedThisTurn
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
@@ -18814,6 +18935,9 @@ impl StaticCondition {
             | StaticCondition::EnchantedIsFaceDown
             | StaticCondition::AdditionalCostPaid
             | StaticCondition::CastingAsVariant { .. }
+            // Absolute player-scope endpoints: nothing to re-anchor to the
+            // defending player, so the class stays unanchorable.
+            | StaticCondition::PlayerAttackedPlayer { .. }
             | StaticCondition::FirstCombatPhaseOfTurn
             | StaticCondition::None => None,
         }
@@ -18912,7 +19036,7 @@ impl StaticCondition {
             | StaticCondition::DuringOpponentsTurn
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
-            | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceHasDealtDamage { .. }
             | StaticCondition::SourceExertedThisTurn
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
@@ -18937,9 +19061,23 @@ impl StaticCondition {
             | StaticCondition::EnchantedIsFaceDown
             | StaticCondition::AdditionalCostPaid
             | StaticCondition::CastingAsVariant { .. }
+            | StaticCondition::PlayerAttackedPlayer { .. }
             | StaticCondition::FirstCombatPhaseOfTurn
             | StaticCondition::None => visit(self),
         }
+    }
+
+    /// CR 120.2a + CR 120.2b: true when some leaf of this condition reads the
+    /// per-kind damage history of its source (`SourceHasDealtDamage` with a
+    /// kind other than `Any`). `Any` consults only the any-damage set and never
+    /// needs the combat/noncombat split.
+    pub fn reads_damage_kind(&self) -> bool {
+        self.any_leaf(|leaf| {
+            matches!(
+                leaf,
+                StaticCondition::SourceHasDealtDamage { kind } if *kind != DamageKindFilter::Any
+            )
+        })
     }
 
     /// True when any LEAF of this condition tree satisfies `predicate`.
@@ -20301,7 +20439,7 @@ pub fn is_direct_resolution_optional_payment_branch(cost: &AbilityCost) -> bool 
 /// absent: the optional-branch selector intercepts it before this executor and
 /// rewrites the completed frame to an empty prepaid composite.
 pub fn supported_at_resolution(cost: &AbilityCost) -> bool {
-    use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
+    use crate::types::ability::{BeholdCostAction, CardSelectionMode, DiscardSelfScope};
     match cost {
         AbilityCost::Mana { .. }
         | AbilityCost::ManaDynamic { .. }
@@ -20330,6 +20468,14 @@ pub fn supported_at_resolution(cost: &AbilityCost) -> bool {
         // CR 118.3: The shared effect-cost predicate admits only deterministic
         // payment effects that the authority resolves directly.
         AbilityCost::EffectCost { .. } if cost.supports_effect_cost_payment() => true,
+        // CR 614.12a + CR 118.3 + CR 701.4a: a single-object "behold a [quality]"
+        // replacement cost has an interactive resolution path.
+        AbilityCost::Behold {
+            count: 1,
+            action: BeholdCostAction::ChooseOrReveal,
+            type_choice: None,
+            ..
+        } => true,
         AbilityCost::Discard { .. }
         | AbilityCost::Sacrifice(_)
         | AbilityCost::Tap
@@ -21817,6 +21963,20 @@ impl LibraryPosition {
     /// Serde skip-helper: `Top` is the default and is omitted from JSON.
     pub fn is_top(&self) -> bool {
         matches!(self, Self::Top)
+    }
+
+    /// CR 401.4 + CR 401.7: whether several arrivals at this position are
+    /// grouped into one owner arrangement prompt. The one position contract for
+    /// both the staged producer and checked persistence: fixed positions (`Top`,
+    /// `Bottom`, a numbered slot, and a statically known "beneath the top X") are
+    /// arrangeable; a depth known only at resolution time and the random Alchemy
+    /// slot are not.
+    pub fn is_owner_arrangeable(&self) -> bool {
+        match self {
+            Self::Top | Self::Bottom | Self::NthFromTop { .. } => true,
+            Self::BeneathTop { depth } => matches!(depth, QuantityExpr::Fixed { .. }),
+            Self::RandomWithinTop { .. } => false,
+        }
     }
 }
 
@@ -28667,7 +28827,9 @@ fn immediate_modification_target_slot_filter(
         | ContinuousModification::AddCounterOnEnter { .. }
         | ContinuousModification::SetStartingLoyalty { .. }
         | ContinuousModification::RemoveManaCost
-        | ContinuousModification::SubstituteTextWord { .. } => None,
+        | ContinuousModification::SubstituteTextWord { .. }
+        // CR 613.1b: designation-anchored control carries no quantity.
+        | ContinuousModification::ChangeControllerToDesignation { .. } => None,
     }
 }
 
@@ -35101,10 +35263,11 @@ macro_rules! define_effect_quantity_walk {
     };
 }
 
-impl Effect {
-    define_effect_quantity_walk!([]; for_each_quantity_expr);
-    define_effect_quantity_walk!([mut]; for_each_quantity_expr_mut);
-
+/// One body, two receivers: the shared [`Effect::for_each_nested_definition`] and
+/// the exclusive [`Effect::for_each_nested_definition_mut`] (the
+/// `define_effect_quantity_walk!` precedent), so the edge set cannot drift between them.
+macro_rules! define_nested_definition_walk {
+    ([$($mut_:tt)?]; $name:ident; $as_deref:ident) => {
     /// Every [`AbilityDefinition`] this effect carries as a DIRECT executable
     /// payload, together with the [`NestedDefinitionEdge`] it hangs from.
     ///
@@ -35130,9 +35293,9 @@ impl Effect {
     /// the entire point of this visitor: a wildcard is invisible, and the defect
     /// it produces is a card reporting support it does not have, which is worse
     /// than a card honestly reporting a gap.
-    pub fn for_each_nested_definition<'a>(
-        &'a self,
-        f: &mut dyn FnMut(NestedDefinitionEdge, &'a AbilityDefinition),
+    pub fn $name<'a>(
+        &'a $($mut_)? self,
+        f: &mut dyn FnMut(NestedDefinitionEdge, &'a $($mut_)? AbilityDefinition),
     ) {
         match self {
             // CR 701.38: a vote picks one choice from a list. Each listed
@@ -35200,14 +35363,14 @@ impl Effect {
             // unimplemented detection see through the boon wrapper exactly as
             // they see through `CreateDelayedTrigger`.
             Effect::CreateBoon { trigger, .. } => {
-                if let Some(execute) = trigger.execute.as_deref() {
+                if let Some(execute) = trigger.execute.$as_deref() {
                     f(NestedDefinitionEdge::CreateBoonTrigger, execute)
                 }
             }
             // CR 706.3a: one payload per results-table striation.
             Effect::RollDie { results, .. } => {
                 for result in results {
-                    f(NestedDefinitionEdge::RollDieResult, &result.effect);
+                    f(NestedDefinitionEdge::RollDieResult, &$($mut_)? result.effect);
                 }
             }
             // CR 705.1: coin-flip branches, in every run mode. Each side is its own edge.
@@ -35465,327 +35628,14 @@ impl Effect {
             | Effect::Unimplemented { .. } => {}
         }
     }
+    };
+}
 
-    /// Mutable twin of [`Effect::for_each_nested_definition`].
-    ///
-    /// The two visitors deliberately keep the same exhaustive carrier list:
-    /// callers that need to rewrite a nested executable definition must not
-    /// silently miss a new effect payload just because the rewrite happens on
-    /// the mutable side of the AST.
-    pub fn for_each_nested_definition_mut(
-        &mut self,
-        f: &mut dyn FnMut(NestedDefinitionEdge, &mut AbilityDefinition),
-    ) {
-        match self {
-            Effect::Vote {
-                per_choice_effect,
-                subject,
-                ..
-            } => {
-                for effect in per_choice_effect {
-                    f(NestedDefinitionEdge::VotePerChoice, effect);
-                }
-                if let VoteSubject::Objects {
-                    outcome_template, ..
-                } = subject
-                {
-                    f(NestedDefinitionEdge::VoteObjectOutcome, outcome_template);
-                }
-            }
-            Effect::SeparateIntoPiles {
-                chosen_pile_effect,
-                unchosen_pile_effect,
-                ..
-            } => {
-                f(
-                    NestedDefinitionEdge::SeparateIntoPilesChosen,
-                    chosen_pile_effect,
-                );
-                if let Some(unchosen_pile_effect) = unchosen_pile_effect {
-                    f(
-                        NestedDefinitionEdge::SeparateIntoPilesUnchosen,
-                        unchosen_pile_effect,
-                    );
-                }
-            }
-            Effect::ExileTopCardContest { winner_effect } => {
-                f(
-                    NestedDefinitionEdge::ExileTopCardContestWinner,
-                    winner_effect,
-                );
-            }
-            Effect::RevealFromHand { on_decline, .. } => {
-                if let Some(on_decline) = on_decline {
-                    f(NestedDefinitionEdge::RevealFromHandOnDecline, on_decline);
-                }
-            }
-            Effect::CreateDelayedTrigger { effect, .. } => {
-                f(NestedDefinitionEdge::CreateDelayedTriggerEffect, effect)
-            }
-            Effect::CreateDrawReplacement { replacement_effect } => f(
-                NestedDefinitionEdge::CreateDrawReplacementEffect,
-                replacement_effect,
-            ),
-            Effect::CreateBoon { trigger, .. } => {
-                if let Some(execute) = trigger.execute.as_deref_mut() {
-                    f(NestedDefinitionEdge::CreateBoonTrigger, execute);
-                }
-            }
-            Effect::RollDie { results, .. } => {
-                for result in results {
-                    f(NestedDefinitionEdge::RollDieResult, &mut result.effect);
-                }
-            }
-            Effect::FlipCoins {
-                win_effect,
-                lose_effect,
-                ..
-            } => {
-                if let Some(win_effect) = win_effect {
-                    f(NestedDefinitionEdge::FlipCoinsWin, win_effect);
-                }
-                if let Some(lose_effect) = lose_effect {
-                    f(NestedDefinitionEdge::FlipCoinsLose, lose_effect);
-                }
-            }
-            Effect::ChooseOneOf { branches, .. } => {
-                for branch in branches {
-                    f(NestedDefinitionEdge::ChooseOneOfBranch, branch);
-                }
-            }
-            Effect::StartYourEngines { .. }
-            | Effect::ChangeSpeed { .. }
-            | Effect::DealDamage { .. }
-            | Effect::ApplyPostReplacementDamage { .. }
-            | Effect::ResumeDamageBatch { .. }
-            | Effect::EachDealsDamageEqualToPower { .. }
-            | Effect::EachSourceDealsDamage { .. }
-            | Effect::Draw { .. }
-            | Effect::Pump { .. }
-            | Effect::PairWith { .. }
-            | Effect::Destroy { .. }
-            | Effect::Regenerate { .. }
-            | Effect::RemoveAllDamage { .. }
-            | Effect::Counter { .. }
-            | Effect::CounterAll { .. }
-            | Effect::Token { .. }
-            | Effect::GainLife { .. }
-            | Effect::LoseLife { .. }
-            | Effect::SetTapState { .. }
-            | Effect::RemoveCounter { .. }
-            | Effect::Sacrifice { .. }
-            | Effect::DiscardCard { .. }
-            | Effect::Mill { .. }
-            | Effect::Scry { .. }
-            | Effect::PumpAll { .. }
-            | Effect::DamageAll { .. }
-            | Effect::DamageEachPlayer { .. }
-            | Effect::DestroyAll { .. }
-            | Effect::ChangeZone { .. }
-            | Effect::ChangeZoneAll { .. }
-            | Effect::Dig { .. }
-            | Effect::GainControl { .. }
-            | Effect::GainControlAll { .. }
-            | Effect::ControlNextTurn { .. }
-            | Effect::Attach { .. }
-            | Effect::UnattachAll { .. }
-            | Effect::Surveil { .. }
-            | Effect::Fight { .. }
-            | Effect::Bounce { .. }
-            | Effect::BounceAll { .. }
-            | Effect::Explore
-            | Effect::ExploreAll { .. }
-            | Effect::Investigate
-            | Effect::Tribute { .. }
-            | Effect::TimeTravel
-            | Effect::BecomeMonarch { .. }
-            | Effect::NoOp
-            | Effect::Proliferate
-            | Effect::ProliferateTarget { .. }
-            | Effect::Populate
-            | Effect::Clash
-            | Effect::Behold { .. }
-            | Effect::EndTheTurn
-            | Effect::EndCombatPhase
-            | Effect::SwitchPT { .. }
-            | Effect::CopySpell { .. }
-            | Effect::EpicCopy { .. }
-            | Effect::CastCopyOfCard { .. }
-            | Effect::CopyTokenOf { .. }
-            | Effect::CreateTokenCopyFromPool { .. }
-            | Effect::Myriad
-            | Effect::Encore
-            | Effect::CombineHost { .. }
-            | Effect::ChooseAugmentAndCombineWithHost { .. }
-            | Effect::Meld { .. }
-            | Effect::ExileHaunting { .. }
-            | Effect::HideawayConceal { .. }
-            | Effect::CopyTokenBlockingAttacker { .. }
-            | Effect::BecomeCopy { .. }
-            | Effect::ChoosePermanent { .. }
-            | Effect::GainActivatedAbilitiesOfTarget { .. }
-            | Effect::ChooseCard { .. }
-            | Effect::PutCounter { .. }
-            | Effect::ChooseCounterKind { .. }
-            | Effect::PutChosenCounter { .. }
-            | Effect::PutCounterAll { .. }
-            | Effect::MultiplyCounter { .. }
-            | Effect::ChooseCounterAdjustment { .. }
-            | Effect::DoublePT { .. }
-            | Effect::DoublePTAll { .. }
-            | Effect::MoveCounters { .. }
-            | Effect::ReproduceEventCounters { .. }
-            | Effect::Animate { .. }
-            | Effect::ReturnAsAura { .. }
-            | Effect::RegisterBending { .. }
-            | Effect::GenericEffect { .. }
-            | Effect::Cleanup { .. }
-            | Effect::Mana { .. }
-            | Effect::Discard { .. }
-            | Effect::Shuffle { .. }
-            | Effect::Transform { .. }
-            | Effect::FlipPermanent { .. }
-            | Effect::SearchLibrary { .. }
-            | Effect::SearchOutsideGame { .. }
-            | Effect::OpenBoosterPack { .. }
-            | Effect::RevealHand { .. }
-            | Effect::Reveal { .. }
-            | Effect::RevealChosenNumbers { .. }
-            | Effect::RevealTop { .. }
-            | Effect::ExileTop { .. }
-            | Effect::ExileFaceDownPile { .. }
-            | Effect::TargetOnly { .. }
-            | Effect::Choose { .. }
-            | Effect::OpponentGuess { .. }
-            | Effect::SwapChosenLabels { .. }
-            | Effect::ChooseDamageSource { .. }
-            | Effect::Suspect { .. }
-            | Effect::Unsuspect { .. }
-            | Effect::Connive { .. }
-            | Effect::PhaseOut { .. }
-            | Effect::PhaseIn { .. }
-            | Effect::ForceBlock { .. }
-            | Effect::ForceAttack { .. }
-            | Effect::SolveCase
-            | Effect::BecomePrepared { .. }
-            | Effect::BecomeUnprepared { .. }
-            | Effect::BecomeSaddled { .. }
-            | Effect::SetClassLevel { .. }
-            | Effect::AddTargetReplacement { .. }
-            | Effect::AddRestriction { .. }
-            | Effect::ReduceNextSpellCost { .. }
-            | Effect::GrantNextSpellAbility { .. }
-            | Effect::AddPendingETBCounters { .. }
-            | Effect::AddPendingEntersModifications { .. }
-            | Effect::CreateEmblem { .. }
-            | Effect::PayCost { .. }
-            | Effect::CastFromZone { .. }
-            | Effect::FreeCastFromZones { .. }
-            | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
-            | Effect::PreventDamage { .. }
-            | Effect::CreateDamageReplacement { .. }
-            | Effect::CreatePlaneswalkReplacement { .. }
-            | Effect::LoseTheGame { .. }
-            | Effect::WinTheGame { .. }
-            | Effect::RingTemptsYou
-            | Effect::VentureIntoDungeon
-            | Effect::VentureInto { .. }
-            | Effect::TakeTheInitiative
-            | Effect::ArrangePlanarDeckTop { .. }
-            | Effect::Planeswalk
-            | Effect::AbandonScheme
-            | Effect::ChaosEnsues
-            | Effect::ReverseTurnOrder
-            | Effect::RedistributeLifeTotals
-            | Effect::OpenAttractions { .. }
-            | Effect::RollToVisitAttractions
-            | Effect::AssembleContraptions { .. }
-            | Effect::AssembleContraptionsFromRollDifference
-            | Effect::CrankContraptions { .. }
-            | Effect::ReassembleContraption { .. }
-            | Effect::AssembleContraptionOnSprocket { .. }
-            | Effect::ReassembleContraptionOnSprocket { .. }
-            | Effect::PutSticker { .. }
-            | Effect::ApplySticker { .. }
-            | Effect::ProcessRadCounters
-            | Effect::GrantCastingPermission { .. }
-            | Effect::ChooseFromZone { .. }
-            | Effect::RememberCard { .. }
-            | Effect::NoteManaSpent
-            | Effect::NoteNumber { .. }
-            | Effect::ForEachCategory { .. }
-            | Effect::ChooseObjectsIntoTrackedSet { .. }
-            | Effect::ChooseAndSacrificeRest { .. }
-            | Effect::EachPlayerCopyChosen { .. }
-            | Effect::Exploit { .. }
-            | Effect::GainEnergy { .. }
-            | Effect::GivePlayerCounter { .. }
-            | Effect::LoseAllPlayerCounters { .. }
-            | Effect::ExileFromTopUntil { .. }
-            | Effect::RevealUntil { .. }
-            | Effect::Discover { .. }
-            | Effect::PhysicalContest { .. }
-            | Effect::Heist { .. }
-            | Effect::HeistExile
-            | Effect::Cascade
-            | Effect::Ripple { .. }
-            | Effect::MiracleCast { .. }
-            | Effect::MadnessCast { .. }
-            | Effect::PutAtLibraryPosition { .. }
-            | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
-            | Effect::PutOnTopOrBottom { .. }
-            | Effect::GiftDelivery { .. }
-            | Effect::Goad { .. }
-            | Effect::GoadAll { .. }
-            | Effect::Detain { .. }
-            | Effect::SetRoomDoorLock { .. }
-            | Effect::ExchangeControl { .. }
-            | Effect::ChangeTargets { .. }
-            | Effect::Manifest { .. }
-            | Effect::ManifestDread
-            | Effect::Cloak { .. }
-            | Effect::TurnFaceUp { .. }
-            | Effect::TurnFaceDown { .. }
-            | Effect::ExtraTurn { .. }
-            | Effect::GrantExtraLoyaltyActivations { .. }
-            | Effect::SkipNextTurn { .. }
-            | Effect::SkipNextStep { .. }
-            | Effect::AdditionalPhase { .. }
-            | Effect::Double { .. }
-            | Effect::ModifyAnnouncedX { .. }
-            | Effect::RuntimeHandled { .. }
-            | Effect::Incubate { .. }
-            | Effect::Amass { .. }
-            | Effect::EmpowerJace { .. }
-            | Effect::Monstrosity { .. }
-            | Effect::Specialize
-            | Effect::Renown { .. }
-            | Effect::Bolster { .. }
-            | Effect::Adapt { .. }
-            | Effect::Learn
-            | Effect::Forage
-            | Effect::CompletePlayerAction { .. }
-            | Effect::Harness
-            | Effect::CollectEvidence { .. }
-            | Effect::Endure { .. }
-            | Effect::BlightEffect { .. }
-            | Effect::Seek { .. }
-            | Effect::SetLifeTotal { .. }
-            | Effect::ExchangeLifeWithStat { .. }
-            | Effect::ExchangeLifeTotals { .. }
-            | Effect::SetDayNight { .. }
-            | Effect::GiveControl { .. }
-            | Effect::RemoveFromCombat { .. }
-            | Effect::BecomeBlocked { .. }
-            | Effect::Conjure { .. }
-            | Effect::CreateCardCopyByName { .. }
-            | Effect::ApplyPerpetual { .. }
-            | Effect::Intensify { .. }
-            | Effect::DraftFromSpellbook { .. }
-            | Effect::HordePlayCard { .. }
-            | Effect::Unimplemented { .. } => {}
-        }
-    }
+impl Effect {
+    define_effect_quantity_walk!([]; for_each_quantity_expr);
+    define_effect_quantity_walk!([mut]; for_each_quantity_expr_mut);
+    define_nested_definition_walk!([]; for_each_nested_definition; as_deref);
+    define_nested_definition_walk!([mut]; for_each_nested_definition_mut; as_deref_mut);
 
     /// CR 107.3 + CR 608.2c: Returns the `QuantityExpr` carrying this effect's
     /// primary count/amount, for the full class of count- and amount-bearing
@@ -37743,6 +37593,8 @@ pub struct AbilityDefinition {
     /// CR 608.2c: Repeat this ability N times, where N = resolve_quantity(repeat_for).
     /// Produced by "for each [X], [effect]" leading patterns.
     pub repeat_for: Option<QuantityExpr>,
+    /// CR 608.2: the iteration relation of `repeat_for`; see [`RepeatForTiming`].
+    pub repeat_timing: RepeatForTiming,
     /// Minimum legal announced value for X. Defaults to zero; set to one by
     /// "X can't be 0" annotations.
     pub min_x_value: u32,
@@ -37842,6 +37694,8 @@ pub struct AbilityDefinition {
     pub instruction_join: InstructionJoin,
     /// CR 608.2c + CR 614.1a: see [`UnloweredGuard`]. Always `None` on a finished parse.
     pub unlowered_guard: Option<UnloweredGuard>,
+    /// CR 607.2a: see [`LinkedExileReturn`]. Always `None` on a finished parse.
+    pub linked_exile_return: Option<LinkedExileReturn>,
     /// Typed intent for SearchLibrary clauses that exile the found card face down.
     /// This is deliberately separate from `FaceDownProfile`, which describes
     /// battlefield characteristics only.
@@ -38202,6 +38056,8 @@ struct AbilityDefinitionRepr<'a> {
     mode_abilities: &'a Vec<AbilityDefinition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     repeat_for: &'a Option<QuantityExpr>,
+    #[serde(skip_serializing_if = "RepeatForTiming::is_sequential")]
+    repeat_timing: RepeatForTiming,
     #[serde(skip_serializing_if = "is_zero_u32")]
     min_x_value: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38237,6 +38093,8 @@ struct AbilityDefinitionRepr<'a> {
     instruction_join: InstructionJoin,
     #[serde(skip_serializing_if = "Option::is_none")]
     unlowered_guard: &'a Option<UnloweredGuard>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    linked_exile_return: &'a Option<LinkedExileReturn>,
     #[serde(skip_serializing_if = "ExileConcealment::is_public")]
     face_down_in_exile: ExileConcealment,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38281,6 +38139,7 @@ impl Serialize for AbilityDefinition {
             modal,
             mode_abilities,
             repeat_for,
+            repeat_timing,
             min_x_value,
             announced_x,
             cant_be_copied,
@@ -38299,6 +38158,7 @@ impl Serialize for AbilityDefinition {
             sibling_condition,
             instruction_join,
             unlowered_guard,
+            linked_exile_return,
             face_down_in_exile,
             granting_object,
             grant_chain,
@@ -38335,6 +38195,7 @@ impl Serialize for AbilityDefinition {
             modal,
             mode_abilities,
             repeat_for,
+            repeat_timing: *repeat_timing,
             min_x_value: *min_x_value,
             announced_x,
             cant_be_copied: *cant_be_copied,
@@ -38353,6 +38214,7 @@ impl Serialize for AbilityDefinition {
             sibling_condition: *sibling_condition,
             instruction_join: *instruction_join,
             unlowered_guard,
+            linked_exile_return,
             face_down_in_exile: *face_down_in_exile,
             granting_object,
             grant_chain,
@@ -38453,6 +38315,8 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     repeat_for: Option<QuantityExpr>,
     #[serde(default)]
+    repeat_timing: RepeatForTiming,
+    #[serde(default)]
     min_x_value: u32,
     #[serde(default)]
     announced_x: Option<QuantityExpr>,
@@ -38488,6 +38352,8 @@ struct AbilityDefinitionDe {
     instruction_join: InstructionJoin,
     #[serde(default)]
     unlowered_guard: Option<UnloweredGuard>,
+    #[serde(default)]
+    linked_exile_return: Option<LinkedExileReturn>,
     #[serde(default)]
     face_down_in_exile: ExileConcealment,
     #[serde(default)]
@@ -38537,6 +38403,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             modal: de.modal,
             mode_abilities: de.mode_abilities,
             repeat_for: de.repeat_for,
+            repeat_timing: de.repeat_timing,
             min_x_value: de.min_x_value,
             announced_x: de.announced_x,
             cant_be_copied: de.cant_be_copied,
@@ -38555,6 +38422,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             sibling_condition: de.sibling_condition,
             instruction_join: de.instruction_join,
             unlowered_guard: de.unlowered_guard,
+            linked_exile_return: de.linked_exile_return,
             face_down_in_exile: de.face_down_in_exile,
             granting_object: de.granting_object,
             grant_chain: de.grant_chain,
@@ -38746,6 +38614,33 @@ impl InstructionJoin {
     }
 }
 
+/// CR 608.2: how the iterations of a counted repeat (`repeat_for`) relate.
+/// Meaningful only when `repeat_for` is `Some`; producers never pair
+/// `SimultaneousInstances` with no count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum RepeatForTiming {
+    /// Each iteration completes before the next begins, as Torment of Hailfire's
+    /// ruling (2017-07-14) says: "Each repetition through this process is done
+    /// separately." Every producer other than the for-each prefix peel stamps this:
+    /// "repeat the following process", "twice" / "N times", difference counts,
+    /// and lifted and copy counts.
+    #[default]
+    Sequential,
+    /// CR 608.2c + CR 101.4: a leading "for each <count>, <instruction>" —
+    /// every iteration is an instance of one instruction. RUNTIME: read by the
+    /// engine's CR 101.4 admission authority (`effects::simultaneous_unless::admits`),
+    /// which resolves an admitted scoped unless poll choose-all-then-act; a shape
+    /// it does not admit resolves on the round-by-round driver like `Sequential`.
+    SimultaneousInstances,
+}
+
+impl RepeatForTiming {
+    /// `skip_serializing_if` predicate — the default needs no JSON byte.
+    pub fn is_sequential(timing: &Self) -> bool {
+        matches!(timing, Self::Sequential)
+    }
+}
+
 /// CR 608.2c + CR 107.1c: how a "repeat this process" loop decides whether to
 /// run another iteration. The non-count companion to `AbilityDefinition`'s
 /// `repeat_for` (a fixed `QuantityExpr` count) — this predicate decides
@@ -38864,6 +38759,31 @@ pub struct UnloweredGuard {
     pub clause_text: String,
 }
 
+/// CR 607.2a: a return whose object is written "the exiled card" / "the exiled cards",
+/// parsed with the bare chain sentinel (`TrackedSet(0)`) as its target.
+///
+/// Whether that phrase names only the cards the linked exile instruction exiled
+/// (`TrackedSetFiltered { caused_by: Exiled }`) depends on what the return's OWN
+/// resolution chain did before it (CR 608.2c), and a delayed trigger's payload is
+/// a separate chain whose binding is fixed when the trigger is created (CR 603.7c).
+/// Neither is known where the clause is parsed: assembly and the Phase 2 passes can
+/// still move the clause across a `CreateDelayedTrigger` edge. The parser therefore
+/// marks the clause here and decides the binding once, on the finished tree, in
+/// `parser::oracle::bind_linked_exile_returns`.
+///
+/// `None` on every tree `parse_oracle_pipeline` hands out (both the production
+/// `ParsedAbilities` and the `RawLoweredIr` stage clone); serialized when set so a
+/// mark that escaped the pass is visible in `card-data.json`. Like
+/// [`UnloweredGuard`], a tree built by `parse_effect_chain` outside the pipeline keeps
+/// its mark and the sentinel target, which is the unrebound binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinkedExileReturn {
+    /// "the exiled card": one card of the linked set.
+    OneCard,
+    /// "the exiled cards": the whole linked set, moved set-wide.
+    WholeSet,
+}
+
 impl fmt::Debug for AbilityDefinition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // JSON serialization instead of field-by-field Debug — avoids stack overflow
@@ -38919,6 +38839,7 @@ impl AbilityDefinition {
             modal: None,
             mode_abilities: Vec::new(),
             repeat_for: None,
+            repeat_timing: RepeatForTiming::Sequential,
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
@@ -38937,6 +38858,7 @@ impl AbilityDefinition {
             sibling_condition: SiblingCondition::Dependent,
             instruction_join: InstructionJoin::Own,
             unlowered_guard: None,
+            linked_exile_return: None,
             face_down_in_exile: ExileConcealment::Public,
             granting_object: None,
             grant_chain: Vec::new(),
@@ -39851,6 +39773,23 @@ pub enum AbilityCondition {
     /// condition resolves against the ability's controller — the canonical
     /// fallback semantics for the `ScopedPlayer`/`Controller` split.
     ScopedPlayerMatches { filter: PlayerFilter },
+    /// CR 508.6 + CR 608.2c: True when the `attacker` player declared one or
+    /// more creatures attacking the `defender` player this turn. First
+    /// `PlayerScope`-parameterized `AbilityCondition`: both endpoints resolve
+    /// via `quantity::resolve_single_player_scope` (`Target` = first
+    /// `TargetRef::Player` in `ability.targets` — the stamped chosen player
+    /// for Faramir's delayed body). Faramir, Prince of Ithilien reads
+    /// `Not { PlayerAttackedPlayer { attacker: Target, defender: Controller } }`
+    /// ("if they didn't attack you that turn"). An unresolvable scope
+    /// (including duration-timing-only `AnyTurn`/`SpecificPlayer`, which must
+    /// never reach the scope resolver's `unreachable!()`) fails closed to
+    /// `false`; card-level `Not` composes above it. Reads the UNCOLLAPSED
+    /// `attacked_players_directly_this_turn` ledger (Faramir ruling
+    /// 2023-06-16: a planeswalker/battle attack is not attacking you).
+    PlayerAttackedPlayer {
+        attacker: PlayerScope,
+        defender: PlayerScope,
+    },
 }
 
 impl AbilityCondition {
@@ -39924,7 +39863,8 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
-            | AbilityCondition::ScopedPlayerMatches { .. } => false,
+            | AbilityCondition::ScopedPlayerMatches { .. }
+            | AbilityCondition::PlayerAttackedPlayer { .. } => false,
         }
     }
 
@@ -40025,7 +39965,8 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIsNeither
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
-            | AbilityCondition::SourceLacksKeyword { .. } => false,
+            | AbilityCondition::SourceLacksKeyword { .. }
+            | AbilityCondition::PlayerAttackedPlayer { .. } => false,
         }
     }
 
@@ -40172,6 +40113,7 @@ impl AbilityCondition {
             | AbilityCondition::Not { .. }
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
+            | AbilityCondition::PlayerAttackedPlayer { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
             | AbilityCondition::ScopedPlayerMatches { .. } => false,
         }
@@ -40254,6 +40196,9 @@ impl AbilityCondition {
             | AbilityCondition::Not { .. }
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
+            // Not a zone-change head: an attack-ledger predicate, never the
+            // reflexive's trigger event.
+            | AbilityCondition::PlayerAttackedPlayer { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
             | AbilityCondition::ChosenLabelIs { .. }
             | AbilityCondition::ScopedPlayerMatches { .. } => None,
@@ -40414,7 +40359,8 @@ impl AbilityCondition {
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
-            | AbilityCondition::ScopedPlayerMatches { .. } => false,
+            | AbilityCondition::ScopedPlayerMatches { .. }
+            | AbilityCondition::PlayerAttackedPlayer { .. } => false,
         }
     }
 
@@ -40488,7 +40434,10 @@ impl AbilityCondition {
             | AbilityCondition::AbilityUseCountThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
             | AbilityCondition::ChosenLabelIs { .. }
-            | AbilityCondition::ScopedPlayerMatches { .. } => false,
+            | AbilityCondition::ScopedPlayerMatches { .. }
+            // Merge seam (upstream/main): combat-history condition, never a
+            // spell-casting condition.
+            | AbilityCondition::PlayerAttackedPlayer { .. } => false,
         }
     }
 
@@ -41225,13 +41174,15 @@ pub enum TriggerCondition {
     ChosenLabelIs { label: String },
 
     /// CR 506.2 + CR 508.1 + CR 508.1b + CR 603.4: Intervening-if comparison
-    /// over the current attack declaration. Handles "attacks with N or more
+    /// over the current attack declaration or the current combat’s declaration
+    /// history. Handles "attacks with N or more
     /// creatures", "none of those creatures attacked you", and attack-target
     /// count gates such as "two or more of those creatures are attacking you
     /// and/or planeswalkers you control."
     ///
     /// The `subject` axis selects what is counted (attackers by controller, or
-    /// attacks by their announced target); the `Controller` subject also carries
+    /// attacks by their announced target, or declarations in this combat); the
+    /// `Controller` subject also carries
     /// the optional condition-level type filter (CR 508.1) so "you attack with
     /// two or more Dinosaurs" counts only Dinosaur attackers. `comparator` and
     /// `count` express the threshold (`GE 2` for "two or more", `EQ 0` for
@@ -41773,13 +41724,14 @@ pub enum ReplacementCondition {
     Unrecognized { text: String },
 }
 
-/// The historical wire shape of `NthSpellThisTurn` represented an exact ordinal.
+/// The historical wire shape of `NthSpellThisTurn` (and `NthDrawThisTurn`) represented an
+/// exact ordinal.
 /// Keep that meaning when a persisted export has no comparator field.
-fn default_nth_spell_comparator() -> Comparator {
+fn default_exact_ordinal_comparator() -> Comparator {
     Comparator::EQ
 }
 
-fn is_default_nth_spell_comparator(comparator: &Comparator) -> bool {
+fn is_default_exact_ordinal_comparator(comparator: &Comparator) -> bool {
     *comparator == Comparator::EQ
 }
 
@@ -41826,16 +41778,24 @@ pub enum TriggerConstraint {
     NthSpellThisTurn {
         n: u32,
         #[serde(
-            default = "default_nth_spell_comparator",
-            skip_serializing_if = "is_default_nth_spell_comparator"
+            default = "default_exact_ordinal_comparator",
+            skip_serializing_if = "is_default_exact_ordinal_comparator"
         )]
         comparator: Comparator,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
     },
-    /// "Whenever you draw your Nth card each turn" — fires exactly when the
-    /// triggering draw event's per-turn ordinal equals `n`.
-    NthDrawThisTurn { n: u32 },
+    /// "Whenever you draw your Nth card each turn" — the triggering draw event's
+    /// per-turn ordinal satisfies `comparator` against `n`. `EQ` preserves exact
+    /// ordinals; `LE` covers a contiguous prefix such as "your first or second card."
+    NthDrawThisTurn {
+        n: u32,
+        #[serde(
+            default = "default_exact_ordinal_comparator",
+            skip_serializing_if = "is_default_exact_ordinal_comparator"
+        )]
+        comparator: Comparator,
+    },
     /// "At the beginning of each opponent's [phase]"
     OnlyDuringOpponentsTurn,
     /// CR 505.1: Trigger fires only during the controller's main phase
@@ -43216,6 +43176,20 @@ impl TriggerDefinition {
         self
     }
 
+    /// CR 615.13 (Matt M5): whether this `DamagePreventedOnce` def carries
+    /// qualifiers the engine cannot honor. `GameEvent::DamagePrevented`
+    /// carries no combat flag and its `source_id` names the aggregate
+    /// shield host (or the floating-shield sentinel), never the actual
+    /// damage source — so a kind qualifier or a source filter has no true
+    /// reading. Shared single authority: the runtime matcher refuses to
+    /// fire such defs and all three coverage authorities refuse to admit
+    /// them as supported. Every other mode answers false (their matchers
+    /// honor these fields on events that carry the provenance).
+    pub fn unsupported_damage_prevention_qualifiers(&self) -> bool {
+        self.mode == TriggerMode::DamagePreventedOnce
+            && (!matches!(self.damage_kind, DamageKindFilter::Any) || self.valid_source.is_some())
+    }
+
     /// CR 601.2a + CR 603.2: set the cast-origin constraint for SpellCast
     /// triggers ("from your graveyard", "from anywhere other than their hand").
     pub fn spell_cast_origin(mut self, constraint: OriginConstraint) -> Self {
@@ -43352,7 +43326,10 @@ pub struct StaticDefinition {
     /// unconditional, bare-`SelfRef` `CantAttack` / `CantAttackOrBlock` with an
     /// eligible controller-relative defended scope. `AddStaticMode` separately
     /// sets it for controller-relative `MustBeBlocked*` filters and
-    /// `MustAttackAwayFromSource`. Other granted statics, including quoted
+    /// `MustAttackAwayFromSource`. `AddStaticMode` also copies an
+    /// installer-bound transient's `bound_actor` here, so an actor-scoped
+    /// prohibition graft (Call for Aid) carries its exact bound player while
+    /// object-wide grafts stay `None`. Other granted statics, including quoted
     /// statics with a nontrivial scope or condition, retain the carrier
     /// controller fallback when this is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -43417,6 +43394,16 @@ pub struct StaticDefinition {
     /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granting_object: Option<ObjectIncarnationRef>,
+    /// CR 109.5 + CR 701.21a: the SUBJECT this prohibition binds, in
+    /// controller-role vocabulary. `Some(You)` marks an installer-bound
+    /// player prohibition ("you can't sacrifice those creatures" — Call for
+    /// Aid): install resolves the role to the resolving caster and the bar
+    /// follows only that player. `None` marks an object characteristic
+    /// (printed "~ can't be sacrificed", granted "it gains 'this permanent
+    /// can't be sacrificed'" — Stilt-Man): the bar binds the object for every
+    /// actor. Serde-defaulted: historical defs are all object-wide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_actor: Option<ControllerRef>,
 }
 
 /// CR 702.16n / CR 702.16p: Which attachments a protection-granting continuous
@@ -43603,6 +43590,7 @@ impl StaticDefinition {
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         }
     }
 
@@ -43706,6 +43694,14 @@ impl StaticDefinition {
 
     pub fn description(mut self, desc: String) -> Self {
         self.description = Some(desc);
+        self
+    }
+
+    /// CR 109.5: Bind this prohibition's subject in controller-role vocabulary
+    /// (see the `bound_actor` field doc). The sole producer is the "you can't
+    /// sacrifice those creatures" lowering with `ControllerRef::You`.
+    pub fn bound_actor(mut self, actor: ControllerRef) -> Self {
+        self.bound_actor = Some(actor);
         self
     }
 }
@@ -45475,6 +45471,21 @@ pub enum ContinuousModification {
     /// CR 613.2 (Layer 2): Change the controller of the affected object to the
     /// controller of the source permanent (e.g., Control Magic auras).
     ChangeController,
+    /// CR 613.1b (Layer 2) + CR 725.5: Change the controller of the affected
+    /// object to the current holder of a game designation (e.g., Fealty to
+    /// the Realm — "The monarch controls enchanted creature"). Unlike
+    /// `ChangeController` (source-controller snapshot semantics via the
+    /// queued effect's controller field), the holder is re-derived LIVE
+    /// from game state at each layer evaluation, so a designation change
+    /// moves control with no other game action. CR 725.5: while the
+    /// designation is vacant the effect does nothing (never defaults).
+    /// Controller-source axis note: `ChangeController` (source) vs this
+    /// member (designation) differ ONLY in where the new controller comes
+    /// from — a THIRD source must parameterize both into one
+    /// controller-source axis rather than adding a third sibling.
+    ChangeControllerToDesignation {
+        designation: Designation,
+    },
     /// CR 305.7: Sets a land's subtype to a basic land type, replacing old land
     /// subtypes and their associated mana abilities.
     SetBasicLandType {
@@ -50149,6 +50160,7 @@ mod tests {
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         };
         let json = serde_json::to_string(&static_def).unwrap();
         let deserialized: StaticDefinition = serde_json::from_str(&json).unwrap();
@@ -50285,6 +50297,47 @@ mod tests {
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: AbilityDefinition = serde_json::from_str(&json).unwrap();
         assert_eq!(ability, deserialized);
+    }
+
+    /// The repeat timing is omitted at its default,
+    /// round-trips when `SimultaneousInstances`, and legacy JSON without the
+    /// key reads `Sequential`.
+    #[test]
+    fn repeat_timing_serde_default_roundtrip_and_legacy() {
+        let base = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+
+        // (a) Sequential is the default and writes no key.
+        let sequential_json = serde_json::to_value(&base).unwrap();
+        assert!(sequential_json.get("repeat_timing").is_none());
+
+        // (b) SimultaneousInstances writes its key and round-trips equal.
+        let mut simultaneous = base.clone();
+        simultaneous.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
+        simultaneous.repeat_timing = RepeatForTiming::SimultaneousInstances;
+        let json = serde_json::to_value(&simultaneous).unwrap();
+        assert_eq!(
+            json.get("repeat_timing"),
+            Some(&serde_json::json!("SimultaneousInstances"))
+        );
+        let round_trip: AbilityDefinition = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip, simultaneous);
+        assert_eq!(
+            round_trip.repeat_timing,
+            RepeatForTiming::SimultaneousInstances
+        );
+
+        // (c) Legacy JSON lacking the key reads Sequential.
+        let mut legacy = serde_json::to_value(&simultaneous).unwrap();
+        legacy.as_object_mut().unwrap().remove("repeat_timing");
+        let legacy: AbilityDefinition = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.repeat_timing, RepeatForTiming::Sequential);
+        assert_eq!(legacy.repeat_for, Some(QuantityExpr::Fixed { value: 2 }));
     }
 
     #[test]
@@ -50683,6 +50736,7 @@ mod tests {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,
@@ -53126,6 +53180,36 @@ mod player_target_slot_tests {
 mod monarch_subject_axis_tests {
     use super::*;
 
+    /// CR 120.2a / CR 120.2b: `SourceHasDealtDamage` gained a defaulted `kind`.
+    /// The former unit-shaped record must deserialize to `Any`, `Any` must
+    /// serialize without a `kind` key (existing card-data rows stay
+    /// byte-identical), and a qualified kind must round-trip.
+    #[test]
+    fn source_has_dealt_damage_kind_is_defaulted_and_elided_for_any() {
+        let any: StaticCondition =
+            serde_json::from_str(r#"{"type":"SourceHasDealtDamage"}"#).unwrap();
+        assert_eq!(
+            any,
+            StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::Any
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&any).unwrap(),
+            r#"{"type":"SourceHasDealtDamage"}"#
+        );
+        for kind in [
+            DamageKindFilter::CombatOnly,
+            DamageKindFilter::NoncombatOnly,
+        ] {
+            let cond = StaticCondition::SourceHasDealtDamage { kind };
+            let json = serde_json::to_string(&cond).unwrap();
+            assert!(json.contains("\"kind\""), "{json}");
+            let back: StaticCondition = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, cond);
+        }
+    }
+
     /// CR 725.1 + CR 109.5: every pre-existing `{"type":"IsMonarch"}` row in
     /// `card-data.json` and in the committed integration-card fixture must keep
     /// deserializing to the controller subject, and must re-serialize
@@ -53514,6 +53598,125 @@ mod static_condition_traversal_tests {
         assert!(!recipient.has_unanswerable_designation_anchor(|_, scope| {
             StaticMode::CantUntap.binds_designation_scope(scope)
         }));
+    }
+
+    /// CR 109.4: a `PlayerAttackedPlayer` leaf naming a resolution-scoped
+    /// `ChosenPlayer` on either endpoint is unanswerable in the layer
+    /// pipeline — at full nesting depth, like the designation view above.
+    /// CR 109.4 + CR 115.1 (Matt R7-F2): the target-relative endpoints
+    /// (`TargetPlayer`/`TargetOpponent`) are unanswerable too — layer
+    /// evaluation passes no resolving ability, so they read no declared
+    /// target. Pre-fix the target-relative rows are admitted.
+    /// (Matt R9-LOW): the group-tagged `DeclaredPlayer` endpoint reads live
+    /// targeting state, so it is refused on both endpoints as well — no
+    /// parser emits it today, but a hand-built leaf would be admitted.
+    #[test]
+    fn static_condition_unanswerable_attack_endpoint_view_recurses_to_full_depth() {
+        use crate::types::ability::{ChosenGroupId, ControllerRef};
+        for leaf in [
+            StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::ChosenPlayer { index: 0 },
+                defender: ControllerRef::You,
+            },
+            StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::You,
+                defender: ControllerRef::ChosenPlayer { index: 1 },
+            },
+            StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::TargetPlayer,
+                defender: ControllerRef::You,
+            },
+            StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::You,
+                defender: ControllerRef::TargetOpponent,
+            },
+            StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::TargetOpponent,
+                defender: ControllerRef::TargetPlayer,
+            },
+            StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::DeclaredPlayer {
+                    group: ChosenGroupId::declared_player(0),
+                },
+                defender: ControllerRef::You,
+            },
+            StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::You,
+                defender: ControllerRef::DeclaredPlayer {
+                    group: ChosenGroupId::declared_player(1),
+                },
+            },
+        ] {
+            assert!(
+                nested_at_depth(leaf).has_unanswerable_attack_endpoint(),
+                "an unanswerable attack endpoint nested under And(Or(Not(..))) must be found"
+            );
+        }
+        // `ActivePlayer` reads live game state with no ability context, so it
+        // is genuinely layer-resolvable — unlike the target-relative
+        // placeholder this pin used before R7-F2.
+        let bindable = nested_at_depth(StaticCondition::PlayerAttackedPlayer {
+            attacker: ControllerRef::ActivePlayer,
+            defender: ControllerRef::You,
+        });
+        assert!(
+            !bindable.has_unanswerable_attack_endpoint(),
+            "layer-resolvable endpoints bind fine at any depth and must NOT be rejected"
+        );
+    }
+
+    /// CR 109.4 (Matt R2-F4): the canonical admission predicate refuses a
+    /// `PlayerAttackedPlayer` naming a resolution-scoped `ChosenPlayer` —
+    /// bare or nested under `Not` — because the layer pipeline has no
+    /// resolving ability to answer it (the runtime entry gate refuses the
+    /// whole tree). CR 109.4 + CR 115.1 (Matt R7-F2): the same refusal
+    /// covers the target-relative endpoints (`TargetPlayer`/`TargetOpponent`),
+    /// bare or nested. (Matt R9-LOW): the group-tagged `DeclaredPlayer`
+    /// endpoint is refused too — it reads live targeting state with no
+    /// producer for this leaf. The same gate with bindable endpoints stays
+    /// admissible. Pre-fix the target-relative shapes are admitted.
+    #[test]
+    fn static_condition_unanswerable_attack_gate_is_unenforceable() {
+        use crate::types::ability::{ChosenGroupId, ControllerRef};
+        use crate::types::statics::StaticMode;
+        let mode = StaticMode::Continuous;
+        for attacker in [
+            ControllerRef::ChosenPlayer { index: 0 },
+            ControllerRef::TargetPlayer,
+            ControllerRef::TargetOpponent,
+            ControllerRef::DeclaredPlayer {
+                group: ChosenGroupId::declared_player(0),
+            },
+        ] {
+            for gate in [
+                StaticCondition::PlayerAttackedPlayer {
+                    attacker: attacker.clone(),
+                    defender: ControllerRef::You,
+                },
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                        attacker: attacker.clone(),
+                        defender: ControllerRef::You,
+                    }),
+                },
+            ] {
+                assert!(
+                    gate.is_unenforceable_on(&mode),
+                    "an unanswerable attack gate (bare or nested under Not) must be \
+                     unenforceable, got admissible: {gate:?}"
+                );
+            }
+        }
+        let bindable = StaticCondition::Not {
+            condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                attacker: ControllerRef::ActivePlayer,
+                defender: ControllerRef::You,
+            }),
+        };
+        assert!(
+            !bindable.is_unenforceable_on(&mode),
+            "bindable attack endpoints must stay admissible: {bindable:?}"
+        );
     }
 
     /// CR 118.12a / CR 601.2f: leaves whose truth is decided by an

@@ -8,7 +8,7 @@ use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::StackEntryKind;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -631,15 +631,16 @@ fn undying_return_of_a_merged_permanent_keeps_the_base_population() {
 // Full Oracle verified against https://api.scryfall.com/cards/named?exact=Tel-Jilad%20Stylus
 const TEL_JILAD_STYLUS: &str = "{T}: Put target permanent you own on the bottom of your library.";
 
-/// CR 730.3 + CR 401.4: Tel-Jilad Stylus is an ordinary placement, not a
-/// terminal shuffle. Each physical card of a live merged permanent (CR 730.3)
-/// inherits the approved destination and position, so both go to the bottom of
-/// the library and nothing shuffles. No owner arrangement (CR 730.3a) is
-/// offered; the relative order of the two cards is not asserted. At `main`
-/// each card took the zone-default delivery and shuffled the library once
-/// (the known gap tracked in #10759).
+/// CR 730.3a + CR 401.4: Tel-Jilad Stylus is an ordinary placement, not a
+/// terminal shuffle. With the staged component batches of #10637 a live merged
+/// permanent's cards are put on the bottom of their owner's library together,
+/// and their owner arranges them: the cards land below the existing library in
+/// the submitted order and no library is shuffled. Only the move component of
+/// a terminal shuffle skips that arrangement. Before #10637 each card took the
+/// zone-default delivery and shuffled the library once (the gap tracked in
+/// #10759); this test pinned that until the two changes met.
 #[test]
-fn stylus_on_a_live_merged_permanent_puts_every_component_on_the_bottom() {
+fn stylus_on_a_live_merged_permanent_lets_its_owner_arrange_the_cards_on_the_bottom() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Existing A", "Existing B"]);
@@ -655,18 +656,110 @@ fn stylus_on_a_live_merged_permanent_puts_every_component_on_the_bottom() {
         let mut events = vec![];
         merge_object_onto(state, component, host, MergeSide::Top, &mut events);
     }
-    assert_eq!(runner.state().players[P0.0 as usize].library.len(), 2);
+    let existing: Vec<_> = runner.state().players[P0.0 as usize]
+        .library
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(existing.len(), 2);
 
     let outcome = runner.activate(stylus, 0).target_object(host).resolve();
+    let WaitingFor::DigRestSplitChoice { player, cards, .. } = outcome.final_waiting_for().clone()
+    else {
+        panic!(
+            "the owner arranges the two cards: {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(player, P0);
+    let mut offered = cards.clone();
+    offered.sort_unstable();
+    let mut both = vec![host, component];
+    both.sort_unstable();
+    assert_eq!(offered, both);
+    let mut shuffles = outcome
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                }
+            )
+        })
+        .count();
+
+    // Submit the order that is not the offered one.
+    let submitted: Vec<_> = cards.iter().rev().copied().collect();
+    let result = runner
+        .act(GameAction::SelectCards {
+            cards: submitted.clone(),
+        })
+        .expect("the owner submits the arrangement");
+    shuffles += result
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                }
+            )
+        })
+        .count();
+    let state = runner.state();
+    let library: Vec<_> = state.players[P0.0 as usize]
+        .library
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(
+        library,
+        [existing, submitted].concat(),
+        "both cards are on the bottom in the submitted order"
+    );
+    assert_eq!(shuffles, 0, "an ordered placement shuffles nothing");
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
+}
+
+// Oracle text from the repo's card data export.
+const CHAOS_WARP: &str = "The owner of target permanent shuffles it into their library, then reveals the top card of their library. If it's a permanent card, they put it onto the battlefield.";
+
+/// CR 701.24a + CR 730.3: Chaos Warp on a live merged permanent is a terminal
+/// shuffle, so its cards' library position is transient: their owner is not
+/// asked to arrange them, the library is shuffled exactly once, and the reveal
+/// that follows completes.
+#[test]
+fn chaos_warp_on_a_live_merged_permanent_shuffles_once_without_an_arrangement() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Existing A", "Existing B", "Existing C"]);
+    let host = scenario.add_creature(P1, "Host Creature", 2, 2).id();
+    let component = scenario.add_creature(P1, "Migratory Greathorn", 3, 4).id();
+    let warp = scenario
+        .add_spell_to_hand_from_oracle(P0, "Chaos Warp", true, CHAOS_WARP)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.battlefield.retain(|&id| id != component);
+        let mut events = vec![];
+        merge_object_onto(state, component, host, MergeSide::Top, &mut events);
+    }
+
+    let outcome = runner.cast(warp).target_object(host).resolve();
 
     assert!(
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
-        "no arrangement prompt is offered: {:?}",
+        "a terminal shuffle offers no arrangement: {:?}",
         outcome.final_waiting_for()
     );
-    outcome.assert_zone(&[host, component], Zone::Library);
-    let state = outcome.state();
-    assert_eq!(state.players[P0.0 as usize].library.len(), 4);
     let shuffled_players: Vec<_> = outcome
         .events()
         .iter()
@@ -681,16 +774,30 @@ fn stylus_on_a_live_merged_permanent_puts_every_component_on_the_bottom() {
         .collect();
     assert_eq!(
         shuffled_players,
-        Vec::<engine::types::player::PlayerId>::new(),
-        "a positioned placement shuffles nothing"
+        vec![P1],
+        "the owner shuffles exactly once"
     );
-    let library = &state.players[P0.0 as usize].library;
-    let bottom: Vec<ObjectId> = library.iter().skip(2).copied().collect();
-    assert!(
-        bottom.contains(&host) && bottom.contains(&component),
-        "both cards are beneath the two that were already there: {library:?}"
+    let state = outcome.state();
+    for card in [host, component] {
+        // The reveal may put one permanent card straight back.
+        assert!(
+            matches!(state.objects[&card].zone, Zone::Library | Zone::Battlefield),
+            "{:?}",
+            state.objects[&card].zone
+        );
+        assert!(state.objects[&card].merged_components.is_empty());
+    }
+    assert_eq!(
+        state.players[P1.0 as usize].library.len()
+            + [host, component]
+                .iter()
+                .filter(|card| state.objects[*card].zone == Zone::Battlefield)
+                .count(),
+        5,
+        "both cards went through the library"
     );
     assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
 }
 
 // Oracle text from the repo's card data export.

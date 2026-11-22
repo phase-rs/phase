@@ -9,9 +9,20 @@ use super::card::CardFace;
 
 /// The census's semantic-defect categories, not parser or resolver diagnoses.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, strum::EnumIter,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    strum::EnumIter,
+    strum::IntoStaticStr,
 )]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum MisparseClass {
     DroppedQualifier,
     WrongPlayer,
@@ -29,6 +40,12 @@ pub enum MisparseClass {
 }
 
 impl MisparseClass {
+    /// The class's wire tag: the same snake_case name the census file and the
+    /// coverage export's `class` field use.
+    pub fn tag(self) -> &'static str {
+        self.into()
+    }
+
     /// Public coverage handler; no clause prose is included in runtime gaps.
     pub fn handler(self) -> &'static str {
         match self {
@@ -104,6 +121,10 @@ impl ConfirmedMisparses {
 
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    pub fn get(&self, key: &str) -> Option<&ConfirmedMisparse> {
+        self.faces.get(key)
     }
 
     pub fn class_of(&self, key: &str) -> Option<MisparseClass> {

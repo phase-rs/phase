@@ -13,12 +13,11 @@
 //! force the full export. [`shared_card_export_json`] still loads the full export
 //! for the few drift-guard tests that must inspect every card.
 
-use std::fs::File;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use engine::database::card_db::CardDatabase;
+use engine::database::integration_fixture;
 use engine::game::scenario::GameRunner;
 use engine::game::triggers::trigger_source_context_for_latch;
 use engine::types::actions::GameAction;
@@ -29,7 +28,6 @@ use engine::types::game_state::{
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::TargetRef;
-use flate2::read::GzDecoder;
 use serde_json::{Map, Value};
 
 /// Builds the exact object-and-resolution authority used by persisted named
@@ -79,19 +77,8 @@ fn export_path() -> PathBuf {
     }
 }
 
-/// Path to the curated integration-test fixture (a subset of the export).
-// TWIN-SYNC: keep this fixture path in lockstep with src/test_support.rs.
-fn fixture_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/integration_cards.json.gz")
-}
-
-fn load_fixture(path: &Path) -> CardDatabase {
-    let file = File::open(path).expect("fixture should open");
-    let reader = BufReader::new(file);
-    CardDatabase::from_compressed_export_cached(reader, |gz| {
-        std::io::read_to_string(GzDecoder::new(gz))
-    })
-    .expect("fixture should load")
+fn load_fixture() -> CardDatabase {
+    CardDatabase::from_integration_fixture_cached().expect("fixture should load")
 }
 
 /// Returns the shared, process-wide card database, loading it on first use.
@@ -103,9 +90,8 @@ fn load_fixture(path: &Path) -> CardDatabase {
 pub fn shared_card_db() -> Option<&'static CardDatabase> {
     static DB: OnceLock<Option<CardDatabase>> = OnceLock::new();
     DB.get_or_init(|| {
-        let fixture = fixture_path();
-        if std::env::var_os("FORGE_TEST_FULL_DB").is_none() && fixture.exists() {
-            return Some(load_fixture(&fixture));
+        if std::env::var_os("FORGE_TEST_FULL_DB").is_none() && integration_fixture::exists() {
+            return Some(load_fixture());
         }
         let path = export_path();
         if !path.exists() {
@@ -205,4 +191,44 @@ pub fn advance_until_stack_empty_and_collect_events(runner: &mut GameRunner) -> 
         events.extend(result.events);
     }
     events
+}
+
+/// CR 615.13: what one parked two-phase damage batch has prevented so far — its
+/// `ParkedDamageBatch::prevention_tally`, published once when the batch completes.
+pub struct ParkedBatchView {
+    pub tally: Vec<engine::types::game_state::PreventedDamageEntry>,
+}
+
+/// The parked damage batches on the resolution stack (each an
+/// `Effect::ResumeDamageBatch` carrier), bottom first.
+pub trait ParkedBatchViews {
+    fn parked_batch_views(&self) -> Vec<ParkedBatchView>;
+}
+
+impl ParkedBatchViews for engine::types::game_state::GameState {
+    fn parked_batch_views(&self) -> Vec<ParkedBatchView> {
+        self.resolution_stack
+            .iter()
+            .filter_map(|frame| match frame {
+                engine::types::resolution::ResolutionFrame::AbilityContinuation(frame)
+                    if matches!(
+                        frame.pending.chain.effect,
+                        engine::types::ability::Effect::ResumeDamageBatch { .. }
+                    ) =>
+                {
+                    Some(ParkedBatchView {
+                        tally: frame
+                            .pending
+                            .chain
+                            .context
+                            .parked_damage_batch
+                            .as_deref()
+                            .map(|parked| parked.prevention_tally.clone())
+                            .unwrap_or_default(),
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }

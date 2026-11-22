@@ -114,7 +114,10 @@ fn trigger_route(mode: &TriggerMode) -> Option<TriggerRoute> {
         TriggerMode::Adapt => silent(match_adapt),
         TriggerMode::Connives => silent(match_connives),
         TriggerMode::Foretell => silent(match_foretell),
-        TriggerMode::DamagePreventedOnce => silent(match_unimplemented),
+        // CR 615.13: standalone damage-prevention trigger. Kept in lockstep with
+        // the `r.insert` in `build_trigger_registry` — `damage_prevented_once_registry_and_match_arm_agree`
+        // is the guard.
+        TriggerMode::DamagePreventedOnce => silent(match_damage_prevented),
         TriggerMode::AttackersDeclared | TriggerMode::AttackersDeclaredOneTarget => {
             silent(match_attackers_declared)
         }
@@ -346,6 +349,12 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::DamageDoneOnceByController,
         match_damage_done_once_by_controller,
     );
+    // CR 615.13: standalone damage-prevention trigger. Graduated out of
+    // `unimplemented_modes` below — that array is the insert loop's INPUT, so the
+    // removal there MUST be paired with this insert or the mode leaves the
+    // registry entirely (which would flip `coverage.rs`'s `mode_supported` to
+    // false while runtime dispatch kept working off the match arm).
+    r.insert(TriggerMode::DamagePreventedOnce, match_damage_prevented);
     r.insert(TriggerMode::SpellCast, match_spell_cast);
     r.insert(TriggerMode::SpellCastOrCopy, match_spell_cast);
     r.insert(TriggerMode::Attacks, match_attacks);
@@ -520,12 +529,14 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         (
             TriggerCause::EntersBattlefield {
                 core_types: Vec::new(),
+                entrant: crate::types::statics::CausingObject::Any,
             },
             CausedAbilitySource::CausingObject,
         ),
         (
             TriggerCause::EntersBattlefield {
                 core_types: Vec::new(),
+                entrant: crate::types::statics::CausingObject::Any,
             },
             CausedAbilitySource::Any,
         ),
@@ -615,7 +626,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
 
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
-        TriggerMode::DamagePreventedOnce,
+        // TriggerMode::DamagePreventedOnce — moved to real matcher above
         TriggerMode::AbilityCast,
         TriggerMode::AbilityResolves,
         TriggerMode::SpellAbilityCast,
@@ -2111,15 +2122,16 @@ pub(super) fn match_damage_done_once_by_controller(
                 amount: *amount,
                 is_combat: *is_combat,
             };
-            if *is_combat
+            !(*is_combat
                 || !damage_kind_matches(trigger.damage_kind, *is_combat)
                 || !damage_amount_matches(trigger, *amount)
-                || !valid_damage_done_once_player_target(trigger, state, *player_id, source_context)
-                || !damage_done_once_source_matches(trigger, state, damage, source_context)
-            {
-                return false;
-            }
-            true
+                || !valid_damage_done_once_player_target(
+                    trigger,
+                    state,
+                    *player_id,
+                    source_context,
+                )
+                || !damage_done_once_source_matches(trigger, state, damage, source_context))
         }
         _ => false,
     }
@@ -2373,16 +2385,6 @@ pub(super) fn match_spell_cast(
     {
         return false;
     }
-    // CR 115.9c: Check "that targets only [X]" constraint against the spell's actual targets.
-    if let Some(targets_only_filter) = trigger
-        .valid_card
-        .as_ref()
-        .and_then(super::filter::extract_targets_only)
-    {
-        if !stack_entry_targets_only(state, *object_id, &targets_only_filter, source_context) {
-            return false;
-        }
-    }
     // CR 115.9a / CR 115.9c: a single target, counted as the requirement says.
     if let Some(count) = trigger
         .valid_card
@@ -2501,7 +2503,15 @@ pub(super) fn match_ability_triggered(
     let mut subjects = causes
         .iter()
         .filter(|cause_event| {
-            super::triggers::trigger_cause_matches(state, cause, Some(cause_event), controller)
+            // The observer stands in for the doubler as the cause predicate's
+            // own object ("another permanent entering" excludes it).
+            super::triggers::trigger_cause_matches(
+                state,
+                cause,
+                Some(cause_event),
+                controller,
+                source_event_subject_id(source_context),
+            )
         })
         .flat_map(|cause_event| cause_subjects(cause, cause_event))
         .filter(|subject| valid_card_matches_with_lki(trigger, state, *subject, source_context));
@@ -2537,9 +2547,11 @@ fn cause_subjects(cause: &TriggerCause, event: &GameEvent) -> Vec<ObjectId> {
         },
         TriggerCause::Any
         | TriggerCause::CreatureDying
-        | TriggerCause::ControlledCreatureDealtDamage
+        | TriggerCause::ControlledCreature { .. }
         | TriggerCause::ControllerCastOrCopiedSpell { .. }
         | TriggerCause::RoomEntered
+        | TriggerCause::PlayerAction { .. }
+        | TriggerCause::TurnedFaceUp
         | TriggerCause::BattlefieldTransition { .. } => Vec::new(),
     }
 }
@@ -5427,6 +5439,90 @@ pub(super) fn damage_received_filters_match(
     }
 }
 
+/// CR 615.13: "Some triggered abilities trigger when damage that would be dealt
+/// is prevented. Such an ability triggers each time a prevention effect is
+/// applied to one or more simultaneous damage events and prevents some or all of
+/// that damage."
+///
+/// CR 603.2c: "An ability triggers only once each time its trigger event
+/// occurs." The "once" in `DamagePreventedOnce` is therefore a property of the
+/// EVENT STREAM, not of this predicate: every simultaneous batch emits ONE
+/// aggregate `DamagePrevented` per shield per simultaneous batch — combat or
+/// noncombat (`EachSourceDealsDamage`) — via
+/// `combat_damage.rs::fire_batch_prevention_riders`; only genuinely
+/// sequential damage emits one per event. This matcher MUST stay a pure
+/// per-event predicate — adding dedup or a once-per-turn latch here would
+/// double-count the abstraction and break the CR 510.4 first-strike case, where
+/// two combat damage steps are two separate applications and must produce two
+/// triggers.
+///
+/// CR 120.3: recipient scoping mirrors `damage_received_filters_match` — a
+/// player-scoped trigger ("dealt to you") must not fire when the source object
+/// is the recipient, and vice versa.
+///
+/// `trigger.damage_kind` and `trigger.valid_source` are consulted only as a
+/// refusal: `GameEvent::DamagePrevented` carries no `is_combat` flag and its
+/// `source_id` names the shield host, so a kind qualifier or source filter
+/// cannot be honored on this event and the def stays silent. The parser
+/// refuses those phrasings rather than accepting the text and dropping the
+/// qualifier; this matcher extends the same honesty to typed defs.
+pub(super) fn match_damage_prevented(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_context: &TriggerSourceContext,
+    state: &GameState,
+) -> bool {
+    let GameEvent::DamagePrevented {
+        source_id: damage_source_id,
+        target,
+        amount,
+    } = event
+    else {
+        return false;
+    };
+    // CR 615.13: "... and prevents some or all of that damage" — a zero-prevention
+    // application is not a trigger event.
+    if *amount == 0 {
+        return false;
+    }
+    // CR 615.13 (Matt M5): qualifier-bearing defs never fire — the event
+    // carries no combat flag and names the shield host, not the damage
+    // source, so neither qualifier has a true reading. Shared authority
+    // with the three coverage gates (see `TriggerDefinition::
+    // unsupported_damage_prevention_qualifiers`).
+    if trigger.unsupported_damage_prevention_qualifiers() {
+        return false;
+    }
+    let source_id = source_event_subject_id(source_context);
+    match target {
+        TargetRef::Object(target_id) => {
+            // CR 120.3: player-scoped triggers ("damage dealt to you is prevented")
+            // must not fire when an object is the recipient.
+            if trigger.valid_card.is_none() && trigger.valid_target.is_some() {
+                return false;
+            }
+            let recipient_matches = match &trigger.valid_card {
+                None | Some(TargetFilter::SelfRef) => *target_id == source_id,
+                // Degraded parser fallback — never widen to "any object".
+                Some(TargetFilter::Any) => *target_id == source_id,
+                Some(filter) => {
+                    target_filter_matches_object(state, *target_id, filter, source_context)
+                }
+            };
+            recipient_matches
+                && valid_source_matches(trigger, state, *damage_source_id, source_context)
+        }
+        TargetRef::Player(pid) => {
+            // CR 120.3: object-scoped triggers must not fire on player damage.
+            if trigger.valid_card.is_some() {
+                return false;
+            }
+            valid_player_matches(trigger, state, *pid, source_context)
+                && valid_source_matches(trigger, state, *damage_source_id, source_context)
+        }
+    }
+}
+
 /// CR 120.10: ExcessDamage — fires when the trigger source deals excess damage to a permanent.
 ///
 /// Intentionally ignores `trigger.damage_amount`: that field gates on the raw
@@ -6684,40 +6780,6 @@ fn valid_player_is_controller(
     source_context.source_read(state).controller() == player_id
 }
 
-/// CR 115.9c: Check that a stack entry's targets ALL match the given filter.
-/// A spell with no targets does not satisfy "targets only X" (it doesn't target at all).
-fn stack_entry_targets_only(
-    state: &GameState,
-    stack_object_id: ObjectId,
-    constraint: &TargetFilter,
-    source_context: &TriggerSourceContext,
-) -> bool {
-    let entry = state.stack.iter().find(|e| e.id == stack_object_id);
-    let Some(entry) = entry else {
-        return false;
-    };
-    let Some(ability) = entry.ability() else {
-        return false;
-    };
-    let targets = super::ability_utils::declared_targets_in_chain(ability);
-    // A spell with no targets doesn't "target only X" — it doesn't target at all.
-    if targets.is_empty() {
-        return false;
-    }
-    let source_controller = Some(source_context.source_read(state).controller());
-    let ctx = super::filter::FilterContext::from_trigger_source(source_context);
-    targets.iter().all(|t| match t {
-        TargetRef::Object(id) => super::filter::matches_target_filter(state, *id, constraint, &ctx),
-        TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
-            state,
-            constraint,
-            *pid,
-            source_controller,
-            Some(ctx.source_id),
-        ),
-    })
-}
-
 /// CR 115.9b: Check that a stack entry has at least one target matching the filter.
 /// A spell with no targets does not satisfy "that targets X" (it doesn't target at all).
 fn stack_entry_targets_any(
@@ -6948,6 +7010,333 @@ mod tests {
         }
     }
 
+    /// CR 615.13: `DamagePreventedOnce` must resolve to the SAME real matcher
+    /// from BOTH authorities — the `LazyLock` HashMap (`build_trigger_registry`)
+    /// and the direct `trigger_matcher` match arm.
+    ///
+    /// This is mode-specific rather than a general sweep on purpose: the two
+    /// authorities already diverge on ~19 pre-existing modes (the registry inserts
+    /// `match_unimplemented` for them while the match arm folds them into
+    /// `match_visit_attraction`), so a general `fn_addr_eq` sweep would fail on
+    /// drift this change did not create. Generalizing it is deferred follow-up
+    /// work that must first adjudicate those 19.
+    ///
+    /// Why the generic `trigger_matcher_covers_registry_entries` does NOT cover
+    /// this: that test iterates `registry.keys()`, so a mode DROPPED from the
+    /// registry is never visited and its assertion never runs. The registry entry
+    /// for this mode used to come from the `unimplemented_modes` INSERT LOOP, so
+    /// removing the array entry without adding a compensating `r.insert` would
+    /// silently delete the key. That would flip `coverage.rs`'s `mode_supported`
+    /// (which gates on registry membership) from true to false and make
+    /// `unimplemented_mechanics` report Selfless Squire's WORKING trigger as an
+    /// unimplemented mechanic, while runtime dispatch (which uses the match arm)
+    /// kept working — a silent coverage regression invisible to every runtime test.
+    #[test]
+    fn damage_prevented_once_registry_and_match_arm_agree() {
+        let registry = build_trigger_registry();
+
+        // Leg 1 — presence. Catches a bare array removal with no compensating insert.
+        let from_registry = *registry
+            .get(&TriggerMode::DamagePreventedOnce)
+            .expect("DamagePreventedOnce must be in the trigger registry");
+
+        // Leg 2 — agreement. Catches a one-sided re-stub of either authority.
+        let from_arm = trigger_matcher(TriggerMode::DamagePreventedOnce)
+            .expect("DamagePreventedOnce must have a direct matcher");
+        assert!(
+            std::ptr::fn_addr_eq(from_registry, from_arm),
+            "registry and match arm resolve DamagePreventedOnce to different matchers"
+        );
+
+        // Leg 3 — reach guard. Catches BOTH sides being re-stubbed in step, which
+        // legs 1 and 2 would both pass. The matcher obtained FROM THE REGISTRY must
+        // answer true on a positive prevention event.
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Selfless Squire".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+            .valid_target(TargetFilter::Controller);
+        let event = GameEvent::DamagePrevented {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 4,
+        };
+        assert!(
+            from_registry(
+                &event,
+                &trigger,
+                &test_trigger_source_context(&state, source),
+                &state,
+            ),
+            "registry-obtained matcher must fire on a positive prevention event"
+        );
+    }
+
+    /// CR 120.3: recipient scoping for prevention triggers — a player-scoped
+    /// trigger ("damage that would be dealt to you") fires only for its
+    /// controller, never for another player and never for an object.
+    ///
+    /// Multi-authority hostile fixture: a 3-player game gives three candidate
+    /// recipients, only one of which is correct. Revert-failing: dropping the
+    /// recipient half (leaving `valid_target` unset in the parser, or removing the
+    /// `valid_player_matches` call in the matcher) makes the wrong-player case fire.
+    #[test]
+    fn damage_prevented_recipient_scoping_rejects_other_players_and_objects() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Selfless Squire".to_string(),
+            Zone::Battlefield,
+        );
+        let bystander = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+            .valid_target(TargetFilter::Controller);
+        let ctx = test_trigger_source_context(&state, source);
+
+        // Paired positive reach-guard: prevention for the controller fires.
+        assert!(
+            match_damage_prevented(
+                &GameEvent::DamagePrevented {
+                    source_id: source,
+                    target: TargetRef::Player(PlayerId(0)),
+                    amount: 3,
+                },
+                &trigger,
+                &ctx,
+                &state,
+            ),
+            "prevention for the trigger's controller must fire"
+        );
+
+        // Negative 1: a different player's prevention must not fire.
+        for other in [PlayerId(1), PlayerId(2)] {
+            assert!(
+                !match_damage_prevented(
+                    &GameEvent::DamagePrevented {
+                        source_id: source,
+                        target: TargetRef::Player(other),
+                        amount: 3,
+                    },
+                    &trigger,
+                    &ctx,
+                    &state,
+                ),
+                "player-scoped prevention trigger must not fire for {other:?}"
+            );
+        }
+
+        // Negative 2: CR 120.3 — a player-scoped trigger must not fire when an
+        // OBJECT is the recipient, not even its own source object.
+        for object in [source, bystander] {
+            assert!(
+                !match_damage_prevented(
+                    &GameEvent::DamagePrevented {
+                        source_id: source,
+                        target: TargetRef::Object(object),
+                        amount: 3,
+                    },
+                    &trigger,
+                    &ctx,
+                    &state,
+                ),
+                "player-scoped prevention trigger must not fire on object damage"
+            );
+        }
+
+        // Cross-direction: an object-scoped trigger ("dealt to ~") is the mirror —
+        // it fires on its own object and not on the controller.
+        let self_trigger = TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+            .valid_card(TargetFilter::SelfRef);
+        assert!(
+            match_damage_prevented(
+                &GameEvent::DamagePrevented {
+                    source_id: source,
+                    target: TargetRef::Object(source),
+                    amount: 3,
+                },
+                &self_trigger,
+                &ctx,
+                &state,
+            ),
+            "object-scoped prevention trigger must fire on its own object"
+        );
+        assert!(
+            !match_damage_prevented(
+                &GameEvent::DamagePrevented {
+                    source_id: source,
+                    target: TargetRef::Player(PlayerId(0)),
+                    amount: 3,
+                },
+                &self_trigger,
+                &ctx,
+                &state,
+            ),
+            "object-scoped prevention trigger must not fire on player damage"
+        );
+        assert!(
+            !match_damage_prevented(
+                &GameEvent::DamagePrevented {
+                    source_id: source,
+                    target: TargetRef::Object(bystander),
+                    amount: 3,
+                },
+                &self_trigger,
+                &ctx,
+                &state,
+            ),
+            "self-scoped prevention trigger must not fire on another object"
+        );
+    }
+
+    /// CR 615.13 (Matt M5): qualifier-bearing `DamagePreventedOnce` defs never
+    /// fire — the event names the shield host (or sentinel), not the damage
+    /// source, and carries no combat flag, so neither a kind qualifier nor a
+    /// source filter can be honored. The source filter below deliberately
+    /// MATCHES the aggregate id: pre-fix this fires on shield-host identity.
+    #[test]
+    fn damage_prevented_qualified_forms_do_not_fire() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Selfless Squire".to_string(),
+            Zone::Battlefield,
+        );
+        let event = GameEvent::DamagePrevented {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+        };
+        let ctx = test_trigger_source_context(&state, source);
+
+        // Paired positive reach-guard: the unqualified Squire shape fires.
+        let plain = TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+            .valid_target(TargetFilter::Controller);
+        assert!(
+            match_damage_prevented(&event, &plain, &ctx, &state),
+            "unqualified prevention trigger must fire"
+        );
+
+        // Combat/noncombat kind qualifiers cannot be honored: no flag on the
+        // event. Both stay silent on the same prevention.
+        for kind in [
+            DamageKindFilter::CombatOnly,
+            DamageKindFilter::NoncombatOnly,
+        ] {
+            let qualified = TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+                .valid_target(TargetFilter::Controller)
+                .damage_kind(kind);
+            assert!(
+                !match_damage_prevented(&event, &qualified, &ctx, &state),
+                "kind-qualified prevention trigger must not fire: {kind:?}"
+            );
+        }
+
+        // Source-qualified form: the filter matches the aggregate shield-host
+        // id, so pre-fix this fires — on host identity, not the damage source.
+        let source_qualified = TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+            .valid_target(TargetFilter::Controller)
+            .valid_source(TargetFilter::SpecificObject { id: source });
+        assert!(
+            !match_damage_prevented(&event, &source_qualified, &ctx, &state),
+            "source-qualified prevention trigger must not fire on aggregate identity"
+        );
+    }
+
+    /// CR 615.13: "... and prevents some or all of that damage" — an application
+    /// that prevents nothing is not a trigger event.
+    ///
+    /// Revert-failing: deleting the `amount == 0` guard flips the negative.
+    #[test]
+    fn damage_prevented_zero_amount_does_not_trigger() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Selfless Squire".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+            .valid_target(TargetFilter::Controller);
+        let ctx = test_trigger_source_context(&state, source);
+
+        assert!(
+            !match_damage_prevented(
+                &GameEvent::DamagePrevented {
+                    source_id: source,
+                    target: TargetRef::Player(PlayerId(0)),
+                    amount: 0,
+                },
+                &trigger,
+                &ctx,
+                &state,
+            ),
+            "a zero-prevention application must not trigger"
+        );
+
+        // Paired positive reach-guard: the same fixture with a nonzero amount
+        // fires, proving the negative is not vacuous.
+        assert!(
+            match_damage_prevented(
+                &GameEvent::DamagePrevented {
+                    source_id: source,
+                    target: TargetRef::Player(PlayerId(0)),
+                    amount: 1,
+                },
+                &trigger,
+                &ctx,
+                &state,
+            ),
+            "the same fixture with amount=1 must fire"
+        );
+    }
+
+    /// The matcher rejects non-prevention events outright — it must not be a
+    /// catch-all that fires on ordinary damage (charter row 2's negative).
+    #[test]
+    fn damage_prevented_matcher_ignores_unprevented_damage() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Selfless Squire".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = TriggerDefinition::new(TriggerMode::DamagePreventedOnce)
+            .valid_target(TargetFilter::Controller);
+        let ctx = test_trigger_source_context(&state, source);
+
+        assert!(!match_damage_prevented(
+            &GameEvent::DamageDealt {
+                source_id: source,
+                target: TargetRef::Player(PlayerId(0)),
+                amount: 4,
+                is_combat: false,
+                excess: 0,
+                source_incarnation: None,
+            },
+            &trigger,
+            &ctx,
+            &state,
+        ));
+    }
+
     #[test]
     fn trigger_registry_includes_crank_contraption() {
         let registry = build_trigger_registry();
@@ -6990,11 +7379,17 @@ mod tests {
                 CausedAbilitySource::CausingObject,
             ),
             (
-                TriggerCause::EntersBattlefield { core_types: vec![] },
+                TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: crate::types::statics::CausingObject::Any,
+                },
                 CausedAbilitySource::CausingObject,
             ),
             (
-                TriggerCause::EntersBattlefield { core_types: vec![] },
+                TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: crate::types::statics::CausingObject::Any,
+                },
                 CausedAbilitySource::Any,
             ),
         ] {
@@ -17588,46 +17983,6 @@ mod tests {
             &test_trigger_source_context(&state, source_id),
             &state
         ));
-    }
-
-    // --- CR 115.9c: TargetsOnly helper tests ---
-
-    #[test]
-    fn extract_targets_only_from_typed_filter() {
-        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant).properties(vec![
-            FilterProp::TargetsOnly {
-                filter: Box::new(TargetFilter::SelfRef),
-            },
-        ]));
-        let result = crate::game::filter::extract_targets_only(&filter);
-        assert_eq!(result, Some(TargetFilter::SelfRef));
-    }
-
-    #[test]
-    fn extract_targets_only_from_or_filter() {
-        let filter = TargetFilter::Or {
-            filters: vec![
-                TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant).properties(vec![
-                    FilterProp::TargetsOnly {
-                        filter: Box::new(TargetFilter::SelfRef),
-                    },
-                ])),
-                TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery).properties(vec![
-                    FilterProp::TargetsOnly {
-                        filter: Box::new(TargetFilter::SelfRef),
-                    },
-                ])),
-            ],
-        };
-        let result = crate::game::filter::extract_targets_only(&filter);
-        assert_eq!(result, Some(TargetFilter::SelfRef));
-    }
-
-    #[test]
-    fn extract_targets_only_returns_none_when_absent() {
-        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
-        let result = crate::game::filter::extract_targets_only(&filter);
-        assert_eq!(result, None);
     }
 
     /// CR 608.2b + CR 608.2c: the player-axis leaves a delayed condition's

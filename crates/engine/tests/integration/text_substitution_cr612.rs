@@ -834,8 +834,8 @@ fn crystal_spray_prompts_both_domains_then_draws() {
         let (a, b) = o.split_once(" -> ").unwrap();
         a != b
     }));
-    assert!(options.contains(&"Black -> Blue".to_string()));
-    assert!(options.contains(&"Forest -> Island".to_string()));
+    assert!(options.iter().any(|i: &String| i == "Black -> Blue"));
+    assert!(options.iter().any(|i: &String| i == "Forest -> Island"));
 
     runner
         .act(GameAction::ChooseOption {
@@ -881,8 +881,8 @@ fn sleight_of_mind_offers_only_color_pairs_and_latches_nothing_for_a_bad_answer(
         panic!("expected a labeled prompt");
     };
     assert_eq!(options.len(), 20, "only the 20 color pairs");
-    assert!(!options.contains(&"Black -> Black".to_string()));
-    assert!(!options.contains(&"Forest -> Island".to_string()));
+    assert!(!options.iter().any(|i: &String| i == "Black -> Black"));
+    assert!(!options.iter().any(|i: &String| i == "Forest -> Island"));
     assert!(
         runner
             .act(GameAction::ChooseOption {

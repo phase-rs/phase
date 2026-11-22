@@ -1185,7 +1185,7 @@ pub(crate) fn preflight_tap_land_action(
     if !matches!(action, GameAction::TapLandForMana { .. }) {
         return Ok(());
     }
-    super::engine_payment_choices::refuse_mana_at_draw_only_payment(state)?;
+    super::engine_payment_choices::refuse_mana_where_none_is_asked(state)?;
     let waiting_player = match &state.waiting_for {
         WaitingFor::Priority { player }
         | WaitingFor::ManaPayment { player, .. }
@@ -1973,6 +1973,28 @@ pub(crate) fn mana_source_option_has_drawback(
                 count_leaf_components(cost, &|leaf| !matches!(leaf, AbilityCost::Tap)) > 0
             })
         })
+}
+
+/// CR 605.1b + CR 605.3b: True when some `TapsForMana` triggered mana ability on
+/// the battlefield does more on resolution than add mana. Such an ability
+/// resolves inline whenever a permanent it matches is tapped for mana, so then
+/// even a source without a [`mana_source_option_has_drawback`] drawback can
+/// change more than the mana pool when tapped.
+pub(crate) fn taps_for_mana_trigger_has_non_mana_effect(state: &GameState) -> bool {
+    taps_for_mana_trigger_sources(state).iter().any(|id| {
+        state.objects.get(id).is_some_and(|obj| {
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition())
+                .filter(|trigger| trigger.mode == TriggerMode::TapsForMana)
+                .any(|trigger| {
+                    trigger.execute.as_deref().is_some_and(|execute| {
+                        !matches!(*execute.effect, Effect::Mana { .. })
+                            || mana_ability_penalty(execute) != ManaSourcePenalty::None
+                    })
+                })
+        })
+    })
 }
 
 /// CR 119.3 (life) / CR 120.3 (damage → life loss): The benefit twin of

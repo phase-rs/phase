@@ -523,8 +523,8 @@ fn changeling_one_with_stars_does_not_regain_creature_types() {
     );
     for id in [changeling, sibling] {
         assert!(runner.state().objects[&id].has_keyword(&Keyword::Changeling));
-        assert!(subtypes(&runner, id).contains(&"Bear".to_string()));
-        assert!(subtypes(&runner, id).contains(&"Elf".to_string()));
+        assert!(subtypes(&runner, id).iter().any(|i| i == "Bear"));
+        assert!(subtypes(&runner, id).iter().any(|i| i == "Elf"));
     }
     add_mana(&mut runner, ManaType::Blue, 4);
     let outcome = runner.cast(aura).target_object(changeling).resolve();
@@ -546,7 +546,7 @@ fn changeling_one_with_stars_does_not_regain_creature_types() {
     assert_eq!(runner.state().objects[&sibling].controller, P1);
     assert!(has_core(&runner, sibling, CoreType::Creature));
     for ty in ["Bear", "Elf"] {
-        assert!(subtypes(&runner, sibling).contains(&ty.to_string()));
+        assert!(subtypes(&runner, sibling).iter().any(|i| i == ty));
     }
 
     let mut events = Vec::new();
@@ -555,7 +555,7 @@ fn changeling_one_with_stars_does_not_regain_creature_types() {
     assert!(has_core(&runner, changeling, CoreType::Creature));
     for id in [changeling, sibling] {
         for ty in ["Bear", "Elf"] {
-            assert!(subtypes(&runner, id).contains(&ty.to_string()));
+            assert!(subtypes(&runner, id).iter().any(|i| i == ty));
         }
     }
 }

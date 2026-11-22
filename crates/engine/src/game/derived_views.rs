@@ -3400,7 +3400,7 @@ fn combat_damage_label(sub_step: CombatDamageSubStep) -> String {
 
 fn stack_entry_targets(state: &GameState, entry: &StackEntry) -> Vec<StackTargetDisplay> {
     let targets = match &entry.kind {
-        StackEntryKind::KeywordAction { action } => keyword_action_targets(action),
+        StackEntryKind::KeywordAction { action } => action.targets(),
         _ => effective_stack_ability(state, entry)
             .ability
             .map(|ability| {
@@ -3421,17 +3421,6 @@ fn stack_entry_targets(state: &GameState, entry: &StackEntry) -> Vec<StackTarget
             target,
         })
         .collect()
-}
-
-fn keyword_action_targets(action: &KeywordAction) -> Vec<TargetRef> {
-    match action {
-        KeywordAction::Equip {
-            target_creature_id, ..
-        } => vec![TargetRef::Object(*target_creature_id)],
-        KeywordAction::Crew { .. }
-        | KeywordAction::Saddle { .. }
-        | KeywordAction::Station { .. } => Vec::new(),
-    }
 }
 
 fn target_label(state: &GameState, target: &TargetRef) -> String {
@@ -8248,6 +8237,7 @@ mod tests {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }]
             .into();
         }

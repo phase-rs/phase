@@ -405,6 +405,7 @@ mod tests {
             selected_mode_labels: Vec::new(),
             modal_instruction_ordinal: None,
             repeat_for: None,
+            repeat_timing: crate::types::ability::RepeatForTiming::Sequential,
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,

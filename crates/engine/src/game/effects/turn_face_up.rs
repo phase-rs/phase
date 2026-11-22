@@ -312,7 +312,7 @@ mod tests {
             "the granted TurnFaceUp {{ SelfRef }} ability must flip the source face up"
         );
         assert_eq!(obj.name, "Hidden Assassin", "real face restored");
-        assert!(obj.card_types.subtypes.contains(&"Assassin".to_string()));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Assassin"));
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::TurnedFaceUp { object_id } if *object_id == id)));

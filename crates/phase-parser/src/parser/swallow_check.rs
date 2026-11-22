@@ -14676,7 +14676,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             .find(|t| {
                 matches!(
                     t.constraint,
-                    Some(crate::types::ability::TriggerConstraint::NthDrawThisTurn { n: 2 })
+                    Some(crate::types::ability::TriggerConstraint::NthDrawThisTurn { n: 2, .. })
                 )
             })
             .and_then(|t| t.execute.as_deref())

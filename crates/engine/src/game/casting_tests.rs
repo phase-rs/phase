@@ -5358,6 +5358,7 @@ fn granted_freerunning_static_surfaces_freerunning_variant() {
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         };
         obj.static_definitions = vec![def].into();
     }
@@ -14633,6 +14634,7 @@ fn x_cost_max_accounts_for_granted_affinity_exceeding_fixed_generic() {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }]
             .into();
         }
@@ -17484,6 +17486,7 @@ fn witherbloom_grants_affinity_to_instant_and_sorcery_spells() {
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         };
         obj.static_definitions = vec![def].into();
     }
@@ -17604,6 +17607,7 @@ fn add_witherbloom_affinity_source(state: &mut GameState, player: PlayerId) -> O
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         }]
         .into();
     }
@@ -21553,11 +21557,11 @@ fn graveyard_cast_this_way_enters_with_type_grant_rider() {
     crate::game::layers::evaluate_layers(&mut state);
     let subtypes = &state.objects[&creature].card_types.subtypes;
     assert!(
-        subtypes.contains(&"Vampire".to_string()),
+        subtypes.iter().any(|i| i == "Vampire"),
         "the entered creature must be a Vampire (type grant); got {subtypes:?}"
     );
     assert!(
-        subtypes.contains(&"Zombie".to_string()),
+        subtypes.iter().any(|i| i == "Zombie"),
         "the printed Zombie subtype must be retained (CR 205.1b additive); got {subtypes:?}"
     );
 }
@@ -21633,11 +21637,11 @@ fn graveyard_cast_without_type_rider_is_not_a_vampire() {
     crate::game::layers::evaluate_layers(&mut state);
     let subtypes = &state.objects[&creature].card_types.subtypes;
     assert!(
-        subtypes.contains(&"Zombie".to_string()),
+        subtypes.iter().any(|i| i == "Zombie"),
         "printed Zombie subtype retained; got {subtypes:?}"
     );
     assert!(
-        !subtypes.contains(&"Vampire".to_string()),
+        !subtypes.iter().any(|i| i == "Vampire"),
         "a graveyard cast without the type rider must NOT become a Vampire; got {subtypes:?}"
     );
 }
@@ -21932,11 +21936,11 @@ fn exact_permission_does_not_inherit_sibling_permanent_modification() {
 
     let subtypes = &state.objects[&creature].card_types.subtypes;
     assert!(
-        subtypes.contains(&"Human".to_string()) && subtypes.contains(&"Vampire".to_string()),
+        subtypes.iter().any(|i| i == "Human") && subtypes.iter().any(|i| i == "Vampire"),
         "the exact accepted grant's Vampire modification must survive cleanup"
     );
     assert!(
-        !subtypes.contains(&"Zombie".to_string()),
+        !subtypes.iter().any(|i| i == "Zombie"),
         "the first sibling's permanent Zombie grant must not apply"
     );
 }
@@ -45404,7 +45408,8 @@ fn cast_reanimator_aura_grant_and_fire_etb() -> (GameState, ObjectId, ObjectId) 
         !state.objects[&enchantment_id]
             .card_types
             .subtypes
-            .contains(&"Aura".to_string()),
+            .iter()
+            .any(|i| i == "Aura"),
         "the enchantment must NOT be an Aura before its ETB resolves (reach guard)"
     );
     assert!(
@@ -45462,7 +45467,8 @@ fn reanimator_aura_grant_full_pipeline_reanimates_and_becomes_aura() {
         state.objects[&enchantment_id]
             .card_types
             .subtypes
-            .contains(&"Aura".to_string()),
+            .iter()
+            .any(|i: &String| i == "Aura"),
         "the enchantment must become an Aura (AddSubtype grant) after its ETB resolves"
     );
     assert_eq!(
@@ -45573,7 +45579,8 @@ fn reanimator_aura_grant_shape_survives_cleanup_step() {
         state.objects[&enchantment_id]
             .card_types
             .subtypes
-            .contains(&"Aura".to_string()),
+            .iter()
+            .any(|i: &String| i == "Aura"),
         "the enchantment must remain an Aura after cleanup (AddSubtype grant not pruned)"
     );
     assert!(
@@ -45626,7 +45633,8 @@ fn reanimator_aura_grant_etb_trigger_fizzles_when_target_creature_leaves_graveya
         !state.objects[&enchantment_id]
             .card_types
             .subtypes
-            .contains(&"Aura".to_string()),
+            .iter()
+            .any(|i: &String| i == "Aura"),
         "the enchantment must remain a non-Aura Enchantment when the ETB fizzles"
     );
     assert!(

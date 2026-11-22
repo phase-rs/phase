@@ -175,7 +175,9 @@ pub(crate) fn is_alternative_keyword_cost_pattern(lower: &str) -> bool {
     (lower_starts_with(lower, "you may ")
         || (lower_starts_with(lower, "as long as ") && scan_contains(lower, "you may ")))
         && scan_contains(lower, "rather than pay")
-        && (scan_contains(lower, "cycling cost") || scan_contains(lower, "crew cost"))
+        && (scan_contains(lower, "cycling cost")
+            || scan_contains(lower, "crew cost")
+            || scan_contains(lower, "equip cost"))
 }
 
 /// CR 118.9: Alternative-cost grant — "You may cast [filter] by paying {cost}
@@ -592,6 +594,10 @@ const STATIC_PREFIX_PATTERNS: &[&str] = &[
     "enchanted ",
     "equipped ",
     "you control enchanted ",
+    // CR 613.1b + CR 725.5: Fealty to the Realm — "The monarch controls
+    // enchanted creature." Routes the designation-anchored control static to
+    // `parse_static_line` (sibling of the Control Magic prefix above).
+    "the monarch controls enchanted ",
     "all creatures ",
     "all permanents ",
     "other ",

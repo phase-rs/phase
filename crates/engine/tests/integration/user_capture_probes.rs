@@ -190,7 +190,7 @@ fn dina_drive_and_report(state: &mut GameState, label: &str, beats: u32) -> Opti
                     state.stack.len(),
                     play_seats(state).len(),
                     state.players.iter().map(|p| p.life).collect::<Vec<_>>(),
-                    &act.chars().take(40).collect::<String>()
+                    act.chars().take(40).collect::<String>()
                 );
             }
             Err(e) => {

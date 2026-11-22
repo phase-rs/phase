@@ -203,6 +203,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         ability_index: None,
         may_trigger_origin: None,
         repeat_for: None,
+        repeat_timing: engine::types::ability::RepeatForTiming::Sequential,
         min_x_value: 0,
         announced_x: None,
         cant_be_copied: false,

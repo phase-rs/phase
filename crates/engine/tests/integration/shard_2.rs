@@ -4,6 +4,9 @@
 //! than `support` through `crate::<module>`, and every module with an insta snapshot; it may also
 //! hold modules from this range. `no_top_level_test_binaries` enforces that each file here is
 //! registered in exactly one shard root.
+// The auto-trait (`Send`) proof for the im-backed `GameState` exceeds the default
+// recursion limit of 128 (a future-incompatibility error on newer toolchains).
+#![recursion_limit = "512"]
 
 pub mod support;
 
@@ -42,14 +45,17 @@ mod ai_multi_target_selection;
 mod ajani_nacatl_pariah_co_departure_6427;
 mod ajani_nacatl_pariah_sacrifice_outlet_6018;
 mod ajani_nacatl_pariah_transform;
+mod ajani_resolute;
 mod ajani_strength_of_the_pride;
 mod akroan_horse;
 mod alania_divergent_storm;
 mod alchemists_gift_pump_modal_keyword_choice;
+mod algorithmic_ferocity;
 mod all_creatures_chosen_type_static_9566;
 mod all_player_library_wheel;
 mod altcast_plural_instances;
 mod alternative_cost_defiler_offers;
+mod alternative_cycling_cost_keeps_discard;
 mod amass_the_components;
 mod ambitious_augmenter;
 mod ambuscade_one_sided_fight_anaphoric;
@@ -178,6 +184,7 @@ mod brigid_mana_ability;
 mod bring_the_ending_corrupted_instead_branch_5683;
 mod bring_to_light_converge_mana_value;
 mod broken_bond_land_prompt;
+mod burden_of_proof;
 mod burning_eye_zubera_damage_threshold;
 mod burning_rune_demon_exact_count_search;
 mod cait_sith_fortune_teller;
@@ -212,9 +219,14 @@ mod census_exile_instead_replacement_class;
 mod census_release_batch_1;
 mod census_release_batch_2;
 mod census_release_batch_3;
+mod census_release_batch_4;
+mod census_release_batch_5;
+mod census_release_batch_7;
+mod census_release_batch_8;
 mod chain_of_smog_copy;
 mod chain_root_target_suspension;
 mod chains_of_mephistopheles_discard_draw_or_mill;
+mod champions_of_minas_tirith;
 mod chandra_revolution_doesnt_untap_slot;
 mod chaos_wand_targeted_free_cast_301;
 mod chaos_warp_owner_library;
@@ -236,7 +248,10 @@ mod claim_jumper_repeat;
 mod cleanup_control_reversion_triggers;
 mod cleanup_discard_trigger_pipeline;
 mod cleave_text_changing_cost;
+mod clever_concealment_convoke_color_9117;
 mod client_wire_viewer_projection;
+mod clone_copy_artillery_halo_lki;
+mod clone_copy_modal_artillery_halo_lki;
 mod cloud_ex_soldier_live_power;
 mod cloud_key_chosen_type_cost;
 mod coalition_relic_integration;
@@ -253,6 +268,7 @@ mod collect_evidence_effect_resolution;
 mod collect_evidence_self;
 mod collector_ouphe_mana_ability_prohibition;
 mod colorless_spell_cost_reduction;
+mod combat_batch_apnap_order;
 mod combat_damage_stack_object;
 mod combat_history_mass_effects;
 mod combat_hit_bookkeeping_follows_delivery;
@@ -271,6 +287,7 @@ mod commanders_plate_protection;
 mod companion_special_action;
 mod composite_cost_shared_resources;
 mod compound_ward_cost_pays_every_part;
+mod conceded_halo_combat_ordering_reproposal;
 mod condition_gates_fail_closed;
 mod conditional_cost_reduction_3223;
 mod conditional_entry_gate_projection;
@@ -289,6 +306,7 @@ mod context_ref_slot_hygiene;
 mod controlled_color_protection_from_oracle_text;
 mod controls_commander_statics;
 mod converge_colors_spent_trigger_lifetime;
+mod coordinated_clobbering_prevention_aggregation;
 mod coordinated_player_subjects;
 mod copied_ability_transform_generation;
 mod copied_cost_choices_phase1;
@@ -324,6 +342,7 @@ mod counter_quantity_object_forms;
 mod counter_recipient_exact_count;
 mod counter_rider_tail_8762;
 mod counter_rider_time_counters_8795;
+mod counter_spell_or_ability_that_targets;
 mod counter_spell_zone_redirect;
 mod counter_target_spell_ignores_permanent_targeting_keywords;
 mod counters_on_population_quantity;

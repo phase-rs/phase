@@ -477,6 +477,8 @@ where
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // Scalar designation payload: no nested effects to visit.
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -1427,6 +1429,7 @@ pub(crate) fn static_condition(condition: &$($mut_)? StaticCondition, v: &mut im
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::UnlessPay { .. }
@@ -1436,7 +1439,7 @@ pub(crate) fn static_condition(condition: &$($mut_)? StaticCondition, v: &mut im
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
