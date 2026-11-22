@@ -6768,7 +6768,7 @@ pub struct DamageAmountThreshold {
 /// (`crates/phase-server/src/persistence.rs` deserializing a
 /// `PersistedSession` whose `state` is a `PersistedGameState`, and
 /// `crates/server-core/src/persist.rs`), and the in-repo shared card fixture
-/// `crates/engine/tests/fixtures/integration_cards.json.gz`, which already
+/// `crates/engine/tests/fixtures/integration_cards/`, which already
 /// carries legacy `["GE",5]` / `["EQ",1]` arrays.
 /// Write-side counterpart to [`deserialize_damage_amount_compat`]: `PerSource`
 /// is the pre-axis pole, so it is emitted as the legacy tuple `["GE", 6]` —
@@ -45928,7 +45928,7 @@ mod tests {
     }
 
     fn legacy_worship_draw_replacement() -> serde_json::Value {
-        // Witnessed in integration_cards.json.gz at the original PR base.
+        // Witnessed in integration_cards/ at the original PR base.
         serde_json::json!({
             "type": "CreateDrawReplacement",
             "replacement_effect": { "type": "GainLife", "amount": { "type": "Fixed", "value": 5 } }
