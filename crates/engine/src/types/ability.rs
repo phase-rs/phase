@@ -2315,7 +2315,7 @@ pub struct SpellContext {
     /// player-scope leg (CR 101.4), which is the distinction `entry_observation_deferred` reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase_turn_player: Option<crate::types::player::PlayerId>,
-    /// CR 608.2c: the player actions an instruction of this chain performed, carried on the
+    /// CR 608.2c + CR 701.23a: the player actions an instruction of this chain performed, carried on the
     /// ability so a later "if you … this way" gate reads THIS chain's earlier instruction.
     /// The per-resolution `GameState::player_actions_this_way` ledger is cleared by every
     /// nested top-level chain (a copy-choice entry runs one between the search and the

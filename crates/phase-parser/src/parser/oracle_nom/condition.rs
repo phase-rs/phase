@@ -27314,12 +27314,23 @@ mod tests {
             "an opponent searches their library this way",
             "you search your graveyard this way",
             "they search their library this way",
+            "you search a library this way",
+            "you draw a card this way",
+            "you search your library",
         ] {
             assert!(
                 parse_you_search_library_this_way_condition(text).is_err(),
                 "{text}"
             );
         }
+        // Regression guard: the population "who ... this way" path ("each player who searched their
+        // library this way", Natural Balance) still reads the same action from the shared verb table.
+        let (rest, action) = crate::parser::oracle_quantity::parse_who_action_this_way(
+            "who searched their library this way",
+        )
+        .unwrap();
+        assert!(rest.is_empty(), "leftover {rest:?}");
+        assert_eq!(action, PlayerActionKind::SearchedLibrary);
     }
 
     /// CR 121 + CR 608.2c: the draw-count gate reads the printed threshold and

@@ -66782,6 +66782,13 @@ fn unlucky_cabbage_merchant_guard_lands_on_the_put_on_bottom_clause() {
             .is_some()
         })
         .expect("reach guard: the Food-sacrifice trigger carries the library search");
+    assert!(
+        find_effect_node(Some(sacrifice_trigger), |effect| {
+            matches!(effect, Effect::Unimplemented { .. })
+        })
+        .is_none(),
+        "the Food-sacrifice trigger chain parses without an Unimplemented node"
+    );
     let put_on_bottom = find_effect_node(Some(sacrifice_trigger), |effect| {
         matches!(effect, Effect::PutAtLibraryPosition { .. })
     })
@@ -66815,6 +66822,46 @@ fn unguarded_tutor_shuffle_stays_unconditional() {
     })
     .expect("the tutor parsed its shuffle");
     assert_eq!(shuffle.condition, None);
+}
+
+/// CR 701.24a + CR 608.2c: Natural Balance's population shuffle ("Then each player who searched their
+/// library this way shuffles.") is the who-path, not the controller guard: its `Shuffle` keeps no
+/// `condition` and stays scoped to every player who searched (`PerformedActionThisWay`), unchanged.
+#[test]
+fn natural_balance_population_shuffle_is_not_given_the_controller_gate() {
+    let parsed = parse_oracle_text(
+        "Each player who controls six or more lands chooses five lands they control and sacrifices the rest. Each player who controls four or fewer lands may search their library for up to X basic land cards and put them onto the battlefield, where X is five minus the number of lands they control. Then each player who searched their library this way shuffles.",
+        "Natural Balance",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let spell = parsed
+        .abilities
+        .first()
+        .expect("reach guard: the spell parsed an ability");
+    assert!(
+        find_effect_node(Some(spell), |effect| matches!(
+            effect,
+            Effect::SearchLibrary { .. }
+        ))
+        .is_some(),
+        "reach guard: the card parsed its library search"
+    );
+    let shuffle = find_effect_node(Some(spell), |effect| {
+        matches!(effect, Effect::Shuffle { .. })
+    })
+    .expect("the card parsed its shuffle");
+    assert_eq!(shuffle.condition, None);
+    assert_eq!(
+        shuffle.player_scope,
+        Some(
+            crate::types::ability::PlayerFilter::PerformedActionThisWay {
+                relation: crate::types::ability::PlayerRelation::All,
+                action: crate::types::event_kinds::PlayerActionKind::SearchedLibrary,
+            }
+        )
+    );
 }
 
 /// CR 705.2 + CR 608.2c: the resolution-scoped coin-flip loop gate — the flip

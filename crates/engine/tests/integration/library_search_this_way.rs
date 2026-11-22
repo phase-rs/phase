@@ -1248,7 +1248,7 @@ fn muzzled_search_does_not_shuffle_for_every_member() {
             && o.moves_of_found >= 1
             && matches!(o.found_zone, Some(Zone::Hand | Zone::Battlefield));
         let library_searched = counts_search_events(spec) && o.searched != 0;
-        if o.stuck.is_some() || !found_it || library_searched || o.shuffles != 0 {
+        if o.stuck.is_some() || !o.completed || !found_it || library_searched || o.shuffles != 0 {
             failures.push(format!("{}: {o:?}", spec.name));
         }
     }
@@ -1264,7 +1264,12 @@ fn library_search_shuffles_once_for_every_member() {
         let o = run_case(spec, "L");
         let found_elsewhere = matches!(o.found_zone, Some(Zone::Hand | Zone::Battlefield));
         let search_counted = !counts_search_events(spec) || o.searched == 1;
-        if o.stuck.is_some() || !found_elsewhere || !search_counted || o.shuffles != 1 {
+        if o.stuck.is_some()
+            || !o.completed
+            || !found_elsewhere
+            || !search_counted
+            || o.shuffles != 1
+        {
             failures.push(format!("{}: {o:?}", spec.name));
         }
     }
@@ -1334,6 +1339,7 @@ fn copy_choice_entry_between_search_and_shuffle_keeps_the_shuffle() {
         o.prompts.iter().any(|p| p == "CopyTargetChoice"),
         "the copy choice was reached: {o:?}"
     );
+    assert!(o.completed, "the resolution completed: {o:?}");
     assert_eq!(o.found_zone, Some(Zone::Battlefield), "{o:?}");
     assert_eq!(o.searched, 1, "{o:?}");
     assert_eq!(o.shuffles, 1, "{o:?}");
@@ -1356,6 +1362,7 @@ fn copy_choice_entry_with_muzzled_library_does_not_shuffle() {
         o.prompts.iter().any(|p| p == "CopyTargetChoice"),
         "the copy choice was reached: {o:?}"
     );
+    assert!(o.completed, "the resolution completed: {o:?}");
     assert_eq!(o.found_zone, Some(Zone::Battlefield), "{o:?}");
     assert_eq!(o.shuffles, 0, "{o:?}");
 }
@@ -1385,6 +1392,11 @@ fn as_enters_choice_entry_between_search_and_shuffle_keeps_the_shuffle() {
         assert!(
             o.prompts.iter().any(|p| p == "NamedChoice"),
             "{}: the as-enters choice was reached: {o:?}",
+            spec.name
+        );
+        assert!(
+            o.completed,
+            "{}: the resolution completed: {o:?}",
             spec.name
         );
         assert_eq!(
