@@ -2442,9 +2442,12 @@ pub(crate) enum ZoneCounterImperativeAst {
     },
     /// CR 122.1 + CR 608.2d (Clockspinning sentence 2): "Remove that counter ...
     /// or put another of those counters on it." The single target object is
-    /// established by the preceding `TargetOnly` clause; this clause only records
-    /// the operation set the controller may choose among at resolution. Lowers to
-    /// `Effect::ChooseCounterAdjustment` (which has no target slot of its own).
+    /// established by the preceding `TargetOnly` clause, and the counter kind by
+    /// the `ChooseCounterKind` chained beneath it (sentence 1, "Choose a counter
+    /// on target ...", `ChooseImperativeAst::CounterKindOnTarget`); this clause
+    /// only records the operation set the controller may choose among at
+    /// resolution, over that chosen kind. Lowers to `Effect::ChooseCounterAdjustment`
+    /// (which has no target slot of its own).
     ChooseCounterAdjustment {
         adjustment: CounterAdjustment,
         counter_type: Option<CounterType>,

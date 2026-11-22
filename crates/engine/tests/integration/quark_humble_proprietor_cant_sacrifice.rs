@@ -9,6 +9,8 @@
 
 use crate::support::shared_card_db;
 use engine::ai_support::legal_actions_full;
+use engine::game::coverage::card_face_gaps;
+use engine::game::mana_abilities::can_activate_mana_ability_now;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{AbilityDefinition, Effect};
@@ -505,5 +507,77 @@ fn treasure_token_mana_ability_is_not_offered_while_quark_is_out() {
     assert!(
         !offers_activation(treasure),
         "the Treasure token's sacrifice ability is not offered"
+    );
+}
+
+/// CR 118.3 + CR 701.21a: the mana-readiness gate (`can_activate_mana_ability_now`,
+/// the cheap pre-payment check that decides whether a Treasure counts as an
+/// available mana source) reads Quark's prohibition through the cost-payability
+/// authority, so a barred Treasure token is never reported as ready and then
+/// fails at payment. Paired positive in the same state: the nontoken Treasure
+/// Buried Treasure, with the same printed mana ability, is ready.
+#[test]
+fn mana_readiness_gate_reads_quarks_prohibition() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    let quark = scenario.add_real_card(P0, "Quark, Humble Proprietor", Zone::Battlefield, db);
+    let buried = scenario.add_real_card(P0, "Buried Treasure", Zone::Battlefield, db);
+    scenario.with_library_top(P0, &["Island"]);
+    let mut runner = scenario.build();
+    assert_quark_prohibition(&runner, quark);
+    // Quark's printed upkeep trigger creates the Treasure token for real.
+    runner.advance_to_upkeep();
+    runner.advance_until_stack_empty();
+    let treasure = treasure_token(&runner);
+    runner.advance_to_phase(Phase::PreCombatMain);
+
+    let ready = |id: ObjectId| {
+        let def = runner.state().objects[&id].abilities[0].clone();
+        // REACH: index 0 is the Treasure mana ability on both permanents, so a
+        // `false` below is the prohibition and not a different ability.
+        assert!(
+            matches!(def.effect.as_ref(), Effect::Mana { .. }),
+            "abilities[0] of {id:?} must be the Treasure mana ability: {def:?}"
+        );
+        can_activate_mana_ability_now(runner.state(), P0, id, 0, &def)
+    };
+    assert!(
+        ready(buried),
+        "control: the nontoken Treasure is outside the 'Treasure tokens' filter"
+    );
+    assert!(
+        !ready(treasure),
+        "a Treasure token cannot be sacrificed, so its mana ability is not ready"
+    );
+}
+
+/// CR 701.21a: a card counts as supported only when no line of it is a coverage
+/// gap. Both of Quark's lines (the sacrifice prohibition and the upkeep Treasure
+/// trigger) are read from the production-written fixture entry; the Treasure
+/// tests above are the runtime witnesses for the same card.
+#[test]
+fn quark_whole_card_has_no_coverage_gap() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let face = db
+        .get_face_by_name("Quark, Humble Proprietor")
+        .expect("Quark is in the integration fixture");
+    // REACH: both printed lines were parsed into typed abilities.
+    assert!(
+        face.static_abilities
+            .iter()
+            .any(|d| matches!(d.mode, StaticMode::CantSacrifice { .. })),
+        "the prohibition line parses to CantSacrifice: {:?}",
+        face.static_abilities
+    );
+    assert!(
+        !face.triggers.is_empty(),
+        "the upkeep trigger line parses: {:?}",
+        face.triggers
+    );
+    assert!(
+        card_face_gaps(face).is_empty(),
+        "Quark must have no coverage gaps: {:?}",
+        card_face_gaps(face)
     );
 }

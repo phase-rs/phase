@@ -12,6 +12,7 @@
 //! whole-card witnesses at the end of the file.
 
 use crate::support::shared_card_db;
+use engine::game::coverage::card_face_gaps;
 use engine::game::engine::EngineError;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -372,6 +373,54 @@ fn casting_a_saga_also_deals_two_damage_to_each_opponent() {
     ));
 }
 
+/// CR 603.2 + CR 109.5: Dathon's "Whenever YOU cast an enchantment spell" is its
+/// controller's cast only. P1 casting the same Saga (History of Benalia, as in
+/// `casting_a_saga_also_deals_two_damage_to_each_opponent`) on P1's own turn
+/// neither draws P0 a card nor deals Dathon's 2 damage: the paired positive is
+/// that test, where P0 casts the identical Saga and both effects happen.
+#[test]
+fn an_opponents_saga_cast_does_not_trigger_dathon() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Dathon, His Heart Open", Zone::Battlefield, db);
+    let saga = scenario.add_real_card(P1, "History of Benalia", Zone::Hand, db);
+    scenario.with_library_top(P0, &["Island"]);
+    let mut runner = scenario.build();
+    // CR 117.1a: a Saga is cast at sorcery speed, so it is P1's turn with P1
+    // holding priority; fund the printed {1}{W}{W}.
+    let state = runner.state_mut();
+    state.active_player = P1;
+    state.priority_player = P1;
+    state.waiting_for = WaitingFor::Priority { player: P1 };
+    for color in [ManaType::Colorless, ManaType::White, ManaType::White] {
+        runner.state_mut().players[1].mana_pool.add(ManaUnit::new(
+            color,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    }
+    assert_eq!(runner.life(P1), 20, "precondition: P1 at 20");
+
+    runner.cast(saga).resolve();
+    settle_without_prompts(&mut runner);
+
+    // REACH: the cast went through, so the absence below is Dathon's scope.
+    assert_eq!(
+        runner.state().objects[&saga].zone,
+        Zone::Battlefield,
+        "P1's Saga resolved"
+    );
+    assert_eq!(
+        hand_cards(&runner, P0).len(),
+        0,
+        "Dathon's draw did not fire on an opponent's cast"
+    );
+    assert_eq!(runner.life(P1), 20, "no Dathon damage to the caster");
+    assert_eq!(runner.life(P0), 20);
+}
+
 /// Dathon plus the blank enchantment filler carrying one Stun counter — the
 /// existing `setup` board — but staged at `phase`, so the same printed {2}
 /// activation can be attempted in an illegal and a legal window.
@@ -455,4 +504,28 @@ fn dathon_counter_ability_is_sorcery_speed_only() {
     assert_eq!(counters(&runner, ench, CounterType::Stun), 2);
     assert_eq!(mana_total(&runner, P0), 0, "the {{2}} was spent");
     assert!(runner.state().stack.is_empty());
+}
+
+/// CR 608.2d + CR 122.1: Dathon and Clockspinning are supported only when every
+/// line parses (Dathon's cast trigger and its "Put another counter of that kind"
+/// sentence; Clockspinning's chosen-kind adjustment). Read from the
+/// production-written fixture entries; the runtime witnesses above prove the
+/// behavior.
+#[test]
+fn dathon_and_clockspinning_whole_cards_have_no_coverage_gap() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    for name in ["Dathon, His Heart Open", "Clockspinning"] {
+        let face = db
+            .get_face_by_name(name)
+            .unwrap_or_else(|| panic!("{name} is in the integration fixture"));
+        assert!(
+            !face.abilities.is_empty() || !face.triggers.is_empty(),
+            "REACH: {name} parsed into abilities or triggers"
+        );
+        assert!(
+            card_face_gaps(face).is_empty(),
+            "{name} must have no coverage gaps: {:?}",
+            card_face_gaps(face)
+        );
+    }
 }

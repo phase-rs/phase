@@ -29822,6 +29822,24 @@ fn static_cant_sacrifice_treasure_tokens_is_a_player_scoped_prohibition() {
     assert!(filter.properties.contains(&FilterProp::Token));
 }
 
+/// CR 701.21a + CR 101.2: the player-scoped prohibition consumes the whole
+/// sentence. Call for Aid's one-shot "You can't sacrifice those creatures this
+/// turn." (an object-scoped transient on a spell, not a static) leaves a
+/// non-empty object phrase, so it is never claimed as `CantSacrifice`. The
+/// positive reach guard is Quark's line parsed in the same test, so the negative
+/// cannot be satisfied by the parser refusing every "can't sacrifice" sentence.
+#[test]
+fn static_cant_sacrifice_prohibition_rejects_the_one_shot_object_phrase() {
+    let quark = parse_static_line("You can't sacrifice Treasure tokens.")
+        .expect("REACH: Quark's line parses");
+    assert!(matches!(quark.mode, StaticMode::CantSacrifice { .. }));
+    assert!(
+        !parse_static_line("You can't sacrifice those creatures this turn.")
+            .is_some_and(|def| matches!(def.mode, StaticMode::CantSacrifice { .. })),
+        "a trailing duration is not part of the barred population"
+    );
+}
+
 #[test]
 fn static_life_total_cant_change_emits_both_locks_self_scope() {
     // CR 119.7 + CR 119.8: Platinum Emperion — "Your life total can't change."

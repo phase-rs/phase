@@ -15,6 +15,7 @@
 //! grows the wrong kind — cannot pass.
 
 use crate::support::shared_card_db;
+use engine::game::coverage::card_face_gaps;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{AbilityDefinition, Effect};
@@ -194,5 +195,26 @@ fn noncreature_cast_prompts_kind_and_only_chosen_kind_grows() {
         runner.state().objects[&gauntlet].zone,
         Zone::Battlefield,
         "the Gauntlet itself is untouched"
+    );
+}
+
+/// Whole-card coverage: the planeswalker loyalty grants and the cast trigger
+/// both parse, so Ichormoon Gauntlet reports no gap. Read from the
+/// production-written fixture entry; the witness above proves the trigger's
+/// behavior.
+#[test]
+fn ichormoon_gauntlet_whole_card_has_no_coverage_gap() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let face = db
+        .get_face_by_name("Ichormoon Gauntlet")
+        .expect("Ichormoon Gauntlet is in the integration fixture");
+    assert!(
+        !face.triggers.is_empty() && !face.static_abilities.is_empty(),
+        "REACH: the grant static and the cast trigger parse: {face:?}"
+    );
+    assert!(
+        card_face_gaps(face).is_empty(),
+        "Ichormoon Gauntlet must have no coverage gaps: {:?}",
+        card_face_gaps(face)
     );
 }
