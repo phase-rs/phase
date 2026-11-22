@@ -26,10 +26,8 @@
 //! collected once and put on the stack with the combat damage step's own, in one APNAP process
 //! (CR 510.3a, CR 603.3b). Each driver here checks that no priority window opens while the batch
 //! is parked. Inside a leg, a damage substitution's action precedes an earlier rider, and either
-//! one's prompt parks the leg (CR 614.6 + CR 615.5, CR 616.1g). A card whose replacement asks such
-//! a choice still reports unsupported
-//! (`ResolverFeature:structural:damage_replacement_choice_unasked_in_combat`). The rider-pause
-//! sections hold those rows; the Ironscale Hydra rows are in `ironscale_hydra_combat_prevention`.
+//! one's prompt parks the leg (CR 614.6 + CR 615.5, CR 616.1g). The rider-pause sections hold
+//! those rows; the Ironscale Hydra rows are in `ironscale_hydra_combat_prevention`.
 
 use engine::game::combat::AttackTarget;
 use engine::game::effects::attach::attach_to;

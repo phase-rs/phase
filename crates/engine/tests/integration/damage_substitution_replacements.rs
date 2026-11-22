@@ -3193,11 +3193,9 @@ fn a_paused_rider_keeps_the_batchs_later_riders_behind_it() {
         assert_eq!(orders, vec![0, 4]);
         // strict-failure: the order between Dralnu's substitution and the Bear's counters is not
         // asserted: by CR 614.6 + CR 615.5 the substitution comes first, which the engine doesn't
-        // yet do in every creation order (Command Zone #172). That order decides what P1 can
-        // sacrifice (Hardened Scales before or after the Bear's counters). Dralnu's sacrifice is a
-        // choice, so the card reports unsupported
-        // (`ResolverFeature:structural:damage_replacement_choice_unasked_in_combat`), which keeps
-        // this order outside the claimed coverage.
+        // yet do in every creation order (Command Zone #348). That order decides what P1 can
+        // sacrifice (Hardened Scales before or after the Bear's counters). Coverage does not see
+        // this order.
         assert!(sacrificed_at.is_some());
         assert_eq!(plus_counters(&runner, bear), 8);
         assert_eq!(zone(&runner, id), Zone::Battlefield);

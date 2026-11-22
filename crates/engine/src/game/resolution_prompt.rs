@@ -180,7 +180,7 @@ fn resolution_probe_verdict(
 /// arm's resolver has been fixed yet. It is fail-closed — it can only turn a
 /// verdict into `MayPrompt`, never the reverse — so a resolver gaining a real
 /// prompt never invalidates it.
-pub(crate) fn quantity_offers_up_to_choice(q: &QuantityExpr) -> bool {
+fn quantity_offers_up_to_choice(q: &QuantityExpr) -> bool {
     match q {
         QuantityExpr::UpTo { .. } => true,
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
@@ -212,7 +212,7 @@ pub(crate) fn quantity_offers_up_to_choice(q: &QuantityExpr) -> bool {
 /// `ResolutionProbe::Prompted`, which OBSERVES the real resolver opening a real
 /// prompt on the real board. The arm only decides which classes are worth paying
 /// a clone for.
-pub(crate) fn effect_offers_choice(e: &Effect) -> bool {
+fn effect_offers_choice(e: &Effect) -> bool {
     match e {
         // Engine-set from the activation-payment snapshot, never a player prompt.
         Effect::NoteManaSpent | Effect::CompletePlayerAction { .. } => false,
