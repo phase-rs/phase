@@ -7,11 +7,12 @@
 //! a library search, so no shuffle. Every ability-bearing card is built from its verbatim MTGJSON
 //! Oracle text and driven through the production cast / activate / trigger path; the found card is a
 //! textless filler, or the printed Rune of Sustenance / Arachnus Web where the found card's own text
-//! matters. Not asserted: a shuffle after a graveyard or hand find with the library searchable (the
-//! engine pools the zones into one search; the printed zone election is a separate gap).
+//! matters. Not asserted: a shuffle after a graveyard or hand find with the library searchable. The
+//! engine pools the zones into one search and has no action for the printed zone election
+//! (CR 608.2d: the player announces the choice while applying the effect), so the 41 cards keep their
+//! `confirmed-misparses.toml` rows and stay unsupported; this file proves the guard, not the election.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::game::triggers::process_triggers;
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -829,6 +830,10 @@ struct Obs {
     moves_of_found: usize,
     stuck: Option<String>,
     moves: Vec<String>,
+    /// Some(accept) once the engine ACCEPTED the decision action; a rejected decline would pass the negatives vacuously.
+    decision: Option<bool>,
+    /// Set only when `drive` exits at priority with an empty stack: the resolution completed, not the iteration cap.
+    completed: bool,
 }
 
 fn variant_name(w: &WaitingFor) -> String {
@@ -871,8 +876,13 @@ fn drive(runner: &mut GameRunner, found: ObjectId, obs: &mut Obs, accept: bool) 
     for _ in 0..60 {
         let w = runner.state().waiting_for.clone();
         let name = variant_name(&w);
+        // Recorded on the action's Ok only: a rejected decline would pass the negative assertions vacuously.
+        let deciding = matches!(w, WaitingFor::OptionalEffectChoice { player: P0, .. });
         let res = match w {
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
+                obs.completed = true;
+                break;
+            }
             WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
             WaitingFor::OptionalEffectChoice { player: P0, .. } => {
                 obs.prompts.push(name);
@@ -913,7 +923,12 @@ fn drive(runner: &mut GameRunner, found: ObjectId, obs: &mut Obs, accept: bool) 
             }
         };
         match res {
-            Ok(r) => count_events(obs, &r.events, found),
+            Ok(r) => {
+                if deciding {
+                    obs.decision = Some(accept);
+                }
+                count_events(obs, &r.events, found);
+            }
             Err(e) => {
                 obs.stuck = Some(format!("ERR {e:?}").chars().take(120).collect());
                 break;
@@ -931,7 +946,14 @@ fn run_case(spec: &Spec, variant: &str) -> Obs {
 /// the found card; a trailing M puts a printed Mindlock Orb on the battlefield.
 fn run_case_deciding(spec: &Spec, variant: &str, accept: bool) -> Obs {
     let mut scn = GameScenario::new();
-    scn.at_phase(Phase::PreCombatMain);
+    // The Sanctum flow's witness is a beginning-of-upkeep trigger (CR 503.1a + CR 500.6): it starts
+    // one step earlier so the engine's own turn structure puts the trigger on the stack; every other
+    // flow starts in the precombat main of P0's own turn.
+    if matches!(spec.flow, Flow::Sanctum) {
+        scn.at_phase(Phase::Untap);
+    } else {
+        scn.at_phase(Phase::PreCombatMain);
+    }
     let muzzled = variant.ends_with('M');
     let zone = match variant.chars().next().unwrap() {
         'G' => Zone::Graveyard,
@@ -965,7 +987,7 @@ fn run_case_deciding(spec: &Spec, variant: &str, accept: bool) -> Obs {
             targets: Vec<ObjectId>,
             pay: Vec<ObjectId>,
         },
-        Trigger,
+        Upkeep,
         PlayLand(ObjectId),
     }
     let mut tapped_target = None;
@@ -1108,7 +1130,7 @@ fn run_case_deciding(spec: &Spec, variant: &str, accept: bool) -> Obs {
                 .as_legendary()
                 .with_subtypes(spec.subtypes.to_vec())
                 .id();
-            (id, Start::Trigger)
+            (id, Start::Upkeep)
         }
         Flow::LastLight => {
             let id = scn
@@ -1157,12 +1179,24 @@ fn run_case_deciding(spec: &Spec, variant: &str, accept: bool) -> Obs {
             }
             let _ = a.resolve();
         }
-        Start::Trigger => {
-            process_triggers(
-                runner.state_mut(),
-                &[GameEvent::PhaseChanged {
-                    phase: Phase::Upkeep,
-                }],
+        // CR 503.1a + CR 500.6: the engine's own turn structure puts the beginning-of-upkeep
+        // trigger on the stack — the event is never fabricated by the test.
+        Start::Upkeep => {
+            runner.advance_to_upkeep();
+            // Reach guard: P0's upkeep through the production turn progression,
+            // with Sanctum of All's trigger on the stack.
+            assert_eq!(
+                runner.state().phase,
+                Phase::Upkeep,
+                "the turn structure reached P0's upkeep"
+            );
+            assert!(
+                runner
+                    .state()
+                    .stack
+                    .iter()
+                    .any(|entry| entry.source_id == src),
+                "Sanctum of All's upkeep trigger is on the stack"
             );
         }
         Start::PlayLand(land) => {
@@ -1258,6 +1292,18 @@ fn declined_optional_search_does_not_shuffle() {
     assert!(
         o.prompts.iter().any(|p| p == "OptionalEffectChoice"),
         "the optional search prompt was reached: {o:?}"
+    );
+    // The decline must have been accepted by the engine and the resolution completed
+    // before the negatives below mean anything.
+    assert_eq!(
+        o.decision,
+        Some(false),
+        "the engine accepted the decline: {o:?}"
+    );
+    assert!(o.stuck.is_none(), "{o:?}");
+    assert!(
+        o.completed,
+        "the resolution finished back at priority with an empty stack: {o:?}"
     );
     assert_eq!(o.searched, 0, "{o:?}");
     assert_eq!(o.shuffles, 0, "{o:?}");
