@@ -11806,7 +11806,7 @@ fn parse_damage_source_subject_filter_with_ctx(
             // stack scoping is applied only to the targeting relative clause. Every
             // other spell phrase keeps the reading the default variant always had.
             let names_targeting_spell = filter_contains_filter_prop(&filter, &|prop| {
-                matches!(prop, FilterProp::Targets { .. })
+                matches!(prop, FilterProp::Targets { filter: _ })
             });
             Some(if names_targeting_spell {
                 scope_target_spell_phrase(filter, subject)

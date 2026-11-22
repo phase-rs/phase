@@ -166,10 +166,21 @@ fn new_master_of_arms_tapped_blocker_damage_is_prevented() {
         "P0 keeps priority with the ability on the stack, got {:?}",
         runner.state().waiting_for
     );
-    assert_eq!(runner.state().stack.len(), 1, "exactly the tap ability is on the stack");
-    let entry = runner.state().stack.back().expect("the tap ability is on the stack");
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "exactly the tap ability is on the stack"
+    );
+    let entry = runner
+        .state()
+        .stack
+        .back()
+        .expect("the tap ability is on the stack");
     let StackEntryKind::ActivatedAbility { source_id, ability } = &entry.kind else {
-        panic!("the stack entry is an activated ability, got {:?}", entry.kind);
+        panic!(
+            "the stack entry is an activated ability, got {:?}",
+            entry.kind
+        );
     };
     assert_eq!(source_id, &master);
     assert_eq!(

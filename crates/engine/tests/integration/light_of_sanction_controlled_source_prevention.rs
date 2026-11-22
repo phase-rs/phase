@@ -329,11 +329,7 @@ fn light_of_sanction_does_not_prevent_damage_to_its_controller() {
         17,
         "the recipient is a player, not a creature P0 controls, so the 3 damage is dealt"
     );
-    assert_eq!(
-        runner.life(P1),
-        20,
-        "reach guard: the Bolt was aimed at P0"
-    );
+    assert_eq!(runner.life(P1), 20, "reach guard: the Bolt was aimed at P0");
     assert_settled(&runner, P0);
 }
 
