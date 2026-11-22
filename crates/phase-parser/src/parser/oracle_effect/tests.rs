@@ -4572,69 +4572,213 @@ fn counted_counter_placement_gate_ranges_over_counts_and_requires_a_recipient() 
     }
 }
 
-/// CR 608.2c + CR 701.13a: a mass exile carries its verb forward to a verbless "all <filter>"
-/// conjunct ("Exile all creatures and all artifacts"), and Shadows' Verdict's two zone
-/// legs become two exile moves, each keeping its own zone filter.
-#[test]
-fn compound_mass_exile_conjunct_carries_exile_forward() {
-    let def = parse_effect_chain("Exile all creatures and all artifacts.", AbilityKind::Spell);
-    match &*def.effect {
-        Effect::ChangeZoneAll {
-            destination: Zone::Exile,
-            target,
-            ..
-        } => assert!(has_type(
-            typed_leg(target).expect("typed"),
-            TypeFilter::Creature
-        )),
-        other => panic!("expected primary exile of creatures, got {other:?}"),
-    }
-    let sub = def.sub_ability.as_ref().expect("second exile leg");
-    match &*sub.effect {
-        Effect::ChangeZoneAll {
-            destination: Zone::Exile,
-            target,
-            ..
-        } => assert!(has_type(
-            typed_leg(target).expect("typed"),
-            TypeFilter::Artifact
-        )),
-        other => panic!("expected sub exile of artifacts, got {other:?}"),
-    }
+/// CR 400.1: whether a population leg constrains itself to `zone` — via either
+/// zone-property spelling (`InZone`, or an `InAnyZone` union covering it).
+fn leg_in_zone(tf: &TypedFilter, zone: Zone) -> bool {
+    tf.properties.iter().any(|p| match p {
+        FilterProp::InZone { zone: z } => *z == zone,
+        FilterProp::InAnyZone { zones } => zones.contains(&zone),
+        _ => false,
+    })
+}
 
+/// CR 608.2f + CR 603.10a: Shadows' Verdict's battlefield and graveyard
+/// populations are ONE simultaneous mass exile — a single `ChangeZoneAll`
+/// whose `Or` filter carries both zones, never a battlefield wipe chained
+/// ahead of a second zone-change event (Stonebound Mentor's
+/// leaves-the-graveyard trigger must still see the graveyard leg's cards
+/// leave after the battlefield leg exiled the Mentor itself).
+#[test]
+fn mass_exile_population_union_is_one_instruction() {
     let verdict = parse_effect_chain(
         "Exile all creatures and planeswalkers with mana value 3 or less from the battlefield and all creature and planeswalker cards with mana value 3 or less from all graveyards.",
         AbilityKind::Spell,
     );
-    let in_zone = |filter: &TargetFilter, zone: Zone| {
-        let legs = typed_legs(filter);
-        !legs.is_empty()
-            && legs
-                .iter()
-                .all(|leg| leg.properties.contains(&FilterProp::InZone { zone }))
+    assert!(
+        verdict.sub_ability.is_none(),
+        "the two populations must be one effect, not a chained sub-ability"
+    );
+    let target = match &*verdict.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            origin: None,
+            target,
+            ..
+        } => target,
+        other => panic!("expected one mass exile with origin None, got {other:?}"),
     };
-    match &*verdict.effect {
-        Effect::ChangeZoneAll {
-            destination: Zone::Exile,
-            target,
-            ..
-        } => assert!(in_zone(target, Zone::Battlefield), "{target:?}"),
-        other => panic!("expected battlefield exile, got {other:?}"),
+    let legs = typed_legs(target);
+    assert_eq!(
+        legs.len(),
+        4,
+        "expected four population legs, got {target:?}"
+    );
+    let cmc_le_3 = |tf: &TypedFilter| {
+        tf.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 3 }
+                }
+            )
+        })
+    };
+    assert!(
+        legs.iter().all(|tf| cmc_le_3(tf)),
+        "every leg carries the mana-value bound, got {target:?}"
+    );
+    let battlefield: Vec<&TypedFilter> = legs
+        .iter()
+        .copied()
+        .filter(|tf| leg_in_zone(tf, Zone::Battlefield))
+        .collect();
+    let graveyard: Vec<&TypedFilter> = legs
+        .iter()
+        .copied()
+        .filter(|tf| leg_in_zone(tf, Zone::Graveyard))
+        .collect();
+    assert_eq!(battlefield.len(), 2, "two battlefield legs, got {target:?}");
+    assert_eq!(graveyard.len(), 2, "two graveyard legs, got {target:?}");
+    for (group, zone) in [
+        (battlefield, Zone::Battlefield),
+        (graveyard, Zone::Graveyard),
+    ] {
+        assert!(
+            group.iter().any(|tf| has_type(tf, TypeFilter::Creature))
+                && group
+                    .iter()
+                    .any(|tf| has_type(tf, TypeFilter::Planeswalker)),
+            "each {zone:?} group needs a Creature leg and a Planeswalker leg, got {target:?}"
+        );
     }
-    let graveyard_leg = verdict.sub_ability.as_ref().expect("graveyard leg");
-    match &*graveyard_leg.effect {
+    let zones = target.extract_zones();
+    assert_eq!(
+        zones.len(),
+        2,
+        "the scan must reach exactly Battlefield and Graveyard, got {zones:?}"
+    );
+    assert!(
+        zones.contains(&Zone::Battlefield) && zones.contains(&Zone::Graveyard),
+        "the scan must reach Battlefield and Graveyard, got {zones:?}"
+    );
+}
+
+/// CR 109.2 + CR 608.2f: Once More with Feeling — "Exile all permanents and
+/// all cards from all graveyards." The bare "all permanents" leg is a
+/// battlefield population, so it gains `InZone(Battlefield)` only because the
+/// "all cards from all graveyards" leg names a zone; the whole clause is one
+/// `ChangeZoneAll` with `origin: None`.
+#[test]
+fn mass_exile_bare_leg_gains_battlefield_beside_a_zoned_leg() {
+    let def = parse_effect_chain(
+        "Exile all permanents and all cards from all graveyards.",
+        AbilityKind::Spell,
+    );
+    assert!(def.sub_ability.is_none(), "one instruction, not a chain");
+    let target = match &*def.effect {
         Effect::ChangeZoneAll {
             destination: Zone::Exile,
+            origin: None,
             target,
             ..
-        } => assert!(in_zone(target, Zone::Graveyard), "{target:?}"),
-        other => panic!("expected graveyard exile, got {other:?}"),
+        } => target,
+        other => panic!("expected one mass exile with origin None, got {other:?}"),
+    };
+    let legs = typed_legs(target);
+    assert_eq!(
+        legs.len(),
+        2,
+        "expected two population legs, got {target:?}"
+    );
+    assert!(
+        has_type(legs[0], TypeFilter::Permanent) && leg_in_zone(legs[0], Zone::Battlefield),
+        "the bare permanents leg is battlefield-scoped, got {target:?}"
+    );
+    assert!(
+        has_type(legs[1], TypeFilter::Card) && leg_in_zone(legs[1], Zone::Graveyard),
+        "the cards leg keeps its own graveyard zone, got {target:?}"
+    );
+}
+
+/// CR 608.2f + CR 109.2: a same-zone union ("Exile all creatures and all
+/// artifacts") is one battlefield population — returned UNCHANGED, with no
+/// `InZone` scoping injected (that belongs only beside a leg that names a
+/// zone; the resolver defaults an empty `extract_zones()` to the battlefield),
+/// and no chained second exile.
+#[test]
+fn mass_exile_same_zone_union_keeps_bare_legs_unscoped() {
+    let def = parse_effect_chain("Exile all creatures and all artifacts.", AbilityKind::Spell);
+    assert!(def.sub_ability.is_none(), "one instruction, not a chain");
+    let target = match &*def.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            origin: None,
+            target,
+            ..
+        } => target,
+        other => panic!("expected one mass exile with origin None, got {other:?}"),
+    };
+    let legs = typed_legs(target);
+    assert_eq!(
+        legs.len(),
+        2,
+        "expected two population legs, got {target:?}"
+    );
+    assert!(
+        legs.iter().all(|tf| tf.properties.is_empty()),
+        "a purely bare union carries no zone scoping, got {target:?}"
+    );
+    assert!(
+        legs.iter().any(|tf| has_type(tf, TypeFilter::Creature))
+            && legs.iter().any(|tf| has_type(tf, TypeFilter::Artifact)),
+        "expected Creature and Artifact legs, got {target:?}"
+    );
+}
+
+/// CR 608.2f: only a CROSS-zone union is claimed by the population-union recognizer. A union
+/// whose legs all name the one zone ("Exile all artifact and enchantment cards from all
+/// graveyards", Saprazzan Bailiff) is a single population: its parse keeps the single inferred
+/// origin the generic path always gave it.
+#[test]
+fn mass_exile_same_zone_union_keeps_its_single_origin() {
+    let def = parse_effect_chain(
+        "Exile all artifact and enchantment cards from all graveyards.",
+        AbilityKind::Spell,
+    );
+    assert!(def.sub_ability.is_none(), "one instruction, not a chain");
+    match &*def.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            origin: Some(Zone::Graveyard),
+            target,
+            ..
+        } => assert_eq!(typed_legs(target).len(), 2, "{target:?}"),
+        other => panic!("expected the single-origin graveyard exile, got {other:?}"),
     }
 }
 
-/// Tested fence: the mass-exile verb reaches only a verbless "all <filter>" conjunct. A possessive
-/// zone conjunct ("their graveyard") after a mass exile stays a strict failure (the pinned
-/// Strategic Betrayal shape: the first leg binds "they" to no player).
+/// Tested decline: a leg-scoped union is accepted only when the whole operand
+/// IS the union — an orphan instruction tail ("… and all artifacts and gain 2
+/// life") must not be swept into the population. The recognizer declines so
+/// the tail keeps its own clause path instead of being silently dropped.
+#[test]
+fn mass_exile_population_union_declines_orphan_instruction_tail() {
+    let rest = "creatures and all artifacts and gain 2 life";
+    let lower = rest.to_lowercase();
+    let mut ctx = ParseContext::default();
+    assert!(
+        imperative::try_parse_mass_exile_permanents_and_zones(rest, &lower, &mut ctx).is_none(),
+        "an orphan tail must decline, not be swallowed into one population"
+    );
+}
+
+/// Tested fence: the mass-exile population union claims only verbless "all
+/// <filter>" conjuncts that parse as `Typed` population legs. A possessive
+/// zone conjunct ("their graveyard") after a mass exile stays a strict
+/// failure (the pinned Strategic Betrayal shape: the first leg binds "they"
+/// to no player), and the deleted exile verb carry-forward must not return
+/// to re-head it into a second zone-change event.
 #[test]
 fn compound_mass_exile_possessive_zone_conjunct_stays_an_honest_gap() {
     let def = parse_effect_chain(
@@ -4657,9 +4801,9 @@ fn compound_mass_exile_possessive_zone_conjunct_stays_an_honest_gap() {
 /// Tested fence: a mass RETURN to hand is dispatched with one origin zone inferred from the
 /// whole remainder, so Soulquake's two-zone conjunction ("all creatures on the battlefield
 /// and all creature cards in graveyards") would carry the wrong origin for its first leg.
-/// The verb carry-forward is deliberately limited to mass exile; this card stays an honest
-/// gap until the origin inference reads each leg's own zone. Reach guard: the first leg
-/// parsed as a mass move, so the compound splitter was consulted.
+/// The population-union recognizer is deliberately limited to mass exile; this card stays
+/// an honest gap until the return paths read each leg's own zone. Reach guard: the first
+/// leg parsed as a mass move, so the compound splitter was consulted.
 #[test]
 fn compound_mass_return_two_zone_conjunct_stays_an_honest_gap() {
     let def = parse_effect_chain(
@@ -34450,12 +34594,13 @@ fn ultimate_nullification_exiles_creatures_and_all_graveyards() {
     );
 }
 
-/// Reach-guard: a pure permanent-type union with NO zone leg ("Exile all
-/// creatures and artifacts") must be DECLINED by the heterogeneous recognizer and
-/// keep the existing type-union lowering — crucially with NO `InZone(Battlefield)`
-/// scoping injected (that belongs only to the mixed permanent+zone form).
+/// CR 109.2: a purely bare leg union ("Exile all creatures and artifacts")
+/// is ONE battlefield population — the recognizer returns it UNCHANGED,
+/// with NO `InZone(Battlefield)` scoping injected (that belongs only beside
+/// a leg that names a zone; the resolver defaults an empty `extract_zones()`
+/// to the battlefield).
 #[test]
-fn exile_permanents_and_zones_declines_pure_type_union() {
+fn exile_pure_type_union_carries_no_zone_scoping() {
     let def = parse_effect_chain("Exile all creatures and artifacts.", AbilityKind::Spell);
     let filters = match &*def.effect {
         Effect::ChangeZoneAll {

@@ -24416,13 +24416,15 @@ fn try_parse_verb_and_target<'a>(
                 "",
             ));
         }
-        // CR 406.2 + CR 404.1 + CR 608.2f: "exile all <permanent types> and
-        // <zone(s)>" (Ultimate Nullification) is ONE mass-exile instruction
-        // spanning the battlefield and whole zones, not a compound. This is the
+        // CR 406.2 + CR 404.1 + CR 108.2 + CR 608.2f: "exile all <permanent
+        // types> and <zone(s)>" (Ultimate Nullification) is ONE mass-exile
+        // instruction spanning the battlefield and whole zones — as is a union
+        // whose legs each carry their own zone (Shadows' Verdict: "… from the
+        // battlefield and … from all graveyards"). This is the
         // compound-splitter's remainder probe: claiming the whole clause (empty
-        // remainder) keeps it single so it is not mis-split into an orphaned
-        // "graveyards" conjunct. The actual `ChangeZoneAll { Or[..] }` is built
-        // by `parse_exile_ast`, which mirrors this recognizer.
+        // remainder) keeps it single so it is not mis-split into chained
+        // zone-change events. The actual `ChangeZoneAll { Or[..] }` is built by
+        // `parse_exile_ast`, which mirrors this recognizer.
         if let Some(target) =
             imperative::try_parse_mass_exile_permanents_and_zones(rest, rest_lower, ctx)
         {
@@ -25316,6 +25318,13 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // "all Samurai you control"; prepend the primary verb so the existing
     // mass parser sees "untap all Samurai you control".
     //
+    // A mass-exile population union ("exile all A and all B") never reaches
+    // here: `try_parse_mass_exile_permanents_and_zones` claims the whole
+    // clause upstream, so a verbless "all <filter>" conjunct it declines
+    // stays an honest `Unimplemented` gap instead of being re-headed "exile"
+    // into a SECOND zone-change event (CR 608.2f wants one simultaneous
+    // instruction, never a chained one).
+    //
     // CR 109.5: but "each of your opponents loses life …" is a player
     // subject-predicate clause, not a verbless object continuation — never
     // re-head it with the primary action verb. `subject_application_is_player_scoped`
@@ -25332,9 +25341,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         .is_ok()
         && !subject_application_is_player_scoped(sub_text, &mut continuation_ctx)
     {
-        if let Some(verb) = extract_effect_verb(&primary_effect)
-            .or_else(|| extract_mass_exile_verb(&primary_effect))
-        {
+        if let Some(verb) = extract_effect_verb(&primary_effect) {
             let reparsed_text = format!("{verb} {sub_text}");
             let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
             if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
@@ -59019,24 +59026,6 @@ fn add_single_target_constraint(filter: TargetFilter) -> TargetFilter {
             ],
         },
     }
-}
-
-/// CR 608.2c: a mass exile carries its verb forward to a verbless "all <filter>" / "each <filter>"
-/// conjunct ("exile all A and all B"). Kept out of `extract_effect_verb` on purpose: that table also
-/// feeds the possessive-zone, `target` and chunk-loop carry-forwards, and "exile all creatures they
-/// control and their graveyard" must stay a strict failure (its first leg binds "they" to no
-/// player). Only the exile destination: a mass return to hand is dispatched with a single inferred
-/// origin zone, which a two-zone conjunction ("all A on the battlefield and all B in graveyards")
-/// cannot share, so it stays an honest gap.
-fn extract_mass_exile_verb(effect: &Effect) -> Option<&'static str> {
-    matches!(
-        effect,
-        Effect::ChangeZoneAll {
-            destination: Zone::Exile,
-            ..
-        }
-    )
-    .then_some("exile")
 }
 
 /// Extract the imperative verb keyword from an effect for verb carry-forward

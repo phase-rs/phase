@@ -3736,27 +3736,41 @@ fn parse_same_name_exile_source<'a>(
     .parse(input)
 }
 
-/// CR 406.2 + CR 404.1 + CR 108.2 + CR 608.2f: "exile all `<permanent types>` and
-/// `<zone(s)>`" — a heterogeneous mass exile whose operand unions a battlefield
-/// permanent population with one or more whole-zone populations (every card in
-/// every player's graveyard / hand / library, keyed by owner per CR 400.3).
-/// Ultimate Nullification ("Exile all creatures and graveyards") is the
-/// exemplar. Generalizes to any permutation ("… creatures and artifacts and
-/// graveyards", "… creatures and graveyards and hands").
+/// CR 406.2 + CR 404.1 + CR 108.2 + CR 608.2f: "exile all `<population>` and
+/// `<population>`, …" — a heterogeneous mass exile whose operand is ONE union
+/// of populations, so the resolving `ChangeZoneAll` (built with `origin: None`
+/// and scanning `extract_zones()`) moves every match simultaneously
+/// (CR 608.2f). One shared [`parse_mass_type_union`] read feeds two ways in:
 ///
-/// The permanent legs are parsed by [`parse_mass_type_union`] (CR 205.2a +
-/// CR 205.3a — a card-type/subtype union) and scoped to the battlefield via
-/// `InZone`; the trailing zone legs become an all-cards (`TypeFilter::Card`),
-/// all-owners (`controller: None`) leg carrying the zone union on `InAnyZone`.
-/// The two are merged into one `Or`, so the resolving `ChangeZoneAll` scans
-/// `extract_zones()` = Battlefield ∪ zone-union and moves every match to exile
-/// simultaneously (CR 608.2f) — one instruction, never a battlefield wipe plus
-/// an orphaned zone conjunct.
+/// * Way 1 — bare battlefield permanent legs followed by trailing whole-zone
+///   words ("Exile all creatures and graveyards", Ultimate Nullification). The
+///   permanent legs are a CR 205.2a + CR 205.3a type union scoped to the
+///   battlefield via `InZone`; the trailing zone legs become an all-cards
+///   (`TypeFilter::Card`, CR 108.2), all-owners (`controller: None`,
+///   CR 400.3) leg carrying the zone union on `InAnyZone` (CR 404.1).
+/// * Way 2 — every leg carries its OWN zone ("Exile all creatures and
+///   planeswalkers with mana value 3 or less from the battlefield and all
+///   creature and planeswalker cards with mana value 3 or less from all
+///   graveyards", Shadows' Verdict; "Exile all permanents and all cards from
+///   all graveyards", Once More with Feeling). Each leg keeps its own filter,
+///   controller, and zone. One `ChangeZoneAll` announces a single population
+///   latched before any object moves, so a leaves-the-graveyard trigger's
+///   look-back (CR 603.10a) still sees the graveyard leg's cards leave even
+///   when an earlier leg exiled the watching permanent — a chained second
+///   effect would move the groups as two separate zone-change events and lose
+///   the trigger (Stonebound Mentor watching Shadows' Verdict).
 ///
-/// Declines (`None`) unless a permanent leg is followed by at least one zone leg
-/// AND the operand is fully consumed (only trailing punctuation may remain), so
-/// pure type unions ("all creatures and artifacts") keep the existing type-union
-/// path and no trailing fragment is ever silently dropped.
+/// CR 109.2: a leg with no zone property is a battlefield permanent, so when
+/// any other leg names a zone the bare legs gain `InZone(Battlefield)` —
+/// without it `extract_zones()` would report only the written zones and the
+/// battlefield would never be scanned. A union of purely bare legs is
+/// returned unchanged (one battlefield population; the resolver defaults an
+/// empty `extract_zones()` to the battlefield).
+///
+/// Declines (`None`) on every other shape — a single leg, fewer than two
+/// `Typed` legs, a stack-object or non-Typed leg, or a remainder beyond
+/// trailing punctuation — so owner-scoped zone forms keep their own paths and
+/// no trailing fragment is ever silently dropped.
 pub(super) fn try_parse_mass_exile_permanents_and_zones(
     rest: &str,
     rest_lower: &str,
@@ -3768,40 +3782,128 @@ pub(super) fn try_parse_mass_exile_permanents_and_zones(
     if !starts_with_type_word(rest_lower) {
         return None;
     }
-    // CR 205.2a + CR 205.3a: consume the leading permanent-type union
-    // ("creatures", "creatures and artifacts", …); `rem` is the untyped tail
-    // (e.g. " and graveyards").
-    let (perm_filter, rem) = parse_mass_type_union(rest, ctx);
-    // The leading leg MUST be a bare battlefield permanent-type description. If
-    // `parse_mass_type_union` already consumed an explicit source zone or owner
-    // scope ("… cards from that player's hand", "… cards from all hands"), this
-    // form belongs to the owner-scoped multi-zone parser, not here — injecting
-    // `InZone(Battlefield)` below would make that zone leg unsatisfiable and the
-    // rebuilt zone leg would drop the parsed owner (CR 400.3) and type
-    // restriction (CR 205). Decline so Thought Distortion / Worldfire keep their
-    // existing owner-scoped parse.
-    if !is_bare_battlefield_permanent_leg(&perm_filter) {
+    // CR 205.2a + CR 205.3a: consume the whole population list ("creatures",
+    // "creatures and artifacts", "creatures … from the battlefield and all
+    // creature cards … from all graveyards"); `rem` is whatever follows the
+    // last leg — trailing zone words, sentence punctuation, or an orphan
+    // fragment the guards below must reject.
+    let (union, rem) = parse_mass_type_union(rest, ctx);
+    // ---- Way 1: bare permanent legs + trailing whole-zone words ----
+    // The legs MUST be bare battlefield permanent-type descriptions. If
+    // `parse_mass_type_union` already consumed an explicit source zone or
+    // owner scope ("… cards from that player's hand", "… cards from all
+    // hands"), this form belongs to the owner-scoped multi-zone parser, not
+    // here — injecting `InZone(Battlefield)` below would make that zone leg
+    // unsatisfiable and the rebuilt zone leg would drop the parsed owner
+    // (CR 400.3) and type restriction (CR 205). Declining keeps Thought
+    // Distortion / Worldfire on their existing owner-scoped parse; a bare
+    // union whose tail is not bare zone words falls through to Way 2.
+    if is_bare_battlefield_permanent_leg(&union) {
+        // CR 404.1 + CR 108.2: the trailing whole-zone union — `None` when the
+        // tail is not bare zone words.
+        if let Some(zones) = parse_trailing_zone_union(&rem.to_lowercase()) {
+            // CR 109.2: a bare card-type description ("creatures", no zone
+            // word / "card") means permanents of that type on the
+            // battlefield — so scope the permanent legs to the battlefield.
+            // This also makes `ChangeZoneAll::extract_zones` yield
+            // Battlefield ∪ zone-union; without it the zone leg would shadow
+            // the scan and battlefield permanents would never be collected.
+            let perm_scoped = super::add_filter_props(
+                union,
+                &[FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }],
+            );
+            // CR 108.2 + CR 404.1: "all cards in `<zone(s)>`" — a bare zone
+            // word (no possessive) is every player's such zone, so the leg is
+            // `TypeFilter::Card` (CR 108.2) with `controller` left `None`
+            // (every owner).
+            let zone_leg = TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::InAnyZone { zones }]),
+            );
+            return Some(merge_or_filters(perm_scoped, zone_leg));
+        }
+    }
+    // ---- Way 2: every leg carries its own zone (or is bare = battlefield) ----
+    // CR 608.2f: at least two population legs — a single leg, however scoped,
+    // is not a union and keeps the generic single-population path.
+    let TargetFilter::Or {
+        filters: leg_filters,
+    } = &union
+    else {
+        return None;
+    };
+    if leg_filters.len() < 2 {
         return None;
     }
-    // CR 404.1 + CR 108.2: the trailing whole-zone union — declines if absent.
-    let zones = parse_trailing_zone_union(&rem.to_lowercase())?;
-    // CR 109.2: a bare card-type description ("creatures", no zone word / "card")
-    // means permanents of that type on the battlefield — so scope the permanent
-    // legs to the battlefield. This also makes `ChangeZoneAll::extract_zones`
-    // yield Battlefield ∪ zone-union; without it the zone leg would shadow the
-    // scan and battlefield permanents would never be collected.
-    let perm_scoped = super::add_filter_props(
-        perm_filter,
-        &[FilterProp::InZone {
-            zone: Zone::Battlefield,
-        }],
-    );
-    // CR 108.2 + CR 404.1: "all cards in `<zone(s)>`" — a bare zone word (no
-    // possessive) is every player's such zone, so the leg is `TypeFilter::Card`
-    // (CR 108.2) with `controller` left `None` (every owner).
-    let zone_leg =
-        TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::InAnyZone { zones }]));
-    Some(merge_or_filters(perm_scoped, zone_leg))
+    // Every leg must be a plain `Typed` population. Any other shape — a
+    // `StackSpell`/`TrackedSet` referent or an `And`/`Not`-wrapped exclusion —
+    // has its own mass-exile path and must not be silently re-scoped here.
+    if !leg_filters
+        .iter()
+        .all(|leg| matches!(leg, TargetFilter::Typed(_)))
+    {
+        return None;
+    }
+    // CR 112.1: a stack-object leg ("exile all creatures and all spells") is
+    // dispatched by the stack-scoped mass-exile paths, never a zone union.
+    if filter_targets_stack(&union) {
+        return None;
+    }
+    // Full consumption: nothing but sentence punctuation may remain, so no
+    // trailing fragment is orphaned into an unsupported child clause.
+    if !terminal_punctuation_only(rem) {
+        return None;
+    }
+    // CR 109.2: a leg with no zone property is a battlefield permanent. A
+    // purely bare union is one battlefield population, returned unchanged (the
+    // resolver defaults an empty `extract_zones()` to the battlefield).
+    let leg_zones: Vec<Vec<Zone>> = leg_filters
+        .iter()
+        .map(TargetFilter::extract_zones)
+        .collect();
+    if leg_zones.iter().all(Vec::is_empty) {
+        return Some(union);
+    }
+    // CR 608.2f: the union is a CROSS-zone operation only when the legs, bare
+    // ones counted as battlefield, name at least two distinct zones. Legs that
+    // all name the same zone ("artifact and enchantment cards from all
+    // graveyards") are one population the generic single-origin path already
+    // reads; leave that parse untouched.
+    let mut zones = vec![];
+    for leg in &leg_zones {
+        for zone in if leg.is_empty() {
+            &[Zone::Battlefield][..]
+        } else {
+            leg.as_slice()
+        } {
+            if !zones.contains(zone) {
+                zones.push(*zone);
+            }
+        }
+    }
+    if zones.len() < 2 {
+        return None;
+    }
+    // A bare leg beside a zoned one must name its battlefield, or
+    // `extract_zones()` would report only the written zones.
+    let filters = leg_filters
+        .iter()
+        .zip(&leg_zones)
+        .map(|(leg, zones)| {
+            if zones.is_empty() {
+                super::add_filter_props(
+                    leg.clone(),
+                    &[FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    }],
+                )
+            } else {
+                leg.clone()
+            }
+        })
+        .collect();
+    Some(TargetFilter::Or { filters })
 }
 
 /// Whether every leg of `filter` is a BARE battlefield permanent-type
@@ -12782,10 +12884,12 @@ pub(super) fn parse_exile_ast(
         // types> and <zone(s)>" — a heterogeneous union of a battlefield
         // permanent population and whole-zone (graveyard/hand/library)
         // populations (Ultimate Nullification: "Exile all creatures and
-        // graveyards"). Recognized before the type-only union path below, which
-        // parses only the permanent leg and orphans the trailing zone leg as an
-        // unsupported child clause. `origin: None` defers the multi-zone scan to
-        // `extract_zones()` (Battlefield ∪ zone-union) carried on the filter.
+        // graveyards"), or of legs each carrying their own zone (Shadows'
+        // Verdict: "… from the battlefield and … from all graveyards").
+        // Recognized before the type-only union path below, which parses only
+        // the first leg and orphans the rest as unsupported child clauses.
+        // `origin: None` defers the multi-zone scan to `extract_zones()`
+        // (Battlefield ∪ zone-union) carried on the filter.
         if let Some(target) = try_parse_mass_exile_permanents_and_zones(rest, rest_lower, ctx) {
             return Some(ZoneCounterImperativeAst::Exile {
                 origin: None,
