@@ -3881,7 +3881,10 @@ pub fn resolve_post_replacement(
 /// When absent (e.g. activated abilities), the ability's own source is read through
 /// its pinned announcement epoch: the live object only while it is still that
 /// incarnation, else that incarnation's exit LKI.
-fn damage_context_from_ability(state: &GameState, ability: &ResolvedAbility) -> DamageContext {
+pub(crate) fn damage_context_from_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> DamageContext {
     damage_context_for_subject(
         state,
         ability.source_id,
@@ -4165,7 +4168,7 @@ pub(super) fn damage_sources(state: &GameState, ability: &ResolvedAbility) -> Ve
 
 /// CR 120.3: the recipients of a `DealDamage` node. Shared by `resolve` and
 /// `stack_reach`, so a pending node is read with the resolver's own binding.
-pub(super) fn damage_recipients(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
+pub(crate) fn damage_recipients(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
     let Effect::DealDamage {
         damage_source,
         target: target_filter,

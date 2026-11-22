@@ -5194,6 +5194,86 @@ fn simultaneous_channel_harm_riders_ask_in_apnap_order() {
     }
 }
 
+/// CR 101.4 + CR 616.1: a transferred creature's counter order belongs to its
+/// current controller, while Channel Harm's optional choice belongs to its caster.
+#[test]
+fn transferred_gatta_and_luzzu_rider_uses_counter_chooser_for_apnap() {
+    let mut scenario = rider_board();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let gatta = gatta_and_luzzu(&mut scenario);
+    let (scales, season) = scales_and_season(&mut scenario, P1);
+    let offering = spell(
+        &mut scenario,
+        "Harmless Offering",
+        "Target opponent gains control of target permanent you control.",
+        false,
+    );
+    let harm = spell(&mut scenario, "Channel Harm", CHANNEL_HARM, true);
+    let mut runner = scenario.build();
+    cast(&mut runner, gatta, vec![TargetRef::Object(gatta)]);
+    let gatta = runner
+        .state()
+        .objects
+        .values()
+        .find(|object| object.name == "Gatta and Luzzu" && object.zone == Zone::Battlefield)
+        .expect("Gatta and Luzzu resolved")
+        .id;
+    cast(&mut runner, offering, vec![TargetRef::Object(gatta)]);
+    assert_eq!(runner.state().objects[&gatta].controller, P1);
+    cast(&mut runner, harm, vec![TargetRef::Object(bears)]);
+
+    let mut choosers = Vec::new();
+    let mut choose_scales = preferring(vec![scales]);
+    let combat = fight_answering(
+        &mut runner,
+        &[bears],
+        &[(gatta, bears)],
+        |state| match &state.waiting_for {
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                choosers.push(*player);
+                GameAction::DecideOptionalEffect { accept: false }
+            }
+            WaitingFor::ReplacementChoice { player, .. } => {
+                choosers.push(*player);
+                choose_scales(state)
+            }
+            other => panic!("unexpected rider prompt: {other:?}"),
+        },
+    );
+
+    assert_eq!(
+        choosers.first(),
+        Some(&P0),
+        "Channel Harm must ask first: {choosers:?}"
+    );
+    assert_eq!(choosers.iter().filter(|&&player| player == P0).count(), 1);
+    assert!(!combat.prompts.is_empty());
+    assert!(combat.choosers.iter().all(|&player| player == P1));
+    for prompt in &combat.prompts {
+        assert_eq!(offered(prompt), offered(&[scales, season]));
+    }
+    assert_batch_settled(&runner);
+    let mut applications: Vec<_> = combat
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamagePrevented {
+                target: TargetRef::Object(id),
+                amount,
+                ..
+            } => Some((*id, *amount)),
+            _ => None,
+        })
+        .collect();
+    applications.sort_unstable();
+    assert_eq!(applications, [(bears, 1), (gatta, 2)]);
+    assert!(matches!(plus_counters(&runner, gatta), 6 | 8));
+    for creature in [bears, gatta] {
+        assert_eq!(runner.state().objects[&creature].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&creature].damage_marked, 0);
+    }
+}
+
 /// Channel Harm's ruling: two Channel Harms make "a loop that either player can break by choosing
 /// to not have Channel Harm try to deal damage", and "no damage will be dealt in either case". P0's
 /// Channel Harm is at P1's Hill Giant, P1's at P0's Grizzly Bears, and P1's Lightning Bolt at P0's
@@ -7342,10 +7422,16 @@ fn defenders_poison_order_precedes_single_lifelink_draw_with_alms_collector() {
     lifelink_substitute_and_poison_order(DrawReplacement::AlmsCollector);
 }
 
+#[test]
+fn defenders_poison_order_precedes_its_zurs_weirding_offers_on_lifelink_draws() {
+    lifelink_substitute_and_poison_order(DrawReplacement::ZursWeirding);
+}
+
 #[derive(Clone, Copy)]
 enum DrawReplacement {
     Abundance(PlayerId),
     AlmsCollector,
+    ZursWeirding,
 }
 
 fn lifelink_substitute_and_poison_order(draw_replacement: DrawReplacement) {
@@ -7368,6 +7454,20 @@ fn lifelink_substitute_and_poison_order(draw_replacement: DrawReplacement) {
                 ),
                 scenario
                     .add_enchantment_from_oracle(controller, "Abundance", ABUNDANCE)
+                    .id(),
+                2,
+            ),
+            DrawReplacement::ZursWeirding => (
+                creature_with_keywords(
+                    &mut scenario,
+                    P0,
+                    "Vampire Nighthawk",
+                    (2, 3),
+                    &["Flying", "Deathtouch", "Lifelink"],
+                    VAMPIRE_NIGHTHAWK,
+                ),
+                scenario
+                    .add_enchantment_from_oracle(P1, "Zur's Weirding", ZURS_WEIRDING)
                     .id(),
                 2,
             ),
@@ -7417,15 +7517,28 @@ fn lifelink_substitute_and_poison_order(draw_replacement: DrawReplacement) {
         let hand_before = hand_size(&runner, P0);
         let mut decline = answering_abundance(false);
         let mut draw_prompts = 0;
+        let mut chose_poison_order = false;
+        let mut weirding_prompts = 0;
         let combat = fight_driving(&mut runner, &[vampire, elf], &[], |runner| {
             let state = runner.state();
             assert!(state.pending_combat_lifelink.is_some());
+            if let WaitingFor::OpponentMayChoice { player, .. } = &state.waiting_for {
+                assert!(matches!(draw_replacement, DrawReplacement::ZursWeirding));
+                assert_eq!(*player, P1);
+                assert!(
+                    chose_poison_order,
+                    "P1 must order poison before its draw offers"
+                );
+                weirding_prompts += 1;
+                return GameAction::DecideOptionalEffect { accept: false };
+            }
             assert_eq!(state.players[1].poison_counters, 0);
             if let WaitingFor::ReplacementChoice {
                 player, candidates, ..
             } = &state.waiting_for
             {
                 if *player == P1 {
+                    chose_poison_order = true;
                     assert_eq!(
                         draw_prompts, expected_draws_before_order,
                         "Only P0's Abundance may prompt before P1's poison order"
@@ -7454,6 +7567,14 @@ fn lifelink_substitute_and_poison_order(draw_replacement: DrawReplacement) {
         });
 
         assert_batch_settled(&runner);
+        assert_eq!(
+            weirding_prompts,
+            if matches!(draw_replacement, DrawReplacement::ZursWeirding) {
+                2
+            } else {
+                0
+            }
+        );
         let expected_choosers: &[PlayerId] = if active_player_has_abundance {
             &[P0, P0, P1]
         } else {

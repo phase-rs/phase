@@ -228,7 +228,7 @@ pub fn resolve_gain(
 
 /// The proposed `LifeGain` event for an entry, or `None` when the change is
 /// vacuous or suppressed before the replacement pipeline.
-fn proposed_life_gain(
+pub(crate) fn proposed_life_gain(
     state: &GameState,
     player_id: PlayerId,
     amount: u32,
@@ -280,7 +280,7 @@ fn proposed_event_may_prompt(state: &GameState, event: &ProposedEvent) -> bool {
 
 /// The proposed `LifeLoss` event for an entry, or `None` when the change is
 /// vacuous or suppressed before the replacement pipeline.
-fn proposed_life_loss(
+pub(crate) fn proposed_life_loss(
     state: &GameState,
     player_id: PlayerId,
     amount: u32,
@@ -1405,7 +1405,7 @@ pub fn resolve_lose(
     Ok(())
 }
 
-pub(super) fn resolve_life_loss_target(
+pub(crate) fn resolve_life_loss_target(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: Option<&TargetFilter>,

@@ -11476,6 +11476,119 @@ impl ReplacementPromptCauses {
     }
 }
 
+/// CR 616.1: visit the possible choosers of this event's replacement
+/// menu and any optional replacements on it, using the live prompt routing.
+pub(crate) fn visit_proposed_event_choosers(
+    state: &GameState,
+    event: &ProposedEvent,
+    visit: &mut impl FnMut(PlayerId),
+) {
+    let registry = replacement_registry();
+    let candidates = find_applicable_replacements(state, event, registry);
+    let ordering_matters =
+        candidates.len() >= 2 && replacement_ordering_is_material(state, &candidates, event);
+    if let Some(player) = replacement_order_choice_player(state, event).filter(|_| ordering_matters)
+    {
+        visit(player);
+    }
+    for candidate in candidates {
+        let definition = replacement_definition_for_id(state, candidate);
+        if let Some(player) = replacement_choice_player(state, event, candidate)
+            .filter(|_| definition.is_none_or(|def| replacement_mode_is_optional(&def.mode)))
+        {
+            visit(player);
+        }
+        let Some(definition) = definition else {
+            continue;
+        };
+        match event {
+            ProposedEvent::LifeGain {
+                player_id, amount, ..
+            } if plain_life_gain_draw(state, *player_id, candidate, definition) => {
+                visit_draw_event_choosers(state, *player_id, *amount, visit);
+            }
+            ProposedEvent::Draw {
+                player_id, stage, ..
+            } => {
+                let Some(execute) = definition.execute.as_deref() else {
+                    continue;
+                };
+                let controller = replacement_ability_controller(state, candidate, definition);
+                if let Effect::Draw { target, .. } = execute.effect.as_ref() {
+                    // CR 121.2a: a multi-card instruction can substitute draws
+                    // for another player, whose individual draw has its own chooser.
+                    if *stage == DrawEventStage::Instruction
+                        && draw_head_draws_for_other_player(target, controller, *player_id)
+                    {
+                        visit_draw_event_choosers(state, controller, 1, visit);
+                    }
+                } else {
+                    let resolved = build_resolved_from_def(execute, candidate.source, controller);
+                    visit_draw_fanout_choosers(state, &resolved, *player_id, visit);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// CR 121.2 + CR 616.1: project the draw instruction and individual delivery stages.
+pub(crate) fn visit_draw_event_choosers(
+    state: &GameState,
+    player_id: PlayerId,
+    count: u32,
+    visit: &mut impl FnMut(PlayerId),
+) {
+    let individual = ProposedEvent::Draw {
+        player_id,
+        count: 1,
+        stage: DrawEventStage::Individual,
+        applied: HashSet::new(),
+    };
+    visit_proposed_event_choosers(state, &individual, visit);
+    // A one-card draw cannot use the multi-card substitution path above.
+    if count > 1 {
+        visit_proposed_event_choosers(
+            state,
+            &ProposedEvent::Draw {
+                player_id,
+                count,
+                stage: DrawEventStage::Instruction,
+                applied: HashSet::new(),
+            },
+            visit,
+        );
+    }
+}
+
+/// CR 608.2d + CR 101.4: a draw substitute can address its "may" to
+/// eligible seats other than the drawer (for example, "any other player").
+fn visit_draw_fanout_choosers(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    drawer: PlayerId,
+    visit: &mut impl FnMut(PlayerId),
+) {
+    use crate::types::ability::OpponentMayScope;
+    if let Some(scope) = ability.optional_for.filter(|_| ability.optional) {
+        let excluded = match scope {
+            OpponentMayScope::AnyOpponent => Some(ability.controller),
+            OpponentMayScope::AnyPlayer => None,
+            OpponentMayScope::AnyOtherPlayer => Some(drawer),
+        };
+        for player in super::players::apnap_order(state) {
+            if Some(player) != excluded
+                && !super::effects::offered_seat_cannot_accept(state, ability, player)
+            {
+                visit(player);
+            }
+        }
+    }
+    for (_, child) in ability.child_links() {
+        visit_draw_fanout_choosers(state, child, drawer, visit);
+    }
+}
+
 /// CR 614.1a + CR 616.1: can the live replacement pipeline open a player choice
 /// on THIS proposed event, and why? Read-only (`&GameState`, no
 /// `apply_single_replacement`), and derived from the pipeline's own candidate
@@ -11542,39 +11655,15 @@ fn life_gain_substitute_may_prompt(
     def: &ReplacementDefinition,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
 ) -> bool {
-    let (
-        ProposedEvent::LifeGain {
-            player_id, amount, ..
-        },
-        Some(execute),
-    ) = (event, def.execute.as_deref())
+    let ProposedEvent::LifeGain {
+        player_id, amount, ..
+    } = event
     else {
         return true;
     };
-    let Effect::Draw {
-        target: TargetFilter::Controller,
-        count: QuantityExpr::Ref {
-            qty: QuantityRef::EventContextAmount,
-        },
-    } = execute.effect.as_ref()
-    else {
-        return true;
-    };
-    if def.runtime_execute.is_some()
-        || execute.optional
-        || execute.sub_ability.is_some()
-        || execute.else_ability.is_some()
-        || execute.repeat_for.is_some()
-        || execute.modal.is_some()
-        || execute.unless_pay.is_some()
-        || state
-            .objects
-            .get(&rid.source)
-            .is_none_or(|source| source.controller != *player_id)
-    {
+    if !plain_life_gain_draw(state, *player_id, rid, def) {
         return true;
     }
-
     let has_replacement = |event| !find_applicable_replacements(state, &event, registry).is_empty();
     [
         (DrawEventStage::Instruction, *amount),
@@ -11596,6 +11685,37 @@ fn life_gain_substitute_may_prompt(
             None,
         ))
     })
+}
+
+fn plain_life_gain_draw(
+    state: &GameState,
+    player_id: PlayerId,
+    rid: ReplacementId,
+    def: &ReplacementDefinition,
+) -> bool {
+    let Some(execute) = def.execute.as_deref() else {
+        return false;
+    };
+    let Effect::Draw {
+        target: TargetFilter::Controller,
+        count: QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        },
+    } = execute.effect.as_ref()
+    else {
+        return false;
+    };
+    def.runtime_execute.is_none()
+        && !execute.optional
+        && execute.sub_ability.is_none()
+        && execute.else_ability.is_none()
+        && execute.repeat_for.is_none()
+        && execute.modal.is_none()
+        && execute.unless_pay.is_none()
+        && state
+            .objects
+            .get(&rid.source)
+            .is_some_and(|source| source.controller == player_id)
 }
 
 /// CR 732.2a: does this proposed event's applier write a board axis the

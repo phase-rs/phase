@@ -2071,13 +2071,23 @@ fn reorder_ranked_slots<T: Clone>(items: &mut [T], rank: impl Fn(&T) -> Option<u
 }
 
 /// CR 616.1 + CR 101.4 + CR 702.15b: the APNAP rank of a lifelink gain's
-/// choice owner (the gaining player, the source's controller) when the gain's
-/// replacement pipeline or its substitute's action can open a choice.
+/// earliest possible chooser. A gain's replacement order belongs to the
+/// gaining player, but its substitute can address another player.
 /// A gain with no rank keeps its slot and is staged ahead of a leg only when
 /// its owner is the player that leg damages.
 fn lifelink_gain_rank(state: &GameState, controller: PlayerId, amount: u32) -> Option<usize> {
-    crate::game::effects::life::life_gain_may_prompt(state, controller, amount)
-        .then(|| crate::game::topology::apnap_team_rank(state, controller))
+    use crate::game::effects::life;
+    use crate::game::topology::apnap_team_rank;
+    let event = life::proposed_life_gain(state, controller, amount)?;
+    let mut earliest = None;
+    replacement::visit_proposed_event_choosers(state, &event, &mut |player| {
+        let rank = apnap_team_rank(state, player);
+        earliest = Some(earliest.map_or(rank, |current: usize| current.min(rank)));
+    });
+    earliest.or_else(|| {
+        life::life_gain_may_prompt(state, controller, amount)
+            .then(|| apnap_team_rank(state, controller))
+    })
 }
 
 /// CR 120.4b: what a not-yet-applied leg will deal: its survivor's amount, or
@@ -2202,9 +2212,10 @@ fn stage_combat_lifelink_gain(
 ///   only when the leg's result can open a choice (`combat_leg_may_prompt`):
 ///   the damage and its lifelink gain are simultaneous results of the batch
 ///   (CR 510.2, CR 120.3f), so their choices are made in APNAP order;
-/// - EVERY gain (choice-capable or not) owned by an equal-rank player (the
-///   damaged player, or one shared-turn team, CR 805.6). Staging the gain
-///   before the leg writes the board makes both read the pre-batch board. A
+/// - Gains of an equal-rank player (the damaged player or a shared-turn
+///   teammate, CR 805.6) whose chooser has the same or an earlier rank, plus
+///   choice-free gains. Staging the gain before the leg writes the board
+///   makes both read the pre-batch board. A
 ///   gain's substitute runs during staging (CR 614.6), so it can end the game
 ///   before the leg is applied (CR 104.1).
 ///
@@ -2245,10 +2256,11 @@ fn stage_earlier_apnap_lifelink(
         .into_iter()
         .filter_map(|(source_id, controller, amount)| {
             let gain_rank = crate::game::topology::apnap_team_rank(state, controller);
-            let earlier = leg_may_prompt
-                && lifelink_gain_rank(state, controller, amount)
-                    .is_some_and(|capable_rank| capable_rank < rank);
-            (earlier || gain_rank == rank).then_some((gain_rank, source_id, controller, amount))
+            let chooser_rank = lifelink_gain_rank(state, controller, amount);
+            let earlier = leg_may_prompt && chooser_rank.is_some_and(|chooser| chooser < rank);
+            let scheduled_rank = chooser_rank.unwrap_or(gain_rank);
+            let same_team = gain_rank == rank && scheduled_rank <= rank;
+            (earlier || same_team).then_some((scheduled_rank, source_id, controller, amount))
         })
         .collect();
     due.sort_by_key(|&(gain_rank, ..)| gain_rank);
@@ -2993,19 +3005,38 @@ fn drain_combat_lifelink(
     // prompt is open, and after nothing else can stamp `last_effect_count`.
     // CR 104.1: a gain that ended the game ends the batch; no rider runs after it.
     if state.game_end.is_none() {
-        let mut prevention_tally = std::mem::take(&mut record.prevention_tally);
-        // CR 101.4: simultaneous rider choices go to the active player first.
-        // Every entry for the same shield has the same rank, so the stable sort
-        // keeps shields intact and preserves registry and recipient order within a rank.
+        let prevention_tally = std::mem::take(&mut record.prevention_tally);
+        // CR 101.4 + CR 616.1: rank whole shields by who can be asked,
+        // preserving registry and recipient order for ties.
         let rank = apnap_ranker(state);
-        prevention_tally.sort_by_cached_key(|entry| {
-            if matches!(entry.key, AppliedReplacementKey::Protection { .. }) {
+        let mut groups: Vec<_> = prevention_tally.chunk_by(|a, b| a.key == b.key).collect();
+        groups.sort_by_cached_key(|group| {
+            if matches!(group[0].key, AppliedReplacementKey::Protection { .. }) {
                 return usize::MAX;
             }
-            aggregate_prevention_definition(state, entry.key.as_replacement_id())
-                .and_then(|def| state.replacement_rider(def))
-                .map_or(usize::MAX, |rider| rank(rider.controller))
+            let rid = group[0].key.as_replacement_id();
+            let Some(def) = aggregate_prevention_definition(state, rid) else {
+                return usize::MAX;
+            };
+            let Some(rider) = state.replacement_rider(def) else {
+                return usize::MAX;
+            };
+            // A rider whose chooser the scan cannot name keeps its own
+            // controller's rank, as before the scan existed.
+            match crate::game::resolution_prompt::prevention_rider_choice_rank(
+                state,
+                rider,
+                group.iter().map(|entry| entry.amount).sum(),
+                def.damage_source_filter
+                    .as_ref()
+                    .and_then(shield_specific_source),
+                &rank,
+            ) {
+                usize::MAX => rank(rider.controller),
+                chooser_rank => chooser_rank,
+            }
         });
+        let prevention_tally: Vec<_> = groups.into_iter().flatten().cloned().collect();
         // CR 608.2c + CR 608.2d: a rider that asks its player a choice (Channel
         // Harm's "you may have Channel Harm deal that much damage") stops Phase D:
         // the later shields wait beneath the prompt as the unpublished remainder,
