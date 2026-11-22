@@ -70,7 +70,9 @@ fn setup() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
         vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
     );
     let runner = scenario.build();
-    let triggers = runner.state().objects[&gauntlet].trigger_definitions.as_slice();
+    let triggers = runner.state().objects[&gauntlet]
+        .trigger_definitions
+        .as_slice();
     assert!(
         triggers.iter().any(|entry| entry.definition.execute.is_some())
             && !triggers.iter().any(|entry| entry
@@ -108,7 +110,11 @@ fn noncreature_cast_prompts_kind_and_only_chosen_kind_grows() {
     // CR 601.2 + CR 603.3d: real production cast of Lightning Bolt aimed at P1.
     // The cast also declares the Gauntlet's trigger target: the helper matches
     // the carrier to the trigger's target slot and the player to Bolt's.
-    runner.cast(bolt).target_player(P1).target_objects(&[carrier]).commit();
+    runner
+        .cast(bolt)
+        .target_player(P1)
+        .target_objects(&[carrier])
+        .commit();
     assert_eq!(
         runner.state().stack.len(),
         2,
@@ -131,7 +137,9 @@ fn noncreature_cast_prompts_kind_and_only_chosen_kind_grows() {
             other => panic!("expected the counter-kind prompt, got {other:?}"),
         }
     }
-    let WaitingFor::NamedChoice { player, options, .. } = runner.state().waiting_for.clone()
+    let WaitingFor::NamedChoice {
+        player, options, ..
+    } = runner.state().waiting_for.clone()
     else {
         panic!(
             "the Gauntlet trigger must ask for the counter kind, got {:?}",

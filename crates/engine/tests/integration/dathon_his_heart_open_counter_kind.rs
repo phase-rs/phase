@@ -7,18 +7,22 @@
 //!
 //! CR 608.2d + CR 122.1: the controller chooses one kind among those already
 //! on the target (no choice with one kind, none with zero), then CR 122.6 one
-//! more counter of that kind is put on it.
+//! more counter of that kind is put on it. The cast trigger (draw; two damage
+//! when the spell is a Saga) and the sorcery-speed restriction have their own
+//! whole-card witnesses at the end of the file.
 
 use crate::support::shared_card_db;
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::engine::EngineError;
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{AbilityDefinition, AbilityKind, Effect};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 fn counters(runner: &GameRunner, id: ObjectId, kind: CounterType) -> u32 {
@@ -211,4 +215,244 @@ fn no_counters_adds_none() {
     runner.activate(dathon, idx).target_object(ench).resolve();
     let obj = &runner.state().objects[&ench];
     assert!(obj.counters.values().all(|n| *n == 0), "nothing to copy");
+}
+
+/// The object ids currently in `player`'s hand, in hand order.
+fn hand_cards(runner: &GameRunner, player: PlayerId) -> Vec<ObjectId> {
+    runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .expect("player exists")
+        .hand
+        .iter()
+        .copied()
+        .collect()
+}
+
+/// Units remaining in `player`'s mana pool.
+fn mana_total(runner: &GameRunner, player: PlayerId) -> usize {
+    runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .expect("player exists")
+        .mana_pool
+        .total()
+}
+
+/// P0 controls Dathon (printed card, `add_real_card`) with the printed
+/// enchantment `spell_name` in hand, a mana pool seeded with exactly `mana`
+/// (the printed cost), and "Island" staged on top of the library — the
+/// `with_library_top(P0, &["Island"])` convention the Quark tests use, so the
+/// card the cast trigger draws is known in advance. P0's precombat main with
+/// an empty stack: a legal cast window (CR 307.1; CR 505.1 + CR 505.6a).
+fn dathon_cast_setup(spell_name: &str, mana: Vec<ManaUnit>) -> (GameRunner, ObjectId) {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Dathon, His Heart Open", Zone::Battlefield, db);
+    let spell = scenario.add_real_card(P0, spell_name, Zone::Hand, db);
+    scenario.with_mana_pool(P0, mana);
+    scenario.with_library_top(P0, &["Island"]);
+    let runner = scenario.build();
+    (runner, spell)
+}
+
+/// Pass priority until the stack drains; any prompt fails loudly, so an
+/// unexpected choice cannot be answered blindly.
+fn settle_without_prompts(runner: &mut GameRunner) {
+    for _ in 0..20 {
+        let WaitingFor::Priority { .. } = runner.state().waiting_for else {
+            panic!(
+                "unexpected prompt while settling: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        if runner.state().stack.is_empty() {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass so the top of the stack resolves");
+    }
+    panic!("the stack never drained: {:?}", runner.state().stack);
+}
+
+/// CR 603.1 + CR 121.1: casting a non-Saga enchantment makes Dathon's
+/// "Whenever you cast an enchantment spell, draw a card" trigger fire and
+/// resolve — P0's hand ends holding exactly the staged library-top card.
+/// The Saga rider does not fire: P1's life is untouched.
+#[test]
+fn casting_a_non_saga_enchantment_draws_without_damage() {
+    // Printed Bad Moon cost, read from the fixture: {1}{B}.
+    let (mut runner, moon) = dathon_cast_setup(
+        "Bad Moon",
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+        ],
+    );
+    assert_eq!(hand_cards(&runner, P0).len(), 1, "only Bad Moon in hand");
+    assert_eq!(hand_cards(&runner, P1).len(), 0);
+    assert_eq!(runner.life(P1), 20, "precondition: P1 at 20");
+
+    // Production path: announce, pay the printed cost, resolve (CR 601.2a-h),
+    // then let the cast trigger resolve off the stack.
+    runner.cast(moon).resolve();
+
+    // Control: this fails if the trigger did not draw — casting moved the
+    // Moon out of hand, so only the trigger's draw can put the known card
+    // there.
+    let hand = hand_cards(&runner, P0);
+    assert_eq!(hand.len(), 1, "drew exactly one card");
+    assert_eq!(
+        runner.state().objects[&hand[0]].name,
+        "Island",
+        "the drawn card is the staged library top"
+    );
+    assert_eq!(
+        runner.state().objects[&moon].zone,
+        Zone::Battlefield,
+        "Bad Moon resolved"
+    );
+    assert_eq!(mana_total(&runner, P0), 0, "the printed cost was paid");
+    assert_eq!(hand_cards(&runner, P1).len(), 0, "P1 drew nothing");
+    assert_eq!(runner.life(P1), 20, "not a Saga — no damage to opponents");
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 603.1 + CR 121.1 + the Saga rider: casting a Saga draws the card AND
+/// has Dathon deal 2 damage to each opponent (P1: 20 -> 18). CR 714.3 / CR 714.2d: the Saga enters
+/// with its lore counter and Chapter I resolves (a 2/2 white Vigilance Knight
+/// token), driven to rest without any prompt.
+#[test]
+fn casting_a_saga_also_deals_two_damage_to_each_opponent() {
+    // Printed History of Benalia cost, read from the fixture: {1}{W}{W}.
+    let (mut runner, saga) = dathon_cast_setup(
+        "History of Benalia",
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
+        ],
+    );
+    assert_eq!(runner.life(P1), 20, "precondition: P1 at 20");
+    assert_eq!(runner.life(P0), 20, "precondition: P0 at 20");
+
+    runner.cast(saga).resolve();
+    // Chapter I (token creation) is choice-free; any prompt fails the settle.
+    settle_without_prompts(&mut runner);
+
+    let hand = hand_cards(&runner, P0);
+    assert_eq!(hand.len(), 1, "drew exactly one card");
+    assert_eq!(
+        runner.state().objects[&hand[0]].name,
+        "Island",
+        "the drawn card is the staged library top"
+    );
+    assert_eq!(
+        runner.state().objects[&saga].zone,
+        Zone::Battlefield,
+        "the Saga resolved"
+    );
+    assert_eq!(mana_total(&runner, P0), 0, "the printed cost was paid");
+    assert_eq!(runner.life(P1), 18, "2 damage to each opponent (P1)");
+    assert_eq!(runner.life(P0), 20, "P0 is not their own opponent");
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// Dathon plus the blank enchantment filler carrying one Stun counter — the
+/// existing `setup` board — but staged at `phase`, so the same printed {2}
+/// activation can be attempted in an illegal and a legal window.
+fn dathon_board_at(phase: Phase) -> (GameRunner, ObjectId, ObjectId) {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(phase);
+    let dathon = scenario.add_real_card(P0, "Dathon, His Heart Open", Zone::Battlefield, db);
+    // Blank enchantment filler: the {2} ability needs a target enchantment
+    // (same exemption as the existing file's "Test Enchantment").
+    let ench = scenario
+        .add_enchantment_from_oracle(P0, "Test Enchantment", "")
+        .id();
+    scenario.with_counter(ench, CounterType::Stun, 1);
+    // Dathon's printed {2} activation cost, funded exactly.
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]); 2],
+    );
+    let runner = scenario.build();
+    let obj = &runner.state().objects[&dathon];
+    assert!(
+        !obj.abilities.iter().any(contains_unimplemented),
+        "Dathon's activated ability must parse with no Unimplemented residue: {:?}",
+        obj.abilities
+    );
+    (runner, dathon, ench)
+}
+
+/// CR 307.1 + CR 602.5d ("Activate only as a sorcery"): the printed {2}
+/// counter ability is rejected outside a main phase with an empty stack —
+/// here P0's own beginning-of-combat step (the scenario API stages it
+/// directly via `at_phase(Phase::BeginCombat)`; P1's turn is the equivalent
+/// negative window but needs raw state mutation to stage) — while the same
+/// activation on the same board at P0's precombat main succeeds. Both sides
+/// live in one test so an engine that always rejected OR always allowed
+/// cannot pass.
+#[test]
+fn dathon_counter_ability_is_sorcery_speed_only() {
+    // Negative: P0's combat step  — priority is P0's, the stack is empty, the
+    // pool covers {2}: everything is legal except the timing, so the
+    // rejection must come from the printed sorcery-speed restriction.
+    let (mut runner, dathon, ench) = dathon_board_at(Phase::BeginCombat);
+    let idx = activated_index(&runner, dathon);
+    assert_eq!(counters(&runner, ench, CounterType::Stun), 1);
+    assert_eq!(mana_total(&runner, P0), 2);
+
+    let Err(rejection) = runner.act(GameAction::ActivateAbility {
+        source_id: dathon,
+        ability_index: idx,
+        payment_mode: CastPaymentMode::Auto,
+    }) else {
+        panic!("the {{2}} ability must be rejected in the combat step");
+    };
+    assert!(
+        matches!(&rejection, EngineError::ActionNotAllowed(msg) if msg.contains("AsSorcery")),
+        "rejected by the printed sorcery-timing restriction, got {rejection:?}"
+    );
+    // Nothing was spent and nothing moved.
+    assert_eq!(
+        counters(&runner, ench, CounterType::Stun),
+        1,
+        "no counter added"
+    );
+    assert_eq!(mana_total(&runner, P0), 2, "the {{2}} was not spent");
+    assert!(
+        runner.state().stack.is_empty(),
+        "nothing was put on the stack"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+
+    // Positive control: identical board at P0's precombat main (empty stack)
+    // — the same announcement is accepted, the cost is paid, and CR 608.2d +
+    // CR 122.6 put one more counter of the only kind present.
+    let (mut runner, dathon, ench) = dathon_board_at(Phase::PreCombatMain);
+    let idx = activated_index(&runner, dathon);
+    runner.activate(dathon, idx).target_object(ench).resolve();
+    assert_eq!(counters(&runner, ench, CounterType::Stun), 2);
+    assert_eq!(mana_total(&runner, P0), 0, "the {{2}} was spent");
+    assert!(runner.state().stack.is_empty());
 }

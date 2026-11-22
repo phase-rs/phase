@@ -2840,7 +2840,10 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                         // FirstEmitted. Its one structural refinement is an optional
                         // payment: there, the override replaces the immediate
                         // `IfYouDo` continuation, not the payment instruction.
-                        // Do not unify it with the `Last*` selectors.
+                        // Do not unify it with the `Last*` selectors. An override
+                        // whose anaphor names an earlier clause ("create two of
+                        // those tokens instead") begins from the clause the parser
+                        // declared for it instead (`instead_antecedent_index`).
                         let bound = env.resolve(
                             &defs,
                             AntecedentSelector::FirstEmitted,

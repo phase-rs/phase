@@ -29179,10 +29179,12 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             card_face_gaps(&face)
         );
     }
+
     /// CR 614.1a + CR 614.6: Dr. McCoy's "would be destroyed, instead remove all
     /// +1/+1 counters from it and all damage already dealt to it is healed" is a
-    /// destroy-instead substitution. This PR ships no batch departure engine, so
-    /// the line must stay honestly unsupported: half-parsing it into a `Destroy`
+    /// destroy-instead substitution. Its riders need the staged simultaneous-Destroy
+    /// batch to deliver them, which is not implemented, so the line must stay
+    /// honestly unsupported: half-parsing it into a `Destroy`
     /// replacement with an `execute` body would let the destruction proceed after
     /// the counters came off (CR 614.6: a replaced event never happens).
     #[test]
@@ -29227,8 +29229,8 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     }
 
     /// The census is the printed record that Crackling Emergence's destroy-instead
-    /// Aura substitution is a known misparse. This PR adds no batch engine, so the
-    /// row must keep saying so: `MissingEffect`, with the unparsed clause text.
+    /// Aura substitution is a known misparse, and the staged Destroy batch cannot
+    /// deliver its rider yet, so the row must keep saying so: `MissingEffect`, with the unparsed clause text.
     #[test]
     fn crackling_emergence_census_row_stays_marked() {
         let entry = ConfirmedMisparses::committed()
@@ -29240,8 +29242,10 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             "the census row must keep its missing-effect class: {entry:?}"
         );
         assert!(
-            entry.clauses.iter().any(|clause| clause
-                .contains("would be destroyed, instead sacrifice this Aura")),
+            entry
+                .clauses
+                .iter()
+                .any(|clause| clause.contains("would be destroyed, instead sacrifice this Aura")),
             "the census row must keep the unparsed destroy-instead clause: {:?}",
             entry.clauses
         );

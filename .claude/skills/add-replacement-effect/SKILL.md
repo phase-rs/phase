@@ -182,7 +182,7 @@ disposition**, not an emitted sibling:
 | IR carrier (`parser/oracle_ir/effect_chain.rs`) | Shape |
 |---|---|
 | `ClauseDisposition::ReplaceMeaning { kind }` | The clause replaces/overrides the meaning of the **prior emitted def(s)** rather than emitting an independent sibling (CR 608.2c: "later text on the card may modify the meaning of earlier text") |
-| `ReplaceMeaningKind::Instead(..)` | Multi-clause base + "instead" override; the tail clauses are stashed in the override's `else_ability` |
+| `ReplaceMeaningKind::Instead { .. }` | Multi-clause base + "instead" override; the tail clauses are stashed in the override's `else_ability` |
 | `ReplaceMeaningKind::DigAlt(..)` / `KeywordOverride` | The other two override shapes — the prior def is popped/wrapped, or attached as `sub_ability` |
 
 **The rule for contributors:** if your new pattern's Oracle text contains an override
