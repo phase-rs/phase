@@ -2909,6 +2909,39 @@ impl GameState {
     }
 }
 
+/// Settled entry snapshots indexed by their turn ledger position.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BattlefieldEntryObservations(im::OrdMap<usize, Arc<TriggerSourceContext>>);
+
+impl BattlefieldEntryObservations {
+    pub(crate) fn get(&self, index: &usize) -> Option<&TriggerSourceContext> {
+        self.0.get(index).map(Arc::as_ref)
+    }
+
+    pub(crate) fn insert(&mut self, index: usize, observation: TriggerSourceContext) {
+        // OrdMap insertion moves whole nodes through recursive stack frames.
+        // Keep those nodes small when a batch settles many entries.
+        self.0.insert(index, Arc::new(observation));
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &TriggerSourceContext> {
+        self.0.values().map(Arc::as_ref)
+    }
+}
+
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
 /// object leaving its current zone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -19668,6 +19701,8 @@ pub enum PersistedRestoreError {
     PrioritySettlementFailed(String),
     #[error("persisted per-player choice cannot be restored: {0}")]
     InvalidPerPlayerChoice(String),
+    #[error("persisted battlefield entry for {object_id:?} has no token status and cannot be aligned with a zone change from the same turn")]
+    UnrecoverableBattlefieldEntryTokenStatus { object_id: ObjectId },
     /// CR 707.10c / CR 601.2c: a parked copy target walk is structurally
     /// malformed (its mode, decided picks, cursor or copy disagree).
     #[error("persisted copy target walk cannot be restored: {0}")]
@@ -20045,6 +20080,7 @@ impl PersistedGameState {
         state
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
+        state.restore_legacy_battlefield_entry_token_status()?;
         state.rehydrate_recovered_checkpoint_rng();
         crate::game::engine_casting::restore_legacy_cast_timing_routes(&mut state)?;
         crate::game::engine_casting::restore_legacy_pitch_cost_resume(&mut state);
@@ -28979,8 +29015,8 @@ declare_game_state! {
     /// through `GameState::battlefield_entry_observation`. An entry with no row was never settled,
     /// and enter observers read the live entrant (or its record). Engine-internal: stripped from
     /// every viewer projection.
-    #[serde(default, skip_serializing_if = "im::OrdMap::is_empty")]
-    pub battlefield_entry_observations: im::OrdMap<usize, TriggerSourceContext>,
+    #[serde(default, skip_serializing_if = "BattlefieldEntryObservations::is_empty")]
+    pub battlefield_entry_observations: BattlefieldEntryObservations,
     /// CR 608.2c + CR 603.6a: the length of `zone_changes_this_turn` at each instruction boundary
     /// (`effects::settle_entries_before_instruction` past its pending-choice guard, whether or
     /// not that boundary deferred the entry observations), strictly increasing and never zero.
@@ -36864,6 +36900,64 @@ impl GameState {
         })
     }
 
+    /// The battlefield-entry ledger is appended in the same order as the
+    /// battlefield subset of the zone-change ledger.
+    pub(crate) fn battlefield_entry_zone_changes(&self) -> impl Iterator<Item = &ZoneChangeRecord> {
+        self.zone_changes_this_turn
+            .iter()
+            .filter(|record| record.to_zone == Zone::Battlefield)
+    }
+
+    fn restore_legacy_battlefield_entry_token_status(
+        &mut self,
+    ) -> Result<(), PersistedRestoreError> {
+        if self
+            .battlefield_entries_this_turn
+            .iter()
+            .all(|entry| entry.token_status.is_some())
+        {
+            return Ok(());
+        }
+        // CR 111.1 + CR 400.7: token identity is fixed per object. The entry's own
+        // zone-change record captured it as the entrant arrived, so it answers even after
+        // the entrant has left; an entrant still in `objects` answers for itself.
+        let mut unmatched_changes: Vec<&ZoneChangeRecord> =
+            self.battlefield_entry_zone_changes().collect();
+        let mut repairs = Vec::new();
+        for (index, entry) in self.battlefield_entries_this_turn.iter().enumerate() {
+            if entry.token_status.is_some() {
+                continue;
+            }
+            let is_token = match unmatched_changes
+                .iter()
+                .position(|change| change.object_id == entry.object_id)
+            {
+                Some(position) => unmatched_changes.remove(position).is_token,
+                None => self
+                    .objects
+                    .get(&entry.object_id)
+                    .map(|object| object.is_token)
+                    .ok_or(
+                        PersistedRestoreError::UnrecoverableBattlefieldEntryTokenStatus {
+                            object_id: entry.object_id,
+                        },
+                    )?,
+            };
+            repairs.push((
+                index,
+                if is_token {
+                    EntryTokenStatus::Token
+                } else {
+                    EntryTokenStatus::Nontoken
+                },
+            ));
+        }
+        for (index, status) in repairs {
+            self.battlefield_entries_this_turn[index].token_status = Some(status);
+        }
+        Ok(())
+    }
+
     /// CR 400.7 + CR 603.6a: the zone change that put the exact object `identity` onto the
     /// battlefield this turn (its `entered_incarnation`). An incarnation enters at most once.
     /// `None` when it has not entered this turn (the ledger is per-turn).
@@ -38990,7 +39084,7 @@ impl GameState {
             players_who_sacrificed_artifact_this_turn: HashSet::new(),
             sacrificed_permanents_this_turn: im::Vector::new(),
             zone_changes_this_turn: im::Vector::new(),
-            battlefield_entry_observations: im::OrdMap::new(),
+            battlefield_entry_observations: BattlefieldEntryObservations::default(),
             instruction_boundary_marks: Vec::new(),
             batched_zone_change_trigger_fired: im::HashSet::new(),
             battlefield_entries_this_turn: im::Vector::new(),

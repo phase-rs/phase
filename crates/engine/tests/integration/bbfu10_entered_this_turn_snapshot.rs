@@ -19,6 +19,7 @@
 use engine::game::quantity::resolve_quantity;
 use engine::game::restrictions::{check_activation_restrictions, record_battlefield_entry};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::zones::move_to_zone;
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, ActivationRestriction, Comparator, ControllerRef, Effect, FilterProp,
@@ -27,7 +28,10 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::CounterType;
-use engine::types::game_state::{EntryTokenStatus, StackEntryKind, WaitingFor};
+use engine::types::game_state::{
+    EntryTokenStatus, GameState, PersistedGameState, PersistedRestoreError,
+    PersistedRestoreFinalization, StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -1386,4 +1390,160 @@ fn issue_634_manifested_land_is_a_nontoken_creature_at_entry() {
     assert_eq!(entry.core_types, vec![CoreType::Creature]);
     assert_eq!(entry.token_status, Some(EntryTokenStatus::Nontoken));
     assert_gyome_food_delta(&mut runner, gyome, 1);
+}
+
+#[test]
+fn issue_634_gyome_counts_forest_animated_as_it_enters() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let gyome = scenario
+        .add_creature(P0, "Gyome, Master Chef", 5, 3)
+        .from_oracle_text_with_keywords(&["Trample"], GYOME)
+        .id();
+    let revolt = scenario
+        .add_enchantment_from_oracle(
+            P0,
+            "Nature's Revolt",
+            "All lands are 2/2 creatures that are still lands.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+            generic: 3,
+        })
+        .id();
+    let forest = scenario
+        .add_land_to_hand(P0, "Forest")
+        .with_subtypes(vec!["Forest"])
+        .id();
+    let mut runner = scenario.build();
+    let previous_turn = runner.state().turn_number - 1;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&revolt)
+        .unwrap()
+        .entered_battlefield_turn = Some(previous_turn);
+    assert!(runner.state().battlefield_entries_this_turn.is_empty());
+    play_land(&mut runner, forest);
+
+    // CR 611.3c: Nature's Revolt makes the land a creature as it enters.
+    assert_gyome_food_delta(&mut runner, gyome, 1);
+}
+
+fn play_land(runner: &mut GameRunner, land: ObjectId) {
+    let card_id = runner.state().objects[&land].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        })
+        .unwrap();
+    assert_priority(runner);
+    assert_eq!(runner.state().objects[&land].zone, Zone::Battlefield);
+}
+
+fn legacy_save_without_entry_token_status(state: &GameState) -> PersistedGameState {
+    let mut save = serde_json::to_value(PersistedGameState::capture(state.clone())).unwrap();
+    assert!(save["state"]["battlefield_entries_this_turn"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("token_status")
+        .is_some());
+    serde_json::from_value(save).unwrap()
+}
+
+#[test]
+fn legacy_entry_token_status_is_recovered_for_same_incarnation() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let gyome = scenario
+        .add_creature(P0, "Gyome, Master Chef", 5, 3)
+        .from_oracle_text_with_keywords(&["Trample"], GYOME)
+        .id();
+    let bears = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        })
+        .id();
+    scenario.with_mana_pool(P0, vec![mana(ManaType::Green), mana(ManaType::Colorless)]);
+    let mut runner = scenario.build();
+    runner
+        .cast(bears)
+        .resolve()
+        .assert_zone(&[bears], Zone::Battlefield);
+    assert_priority(&runner);
+
+    let restored = legacy_save_without_entry_token_status(runner.state())
+        .into_game_state()
+        .unwrap();
+    assert_eq!(
+        restored.battlefield_entries_this_turn[0].token_status,
+        Some(EntryTokenStatus::Nontoken)
+    );
+    assert_gyome_food_delta(&mut GameRunner::from_state(restored), gyome, 1);
+}
+
+#[test]
+fn legacy_entry_token_status_is_recovered_after_the_entrant_leaves() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let gyome = scenario
+        .add_creature(P0, "Gyome, Master Chef", 5, 3)
+        .from_oracle_text_with_keywords(&["Trample"], GYOME)
+        .id();
+    let bears = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        })
+        .id();
+    scenario.with_mana_pool(P0, vec![mana(ManaType::Green), mana(ManaType::Colorless)]);
+    let mut runner = scenario.build();
+    runner
+        .cast(bears)
+        .resolve()
+        .assert_zone(&[bears], Zone::Battlefield);
+    assert_priority(&runner);
+    let entered_incarnation = runner.state().objects[&bears].incarnation;
+
+    let mut events = Vec::new();
+    let state = runner.state_mut();
+    move_to_zone(state, bears, Zone::Hand, &mut events);
+    assert_eq!(state.objects[&bears].zone, Zone::Hand);
+    assert_ne!(state.objects[&bears].incarnation, entered_incarnation);
+
+    let restored = legacy_save_without_entry_token_status(state)
+        .into_game_state()
+        .unwrap();
+    assert_eq!(
+        restored.battlefield_entries_this_turn[0].token_status,
+        Some(EntryTokenStatus::Nontoken)
+    );
+    assert_gyome_food_delta(&mut GameRunner::from_state(restored), gyome, 1);
+}
+
+#[test]
+fn legacy_entry_token_status_refuses_an_entrant_with_no_record_or_object() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let forest = scenario.add_land_to_hand(P0, "Forest").id();
+    let mut runner = scenario.build();
+    play_land(&mut runner, forest);
+    let state = runner.state_mut();
+    // Neither the entry's zone-change record nor the object survives to say
+    // whether the entrant was a token.
+    state.zone_changes_this_turn.clear();
+    state.objects.remove(&forest);
+    state.battlefield.retain(|id| *id != forest);
+
+    let result = legacy_save_without_entry_token_status(state)
+        .prepare_for_restore(PersistedRestoreFinalization::Immediate);
+    assert!(matches!(
+        result,
+        Err(PersistedRestoreError::UnrecoverableBattlefieldEntryTokenStatus { object_id })
+            if object_id == forest
+    ));
 }
