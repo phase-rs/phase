@@ -71820,7 +71820,12 @@ mod tests {
         child.player_scope = Some(PlayerFilter::Opponent);
         node.sub_ability = Some(Box::new(child));
 
-        let tail = detach_after_player_scope_local_chain(&mut node, &owner_shuffle_scope, false);
+        let tail = detach_after_player_scope_local_chain(
+            &mut node,
+            &owner_shuffle_scope,
+            false,
+            SeatGateMembership::Ungoverned,
+        );
         let tail = tail.expect("a distinct child scope is detached, not absorbed");
         assert_eq!(
             tail.player_scope,
@@ -71854,7 +71859,13 @@ mod tests {
         child.sub_link = SubAbilityLink::ContinuationStep;
         node.sub_ability = Some(Box::new(child));
         assert!(
-            detach_after_player_scope_local_chain(&mut node, &owner_shuffle_scope, false).is_none(),
+            detach_after_player_scope_local_chain(
+                &mut node,
+                &owner_shuffle_scope,
+                false,
+                SeatGateMembership::Ungoverned
+            )
+            .is_none(),
             "an unscoped owner-seat continuation stays in the iteration"
         );
         let attached = node
