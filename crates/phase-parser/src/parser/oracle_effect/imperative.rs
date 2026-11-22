@@ -5019,8 +5019,9 @@ fn parse_hand_possessive_target(input: &str) -> nom::IResult<&str, TargetFilter,
 /// CR 122.1 + CR 115.1: "[a|one|any] counter on <target>" — designate the object
 /// whose counters a later clause adjusts (Clockspinning sentence 1: "Choose a
 /// counter on target permanent or suspended card"). The chosen counter KIND is
-/// decided at resolution by sentence 2 (`Effect::ChooseCounterAdjustment`), so
-/// this clause only fixes the TARGET and lowers to `Effect::TargetOnly`.
+/// decided at resolution; the clause lowers to `Effect::TargetOnly` (the declared
+/// target) with the resolution-time `ChooseCounterKind` over it chained beneath
+/// (`ChooseImperativeAst::CounterKindOnTarget`).
 ///
 /// `parse_target` does not forward-scan past the "counter on " lead-in (the lead
 /// is an effect noun, not a target descriptor), so it is stripped with a nom

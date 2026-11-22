@@ -219,7 +219,6 @@ mod json_smoke_test;
 mod judgment_bolt_where_x_damage_runtime;
 mod kaho_minamo_historian_linked_exile;
 mod kaito_integration;
-mod kalitas_traitor_of_ghet_wrath_batch;
 mod kamigawa_flip_cards;
 mod karona_false_god;
 mod karplusan_yeti_fight_back;

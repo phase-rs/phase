@@ -84,7 +84,6 @@ mod doomsday_excruciator_copy;
 mod doorman_and_or_block_restriction_union;
 mod double_pt_all_tracked_set;
 mod doubling_cube_mana_ability;
-mod dr_mccoy_surly_surgeon_destroy_heal;
 mod dragon_egg_token_granted_activated_pump;
 mod dragon_man_reformed_robot_graveyard_discard_cost;
 mod dragon_whelp_activation_threshold_8388;

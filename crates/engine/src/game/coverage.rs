@@ -29179,6 +29179,74 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             card_face_gaps(&face)
         );
     }
+    /// CR 614.1a + CR 614.6: Dr. McCoy's "would be destroyed, instead remove all
+    /// +1/+1 counters from it and all damage already dealt to it is healed" is a
+    /// destroy-instead substitution. This PR ships no batch departure engine, so
+    /// the line must stay honestly unsupported: half-parsing it into a `Destroy`
+    /// replacement with an `execute` body would let the destruction proceed after
+    /// the counters came off (CR 614.6: a replaced event never happens).
+    #[test]
+    fn dr_mccoy_destroy_instead_replacement_stays_a_coverage_gap() {
+        let face = counter_rider_face(
+            "Dr. McCoy, Surly Surgeon",
+            "When Dr. McCoy enters, put a +1/+1 counter on another target creature you control.\nIf another creature you control with a +1/+1 counter on it would be destroyed, instead remove all +1/+1 counters from it and all damage already dealt to it is healed.",
+            &[],
+            &["Creature"],
+        );
+        // REACH: the enters trigger lowers, so the gap below is the destroy-instead
+        // line and not a card-wide parse failure.
+        assert!(
+            !face.triggers.is_empty(),
+            "REACH: the enters trigger parses: {:?}",
+            face.triggers
+        );
+        assert!(
+            !face.replacements.iter().any(|replacement| {
+                replacement.event == ReplacementEvent::Destroy && replacement.execute.is_some()
+            }),
+            "the destroy-instead line must not be half-parsed into a Destroy \
+             replacement with an execute body: {:?}",
+            face.replacements
+        );
+        let gaps = card_face_gaps(&face);
+        assert!(
+            !gaps.is_empty(),
+            "the destroy-instead line must stay an honest coverage gap"
+        );
+        let coverage = card_face_coverage(&face);
+        assert!(
+            coverage.gaps.iter().any(|gap| {
+                gap.handler.starts_with("Effect:")
+                    && gap.source_text.as_deref().is_some_and(|text| {
+                        text.contains("instead remove all +1/+1 counters from it")
+                    })
+            }),
+            "an Effect: gap must name the destroy-instead line, got {:?}",
+            coverage.gaps
+        );
+    }
+
+    /// The census is the printed record that Crackling Emergence's destroy-instead
+    /// Aura substitution is a known misparse. This PR adds no batch engine, so the
+    /// row must keep saying so: `MissingEffect`, with the unparsed clause text.
+    #[test]
+    fn crackling_emergence_census_row_stays_marked() {
+        let entry = ConfirmedMisparses::committed()
+            .get("crackling emergence")
+            .expect("the committed census carries Crackling Emergence");
+        assert_eq!(
+            entry.class,
+            MisparseClass::MissingEffect,
+            "the census row must keep its missing-effect class: {entry:?}"
+        );
+        assert!(
+            entry.clauses.iter().any(|clause| clause
+                .contains("would be destroyed, instead sacrifice this Aura")),
+            "the census row must keep the unparsed destroy-instead clause: {:?}",
+            entry.clauses
+        );
+    }
+
     /// The `fmt_quantity_ref` `PreviousEffectAmount` arms are ORDER-DEPENDENT:
     /// the `(_, Sum)` arm must stay first so every Excess-channel corpus card
     /// (all of which are `Sum`) keeps rendering the pre-change string. Nothing

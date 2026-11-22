@@ -375,7 +375,6 @@ mod cr733_resolved_zone_change;
 mod cr_annotations;
 mod crabomination_etb_exile_list;
 mod crackle_with_power;
-mod crackling_emergence_destroy_instead_sacrifice;
 mod craft_material_references;
 mod craft_tithing_blade_transform;
 mod crafty_cutpurse_independent_redirect;
