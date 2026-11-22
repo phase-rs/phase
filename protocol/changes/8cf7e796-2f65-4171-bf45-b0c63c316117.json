@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "StaticMode gains LethalDamageDeterminedByPower (Zilortha, Strength Incarnate; CR 120.6 + CR 704.5g). Older full-game and P2P engines decode it through the forward-compatible deserializer as StaticMode::Other and silently omit the rule, so they destroy creatures, set trample minimums and compute excess damage by toughness."
+}

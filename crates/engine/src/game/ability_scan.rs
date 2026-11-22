@@ -9061,6 +9061,7 @@ fn static_mode_axes(static_mode: &StaticMode, mode: ScanMode) -> Axes<'_> {
         } => census_opt(spell_filter, mode).or(census_opt(activation_source_filter, mode)),
         StaticMode::Continuous
         | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::LethalDamageDeterminedByPower
         | StaticMode::CantAttack
         | StaticMode::CantBlock
         | StaticMode::CantAttackOrBlock
