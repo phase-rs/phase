@@ -3021,10 +3021,9 @@ fn settle_finished_game(state: &mut GameState, result: &mut ActionResult) {
     }
 }
 
-/// CR 117.2e + CR 608.2c + CR 117.5: finish a resolution whose current pause a
-/// player's departure canceled, or whose choose-all-then-act collection the
-/// departure completed and delivered (`elimination::DepartureResume`), then
-/// settle it as any action that completed one: the owed final part (CR 608.2n),
+/// CR 117.2e + CR 608.2c + CR 117.5: finish a resolution that a player's
+/// departure left unsettled (`elimination::DepartureResume::ResolutionTail`),
+/// then settle it as any action that completed one: the owed final part (CR 608.2n),
 /// state-based actions (CR 704.3), then the queued triggered abilities. The
 /// pipeline scans `events[scan_from..]` and skips every occurrence the departure
 /// already claimed (the departure collects its own triggers once, against the
@@ -11871,9 +11870,9 @@ fn apply_action(
     // performs CR 800.4a object cleanup and advances `waiting_for` if the conceder
     // owned it (see `elimination::concede`), and queues what the departure triggered
     // (CR 603.6c), since no pipeline scans the departure's own events. When the
-    // departure canceled the current pause of a resolution still under way, or
-    // completed and delivered its choose-all-then-act collection, the resolution
-    // is finished and the action settled through the post-action pipeline
+    // departure left a resolution still under way unsettled (see
+    // `elimination::DepartureResume::ResolutionTail`), the resolution is finished
+    // and the action settled through the post-action pipeline
     // (`settle_resolution_resumed_after_departure`).
     if let GameAction::Concede { player_id } = action {
         // CR 614.17a + CR 118.12: keep the pre-departure base so a staged
@@ -11883,10 +11882,9 @@ fn apply_action(
         let pre_action = state.payment_transaction.as_ref().map(|_| state.clone());
         let mut events = Vec::new();
         let departure = super::elimination::concede(state, player_id, &mut events);
-        // CR 117.2e + CR 608.2c + CR 117.5: the concession canceled the
-        // current pause of a parked zone-change owner, or completed and
-        // delivered a choose-all-then-act collection, while its resolution
-        // still owes a surviving tail. Finish that resolution, then settle
+        // CR 117.2e + CR 608.2c + CR 117.5: the concession left a resolution
+        // still under way unsettled (`DepartureResume::ResolutionTail`).
+        // Finish that resolution, then settle
         // the action as any action that completed one: the owed final part
         // (CR 608.2n), state-based actions (CR 704.3), then the triggered
         // abilities the departure queued together with the resumed ones.

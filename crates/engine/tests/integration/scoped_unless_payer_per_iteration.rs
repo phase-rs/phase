@@ -3270,6 +3270,110 @@ fn viper_step_chooser_conceding_during_a_paused_delivery_resumes_it() {
     assert!(runner.state().resolving_stack_entry.is_none());
 }
 
+/// (f4b). CR 800.4a + CR 701.21a: the sacrificing chooser concedes while its
+/// sacrifice step waits on its CR 616.1 choice (Rest in Peace against Leyline of
+/// the Void). The permanent left the game with its controller, so it is not
+/// sacrificed; the discard that already happened is held across the pause, and
+/// it is collected exactly once, and the unpaid step's life loss lands once.
+#[test]
+fn viper_sacrificing_chooser_conceding_during_its_paused_sacrifice_resumes_the_delivery() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut scenario, viper) = viper_board(4, 0);
+    let megrim = scenario.add_real_card(P0, "Megrim", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Leyline of the Void", Zone::Battlefield, db);
+    let rip = scenario.add_real_card(P1, "Rest in Peace", Zone::Battlefield, db);
+    let mut runner = viper_attacks(scenario, viper);
+    let p2_card = object_named(&runner, "Filler Card 2");
+
+    choose_branch(&mut runner, Branch::Sacrifice);
+    pick(&mut runner, rip);
+    choose_branch(&mut runner, Branch::Discard);
+    pick(&mut runner, p2_card);
+    decline(&mut runner);
+
+    // P2's card meets both replacements first; its answer completes the discard.
+    expect_replacement_choice(&runner, P2, "P2's discard");
+    answer_replacement_choice(&mut runner);
+
+    expect_replacement_choice(&runner, P1, "the sacrificed Rest in Peace");
+    assert_eq!(zone_of(&runner, p2_card), Zone::Exile, "reach guard");
+    assert_eq!(
+        zone_of(&runner, rip),
+        Zone::Battlefield,
+        "reach guard: the sacrifice is still waiting"
+    );
+    assert_eq!(triggers_from(&runner, megrim), 0, "reach guard: held");
+    assert_eq!(
+        runner.life(P3),
+        16,
+        "reach guard: the unpaid step is delivered before the sacrifice step"
+    );
+    assert!(
+        runner
+            .state()
+            .pending_player_scope_sacrifice_choice
+            .is_some(),
+        "reach guard: the sacrifice batch is parked on the replacement choice"
+    );
+
+    let concession = runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("a concession is accepted");
+
+    assert!(is_eliminated(&runner, P1));
+    assert_ne!(
+        zone_of(&runner, rip),
+        Zone::Battlefield,
+        "Rest in Peace left the game with its controller"
+    );
+    assert!(
+        concession.events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged { object_id, .. } if *object_id == rip
+        )),
+        "reach guard: the departure moved Rest in Peace"
+    );
+    assert!(
+        !concession.events.iter().any(|event| matches!(
+            event,
+            GameEvent::PermanentSacrificed { object_id, .. } if *object_id == rip
+        )),
+        "it left with its controller (CR 800.4a); it was not sacrificed"
+    );
+    assert!(poll(&runner).is_none(), "the poll is cleared");
+    assert!(runner.state().pending_discard_batch.is_none());
+    assert!(runner
+        .state()
+        .pending_player_scope_sacrifice_choice
+        .is_none());
+    assert!(runner.state().pending_replacement.is_none());
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "no replacement choice outlives its chooser"
+    );
+    assert_eq!(runner.life(P3), 16, "the unpaid step landed once");
+    assert_eq!(
+        triggers_from(&runner, megrim),
+        1,
+        "P2's discard was collected exactly once"
+    );
+    assert_eq!(stack_entries_from(&runner, megrim), 1);
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.life(P2), 18, "Megrim dealt 2 to P2 once");
+    assert_eq!(runner.life(P3), 16);
+    assert_eq!(runner.life(P0), 20);
+}
+
 /// (f5). CR 800.4a: the Viper's controller concedes during a paused delivery.
 /// The resolving ability ceased to exist, so the remaining steps don't happen,
 /// but the events that already happened are released and collected once.

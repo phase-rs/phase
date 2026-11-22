@@ -503,36 +503,6 @@ pub(crate) fn settle_simultaneous_unless_after_departure(
             );
             Ok(DepartureResume::Settled)
         }
-        SimultaneousUnlessReconciliation::DeliveryStepAbandoned => {
-            let carrier = state
-                .pending_simultaneous_unless
-                .take()
-                .expect("an abandoned step keeps its parked delivery");
-            // CR 117.2e + CR 117.3b + CR 800.4j: provisional, exactly as the
-            // `Settle` arm below; the abandoned step's prompt named a departed
-            // player.
-            set_priority(state, super::engine::living_priority_seat(state));
-            // The concession's own events precede the resume point and stay in
-            // its result; the delivery's span starts here.
-            let resume_at = events.len();
-            let outcome =
-                effects::simultaneous_unless::drive_delivery(state, *carrier, events, 0, resume_at)
-                    .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
-            match outcome {
-                DeliveryOutcome::Delivered { span } => {
-                    super::triggers::collect_departure_triggers_into_deferred(
-                        state, events, span.start, None,
-                    );
-                    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                        Ok(DepartureResume::ResolutionTail)
-                    } else {
-                        Ok(DepartureResume::Settled)
-                    }
-                }
-                // A later step's prompt names a living chooser.
-                DeliveryOutcome::Paused => Ok(DepartureResume::Settled),
-            }
-        }
         SimultaneousUnlessReconciliation::Prompted(chooser) => {
             // CR 117.2e: the republished prompt is the wait; it names a living
             // chooser.

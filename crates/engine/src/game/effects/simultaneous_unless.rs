@@ -616,10 +616,10 @@ fn begin_delivery(collection: &SimultaneousUnlessCollection) -> SimultaneousUnle
 }
 
 /// The single entry that runs a delivery's remaining steps: the start, an
-/// answer's settle, a departure's settle or resume, and the resume hook. It owns
+/// answer's settle and the resume hook. It owns
 /// the installation and restoration of the poll's trigger event. `span_start` is
 /// the first index of `events` that belongs to this delivery.
-pub(crate) fn drive_delivery(
+fn drive_delivery(
     state: &mut GameState,
     carrier: PendingSimultaneousUnless,
     events: &mut Vec<GameEvent>,
@@ -867,10 +867,6 @@ pub(crate) enum SimultaneousUnlessReconciliation {
     /// CR 800.4f: departed seats' remaining delivery entries were dropped; the
     /// paused step's prompt still stands for a chooser in the game.
     DeliveryParked,
-    /// CR 800.4a + CR 701.9a: the paused step's chooser left the game, so that
-    /// step will not happen (its card left the game with its owner and was never
-    /// discarded). The cursor is still in `state`; the caller resumes it.
-    DeliveryStepAbandoned,
     /// CR 800.4a: the delivery's controller left; the resolving ability ceased to
     /// exist, so its remaining steps don't happen. The held events (which did
     /// happen) were appended to `events` from `released_from`.
@@ -937,33 +933,12 @@ fn reconcile_delivery_after_departure(
         .take()
         .expect("a parked delivery");
     let controller = carrier.ability.controller;
-    let source_id = carrier.ability.source_id;
-    let mut step_abandoned = false;
-    // The teardown clears `pending_replacement` only when the leaver is the
-    // latched chooser of the live CR 616.1 choice; a paused step whose
-    // replacement choice was abandoned this way has lost its step.
-    if state.pending_replacement.is_none() {
-        // CR 800.4a + CR 701.9a: the paused card left the game with its owner;
-        // it was not discarded. The batch's chooser is gone and the teardown
-        // cleared its choice. Without this the batch would never be taken again.
-        let stale_batch = state.pending_discard_batch.as_ref().is_some_and(|batch| {
-            batch.source_id == source_id
-                && batch.cause == DiscardCause::Cost
-                && batch.fan_out.is_none()
-                && !crate::game::players::is_alive(state, batch.player)
-        });
-        if stale_batch {
-            state.pending_discard_batch = None;
-            step_abandoned = true;
-        }
-        // A paused life-loss step has no batch: its wait still names the
-        // departed chooser.
-        if let WaitingFor::ReplacementChoice { player, .. } = &state.waiting_for {
-            if !crate::game::players::is_alive(state, *player) {
-                step_abandoned = true;
-            }
-        }
-    }
+    // CR 800.4a + CR 701.9a: a paused step whose chooser left never happens (its
+    // card left the game with its owner and was not discarded). The departure's
+    // replacement settlement (`engine_replacement::settle_replacement_after_departure`)
+    // runs before this reconciliation: it abandons that step's replacement
+    // choice, drains the step's discard batch and resumes this delivery itself,
+    // so a delivery that reaches here is parked on a living chooser's prompt.
     if !crate::game::players::is_alive(state, controller) {
         // CR 800.4a: the resolving ability ceased to exist, so the remaining
         // steps don't happen; the events that did happen are released.
@@ -982,11 +957,7 @@ fn reconcile_delivery_after_departure(
         delivery.sacrifices.retain(|(seat, _)| alive(*seat));
     }
     state.pending_simultaneous_unless = Some(carrier);
-    if step_abandoned {
-        SimultaneousUnlessReconciliation::DeliveryStepAbandoned
-    } else {
-        SimultaneousUnlessReconciliation::DeliveryParked
-    }
+    SimultaneousUnlessReconciliation::DeliveryParked
 }
 
 /// Continue the walk after a departure changed the poll and report where it

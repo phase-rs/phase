@@ -341,18 +341,19 @@ pub enum DepartureResume {
     /// No interrupted resolution needs the caller's convergence boundary.
     Settled,
     /// CR 117.2e + CR 608.2c + CR 117.5: a resolution under way when the departure
-    /// began still owes its tail, and no player has priority while it does. The
-    /// caller resumes it and settles the action before any player receives priority
-    /// (`engine::settle_resolution_resumed_after_departure`), even if reconciliation
-    /// already finished the tail and retired its owner, and the departure left its
-    /// queued triggers for that settlement to place. Reported when a reconciler
-    /// settled a resolution that was under way, when the departure canceled the
-    /// current replacement-choice pause of a parked zone-change owner, or when it
-    /// completed and delivered a choose-all-then-act unless poll (CR 101.4 +
-    /// CR 800.4f). The poll completes either because its last chooser left, or
-    /// because another player's departure staled the chooser's open prompt (the
-    /// pick pool emptied, or the branch set changed) and the remaining choices
-    /// were walked without a prompt (CR 608.2d).
+    /// began has not been settled as an action, and no player has priority while it
+    /// is unsettled. The caller resumes any remaining tail and settles the action
+    /// before any player receives priority
+    /// (`engine::settle_resolution_resumed_after_departure`): the final part, then
+    /// state-based actions, then the triggers the departure left queued. This is owed
+    /// even when reconciliation already finished the tail and retired its owner.
+    /// Reported when the departure settled or ended an interrupted resolution's
+    /// pending work, when it canceled the current replacement-choice pause of a
+    /// parked zone-change owner, or when it completed and delivered a
+    /// choose-all-then-act unless poll (CR 101.4 + CR 800.4f). The poll completes
+    /// either because its last chooser left, or because another player's departure
+    /// staled the chooser's open prompt (the pick pool emptied, or the branch set
+    /// changed) and the remaining choices were walked without a prompt (CR 608.2d).
     ResolutionTail,
 }
 
