@@ -3299,7 +3299,7 @@ const NEW_WAY_FORWARD: &str = "The next time a source of your choice would deal 
 const DEFLECTING_PALM: &str = "The next time a source of your choice would deal damage to you this turn, prevent that damage. If damage is prevented this way, Deflecting Palm deals that much damage to that source's controller.";
 const AWE_STRIKE: &str = "The next time target creature would deal damage this turn, prevent that damage. You gain life equal to the damage prevented this way.";
 const NEFARIOUS_LICH: &str = "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game.";
-const LIFE_TO_DRAW: &str = "If you would gain life, draw that many cards instead.";
+const LICH: &str = "As this enchantment enters, you lose life equal to your life total.\nYou don't lose the game for having 0 or less life.\nIf you would gain life, draw that many cards instead.\nWhenever you're dealt damage, sacrifice that many nontoken permanents. If you can't, you lose the game.\nWhen this enchantment is put into a graveyard from the battlefield, you lose the game.";
 const DUSKMANTLE_GUILDMAGE: &str = "{1}{U}{B}: Whenever a card is put into an opponent's graveyard from anywhere this turn, that player loses 1 life.\n{2}{U}{B}: Target player mills two cards.";
 const SHEOLDRED: &str = "Deathtouch\nWhenever you draw a card, you gain 2 life.\nWhenever an opponent draws a card, they lose 2 life.";
 const EXQUISITE_BLOOD: &str = "Whenever an opponent loses life, you gain that much life.";
@@ -7229,16 +7229,16 @@ fn channel_harms_may_is_asked_in_each_combat_damage_step() {
     );
 }
 
-/// P7: a lifelink gain's substitute asks its own choice (CR 614.6 + CR 616.1g). P1's Vampire
+/// P7: a lifelink gain's substitute asks its own choice (CR 614.6 + CR 616.2). P1's Vampire
 /// Nighthawk (deathtouch, lifelink) blocks P0's Grizzly Bears; P1 controls Nefarious Lich ("If you
 /// would gain life, draw that many cards instead.") and Abundance. The gain of 2 becomes 2 draws
 /// (CR 121.2), each meeting Abundance's "may", which P1 is asked: two prompts, and the batch
 /// completes on the last answer. Declining both draws 2; accepting both and choosing nonland draws
-/// none and still puts 2 cards in P1's hand. P1's life doesn't change, and the Bears die.
-/// An unblocked attacker stages P1's gain before P1's damage leg (CR 101.4c).
-/// A synthetic enchantment isolates the Lich's gain clause because the printed Lich
-/// would replace that attacker's damage. The draw prompt parks the Phase C tail
-/// with the damage leg still owed (CR 510.2), including through a save and load.
+/// none and still puts 2 cards in P1's hand. The Bears die in every case.
+/// The early cases use printed Lich because its damage ability is a trigger, so the
+/// unblocked hit stays owed while the draw prompt parks the Phase C tail (CR 510.2),
+/// including through a save and load. The sacrifice trigger goes on the stack after
+/// the batch with any other pending triggers (CR 510.3a + CR 603.3b).
 #[test]
 fn a_lifelink_substitutes_draws_ask_abundance() {
     for (accept, early, reload) in [
@@ -7264,26 +7264,54 @@ fn a_lifelink_substitutes_draws_ask_abundance() {
             &["Flying", "Deathtouch", "Lifelink"],
             VAMPIRE_NIGHTHAWK,
         );
-        if early {
-            scenario.add_enchantment_from_oracle(P1, "Life-to-draw replacement", LIFE_TO_DRAW);
+        let sacrifice = if early {
+            scenario.add_enchantment_from_oracle(P1, "Lich", LICH);
+            // Start after Lich's as-enters life loss (CR 614.1c). Lich overrides the life-total
+            // state-based loss (CR 101.1 + CR 704.5a).
+            scenario.with_life(P1, 0);
+            Some(
+                scenario
+                    .add_land_from_oracle(P1, "Forest", "{T}: Add {G}.")
+                    .id(),
+            )
         } else {
             scenario.add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH);
-        }
+            None
+        };
         scenario.add_enchantment_from_oracle(P1, "Abundance", ABUNDANCE);
         let mut runner = scenario.build();
+        let life_before = if early { 0 } else { 20 };
         let hand_before = hand_size(&runner, P1);
         let mut answer = answering_abundance(accept);
         let mut reloaded = false;
 
         let combat = fight_driving(&mut runner, &attackers, &[(nighthawk, bears)], |runner| {
-            if matches!(
-                runner.state().waiting_for,
-                WaitingFor::ReplacementChoice { .. }
-            ) {
+            let state = runner.state();
+            if let WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                effect_kind,
+                ..
+            } = &state.waiting_for
+            {
+                let forest = sacrifice.expect("only Lich asks for a sacrifice");
+                assert_eq!(
+                    (*player, *count, *effect_kind),
+                    (P1, 1, EffectKind::Sacrifice),
+                    "{label}"
+                );
+                assert!(cards.contains(&forest), "{label}");
+                assert!(state.pending_combat_lifelink.is_none(), "{label}");
+                return GameAction::SelectCards {
+                    cards: vec![forest],
+                };
+            }
+            if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
                 let parked = runner.state().pending_combat_lifelink.as_ref().unwrap();
                 assert_eq!(parked.phase_c_remnant.is_some(), early, "{label}");
                 assert!(!parked.awaiting_staged_gain, "{label}");
-                assert_eq!(life(runner, P1), 20, "{label}");
+                assert_eq!(life(runner, P1), life_before, "{label}");
                 if reload && !reloaded {
                     let remnant = parked.phase_c_remnant.clone().unwrap();
                     assert!(
@@ -7296,7 +7324,7 @@ fn a_lifelink_substitutes_draws_ask_abundance() {
                     let parked = runner.state().pending_combat_lifelink.as_ref().unwrap();
                     assert_eq!(parked.phase_c_remnant.as_ref(), Some(&remnant), "{label}");
                     assert!(!parked.awaiting_staged_gain, "{label}");
-                    assert_eq!(life(runner, P1), 20, "{label}");
+                    assert_eq!(life(runner, P1), life_before, "{label}");
                     reloaded = true;
                 }
             }
@@ -7313,7 +7341,15 @@ fn a_lifelink_substitutes_draws_ask_abundance() {
             "{label}"
         );
         assert_eq!(hand_size(&runner, P1) - hand_before, 2, "{label}");
-        assert_eq!(life(&runner, P1), if early { 19 } else { 20 }, "{label}");
+        // CR 120.3a: the unblocked hit costs one life.
+        assert_eq!(life(&runner, P1), if early { -1 } else { 20 }, "{label}");
+        if let Some(forest) = sacrifice {
+            assert_eq!(
+                runner.state().objects[&forest].zone,
+                Zone::Graveyard,
+                "{label}"
+            );
+        }
         assert_eq!(
             runner.state().objects[&bears].zone,
             Zone::Graveyard,
@@ -7323,16 +7359,16 @@ fn a_lifelink_substitutes_draws_ask_abundance() {
 }
 
 /// Two P1 lifelink sources have gains to stage before the unblocked attacker deals
-/// damage to P1 (CR 510.2 + CR 702.15b + CR 101.4c). The synthetic enchantment
-/// uses the Lich's gain clause so the unblocked damage stays owed. Laboratory Maniac
+/// damage to P1 (CR 510.2 + CR 702.15b + CR 101.4c). Printed Lich's damage
+/// ability is a trigger, so the unblocked hit stays owed (CR 510.3a). Laboratory Maniac
 /// replaces the first substitute draw with a win (CR 614.6), ending the game immediately
 /// (CR 104.1) before player damage or staging the other source's gain.
 #[test]
 fn an_early_lifelink_substitutes_win_stops_phase_c() {
     let mut scenario = main_phase();
-    let lich = scenario
-        .add_enchantment_from_oracle(P1, "Life-to-draw replacement", LIFE_TO_DRAW)
-        .id();
+    let lich = scenario.add_enchantment_from_oracle(P1, "Lich", LICH).id();
+    // Start after Lich's as-enters life loss (CR 614.1c).
+    scenario.with_life(P1, 0);
     let maniac = scenario
         .add_creature_from_oracle(P1, "Laboratory Maniac", 2, 2, LABORATORY_MANIAC)
         .id();
@@ -7368,7 +7404,7 @@ fn an_early_lifelink_substitutes_win_stops_phase_c() {
         runner.state().waiting_for,
         WaitingFor::GameOver { winner: Some(P1) }
     ));
-    assert_eq!(life(&runner, P1), 20, "the owed leg never took life");
+    assert_eq!(life(&runner, P1), 0, "the owed leg never took life");
     assert!(damage_dealt_to_player(&combat.events, P1).is_empty());
     assert!(combat.events.iter().any(|event| matches!(
         event, GameEvent::ReplacementApplied { source_id, event_type }
@@ -7390,7 +7426,7 @@ fn an_early_lifelink_substitutes_win_stops_phase_c() {
 
 /// The Nighthawk's lifelink gain (CR 702.15b) asks P1 to order the Lich and Faithmender
 /// (CR 616.1). Choosing the Lich fully replaces the gain (CR 614.6). Abundance can
-/// pause each substitute draw (CR 616.1g + CR 121.2), but the batch no longer awaits a
+/// pause each substitute draw (CR 616.2 + CR 121.2), but the batch no longer awaits a
 /// staged gain. That distinction survives a save and load and the batch finishes.
 #[test]
 fn a_replaced_lifelink_gain_clears_the_staging_marker_before_its_draw_prompt() {

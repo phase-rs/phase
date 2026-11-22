@@ -25410,10 +25410,10 @@ pub struct PendingCombatLifelink {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement: Option<PendingCombatDamageReplacement>,
     /// CR 510.2 + CR 616.1: the unfinished Phase C tail, present when the batch
-    /// parked on a LEG's result pause (life loss, or infect/toxic poison counters;
-    /// no stash — the damage fact was recorded at the pause) or on a pause while
-    /// staging a gain ahead of a leg. The resume completes it before draining
-    /// `remaining`.
+    /// parked on a LEG's result pause (its life-loss or `-1/-1` counter
+    /// replacements, each with a combat-flagged stash, or its poison-counter
+    /// result with nothing left owed and no stash) or on a pause while staging a
+    /// gain ahead of a leg. The resume completes it before draining `remaining`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase_c_remnant: Option<PendingCombatPhaseCRemnant>,
 }
