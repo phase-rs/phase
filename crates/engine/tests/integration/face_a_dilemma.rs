@@ -478,6 +478,9 @@ fn a_cancelled_cast_records_no_dilemma() {
         },
     );
     assert_eq!(dilemmas(&runner, P0), 1);
+    // The charm left the hand, drew two, and Seven drew exactly once (a trigger
+    // leaked from the cancelled announcement would draw again).
+    assert_eq!(hand_len(&runner, P0), hand - 1 + 2 + 1, "Seven drew once");
 }
 
 /// R10b — CR 602.2b + CR 733.1: an activated ability cancelled after its mode
