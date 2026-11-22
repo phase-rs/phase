@@ -9,7 +9,7 @@
  *   src/adapter/__tests__/stateCodec.integration.test.ts
  * STATE_CODEC_CORPUS must be absolute. Unset visibly skips; configured missing
  * inputs fail. Requires generated engine_wasm.js/engine_wasm_bg.wasm and the
- * committed integration_cards.json.gz. No generated card data or mocks.
+ * committed integration_cards/. No generated card data or mocks.
  * Limits: 64 MiB corpus, 64 accepted actions, five checkpoints/four audiences.
  */
 import { existsSync, statSync } from "node:fs";

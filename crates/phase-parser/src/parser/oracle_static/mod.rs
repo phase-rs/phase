@@ -104,6 +104,7 @@ pub(crate) use shared::parse_affected_scoped_static_condition;
 pub(crate) use shared::parse_commander_subject_filter_prefix;
 pub(crate) use shared::peel_color_quality_prefix;
 
+pub(crate) use dispatch::is_lethal_damage_determined_by_power_static;
 pub(crate) use dispatch::is_speed_unlock_sentence;
 pub(crate) use dispatch::parse_may_look_at_face_down_filter;
 pub(crate) use dispatch::try_parse_counts_as_named_static;

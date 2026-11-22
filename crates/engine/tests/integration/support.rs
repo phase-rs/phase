@@ -7,7 +7,7 @@
 //! build, but the suite only references a few hundred distinct cards.
 //!
 //! So [`shared_card_db`] loads a small committed fixture
-//! (`tests/fixtures/integration_cards.json.gz`, a strict subset of the export) that
+//! (`tests/fixtures/integration_cards/`, a strict subset of the export) that
 //! parses in milliseconds. Regenerate it with `python3 scripts/gen-test-fixture.py`
 //! after adding a test that references a new card; set `FORGE_TEST_FULL_DB=1` to
 //! force the full export. [`shared_card_export_json`] still loads the full export
