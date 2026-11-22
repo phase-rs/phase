@@ -1,5 +1,6 @@
 use crate::game::combat::{
-    AttackTarget, CombatParticipation, CombatState, DamageAssignment, DamageTarget, TrampleKind,
+    record_block_edge, AttackTarget, AttackerInfo, CombatParticipation, CombatState,
+    DamageAssignment, DamageTarget, TrampleKind,
 };
 use crate::game::effects::deal_damage::{
     apply_damage_after_replacement, pre_replacement_damage_gate,
@@ -1629,7 +1630,7 @@ pub fn combat_damage_to_defender(
                 },
             )
         }));
-        preview = preview_first_step(state, &assignments);
+        preview = preview_first_step(state, attacker, blockers, &assignments);
         if preview.is_none() {
             // The creatures this step can damage: the blockers when the attacker strikes
             // first, and the attacker itself.
@@ -1653,18 +1654,17 @@ pub fn combat_damage_to_defender(
         }
     }
 
-    let preview_combat = preview.as_ref().map(|preview| {
+    let preview_combat = preview.as_ref().map(|(preview, before)| {
         (
             preview,
-            CombatParticipation::capture(state, attacker_id),
+            before,
             CombatParticipation::capture(preview, attacker_id),
         )
     });
     let has_departed = |id| match &preview_combat {
         Some((preview, before, after)) => {
             // CR 701.19a + CR 506.4: regeneration removes a creature from combat without a
-            // zone change. Only a role the live combat records can end, so a hypothetical
-            // attack or block passed in by the caller still counts.
+            // zone change. Compare against the roles the preview started with.
             let left_combat = if id == attacker_id {
                 before.attacking.is_some() && after.attacking.is_none()
             } else {
@@ -1678,7 +1678,7 @@ pub fn combat_damage_to_defender(
         }
         None => departed.contains(&id),
     };
-    let regular_state = preview.as_ref().unwrap_or(state);
+    let regular_state = preview.as_ref().map_or(state, |(preview, _)| preview);
     // CR 702.4b: the attacker assigns in the regular step if it has double strike,
     // or if it never had first strike and so has not assigned at all yet.
     if !has_departed(attacker_id) && (has_double_strike || !attacker_strikes_first) {
@@ -1775,13 +1775,15 @@ struct PredictedHit {
 
 /// CR 510.2 + CR 615.5: when some first-step damage is not fixed, run the step on a copy of
 /// the game, prevention riders included (protection granted after blocks, a Protean Hydra
-/// losing counters), then its state-based actions, and return that copy for the regular step
-/// to read. `None` when the damage is fixed or the copy pauses for a player's choice; the
-/// caller then estimates from the assigned amounts.
+/// losing counters), then its state-based actions. Return the resulting state and the
+/// attacker's starting combat participation. `None` when the damage is fixed or the copy
+/// pauses for a player's choice; the caller then estimates from the assigned amounts.
 fn preview_first_step(
     state: &GameState,
+    attacker: &GameObject,
+    blockers: &[ObjectId],
     assignments: &[(ObjectId, DamageAssignment)],
-) -> Option<GameState> {
+) -> Option<(GameState, CombatParticipation)> {
     let needs_preview = assignments.iter().any(|(source, assignment)| {
         let DamageTarget::Object(target) = assignment.target else {
             return false;
@@ -1799,6 +1801,8 @@ fn preview_first_step(
         return None;
     }
     let mut preview = state.clone();
+    seed_forecast_combat(&mut preview, attacker, blockers);
+    let before = CombatParticipation::capture(&preview, attacker.id);
     if let CombatDamageBatch::Paused { .. } =
         apply_combat_damage(&mut preview, assignments, CombatDamageSubStep::FirstStrike)
     {
@@ -1808,7 +1812,51 @@ fn preview_first_step(
     // CR 704.3 + CR 704.5f + CR 704.5g + CR 704.5h: check for zero toughness and
     // lethal damage on the battlefield left by first strike, repeating after departures.
     sba::check_state_based_actions(&mut preview, &mut Vec::new());
-    Some(preview)
+    Some((preview, before))
+}
+
+/// Records on the preview copy the attack and blocks the forecast was asked about, where the
+/// live combat doesn't already hold them, so first-step effects that end a combat role
+/// (regeneration, CR 701.19a) act on hypothetical blocks as they would on declared ones.
+/// Records roles only: no declaration triggers, costs or requirements run.
+fn seed_forecast_combat(state: &mut GameState, attacker: &GameObject, blockers: &[ObjectId]) {
+    let defending_player = blockers
+        .iter()
+        .find_map(|id| state.objects.get(id).map(|blocker| blocker.controller))
+        .unwrap_or_else(|| crate::game::players::next_player(state, attacker.controller));
+    let combat = state.combat.get_or_insert_with(CombatState::default);
+    // CR 508.1k: give a hypothetical attacker an attacking role. Keep any
+    // declared attack's destination.
+    if !combat
+        .attackers
+        .iter()
+        .any(|info| info.object_id == attacker.id)
+    {
+        combat.attackers.push(AttackerInfo::attacking_player(
+            attacker.id,
+            defending_player,
+        ));
+        state.layers_dirty.mark_full();
+    }
+    for &blocker in blockers {
+        if combat
+            .blocker_to_attacker
+            .get(&blocker)
+            .is_some_and(|attackers| attackers.contains(&attacker.id))
+        {
+            continue;
+        }
+        record_block_edge(combat, blocker, attacker.id);
+        state.layers_dirty.mark_full();
+    }
+    // CR 509.1h: a creature with a blocker is blocked.
+    if let Some(info) = combat
+        .attackers
+        .iter_mut()
+        .find(|info| info.object_id == attacker.id)
+    {
+        info.blocked |= !blockers.is_empty();
+    }
 }
 
 /// Fills `hits` with the first-step damage as assigned, for a step whose damage is fixed (no

@@ -1185,6 +1185,13 @@ fn zilortha_combat_forecast_drops_regenerated_blocker() {
     runner.act(GameAction::PassPriority).unwrap();
     cast_at(&mut runner, regenerate, bears);
 
+    runner.advance_to_combat();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareAttackers { player: P0, .. }
+    ));
+    let hypothetical_forecast = combat_damage_to_defender(runner.state(), ghalta, &[hydra, bears]);
+
     let life_before = runner.life(P1);
     attack_and_block(&mut runner, &[ghalta], &[(hydra, ghalta), (bears, ghalta)]);
     let forecast = combat_damage_to_defender(runner.state(), ghalta, &[hydra, bears]);
@@ -1202,6 +1209,10 @@ fn zilortha_combat_forecast_drops_regenerated_blocker() {
     // CR 702.19d: with both blockers gone, all 12 regular-step damage tramples over.
     let actual = life_before - runner.life(P1);
     assert_eq!(actual, 20);
+    assert_eq!(
+        hypothetical_forecast, actual,
+        "forecast before declaring attackers or blockers must match the actual trample damage"
+    );
     assert_eq!(
         forecast, actual,
         "forecast must match the actual trample damage"
