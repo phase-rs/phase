@@ -7,9 +7,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityTag, ChoiceType, Comparator, ControllerRef, CountScope, CyclingHistoryWindow, Effect,
-    FilterProp, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityTag, ChoiceType, Comparator, CountScope, CyclingHistoryWindow, Effect, QuantityExpr,
+    QuantityRef, ResolvedAbility, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::{GameEvent, PlayerActionKind};
@@ -1879,7 +1878,7 @@ fn read_cycles(
     ability: &ResolvedAbility,
     scope: CountScope,
     window: CyclingHistoryWindow,
-    filter: Option<TargetFilter>,
+    name: Option<&str>,
 ) -> i32 {
     engine::game::quantity::resolve_quantity_with_targets(
         state,
@@ -1887,7 +1886,7 @@ fn read_cycles(
             qty: QuantityRef::CardsCycled {
                 scope,
                 window,
-                filter,
+                name: name.map(str::to_owned),
             },
         },
         ability,
@@ -2294,18 +2293,13 @@ fn phase3_v3_counts_recorded_names_and_excludes_ordinary_discard() {
     scenario.with_mana_pool(P0, mana(ManaType::Red, 5));
     let mut runner = scenario.build();
     let ability = ResolvedAbility::new(Effect::NoOp, vec![], first, P0);
-    let named = |name: &str| TypedFilter {
-        type_filters: vec![],
-        controller: None,
-        properties: vec![FilterProp::Named { name: name.into() }],
-    };
-    let count = |runner: &GameRunner, filter| {
+    let count = |runner: &GameRunner, name| {
         read_cycles(
             runner.state(),
             &ability,
             CountScope::Controller,
             CyclingHistoryWindow::ThisGame,
-            filter,
+            name,
         )
     };
     let turn = runner.state().turn_number;
@@ -2332,10 +2326,7 @@ fn phase3_v3_counts_recorded_names_and_excludes_ordinary_discard() {
             runner.state().cycles_completed_this_game_by_player[&P0][index],
             cycle_record(YIDARO, turn),
         );
-        assert_eq!(
-            count(&runner, Some(TargetFilter::Typed(named(YIDARO)))),
-            index as i32 + 1
-        );
+        assert_eq!(count(&runner, Some(YIDARO)), index as i32 + 1);
         for _ in 0..runner.state().stack.len() {
             passes(&mut runner);
         }
@@ -2347,7 +2338,7 @@ fn phase3_v3_counts_recorded_names_and_excludes_ordinary_discard() {
                 return_with_raise_dead(&mut runner, raise_dead, card);
             }
             assert_ne!(zone(&runner, card), Zone::Graveyard);
-            assert_eq!(count(&runner, Some(TargetFilter::Typed(named(YIDARO)))), 1);
+            assert_eq!(count(&runner, Some(YIDARO)), 1);
         }
     }
     let entry = cycle_wraith(&mut runner, wraith);
@@ -2405,32 +2396,7 @@ fn phase3_v3_counts_recorded_names_and_excludes_ordinary_discard() {
         ("yidaro, wandering monster", 2),
         ("Homing Sliver", 0),
     ] {
-        assert_eq!(
-            count(&runner, Some(TargetFilter::Typed(named(name)))),
-            expected
-        );
-    }
-    for unsupported in [
-        TargetFilter::Typed(TypedFilter {
-            type_filters: vec![TypeFilter::Creature],
-            ..named(YIDARO)
-        }),
-        TargetFilter::Typed(TypedFilter {
-            controller: Some(ControllerRef::You),
-            ..named(YIDARO)
-        }),
-        TargetFilter::Typed(named(YIDARO).properties(vec![
-            FilterProp::Named {
-                name: YIDARO.into(),
-            },
-            FilterProp::NonToken,
-        ])),
-        TargetFilter::Typed(named("")),
-        TargetFilter::Not {
-            filter: Box::new(TargetFilter::Typed(named(YIDARO))),
-        },
-    ] {
-        assert_eq!(count(&runner, Some(unsupported)), 0);
+        assert_eq!(count(&runner, Some(name)), expected);
     }
 }
 
@@ -2489,15 +2455,14 @@ fn assert_yidaro_branch(trigger: &engine::types::ability::TriggerDefinition) {
     ));
 }
 
-fn yidaro_scenario() -> GameScenario {
+const YIDARO_SCENARIO_LIBRARY: &[&str] = &[
+    "Island", "Mountain", "Forest", "Plains", "Swamp", "Island", "Forest",
+];
+
+fn yidaro_scenario(p0_library: &[&str]) -> GameScenario {
     let mut scenario = main_phase();
-    for seat in [P0, P1] {
-        scenario.with_library_top(
-            seat,
-            &[
-                "Island", "Mountain", "Forest", "Plains", "Swamp", "Island", "Forest",
-            ],
-        );
+    for (seat, library) in [(P0, p0_library), (P1, YIDARO_SCENARIO_LIBRARY)] {
+        scenario.with_library_top(seat, library);
         for _ in 0..8 {
             scenario.add_basic_land(seat, ManaColor::Red);
         }
@@ -2716,8 +2681,11 @@ fn cycle_yidaro_into_library(runner: &mut GameRunner, seat: PlayerId, source: Ob
 
 #[test]
 fn phase5_v2_three_cycles_shuffle_four_enter() {
-    let mut scenario = yidaro_scenario();
-    let cards: [_; 4] = std::array::from_fn(|_| printed(&mut scenario, P0, YIDARO, Zone::Hand));
+    // CR 100.2a: Three cycling copies plus the graveyard bystander fit the four-copy limit.
+    // Two filler cards guarantee that the first three cycles and the Wraith draw
+    // return at least one of those copies to hand, with a card left to draw on cycle four.
+    let mut scenario = yidaro_scenario(&["Island", "Mountain"]);
+    let cards: [_; 3] = std::array::from_fn(|_| printed(&mut scenario, P0, YIDARO, Zone::Hand));
     let bystander = printed(&mut scenario, P0, YIDARO, Zone::Graveyard);
     let opponent = printed(&mut scenario, P1, YIDARO, Zone::Hand);
     let wraith = street_wraith(&mut scenario);
@@ -2746,7 +2714,11 @@ fn phase5_v2_three_cycles_shuffle_four_enter() {
     assert_eq!(zone(&runner, bystander), Zone::Graveyard);
 
     priority_for(&mut runner, P0, 2);
-    let fourth = cycle_yidaro(&mut runner, P0, cards[3]);
+    let recycled = cards
+        .into_iter()
+        .find(|&card| zone(&runner, card) == Zone::Hand)
+        .expect("a previously cycled Yidaro was drawn back into hand");
+    let fourth = cycle_yidaro(&mut runner, P0, recycled);
     let records = &runner.state().cycles_completed_this_game_by_player[&P0];
     assert_eq!(records.len(), 5);
     assert_eq!(records[0], cycle_record(YIDARO, first_turn));
@@ -2771,7 +2743,7 @@ fn cycle_wraith_for_phase5(runner: &mut GameRunner, source: ObjectId) -> ObjectI
 
 #[test]
 fn phase5_v2a_pending_third_trigger_reads_fourth_cycle() {
-    let mut scenario = yidaro_scenario();
+    let mut scenario = yidaro_scenario(YIDARO_SCENARIO_LIBRARY);
     let [first, second, a, b] =
         std::array::from_fn(|_| printed(&mut scenario, P0, YIDARO, Zone::Hand));
     let mut runner = scenario.build();
@@ -2824,7 +2796,7 @@ fn phase5_v2a_pending_third_trigger_reads_fourth_cycle() {
 #[test]
 fn phase5_v3_departed_source_keeps_only_the_selected_branch() {
     for prior_cycles in [2, 3] {
-        let mut scenario = yidaro_scenario();
+        let mut scenario = yidaro_scenario(YIDARO_SCENARIO_LIBRARY);
         let earlier: Vec<_> = (0..prior_cycles)
             .map(|_| printed(&mut scenario, P0, YIDARO, Zone::Hand))
             .collect();
@@ -2902,7 +2874,7 @@ fn phoenix_guard() -> TriggerCondition {
             qty: QuantityRef::CardsCycled {
                 scope: CountScope::Controller,
                 window: CyclingHistoryWindow::ThisTurn,
-                filter: None,
+                name: None,
             },
         },
         comparator: Comparator::GE,

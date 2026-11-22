@@ -4010,14 +4010,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             acc = acc.or(scan_player_scope(player));
             acc
         }
-        QuantityRef::CardsCycled {
-            scope,
-            window,
-            filter,
-        } => {
-            if crate::game::filter::cycling_history_filter_name(filter.as_ref()).is_err() {
-                return Axes::NONE;
-            }
+        QuantityRef::CardsCycled { scope, window, .. } => {
             // Resource comparison retains the ledger. The turn window also reads the frame turn.
             let acc = Axes::history_of(HistoryMember::CompletedCyclingHistory)
                 .or(scan_count_scope(scope));
@@ -15759,24 +15752,18 @@ mod poison_condition_scan_tests {
 #[cfg(test)]
 mod cycling_quantity_scan_tests {
     use super::*;
-    use crate::types::ability::{Comparator, CyclingHistoryWindow, TypedFilter};
+    use crate::types::ability::{Comparator, CyclingHistoryWindow};
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
 
     #[test]
     fn phase3_v5_cycling_dependencies_reach_the_loop_firewall() {
-        let name = TargetFilter::Typed(TypedFilter {
-            type_filters: vec![],
-            controller: None,
-            properties: vec![FilterProp::Named {
-                name: "Yidaro, Wandering Monster".into(),
-            }],
-        });
-        let quantity = |window, filter| QuantityExpr::Ref {
+        let name = "Yidaro, Wandering Monster".to_owned();
+        let quantity = |window, name| QuantityExpr::Ref {
             qty: QuantityRef::CardsCycled {
                 scope: CountScope::Controller,
                 window,
-                filter,
+                name,
             },
         };
         let fixed = |value| QuantityExpr::Fixed { value };
@@ -15798,13 +15785,12 @@ mod cycling_quantity_scan_tests {
         let trigger = |lhs| comparison_trigger(lhs, fixed(2));
         let named_cycles = quantity(CyclingHistoryWindow::ThisGame, Some(name));
         let turn_cycles = quantity(CyclingHistoryWindow::ThisTurn, None);
-        // No printed card uses the synthetic comparison or filter shapes below. The closest
+        // No printed card uses the synthetic comparison shapes below. The closest
         // printed cases are Yidaro's resolution instruction (CR 608.2c), "If you've cycled a card
         // named Yidaro, Wandering Monster four or more times this game", and Spellpyre Phoenix's
         // intervening-if condition (CR 603.4), "if you cycled two or more cards this turn".
         // The cast-count comparison isolates whether scanning the other operand still picks up
-        // its projected-resource dependency. The Any filter isolates rejection of unsupported
-        // cycling filters by both the history and projected-resource scans.
+        // its projected-resource dependency.
         let yidaro = ability(named_cycles.clone());
         let phoenix = trigger(turn_cycles.clone());
         assert!(!ability_reads_projected_resource(&yidaro));
@@ -15855,21 +15841,6 @@ mod cycling_quantity_scan_tests {
         );
         assert_eq!(
             trigger_condition_history(&trigger(fixed(0))),
-            HistoryReads::NONE
-        );
-        let unsupported = quantity(CyclingHistoryWindow::ThisTurn, Some(TargetFilter::Any));
-        let unsupported_ability = ability(unsupported.clone());
-        let unsupported_trigger = trigger(unsupported);
-        assert!(!ability_reads_projected_resource(&unsupported_ability));
-        assert!(!trigger_condition_reads_projected_resource(
-            &unsupported_trigger
-        ));
-        assert_eq!(
-            resolved_ability_history(&unsupported_ability),
-            HistoryReads::NONE
-        );
-        assert_eq!(
-            trigger_condition_history(&unsupported_trigger),
             HistoryReads::NONE
         );
     }

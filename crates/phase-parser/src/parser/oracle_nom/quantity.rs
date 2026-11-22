@@ -68,25 +68,14 @@ pub(super) fn named_game_cycling_quantity(name: &str) -> Option<QuantityExpr> {
     {
         return None;
     }
-    let operand = format!("card named {name}");
-    let (filter, rest) = parse_type_phrase_folding(&operand);
-    let TargetFilter::Typed(mut typed) = filter else {
-        return None;
-    };
-    if !rest.trim().is_empty()
-        || !matches!(typed.type_filters.as_slice(), [] | [TypeFilter::Card])
-        || typed.controller.is_some()
-        || !matches!(typed.properties.as_slice(), [FilterProp::Named { name: parsed }] if parsed == &name)
-    {
+    if crate::parser::oracle_target::named_filter_name_end(&name) != name.len() {
         return None;
     }
-    // Every recorded cycle already has a card as its subject.
-    typed.type_filters.clear();
     Some(QuantityExpr::Ref {
         qty: QuantityRef::CardsCycled {
             scope: CountScope::Controller,
             window: crate::types::ability::CyclingHistoryWindow::ThisGame,
-            filter: Some(TargetFilter::Typed(typed)),
+            name: Some(name),
         },
     })
 }

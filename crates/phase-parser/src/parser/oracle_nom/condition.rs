@@ -235,7 +235,7 @@ fn parse_current_turn_cycling_condition(input: &str) -> OracleResult<'_, StaticC
                 qty: QuantityRef::CardsCycled {
                     scope: CountScope::Controller,
                     window: CyclingHistoryWindow::ThisTurn,
-                    filter: None,
+                    name: None,
                 },
             },
             comparator,
@@ -29240,7 +29240,7 @@ mod intervening_if_state_condition_tests {
 #[cfg(test)]
 #[test]
 fn named_cycling_guard_requires_a_complete_whole_game_minimum() {
-    use crate::types::ability::{CyclingHistoryWindow, TypedFilter};
+    use crate::types::ability::CyclingHistoryWindow;
 
     for (guard, name, minimum) in [
         (
@@ -29265,11 +29265,7 @@ fn named_cycling_guard_requires_a_complete_whole_game_minimum() {
                     qty: QuantityRef::CardsCycled {
                         scope: CountScope::Controller,
                         window: CyclingHistoryWindow::ThisGame,
-                        filter: Some(TargetFilter::Typed(TypedFilter {
-                            type_filters: vec![],
-                            controller: None,
-                            properties: vec![FilterProp::Named { name: name.into() }],
-                        })),
+                        name: Some(name.into()),
                     },
                 },
                 comparator: Comparator::GE,
@@ -29319,7 +29315,7 @@ fn unrestricted_cycling_guard_requires_a_complete_current_turn_minimum() {
                         qty: QuantityRef::CardsCycled {
                             scope: CountScope::Controller,
                             window: CyclingHistoryWindow::ThisTurn,
-                            filter: None,
+                            name: None,
                         },
                     },
                     comparator: Comparator::GE,

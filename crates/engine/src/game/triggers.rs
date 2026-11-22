@@ -18165,10 +18165,7 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
             filter_binding_diverges(source) || filter_binding_diverges(target)
         }
         // CR 603.4: a scoped cycling count can bind to a different seat at resolution.
-        QuantityRef::CardsCycled { scope, filter, .. } => {
-            count_scope_binding_diverges(scope)
-                || filter.as_ref().is_some_and(filter_binding_diverges)
-        }
+        QuantityRef::CardsCycled { scope, .. } => count_scope_binding_diverges(scope),
         // Same filter axis, optional: a `None` filter names no population to
         // re-scope, so only the `Some` arm can diverge.
         QuantityRef::ZoneCardCount { filter, .. }
@@ -33926,7 +33923,7 @@ pub mod tests {
                     qty: QuantityRef::CardsCycled {
                         scope,
                         window: CyclingHistoryWindow::ThisTurn,
-                        filter: None,
+                        name: None,
                     },
                 },
                 comparator: Comparator::GE,

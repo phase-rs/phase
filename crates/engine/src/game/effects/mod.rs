@@ -78837,7 +78837,7 @@ mod cycling_candidate_scalar_tests {
             let attr = QuantityRef::CardsCycled {
                 scope: CountScope::ScopedPlayer,
                 window,
-                filter: None,
+                name: None,
             };
             assert_eq!(
                 resolve_quantity_with_targets(

@@ -13657,14 +13657,6 @@ mod tests {
         window: crate::types::ability::CyclingHistoryWindow,
         name: Option<&str>,
     ) -> i32 {
-        use crate::types::ability::{FilterProp, TypedFilter};
-        let filter = name.map(|name| {
-            TargetFilter::Typed(TypedFilter {
-                type_filters: vec![],
-                controller: None,
-                properties: vec![FilterProp::Named { name: name.into() }],
-            })
-        });
         let ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), player);
         crate::game::quantity::resolve_quantity_with_targets(
             state,
@@ -13672,7 +13664,7 @@ mod tests {
                 qty: QuantityRef::CardsCycled {
                     scope,
                     window,
-                    filter,
+                    name: name.map(str::to_owned),
                 },
             },
             &ability,

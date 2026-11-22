@@ -34990,7 +34990,6 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::SpellsCast { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. }
-        | QuantityRef::CardsCycled { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. } => filter
             .as_ref()
             .is_some_and(|x| target_filter_reads_chosen_target(x, read)),
@@ -35045,6 +35044,7 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::ChosenNumber
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::DungeonsCompleted
         | QuantityRef::CostXPaid
         | QuantityRef::KickerCount

@@ -250,17 +250,7 @@ expression: "&ir"
                                     "type": "CardsCycled",
                                     "scope": "Controller",
                                     "window": "ThisGame",
-                                    "filter": {
-                                      "type": "Typed",
-                                      "type_filters": [],
-                                      "controller": null,
-                                      "properties": [
-                                        {
-                                          "type": "Named",
-                                          "name": "yidaro, wandering monster"
-                                        }
-                                      ]
-                                    }
+                                    "name": "yidaro, wandering monster"
                                   }
                                 },
                                 "comparator": "GE",

@@ -6964,11 +6964,8 @@ fn resolve_ref(
         QuantityRef::CardsCycled {
             scope,
             window,
-            filter,
+            name,
         } => {
-            let Ok(name) = crate::game::filter::cycling_history_filter_name(filter.as_ref()) else {
-                return 0;
-            };
             // CR 602.2b + CR 601.2h + CR 601.2i: The ledger records paid activations
             // at placement. CR 608.2h: Evaluate membership using the current turn.
             // CR 109.5: In an ability, "you" uses its bound controller.
@@ -6985,8 +6982,9 @@ fn resolve_ref(
                         };
                         // CR 201.2 + CR 201.2a: Compare the recorded English name.
                         in_window
-                            && name.is_none_or(|name| {
-                                crate::game::filter::card_names_match(&record.name, name)
+                            && name.as_deref().is_none_or(|name| {
+                                !name.is_empty()
+                                    && crate::game::filter::card_names_match(&record.name, name)
                             })
                     })
                     .count(),
@@ -13534,7 +13532,6 @@ mod tests {
                 | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => Some(filter),
                 QuantityRef::SpellsCast { filter, .. }
                 | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
-                | QuantityRef::CardsCycled { filter, .. }
                 | QuantityRef::SpellsCastThisGame { filter, .. } => filter.as_ref(),
                 QuantityRef::ManaSpentToCast {
                     metric: CastManaSpentMetric::FromSource { source_filter },

@@ -7371,10 +7371,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         QuantityRef::CardsDrawnThisTurn { player: _ }
         | QuantityRef::CardsDrawnLastTurn { player: _ }
         | QuantityRef::CardsDiscardedThisTurn { .. } => reads_player_of(StateKind::JournalCards),
-        QuantityRef::CardsCycled { scope, window: _, filter } => {
-            if crate::game::filter::cycling_history_filter_name(filter.as_ref()).is_err() {
-                return RwProfile::empty();
-            }
+        QuantityRef::CardsCycled { scope, .. } => {
             // CR 603.3b + CR 608.2h: This reads a player journal, with a per-source
             // binding only when the scope uses that source's persisted player choice.
             let mut profile = reads_player_of(StateKind::JournalCards);
@@ -11612,13 +11609,7 @@ mod cycling_quantity_rw_tests {
 
     #[test]
     fn phase3_v5_cycling_footprint_tracks_only_the_player_journal_and_bound_choice() {
-        let name = TargetFilter::Typed(TypedFilter {
-            type_filters: vec![],
-            controller: None,
-            properties: vec![FilterProp::Named {
-                name: "Yidaro, Wandering Monster".into(),
-            }],
-        });
+        let name = "Yidaro, Wandering Monster".to_owned();
         let fixed = |value| QuantityExpr::Fixed { value };
         let profiles = |lhs: QuantityExpr| {
             let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
@@ -11637,7 +11628,7 @@ mod cycling_quantity_rw_tests {
                 trigger_condition_rw_profile(&trigger),
             ]
         };
-        for (window, filter) in [
+        for (window, name) in [
             (CyclingHistoryWindow::ThisGame, Some(name)),
             (CyclingHistoryWindow::ThisTurn, None),
         ] {
@@ -11649,7 +11640,7 @@ mod cycling_quantity_rw_tests {
                     qty: QuantityRef::CardsCycled {
                         scope,
                         window,
-                        filter: filter.clone(),
+                        name: name.clone(),
                     },
                 }) {
                     assert_eq!(profile.reads_player, KindSet::one(StateKind::JournalCards));

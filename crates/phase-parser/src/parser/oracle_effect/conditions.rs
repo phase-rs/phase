@@ -18924,7 +18924,7 @@ mod referent_owner_tests {
 #[cfg(test)]
 #[test]
 fn named_cycling_split_commits_at_the_first_structural_suffix() {
-    use crate::types::ability::{CyclingHistoryWindow, TypedFilter};
+    use crate::types::ability::CyclingHistoryWindow;
 
     // No printed card has these adversarial shapes. Yidaro, Wandering Monster
     // is the nearest printed case.
@@ -18948,13 +18948,7 @@ fn named_cycling_split_commits_at_the_first_structural_suffix() {
                     qty: QuantityRef::CardsCycled {
                         scope: crate::types::ability::CountScope::Controller,
                         window: CyclingHistoryWindow::ThisGame,
-                        filter: Some(TargetFilter::Typed(TypedFilter {
-                            type_filters: vec![],
-                            controller: None,
-                            properties: vec![FilterProp::Named {
-                                name: "yidaro, wandering monster".into()
-                            }],
-                        })),
+                        name: Some("yidaro, wandering monster".into()),
                     },
                 },
                 comparator: Comparator::GE,

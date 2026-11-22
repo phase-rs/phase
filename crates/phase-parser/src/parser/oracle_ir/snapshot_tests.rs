@@ -4009,13 +4009,7 @@ fn yidaro_cycle_history_two_layer() {
                     qty: QuantityRef::CardsCycled {
                         scope: CountScope::Controller,
                         window: CyclingHistoryWindow::ThisGame,
-                        filter: Some(TargetFilter::Typed(TypedFilter {
-                            type_filters: vec![],
-                            controller: None,
-                            properties: vec![FilterProp::Named {
-                                name: "yidaro, wandering monster".into()
-                            }],
-                        })),
+                        name: Some("yidaro, wandering monster".into()),
                     },
                 },
                 comparator: Comparator::GE,
@@ -4179,7 +4173,7 @@ fn spellpyre_phoenix_turn_history_two_layer() {
             qty: QuantityRef::CardsCycled {
                 scope: CountScope::Controller,
                 window: CyclingHistoryWindow::ThisTurn,
-                filter: None,
+                name: None,
             },
         },
         comparator: Comparator::GE,

@@ -2257,16 +2257,15 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::CardsCycled {
             scope,
             window,
-            filter,
+            name,
         } => {
             let window = match window {
                 crate::types::ability::CyclingHistoryWindow::ThisTurn => "this turn",
                 crate::types::ability::CyclingHistoryWindow::ThisGame => "this game",
             };
-            match crate::game::filter::cycling_history_filter_name(filter.as_ref()) {
-                Ok(None) => format!("cards cycled {window} ({scope:?})"),
-                Ok(Some(name)) => format!("cards named {name} cycled {window} ({scope:?})"),
-                Err(()) => format!("filtered cards cycled {window} ({scope:?})"),
+            match name {
+                None => format!("cards cycled {window} ({scope:?})"),
+                Some(name) => format!("cards named {name} cycled {window} ({scope:?})"),
             }
         }
         QuantityRef::SpellsCastThisGame { scope, filter } => match (scope, filter) {
@@ -12872,14 +12871,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } => {
             ("LoyaltyAbilitiesActivatedThisTurn", Handled)
         }
-        QuantityRef::CardsCycled { filter, .. } => (
-            "CardsCycled",
-            if crate::game::filter::cycling_history_filter_name(filter.as_ref()).is_ok() {
-                Handled
-            } else {
-                Unhandled
-            },
-        ),
+        QuantityRef::CardsCycled { .. } => ("CardsCycled", Handled),
         QuantityRef::SpellsCastThisGame { .. } => ("SpellsCastThisGame", Handled),
         QuantityRef::CounterAddedThisTurn { .. } => ("CounterAddedThisTurn", Handled),
         QuantityRef::CardsDiscardedThisTurn { .. } => ("CardsDiscardedThisTurn", Handled),
@@ -29895,15 +29887,9 @@ mod cycling_quantity_coverage_tests {
 
     #[test]
     fn phase3_v3_v4_cycling_quantity_support_is_context_sensitive() {
-        use crate::types::ability::{ControllerRef, PlayerRelation, TypeFilter, TypedFilter};
+        use crate::types::ability::PlayerRelation;
 
-        let named = TypedFilter {
-            type_filters: vec![],
-            controller: None,
-            properties: vec![FilterProp::Named {
-                name: "Yidaro, Wandering Monster".into(),
-            }],
-        };
+        let named = "Yidaro, Wandering Monster".to_owned();
         let feature = |qty, key| {
             let mut features = HashMap::new();
             extract_quantity_features(&QuantityExpr::Ref { qty }, &mut features);
@@ -29913,13 +29899,13 @@ mod cycling_quantity_coverage_tests {
             CyclingHistoryWindow::ThisTurn,
             CyclingHistoryWindow::ThisGame,
         ] {
-            let cycle = |filter| QuantityRef::CardsCycled {
+            let cycle = |name| QuantityRef::CardsCycled {
                 scope: CountScope::ScopedPlayer,
                 window,
-                filter,
+                name,
             };
-            for filter in [None, Some(TargetFilter::Typed(named.clone()))] {
-                let attr = cycle(filter);
+            for name in [None, Some(named.clone())] {
+                let attr = cycle(name);
                 assert_eq!(
                     feature(attr.clone(), "CardsCycled"),
                     FeatureSupport::Handled
@@ -29933,35 +29919,6 @@ mod cycling_quantity_coverage_tests {
                     },
                 };
                 assert_eq!(feature(outer, "PlayerCount"), FeatureSupport::Unhandled);
-            }
-            for unsupported in [
-                TargetFilter::Any,
-                TargetFilter::Typed(TypedFilter {
-                    properties: vec![],
-                    ..named.clone()
-                }),
-                TargetFilter::Typed(TypedFilter {
-                    properties: vec![FilterProp::Named {
-                        name: String::new(),
-                    }],
-                    ..named.clone()
-                }),
-                TargetFilter::Typed(TypedFilter {
-                    type_filters: vec![TypeFilter::Creature],
-                    ..named.clone()
-                }),
-                TargetFilter::Typed(TypedFilter {
-                    controller: Some(ControllerRef::You),
-                    ..named.clone()
-                }),
-                TargetFilter::Not {
-                    filter: Box::new(TargetFilter::Typed(named.clone())),
-                },
-            ] {
-                assert_eq!(
-                    feature(cycle(Some(unsupported)), "CardsCycled"),
-                    FeatureSupport::Unhandled
-                );
             }
         }
     }

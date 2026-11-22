@@ -10077,7 +10077,6 @@ pub fn quantity_ref_grammar_any(
         | QuantityRef::SpellsCast { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. }
-        | QuantityRef::CardsCycled { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. } => filter
             .as_ref()
             .is_some_and(|inner| filter_grammar_any(inner, visit)),
@@ -10147,6 +10146,7 @@ pub fn quantity_ref_grammar_any(
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
@@ -10910,7 +10910,6 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::SpellsCast { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. }
-        | QuantityRef::CardsCycled { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. } => {
             filter.as_mut().into_iter().for_each(|inner| {
                 rewrite_filter_props(
@@ -11013,6 +11012,7 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
@@ -13363,7 +13363,6 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::SpellsCast { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. }
-        | QuantityRef::CardsCycled { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. } => filter
             .as_ref()
             .is_some_and(|member| target_filter_has_unsupported_selected_ref(member, true)),
@@ -13414,6 +13413,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::NotedNumber
         | QuantityRef::ChosenNumber
         | QuantityRef::DescendedThisTurn
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::DungeonsCompleted
         | QuantityRef::KickerCount
         | QuantityRef::AdditionalCostPaymentCount
@@ -15101,7 +15101,7 @@ pub enum QuantityRef {
         scope: CountScope,
         window: CyclingHistoryWindow,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        filter: Option<TargetFilter>,
+        name: Option<String>,
     },
     /// CR 122.1 + CR 122.6: Count counters put this turn by `actor` on objects
     /// matching `target`. `counters` narrows the counter kind; `CounterMatch::Any`
@@ -15467,7 +15467,6 @@ impl QuantityRef {
             | QuantityRef::AttackedThisTurn { filter, .. }
             | QuantityRef::SpellsCast { filter, .. }
             | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
-            | QuantityRef::CardsCycled { filter, .. }
             | QuantityRef::SpellsCastThisGame { filter, .. } => filter
                 .as_ref()
                 .is_some_and(TargetFilter::references_cost_paid_object),
@@ -15551,6 +15550,7 @@ impl QuantityRef {
             | QuantityRef::PlayerChosenNumber { .. }
             | QuantityRef::NotedNumber
             | QuantityRef::DescendedThisTurn
+            | QuantityRef::CardsCycled { .. }
             | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
             | QuantityRef::CardsDrawnLastTurn { .. }
             | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
@@ -54541,40 +54541,28 @@ mod cycling_quantity_serde_tests {
 
     #[test]
     fn phase3_v6_cycling_quantity_roundtrips_and_legacy_cast_history_decodes() {
-        let named = TargetFilter::Typed(TypedFilter {
-            type_filters: vec![],
-            controller: None,
-            properties: vec![FilterProp::Named {
-                name: "Yidaro, Wandering Monster".into(),
-            }],
-        });
+        let named = "Yidaro, Wandering Monster".to_owned();
         for window in [
             CyclingHistoryWindow::ThisTurn,
             CyclingHistoryWindow::ThisGame,
         ] {
-            for filter in [None, Some(named.clone())] {
-                let expected_filter = filter
+            for name in [None, Some(named.clone())] {
+                let expected_name = name
                     .as_ref()
                     .map(|value| serde_json::to_value(value).unwrap());
                 let qty = QuantityRef::CardsCycled {
                     scope: CountScope::Controller,
                     window,
-                    filter,
+                    name,
                 };
                 let wire = serde_json::to_value(&qty).unwrap();
                 assert_eq!(wire["type"], "CardsCycled");
                 assert_eq!(wire["window"], serde_json::to_value(window).unwrap());
-                assert_eq!(wire.get("filter"), expected_filter.as_ref());
+                assert_eq!(wire.get("name"), expected_name.as_ref());
                 assert_eq!(serde_json::from_value::<QuantityRef>(wire).unwrap(), qty);
                 assert!(quantity_ref_target_slot_spec(&qty).is_none());
             }
         }
-        assert!(quantity_ref_target_slot_spec(&QuantityRef::CardsCycled {
-            scope: CountScope::Controller,
-            window: CyclingHistoryWindow::ThisGame,
-            filter: Some(TargetFilter::Player),
-        })
-        .is_none());
         assert_eq!(
             serde_json::from_str::<QuantityRef>(r#"{"type":"SpellsCastThisGame"}"#).unwrap(),
             QuantityRef::SpellsCastThisGame {
