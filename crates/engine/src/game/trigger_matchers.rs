@@ -2122,15 +2122,16 @@ pub(super) fn match_damage_done_once_by_controller(
                 amount: *amount,
                 is_combat: *is_combat,
             };
-            if *is_combat
+            !(*is_combat
                 || !damage_kind_matches(trigger.damage_kind, *is_combat)
                 || !damage_amount_matches(trigger, *amount)
-                || !valid_damage_done_once_player_target(trigger, state, *player_id, source_context)
-                || !damage_done_once_source_matches(trigger, state, damage, source_context)
-            {
-                return false;
-            }
-            true
+                || !valid_damage_done_once_player_target(
+                    trigger,
+                    state,
+                    *player_id,
+                    source_context,
+                )
+                || !damage_done_once_source_matches(trigger, state, damage, source_context))
         }
         _ => false,
     }

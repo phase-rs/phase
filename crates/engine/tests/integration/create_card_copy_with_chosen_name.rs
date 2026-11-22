@@ -475,7 +475,10 @@ fn accepting_the_cast_puts_the_copy_on_the_stack() {
         runner.state().waiting_for
     );
     assert!(
-        runner.stack_names().contains(&"Grizzly Bears".to_string()),
+        runner
+            .stack_names()
+            .iter()
+            .any(|i: &String| i == "Grizzly Bears"),
         "the copy is on the stack: {:?}",
         runner.stack_names()
     );
@@ -541,7 +544,7 @@ fn a_name_already_chosen_leaves_the_domain() {
 
     let offered = offered_names(&runner);
     assert!(
-        !offered.contains(&"Disenchant".to_string()),
+        !offered.iter().any(|i| i == "Disenchant"),
         "CR 608.2d: \"a card name that hasn't been chosen\" — got {offered:?}"
     );
     assert_eq!(
@@ -688,7 +691,10 @@ fn a_cast_copy_is_never_put_into_exile() {
     }
     // Reach-guard: the copy really was cast.
     assert!(
-        runner.stack_names().contains(&"Grizzly Bears".to_string()),
+        runner
+            .stack_names()
+            .iter()
+            .any(|i: &String| i == "Grizzly Bears"),
         "the copy is on the stack: {:?}",
         runner.stack_names()
     );
@@ -1106,7 +1112,10 @@ fn real_garth_casts_a_targeted_copy() {
     garth_choose(&mut runner, garth, "Disenchant");
     drive_copy_cast(&mut runner, 0, Some(TargetRef::Object(lotus)));
     assert!(
-        runner.stack_names().contains(&"Disenchant".to_string()),
+        runner
+            .stack_names()
+            .iter()
+            .any(|i: &String| i == "Disenchant"),
         "the Disenchant copy is on the stack: {:?} / {:?}",
         runner.stack_names(),
         runner.state().waiting_for
@@ -1144,7 +1153,10 @@ fn real_garth_casts_an_x_copy() {
     garth_choose(&mut runner, garth, "Braingeyser");
     drive_copy_cast(&mut runner, 2, Some(TargetRef::Player(P0)));
     assert!(
-        runner.stack_names().contains(&"Braingeyser".to_string()),
+        runner
+            .stack_names()
+            .iter()
+            .any(|i: &String| i == "Braingeyser"),
         "the Braingeyser copy is on the stack: {:?} / {:?}",
         runner.stack_names(),
         runner.state().waiting_for
@@ -1204,7 +1216,8 @@ fn real_ersta_casts_her_copy_for_free() {
     assert!(
         runner
             .stack_names()
-            .contains(&"Enlightened Tutor".to_string()),
+            .iter()
+            .any(|i: &String| i == "Enlightened Tutor"),
         "the free copy is on the stack: {:?} / {:?}",
         runner.stack_names(),
         runner.state().waiting_for
@@ -1637,7 +1650,10 @@ fn first_cast_readers(first_cast: FirstCast) -> FirstCastReaders {
     FirstCastReaders {
         demonstrate: spell_has_keyword(&runner, spell, |k| matches!(k, Keyword::Demonstrate)),
         cascade: spell_has_keyword(&runner, spell, |k| matches!(k, Keyword::Cascade)),
-        nalfeshnee_triggered: runner.stack_names().contains(&"Nalfeshnee".to_string()),
+        nalfeshnee_triggered: runner
+            .stack_names()
+            .iter()
+            .any(|i: &String| i == "Nalfeshnee"),
     }
 }
 
@@ -1839,10 +1855,7 @@ fn web_watch_mana_pays_for_an_exile_cast_but_not_for_garths_copy() {
         TargetRef::Object(table.watch)
     ));
     assert!(
-        table
-            .runner
-            .stack_names()
-            .contains(&"Disenchant".to_string()),
+        table.runner.stack_names().iter().any(|i| i == "Disenchant"),
         "unrestricted mana pays for the copy: {:?}",
         table.runner.state().waiting_for
     );

@@ -3820,7 +3820,7 @@ fn copy_target_choice_resolves_become_copy() {
     assert_eq!(clone.name, "Grizzly Bears");
     assert_eq!(clone.power, Some(2));
     assert_eq!(clone.toughness, Some(2));
-    assert!(clone.card_types.subtypes.contains(&"Bird".to_string()));
+    assert!(clone.card_types.subtypes.iter().any(|i| i == "Bird"));
     assert!(clone
         .keywords
         .contains(&crate::types::keywords::Keyword::Flying));
@@ -6391,7 +6391,7 @@ fn jotun_owl_keeper_one_of_x_n_pays_combined_mana() {
                         if shards.as_slice() == [crate::types::mana::ManaCostShard::White]
                 ),
                 "first pick is Mana({{W}}) as selected by index 0; got {:?}",
-                &chosen[0]
+                chosen[0]
             );
         }
         other => panic!("expected second UnlessPaymentChooseCost, got {other:?}"),

@@ -189,7 +189,7 @@ fn encore_activation_creates_attacking_haste_copy_per_opponent() {
     // Copies the source's copiable values (3/2 red Goblin).
     assert_eq!(tok.power, Some(3));
     assert_eq!(tok.toughness, Some(2));
-    assert!(tok.card_types.subtypes.contains(&"Goblin".to_string()));
+    assert!(tok.card_types.subtypes.iter().any(|i| i == "Goblin"));
     // CR 702.141a: "The tokens gain haste."
     assert!(
         tok.keywords.contains(&Keyword::Haste),

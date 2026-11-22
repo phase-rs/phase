@@ -286,8 +286,8 @@ mod tests {
     #[test]
     fn spoken_words_preserves_hyphenated_words() {
         let words: Vec<String> = spoken_words("This is a touch-and-go scenario - right?").collect();
-        assert!(words.contains(&"touch-and-go".to_string()));
-        assert!(!words.contains(&"-".to_string()));
+        assert!(words.iter().any(|i| i == "touch-and-go"));
+        assert!(!words.iter().any(|i| i == "-"));
     }
 
     #[test]

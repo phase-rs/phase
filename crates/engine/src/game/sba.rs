@@ -2465,11 +2465,7 @@ fn check_saga_sacrifice(
                     } if *object_id == *id
                 )
             });
-            if pending_lore_event {
-                return false;
-            }
-
-            true
+            !pending_lore_event
         })
         .collect();
 

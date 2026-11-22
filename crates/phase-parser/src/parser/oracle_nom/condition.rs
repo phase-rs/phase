@@ -5426,7 +5426,7 @@ pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCo
 ///
 /// CR 603.4: Intervening-if conditions are evaluated as written — both
 /// idioms are grammatically equivalent `>= N` thresholds.
-fn parse_ge_threshold(input: &str) -> OracleResult<'_, u32> {
+pub(crate) fn parse_ge_threshold(input: &str) -> OracleResult<'_, u32> {
     alt((
         // "N or more "
         |i| {
@@ -7013,7 +7013,7 @@ pub(crate) fn inject_controller_you(filter: TargetFilter) -> TargetFilter {
 
 /// CR 102.2 + CR 102.3: Recognize opponent possessive prefixes. Shared
 /// combinator used by zone-count parsing and life-total condition parsing.
-fn parse_opponent_possessive(input: &str) -> OracleResult<'_, ()> {
+pub(crate) fn parse_opponent_possessive(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((

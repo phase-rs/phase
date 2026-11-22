@@ -2119,7 +2119,8 @@ fn compound_subject_rider_with_an_intervening_declarer_fails_closed() {
     let parsed = parse_oracle_text(TEXT, "Probe", &[], &types("Instant"), &[]);
     assert!(
         unimplemented_names(&[&parsed.abilities[0]])
-            .contains(&"die_exile_rider_antecedent".to_string()),
+            .iter()
+            .any(|i| i == "die_exile_rider_antecedent"),
         "got {:?}",
         chain(&parsed.abilities[0])
     );
