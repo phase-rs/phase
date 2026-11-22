@@ -55193,8 +55193,11 @@ fn when_next_cast_that_spell_grant_binds_triggering_source() {
 /// CR 608.2k + CR 601.2a + CR 603.7 + CR 707.10: in a "when you next cast <spell> this
 /// turn" delayed body, the bare pronoun "it" names the newly-cast spell (the trigger's
 /// event source), exactly like "that spell". Left unpinned, `resolve_pronoun_target` falls
-/// back to `ParentTarget`, which a `WhenNextEvent` delayed trigger does not have, so the
-/// copy is never made (Summon: G.F. Cerberus, The Clone Saga, Najal).
+/// back to `ParentTarget`, which names no object of a `WhenNextEvent` delayed trigger. With
+/// the base parse the runtime witnesses for Summon: G.F. Cerberus, The Clone Saga and Najal
+/// make no copy; an activated ability's untargeted `ParentTarget` copy (Adaptive Training
+/// Post, Rimefire Torque, Jeong Jeong) still reaches the cast spell through the engine's
+/// untargeted fallback, so for those the pin corrects the parsed antecedent only.
 #[test]
 fn when_next_cast_copy_it_binds_triggering_source() {
     for text in [
