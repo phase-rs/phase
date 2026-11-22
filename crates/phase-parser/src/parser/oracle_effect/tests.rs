@@ -106185,3 +106185,85 @@ fn each_target_player_bounds_comparison_to_the_sacrificing_player() {
         Some(ControllerRef::ScopedPlayer)
     );
 }
+
+#[test]
+fn issue_634_gyome_quantity_keeps_this_turn_and_activation_duration() {
+    let parsed = parse_oracle_text(
+        "Trample\nAt the beginning of your end step, create a number of Food tokens equal to the number of nontoken creatures you had enter the battlefield under your control this turn.\n{1}, Sacrifice a Food: Target creature gains indestructible until end of turn. Tap it.",
+        "Gyome, Master Chef",
+        &["Trample".to_string()],
+        &["Creature".to_string()],
+        &["Troll".to_string(), "Warlock".to_string()],
+    );
+    assert!(outer_gap_names(&parsed).is_empty(), "{parsed:#?}");
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("expected Gyome's end-step trigger");
+    };
+    assert_eq!(trigger.phase, Some(crate::types::phase::Phase::End));
+    let execute = trigger.execute.as_deref().unwrap();
+    assert_eq!(execute.duration, None);
+    let Effect::Token { name, count, .. } = execute.effect.as_ref() else {
+        panic!("expected Food token creation, got {:?}", execute.effect);
+    };
+    assert_eq!(name, "Food");
+    assert_eq!(
+        count,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::Controller,
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::NonToken])
+                ),
+            },
+        }
+    );
+    let [activation] = parsed.abilities.as_slice() else {
+        panic!("expected Gyome's activated ability");
+    };
+    assert_eq!(activation.duration, Some(Duration::UntilEndOfTurn));
+    assert!(matches!(
+        activation.effect.as_ref(),
+        Effect::GenericEffect {
+            duration: Some(Duration::UntilEndOfTurn),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn issue_634_emergent_sequence_counter_uses_historical_land_count() {
+    let parsed = parse_oracle_text(
+        "Search your library for a basic land card, put it onto the battlefield tapped, then shuffle. That land becomes a 0/0 green and blue Fractal creature that's still a land. Put a +1/+1 counter on it for each land you had enter the battlefield under your control this turn.",
+        "Emergent Sequence",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert!(outer_gap_names(&parsed).is_empty());
+    let mut definitions = Vec::new();
+    collect_parsed_roots(&parsed, false, &mut definitions);
+    let counter = definitions.last().unwrap();
+    assert_eq!(counter.duration, None);
+    let Effect::PutCounter {
+        target,
+        count,
+        counter_type,
+    } = counter.effect.as_ref()
+    else {
+        panic!("expected final counter placement, got {:?}", counter.effect);
+    };
+    assert_eq!(*counter_type, CounterType::Plus1Plus1);
+    // The recipient "it" still binds to the spell rather than the fetched land: a
+    // separate anaphor gap, recorded in `confirmed-misparses.toml`. This test pins
+    // only the historical land count.
+    let _ = target;
+    assert_eq!(
+        count,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::Controller,
+                filter: TargetFilter::Typed(TypedFilter::land()),
+            },
+        }
+    );
+}

@@ -24,10 +24,12 @@ use engine::types::ability::{
     AbilityDefinition, ActivationRestriction, Comparator, ControllerRef, Effect, FilterProp,
     ParsedCondition, PlayerScope, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
 };
-use engine::types::card_type::Supertype;
+use engine::types::actions::GameAction;
+use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::CounterType;
+use engine::types::game_state::{EntryTokenStatus, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaColor;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -96,9 +98,9 @@ const OWN_SURFACE_SYNTHETIC: &str = "{T}: This creature deals damage equal to th
 creatures that entered the battlefield under your control this turn to any target.";
 
 /// Synthetic T20 fixture: the same shape whose subject noun carries a
-/// `FilterProp` the entry-record matcher cannot answer (`NonToken`).
+/// `FilterProp` the entry-record matcher cannot answer (`Tapped`).
 const NONEVALUABLE_PROP_SYNTHETIC: &str = "{T}: This creature deals damage equal to the number of \
-nontoken creatures that entered the battlefield under your control this turn to any target.";
+tapped creatures that entered the battlefield under your control this turn to any target.";
 
 /// Synthetic T20 prop-discrimination reach-guard: same shape, a prop the matcher
 /// DOES answer (`HasColor`). Proves the guard screens *which* prop rather than
@@ -1028,8 +1030,8 @@ fn bbfu10_lilypad_village_activation_unlocked_by_composite_fix() {
 // T20 / T21 — Step 7: the entry-record matcher's fail-closed `FilterProp` hole
 // ===========================================================================
 
-/// T20 (Step 7b). `battlefield_entry_matches_filter` answers only 4 of the 98
-/// `FilterProp` variants and fails closed on the rest, so a ledger tally over an
+/// T20 (Step 7b). `battlefield_entry_matches_filter` fails closed on
+/// unsupported `FilterProp` variants, so a ledger tally over an
 /// unanswerable prop resolves to a silent constant 0. On the QUANTITY path a
 /// refused clause becomes an honest `Effect::Unimplemented`, so the guard refuses
 /// rather than mis-lowering.
@@ -1039,11 +1041,11 @@ fn bbfu10_lilypad_village_activation_unlocked_by_composite_fix() {
 ///
 /// REVERT-PROBE: delete the `if !ledger_filter_is_evaluable(..)` block in
 /// `parse_entered_this_turn_ref` → (a) lowers to
-/// `DealDamage{amount: Ref(BattlefieldEntriesThisTurn{…[NonToken]})}` and FAILS.
+/// `DealDamage{amount: Ref(BattlefieldEntriesThisTurn{…[Tapped]})}` and FAILS.
 /// (b) and (c) pass in both builds and are the vacuity controls.
 #[test]
 fn bbfu10_nonevaluable_entry_filter_stays_unimplemented() {
-    // (a) THE DISCRIMINATOR — `NonToken` is not answerable from the entry record.
+    // (a) THE DISCRIMINATOR — `Tapped` is not answerable from the entry record.
     let refused = parse_card(
         NONEVALUABLE_PROP_SYNTHETIC,
         "Bbfu10 Nonevaluable Prop Probe",
@@ -1109,14 +1111,8 @@ fn bbfu10_nonevaluable_entry_filter_stays_unimplemented() {
     );
 }
 
-/// T21. The MOTIVATING MEASUREMENT for Step 7, not a discriminator: it asserts
-/// existing runtime behaviour. A single own nontoken legendary tapped creature is
-/// stamped into the production ledger; every `FilterProp` outside the matcher's
-/// four reads a constant 0 even though the live object genuinely satisfies it.
-///
-/// It flips only when `battlefield_entry_matches_filter` gains those props, at
-/// which point `ledger_guard_agrees_with_matcher` (game/restrictions.rs) must be
-/// updated in the same commit.
+/// T21. A tapped entrant proves that the historical matcher fails closed on
+/// properties it cannot evaluate from the snapshot.
 #[test]
 fn bbfu10_nonevaluable_ledger_prop_reads_constant_zero() {
     let mut scenario = GameScenario::new();
@@ -1141,8 +1137,7 @@ fn bbfu10_nonevaluable_ledger_prop_reads_constant_zero() {
 
     // Positive reach-guard: the fixture really pushed a record.
     assert_eq!(read(vec![]), 1, "the bare ledger read sees the entry");
-    // The live object IS nontoken, legendary and tapped — the SNAPSHOT is not.
-    assert_eq!(read(vec![FilterProp::NonToken]), 0, "NonToken fails closed");
+    assert_eq!(read(vec![FilterProp::NonToken]), 1, "nontoken entry");
     assert_eq!(
         read(vec![FilterProp::HasSupertype {
             value: Supertype::Legendary
@@ -1151,4 +1146,244 @@ fn bbfu10_nonevaluable_ledger_prop_reads_constant_zero() {
         "HasSupertype fails closed even though the record snapshots supertypes"
     );
     assert_eq!(read(vec![FilterProp::Tapped]), 0, "Tapped fails closed");
+}
+
+const GYOME: &str = "Trample\nAt the beginning of your end step, create a number of Food tokens equal to the number of nontoken creatures you had enter the battlefield under your control this turn.\n{1}, Sacrifice a Food: Target creature gains indestructible until end of turn. Tap it.";
+
+fn mana(color: ManaType) -> ManaUnit {
+    ManaUnit::new(color, ObjectId(0), false, vec![])
+}
+
+fn assert_priority(runner: &GameRunner) {
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+fn assert_gyome_food_delta(runner: &mut GameRunner, gyome: ObjectId, expected: usize) {
+    let food_count = |runner: &GameRunner| {
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|obj| {
+                obj.zone == Zone::Battlefield
+                    && obj.controller == P0
+                    && obj.is_token
+                    && obj
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Food")
+            })
+            .count()
+    };
+    assert_priority(runner);
+    let before = food_count(runner);
+    runner.advance_to_end_step();
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareAttackers { .. }
+    ) {
+        runner.declare_attackers(&[]).unwrap();
+        runner.advance_to_end_step();
+    }
+    assert_eq!(runner.state().phase, Phase::End);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "expected one end-step trigger"
+    );
+    assert!(matches!(
+        &runner.state().stack[0].kind,
+        StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == gyome
+    ));
+    runner.resolve_top();
+    assert_priority(runner);
+    assert_eq!(food_count(runner), before + expected);
+}
+
+#[test]
+fn issue_634_gyome_counts_departed_and_present_nontokens_only() {
+    for qualifying_entrants in [0, 2] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let gyome = scenario
+            .add_creature(P0, "Gyome, Master Chef", 5, 3)
+            .from_oracle_text_with_keywords(&["Trample"], GYOME)
+            .with_subtypes(vec!["Troll", "Warlock"])
+            .as_legendary()
+            .id();
+        let prior = scenario.add_creature(P0, "Prior-turn creature", 2, 2).id();
+        let first = scenario
+            .add_creature_to_hand(P0, "First entrant", 2, 2)
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        let second = scenario
+            .add_creature_to_hand(P0, "Second entrant", 2, 2)
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        let soldiers = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Raise the Alarm",
+                true,
+                "Create two 1/1 white Soldier creature tokens.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 1,
+            })
+            .id();
+        let murder = scenario
+            .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black; 2],
+                generic: 1,
+            })
+            .id();
+        let viper = scenario
+            .add_creature_to_hand(P1, "Ambush Viper", 2, 1)
+            .from_oracle_text_with_keywords(&["Flash", "Deathtouch"], "Flash\nDeathtouch")
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            })
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                mana(ManaType::White),
+                mana(ManaType::Black),
+                mana(ManaType::Black),
+                mana(ManaType::Colorless),
+                mana(ManaType::Colorless),
+            ],
+        );
+        scenario.with_mana_pool(P1, vec![mana(ManaType::Green), mana(ManaType::Colorless)]);
+        let mut runner = scenario.build();
+        assert!(runner.state().battlefield_entries_this_turn.is_empty());
+        assert_eq!(runner.state().objects[&prior].zone, Zone::Battlefield);
+
+        if qualifying_entrants == 2 {
+            runner
+                .cast(first)
+                .resolve()
+                .assert_zone(&[first], Zone::Battlefield);
+            runner
+                .cast(second)
+                .resolve()
+                .assert_zone(&[second], Zone::Battlefield);
+        }
+        runner
+            .cast(soldiers)
+            .resolve()
+            .assert_zone(&[soldiers], Zone::Graveyard);
+        assert_eq!(
+            runner
+                .state()
+                .objects
+                .values()
+                .filter(|obj| {
+                    obj.zone == Zone::Battlefield
+                        && obj.controller == P0
+                        && obj.is_token
+                        && obj.card_types.core_types.contains(&CoreType::Creature)
+                })
+                .count(),
+            2
+        );
+        if qualifying_entrants == 2 {
+            runner
+                .cast(murder)
+                .target_objects(&[first])
+                .resolve()
+                .assert_zone(&[first], Zone::Graveyard);
+            assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+        }
+
+        runner.act(GameAction::PassPriority).unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        ));
+        runner
+            .cast(viper)
+            .resolve()
+            .assert_zone(&[viper], Zone::Battlefield);
+        assert_eq!(runner.state().objects[&viper].controller, P1);
+        assert_gyome_food_delta(&mut runner, gyome, qualifying_entrants);
+    }
+}
+
+#[test]
+fn issue_634_gyome_counts_its_own_entry() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let gyome = scenario
+        .add_creature_to_hand(P0, "Gyome, Master Chef", 5, 3)
+        .from_oracle_text_with_keywords(&["Trample"], GYOME)
+        .with_subtypes(vec!["Troll", "Warlock"])
+        .as_legendary()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Green],
+            generic: 2,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            mana(ManaType::Black),
+            mana(ManaType::Green),
+            mana(ManaType::Colorless),
+            mana(ManaType::Colorless),
+        ],
+    );
+    let mut runner = scenario.build();
+    runner
+        .cast(gyome)
+        .resolve()
+        .assert_zone(&[gyome], Zone::Battlefield);
+    assert_gyome_food_delta(&mut runner, gyome, 1);
+}
+
+// CR 701.40a: the continuous face-down effect makes the land a creature at entry.
+#[test]
+fn issue_634_manifested_land_is_a_nontoken_creature_at_entry() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let gyome = scenario
+        .add_creature(P0, "Gyome, Master Chef", 5, 3)
+        .from_oracle_text_with_keywords(&["Trample"], GYOME)
+        .id();
+    let forest = scenario
+        .add_land_to_library_top(P0, "Forest")
+        .with_subtypes(vec!["Forest"])
+        .id();
+    let summons = scenario.add_spell_to_hand_from_oracle(
+        P0, "Soul Summons", false,
+        "Manifest the top card of your library. (Put it onto the battlefield face down as a 2/2 creature. Turn it face up any time for its mana cost if it's a creature card.)",
+    ).with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::White], generic: 1 }).id();
+    scenario.with_mana_pool(P0, vec![mana(ManaType::White), mana(ManaType::Colorless)]);
+    let mut runner = scenario.build();
+    assert_eq!(
+        runner.state().objects[&forest].card_types.core_types,
+        vec![CoreType::Land]
+    );
+    runner
+        .cast(summons)
+        .resolve()
+        .assert_zone(&[forest], Zone::Battlefield);
+    assert_priority(&runner);
+    let entry = runner
+        .state()
+        .battlefield_entries_this_turn
+        .iter()
+        .find(|entry| entry.object_id == forest)
+        .unwrap();
+    assert_eq!(entry.core_types, vec![CoreType::Creature]);
+    assert_eq!(entry.token_status, Some(EntryTokenStatus::Nontoken));
+    assert_gyome_food_delta(&mut runner, gyome, 1);
 }

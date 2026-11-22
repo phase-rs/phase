@@ -3098,6 +3098,9 @@ impl ZoneChangeRecord {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(not(feature = "test-support"), derive(Clone))]
 pub struct BattlefieldEntryRecord {
+    /// CR 111.1: token identity at entry. Older snapshots may lack this information.
+    #[serde(default)]
+    pub token_status: Option<EntryTokenStatus>,
     pub object_id: ObjectId,
     pub name: String,
     pub core_types: Vec<CoreType>,
@@ -3130,6 +3133,12 @@ pub struct BattlefieldEntryRecord {
     /// `true` = FaceDown.
     #[serde(default)]
     pub face_state: FaceState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EntryTokenStatus {
+    Token,
+    Nontoken,
 }
 
 /// CR 110.5 + CR 708.2: Face state of a permanent at battlefield entry time.
@@ -3179,6 +3188,7 @@ impl Clone for BattlefieldEntryRecord {
             keywords,
             controller,
             face_state,
+            token_status,
         } = self;
         Self {
             object_id: *object_id,
@@ -3190,6 +3200,7 @@ impl Clone for BattlefieldEntryRecord {
             keywords: keywords.clone(),
             controller: *controller,
             face_state: *face_state,
+            token_status: *token_status,
         }
     }
 }

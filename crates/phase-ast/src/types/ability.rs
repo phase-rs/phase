@@ -11120,8 +11120,7 @@ pub fn filter_reads_declared_slot(filter: &TargetFilter) -> bool {
 /// `ledger_guard_agrees_with_matcher` (test, `crate::game::restrictions`).
 ///
 /// Upgrade path, ascending cost: `HasSupertype` and `Named` are answerable from `record.supertypes`
-/// / `record.name` TODAY — one matcher arm plus one line here. `Token`/`NonToken` and `Tapped`
-/// need a new snapshot field on `BattlefieldEntryRecord`.
+/// / `record.name`. `Tapped` needs a new snapshot field on `BattlefieldEntryRecord`.
 ///
 /// `TypedFilter::type_filters` is intentionally NOT screened: `entry_type_filter_matches` is
 /// exhaustive; `Instant`/`Sorcery` answer `false` per CR 403.3, whose negation is correctly
@@ -11143,6 +11142,8 @@ pub fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
                             | FilterProp::WithKeyword { .. }
                             | FilterProp::FaceDown
                             | FilterProp::Another
+                            | FilterProp::Token
+                            | FilterProp::NonToken
                     )
                 })
         }

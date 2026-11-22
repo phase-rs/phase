@@ -24866,7 +24866,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     /// of them resolves a silent constant 0. The classifier must stop calling that
     /// `Handled`. The entry snapshot NOW captures `FaceDown` (FaceState enum), so
     /// Tunnel Tipster's intervening-if is answerable (case (a2)). Case (a) uses
-    /// `NonToken`, which the entry snapshot cannot answer. This test drives
+    /// `Tapped`, which the entry snapshot cannot answer. This test drives
     /// `quantity_ref_feature` directly; the classifier now also reaches Tunnel
     /// Tipster's trigger intervening-if through `extract_trigger_condition_features`,
     /// which `trigger_condition_walk_marks_tunnel_tipster_supported` proves is
@@ -24885,11 +24885,11 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             }),
         };
 
-        // (a) NonToken is unanswerable from the entry record (FaceDown IS answerable now).
+        // (a) Tapped is unanswerable from the entry record (FaceDown IS answerable now).
         assert_eq!(
-            quantity_ref_feature(&ledger(vec![FilterProp::NonToken])),
+            quantity_ref_feature(&ledger(vec![FilterProp::Tapped])),
             ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled),
-            "(a) NonToken is not answerable from a BattlefieldEntryRecord"
+            "(a) Tapped is not answerable from a BattlefieldEntryRecord"
         );
         // (a2) FaceDown IS answerable: the entry snapshot records the face state.
         assert_eq!(
@@ -24897,6 +24897,12 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             ("BattlefieldEntriesThisTurn", FeatureSupport::Handled),
             "(a2) FaceDown is captured on the entry snapshot"
         );
+        for prop in [FilterProp::Token, FilterProp::NonToken] {
+            assert_eq!(
+                quantity_ref_feature(&ledger(vec![prop])),
+                ("BattlefieldEntriesThisTurn", FeatureSupport::Handled)
+            );
+        }
         // (b)/(c) vacuity controls — the feature stays Handled for evaluable filters.
         assert_eq!(
             quantity_ref_feature(&ledger(vec![])),
@@ -24914,9 +24920,8 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let QuantityRef::BattlefieldEntriesThisTurn { filter: bare, .. } = ledger(vec![]) else {
             unreachable!()
         };
-        let QuantityRef::BattlefieldEntriesThisTurn {
-            filter: non_token, ..
-        } = ledger(vec![FilterProp::NonToken])
+        let QuantityRef::BattlefieldEntriesThisTurn { filter: tapped, .. } =
+            ledger(vec![FilterProp::Tapped])
         else {
             unreachable!()
         };
@@ -24924,7 +24929,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             quantity_ref_feature(&QuantityRef::BattlefieldEntriesThisTurn {
                 player: PlayerScope::Controller,
                 filter: TargetFilter::Or {
-                    filters: vec![bare, non_token]
+                    filters: vec![bare, tapped]
                 },
             }),
             ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled),
@@ -24936,7 +24941,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     // -----------------------------------------------------------------------
     // F2: condition-quantity walks and the sticky feature merge. Every real-card
     // row parses verbatim Oracle text; hostile rows mutate the parsed real shape
-    // (one ledger filter given an unevaluable prop like `FilterProp::NonToken`,
+    // (one ledger filter given an unevaluable prop like `FilterProp::Tapped`,
     // or the parsed leaf wrapped in a compound), never a free-hand AST.
     // -----------------------------------------------------------------------
 
@@ -24978,7 +24983,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             .collect()
     }
 
-    /// Gives a ledger read an unevaluable `FilterProp` (e.g., `NonToken`). Returns
+    /// Gives a ledger read an unevaluable `FilterProp` (e.g., `Tapped`). Returns
     /// how many ledger reads it mutated; each one is asserted to have been
     /// evaluable before (the reach guard that the parse produced the shape the
     /// row assumes).
@@ -24995,10 +25000,10 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     !typed
                         .properties
                         .iter()
-                        .any(|prop| matches!(prop, FilterProp::NonToken)),
+                        .any(|prop| matches!(prop, FilterProp::Tapped)),
                     "the parsed ledger read must start evaluable"
                 );
-                typed.properties.push(FilterProp::NonToken);
+                typed.properties.push(FilterProp::Tapped);
                 1
             }
             _ => 0,
@@ -25115,7 +25120,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     }
 
     /// Tunnel Tipster's leaf with its ledger filter made unanswerable
-    /// (`NonToken`), for traversal controls that need an `Unhandled` leaf now
+    /// (`Tapped`), for traversal controls that need an `Unhandled` leaf now
     /// that the entry snapshot answers `FaceDown`.
     fn unevaluable_tunnel_tipster_leaf() -> TriggerCondition {
         let mut leaf = tunnel_tipster_leaf();
