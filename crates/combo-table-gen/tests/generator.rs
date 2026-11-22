@@ -16,11 +16,9 @@ use flate2::Compression;
 use sha2::{Digest, Sha256};
 
 const FIXTURE: &str = "tests/fixtures/spellbook-fixture.json.gz";
-const POOL: &str = "../engine/tests/fixtures/integration_cards.json.gz";
 
 fn pool() -> CardDatabase {
-    let file = fs::File::open(POOL).expect("integration card pool exists");
-    CardDatabase::from_export_reader(GzDecoder::new(file)).expect("integration card pool loads")
+    CardDatabase::from_integration_fixture().expect("integration card pool loads")
 }
 
 fn decompressed_fixture() -> Vec<u8> {
