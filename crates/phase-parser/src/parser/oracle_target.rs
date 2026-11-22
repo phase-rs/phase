@@ -14489,8 +14489,10 @@ mod tests {
     /// ability's source; a blank context, another tail and a window decline.
     #[test]
     fn source_is_blocking_relative_binds_only_for_the_source() {
-        let mut armed = ParseContext::default();
-        armed.subject = Some(TargetFilter::SelfRef);
+        let mut armed = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
         let expected = FilterProp::CombatRelation {
             relation: CombatRelation::BlockPairing {
                 direction: BlockPairDirection::SubjectIsBlocker,
@@ -24100,8 +24102,10 @@ mod tests {
         assert_eq!(consumed, " that target this creature".len());
 
         // Plural verb + bare "it": binds only under an armed context.
-        let mut self_ref_ctx = ParseContext::default();
-        self_ref_ctx.subject = Some(TargetFilter::SelfRef);
+        let mut self_ref_ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
         let (props, consumed) = parse_that_clause_suffix(" that target it.", Some(&self_ref_ctx))
             .expect("an armed context binds the bare pronoun");
         assert_eq!(props.len(), 1);

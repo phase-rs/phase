@@ -18168,8 +18168,10 @@ mod tests {
         // CR 608.2c: the same subjects bind once the recipient is the
         // self-reference and the context is armed with it — the prevention
         // route's passive subject reader does exactly this (step 4).
-        let mut self_ref_ctx = ParseContext::default();
-        self_ref_ctx.subject = Some(TargetFilter::SelfRef);
+        let mut self_ref_ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
         for (text, expected) in [
             // CR 509.1g: Armored Transport — the creatures blocking the host.
             (
