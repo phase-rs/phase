@@ -17146,7 +17146,11 @@ mod tests {
     /// CR 608.2d + CR 510.2 + CR 616.1: a combat damage batch asks a damage replacement's or
     /// prevention rider's own choice at the leg or after the batch's damage (CR 615.5), so none
     /// of these cards reports a structural resolver gap: Battletide Alchemist's "may", Dralnu's
-    /// and Outfitted Jouster's sacrifice, Nefarious Lich's exile and Channel Harm's "may".
+    /// and Outfitted Jouster's sacrifice, Nefarious Lich's exile and Channel Harm's "may". This
+    /// checks only the structural family. Each card's other gaps stay, each kept by its
+    /// confirmed-misparse row: the engine runs Outfitted Jouster's rider once per damage event,
+    /// not once for damage prevented simultaneously (CR 615.13), and Nefarious Lich has its own
+    /// misparse.
     #[test]
     fn a_combat_damage_rider_choice_is_not_a_coverage_gap() {
         use crate::types::ability::SubAbilityLink;
