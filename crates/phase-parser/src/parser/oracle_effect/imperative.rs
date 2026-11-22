@@ -3768,9 +3768,11 @@ fn parse_same_name_exile_source<'a>(
 /// empty `extract_zones()` to the battlefield).
 ///
 /// Declines (`None`) on every other shape — a single leg, fewer than two
-/// `Typed` legs, a stack-object or non-Typed leg, or a remainder beyond
-/// trailing punctuation — so owner-scoped zone forms keep their own paths and
-/// no trailing fragment is ever silently dropped.
+/// `Typed` legs, a stack-object or non-Typed leg, legs that all name one zone,
+/// an operand whose "this way" anaphor or anaphoric player's zone the filter
+/// dropped, or a remainder beyond trailing punctuation — so owner-scoped zone
+/// forms keep their own paths and no trailing fragment is ever silently
+/// dropped.
 pub(super) fn try_parse_mass_exile_permanents_and_zones(
     rest: &str,
     rest_lower: &str,
@@ -3862,48 +3864,59 @@ pub(super) fn try_parse_mass_exile_permanents_and_zones(
         .iter()
         .map(TargetFilter::extract_zones)
         .collect();
-    if leg_zones.iter().all(Vec::is_empty) {
-        return Some(union);
-    }
-    // CR 608.2f: the union is a CROSS-zone operation only when the legs, bare
-    // ones counted as battlefield, name at least two distinct zones. Legs that
-    // all name the same zone ("artifact and enchantment cards from all
-    // graveyards") are one population the generic single-origin path already
-    // reads; leave that parse untouched.
-    let mut zones = vec![];
-    for leg in &leg_zones {
-        for zone in if leg.is_empty() {
-            &[Zone::Battlefield][..]
-        } else {
-            leg.as_slice()
-        } {
-            if !zones.contains(zone) {
-                zones.push(*zone);
+    let population = if leg_zones.iter().all(Vec::is_empty) {
+        union
+    } else {
+        // CR 608.2f: the union is a CROSS-zone operation only when the legs, bare
+        // ones counted as battlefield, name at least two distinct zones. Legs that
+        // all name the same zone ("artifact and enchantment cards from all
+        // graveyards") are one population the generic single-origin path already
+        // reads; leave that parse untouched.
+        let mut zones = vec![];
+        for leg in &leg_zones {
+            for zone in if leg.is_empty() {
+                &[Zone::Battlefield][..]
+            } else {
+                leg.as_slice()
+            } {
+                if !zones.contains(zone) {
+                    zones.push(*zone);
+                }
             }
         }
-    }
-    if zones.len() < 2 {
+        if zones.len() < 2 {
+            return None;
+        }
+        // A bare leg beside a zoned one must name its battlefield, or
+        // `extract_zones()` would report only the written zones.
+        let filters = leg_filters
+            .iter()
+            .zip(&leg_zones)
+            .map(|(leg, zones)| {
+                if zones.is_empty() {
+                    super::add_filter_props(
+                        leg.clone(),
+                        &[FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        }],
+                    )
+                } else {
+                    leg.clone()
+                }
+            })
+            .collect();
+        TargetFilter::Or { filters }
+    };
+    // The generic exile path refuses an operand whose "this way" anaphor or
+    // anaphoric player's zone the filter dropped (Elder Brain: "exile all cards
+    // from that player's hand"); the union must refuse the same operands rather
+    // than sweep every player's zone.
+    if super::target_span_dropped_this_way_anaphor(rest, &population)
+        || operand_dropped_player_possessive_source(rest_lower, &population)
+    {
         return None;
     }
-    // A bare leg beside a zoned one must name its battlefield, or
-    // `extract_zones()` would report only the written zones.
-    let filters = leg_filters
-        .iter()
-        .zip(&leg_zones)
-        .map(|(leg, zones)| {
-            if zones.is_empty() {
-                super::add_filter_props(
-                    leg.clone(),
-                    &[FilterProp::InZone {
-                        zone: Zone::Battlefield,
-                    }],
-                )
-            } else {
-                leg.clone()
-            }
-        })
-        .collect();
-    Some(TargetFilter::Or { filters })
+    Some(population)
 }
 
 /// Whether every leg of `filter` is a BARE battlefield permanent-type

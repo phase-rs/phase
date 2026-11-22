@@ -4575,11 +4575,9 @@ fn counted_counter_placement_gate_ranges_over_counts_and_requires_a_recipient() 
 /// CR 400.1: whether a population leg constrains itself to `zone` — via either
 /// zone-property spelling (`InZone`, or an `InAnyZone` union covering it).
 fn leg_in_zone(tf: &TypedFilter, zone: Zone) -> bool {
-    tf.properties.iter().any(|p| match p {
-        FilterProp::InZone { zone: z } => *z == zone,
-        FilterProp::InAnyZone { zones } => zones.contains(&zone),
-        _ => false,
-    })
+    TargetFilter::Typed(tf.clone())
+        .extract_zones()
+        .contains(&zone)
 }
 
 /// CR 608.2f + CR 603.10a: Shadows' Verdict's battlefield and graveyard
@@ -4773,7 +4771,37 @@ fn mass_exile_population_union_declines_orphan_instruction_tail() {
     );
 }
 
-/// Tested fence: the mass-exile population union claims only verbless "all
+/// CR 400.1 + CR 608.2c: the union refuses an operand whose anaphoric player's zone the filter
+/// would drop, exactly as the generic exile path does (Elder Brain's "from that player's hand"):
+/// accepting it would sweep every player's hand. Reach guard: the same shape without the
+/// anaphoric possessive is claimed.
+#[test]
+fn mass_exile_population_union_declines_an_unbound_anaphoric_zone() {
+    let claimed = "creatures from the battlefield and all cards from all hands";
+    let mut ctx = ParseContext::default();
+    assert!(
+        imperative::try_parse_mass_exile_permanents_and_zones(
+            claimed,
+            &claimed.to_lowercase(),
+            &mut ctx
+        )
+        .is_some(),
+        "reach guard: the cross-zone union without an anaphoric owner is claimed"
+    );
+    let anaphoric = "creatures from the battlefield and all cards from that player's hand";
+    let mut ctx = ParseContext::default();
+    assert!(
+        imperative::try_parse_mass_exile_permanents_and_zones(
+            anaphoric,
+            &anaphoric.to_lowercase(),
+            &mut ctx
+        )
+        .is_none(),
+        "an anaphoric player's zone with no bound owner must decline"
+    );
+}
+
+/// Tested fence: the mass-exile population union claims only "all
 /// <filter>" conjuncts that parse as `Typed` population legs. A possessive
 /// zone conjunct ("their graveyard") after a mass exile stays a strict
 /// failure (the pinned Strategic Betrayal shape: the first leg binds "they"

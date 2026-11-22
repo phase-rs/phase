@@ -15,9 +15,11 @@
 //! printed sorcery's. The mass-exile witnesses below add a second printed body,
 //! Stonebound Mentor, whose leaves-your-graveyard ability is the subject.
 //!
-//! Decree of Annihilation — Sorcery, {8}{R}{R} — carries the same verbless-conjunct
-//! shape across three zone families at once: "Exile all artifacts, creatures, and
-//! lands from the battlefield, all cards from all graveyards, and all cards from
+//! Decree of Annihilation — Sorcery, {8}{R}{R} — is a cross-zone union of three
+//! populations whose parse the union recognizer now builds with `origin: None` (it
+//! was a single origin of Graveyard before; the resolver already read the zones
+//! from the filter, so this witness guards the behavior and is not a reverse-fail):
+//! "Exile all artifacts, creatures, and lands from the battlefield, all cards from all graveyards, and all cards from
 //! all hands." Its witness drives the whole printed instruction as ONE
 //! `ChangeZoneAll`.
 //!
@@ -567,7 +569,7 @@ fn shadows_verdict_leaves_mv3_or_less_creature_cards_in_hand_and_library_alone()
 /// all graveyards. Each player shuffles their hand into their library, then draws seven
 /// cards. Each player's life total becomes 10. Exile Once More with Feeling."
 ///
-/// The first sentence is the same verbless-conjunct shape as Shadows' Verdict ("exile all A
+/// The first sentence is the same population-union shape as Shadows' Verdict ("exile all A
 /// and all B"); the witness drives the WHOLE printed card: both players' permanents and
 /// graveyard cards are exiled, each hand is shuffled into the library and seven cards are
 /// drawn from it, both life totals become 10 (from different starting totals), and the
@@ -723,7 +725,7 @@ fn shadows_verdict_exiling_the_observer_and_a_graveyard_card_triggers_one_scry()
         "a keep-on-top scry leaves the library order unchanged"
     );
 
-    // CR 701.22d: exactly one completed Scry resolution.
+    // CR 701.22a: exactly one completed Scry resolution.
     assert_eq!(
         scry_resolutions_from(&events, mentor),
         1,
@@ -854,7 +856,7 @@ fn once_more_with_feeling_exiling_the_observer_and_a_graveyard_card_triggers_one
 }
 
 // ---------------------------------------------------------------------------
-// Decree of Annihilation — one verbless "exile all" conjunct per zone family
+// Decree of Annihilation — one population leg per zone family
 // (battlefield permanents / graveyards / hands), resolved as ONE instruction.
 // ---------------------------------------------------------------------------
 
