@@ -84,6 +84,68 @@ fn watery_grasp_owner_shuffle_keeps_a_resolution_host_operand() {
     assert!(shuffle.sub_ability.is_none());
 }
 
+#[test]
+fn bringer_of_the_last_gift_tracks_sacrificed_creatures_as_excluded() {
+    let parsed = parse_oracle_text(
+        "Flying\nWhen this creature enters, if you cast it, each player sacrifices all other \
+         creatures they control. Then each player returns all creature cards from their \
+         graveyard that weren't put there this way to the battlefield.",
+        "Bringer of the Last Gift",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let trigger = parsed.triggers.first().expect("Bringer ETB trigger");
+    assert!(matches!(
+        trigger.condition,
+        Some(crate::types::ability::TriggerCondition::WasCast { .. })
+    ));
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    assert!(matches!(*execute.effect, Effect::Sacrifice { .. }));
+    let returned = execute
+        .sub_ability
+        .as_deref()
+        .expect("graveyard return follows the sacrifice");
+    let Effect::ChangeZoneAll {
+        origin,
+        destination,
+        target,
+        ..
+    } = &*returned.effect
+    else {
+        panic!("expected mass return, got {:?}", returned.effect);
+    };
+    assert_eq!(*origin, Some(crate::types::zones::Zone::Graveyard));
+    assert_eq!(*destination, crate::types::zones::Zone::Battlefield);
+    let TargetFilter::Typed(filter) = target else {
+        panic!("expected a typed graveyard filter, got {target:?}");
+    };
+    assert!(filter
+        .type_filters
+        .contains(&crate::types::ability::TypeFilter::Creature));
+    assert!(
+        filter.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::Not { prop }
+                if matches!(
+                    &**prop,
+                    FilterProp::InTrackedSet { id }
+                        if *id == crate::types::identifiers::TrackedSetId(0)
+                )
+        )),
+        "the returned population must exclude cards moved by the sacrifice: {filter:?}"
+    );
+    let mut node = Some(execute);
+    while let Some(ability) = node {
+        assert!(
+            !matches!(&*ability.effect, Effect::Unimplemented { .. }),
+            "Bringer must parse without a swallowed effect: {:?}",
+            ability.effect
+        );
+        node = ability.sub_ability.as_deref();
+    }
+}
+
 /// SHAPE: real Technomancer Oracle keeps mill before the direct whole-graveyard
 /// choice, whose immediate continuation moves only the selected parents.
 #[test]
@@ -13313,7 +13375,7 @@ fn hideaway_ltb_put_exiled_card_binds_exiled_by_source() {
 
 /// Regression guard for the #5577 fix: a SAME-chain exile-then-put keeps the
 /// chain-local `TrackedSet(0)` binding (the helper returns `same_chain_binding`
-/// when `chain_has_prior_exile_producer` is set), so it must NOT flip to
+/// when `chain_prior_publishers` includes an exile), so it must NOT flip to
 /// `ExiledBySource`.
 #[test]
 fn same_chain_put_exiled_card_keeps_tracked_set() {
@@ -17064,10 +17126,10 @@ fn wheel_and_deal_implicit_draw_inherits_each_targeted_opponent() {
             &*per_opponent_draw.effect,
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 7 },
-                target: TargetFilter::ParentTarget,
+                target: TargetFilter::ScopedPlayer,
             }
         ),
-        "expected the seven-card draw to inherit ParentTarget, got {:?}; full definition: {def:?}",
+        "expected the seven-card draw to bind the current target player, got {:?}; full definition: {def:?}",
         per_opponent_draw.effect
     );
     let controller_draw = per_opponent_draw
@@ -19451,9 +19513,9 @@ fn effect_create_wicked_role_token() {
         e,
         Effect::Token { ref name, ref types, .. }
         if name == "Wicked Role"
-            && types.contains(&"Enchantment".to_string())
-            && types.contains(&"Aura".to_string())
-            && types.contains(&"Role".to_string())
+            && types.iter().any(|t| t == "Enchantment")
+            && types.iter().any(|t| t == "Aura")
+            && types.iter().any(|t| t == "Role")
     ));
 }
 
@@ -25621,6 +25683,58 @@ fn strip_temporal_suffix_player_next_step_shapes() {
         .1,
         None
     );
+}
+
+/// CR 608.2c + CR 108.3: "their next <step>" after an owner control clause
+/// names that owner (Phytotitan: "return it to the battlefield tapped under its
+/// owner's control at the beginning of their next upkeep"). The control clause
+/// is the pronoun's antecedent and stays in the instruction; every other
+/// antecedent, and a bare "their", keeps today's undelayed reading.
+#[test]
+fn strip_temporal_suffix_their_next_step_names_owner_antecedent() {
+    use crate::types::ability::{DelayedTriggerPlayerBinding as B, TurnGate as G};
+    for (step_text, phase) in [
+        ("upkeep", Phase::Upkeep),
+        ("upkeep step", Phase::Upkeep),
+        ("end step", Phase::End),
+        ("draw step", Phase::Draw),
+        ("declare attackers step", Phase::DeclareAttackers),
+    ] {
+        for possessor in ["its owner's", "their owner's", "its owner\u{2019}s"] {
+            let text = format!(
+                "Return it to the battlefield tapped under {possessor} control at the beginning of their next {step_text}"
+            );
+            let (rest, cond) = strip_temporal_suffix(&text);
+            assert_eq!(
+                rest,
+                format!("Return it to the battlefield tapped under {possessor} control"),
+                "{text}"
+            );
+            assert_eq!(
+                cond,
+                Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase,
+                    player: crate::types::player::PlayerId(0),
+                    gate: G::None,
+                    binding: B::ParentTargetOwner,
+                }),
+                "{text}"
+            );
+        }
+    }
+
+    // Declined: "their" is accepted only with an owner antecedent.
+    for declined in [
+        // Plague Reaver's return clause (verbatim): "their" is the chosen opponent.
+        "Return this creature to the battlefield under that player's control at the beginning of their next upkeep",
+        "Return it to the battlefield under your control at the beginning of their next upkeep",
+        "Return it to the battlefield under their control at the beginning of their next upkeep",
+        // Glass Asp's effect clause (verbatim).
+        "that player loses 2 life at the beginning of their next draw step unless they pay {2} before that step",
+        "you draw a card at the beginning of their next upkeep",
+    ] {
+        assert_eq!(strip_temporal_suffix(declined).1, None, "{declined}");
+    }
 }
 
 /// CR 506.1 + CR 608.2c: Noctis's "that combat" rider rides the delayed
@@ -39841,8 +39955,8 @@ fn have_its_controller_create_token_rebinds_owner_to_triggering_source() {
             );
             assert!(tapped, "token should enter tapped");
             assert!(enters_attacking, "token should enter attacking");
-            assert!(types.contains(&"Creature".to_string()));
-            assert!(types.contains(&"Warrior".to_string()));
+            assert!(types.iter().any(|t| t == "Creature"));
+            assert!(types.iter().any(|t| t == "Warrior"));
             assert_eq!(colors, &vec![ManaColor::White]);
         }
         other => panic!("expected Effect::Token, got {other:?}"),
@@ -44863,9 +44977,8 @@ fn craterhoof_where_x_binds_dynamic_pump_to_object_count() {
         assert!(
             matches!(
                 value,
-                QuantityExpr::Ref {
-                    qty: QuantityRef::ObjectCount { .. }
-                }
+                QuantityExpr::ClampMin { inner, minimum: 0 }
+                    if matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ObjectCount { .. } })
             ),
             "X must bind to ObjectCount(creatures you control), got {value:?}"
         );
@@ -44894,15 +45007,18 @@ fn where_x_power_of_the_exiled_card_binds_exiled_card_power() {
     else {
         panic!("expected Pump, got {:?}", def.effect);
     };
-    let expected = QuantityExpr::Ref {
-        qty: QuantityRef::PropertyAggregate(
-            PropertyAggregate::new(
-                AggregateFunction::Sum,
-                ObjectProperty::Power,
-                CardTypeSetSource::ExiledBySource,
-            )
-            .expect("statically valid property aggregate"),
-        ),
+    let expected = QuantityExpr::ClampMin {
+        inner: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::ExiledBySource,
+                )
+                .expect("statically valid property aggregate"),
+            ),
+        }),
+        minimum: 0,
     };
     for (stat, value) in [("power", power), ("toughness", toughness)] {
         assert_eq!(
@@ -49719,23 +49835,20 @@ fn reveal_until_all_cards_revealed_this_way_erratic_mutation() {
         panic!("expected Pump, got {:?}", pump.effect);
     };
     assert_eq!(*pump_target, TargetFilter::ParentTarget);
-    assert_eq!(
-        *power,
-        PtValue::Quantity(QuantityExpr::Ref {
+    let mana_value = QuantityExpr::ClampMin {
+        inner: Box::new(QuantityExpr::Ref {
             qty: QuantityRef::ObjectManaValue {
                 scope: ObjectScope::Demonstrative,
-            }
-        })
-    );
+            },
+        }),
+        minimum: 0,
+    };
+    assert_eq!(*power, PtValue::Quantity(mana_value.clone()));
     assert_eq!(
         *toughness,
         PtValue::Quantity(QuantityExpr::Multiply {
             factor: -1,
-            inner: Box::new(QuantityExpr::Ref {
-                qty: QuantityRef::ObjectManaValue {
-                    scope: ObjectScope::Demonstrative,
-                }
-            }),
+            inner: Box::new(mana_value),
         })
     );
     let placement = pump
@@ -67314,7 +67427,7 @@ fn find_cast_from_zone_target(ability: &AbilityDefinition) -> Option<&TargetFilt
 /// clause in the SAME resolution chain already produced the exile. Keldon
 /// Flamesage's "look at the top X ... exile ... You may cast the exiled
 /// card" is entirely one chain (one triggered ability, one resolution), so
-/// `chain_has_prior_exile_producer` must gate `resolve_singular_exiled_card_target`
+/// `chain_prior_publishers` must gate `resolve_singular_exiled_card_target`
 /// back to its pre-existing `TrackedSet{0}` binding.
 #[test]
 fn keldon_flamesage_cast_target_stays_tracked_set_after_exiled_by_source_fix() {
@@ -67353,7 +67466,7 @@ fn keldon_flamesage_cast_target_stays_tracked_set_after_exiled_by_source_fix() {
 /// is ALSO entirely one chain (one resolving spell), even though the
 /// Hideaway-shaped "exile one of them face down" clause is recognized via a
 /// `ContinuationAst` marker rather than its own raw exile-shaped effect
-/// surviving to the final lowered tree. `chain_has_prior_exile_producer`
+/// surviving to the final lowered tree. `chain_prior_publishers`
 /// must still detect that same-chain exile and keep the cast anaphor at
 /// `ParentTarget` — never widen it to `ExiledBySource`.
 #[test]
@@ -90516,9 +90629,12 @@ fn liliana_pt_disjunction_keeps_both_alternatives_and_binds_x_to_swamps() {
         );
     };
     assert_eq!(plus_power, plus_toughness, "the card prints +X/+X");
+    let QuantityExpr::ClampMin { inner, minimum: 0 } = plus_power else {
+        panic!("expected a floored Swamp count, got {plus_power:?}");
+    };
     let QuantityExpr::Ref {
         qty: QuantityRef::ObjectCount { filter },
-    } = plus_power
+    } = inner.as_ref()
     else {
         panic!("expected a Swamp ObjectCount, got {plus_power:?}");
     };
@@ -97336,6 +97452,7 @@ mod carried_player_reference_tests {
             inject_subject_target(&mut lib, &phrase, "that player searches their library");
             let expected = match carry {
                 CarriedPlayerSubject::Declared => TargetFilter::ParentTargetController,
+                CarriedPlayerSubject::TargetPopulation => TargetFilter::ScopedPlayer,
                 CarriedPlayerSubject::Reference { filter, .. } => filter.clone(),
             };
             assert!(matches!(
@@ -102728,7 +102845,6 @@ fn revealed_remainder_is_refused_when_dig_selection_does_not_depart_library() {
 /// or graveyard remainder (CR 404.3) requires an arrangement prompt this
 /// instruction does not own, so it is refused rather than silently delivered in
 /// collection order.
-
 #[test]
 fn revealed_remainder_destinations_are_explicit_or_refused() {
     use crate::parser::oracle_effect::sequence::parse_revealed_remainder_clause;
@@ -105939,4 +106055,194 @@ fn sproutwatch_dryad_preserves_per_keyword_conditions_and_duration() {
             .as_deref()
             .is_none_or(|description| !description.contains(" if ")));
     }
+}
+
+#[test]
+fn each_target_player_keeps_coordinated_predicate_recipients() {
+    // Synthetic by necessity: no printed card has a fixed-count "two target
+    // players each A and B". The nearest printed cards are Huddle Up ("Two
+    // target players each draw a card.") for the count and Priest of
+    // Forgotten Gods for the coordinated predicate. This pins the exact-count
+    // subject form, which builds its application with no single target and an
+    // exact `MultiTargetSpec`.
+    let chain = parse_effect_chain(
+        "Two target players each lose 2 life and sacrifice a creature of their choice.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        chain.multi_target,
+        Some(MultiTargetSpec::fixed(2, 2)),
+        "{chain:#?}"
+    );
+    assert!(
+        matches!(
+            *chain.effect,
+            Effect::LoseLife {
+                target: Some(TargetFilter::Player),
+                ..
+            }
+        ),
+        "{chain:#?}"
+    );
+    let sacrifice = chain.sub_ability.as_deref().expect("sacrifice action");
+    assert!(
+        matches!(&*sacrifice.effect, Effect::Sacrifice { target, .. }
+            if target_filter_controller_ref(target) == Some(ControllerRef::ScopedPlayer)),
+        "{chain:#?}"
+    );
+    assert_eq!(sacrifice.multi_target, None);
+    assert_eq!(sacrifice.sub_link, SubAbilityLink::ContinuationStep);
+    assert!(sacrifice.sub_ability.is_none(), "{chain:#?}");
+}
+
+#[test]
+fn each_target_player_keeps_life_and_permanent_actions_under_one_announcement() {
+    /// The ordered action pair each printed clause must lower to.
+    enum Expected {
+        LoseThenSacrifice,
+        SacrificeThenLose,
+        MillThenLose,
+    }
+    for (card, text, kind, expected, controller_riders) in [
+        (
+            "Priest of Forgotten Gods",
+            "Any number of target players each lose 2 life and sacrifice a creature of their choice. You add {B}{B} and draw a card.",
+            AbilityKind::Activated,
+            Expected::LoseThenSacrifice,
+            true,
+        ),
+        (
+            "Will of the Abzan",
+            "Any number of target opponents each sacrifice a creature with the greatest power among creatures that player controls and lose 3 life.",
+            AbilityKind::Spell,
+            Expected::SacrificeThenLose,
+            false,
+        ),
+        (
+            "Tinybones Joins Up",
+            "any number of target players each mill a card and lose 1 life.",
+            AbilityKind::Spell,
+            Expected::MillThenLose,
+            false,
+        ),
+    ] {
+        let chain = parse_effect_chain(text, kind);
+        assert_eq!(
+            chain.multi_target,
+            Some(MultiTargetSpec::unlimited(0)),
+            "{card}: {chain:#?}"
+        );
+        // CR 601.2c + CR 608.2d: the players are announced as targets, while
+        // the permanent is chosen during resolution, so a sacrifice-first
+        // clause announces its players on a node of their own.
+        let first = match expected {
+            Expected::SacrificeThenLose => {
+                assert!(
+                    matches!(*chain.effect, Effect::TargetOnly { .. }),
+                    "{card}: {chain:#?}"
+                );
+                chain.sub_ability.as_deref().expect("first action")
+            }
+            Expected::LoseThenSacrifice | Expected::MillThenLose => &chain,
+        };
+        let second = first.sub_ability.as_deref().expect("second action");
+        assert_eq!(second.multi_target, None);
+        assert_eq!(second.sub_link, SubAbilityLink::ContinuationStep);
+        let scoped_sacrifice = |effect: &Effect| {
+            matches!(effect, Effect::Sacrifice { target, .. }
+                if target_filter_controller_ref(target) == Some(ControllerRef::ScopedPlayer))
+        };
+        let scoped_loss = |effect: &Effect| {
+            matches!(
+                effect,
+                Effect::LoseLife {
+                    target: Some(TargetFilter::ScopedPlayer),
+                    ..
+                }
+            )
+        };
+        let (first_ok, second_ok) = match expected {
+            Expected::LoseThenSacrifice => (
+                matches!(
+                    *first.effect,
+                    Effect::LoseLife {
+                        target: Some(TargetFilter::Player),
+                        ..
+                    }
+                ),
+                scoped_sacrifice(&second.effect),
+            ),
+            Expected::SacrificeThenLose => {
+                (scoped_sacrifice(&first.effect), scoped_loss(&second.effect))
+            }
+            Expected::MillThenLose => (
+                matches!(
+                    *first.effect,
+                    Effect::Mill {
+                        target: TargetFilter::Player,
+                        ..
+                    }
+                ),
+                scoped_loss(&second.effect),
+            ),
+        };
+        assert!(first_ok, "{card}: first action {chain:#?}");
+        assert!(second_ok, "{card}: second action {chain:#?}");
+        if !controller_riders {
+            assert!(second.sub_ability.is_none(), "{card}: {chain:#?}");
+            continue;
+        }
+        // CR 109.5: "You add {B}{B} and draw a card." stays the controller's.
+        let mana = second
+            .sub_ability
+            .as_deref()
+            .expect("independent mana rider");
+        assert_eq!(mana.sub_link, SubAbilityLink::SequentialSibling);
+        assert!(matches!(*mana.effect, Effect::Mana { .. }), "{chain:#?}");
+        let draw = mana.sub_ability.as_deref().expect("independent draw rider");
+        assert!(
+            matches!(
+                *draw.effect,
+                Effect::Draw {
+                    target: TargetFilter::Controller,
+                    ..
+                }
+            ),
+            "{chain:#?}"
+        );
+    }
+}
+
+#[test]
+fn each_target_player_bounds_comparison_to_the_sacrificing_player() {
+    let chain = parse_effect_chain(
+        "Any number of target opponents each sacrifice a creature with the greatest power among creatures that player controls and lose 3 life.",
+        AbilityKind::Spell,
+    );
+    let sacrifice = chain.sub_ability.as_deref().expect("sacrifice action");
+    let Effect::Sacrifice {
+        target: TargetFilter::Typed(permanents),
+        ..
+    } = &*sacrifice.effect
+    else {
+        panic!("expected the sacrifice to retain its permanent filter");
+    };
+    assert_eq!(permanents.controller, Some(ControllerRef::ScopedPlayer));
+    let [FilterProp::PtComparison {
+        value:
+            QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(aggregate),
+            },
+        ..
+    }] = permanents.properties.as_slice()
+    else {
+        panic!("expected an aggregate power comparison");
+    };
+    let CardTypeSetSource::Objects { filter } = aggregate.source() else {
+        panic!("expected to compare battlefield objects");
+    };
+    assert_eq!(
+        target_filter_controller_ref(filter),
+        Some(ControllerRef::ScopedPlayer)
+    );
 }

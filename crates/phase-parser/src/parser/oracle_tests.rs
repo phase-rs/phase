@@ -2962,6 +2962,72 @@ fn parsed_has_unimplemented(r: &ParsedAbilities) -> bool {
             .any(def_chain_has_unimplemented)
 }
 
+/// CR 603.7a + CR 608.2c + CR 108.3: Phytotitan's dies trigger creates a
+/// delayed return bound to its owner's next upkeep, instead of returning it
+/// immediately with the timing dropped.
+#[test]
+fn phytotitan_dies_return_waits_for_owners_next_upkeep() {
+    let parsed = parse(
+        "When this creature dies, return it to the battlefield tapped under its owner's control at the beginning of their next upkeep.",
+        "Phytotitan",
+        &[],
+        &["Creature"],
+        &["Plant", "Elemental"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&parsed),
+        "no Unimplemented: {parsed:#?}"
+    );
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    assert_eq!(trigger.origin, Some(Zone::Battlefield));
+    assert_eq!(trigger.destination, Some(Zone::Graveyard));
+    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    let execute = trigger.execute.as_deref().expect("dies trigger executes");
+    let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected CreateDelayedTrigger, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        *condition,
+        DelayedTriggerCondition::AtNextPhaseForPlayer {
+            phase: crate::types::phase::Phase::Upkeep,
+            player: crate::types::player::PlayerId(0),
+            gate: crate::types::ability::TurnGate::None,
+            binding: crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner,
+        }
+    );
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        enter_tapped,
+        enters_under,
+        ..
+    } = effect.effect.as_ref()
+    else {
+        panic!("expected a delayed ChangeZone, got {:?}", effect.effect);
+    };
+    assert_eq!(*origin, None);
+    assert_eq!(*destination, Zone::Battlefield);
+    assert_eq!(
+        *enter_tapped,
+        crate::types::zones::EtbTapState::Tapped,
+        "it returns tapped"
+    );
+    assert_eq!(*enters_under, None, "under its owner's control (CR 110.2a)");
+    // CR 400.7e + CR 608.2c: the delayed body's "it" is the parent referent the
+    // delayed-trigger snapshot binds (the dying card), as for Ivory Gargoyle.
+    assert_eq!(
+        *target,
+        TargetFilter::ParentTarget,
+        "full payload: {:#?}",
+        effect
+    );
+}
+
 #[test]
 fn altair_ibn_la_ahad_for_each_exile_memory_counter_copy_parses() {
     let parsed = parse(
@@ -7636,8 +7702,11 @@ fn hammer_helper_die_result_pump_parses_dynamic_power_no_warning() {
     let mods = &static_abilities[0].modifications;
     assert!(
         mods.contains(&ContinuousModification::AddDynamicPower {
-            value: QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
+            value: QuantityExpr::ClampMin {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                }),
+                minimum: 0,
             },
         }),
         "expected AddDynamicPower(EventContextAmount), got {mods:?}"
@@ -10132,6 +10201,149 @@ fn gavi_alternative_cycling_cost_tracks_once_per_turn_frequency() {
         r.parse_warnings.is_empty(),
         "unexpected warnings: {:?}",
         r.parse_warnings
+    );
+}
+
+#[test]
+fn kili_alternative_equip_cost_is_conditional_and_once_per_turn() {
+    let r = parse(
+        "Storied (If you control three or more artifacts, legendaries, and/or Sagas, you have an enduring story for the rest of the game.)\nAs long as you have an enduring story, you may pay {0} rather than pay the equip cost of the first equip ability you activate each turn.\nWhenever another Dwarf or Equipment you control enters, draw a card. This ability triggers only once each turn.",
+        "Kíli the Resourceful",
+        &[],
+        &["Creature", "Dwarf"],
+        &[],
+    );
+    let alt = r.statics.iter().find_map(|s| match &s.mode {
+        StaticMode::AlternativeKeywordCost {
+            keyword: crate::types::keywords::KeywordKind::Equip,
+            cost,
+            frequency,
+        } => Some((s, cost, frequency)),
+        _ => None,
+    });
+    let (static_def, cost, frequency) = alt.unwrap_or_else(|| {
+        panic!(
+            "expected equip AlternativeKeywordCost, statics: {:?}, warnings: {:?}",
+            r.statics, r.parse_warnings
+        )
+    });
+    assert!(matches!(cost, AbilityCost::Mana { cost } if cost == &ManaCost::generic(0)));
+    assert_eq!(
+        frequency,
+        &Some(crate::types::statics::CastFrequency::OncePerTurn)
+    );
+    assert!(
+        matches!(
+            static_def.condition.as_ref(),
+            Some(crate::types::ability::StaticCondition::HasEnduringStory)
+        ),
+        "enduring-story condition must gate the alternative cost: {:?}",
+        static_def.condition
+    );
+    assert!(
+        r.parse_warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        r.parse_warnings
+    );
+}
+
+// CR 118.9 + CR 702.6a: Bruenor Battlehammer — the "each turn" first-use clause.
+#[test]
+fn bruenor_alternative_equip_cost_is_once_per_turn_and_ungated() {
+    let r = parse(
+        "Each creature you control gets +2/+0 for each Equipment attached to it.
+You may pay {0} rather than pay the equip cost of the first equip ability you activate each turn.",
+        "Bruenor Battlehammer",
+        &[],
+        &["Creature", "Dwarf", "Warrior"],
+        &[],
+    );
+    let alt = r.statics.iter().find(|s| {
+        matches!(
+            s.mode,
+            StaticMode::AlternativeKeywordCost {
+                keyword: crate::types::keywords::KeywordKind::Equip,
+                frequency: Some(crate::types::statics::CastFrequency::OncePerTurn),
+                ..
+            }
+        )
+    });
+    let alt = alt.unwrap_or_else(|| {
+        panic!(
+            "expected once-per-turn equip alternative cost, statics: {:?}, warnings: {:?}",
+            r.statics, r.parse_warnings
+        )
+    });
+    assert_eq!(alt.condition, None, "\"each turn\" carries no turn gate");
+}
+
+// CR 118.9 + CR 702.6a: Forge Anew — "during each of your turns" is a your-turn
+// gate on the once-per-turn grant, not a droppable tail.
+#[test]
+fn forge_anew_alternative_equip_cost_is_gated_to_your_turn() {
+    let r = parse(
+        "You may pay {0} rather than pay the equip cost of the first equip ability you activate during each of your turns.",
+        "Forge Anew",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    let alt = r.statics.iter().find(|s| {
+        matches!(
+            s.mode,
+            StaticMode::AlternativeKeywordCost {
+                keyword: crate::types::keywords::KeywordKind::Equip,
+                frequency: Some(crate::types::statics::CastFrequency::OncePerTurn),
+                ..
+            }
+        )
+    });
+    let alt = alt.unwrap_or_else(|| {
+        panic!(
+            "expected once-per-turn equip alternative cost, statics: {:?}, warnings: {:?}",
+            r.statics, r.parse_warnings
+        )
+    });
+    assert_eq!(
+        alt.condition,
+        Some(crate::types::ability::StaticCondition::DuringYourTurn)
+    );
+}
+
+// Strict failure: an unmodeled trailing clause must not be silently dropped.
+// No printed card has a trailing clause on this line (the nearest printed card is
+// Bruenor Battlehammer: "You may pay {0} rather than pay the equip cost of the first
+// equip ability you activate each turn."); the tail is a synthetic hostile input.
+#[test]
+fn alternative_keyword_cost_with_unmodeled_tail_is_not_parsed() {
+    let text = "You may pay {0} rather than pay the equip cost of the first equip ability you activate each turn if you control a Dwarf.";
+    // Reach guard: the line enters the alternative-keyword-cost route, so the absence
+    // below is the strict-failure result and not an upstream short-circuit.
+    assert!(
+        crate::parser::oracle_classifier::is_alternative_keyword_cost_pattern(&text.to_lowercase()),
+        "the line must reach the alternative keyword cost route"
+    );
+    let r = parse(text, "Test Card", &[], &["Creature"], &[]);
+    assert!(
+        !r.statics
+            .iter()
+            .any(|s| matches!(s.mode, StaticMode::AlternativeKeywordCost { .. })),
+        "statics: {:?}",
+        r.statics
+    );
+    // Paired guard on the parser itself: the tailed line is rejected by the
+    // alternative-keyword-cost parser, while the nearest printed line (Bruenor
+    // Battlehammer) is accepted, so the rejection is due to the tail alone.
+    assert!(
+        crate::parser::oracle_static::parse_alternative_keyword_cost(text).is_none(),
+        "the unmodeled tail must make the parser decline the line"
+    );
+    assert!(
+        crate::parser::oracle_static::parse_alternative_keyword_cost(
+            "You may pay {0} rather than pay the equip cost of the first equip ability you activate each turn."
+        )
+        .is_some(),
+        "Bruenor Battlehammer's printed line must still parse"
     );
 }
 

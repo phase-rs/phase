@@ -164,8 +164,8 @@ fn filter_names_single_object(filter: &TargetFilter, source_id: ObjectId) -> Opt
 /// 2. it comes from a printed static definition (`def_index`), not a resolved
 ///    transient: CR 400.7 makes a source that changed zones a new object, so a
 ///    resolved effect must not write into it (CR 611.2c);
-/// 3. it is not a characteristic-defining ability: CDA application off the
-///    battlefield (CR 604.3) is a separate class and is not changed here;
+/// 3. for a characteristic-defining ability, it sets P/T and the source is a
+///    spell on the stack (CR 208.2a);
 /// 4. its layer is one the remote-recipient bookkeeping restores
 ///    (`layer_restored_on_remote_objects`), so what is written can be undone;
 ///    Layer 6 stays on demand (`off_zone_characteristics`);
@@ -182,12 +182,27 @@ fn declared_zone_self_static_candidates(
 ) -> Option<Vec<ObjectId>> {
     if effect.affected_filter != TargetFilter::SelfRef
         || effect.def_index.is_none()
-        || effect.characteristic_defining
         || !layer_restored_on_remote_objects(effect.layer)
     {
         return None;
     }
     let zone = state.objects.get(&effect.source_id)?.zone;
+    if effect.characteristic_defining {
+        return (zone == Zone::Stack
+            && effect.layer == Layer::CharDef
+            && state
+                .stack
+                .iter()
+                .chain(state.resolving_stack_entry.iter())
+                .any(|entry| {
+                    entry.id == effect.source_id
+                        && matches!(
+                            entry.kind,
+                            crate::types::game_state::StackEntryKind::Spell { .. }
+                        )
+                }))
+        .then(|| vec![effect.source_id]);
+    }
     if zone == Zone::Battlefield || !zone_cache.zone_contains(state, zone, effect.source_id) {
         return None;
     }
@@ -2347,7 +2362,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -2522,7 +2537,7 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -2658,7 +2673,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -3032,7 +3047,9 @@ fn evaluate_condition_inner(
         // CR 120.3 + CR 120.6 + CR 702.11b: True once the source has actually dealt
         // damage since entering the battlefield (sticky). The "hasn't dealt damage
         // yet" hexproof grant wraps this in `StaticCondition::Not`.
-        StaticCondition::SourceHasDealtDamage => eval_source_has_dealt_damage(state, source_id),
+        StaticCondition::SourceHasDealtDamage { kind } => {
+            eval_source_has_dealt_damage(state, source_id, *kind)
+        }
         // CR 601.2 + CR 611.3a: True when the source permanent was cast.
         StaticCondition::WasCast { zone } => state
             .objects
@@ -5800,7 +5817,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -5935,7 +5952,7 @@ fn static_condition_reads_monarch(condition: &StaticCondition) -> bool {
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -11582,11 +11599,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::SetDynamicToughness { .. }
     );
 
-    if b_changes_pt && filter_references_pt_stat(&a.affected_filter) {
-        return true;
-    }
-
-    false
+    b_changes_pt && filter_references_pt_stat(&a.affected_filter)
 }
 
 /// Check if a TargetFilter references a card type (used for dependency ordering).
@@ -12370,13 +12383,61 @@ fn layer_pass_materializes_keywords(zone: Zone) -> bool {
     matches!(zone, Zone::Battlefield | Zone::Hand | Zone::Stack)
 }
 
+/// CR 208.1 + CR 208.2a + CR 611.3b: A normal spell can reuse its
+/// origin characteristics only if neither zone supplies a continuous change.
+/// Inspect declarations before their conditions: moving the card can change
+/// a condition's truth or start a static that functions on the stack.
+pub(super) fn cast_may_change_layer_characteristics(state: &GameState, spell: &GameObject) -> bool {
+    let can_change_source = |modification: &ContinuousModification| {
+        matches!(
+            modification,
+            ContinuousModification::CopyValues { .. }
+                | ContinuousModification::CopyChosen
+                | ContinuousModification::GrantStaticAbility { .. }
+                | ContinuousModification::ChangeController
+                | ContinuousModification::ChangeControllerToDesignation { .. }
+                | ContinuousModification::SubstituteTextWord { .. }
+        )
+    };
+    if !state.transient_continuous_effects.is_empty() {
+        return true;
+    }
+    state.objects.values().any(|source| {
+        source
+            .static_definitions
+            .as_slice()
+            .iter()
+            .chain(source.base_static_definitions.iter())
+            .any(|def| {
+                if def.mode != StaticMode::Continuous || def.modifications.is_empty() {
+                    return false;
+                }
+                if def.modifications.iter().any(can_change_source)
+                    || (source.id == spell.id
+                        && (def.characteristic_defining
+                            || def.active_zones.contains(&spell.zone)
+                            || def.active_zones.contains(&Zone::Stack)))
+                {
+                    return true;
+                }
+                let affected = static_affected_filter(def);
+                if *affected == TargetFilter::SelfRef {
+                    return false;
+                }
+                let mut zones = Vec::new();
+                collect_scan_zones(state, &affected, Some(spell.id), &mut zones);
+                zones.contains(&spell.zone) || zones.contains(&Zone::Stack)
+            })
+    })
+}
+
 /// CR 613.1: the layer system computes the characteristics of an OBJECT — not only of a
 /// permanent — so the scan domain must be able to reach an object wherever it lives. A
 /// `SpecificObject` leaf is an IDENTITY reference resolved against `state`, which is why this
 /// takes `state`: see [`collect_scan_zones`].
 fn continuous_effect_scan_zones(state: &GameState, filter: &TargetFilter) -> Vec<Zone> {
     let mut zones = Vec::new();
-    collect_scan_zones(state, filter, &mut zones);
+    collect_scan_zones(state, filter, None, &mut zones);
     if zones.is_empty() {
         zones.push(Zone::Battlefield);
     }
@@ -12393,13 +12454,19 @@ fn continuous_effect_scan_zones(state: &GameState, filter: &TargetFilter) -> Vec
 /// [`FilterProp::InAnyZone`] rather than collapsing it to the first zone. Stack
 /// filters retain their implicit `Zone::Stack` interpretation through
 /// [`TargetFilter::extract_in_zone`].
-/// `SpecificObject` resolves its recipient's actual zone from `state`.
-fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zone>) {
+/// `SpecificObject` resolves its recipient's zone from `state` or the proposed
+/// spell's destination.
+fn collect_scan_zones(
+    state: &GameState,
+    filter: &TargetFilter,
+    proposed_spell: Option<ObjectId>,
+    out: &mut Vec<Zone>,
+) {
     match filter {
         TargetFilter::Or { filters } => {
             for f in filters {
                 let mut branch_zones = Vec::new();
-                collect_scan_zones(state, f, &mut branch_zones);
+                collect_scan_zones(state, f, proposed_spell, &mut branch_zones);
                 if branch_zones.is_empty() {
                     branch_zones.push(Zone::Battlefield);
                 }
@@ -12412,10 +12479,10 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
         }
         TargetFilter::And { filters } => {
             for f in filters {
-                collect_scan_zones(state, f, out);
+                collect_scan_zones(state, f, proposed_spell, out);
             }
         }
-        TargetFilter::Not { filter } => collect_scan_zones(state, filter, out),
+        TargetFilter::Not { filter } => collect_scan_zones(state, filter, proposed_spell, out),
         // CR 613.1 + CR 611.2c: `SpecificObject` is the IDENTITY filter — it denotes exactly
         // one object, already bound at resolution time (CR 611.2c: "the set of objects it
         // affects is determined when that continuous effect begins"). It therefore carries no
@@ -12448,12 +12515,16 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
         // An object that no longer exists likewise contributes no zone; the filter could not
         // match it anyway, so the effect is inert rather than misdirected.
         TargetFilter::SpecificObject { id } => {
-            if let Some(zone) = state
-                .objects
-                .get(id)
-                .map(|obj| obj.zone)
-                .filter(|zone| layer_pass_materializes_keywords(*zone))
-            {
+            let zone = if proposed_spell == Some(*id) {
+                Some(Zone::Stack)
+            } else {
+                state
+                    .objects
+                    .get(id)
+                    .map(|obj| obj.zone)
+                    .filter(|zone| layer_pass_materializes_keywords(*zone))
+            };
+            if let Some(zone) = zone {
                 if !out.contains(&zone) {
                     out.push(zone);
                 }
@@ -16539,14 +16610,16 @@ mod tests {
             state.objects[&land]
                 .card_types
                 .subtypes
-                .contains(&"Mountain".to_string()),
+                .iter()
+                .any(|i| i == "Mountain"),
             "reach-guard: CR 305.7 subtype replacement must have run"
         );
         assert!(
             !state.objects[&land]
                 .card_types
                 .subtypes
-                .contains(&"Desert".to_string()),
+                .iter()
+                .any(|i| i == "Desert"),
             "CR 205.3i: the old land subtype is replaced"
         );
 
@@ -21363,10 +21436,10 @@ mod tests {
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&shapeshifter).unwrap();
-        assert!(obj.card_types.subtypes.contains(&"Dragon".to_string()));
-        assert!(obj.card_types.subtypes.contains(&"Elf".to_string()));
-        assert!(obj.card_types.subtypes.contains(&"Human".to_string()));
-        assert!(obj.card_types.subtypes.contains(&"Wizard".to_string()));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Dragon"));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Elf"));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Human"));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Wizard"));
     }
 
     #[test]
@@ -21397,11 +21470,11 @@ mod tests {
         let obj = state.objects.get(&creature).unwrap();
         assert!(obj.has_keyword(&Keyword::Changeling));
         assert!(
-            obj.card_types.subtypes.contains(&"Beast".to_string()),
+            obj.card_types.subtypes.iter().any(|i| i == "Beast"),
             "Granted Changeling should add Beast via post-fixup"
         );
         assert!(
-            obj.card_types.subtypes.contains(&"Goblin".to_string()),
+            obj.card_types.subtypes.iter().any(|i| i == "Goblin"),
             "Granted Changeling should add Goblin via post-fixup"
         );
     }
@@ -21447,12 +21520,9 @@ mod tests {
 
         let obj = state.objects.get(&shapeshifter).unwrap();
         // All types from CDA + the explicit Shapeshifter subtype should be present
-        assert!(obj.card_types.subtypes.contains(&"Elf".to_string()));
-        assert!(obj.card_types.subtypes.contains(&"Sliver".to_string()));
-        assert!(obj
-            .card_types
-            .subtypes
-            .contains(&"Shapeshifter".to_string()));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Elf"));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Sliver"));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Shapeshifter"));
     }
 
     #[test]
@@ -21494,7 +21564,7 @@ mod tests {
 
         let obj = state.objects.get(&land).unwrap();
         assert!(
-            obj.card_types.subtypes.contains(&"Forest".to_string()),
+            obj.card_types.subtypes.iter().any(|i| i == "Forest"),
             "Land should gain Forest subtype from chosen basic land type"
         );
     }
@@ -21574,13 +21644,11 @@ mod tests {
 
         let obj = state.objects.get(&mimic).unwrap();
         assert!(
-            obj.card_types.subtypes.contains(&"Elf".to_string()),
+            obj.card_types.subtypes.iter().any(|i| i == "Elf"),
             "Creature should gain Elf subtype from chosen creature type"
         );
         assert!(
-            obj.card_types
-                .subtypes
-                .contains(&"Shapeshifter".to_string()),
+            obj.card_types.subtypes.iter().any(|i| i == "Shapeshifter"),
             "Should retain original subtypes"
         );
     }
@@ -21643,12 +21711,12 @@ mod tests {
 
         let obj = state.objects.get(&goblin).unwrap();
         assert!(
-            obj.card_types.subtypes.contains(&"Zombie".to_string()),
+            obj.card_types.subtypes.iter().any(|i| i == "Zombie"),
             "Creature should gain the chosen Zombie subtype: {:?}",
             obj.card_types.subtypes
         );
         assert!(
-            !obj.card_types.subtypes.contains(&"Goblin".to_string()),
+            !obj.card_types.subtypes.iter().any(|i| i == "Goblin"),
             "SET form must wipe the original Goblin subtype: {:?}",
             obj.card_types.subtypes
         );
@@ -22450,7 +22518,7 @@ mod tests {
             "should still be Planeswalker"
         );
         assert!(
-            obj.card_types.subtypes.contains(&"Ninja".to_string()),
+            obj.card_types.subtypes.iter().any(|i| i == "Ninja"),
             "should have Ninja subtype"
         );
         assert!(
@@ -24852,7 +24920,7 @@ mod tests {
             }
             let host = &state.objects[&thranduil];
             assert_eq!(host.card_types.core_types, vec![CoreType::Land]);
-            assert!(host.card_types.subtypes.contains(&"Forest".to_string()));
+            assert!(host.card_types.subtypes.iter().any(|i| i == "Forest"));
             assert!(
                 host.static_definitions.is_empty(),
                 "CR 305.7: Song must remove Thranduil's printed static"
@@ -25333,11 +25401,11 @@ mod tests {
 
         let land = state.objects.get(&land_id).unwrap();
         assert!(
-            land.card_types.subtypes.contains(&"Mountain".to_string()),
+            land.card_types.subtypes.iter().any(|i| i == "Mountain"),
             "Land should have Mountain subtype"
         );
         assert!(
-            !land.card_types.subtypes.contains(&"Forest".to_string()),
+            !land.card_types.subtypes.iter().any(|i| i == "Forest"),
             "Land should no longer have Forest subtype"
         );
     }
@@ -26583,9 +26651,9 @@ mod tests {
             1,
             "CR 305.7: SetBasicLandType Mountain should grant the intrinsic red mana ability"
         );
-        assert!(land.card_types.subtypes.contains(&"Mountain".to_string()));
+        assert!(land.card_types.subtypes.iter().any(|i| i == "Mountain"));
         assert!(
-            !land.card_types.subtypes.contains(&"Desert".to_string()),
+            !land.card_types.subtypes.iter().any(|i| i == "Desert"),
             "CR 305.7: Old land subtypes should be removed"
         );
     }
@@ -26657,7 +26725,7 @@ mod tests {
 
         let creature = state.objects.get(&creature_id).unwrap();
         assert_eq!(creature.card_types.core_types, vec![CoreType::Land]);
-        assert!(creature.card_types.subtypes.contains(&"Forest".to_string()));
+        assert!(creature.card_types.subtypes.iter().any(|i| i == "Forest"));
         assert!(
             !creature
                 .abilities
@@ -26736,7 +26804,7 @@ mod tests {
 
         let creature = state.objects.get(&creature_id).unwrap();
         assert_eq!(creature.card_types.core_types, vec![CoreType::Land]);
-        assert!(creature.card_types.subtypes.contains(&"Forest".to_string()));
+        assert!(creature.card_types.subtypes.iter().any(|i| i == "Forest"));
         assert!(
             !creature
                 .abilities
@@ -26778,7 +26846,11 @@ mod tests {
 
         let host_obj = state.objects.get(&host).unwrap();
         assert_eq!(host_obj.card_types.core_types, vec![CoreType::Land]);
-        assert!(host_obj.card_types.subtypes.contains(&"Forest".to_string()));
+        assert!(host_obj
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Forest"));
         assert!(
             host_obj.trigger_definitions.is_empty(),
             "CR 305.7: printed triggers must be removed"
@@ -26856,11 +26928,11 @@ mod tests {
 
         let land = state.objects.get(&land_id).unwrap();
         assert!(
-            land.card_types.subtypes.contains(&"Island".to_string()),
+            land.card_types.subtypes.iter().any(|i| i == "Island"),
             "CR 305.7: enchanted land should gain the source's chosen Island subtype"
         );
         assert!(
-            !land.card_types.subtypes.contains(&"Swamp".to_string()),
+            !land.card_types.subtypes.iter().any(|i| i == "Swamp"),
             "CR 305.7: old land subtype should be removed"
         );
         assert!(
@@ -26929,15 +27001,15 @@ mod tests {
 
         let land = state.objects.get(&land_id).unwrap();
         assert!(
-            land.card_types.subtypes.contains(&"Mountain".to_string()),
+            land.card_types.subtypes.iter().any(|i| i == "Mountain"),
             "Should gain Mountain"
         );
         assert!(
-            land.card_types.subtypes.contains(&"Dryad".to_string()),
+            land.card_types.subtypes.iter().any(|i| i == "Dryad"),
             "CR 305.7: Creature subtypes must be preserved"
         );
         assert!(
-            !land.card_types.subtypes.contains(&"Forest".to_string()),
+            !land.card_types.subtypes.iter().any(|i| i == "Forest"),
             "Forest land subtype should be removed"
         );
         assert!(
@@ -26986,12 +27058,12 @@ mod tests {
 
         let land = state.objects.get(&land_id).unwrap();
         assert!(
-            land.card_types.subtypes.contains(&"Gate".to_string()),
+            land.card_types.subtypes.iter().any(|i| i == "Gate"),
             "Original subtype should be preserved (additive)"
         );
         for name in ["Plains", "Island", "Swamp", "Mountain", "Forest"] {
             assert!(
-                land.card_types.subtypes.contains(&name.to_string()),
+                land.card_types.subtypes.iter().any(|i| i == name),
                 "Missing basic land type: {name}"
             );
         }
@@ -27080,7 +27152,7 @@ mod tests {
         let land = state.objects.get(&land_with).unwrap();
         for name in ["Forest", "Island", "Desert", "Gate", "Locus"] {
             assert!(
-                land.card_types.subtypes.contains(&name.to_string()),
+                land.card_types.subtypes.iter().any(|i| i == name),
                 "Counter land missing land type: {name}"
             );
         }
@@ -27102,10 +27174,7 @@ mod tests {
         // Mutation check: objects WITHOUT the counter gain nothing.
         let bare_land = state.objects.get(&land_without).unwrap();
         assert!(
-            !bare_land
-                .card_types
-                .subtypes
-                .contains(&"Forest".to_string()),
+            !bare_land.card_types.subtypes.iter().any(|i| i == "Forest"),
             "Land without the counter must NOT gain land types"
         );
         assert!(
@@ -27117,7 +27186,8 @@ mod tests {
             !bare_creature
                 .card_types
                 .subtypes
-                .contains(&"Bear".to_string()),
+                .iter()
+                .any(|i| i == "Bear"),
             "Creature without the counter must NOT gain creature types"
         );
     }
@@ -37474,7 +37544,8 @@ mod declared_zone_self_static_tests {
             assert!(branch.objects[&alone]
                 .card_types
                 .subtypes
-                .contains(&"Elf".to_string()));
+                .iter()
+                .any(|i| i == "Elf"));
             assert!(branch.objects[&alone].has_keyword(&Keyword::Flying));
             assert!(!branch.remote_type_layer_recipients.contains(&alone));
         };
@@ -37484,7 +37555,8 @@ mod declared_zone_self_static_tests {
                 assert!(branch.objects[&id]
                     .card_types
                     .subtypes
-                    .contains(&"Goblin".to_string()));
+                    .iter()
+                    .any(|i| i == "Goblin"));
                 assert!(branch.remote_type_layer_recipients.contains(&id));
                 assert!(!branch.attribution[&id].by_layer.is_empty());
             }
@@ -37502,7 +37574,8 @@ mod declared_zone_self_static_tests {
                 assert!(!branch.objects[&id]
                     .card_types
                     .subtypes
-                    .contains(&"Goblin".to_string()));
+                    .iter()
+                    .any(|i| i == "Goblin"));
             }
             assert_eq!(pt_of(branch, coexist), (Some(1), Some(5)));
             assert_eq!(pt_of(branch, painted), (Some(2), Some(2)));

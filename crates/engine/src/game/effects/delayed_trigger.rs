@@ -327,91 +327,6 @@ pub fn resolve(
         }
     }
 
-    // CR 505.1 / CR 608.2c + CR 603.7a: "your next <phase>" binds the trigger
-    // to the ability's controller; "that player's next <phase>" binds it to a
-    // chained effect's target's OWNER (CR 400.3) instead — The Eternal
-    // Wanderer's +1 exiles up to one target ARTIFACT OR CREATURE that may
-    // belong to any player, so the delayed return must fire on ITS owner's
-    // next end step, not unconditionally on the ability's controller's. The
-    // parser emits a placeholder `PlayerId(0)` in `AtNextPhaseForPlayer.player`
-    // because compile-time AST has no access to runtime player ids; `binding`
-    // says which live player to rewrite it to. Mirrors the
-    // `bind_contextual_filter_to_condition` pattern above.
-    //
-    // CR 603.7a + CR 608.2c: `chosen_player_stamp` carries the resolved
-    // `ChosenPlayer` id past this block so it can be stamped onto the built
-    // `delayed_ability.targets` below (`delayed_ability` is built fresh via
-    // `build_resolved_from_def`, so `chosen_players` does NOT survive
-    // creation→fire but `targets` does).
-    let mut chosen_player_stamp: Option<crate::types::player::PlayerId> = None;
-    if let DelayedTriggerCondition::AtNextPhaseForPlayer {
-        player,
-        gate,
-        binding,
-        ..
-    } = &mut condition
-    {
-        *player = match binding {
-            crate::types::ability::DelayedTriggerPlayerBinding::Controller => ability.controller,
-            // CR 608.2c + CR 400.3: resolve "that player" from the first
-            // object among the parent effect's chosen targets — the exiled
-            // permanent's owner, invariant across the zone change that just
-            // moved it (CR 400.3 only relocates library/graveyard/hand
-            // destinations to the owner's own zone; it does not change who
-            // the owner IS). Falls back to the ability's controller if the
-            // parent target is somehow gone (e.g. a malformed chain with no
-            // object target) rather than leaving a stale sentinel PlayerId.
-            crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner => ability
-                .targets
-                .iter()
-                .find_map(|target| match target {
-                    TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.owner),
-                    TargetRef::Player(_) => None,
-                })
-                // CR 108.3: an untargeted moved object's owner is read from the creation tracked set.
-                .or_else(|| {
-                    tracked_set_id
-                        .and_then(|id| state.tracked_object_sets.get(&id))
-                        .and_then(|objects| objects.first())
-                        .and_then(|id| state.objects.get(id))
-                        .map(|obj| obj.owner)
-                })
-                .unwrap_or(ability.controller),
-            // CR 603.7a + CR 608.2c: resolve "that player" from the Nth
-            // `Effect::Choose { Opponent }` answer recorded in the resolving
-            // ability's `chosen_players` (Faramir's "choose an opponent …
-            // at the beginning of that player's next end step"). FAIL-CLOSED:
-            // a missing index (malformed chain, no choice made) errors —
-            // never a controller fallback, which would fire the delayed
-            // body on the wrong player's turn.
-            crate::types::ability::DelayedTriggerPlayerBinding::ChosenPlayer { index } => {
-                match ability.chosen_players.get(*index as usize) {
-                    Some(chosen) => {
-                        chosen_player_stamp = Some(*chosen);
-                        *chosen
-                    }
-                    // A missing index is a malformed chain (binding references a
-                    // choice that was never made): surface it as an error in
-                    // every build rather than silently dropping the trigger
-                    // in release while passing debug tests.
-                    None => {
-                        return Err(crate::types::ability::EffectError::InvalidParam(
-                            format!(
-                                "ChosenPlayer binding index {index} has no chosen player; cannot create delayed trigger"
-                            ),
-                        ));
-                    }
-                }
-            }
-        };
-        // CR 513.2 + CR 603.7a: the "on your next turn" floor only becomes
-        // concrete at creation. Stamp the symbolic parse-time gate to the actual
-        // creation turn so the matcher skips the current turn's matching phase.
-        if matches!(gate, crate::types::ability::TurnGate::AfterCreationTurn) {
-            *gate = crate::types::ability::TurnGate::After(state.turn_number);
-        }
-    }
-
     // CR 603.7a + CR 500.8: "that combat" names the phase the preceding
     // instruction of this resolution added (`last_added_phase_ids`). When none
     // was added (CR 500.10a; "this main phase" outside a main phase; a
@@ -641,74 +556,205 @@ pub fn resolve(
     let root_event_subject_anaphor = creation_time_provenance
         .then(|| super::effect_event_subject_anaphor(&delayed_ability.effect))
         .flatten();
-    let (snapshot_targets, target_pins, illegal) =
-        if let Some(anaphor) = root_event_subject_anaphor {
-            // CR 608.2k: An event-subject anaphor always reads the event context —
-            // `TriggeringSource` the event's subject (the dying creature of a
-            // ZoneChanged), `EventTarget` its object slot (the damaged creature of
-            // a DamageDealt) — never the parent ability's chosen targets. Bypasses
-            // parent_target_snapshot's ability.targets early-return, which is
-            // correct for ParentTarget (Flickerwisp) but wrong here.
-            //
-            // Resolving the ANAPHOR THE CLAUSE ACTUALLY NAMES, rather than a
-            // hardcoded `TriggeringSource`, is what keeps the two members of the
-            // set from drifting: CR 120.1 makes the subject the damage DEALER, so
-            // snapshotting `TriggeringSource` for an `EventTarget` chain would
-            // destroy the attacking creature instead of the one it damaged.
-            let (targets, pins) = snapshot_event_subject(state, anaphor, ability.source_id);
-            (targets, pins, Vec::new())
-        } else if super::ability_refs_parent_target(&delayed_ability) {
-            let targets = parent_target_snapshot(state, ability);
-            let pins = if super::ability_pins_object_anaphor(&delayed_ability)
-                && !condition_expects_referent_move
-            {
-                ability
-                    .context
-                    .forwarded_result_context
-                    .as_ref()
-                    .map(|context| context.object_incarnations.clone())
-                    .unwrap_or_else(|| {
-                        targets
-                            .iter()
-                            .filter_map(|target| match target {
-                                TargetRef::Object(id) => state.objects.get(id).map(
+    // CR 603.7c + CR 400.7e: the creation event's moved subject, when the
+    // payload's parent referent comes from that event rather than the chain.
+    let creation_subject = creation_event_subject(state, ability);
+    let (snapshot_targets, target_pins, illegal) = if let Some(anaphor) = root_event_subject_anaphor
+    {
+        // CR 608.2k: An event-subject anaphor always reads the event context —
+        // `TriggeringSource` the event's subject (the dying creature of a
+        // ZoneChanged), `EventTarget` its object slot (the damaged creature of
+        // a DamageDealt) — never the parent ability's chosen targets. Bypasses
+        // parent_target_snapshot's ability.targets early-return, which is
+        // correct for ParentTarget (Flickerwisp) but wrong here.
+        //
+        // Resolving the ANAPHOR THE CLAUSE ACTUALLY NAMES, rather than a
+        // hardcoded `TriggeringSource`, is what keeps the two members of the
+        // set from drifting: CR 120.1 makes the subject the damage DEALER, so
+        // snapshotting `TriggeringSource` for an `EventTarget` chain would
+        // destroy the attacking creature instead of the one it damaged.
+        let (targets, pins) = snapshot_event_subject(state, anaphor, ability.source_id);
+        (targets, pins, Vec::new())
+    } else if super::ability_refs_parent_target(&delayed_ability) {
+        let mut targets = parent_target_snapshot(state, ability);
+        let pins_object_anaphor = super::ability_pins_object_anaphor(&delayed_ability)
+            && !condition_expects_referent_move;
+        // CR 603.7c + CR 400.7e: binding gate G. The creation-referent
+        // binding below acts only for a phase-delayed payload (its firing
+        // event names no object), inside this arm's own pin gate, without a
+        // forwarded result (which keeps its own incarnations, CR 400.7j),
+        // and only for a referent that came from the creation event. Outside
+        // it the arm's output is unchanged.
+        let bound_subject = creation_subject.as_ref().filter(|_| {
+            creation_time_provenance
+                && pins_object_anaphor
+                && ability.context.forwarded_result_context.is_none()
+        });
+        // CR 730.3 + CR 730.3c + CR 609.3: a merged permanent's departure made
+        // several objects, and "it" finds all of them. Bind each component
+        // the departure split out now, while the departure is still the
+        // current event, so a survivor that moves again cannot hide them.
+        // Only a payload that carries several objects through a pause takes
+        // them (`root_payload_resumes_multi_object_move`).
+        if bound_subject.is_some_and(|subject| subject.from == Some(Zone::Battlefield))
+            && root_payload_resumes_multi_object_move(&effect_def.effect)
+        {
+            if let Some(event) = state.current_trigger_event.as_ref() {
+                for id in crate::game::merge::departure_event_components(state, event) {
+                    if !targets.contains(&TargetRef::Object(id)) {
+                        targets.push(TargetRef::Object(id));
+                    }
+                }
+            }
+        }
+        let pins = if pins_object_anaphor {
+            ability
+                .context
+                .forwarded_result_context
+                .as_ref()
+                .map(|context| context.object_incarnations.clone())
+                .unwrap_or_else(|| {
+                    targets
+                        .iter()
+                        .filter_map(|target| match target {
+                            // CR 603.7c + CR 400.7e: a creation-event subject
+                            // that is not the source is pinned to the object
+                            // the event made, or to its departed incarnation
+                            // once that object has moved again. The source is
+                            // decided by `admit_inferred_source_referents`.
+                            TargetRef::Object(id) => match bound_subject {
+                                Some(subject) if subject.id == *id && *id != ability.source_id => {
+                                    Some(subject.arrival)
+                                }
+                                _ => state.objects.get(id).map(
                                     crate::types::identifiers::ObjectIncarnationRef::from_object,
                                 ),
-                                TargetRef::Player(_) => None,
-                            })
-                            .collect()
-                    })
-            } else {
-                Vec::new()
-            };
-            let illegal = creation_illegal_referents(state, ability, &targets, &pins);
-            (targets, pins, illegal)
-        } else if effect_references_last_created(&delayed_ability.effect)
-            && !state.last_created_token_ids.is_empty()
-        {
-            // CR 603.7c + CR 400.7: pin the snapshotted referents, gated on `condition_expects_referent_move` as the parent-target arm is. Unpinned, a delayed sacrifice whose referents are all gone falls past `pinned_object_targets_all_stale` into an untargeted sacrifice matched against the live `last_created_token_ids`.
-            let pins = if condition_expects_referent_move {
-                Vec::new()
-            } else {
-                state
-                    .last_created_token_ids
-                    .iter()
-                    .filter_map(|id| state.objects.get(id))
-                    .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
-                    .collect()
-            };
-            (
-                state
-                    .last_created_token_ids
-                    .iter()
-                    .map(|&id| TargetRef::Object(id))
-                    .collect(),
-                pins,
-                Vec::new(),
-            )
+                            },
+                            TargetRef::Player(_) => None,
+                        })
+                        .collect()
+                })
         } else {
-            (vec![], Vec::new(), Vec::new())
+            Vec::new()
         };
+        let illegal = creation_illegal_referents(state, ability, &targets, &pins);
+        (targets, pins, illegal)
+    } else if effect_references_last_created(&delayed_ability.effect)
+        && !state.last_created_token_ids.is_empty()
+    {
+        // CR 603.7c + CR 400.7: pin the snapshotted referents, gated on `condition_expects_referent_move` as the parent-target arm is. Unpinned, a delayed sacrifice whose referents are all gone falls past `pinned_object_targets_all_stale` into an untargeted sacrifice matched against the live `last_created_token_ids`.
+        let pins = if condition_expects_referent_move {
+            Vec::new()
+        } else {
+            state
+                .last_created_token_ids
+                .iter()
+                .filter_map(|id| state.objects.get(id))
+                .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+                .collect()
+        };
+        (
+            state
+                .last_created_token_ids
+                .iter()
+                .map(|&id| TargetRef::Object(id))
+                .collect(),
+            pins,
+            Vec::new(),
+        )
+    } else {
+        (vec![], Vec::new(), Vec::new())
+    };
+
+    // CR 109.5 + CR 608.2c + CR 603.7a: "your next <phase>" binds the trigger
+    // to the ability's controller; "that player's next <phase>" binds it to a
+    // chained effect's target's OWNER (CR 400.3) instead — The Eternal
+    // Wanderer's +1 exiles up to one target ARTIFACT OR CREATURE that may
+    // belong to any player, so the delayed return must fire on ITS owner's
+    // next end step, not unconditionally on the ability's controller's. The
+    // parser emits a placeholder `PlayerId(0)` in `AtNextPhaseForPlayer.player`
+    // because compile-time AST has no access to runtime player ids; `binding`
+    // says which live player to rewrite it to. Mirrors the
+    // `bind_contextual_filter_to_condition` pattern above. Stamped after the
+    // referent snapshot, so the owner binding can read the referent the payload
+    // actually binds.
+    //
+    // CR 603.7a + CR 608.2c: `chosen_player_stamp` carries the resolved
+    // `ChosenPlayer` id past this block so it can be stamped onto the built
+    // `delayed_ability.targets` below (`delayed_ability` is built fresh via
+    // `build_resolved_from_def`, so `chosen_players` does NOT survive
+    // creation→fire but `targets` does).
+    let mut chosen_player_stamp: Option<crate::types::player::PlayerId> = None;
+    if let DelayedTriggerCondition::AtNextPhaseForPlayer {
+        player,
+        gate,
+        binding,
+        ..
+    } = &mut condition
+    {
+        *player = match binding {
+            crate::types::ability::DelayedTriggerPlayerBinding::Controller => ability.controller,
+            // CR 608.2c + CR 400.3: resolve "that player" from the first
+            // object among the parent effect's chosen targets — the exiled
+            // permanent's owner, invariant across the zone change that just
+            // moved it (CR 400.3 only relocates library/graveyard/hand
+            // destinations to the owner's own zone; it does not change who
+            // the owner IS). Falls back to the ability's controller if the
+            // parent target is somehow gone (e.g. a malformed chain with no
+            // object target) rather than leaving a stale sentinel PlayerId.
+            crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner => {
+                first_object_owner(state, &ability.targets)
+                    // CR 108.3: an untargeted moved object's owner is read from the creation tracked set.
+                    .or_else(|| {
+                        tracked_set_id
+                            .and_then(|id| state.tracked_object_sets.get(&id))
+                            .and_then(|objects| objects.first())
+                            .and_then(|id| state.objects.get(id))
+                            .map(|obj| obj.owner)
+                    })
+                    // CR 603.7e + CR 108.3: "their" after "under its owner's control"
+                    // (Phytotitan) names the owner of the object this payload returns,
+                    // not the trigger's controller (CR 603.3a): the payload's creation
+                    // referent, else the creation event's recorded subject when no
+                    // successor of it could be found.
+                    .or_else(|| first_object_owner(state, &snapshot_targets))
+                    .or_else(|| creation_subject.as_ref().map(|subject| subject.owner))
+                    .unwrap_or(ability.controller)
+            }
+            // CR 603.7a + CR 608.2c: resolve "that player" from the Nth
+            // `Effect::Choose { Opponent }` answer recorded in the resolving
+            // ability's `chosen_players` (Faramir's "choose an opponent …
+            // at the beginning of that player's next end step"). FAIL-CLOSED:
+            // a missing index (malformed chain, no choice made) errors —
+            // never a controller fallback, which would fire the delayed
+            // body on the wrong player's turn.
+            crate::types::ability::DelayedTriggerPlayerBinding::ChosenPlayer { index } => {
+                match ability.chosen_players.get(*index as usize) {
+                    Some(chosen) => {
+                        chosen_player_stamp = Some(*chosen);
+                        *chosen
+                    }
+                    // A missing index is a malformed chain (binding references a
+                    // choice that was never made): surface it as an error in
+                    // every build rather than silently dropping the trigger
+                    // in release while passing debug tests.
+                    None => {
+                        return Err(crate::types::ability::EffectError::InvalidParam(
+                            format!(
+                                "ChosenPlayer binding index {index} has no chosen player; cannot create delayed trigger"
+                            ),
+                        ));
+                    }
+                }
+            }
+        };
+        // CR 513.2 + CR 603.7a: the "on your next turn" floor only becomes
+        // concrete at creation. Stamp the symbolic parse-time gate to the actual
+        // creation turn so the matcher skips the current turn's matching phase.
+        if matches!(gate, crate::types::ability::TurnGate::AfterCreationTurn) {
+            *gate = crate::types::ability::TurnGate::After(state.turn_number);
+        }
+    }
 
     // CR 603.7c: Stamp `ChangeZone.origin` from the CREATION event's
     // TriggeringSource destination zone only for phase-delayed triggers, whose
@@ -945,6 +991,97 @@ fn tracked_exile_member_pins(
         .filter(|object| object.zone == Zone::Exile)
         .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
         .collect()
+}
+
+/// CR 108.3: the owner of the first object in `targets`.
+fn first_object_owner(
+    state: &GameState,
+    targets: &[TargetRef],
+) -> Option<crate::types::player::PlayerId> {
+    targets.iter().find_map(|target| match target {
+        TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.owner),
+        TargetRef::Player(_) => None,
+    })
+}
+
+/// CR 603.7c + CR 400.7e: the object a delayed ability's creation event moved,
+/// when the payload's parent referent comes from that event (the creating chain
+/// names no referent, so `parent_target_snapshot` falls back to the event).
+struct CreationEventSubject {
+    id: ObjectId,
+    /// CR 108.3: the moved object's owner, as recorded by the event.
+    owner: crate::types::player::PlayerId,
+    /// The incarnation the payload may still affect: the object the move
+    /// created while it is still that object in the destination zone, else the
+    /// departing incarnation the event recorded, which can never be current
+    /// again (CR 400.7).
+    arrival: crate::types::identifiers::ObjectIncarnationRef,
+    /// The zone the creation event moved the subject from.
+    from: Option<Zone>,
+}
+
+/// CR 603.7c + CR 400.7e: read the creation event's subject for
+/// [`CreationEventSubject`]. `None` when the creating chain names its own
+/// referent (chosen or chained objects keep their existing pins, CR 400.7j), or
+/// when the creation event is not a zone change that records the departing
+/// identity.
+fn creation_event_subject(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<CreationEventSubject> {
+    if crate::game::targeting::parent_chain_referents(state, ability).is_some() {
+        return None;
+    }
+    let event = state.current_trigger_event.as_ref()?;
+    let GameEvent::ZoneChanged {
+        object_id,
+        from,
+        to,
+        record,
+    } = event
+    else {
+        return None;
+    };
+    let departed = crate::game::targeting::event_context_incarnation(
+        &TargetFilter::TriggeringSource,
+        event,
+        *object_id,
+    )?;
+    let arrival = state
+        .objects
+        .get(object_id)
+        .filter(|object| {
+            crate::types::ability::zone_change_record_has_live_successor(
+                state,
+                record,
+                *to,
+                object.zone,
+                None,
+            )
+        })
+        .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+        .unwrap_or(departed);
+    Some(CreationEventSubject {
+        id: *object_id,
+        owner: record.owner,
+        arrival,
+        from: *from,
+    })
+}
+
+/// CR 730.3c + CR 609.3: whether the delayed payload's root operation can carry
+/// several returned objects through a pause. Only `ChangeZone`'s targeted loop
+/// stashes its unprocessed members in `PendingChangeZoneIteration.remaining` and
+/// resumes them after a choice; `Bounce` is deliberately excluded because it
+/// abandons its remaining targets on a pause (`bounce.rs`).
+fn root_payload_resumes_multi_object_move(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ChangeZone {
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    )
 }
 
 /// CR 603.7c + CR 608.2k + CR 400.7: Resolve one event-subject anaphor against
@@ -5405,6 +5542,324 @@ mod tests {
             },
             "placeholder player must be rewritten to ability.controller"
         );
+    }
+
+    /// Move `id` off the battlefield into the graveyard and make that move the
+    /// current trigger event, as a dies trigger resolving sees it.
+    fn depart_to_graveyard_as_trigger_event(state: &mut GameState, id: ObjectId) {
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(state, id, Zone::Graveyard, &mut events);
+        let departure = events
+            .into_iter()
+            .find(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(Zone::Battlefield),
+                        ..
+                    } if *object_id == id
+                )
+            })
+            .expect("the departure is recorded");
+        state.current_trigger_event = Some(departure);
+    }
+
+    fn delayed_return(
+        condition: DelayedTriggerCondition,
+        payload: Effect,
+        targets: Vec<TargetRef>,
+        source: ObjectId,
+        controller: PlayerId,
+    ) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition,
+                effect: Box::new(AbilityDefinition::new(AbilityKind::Spell, payload)),
+                uses_tracked_set: false,
+            },
+            targets,
+            source,
+            controller,
+        )
+    }
+
+    fn return_to_battlefield() -> Effect {
+        Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
+            origin: None,
+            destination: Zone::Battlefield,
+            target: TargetFilter::ParentTarget,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        }
+    }
+
+    /// V9 — CR 603.7e + CR 108.3: "their next upkeep" after "under its owner's
+    /// control" names the owner of the payload's creation referent, not the
+    /// controller of the ability that creates the delayed trigger. The sibling
+    /// `Controller` binding keeps the controller.
+    #[test]
+    fn parent_target_owner_binds_the_creation_referents_owner() {
+        use crate::types::ability::{DelayedTriggerPlayerBinding as B, TurnGate};
+        for (binding, expected) in [
+            (B::ParentTargetOwner, PlayerId(1)),
+            (B::Controller, PlayerId(0)),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let source = crate::game::zones::create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Creator".to_string(),
+                Zone::Battlefield,
+            );
+            let dying = crate::game::zones::create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(1),
+                "Dying".to_string(),
+                Zone::Battlefield,
+            );
+            depart_to_graveyard_as_trigger_event(&mut state, dying);
+            let ability = delayed_return(
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::Upkeep,
+                    player: PlayerId(0),
+                    gate: TurnGate::None,
+                    binding,
+                },
+                return_to_battlefield(),
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            resolve(&mut state, &ability, &mut Vec::new()).expect("resolve must succeed");
+            assert_eq!(state.delayed_triggers.len(), 1);
+            assert_eq!(
+                state.delayed_triggers[0].ability.targets,
+                vec![TargetRef::Object(dying)],
+                "reach-guard: the referent came from the creation event"
+            );
+            assert!(
+                matches!(
+                    state.delayed_triggers[0].condition,
+                    DelayedTriggerCondition::AtNextPhaseForPlayer { player, .. } if player == expected
+                ),
+                "{binding:?}: {:?}",
+                state.delayed_triggers[0].condition
+            );
+        }
+    }
+
+    /// G1-G5 — CR 603.7c + CR 400.7e + CR 730.3c: the creation-referent binding
+    /// (arrival pin, merged components) acts only for a phase-delayed payload
+    /// inside the parent-target arm's own pin gate, for a referent the creation
+    /// event supplied, and adds components only for a resumable `ChangeZone`
+    /// root. Every sibling differs from G1 in one input and keeps the binding
+    /// the arm produced before (its snapshot, live pins or none). Synthetic
+    /// payloads: no printed graveyard-destination dies trigger creates an
+    /// expects-move or event-delayed `ParentTarget` delayed ability.
+    mod creation_referent_binding_gate {
+        use super::*;
+        use crate::game::game_object::ObjectIncarnationRefExt;
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        struct Fixture {
+            state: GameState,
+            source: ObjectId,
+            subject: ObjectId,
+            component: ObjectId,
+            departed: ObjectIncarnationRef,
+        }
+
+        /// A non-source merged creature (survivor plus one split component)
+        /// dies; before the creating ability resolves, the survivor is put back
+        /// into the graveyard (library, then graveyard), so it is a new object.
+        fn fixture() -> Fixture {
+            let mut state = GameState::new_two_player(42);
+            let source = crate::game::zones::create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Creator".to_string(),
+                Zone::Battlefield,
+            );
+            let subject = crate::game::zones::create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Survivor".to_string(),
+                Zone::Battlefield,
+            );
+            let component = crate::game::zones::create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(0),
+                "Component".to_string(),
+                Zone::Battlefield,
+            );
+            crate::game::merge::merge_object_onto(
+                &mut state,
+                component,
+                subject,
+                crate::game::merge::MergeSide::Bottom,
+                &mut Vec::new(),
+            );
+            let departed = ObjectIncarnationRef::from_object(&state.objects[&subject]);
+            depart_to_graveyard_as_trigger_event(&mut state, subject);
+            assert_eq!(state.objects[&component].zone, Zone::Graveyard);
+            crate::game::zones::move_to_zone(&mut state, subject, Zone::Library, &mut Vec::new());
+            crate::game::zones::move_to_zone(&mut state, subject, Zone::Graveyard, &mut Vec::new());
+            Fixture {
+                state,
+                source,
+                subject,
+                component,
+                departed,
+            }
+        }
+
+        fn live(fixture: &Fixture, id: ObjectId) -> ObjectIncarnationRef {
+            ObjectIncarnationRef::from_object(&fixture.state.objects[&id])
+        }
+
+        fn bind(
+            fixture: &mut Fixture,
+            condition: DelayedTriggerCondition,
+            payload: Effect,
+            targets: Vec<TargetRef>,
+        ) -> (Vec<TargetRef>, Vec<ObjectIncarnationRef>) {
+            let ability = delayed_return(condition, payload, targets, fixture.source, PlayerId(0));
+            resolve(&mut fixture.state, &ability, &mut Vec::new()).expect("resolve must succeed");
+            let delayed = fixture.state.delayed_triggers.last().expect("installed");
+            (
+                delayed.ability.targets.clone(),
+                delayed.ability.target_incarnations.clone(),
+            )
+        }
+
+        fn end_step() -> DelayedTriggerCondition {
+            DelayedTriggerCondition::AtNextPhase { phase: Phase::End }
+        }
+
+        /// G1 — qualifying (Marchesa shape): the departed subject's pin can never
+        /// be current again, and the component is bound with its live pin.
+        #[test]
+        fn g1_phase_delayed_change_zone_binds_every_departure_object() {
+            let mut fixture = fixture();
+            let (targets, pins) = bind(&mut fixture, end_step(), return_to_battlefield(), vec![]);
+            assert_eq!(
+                targets,
+                vec![
+                    TargetRef::Object(fixture.subject),
+                    TargetRef::Object(fixture.component)
+                ]
+            );
+            assert_eq!(
+                pins,
+                vec![fixture.departed, live(&fixture, fixture.component)]
+            );
+            assert!(!pins[0].is_current(&fixture.state));
+        }
+
+        /// G2 — preservation: a condition that expects the referent to move
+        /// (nearest printed: Animate Dead, Oubliette, Lagrella) keeps its
+        /// binding: no pins, no components.
+        #[test]
+        fn g2_condition_expecting_the_referent_to_move_keeps_its_binding() {
+            let mut fixture = fixture();
+            let (targets, pins) = bind(
+                &mut fixture,
+                DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                    filter: TargetFilter::ParentTarget,
+                },
+                return_to_battlefield(),
+                vec![],
+            );
+            assert_eq!(targets, vec![TargetRef::Object(fixture.subject)]);
+            assert!(pins.is_empty());
+        }
+
+        /// G2' — preservation: a phase-delayed payload that names the parent
+        /// only through a player it derives (no object pin) keeps its binding.
+        #[test]
+        fn g2_phase_delayed_payload_without_an_object_pin_keeps_its_binding() {
+            let mut fixture = fixture();
+            let (targets, pins) = bind(
+                &mut fixture,
+                end_step(),
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ParentTargetOwner,
+                },
+                vec![],
+            );
+            assert_eq!(targets, vec![TargetRef::Object(fixture.subject)]);
+            assert!(pins.is_empty());
+        }
+
+        /// G3 — an event-delayed condition (nearest printed: Long River Lurker)
+        /// keeps today's live pin and gets no components.
+        #[test]
+        fn g3_event_delayed_condition_keeps_its_binding() {
+            let mut fixture = fixture();
+            let (targets, pins) = bind(
+                &mut fixture,
+                DelayedTriggerCondition::WheneverEvent {
+                    trigger: Box::new(TriggerDefinition::new(TriggerMode::DamageDone)),
+                    expiry: crate::types::ability::WheneverEventExpiry::EndOfTurn,
+                },
+                return_to_battlefield(),
+                vec![],
+            );
+            assert_eq!(targets, vec![TargetRef::Object(fixture.subject)]);
+            assert_eq!(pins, vec![live(&fixture, fixture.subject)]);
+        }
+
+        /// G4 — a `Bounce` root (The Locust God shape) takes the arrival pin
+        /// but no components: Bounce abandons remaining targets on a pause.
+        #[test]
+        fn g4_bounce_root_takes_the_arrival_pin_but_no_components() {
+            let mut fixture = fixture();
+            let (targets, pins) = bind(
+                &mut fixture,
+                end_step(),
+                Effect::Bounce {
+                    target: TargetFilter::ParentTarget,
+                    destination: None,
+                    selection: BounceSelection::Targeted,
+                },
+                vec![],
+            );
+            assert_eq!(targets, vec![TargetRef::Object(fixture.subject)]);
+            assert_eq!(pins, vec![fixture.departed]);
+        }
+
+        /// G5 — a chained referent (Flickerwisp shape: the creating chain names
+        /// the object) keeps today's live pin and gets no components.
+        #[test]
+        fn g5_chained_referent_keeps_its_binding() {
+            let mut fixture = fixture();
+            let subject = fixture.subject;
+            let (targets, pins) = bind(
+                &mut fixture,
+                end_step(),
+                return_to_battlefield(),
+                vec![TargetRef::Object(subject)],
+            );
+            assert_eq!(targets, vec![TargetRef::Object(subject)]);
+            assert_eq!(pins, vec![live(&fixture, subject)]);
+        }
     }
 
     /// CR 603.7a + CR 608.2c (Faramir, Prince of Ithilien — "At the beginning

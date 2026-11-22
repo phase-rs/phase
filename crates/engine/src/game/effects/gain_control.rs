@@ -1745,7 +1745,10 @@ mod tests {
             .iter()
             .filter_map(|id| state.objects.get(id))
             .filter(|o| {
-                o.card_types.subtypes.contains(&"Treasure".to_string())
+                o.card_types
+                    .subtypes
+                    .iter()
+                    .any(|i: &String| i == "Treasure")
                     && o.controller == PlayerId(0)
             })
             .count();
@@ -1760,7 +1763,11 @@ mod tests {
                 .battlefield
                 .iter()
                 .filter_map(|id| state.objects.get(id))
-                .filter(|o| o.card_types.subtypes.contains(&"Treasure".to_string()))
+                .filter(|o| o
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|i: &String| i == "Treasure"))
                 .all(
                     |o| o.card_types.core_types.contains(&CoreType::Artifact) && o.color.is_empty()
                 ),

@@ -7132,12 +7132,18 @@ fn channel_harms_may_is_asked_in_each_combat_damage_step() {
 /// (CR 121.2), each meeting Abundance's "may", which P1 is asked: two prompts, and the batch
 /// completes on the last answer. Declining both draws 2; accepting both and choosing nonland draws
 /// none and still puts 2 cards in P1's hand. P1's life doesn't change, and the Bears die.
+/// Isolating the gain replacement and adding an unblocked attacker stages P1's
+/// gain before P1's damage leg (CR 101.4c). The draw prompts park that Phase C remnant.
 #[test]
 fn a_lifelink_substitutes_draws_ask_abundance() {
-    for accept in [false, true] {
-        let label = format!("accept: {accept}");
+    for (accept, early) in [(false, false), (true, false), (false, true), (true, true)] {
+        let label = format!("accept: {accept}, early: {early}");
         let mut scenario = rider_board();
         let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let mut attackers = vec![bears];
+        if early {
+            attackers.push(scenario.add_creature(P0, "Unblocked attacker", 1, 1).id());
+        }
         let nighthawk = creature_with_keywords(
             &mut scenario,
             P1,
@@ -7146,19 +7152,29 @@ fn a_lifelink_substitutes_draws_ask_abundance() {
             &["Flying", "Deathtouch", "Lifelink"],
             VAMPIRE_NIGHTHAWK,
         );
-        scenario.add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH);
+        if early {
+            scenario.add_enchantment_from_oracle(
+                P1,
+                "Life-to-draw replacement",
+                "If you would gain life, draw that many cards instead.",
+            );
+        } else {
+            scenario.add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH);
+        }
         scenario.add_enchantment_from_oracle(P1, "Abundance", ABUNDANCE);
         let mut runner = scenario.build();
         let hand_before = hand_size(&runner, P1);
         let mut answer = answering_abundance(accept);
-        let mut parked_at_prompt = Vec::new();
 
-        let combat = fight_driving(&mut runner, &[bears], &[(nighthawk, bears)], |runner| {
+        let combat = fight_driving(&mut runner, &attackers, &[(nighthawk, bears)], |runner| {
             if matches!(
                 runner.state().waiting_for,
                 WaitingFor::ReplacementChoice { .. }
             ) {
-                parked_at_prompt.push(runner.state().pending_combat_lifelink.is_some());
+                let parked = runner.state().pending_combat_lifelink.as_ref().unwrap();
+                assert_eq!(parked.phase_c_remnant.is_some(), early, "{label}");
+                assert!(!parked.awaiting_staged_gain, "{label}");
+                assert_eq!(life(runner, P1), 20, "{label}");
             }
             answer(runner.state())
         });
@@ -7166,14 +7182,13 @@ fn a_lifelink_substitutes_draws_ask_abundance() {
         assert_batch_settled(&runner);
         assert_eq!(combat.prompts.len(), 2, "{label}");
         assert_eq!(combat.choosers, vec![P1, P1], "{label}");
-        assert_eq!(parked_at_prompt, vec![true, true], "{label}");
         assert_eq!(
             cards_drawn(&combat.events, P1),
             if accept { 0 } else { 2 },
             "{label}"
         );
         assert_eq!(hand_size(&runner, P1) - hand_before, 2, "{label}");
-        assert_eq!(life(&runner, P1), 20, "{label}");
+        assert_eq!(life(&runner, P1), if early { 19 } else { 20 }, "{label}");
         assert_eq!(
             runner.state().objects[&bears].zone,
             Zone::Graveyard,

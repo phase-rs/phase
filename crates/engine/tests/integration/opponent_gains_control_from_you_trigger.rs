@@ -3164,8 +3164,8 @@ fn a_latched_doubler_is_judged_with_its_power_then() {
 ///   Zidane).
 ///
 /// A doubler naming itself by id (`SpecificObject`) isn't printed (the parser
-/// emits `SelfRef` for "~"); the shared self-exclusion
-/// (`filter_references_self`) leaves it undoubled on every path.
+/// emits `SelfRef` for "~"); like every doubler scope, the filter alone decides
+/// whether the doubler's own triggers qualify (CR 603.2d).
 #[test]
 fn a_self_scoped_doubler_is_judged_by_identity() {
     for (doubler_on_zidane, steal_zidane, expected) in

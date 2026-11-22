@@ -4911,6 +4911,8 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         modal_instruction_ordinal,
         detached_remainder,
         repeat_for,
+        // CR 608.2: iteration-relation tag; excluded by the `repeat_for.is_none()` conjunct
+        repeat_timing: _,
         min_x_value,
         announced_x,
         cant_be_copied,
@@ -5174,6 +5176,8 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         modal_instruction_ordinal,
         detached_remainder,
         repeat_for,
+        // CR 608.2: iteration-relation tag; excluded by the `repeat_for.is_none()` conjunct
+        repeat_timing: _,
         min_x_value,
         announced_x,
         cant_be_copied,
@@ -5416,6 +5420,8 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         modal_instruction_ordinal,
         detached_remainder,
         repeat_for,
+        // CR 608.2: iteration-relation tag; excluded by the `repeat_for.is_none()` conjunct
+        repeat_timing: _,
         min_x_value,
         announced_x,
         cant_be_copied,
@@ -5770,6 +5776,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         // upstream by the batch-candidate checks, same as the modal ordinal.
         detached_remainder: _,
         repeat_for: a_repeat_for,
+        repeat_timing: a_repeat_timing,
         min_x_value: a_min_x_value,
         announced_x: a_announced_x,
         cant_be_copied: a_cant_be_copied,
@@ -5867,6 +5874,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         // upstream by the batch-candidate checks, same as the modal ordinal.
         detached_remainder: _,
         repeat_for: b_repeat_for,
+        repeat_timing: b_repeat_timing,
         min_x_value: b_min_x_value,
         announced_x: b_announced_x,
         cant_be_copied: b_cant_be_copied,
@@ -5981,6 +5989,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_target_choice_timing == b_target_choice_timing
         && a_selected_mode_labels == b_selected_mode_labels
         && a_repeat_for == b_repeat_for
+        && a_repeat_timing == b_repeat_timing
         && a_min_x_value == b_min_x_value
         && a_announced_x == b_announced_x
         && a_cant_be_copied == b_cant_be_copied
@@ -11572,6 +11581,8 @@ mod tests {
                             amount: 3,
                         },
                     ]),
+                    staged_gains: Vec::new(),
+                    awaiting_staged_gain: false,
                     batch_events: Vec::new(),
                     damage_to_players: Vec::new(),
                     prevention_tally: Vec::new(),

@@ -1381,7 +1381,7 @@ pub(crate) fn profiles_conflict(p: &RwProfile, s: &GroupStructure) -> bool {
         read_mctrl: effective_span(p.reads_membership_ctrl, board_reads.set_membership),
         write_mctrl: membership_ctrl_of(board_writes, eff_external_ctrl, p.writes_membership_self),
     };
-    if feeds(
+    feeds(
         board_reads,
         board_writes,
         FeedContext::new(
@@ -1395,11 +1395,7 @@ pub(crate) fn profiles_conflict(p: &RwProfile, s: &GroupStructure) -> bool {
             },
             board_spans,
         ),
-    ) {
-        return true;
-    }
-
-    false
+    )
 }
 
 /// The membership-write census applying to an effective write set: external
@@ -1860,8 +1856,9 @@ fn flag_legacy_write_target(p: &mut RwProfile, target: &TargetFilter) {
 
 /// Record a per-member binding (`bind_per_member`) when an effect WRITE target names a per-member-bound
 /// referent (CR 603.10a, PR-6.75 c5) — the write path's counterpart to
-/// `member_bound_target_filter` read-position wiring. A `ChangeZone{TrackedSet}`
-/// return (Day of the Dragons) writes a per-source set ⇒ members diverge.
+/// `member_bound_target_filter` read-position wiring. A
+/// `ChangeZoneAll{origin: Exile, TrackedSetFiltered}` return (Day of the
+/// Dragons) writes a per-source set ⇒ members diverge.
 fn flag_member_bound_write_target(p: &mut RwProfile, target: &TargetFilter) {
     if member_bound_target_filter(target) {
         p.bind_per_member();
@@ -2213,7 +2210,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceIsEquipped
@@ -4789,6 +4786,7 @@ fn walk_ability(
         entry_onset: _,  // CR 611.2e onset tag, no read or write
         sibling_condition: _, // replication marker, no read/write effect
         instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the CR 101.4 admission authority (`simultaneous_unless::admits`)
         replacement_applied: _,
         parent_target_missing_reason: _,
         activation_cost_reduction: _,
@@ -4939,6 +4937,7 @@ fn walk_definition(
         iteration_kind_binding: _,
         sibling_condition: _,
         instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the CR 101.4 admission authority (`simultaneous_unless::admits`)
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on
         // every tree that pipeline produces — which is every tree a runtime walker
@@ -4947,6 +4946,7 @@ fn walk_definition(
         // intact, and no runtime path reaches such a tree. See
         // `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        linked_exile_return: _,
         face_down_in_exile: _,
         granting_object: _,
         // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
@@ -7896,7 +7896,7 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsEnchanted

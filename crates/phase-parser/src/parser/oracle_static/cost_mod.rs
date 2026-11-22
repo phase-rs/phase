@@ -772,8 +772,16 @@ pub(crate) fn parse_alternative_keyword_cost(text: &str) -> Option<StaticDefinit
         let def = parse_alternative_keyword_cost_body(&split.effect_text)?;
         // CR 601.3d: refuse to emit an unconditional grant when the gate is
         // unrecognized — that would be strictly more permissive than printed.
-        return parse_static_condition(&split.condition_text)
-            .map(|condition| def.condition(condition).description(text.to_string()));
+        let gate = parse_static_condition(&split.condition_text)?;
+        // The body may carry its own timing gate ("during each of your turns");
+        // both must hold.
+        let condition = match def.condition.clone() {
+            Some(timing) => StaticCondition::And {
+                conditions: vec![gate, timing],
+            },
+            None => gate,
+        };
+        return Some(def.condition(condition).description(text.to_string()));
     }
 
     parse_alternative_keyword_cost_body(text)
@@ -811,35 +819,76 @@ fn parse_alternative_keyword_cost_body(text: &str) -> Option<StaticDefinition> {
     let after_cost = TextPair::new(&tp.original[cost_len..], after_cost_lower);
     let after_cost = nom_tag_tp(&after_cost, " rather than pay ")?;
 
-    // Keyword remainder: "[optional-possessive][keyword] cost[s]". Scan for the
-    // keyword word + "cost" marker (the possessive prefix, e.g. "heart of
-    // kiran's ", is structurally irrelevant — the keyword identifies the class).
-    let kw_lower = after_cost.lower.trim_end_matches('.').trim();
+    // Keyword remainder, parsed to end of input so a trailing clause this
+    // grammar does not model fails the whole static instead of being dropped.
+    let (_, (keyword, frequency, timing_condition)) = all_consuming(terminated(
+        parse_alternative_keyword_cost_reference,
+        opt(tag(".")),
+    ))
+    .parse(after_cost.lower.trim())
+    .ok()?;
 
-    let keyword = if nom_primitives::scan_contains(kw_lower, "cycling cost") {
-        KeywordKind::Cycling
-    } else if nom_primitives::scan_contains(kw_lower, "crew cost") {
-        KeywordKind::Crew
-    } else {
-        return None;
+    let def = StaticDefinition::new(StaticMode::AlternativeKeywordCost {
+        keyword,
+        cost,
+        frequency,
+    })
+    .description(text.to_string())
+    .active_zones(vec![Zone::Battlefield]);
+    Some(match timing_condition {
+        Some(condition) => def.condition(condition),
+        None => def,
+    })
+}
+
+/// CR 702.29a + CR 702.6a + CR 702.122a: the keyword-cost reference after
+/// "rather than pay ":
+/// `[<name>'s | the ]<keyword> cost[s][ of the first <keyword-action> you <verb>[ each turn | during each of your turns]]`.
+/// Returns the keyword, its first-use frequency, and the timing gate the phrase
+/// carries ("during each of your turns" gates the grant to the controller's turn).
+fn parse_alternative_keyword_cost_reference(
+    i: &str,
+) -> OracleResult<'_, (KeywordKind, Option<CastFrequency>, Option<StaticCondition>)> {
+    // Optional possessive ("Heart of Kiran's ") or article ("the ").
+    let (i, _) = opt(alt((
+        terminated(take_until("'s "), tag("'s ")),
+        tag("the "),
+    )))
+    .parse(i)?;
+    let (i, keyword) = alt((
+        value(KeywordKind::Cycling, tag("cycling cost")),
+        value(KeywordKind::Crew, tag("crew cost")),
+        value(KeywordKind::Equip, tag("equip cost")),
+    ))
+    .parse(i)?;
+    // Plural form ("cycling costs") applies to every activation of the keyword.
+    let (i, plural) = opt(tag("s")).parse(i)?;
+    if plural.is_some() {
+        return Ok((i, (keyword, None, None)));
+    }
+    let (i, first_use) = opt(preceded(
+        tag(" of the first "),
+        alt((
+            value(KeywordKind::Cycling, tag("card you cycle")),
+            value(KeywordKind::Equip, tag("equip ability you activate")),
+        )),
+    ))
+    .parse(i)?;
+    let Some(first_use_keyword) = first_use else {
+        return Ok((i, (keyword, None, None)));
     };
-
-    // Frequency: detect "the first card you [keyword] each turn" pattern.
-    let frequency = if nom_primitives::scan_contains(kw_lower, "first card you cycle each turn") {
-        Some(CastFrequency::OncePerTurn)
-    } else {
-        None
-    };
-
-    Some(
-        StaticDefinition::new(StaticMode::AlternativeKeywordCost {
-            keyword,
-            cost,
-            frequency,
-        })
-        .description(text.to_string())
-        .active_zones(vec![Zone::Battlefield]),
-    )
+    if first_use_keyword != keyword {
+        return Err(oracle_err(i));
+    }
+    let (i, condition) = alt((
+        value(None, tag(" each turn")),
+        value(
+            Some(StaticCondition::DuringYourTurn),
+            tag(" during each of your turns"),
+        ),
+    ))
+    .parse(i)?;
+    Ok((i, (keyword, Some(CastFrequency::OncePerTurn), condition)))
 }
 
 /// CR 118.9 + CR 601.2b: Parse a "cast [filter] by paying life equal to its
