@@ -2962,17 +2962,16 @@ mod feldon_tokens {
 
     /// The same batch delivered in two segments, each Servant's counter stopping on the order of
     /// Hardened Scales and Doubling Season. Both orders must be reached and answered, and Ever
-    /// After must still end as the bottom card of its owner's library. This sequence draws
-    /// two cards on main and here, outside this change. The segment collector skips batched
-    /// observers such as Satoru; this test pins the observed count, without attributing the
-    /// second draw to a particular collector. CR 603.2c calls for one firing.
+    /// After must still end as the bottom card of its owner's library. CR 603.2c: Satoru's
+    /// "one or more" observer fires once for the whole card batch, so the two-segment
+    /// delivery draws one card.
     #[test]
     fn a_counter_order_answer_inside_a_card_batch_keeps_the_card_batch_owners_collection() {
         let (draws, orders) = ever_after_satoru_draws(true);
         assert_eq!(orders, 2, "one counter order per Servant, both answered");
         assert_eq!(
-            draws, 2,
-            "baseline limitation: the paused sequence draws two cards"
+            draws, 1,
+            "CR 603.2c: the paused sequence draws one card for the one batch"
         );
     }
 

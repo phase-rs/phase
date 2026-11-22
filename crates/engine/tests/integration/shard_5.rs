@@ -4,6 +4,9 @@
 //! other than `support` through `crate::<module>`, and every module with an insta snapshot; it may
 //! also hold modules from this range. `no_top_level_test_binaries` enforces that each file here is
 //! registered in exactly one shard root.
+// The auto-trait (`Send`) proof for the im-backed `GameState` exceeds the default
+// recursion limit of 128 (a future-incompatibility error on newer toolchains).
+#![recursion_limit = "512"]
 
 pub mod support;
 
@@ -198,6 +201,7 @@ mod stack_entry_declared_targets;
 mod stack_entry_node_reach;
 mod stack_object_keyword_grants;
 mod stack_session_batch_authority;
+mod staged_replacement_scheduler;
 mod stargaze_dynamic_keep;
 mod starting_intensity_keyword;
 mod starting_player_choice;
@@ -296,6 +300,7 @@ mod the_notary_hobbits;
 mod the_sentry_golden_guardian;
 mod the_ur_dragon_eminence;
 mod the_who_opponent_guess_resolution;
+mod theorists_sanctum;
 mod there_are_no_permanents_state_trigger;
 mod they_gain_keyword_anaphor;
 mod thickest_in_the_thicket_target_anaphor_8460;
@@ -444,6 +449,7 @@ mod where_x_coverage_runtime;
 mod where_x_its_characteristic_trigger_object;
 mod where_x_quantity_channel_binds;
 mod where_x_totality_guard;
+mod whisperwood_elemental_face_up_grant;
 mod white_suns_twilight;
 mod who_villainous_choice_scoped_player;
 mod whtz_bibliophile;

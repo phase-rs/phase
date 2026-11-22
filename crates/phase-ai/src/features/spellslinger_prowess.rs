@@ -554,7 +554,7 @@ mod tests {
         c.keywords.push(Keyword::Prowess);
         let f = detect(&[entry(c, 4)]);
         assert_eq!(f.prowess_count, 4);
-        assert!(f.payoff_names.contains(&"Monastery Swiftspear".to_string()));
+        assert!(f.payoff_names.iter().any(|i| i == "Monastery Swiftspear"));
     }
 
     #[test]
@@ -566,7 +566,7 @@ mod tests {
             .push(cast_payoff_trigger(TriggerMode::SpellCast, None));
         let f = detect(&[entry(c, 2)]);
         assert_eq!(f.cast_payoff_count, 2);
-        assert!(f.payoff_names.contains(&"Conduit Shape".to_string()));
+        assert!(f.payoff_names.iter().any(|i| i == "Conduit Shape"));
     }
 
     #[test]
@@ -596,7 +596,7 @@ mod tests {
         c.triggers.push(t);
         let f = detect(&[entry(c, 2)]);
         assert_eq!(f.cast_payoff_count, 0);
-        assert!(!f.payoff_names.contains(&"Esper Sentinel Shape".to_string()));
+        assert!(!f.payoff_names.iter().any(|i| i == "Esper Sentinel Shape"));
     }
 
     #[test]
@@ -803,10 +803,10 @@ mod tests {
             entry(copier, 4),
         ]);
 
-        assert!(f.payoff_names.contains(&"Monk".to_string()));
-        assert!(f.payoff_names.contains(&"Archmage".to_string()));
-        assert!(!f.payoff_names.contains(&"Bolt".to_string()));
-        assert!(!f.payoff_names.contains(&"Twincast".to_string()));
+        assert!(f.payoff_names.iter().any(|i| i == "Monk"));
+        assert!(f.payoff_names.iter().any(|i| i == "Archmage"));
+        assert!(!f.payoff_names.iter().any(|i| i == "Bolt"));
+        assert!(!f.payoff_names.iter().any(|i| i == "Twincast"));
     }
 
     #[test]

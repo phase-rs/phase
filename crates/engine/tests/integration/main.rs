@@ -5,6 +5,10 @@
 // MEASURED, not assumed — the alternative already in this tree is `test_support.rs` / `support.rs`,
 // twin files kept equal by a comment asking a human to remember.
 #![recursion_limit = "512"]
+// Debug builds of this crate's large dispatch functions allocate stack frames above
+// clippy's 512 KB `large_unopt_stack_frames` default. Test threads run with
+// RUST_MIN_STACK = 16 MiB (.cargo/config.toml) and server runtime threads with 32 MiB.
+#![allow(clippy::large_unopt_stack_frames)]
 #[path = "../../src/source_census.rs"]
 mod source_census;
 
@@ -66,6 +70,7 @@ mod combo_floors;
 mod combo_infinite_pile;
 mod combo_table;
 mod combo_table_on_resolve;
+mod concede_resumed_family_sba;
 mod corpse_appraiser;
 mod counter_removed_last_counter_threshold;
 mod cr732_shortcut_journal_retention;
@@ -123,6 +128,7 @@ mod flamerush_rider_tapped_attacking_copy;
 mod food_chain_board;
 mod for_each_of_those_population;
 mod format_axis_census;
+mod forwarded_source_identity;
 mod freeform_commander_deck_rules;
 mod frenzy_attacker_unblocked_pump;
 mod frostcliff_siege_anchor_word_modes;
@@ -207,11 +213,13 @@ mod karazikar_attack_scope_7189;
 mod kashi_tribe_damage_tap_freeze;
 mod kibo_uktabi_prince_defending_player_sacrifice;
 mod kilo_live_offer_from_real_dump;
+mod lady_octopus_first_second_draw;
 mod later_instruction_unless_bindings;
 mod lathiel_end_step_counters_repro;
 mod layer_boundary_census;
 mod layer_two_control_change_triggers;
 mod leyline_tyrant_pay_any_red_damage;
+mod lost_in_the_maze;
 mod lost_monarch_combat_damage_by_type_intervening_if;
 mod mana_ability_mana_payment_window;
 mod mana_burn;
@@ -305,6 +313,7 @@ mod ureni_attack_trigger;
 mod vengeful_ancestor_goaded_attack_trigger;
 mod viewer_projection_ingest_gate;
 mod void_winnower_announced_x;
+mod vren_the_relentless;
 mod vrestin_menoptra_leader_5949;
 mod vulcan_mind_meld_exiler_plays;
 mod wba_fodder_multiset;
@@ -362,6 +371,7 @@ mod swords_target_legality_recheck;
 mod three_opponent_drain_shortcut;
 mod tromokratis;
 mod tunnel_tipster_face_down_entry_runtime;
+mod twisted_sewer_witch_role_per_rat;
 mod veteran_bodyguard_tap_redirect;
 mod watery_grasp_resolution_host;
 mod yurlok_of_scorch_thrash;
@@ -380,4 +390,5 @@ mod niambi_granted_trigger_once_each_turn;
 mod q_stacking_the_deck;
 mod risky_move_gain_control_trigger;
 mod token_attack_destination;
+mod unless_sacrifice_cant_be_sacrificed;
 mod venat_heros_sundering_transform_8071;

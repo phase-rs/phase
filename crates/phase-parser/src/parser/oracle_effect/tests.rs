@@ -19513,9 +19513,9 @@ fn effect_create_wicked_role_token() {
         e,
         Effect::Token { ref name, ref types, .. }
         if name == "Wicked Role"
-            && types.contains(&"Enchantment".to_string())
-            && types.contains(&"Aura".to_string())
-            && types.contains(&"Role".to_string())
+            && types.iter().any(|t| t == "Enchantment")
+            && types.iter().any(|t| t == "Aura")
+            && types.iter().any(|t| t == "Role")
     ));
 }
 
@@ -39955,8 +39955,8 @@ fn have_its_controller_create_token_rebinds_owner_to_triggering_source() {
             );
             assert!(tapped, "token should enter tapped");
             assert!(enters_attacking, "token should enter attacking");
-            assert!(types.contains(&"Creature".to_string()));
-            assert!(types.contains(&"Warrior".to_string()));
+            assert!(types.iter().any(|t| t == "Creature"));
+            assert!(types.iter().any(|t| t == "Warrior"));
             assert_eq!(colors, &vec![ManaColor::White]);
         }
         other => panic!("expected Effect::Token, got {other:?}"),
@@ -102982,7 +102982,6 @@ fn revealed_remainder_is_refused_when_dig_selection_does_not_depart_library() {
 /// or graveyard remainder (CR 404.3) requires an arrangement prompt this
 /// instruction does not own, so it is refused rather than silently delivered in
 /// collection order.
-
 #[test]
 fn revealed_remainder_destinations_are_explicit_or_refused() {
     use crate::parser::oracle_effect::sequence::parse_revealed_remainder_clause;

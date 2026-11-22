@@ -1625,8 +1625,8 @@ mod tests {
             } => {
                 assert_eq!(*player, PlayerId(0));
                 assert_eq!(*choice_type, ChoiceType::creature_type());
-                assert!(options.contains(&"Elf".to_string()));
-                assert!(options.contains(&"Goblin".to_string()));
+                assert!(options.iter().any(|i: &String| i == "Elf"));
+                assert!(options.iter().any(|i: &String| i == "Goblin"));
                 assert!(source.is_none());
                 assert_eq!(*persist_player, None);
             }
@@ -1644,11 +1644,11 @@ mod tests {
         match &state.waiting_for {
             WaitingFor::NamedChoice { options, .. } => {
                 assert_eq!(options.len(), 5);
-                assert!(options.contains(&"White".to_string()));
-                assert!(options.contains(&"Blue".to_string()));
-                assert!(options.contains(&"Black".to_string()));
-                assert!(options.contains(&"Red".to_string()));
-                assert!(options.contains(&"Green".to_string()));
+                assert!(options.iter().any(|i: &String| i == "White"));
+                assert!(options.iter().any(|i: &String| i == "Blue"));
+                assert!(options.iter().any(|i: &String| i == "Black"));
+                assert!(options.iter().any(|i: &String| i == "Red"));
+                assert!(options.iter().any(|i: &String| i == "Green"));
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
@@ -1705,7 +1705,7 @@ mod tests {
         match &state.waiting_for {
             WaitingFor::NamedChoice { options, .. } => {
                 assert_eq!(options.len(), 5);
-                assert!(options.contains(&"Forest".to_string()));
+                assert!(options.iter().any(|i: &String| i == "Forest"));
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
@@ -1721,10 +1721,10 @@ mod tests {
         match &state.waiting_for {
             WaitingFor::NamedChoice { options, .. } => {
                 assert_eq!(options.len(), 7);
-                assert!(options.contains(&"Creature".to_string()));
-                assert!(options.contains(&"Instant".to_string()));
-                assert!(!options.contains(&"Battle".to_string()));
-                assert!(!options.contains(&"Kindred".to_string()));
+                assert!(options.iter().any(|i: &String| i == "Creature"));
+                assert!(options.iter().any(|i: &String| i == "Instant"));
+                assert!(!options.iter().any(|i: &String| i == "Battle"));
+                assert!(!options.iter().any(|i: &String| i == "Kindred"));
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
@@ -1747,9 +1747,9 @@ mod tests {
         match &state.waiting_for {
             WaitingFor::NamedChoice { options, .. } => {
                 assert_eq!(options.len(), 5);
-                assert!(!options.contains(&"Creature".to_string()));
-                assert!(!options.contains(&"Land".to_string()));
-                assert!(options.contains(&"Planeswalker".to_string()));
+                assert!(!options.iter().any(|i: &String| i == "Creature"));
+                assert!(!options.iter().any(|i: &String| i == "Land"));
+                assert!(options.iter().any(|i: &String| i == "Planeswalker"));
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
@@ -1774,8 +1774,8 @@ mod tests {
                     options,
                     &["Sorcery", "Artifact", "Creature", "Enchantment", "Instant"]
                 );
-                assert!(!options.contains(&"Land".to_string()));
-                assert!(!options.contains(&"Planeswalker".to_string()));
+                assert!(!options.iter().any(|i: &String| i == "Land"));
+                assert!(!options.iter().any(|i: &String| i == "Planeswalker"));
             }
             other => panic!("Expected NamedChoice, got {other:?}"),
         }
@@ -1792,7 +1792,7 @@ mod tests {
         match &state.waiting_for {
             WaitingFor::NamedChoice { options, .. } => {
                 assert!(!options.is_empty());
-                assert!(options.contains(&"Human".to_string()));
+                assert!(options.iter().any(|i: &String| i == "Human"));
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
@@ -2009,10 +2009,10 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
         match &state.waiting_for {
             WaitingFor::NamedChoice { options, .. } => {
-                assert!(options.contains(&"Plains".to_string()));
-                assert!(options.contains(&"Forest".to_string()));
-                assert!(options.contains(&"Sphere".to_string()));
-                assert!(options.contains(&"Urza's".to_string()));
+                assert!(options.iter().any(|i: &String| i == "Plains"));
+                assert!(options.iter().any(|i: &String| i == "Forest"));
+                assert!(options.iter().any(|i: &String| i == "Sphere"));
+                assert!(options.iter().any(|i: &String| i == "Urza's"));
                 assert!(options.len() >= 14);
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
@@ -2170,8 +2170,8 @@ mod tests {
         match &state.waiting_for {
             WaitingFor::NamedChoice { options, .. } => {
                 assert_eq!(options.len(), 2);
-                assert!(options.contains(&"0".to_string()));
-                assert!(options.contains(&"1".to_string()));
+                assert!(options.iter().any(|i: &String| i == "0"));
+                assert!(options.iter().any(|i: &String| i == "1"));
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
@@ -2190,8 +2190,8 @@ mod tests {
         match &state.waiting_for {
             WaitingFor::NamedChoice { options, .. } => {
                 assert_eq!(options.len(), 2);
-                assert!(options.contains(&"0".to_string()));
-                assert!(options.contains(&"1".to_string()));
+                assert!(options.iter().any(|i: &String| i == "0"));
+                assert!(options.iter().any(|i: &String| i == "1"));
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
@@ -2290,8 +2290,8 @@ mod tests {
             WaitingFor::NamedChoice { options, .. } => {
                 // C(5,2) = 10 unique pairs
                 assert_eq!(options.len(), 10);
-                assert!(options.contains(&"White, Blue".to_string()));
-                assert!(options.contains(&"Red, Green".to_string()));
+                assert!(options.iter().any(|i: &String| i == "White, Blue"));
+                assert!(options.iter().any(|i: &String| i == "Red, Green"));
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }
@@ -2314,8 +2314,8 @@ mod tests {
         match &state.waiting_for {
             WaitingFor::NamedChoice { options, .. } => {
                 assert_eq!(options.len(), 2);
-                assert!(options.contains(&"First Strike".to_string()));
-                assert!(options.contains(&"Swampwalk".to_string()));
+                assert!(options.iter().any(|i: &String| i == "First Strike"));
+                assert!(options.iter().any(|i: &String| i == "Swampwalk"));
             }
             other => panic!("Expected NamedChoice, got {:?}", other),
         }

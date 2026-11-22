@@ -304,7 +304,7 @@ fn run_state_based_action_iterations(
             // CR 704.4 + CR 117.2e: the departure canceled the current pause of a
             // resolution that is still under way. Its remaining state-based
             // actions wait for that resolution to finish; the caller resumes it.
-            if resume == DepartureResume::ParkedZoneChangeTail {
+            if resume == DepartureResume::ResolutionTail {
                 return resume;
             }
         }
@@ -2465,11 +2465,7 @@ fn check_saga_sacrifice(
                     } if *object_id == *id
                 )
             });
-            if pending_lore_event {
-                return false;
-            }
-
-            true
+            !pending_lore_event
         })
         .collect();
 

@@ -4,6 +4,9 @@
 //! than `support` through `crate::<module>`, and every module with an insta snapshot; it may also
 //! hold modules from this range. `no_top_level_test_binaries` enforces that each file here is
 //! registered in exactly one shard root.
+// The auto-trait (`Send`) proof for the im-backed `GameState` exceeds the default
+// recursion limit of 128 (a future-incompatibility error on newer toolchains).
+#![recursion_limit = "512"]
 
 pub mod support;
 
@@ -42,6 +45,7 @@ mod ai_multi_target_selection;
 mod ajani_nacatl_pariah_co_departure_6427;
 mod ajani_nacatl_pariah_sacrifice_outlet_6018;
 mod ajani_nacatl_pariah_transform;
+mod ajani_resolute;
 mod ajani_strength_of_the_pride;
 mod akroan_horse;
 mod alania_divergent_storm;
@@ -51,6 +55,7 @@ mod all_creatures_chosen_type_static_9566;
 mod all_player_library_wheel;
 mod altcast_plural_instances;
 mod alternative_cost_defiler_offers;
+mod alternative_cycling_cost_keeps_discard;
 mod amass_the_components;
 mod ambitious_augmenter;
 mod ambuscade_one_sided_fight_anaphoric;
@@ -216,6 +221,7 @@ mod census_release_batch_2;
 mod census_release_batch_3;
 mod census_release_batch_4;
 mod census_release_batch_5;
+mod census_release_batch_7;
 mod census_release_next_cast;
 mod chain_of_smog_copy;
 mod chain_root_target_suspension;

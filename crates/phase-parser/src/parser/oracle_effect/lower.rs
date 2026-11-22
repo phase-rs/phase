@@ -40,7 +40,9 @@ use super::gap_diagnosis::clause_gap_unimplemented;
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::{ParseContext, PlayerAntecedents};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_ir::effect_chain::{AcceptingPlayerBinding, ClauseIr, EffectChainIr};
+use crate::parser::oracle_ir::effect_chain::{
+    AcceptingPlayerBinding, ClauseIr, EffectChainIr, RepeatCount,
+};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, CardTypeSetSource, CastCostModifier, CastFromZoneDriver,
@@ -50,9 +52,9 @@ use crate::types::ability::{
     EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
     NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter, PlayerRelation,
     PreventionAmount, PreventionScope, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
-    RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement, StaticCondition,
-    StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
-    TypeFilter, TypedFilter,
+    RepeatForTiming, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
@@ -5915,7 +5917,7 @@ fn is_chain_veil_for_each_grant(lower: &str) -> bool {
     )
 }
 
-pub(crate) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
+pub(crate) fn strip_for_each_prefix(text: &str) -> (Option<RepeatCount>, String) {
     let (repeat_for, _, rest) = strip_for_each_prefix_with_difference(text);
     (repeat_for, rest)
 }
@@ -5924,9 +5926,24 @@ pub(crate) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String
 /// comparison provenance from the parser product. The optional binding is
 /// produced only by the dedicated controller-scoped `PowerExceedsBase` parser
 /// arm; it is not inferred by searching an arbitrary filter tree later.
+///
+/// CR 608.2c + CR 101.4: every count this peel returns is stamped
+/// `SimultaneousInstances` here, through [`RepeatCount::for_each_prefix`], so the
+/// timing travels with the count from the peel itself.
 pub(crate) fn strip_for_each_prefix_with_difference(
     text: &str,
-) -> (Option<QuantityExpr>, Option<QuantityExpr>, String) {
+) -> (Option<RepeatCount>, Option<QuantityExpr>, String) {
+    let (repeat_for, difference, rest) = peel_for_each_prefix_count(text);
+    (
+        repeat_for.map(RepeatCount::for_each_prefix),
+        difference,
+        rest,
+    )
+}
+
+/// The leading `for each` grammar behind [`strip_for_each_prefix_with_difference`]:
+/// the bare count, its comparison provenance, and the body.
+fn peel_for_each_prefix_count(text: &str) -> (Option<QuantityExpr>, Option<QuantityExpr>, String) {
     let lower = text.to_lowercase();
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("for each ")).parse(i)) {
         let rest_lower = &lower[text.len() - rest.len()..];
@@ -6080,14 +6097,19 @@ mod population_prefix_tests {
 #[cfg(test)]
 mod difference_binding_tests {
     use super::strip_for_each_prefix_with_difference;
-    use crate::types::ability::{QuantityExpr, QuantityRef};
+    use crate::parser::oracle_ir::effect_chain::RepeatCount;
+    use crate::types::ability::{QuantityExpr, QuantityRef, RepeatForTiming};
 
     #[test]
     fn comparison_parser_product_carries_difference_provenance() {
         let (repeat_for, difference, rest) = strip_for_each_prefix_with_difference(
             "for each creature you control with power greater than that creature's base power, put a counter",
         );
-        assert!(repeat_for.is_some());
+        // CR 608.2c + CR 101.4: the authority stamps the for-each timing.
+        assert_eq!(
+            repeat_for.as_ref().map(RepeatCount::timing),
+            Some(RepeatForTiming::SimultaneousInstances)
+        );
         assert!(difference.is_some());
         assert_eq!(rest, "put a counter");
     }
@@ -6116,7 +6138,7 @@ mod difference_binding_tests {
         );
         assert_eq!(
             repeat_for,
-            Some(QuantityExpr::ClampMin {
+            Some(RepeatCount::for_each_prefix(QuantityExpr::ClampMin {
                 inner: Box::new(QuantityExpr::Offset {
                     inner: Box::new(QuantityExpr::Multiply {
                         factor: -1,
@@ -6125,7 +6147,7 @@ mod difference_binding_tests {
                     offset: 2,
                 }),
                 minimum: 0,
-            })
+            }))
         );
         assert!(difference.is_none());
         assert_eq!(rest, "that player gains 2 life.");
@@ -6133,7 +6155,7 @@ mod difference_binding_tests {
         let (repeat_for, _, rest) = strip_for_each_prefix_with_difference(
             "For each card a player draws this way, that player gains 2 life.",
         );
-        assert_eq!(repeat_for, Some(tracked()));
+        assert_eq!(repeat_for, Some(RepeatCount::for_each_prefix(tracked())));
         assert_eq!(rest, "that player gains 2 life.");
     }
 }
@@ -14054,19 +14076,16 @@ fn where_x_is_demonstrative_target_creature_stat(where_x: WhereXBinding<'_>) -> 
         return false;
     };
     let expression = expression.trim().trim_end_matches('.').to_ascii_lowercase();
-    // The `if` condition scopes the parser temporary so it drops at the end of
-    // condition evaluation (before the owned `expression` string), avoiding the
+    // The `let` scopes the parser temporary so it drops at the end of the
+    // statement (before the owned `expression` string), avoiding the
     // tail-position borrow that an `is_ok()` return expression would create.
-    if all_consuming(preceded(
+    let matched = all_consuming(preceded(
         tag::<_, _, OracleError<'_>>("that creature's "),
         alt((tag("power"), tag("toughness"))),
     ))
     .parse(expression.as_str())
-    .is_ok()
-    {
-        return true;
-    }
-    false
+    .is_ok();
+    matched
 }
 
 /// CR 608.2c: Rebind a power/toughness reference scoped `from` inside a
@@ -14622,7 +14641,11 @@ pub(super) fn apply_where_x_ability_expression(
     if let Some(repeat_for) = def.repeat_for.take() {
         match apply_where_x_quantity_expression(repeat_for, where_x) {
             Some(bound) => def.repeat_for = Some(bound),
-            None => unbound_where_x = where_x.expression.map(str::to_string),
+            None => {
+                unbound_where_x = where_x.expression.map(str::to_string);
+                // The dropped count takes its iteration relation with it.
+                def.repeat_timing = RepeatForTiming::Sequential;
+            }
         }
     }
     if let Some(spec) = def.multi_target.as_mut() {

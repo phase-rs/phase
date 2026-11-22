@@ -1,39 +1,25 @@
 #![cfg(test)]
 //! Shared card-data fixture loader for inline `#[cfg(test)]` unit tests in `src/`.
-//! TWIN-SYNC: keep the fixture path here in lockstep with
-//! `crates/engine/tests/integration/support.rs` — both must track the fixture file.
+//! The fixture itself is read through `crate::database::integration_fixture`, the one
+//! reader shared with `crates/engine/tests/integration/support.rs` and the other crates.
 
-use std::fs::File;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::database::card_db::CardDatabase;
+use crate::database::integration_fixture;
 use crate::database::mtgjson::load_atomic_cards;
 use crate::database::oracle_loader::load_from_atomic_cards;
-use flate2::read::GzDecoder;
 
 const PARSER_BACKED_CARD: &str = "witherbloom apprentice";
 
-pub(crate) fn fixture_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/integration_cards.json.gz")
-}
-
-pub(crate) fn load_fixture(path: &Path) -> CardDatabase {
-    let file = File::open(path).expect("integration fixture should open");
-    let reader = BufReader::new(file);
-    let decoder = GzDecoder::new(reader);
-    CardDatabase::from_export_reader_typing_faces_on_read(decoder)
+pub(crate) fn load_fixture() -> CardDatabase {
+    CardDatabase::from_integration_fixture_typing_faces_on_read()
         .expect("integration fixture should load")
 }
 
-fn load_fixture_cached(path: &Path) -> CardDatabase {
-    let file = File::open(path).expect("integration fixture should open");
-    let reader = BufReader::new(file);
-    CardDatabase::from_compressed_export_cached(reader, |gz| {
-        std::io::read_to_string(GzDecoder::new(gz))
-    })
-    .expect("integration fixture should load")
+fn load_fixture_cached() -> CardDatabase {
+    CardDatabase::from_integration_fixture_cached().expect("integration fixture should load")
 }
 
 fn export_path() -> PathBuf {
@@ -183,9 +169,8 @@ pub(crate) fn shared_card_db() -> &'static CardDatabase {
     static DB: OnceLock<CardDatabase> = OnceLock::new();
     DB.get_or_init(|| {
         let db = if std::env::var_os("FORGE_TEST_FULL_DB").is_none() {
-            let fixture = fixture_path();
-            if fixture.exists() {
-                load_fixture_cached(&fixture)
+            if integration_fixture::exists() {
+                load_fixture_cached()
             } else {
                 CardDatabase::from_export(&export_path()).expect("card-data export should load")
             }
@@ -202,7 +187,7 @@ mod tests {
     use crate::types::triggers::TriggerMode;
 
     use super::{
-        assert_same_database, fixture_path, load_fixture, overlay_parser_backed_fixture_card,
+        assert_same_database, load_fixture, overlay_parser_backed_fixture_card,
         parser_backed_card_db, parser_fixture_path, shared_card_db,
     };
     use crate::database::card_db::CardDatabase;
@@ -210,13 +195,11 @@ mod tests {
     #[test]
     fn lone_card_overlay_matches_the_full_parser_fixture_overlay() {
         let reference = overlay_parser_backed_fixture_card(
-            load_fixture(&fixture_path()),
+            load_fixture(),
             &CardDatabase::from_mtgjson(&parser_fixture_path()).unwrap(),
         );
-        let candidate = overlay_parser_backed_fixture_card(
-            load_fixture(&fixture_path()),
-            &parser_backed_card_db(),
-        );
+        let candidate =
+            overlay_parser_backed_fixture_card(load_fixture(), &parser_backed_card_db());
         assert_same_database(&reference, &candidate);
     }
 

@@ -250,6 +250,7 @@ pub mod separate_piles;
 pub mod set_class_level;
 pub mod set_room_door_lock;
 pub mod shuffle;
+pub(crate) mod simultaneous_unless;
 pub mod skip_next_step;
 pub mod skip_next_turn;
 pub mod solve_case;
@@ -963,8 +964,15 @@ pub(crate) fn settle_forwarded_zone_result(
     group: &crate::types::game_state::LogicalZoneChangeGroup,
 ) {
     let Some(marker) = state
-        .active_ability_continuation()
-        .and_then(|pending| pending.chain.context.pending_forwarded_zone_result.clone())
+        .ability_continuation_at_top_or_parent()
+        .and_then(|frame| {
+            frame
+                .pending
+                .chain
+                .context
+                .pending_forwarded_zone_result
+                .clone()
+        })
     else {
         return;
     };
@@ -1002,7 +1010,15 @@ fn pending_forwarded_zone_result(
     let group = state
         .active_change_zone_frame()
         .and_then(|frame| frame.pending.as_ref())
-        .map(|pending| pending.logical_zone_change_group.logical_group_id);
+        .map(|pending| pending.logical_zone_change_group.logical_group_id)
+        // CR 400.7j: the staged ChangeZone family owns the group on its batch
+        // child instead of a legacy iteration frame.
+        .or_else(|| {
+            state
+                .active_batch_delivery()
+                .filter(|batch| batch.staged.is_some())
+                .map(|batch| batch.logical_zone_change_group.logical_group_id)
+        });
     let selected = group
         .is_none()
         .then(|| state.pending_zone_change_delivery_from_replacement())
@@ -1448,19 +1464,24 @@ fn park_forwarded_zone_result_on_active_continuation(
     ability: &ResolvedAbility,
     producer_events: &[GameEvent],
 ) {
+    // CR 400.7j: the continuation may sit immediately below the staged batch
+    // child; the bounded top-or-parent accessor is the exact neighbour.
     if !forwards_battlefield_move(ability)
-        || !state.active_ability_continuation().is_some_and(|pending| {
-            pending.chain.source_id == ability.source_id
-                && pending
-                    .chain
-                    .context
-                    .pending_forwarded_zone_result
-                    .is_none()
-        })
+        || !state
+            .ability_continuation_at_top_or_parent()
+            .is_some_and(|frame| {
+                frame.pending.chain.source_id == ability.source_id
+                    && frame
+                        .pending
+                        .chain
+                        .context
+                        .pending_forwarded_zone_result
+                        .is_none()
+            })
     {
         return;
     }
-    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+    if let Some(frame) = state.ability_continuation_at_top_or_parent_mut() {
         bind_forwarded_generic_self_ref(&mut frame.pending.chain);
     }
     let marker = pending_forwarded_zone_result(state, ability.source_id);
@@ -1469,7 +1490,7 @@ fn park_forwarded_zone_result_on_active_continuation(
         || (result.object_incarnations.is_empty()
             && waits_for_resolution_choice(&state.waiting_for))
     {
-        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        if let Some(frame) = state.ability_continuation_at_top_or_parent_mut() {
             frame.pending.chain.context.pending_forwarded_zone_result = Some(marker);
         }
     } else {
@@ -1489,8 +1510,15 @@ pub(crate) fn settle_replaced_forwarded_zone_delivery(
     delivery_events: &[GameEvent],
 ) {
     let owns_delivery = state
-        .active_ability_continuation()
-        .and_then(|pending| pending.chain.context.pending_forwarded_zone_result.as_ref())
+        .ability_continuation_at_top_or_parent()
+        .and_then(|frame| {
+            frame
+                .pending
+                .chain
+                .context
+                .pending_forwarded_zone_result
+                .as_ref()
+        })
         .is_some_and(|marker| {
             marker.group.is_none() && marker.selected.as_deref() == Some(&[member][..])
         });
@@ -1576,6 +1604,20 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         crate::game::engine_resolution_choices::settle_pending_library_search_delivery(
             state, events,
         );
+    }
+    // CR 101.4 + CR 614.1 + CR 608.2c: a choose-all-then-act delivery parked on
+    // a step's prompt resumes its remaining steps once that step has fully
+    // settled, and before any later instruction of its resolution runs.
+    if simultaneous_unless::delivery_is_parked(state) {
+        if simultaneous_unless::delivery_may_resume(state) {
+            simultaneous_unless::resume_parked_delivery(state, events);
+        }
+        // CR 608.2c: while the delivery is parked, no later instruction runs.
+        if simultaneous_unless::delivery_is_parked(state)
+            || !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        {
+            return;
+        }
     }
     // The continuation — the completed ChangeZone's chained downstream, or any
     // other parked chain — runs only once the inner iteration finished without
@@ -3256,6 +3298,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             &logical_zone_change_group,
             events,
             collector,
+            crate::game::triggers::ConsumedTriggerEventScope::AllCollectors,
         );
         // CR 614.13a: the resumed mass/targeted co-entry finished without pausing —
         // the whole ChangeZone entry event is complete, so clear the pre-entry
@@ -3666,6 +3709,25 @@ fn append_to_pending_continuation_with_scope(
     tail: Box<ResolvedAbility>,
     scope: Option<PendingPlayerScopeTail>,
 ) {
+    // CR 608.2c: the producer tail waits below the whole staged population.
+    if let Some(anchor) = state.staged_population_parent.take() {
+        if state
+            .resolution_stack
+            .batch_at_captured_depth(anchor.group, anchor.batch_depth)
+        {
+            state
+                .insert_ability_continuation_parent_at_child_boundary(
+                    {
+                        let mut pending = PendingContinuation::new(tail, state);
+                        pending.install_player_scope_tail(scope);
+                        pending
+                    },
+                    anchor.batch_depth,
+                )
+                .expect("staged population parent accepts the producer tail");
+            return;
+        }
+    }
     if let Some(active_occurrence) = state
         .active_ability_continuation()
         .map(|frame| frame.return_result_occurrence)
@@ -5564,6 +5626,9 @@ pub(crate) fn apply_parent_chain_context(
     // context wholesale, so preserve the node-local intent while inheriting
     // the remaining casting-time facts from its parent.
     let child_face_down_in_exile = child.context.face_down_in_exile;
+    // CR 118.12: the discard cause is the node's own — a cost-paying delivery
+    // node never makes a chained instruction's discard a cost.
+    let child_discard_cause = child.context.discard_cause;
     // CR 610.3a / CR 610.3b: `check_exile_returns` latches a specified "until" event on the
     // exact duration-bearing ChangeZone node it happened for (after the activation or trigger,
     // before that node's initial zone change). Like the face-down marker, the
@@ -5589,6 +5654,7 @@ pub(crate) fn apply_parent_chain_context(
     child.context.settled_damage_guards = child_settled_guards;
     child.context.parked_damage_batch = child_parked_batch;
     child.context.face_down_in_exile |= child_face_down_in_exile;
+    child.context.discard_cause = child_discard_cause;
     // CR 608.2c: a phase action's resolved population is a one-hop input to
     // the application-filter consumer the phase branch bound it to. It is not
     // a producer's `forward_result` antecedent for the rest of the chain: a
@@ -6531,9 +6597,11 @@ fn batch_completion_matches(
     use crate::types::game_state::BatchCompletion;
     match completion {
         BatchCompletion::CastFromZoneExileDeliveryComplete { ability, .. }
+        | BatchCompletion::DestroyPopulationSettled { ability, .. }
         | BatchCompletion::ForEachCategoryExileComplete { ability, .. } => {
             resolved_chain_matches(ability, query)
         }
+        BatchCompletion::ChangeZonePopulationSettled { .. } => false,
         BatchCompletion::LibrarySearchDeliverySettled { resume }
         | BatchCompletion::SearchPartitionPrimaryDelivered { resume, .. } => {
             library_search_resume_matches(resume, query)
@@ -9905,6 +9973,7 @@ fn instruction_outlives_declined_gate(
         sub_link: _,
         sibling_condition: _,
         instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the CR 101.4 admission authority (`simultaneous_unless::admits`)
         // CR 611.2e: when the instruction's continuous effect starts, not what
         // it names.
         entry_onset: _,
@@ -12397,6 +12466,7 @@ fn trigger_condition_reads_filter_population(
         TriggerCondition::EventDamageSourceMatchesFilter { filter } => has_filter(filter),
         TriggerCondition::EventObjectMatchesFilter { filter } => has_filter(filter),
         TriggerCondition::AttackersDeclaredCount { subject, .. } => match subject {
+            AttackersDeclaredCountSubject::CurrentCombat { .. } => false,
             AttackersDeclaredCountSubject::Controller { filter, .. }
             | AttackersDeclaredCountSubject::AttackTarget { filter, .. } => {
                 filter.as_ref().is_some_and(has_filter)
@@ -14406,7 +14476,16 @@ fn detach_after_player_scope_local_chain(
         next.player_scope,
         Some(PlayerFilter::PerformedActionThisWay { .. })
     );
+    // CR 608.2c + CR 109.5: a child that declares its OWN, distinct scope is a
+    // separate iteration, not a continuation inside the parent's. Comparing the
+    // explicit scope here is what keeps a typed `RevealTop`-style continuation
+    // from silently inheriting the parent's owner iteration.
+    let child_scope_is_distinct = next
+        .player_scope
+        .as_ref()
+        .is_some_and(|child_scope| child_scope != scope);
     let next_is_local_continuation = next.sub_link == SubAbilityLink::ContinuationStep
+        && !child_scope_is_distinct
         && is_player_scope_local_continuation(&node.effect, &next.effect, scope)
         && !next_is_scoped_search_shuffle_tail;
     if next_is_performed_gated
@@ -14572,30 +14651,31 @@ fn fan_out_head_is_allowlisted(head: &ResolvedAbility) -> bool {
         optional_player: _, // selects the optional actor; `optional` records the choice
         sibling_condition: _, // replication marker for `condition`, evaluates nothing itself
         instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
-        player_scope: _,     // cleared on the per-seat template by the split
-        starting_with: _,    // APNAP start of the fan-out, fixed before the first seat
-        announced_x: _,      // announce-time count
-        multi_target: _,     // announce-time target-count bounds
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the CR 101.4 admission authority (`simultaneous_unless::admits`)
+        player_scope: _,  // cleared on the per-seat template by the split
+        starting_with: _, // APNAP start of the fan-out, fixed before the first seat
+        announced_x: _,   // announce-time count
+        multi_target: _,  // announce-time target-count bounds
         target_constraints: _, // announce-time cross-target legality
-        distribution: _,     // announce-time portions
-        distribute: _,       // announce-time division
-        targets: _,          // announced targets, already resolved
+        distribution: _,  // announce-time portions
+        distribute: _,    // announce-time division
+        targets: _,       // announced targets, already resolved
         declares_chosen_group: _, // announce-time identity
         reads_chosen_group: _, // bound selected targets
         declares_return_result: _, // publication marker
         reads_return_result: _, // consumes a settled value
-        source_id: _,        // object id
-        cast_occurrence: _,  // cast provenance
+        source_id: _,     // object id
+        cast_occurrence: _, // cast provenance
         source_incarnation: _, // self-transform epoch latch
         announced_source_incarnation: _, // announcement-time source epoch
         chosen_target_slots: _, // CR 115.1 announced-target record
         noted_mana_payment: _, // activation-payment snapshot
-        trigger_source: _,   // trigger provenance
+        trigger_source: _, // trigger provenance
         trigger_definition_ref: _, // trigger provenance
-        delayed_origin: _,   // delayed-trigger identity
+        delayed_origin: _, // delayed-trigger identity
         force_block_attacker: _, // force-block referent
         target_incarnations: _, // CR 400.7 referent pins
-        target_pins: _,      // CR 400.7 selected-target pins
+        target_pins: _,   // CR 400.7 selected-target pins
         legacy_selected_target_incarnations: _,
         illegal_target_slots: _,         // CR 608.2b legality stamp
         unjudged_target_slots: _,        // CR 608.2b legality stamp
@@ -21454,6 +21534,24 @@ fn repeat_for_outermost_with_scope_or_unless(ability: &ResolvedAbility) -> bool 
         && (ability.player_scope.is_some() || ability.unless_pay.is_some())
 }
 
+/// CR 608.2h: the outermost counted repeat's iteration count, determined once
+/// against the hydrated ability (event-context targets bound, so a count that
+/// reads the trigger's object reads it as it last existed), with the hydrated
+/// ability it was determined against. The single count authority for both the
+/// round-by-round driver and the CR 101.4 choose-all-then-act coordinator.
+fn outermost_repeat_count<'a>(
+    state: &GameState,
+    ability: &'a ResolvedAbility,
+) -> (Cow<'a, ResolvedAbility>, usize) {
+    let hydrated = hydrate_event_context_targets(state, ability);
+    let count = match hydrated.repeat_for.as_ref() {
+        Some(qty) => crate::game::quantity::resolve_quantity_with_targets(state, qty, &hydrated)
+            .max(0) as usize,
+        None => 1,
+    };
+    (hydrated, count)
+}
+
 /// CR 608.2c: Drive a `repeat_for` loop whose iterations each run the full
 /// `resolve_chain_body` (scoped fan-out + unless-pay + effect) with
 /// `repeat_for` cleared so the inner pass does not re-enter this driver.
@@ -21464,13 +21562,8 @@ fn drive_repeat_for_outermost(
     depth: u32,
     mut payment_choice: Option<AutoMayChoice>,
 ) -> Result<ResolutionProgress, EffectError> {
-    let hydrated = hydrate_event_context_targets(state, ability);
+    let (hydrated, base_iterations) = outermost_repeat_count(state, ability);
     let effective = hydrated.as_ref();
-    let base_iterations = if let Some(ref qty) = effective.repeat_for {
-        crate::game::quantity::resolve_quantity_with_targets(state, qty, effective).max(0) as usize
-    } else {
-        1
-    };
 
     let mut iteration = 0usize;
     while iteration < base_iterations {
@@ -24673,17 +24766,21 @@ pub(crate) enum PlayerScopeSacrificeConsultAnswer {
 }
 
 /// CR 101.4 + CR 616.1: answer the replacement choice that interrupted the
-/// batch's consult. CR 616.1 lets the affected player choose the replacement,
+/// batch's consult, through `operation` (the chooser's answer, or a departure's
+/// reconsultation). CR 616.1 lets the affected player choose the replacement,
 /// but the choice only decides how this permanent's move will happen: the
 /// approved move joins the batch's `pending_deliveries`, so every chosen
 /// permanent is still consulted while every co-sacrificed permanent is on the
 /// battlefield, and the batch then happens at once (CR 101.4).
 pub(crate) fn answer_player_scope_sacrifice_consult(
     state: &mut GameState,
-    index: usize,
     events: &mut Vec<GameEvent>,
+    operation: impl FnOnce(
+        &mut GameState,
+        &mut Vec<GameEvent>,
+    ) -> crate::game::replacement::ReplacementResult,
 ) -> PlayerScopeSacrificeConsultAnswer {
-    let consult = crate::game::sacrifice::consult_answered_sacrifice(state, index, events);
+    let consult = crate::game::sacrifice::consult_answered_sacrifice(state, events, operation);
     if let crate::game::sacrifice::SacrificeConsult::NeedsChoice(choice_player) = consult {
         state.waiting_for =
             crate::game::replacement::replacement_choice_waiting_for(choice_player, state);
@@ -24735,6 +24832,25 @@ pub(crate) enum PlayerScopeSacrificeReconciliation {
     /// The carrier binds nothing open and its acting player left, so nothing can
     /// continue it; it is dropped without completion.
     Retired,
+}
+
+/// CR 800.4a + CR 701.21a: prune a sacrifice batch parked on a CR 616.1 choice
+/// before a departure's replacement settlement can resume it, so the resumed
+/// consult never asks about a departed player's selection.
+/// `reconcile_player_scope_sacrifice` prunes the same carrier again; pruning is
+/// idempotent.
+pub(crate) fn prune_paused_player_scope_sacrifice(state: &mut GameState) {
+    let Some(mut pending) = state.pending_player_scope_sacrifice_choice.take() else {
+        return;
+    };
+    if player_scope_sacrifice_carrier_binds(
+        state,
+        &pending,
+        PlayerScopeSacrificeAnswer::Replacement,
+    ) {
+        prune_player_scope_sacrifice_carrier(state, &mut pending);
+    }
+    state.pending_player_scope_sacrifice_choice = Some(pending);
 }
 
 /// Prune a player-scope sacrifice carrier to the players and collected members
@@ -25011,12 +25127,14 @@ pub(crate) fn drain_pending_discard_batch(
     match cursor {
         DiscardBatchCursor::All { remaining } => {
             for (i, obj_id) in remaining.iter().enumerate() {
+                // CR 701.9a vs CR 118.12: the batch's own cause.
                 if let discard::DiscardOutcome::NeedsReplacementChoice(chooser) =
-                    discard::discard_caused_by_effect_with_source_and_frame(
+                    discard::discard_with_cause_and_frame(
                         state,
                         *obj_id,
                         batch.player,
                         Some(batch.source_id),
+                        batch.cause,
                         batch.discard_frame,
                         events,
                     )
@@ -25047,7 +25165,7 @@ pub(crate) fn drain_pending_discard_batch(
                     source_id: batch.source_id,
                     count: remaining,
                     eligible: pool,
-                    cause: discard::DiscardCause::Effect,
+                    cause: batch.cause,
                     discard_frame: batch.discard_frame,
                 },
                 events,
@@ -25078,11 +25196,12 @@ pub(crate) fn drain_pending_discard_batch(
                 }
                 let player = state.objects[&card.object_id].owner;
                 if let discard::DiscardOutcome::NeedsReplacementChoice(chooser) =
-                    discard::discard_caused_by_effect_with_source_and_frame(
+                    discard::discard_with_cause_and_frame(
                         state,
                         card.object_id,
                         player,
                         Some(batch.source_id),
+                        batch.cause,
                         batch.discard_frame,
                         events,
                     )
@@ -25437,7 +25556,11 @@ pub fn resolve_ability_chain(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<(), EffectError> {
-    resolve_ability_chain_step(state, ability, events, depth).map(|_| ())
+    let result = resolve_ability_chain_step(state, ability, events, depth).map(|_| ());
+    if depth == 0 {
+        state.staged_population_parent = None;
+    }
+    result
 }
 
 pub(crate) fn resolve_ability_chain_step(
@@ -26990,6 +27113,10 @@ fn resolve_chain_body(
     if repeat_for_outermost_with_scope_or_unless(ability)
         && !has_member_driven_repeat_after_hydration(state, ability)
     {
+        // CR 101.4 + CR 608.2h: Viper-class instances are chosen first, acted together.
+        if simultaneous_unless::admits(ability) {
+            return simultaneous_unless::start(state, ability, events, depth);
+        }
         return drive_repeat_for_outermost(state, ability, events, depth, payment_choice);
     }
 
@@ -30426,10 +30553,12 @@ fn resolve_chain_body(
         // CR 608.2c: every later condition, alternative, sibling and target
         // choice follows the completed parent instruction. Retain the intact
         // tail before evaluating any of it while this invocation is pending.
+        // CR 115.6 + CR 608.2c: pausing does not turn a declined independent
+        // target slot into a reference to the parent's object.
         if progress.is_pending() {
             let mut sub_clone = sub.as_ref().clone();
             if should_propagate_parent_targets(ability, &sub_clone) {
-                sub_clone.mirror_targets_from(ability);
+                sub_clone.replace_target_occurrences(inherited_parent_occurrences(ability, sub));
             }
             apply_parent_chain_context(
                 &mut sub_clone,
@@ -30952,7 +31081,7 @@ fn resolve_chain_body(
             );
         }
 
-        // Apply forward_result: moved object becomes sub's source.
+        // Apply forward_result: bind moved referents without replacing a primary SelfRef source.
         //
         // CR 303.4f: Aura entering by non-spell means — controller chooses the enchanted object.
         // CR 301.5b: Equipment entering attached via "put onto the battlefield attached to" wiring.
@@ -50559,6 +50688,7 @@ mod tests {
                     0,
                 ),
                 discard_frame: None,
+                cause: crate::types::game_state::DiscardCause::Effect,
                 fan_out,
                 preceding_events: Vec::new(),
             }));
@@ -71471,6 +71601,83 @@ mod tests {
         assert_eq!(state.last_effect_count, Some(0));
     }
 
+    /// CR 608.2c + CR 109.5: a continuation that declares its own, distinct
+    /// player scope is a separate iteration, not part of the parent's. The
+    /// detach must hand it back (scope intact) instead of absorbing it into the
+    /// owner iteration and clearing the scope.
+    #[test]
+    fn distinct_continuation_scope_is_not_absorbed_into_the_owner_iteration() {
+        let owner_shuffle_scope = PlayerFilter::TrackedSetPossessor {
+            relation: crate::types::ability::PlayerRelation::All,
+            possession: crate::types::ability::PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(crate::types::ability::ThisWayCause::OwnerLibraryShuffleSubject),
+        };
+        let mut node = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            ObjectId(7),
+            PlayerId(0),
+        );
+        let mut child = ResolvedAbility::new(
+            Effect::RevealTop {
+                player: TargetFilter::ScopedPlayer,
+                count: 1,
+            },
+            vec![],
+            ObjectId(7),
+            PlayerId(0),
+        );
+        child.sub_link = SubAbilityLink::ContinuationStep;
+        child.player_scope = Some(PlayerFilter::Opponent);
+        node.sub_ability = Some(Box::new(child));
+
+        let tail = detach_after_player_scope_local_chain(&mut node, &owner_shuffle_scope, false);
+        let tail = tail.expect("a distinct child scope is detached, not absorbed");
+        assert_eq!(
+            tail.player_scope,
+            Some(PlayerFilter::Opponent),
+            "the child keeps the scope it declared"
+        );
+        assert!(
+            node.sub_ability.is_none(),
+            "the distinct child is not re-attached inside the owner iteration"
+        );
+
+        // Control: the same chain without its own scope IS the local
+        // continuation and is absorbed with the redundant scope cleared.
+        let mut node = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            ObjectId(7),
+            PlayerId(0),
+        );
+        let mut child = ResolvedAbility::new(
+            Effect::RevealTop {
+                player: TargetFilter::ScopedPlayer,
+                count: 1,
+            },
+            vec![],
+            ObjectId(7),
+            PlayerId(0),
+        );
+        child.sub_link = SubAbilityLink::ContinuationStep;
+        node.sub_ability = Some(Box::new(child));
+        assert!(
+            detach_after_player_scope_local_chain(&mut node, &owner_shuffle_scope, false).is_none(),
+            "an unscoped owner-seat continuation stays in the iteration"
+        );
+        let attached = node
+            .sub_ability
+            .as_ref()
+            .expect("the absorbed continuation stays attached");
+        assert!(attached.player_scope.is_none());
+    }
+
     /// CR 608.2c + CR 701.24a: The runtime keeps only the exact immediate
     /// scoped hand-to-library move and its scoped shuffle in one player pass.
     #[test]
@@ -73149,8 +73356,8 @@ mod entry_observation_settlement_tests {
                 .latch_immediately_before(Vec::new(), Vec::new())
                 .expect("empty batch group retains its pre-delivery latch");
             let pending = PendingBatchDeliveries {
-                library_reorder: None,
                 component_delivery_parent: None,
+                library_reorder: None,
                 logical_zone_change_group,
                 paused_current: None,
                 remaining: Vec::new(),
@@ -73173,6 +73380,7 @@ mod entry_observation_settlement_tests {
                 attempted: Vec::new(),
                 zone_change_record_start: state.zone_changes_this_turn.len(),
                 deferred_events: Vec::new(),
+                staged: None,
                 pre_entry_battlefield: None,
             };
             state

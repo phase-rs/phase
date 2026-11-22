@@ -3941,8 +3941,8 @@ mod tests {
         for pairing in &round {
             assert_eq!(pairing.players.len(), 2);
             assert!(
-                !(pairing.players.contains(&"e".to_string())
-                    && pairing.players.contains(&"f".to_string())),
+                !(pairing.players.iter().any(|i: &String| i == "e")
+                    && pairing.players.iter().any(|i: &String| i == "f")),
                 "swap repair must break the e/f rematch, got {:?}",
                 pairing.players
             );
@@ -4883,7 +4883,7 @@ mod tests {
 
         // `a` is still a legitimate member of `pairing.players` — membership
         // alone does not close this gap.
-        assert!(pairing.players.contains(&"a".to_string()));
+        assert!(pairing.players.iter().any(|i| i == "a"));
         assert!(validate_match_result(
             &pairing,
             &PodOutcome::Decisive {
