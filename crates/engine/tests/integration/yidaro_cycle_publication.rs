@@ -1489,6 +1489,7 @@ fn assert_cycle_apply_rejections(
         "divergent predecessor",
         "graph mismatch",
         "missing coordinate",
+        "legacy coordinate with a stamped graph",
     ] {
         let mut state = prefix.clone();
         for (position, row) in entries
@@ -1497,7 +1498,12 @@ fn assert_cycle_apply_rejections(
             .skip(second_edit)
             .take(second_finalize - second_edit)
         {
-            if position == second_edit && label == "missing coordinate" {
+            if position == second_edit
+                && matches!(
+                    label,
+                    "missing coordinate" | "legacy coordinate with a stamped graph"
+                )
+            {
                 continue;
             }
             if let Some(command) = &row.command {
@@ -1516,6 +1522,10 @@ fn assert_cycle_apply_rejections(
                 FinalizeError::CyclingOccurrenceMismatch(finalize.object)
             }
             "missing coordinate" => FinalizeError::CyclingOccurrenceMismatch(finalize.object),
+            "legacy coordinate with a stamped graph" => {
+                forged.resulting_cycling_occurrence = None;
+                FinalizeError::CyclingOccurrenceMismatch(finalize.object)
+            }
             _ => unreachable!(),
         };
         let before = state.clone();
@@ -1525,6 +1535,20 @@ fn assert_cycle_apply_rejections(
             "{label}"
         );
         assert_no_cycle_replay_mutation(&before, &state);
+        if label == "legacy coordinate with a stamped graph" {
+            let root = activated_graph(&mut forged.resulting_kind);
+            assert!(root.sub_ability.is_none());
+            assert!(root.cycling_occurrence.take().is_some());
+            apply_resolved_stack_entry_finalize(&mut state, &forged).unwrap();
+            assert_eq!(
+                state.stack[forged.entry_position].kind,
+                *forged.resulting_kind
+            );
+            assert_eq!(
+                state.cycles_completed_this_game_by_player,
+                before.cycles_completed_this_game_by_player
+            );
+        }
     }
 }
 
@@ -1544,6 +1568,8 @@ fn assert_cycle_decode_rejections(
 ) {
     const PRIOR_EDIT: &str =
         "cycling provenance requires exactly one matching prior completed-cycle ledger edit";
+    let finalizer =
+        cycling_finalize(journal.entries()[second_finalize].command.as_ref().unwrap()).unwrap();
     let cycle_edit = |wire: &serde_json::Value, i: usize| {
         wire["entries"][i]["command"]["LedgerEdit"]["edit"]["CompletedCycle"].clone()
     };
@@ -1571,6 +1597,24 @@ fn assert_cycle_decode_rejections(
         .remove("command");
     assert_journal_decode_error(missing.clone(), PRIOR_EDIT, "missing edit");
 
+    let mut stamped_legacy = missing.clone();
+    stamped_legacy["entries"][second_finalize]["command"]["StackEntryFinalize"]
+        ["resulting_cycling_occurrence"] = serde_json::Value::Null;
+    assert_journal_decode_error(
+        stamped_legacy.clone(),
+        "cycling provenance disagrees",
+        "legacy coordinate with a stamped graph",
+    );
+    let mut legacy = finalizer.clone();
+    legacy.resulting_cycling_occurrence = None;
+    let root = activated_graph(&mut legacy.resulting_kind);
+    assert!(root.sub_ability.is_none());
+    assert!(root.cycling_occurrence.take().is_some());
+    stamped_legacy["entries"][second_finalize]["command"]["StackEntryFinalize"] =
+        serde_json::to_value(legacy).unwrap();
+    serde_json::from_value::<ResolvedRulesJournal>(stamped_legacy)
+        .expect("an unstamped legacy finalizer decodes without a completed-cycle edit");
+
     let mut late = missing;
     let ordinal = late["next_command_ordinal"].as_u64().unwrap();
     let mut entry = wire["entries"][second_edit].clone();
@@ -1595,8 +1639,6 @@ fn assert_cycle_decode_rejections(
         serde_json::to_value(P1).unwrap();
     // Keep both pushes and the first pair intact. Reuse the second activation's
     // usage-ledger slot, preserving its ordinal and causal node.
-    let finalizer =
-        cycling_finalize(journal.entries()[second_finalize].command.as_ref().unwrap()).unwrap();
     let usage_edit = journal
         .entries()
         .iter()
@@ -1766,12 +1808,33 @@ fn assert_granted_replay_contract(state: &GameState, finalize: &ResolvedStackEnt
         .iter()
         .position(|row| row.command.as_ref().and_then(completed_cycle).is_some())
         .unwrap();
+    let mut without_edit = wire;
+    without_edit["entries"][edit_position]
+        .as_object_mut()
+        .unwrap()
+        .remove("command");
+    let mut descendant_stamped = finalize.clone();
+    descendant_stamped.resulting_cycling_occurrence = None;
+    activated_graph(&mut descendant_stamped.resulting_kind).cycling_occurrence = None;
+    let mut forged = without_edit.clone();
+    forged["entries"][position]["command"]["StackEntryFinalize"] =
+        serde_json::to_value(&descendant_stamped).unwrap();
+    assert_journal_decode_error(
+        forged,
+        "cycling provenance disagrees",
+        "legacy descendant stamp",
+    );
+    let mut restored = predecessor.clone();
+    restored.cycles_completed_this_game_by_player.clear();
+    let before = restored.clone();
+    assert_eq!(
+        apply_resolved_stack_entry_finalize(&mut restored, &descendant_stamped),
+        Err(Error::CyclingOccurrenceMismatch(finalize.object))
+    );
+    assert_no_cycle_replay_mutation(&before, &restored);
+
     for omit_occurrence in [false, true] {
-        let mut old = wire.clone();
-        old["entries"][edit_position]
-            .as_object_mut()
-            .unwrap()
-            .remove("command");
+        let mut old = without_edit.clone();
         let mut result = serde_json::to_value(&legacy).unwrap();
         if omit_occurrence {
             result

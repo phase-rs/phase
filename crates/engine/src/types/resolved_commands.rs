@@ -13,7 +13,9 @@ use crate::game::game_object::AttachTarget;
 use crate::game::perf_counters;
 use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContext};
 
-use super::ability::{ChosenAttribute, ContinuousModification, TriggerDefinitionRef};
+use super::ability::{
+    ChosenAttribute, ContinuousModification, ResolvedAbility, TriggerDefinitionRef,
+};
 use super::card::TokenImageRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
@@ -1490,7 +1492,9 @@ impl ResolvedStackEntryFinalizeCommand {
                 if self.resulting_paid_facts.is_none() {
                     return Err(Error::MissingResultPaidFacts(self.object));
                 }
-                if self.resulting_cycling_occurrence.is_some() {
+                if self.resulting_cycling_occurrence.is_some()
+                    || ability.as_deref().is_some_and(has_cycling_stamp)
+                {
                     return Err(Error::CyclingOccurrenceMismatch(self.object));
                 }
                 if self.resulting_cast_occurrence.is_some_and(|occurrence| {
@@ -1513,9 +1517,11 @@ impl ResolvedStackEntryFinalizeCommand {
                 {
                     return Err(Error::CastOccurrenceMismatch(self.object));
                 }
-                if self.resulting_cycling_occurrence.is_some_and(|occurrence| {
-                    !ability.cycling_occurrence_matches_recursive(occurrence)
-                }) {
+                let invalid_cycling_graph = match self.resulting_cycling_occurrence {
+                    Some(occurrence) => !ability.cycling_occurrence_matches_recursive(occurrence),
+                    None => has_cycling_stamp(ability),
+                };
+                if invalid_cycling_graph {
                     return Err(Error::CyclingOccurrenceMismatch(self.object));
                 }
             }
@@ -1523,6 +1529,13 @@ impl ResolvedStackEntryFinalizeCommand {
         }
         Ok(())
     }
+}
+
+fn has_cycling_stamp(ability: &ResolvedAbility) -> bool {
+    ability.cycling_occurrence.is_some()
+        || ability
+            .child_links()
+            .any(|(_, child)| has_cycling_stamp(child))
 }
 
 /// Typed failure while applying one already-resolved stack entry finalization.
@@ -3984,6 +3997,7 @@ impl ResolvedRulesJournal {
                         ));
                     }
                 }
+                // A missing coordinate is valid only for an unstamped result graph.
                 command.validate_shape().map_err(|error| {
                     ResolvedRulesJournalError::InvalidSerializedAuthority(error.to_string())
                 })?;

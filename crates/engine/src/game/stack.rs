@@ -638,6 +638,8 @@ pub fn apply_resolved_stack_entry_finalize(
     }
     use ResolvedStackEntryFinalizeReplayInvariantError as Error;
 
+    // Validate the entire result graph before installing it, including when a
+    // legacy finalizer carries no cycling coordinate to check against history.
     command.validate_shape()?;
     if matches!(entry.kind, StackEntryKind::Spell { .. }) {
         let object = state
