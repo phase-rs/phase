@@ -2550,9 +2550,10 @@ pub(crate) fn mana_ability_ready_without_simulation_gated(
 /// spurious guard costs performance, never correctness. Note that Guard 2's
 /// granularity is the whole board rather than this source: `static_kind_present`
 /// is a board-global `StaticModeKind` presence read (CR 604.1), so a single
-/// `CantPayCost` permanent anywhere on the battlefield (Yasharn, Impeccable Sire)
-/// returns EVERY mana source to the clone path, not only the sources a
-/// prohibition could actually name.
+/// `CantPayCost` or `CantSacrifice` permanent anywhere on the battlefield
+/// (Yasharn, Impeccable Sire; Quark, Humble Proprietor) returns EVERY mana
+/// source to the clone path, not only the sources a prohibition could actually
+/// name.
 ///
 /// Two divergences deliberately need NO guard:
 /// * CR 616.1 — a replacement on the sacrifice's battlefield -> graveyard move
@@ -2584,10 +2585,13 @@ fn legality_simulation_is_redundant(
         // `player_cant_sacrifice_as_cost` on the PRE-payment state, but the
         // payment re-evaluates it after this tree's `{T}` component has
         // already tapped the source, and a prohibition's object filter can
-        // read that tapped bit (`FilterProp::Tapped`). O(1) presence read
-        // (CR 604.1): a `false` here is precise post-flush, so the two
-        // evaluations are provably identical; a `true` declines and simulates.
+        // read that tapped bit (`FilterProp::Tapped`). `CantSacrifice` (Quark)
+        // reaches the same function through its object filter, so its
+        // presence declines too. O(1) presence reads (CR 604.1): a `false`
+        // here is precise post-flush, so the two evaluations are provably
+        // identical; a `true` declines and simulates.
         && !static_kind_present(state, StaticModeKind::CantPayCost)
+        && !static_kind_present(state, StaticModeKind::CantSacrifice)
 }
 
 pub fn can_activate_mana_ability_now(

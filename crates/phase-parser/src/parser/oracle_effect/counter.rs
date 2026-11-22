@@ -544,8 +544,8 @@ fn try_consume_counter_list_separator(input: &str) -> Option<&str> {
     Some(after_sep)
 }
 
-/// CR 608.2c + CR 122.1 + CR 122.6: "[a[n]] [additional] counter of that kind
-/// on <recipient> [if it doesn't have a counter of that kind on it]" →
+/// CR 608.2c + CR 122.1 + CR 122.6: "[a[n]] [additional|another] counter of that
+/// kind on <recipient> [if it doesn't have a counter of that kind on it]" →
 /// `Effect::PutChosenCounter`. Anaphoric recipients bind to `ParentTarget` (The
 /// Caves of Androzani); declared typed recipients use the shared target parser
 /// (Aven Courier). A source-self recipient IS supported: its producer — the

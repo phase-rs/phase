@@ -2679,6 +2679,10 @@ pub fn object_has_static_other(state: &GameState, object_id: ObjectId, name: &st
 /// pre-derivation timing, the functioning-defs scan per graft — so exactly
 /// the actor-bound graft is exempted for other actors while an independent
 /// object-wide grant on the same object keeps barring them.
+///
+/// A player-scoped `CantSacrifice` static (Quark, Humble Proprietor: "You can't
+/// sacrifice Treasure tokens.") bars its scoped actors for the permanents its
+/// filter matches; it is checked first, through `player_cant_sacrifice`.
 pub(crate) fn object_cant_be_sacrificed_by(
     state: &GameState,
     actor: PlayerId,
