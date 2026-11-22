@@ -256,6 +256,11 @@ fn parse_replacement_line_inner(
         return Some(def);
     }
 
+    // --- "As ~ enters, you may behold a [quality]. If you don't, ~ enters tapped." (Theorist's Sanctum) ---
+    if let Some(def) = parse_as_enters_behold_tapped(&norm_lower, &normalized, &text) {
+        return Some(def);
+    }
+
     // --- Shock lands: "As ~ enters, you may pay N life. If you don't, it enters tapped." ---
     // Must be checked BEFORE the generic "enters tapped" pattern.
     if let Some(def) = parse_shock_land(&norm_lower, &text) {
@@ -2248,6 +2253,64 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
         // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
         .destination_zone(Zone::Battlefield)
         .description(original_text.to_string()),
+    )
+}
+
+/// CR 614.1c + CR 614.12a + CR 701.4a: parse a single-object Behold cost on an
+/// as-enters replacement. Paying the cost leaves the permanent untapped;
+/// declining applies the enters-tapped modifier.
+fn parse_as_enters_behold_tapped(
+    norm_lower: &str,
+    normalized: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let ((), after_prefix) = nom_on_lower(normalized, norm_lower, |i| {
+        value((), preceded(parse_as_self_enters_frame, tag("you may "))).parse(i)
+    })?;
+
+    let after_prefix_lower = after_prefix.to_lowercase();
+    let (cost_text, decline_text) =
+        split_once_on_lower(after_prefix, &after_prefix_lower, ". if you don't, ")?;
+    let cost = crate::parser::oracle_cost::parse_single_cost(cost_text.trim());
+    if !matches!(
+        cost,
+        AbilityCost::Behold {
+            count: 1,
+            action: crate::types::ability::BeholdCostAction::ChooseOrReveal,
+            type_choice: None,
+            ..
+        }
+    ) {
+        return None;
+    }
+
+    let decline_lower = decline_text.to_lowercase();
+    let ((), decline_rest) = nom_on_lower(decline_text, &decline_lower, |i| {
+        value(
+            (),
+            terminated(
+                alt((
+                    tag("~ enters tapped"),
+                    tag("~ enters the battlefield tapped"),
+                )),
+                opt(char('.')),
+            ),
+        )
+        .parse(i)
+    })?;
+    if !decline_rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .mode(ReplacementMode::MayCost {
+                cost,
+                decline: Some(Box::new(unconditional_tap_self_ability())),
+            })
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .description(original_text.to_string()),
     )
 }
 
@@ -8031,7 +8094,7 @@ fn replacement_condition_from_static(
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -16338,6 +16401,10 @@ fn parse_damage_prevention_replacement_with_provenance(
             crate::parser::oracle_static::parse_affected_scoped_static_condition(
                 clause,
                 valid_card_filter.as_ref(),
+                // A prevention shield's host line is not a static's printed
+                // subject; only the plural "they" rewrite needs the source
+                // named alone, and that arm does not apply here.
+                crate::parser::oracle_static::PrintedSubject::Other,
             )
             .and_then(|condition| {
                 replacement_condition_from_static(condition, GatePolarity::OnlyIf)

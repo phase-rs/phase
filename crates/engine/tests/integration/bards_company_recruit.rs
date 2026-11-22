@@ -62,8 +62,16 @@ fn human_soldiers(runner: &GameRunner) -> Vec<&engine::game::game_object::GameOb
                 && object.base_toughness == Some(1)
                 && object.color == vec![ManaColor::White]
                 && object.card_types.core_types.contains(&CoreType::Creature)
-                && object.card_types.subtypes.contains(&"Human".to_string())
-                && object.card_types.subtypes.contains(&"Soldier".to_string())
+                && object
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|i: &String| i == "Human")
+                && object
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|i: &String| i == "Soldier")
         })
         .collect()
 }

@@ -300,7 +300,7 @@ fn lazotep_convert_color_exception_does_not_copy_devoid_cda() {
     let copied = &state.objects[&recipient];
     assert_eq!(copied.name, "Devoid Donor");
     assert_eq!((copied.power, copied.toughness), (Some(4), Some(4)));
-    assert!(copied.card_types.subtypes.contains(&"Zombie".to_string()));
+    assert!(copied.card_types.subtypes.iter().any(|i| i == "Zombie"));
     assert_eq!(copied.color, vec![ManaColor::Black]);
 }
 
@@ -640,7 +640,8 @@ fn unsupported_copy_exception_rider_keeps_preceding_subtype_out_of_later_copy() 
     assert!(state.objects[&first]
         .card_types
         .subtypes
-        .contains(&"Dog".to_string()));
+        .iter()
+        .any(|i| i == "Dog"));
     assert_eq!(state.objects[&first].power, Some(5));
 
     resolve_self_copy(&mut state, second, first, Vec::new());
@@ -648,7 +649,8 @@ fn unsupported_copy_exception_rider_keeps_preceding_subtype_out_of_later_copy() 
         !state.objects[&second]
             .card_types
             .subtypes
-            .contains(&"Dog".to_string()),
+            .iter()
+            .any(|i| i == "Dog"),
         "the unsupported rider must prevent an earlier subtype fold from leaking"
     );
     assert_eq!(state.objects[&second].power, Some(2));
@@ -694,14 +696,16 @@ fn unclassifiable_cda_does_not_preserve_an_independent_overridden_cda() {
     assert!(state.objects[&first]
         .card_types
         .subtypes
-        .contains(&"Dog".to_string()));
+        .iter()
+        .any(|i| i == "Dog"));
     assert_eq!(state.objects[&first].power, Some(7));
 
     resolve_self_copy(&mut state, second, first, Vec::new());
     assert!(state.objects[&second]
         .card_types
         .subtypes
-        .contains(&"Dog".to_string()));
+        .iter()
+        .any(|i| i == "Dog"));
     assert_eq!(
         state.objects[&second].power,
         Some(2),

@@ -4939,7 +4939,7 @@ impl ResolvedRequiredDefender {
     fn members(&self) -> std::iter::Copied<std::slice::Iter<'_, AttackTarget>> {
         match self {
             Self::Fixed(defender) => std::slice::from_ref(defender).iter().copied(),
-            Self::Matching(defenders) => defenders.as_slice().iter().copied(),
+            Self::Matching(defenders) => defenders.iter().copied(),
         }
     }
 
@@ -12190,7 +12190,7 @@ mod tests {
                     }
                     ',' if depth == 1 => {
                         args.push(current.trim().to_string());
-                        current = String::new();
+                        current.clear();
                     }
                     _ => current.push(c),
                 }
