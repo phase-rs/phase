@@ -7371,7 +7371,11 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         QuantityRef::CardsDrawnThisTurn { player: _ }
         | QuantityRef::CardsDrawnLastTurn { player: _ }
         | QuantityRef::CardsDiscardedThisTurn { .. } => reads_player_of(StateKind::JournalCards),
-        QuantityRef::CardsCycled { scope, .. } => {
+        QuantityRef::CardsCycled {
+            scope,
+            window: _,
+            name: _,
+        } => {
             // CR 603.3b + CR 608.2h: This reads a player journal, with a per-source
             // binding only when the scope uses that source's persisted player choice.
             let mut profile = reads_player_of(StateKind::JournalCards);

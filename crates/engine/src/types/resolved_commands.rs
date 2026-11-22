@@ -1525,7 +1525,22 @@ impl ResolvedStackEntryFinalizeCommand {
                     return Err(Error::CyclingOccurrenceMismatch(self.object));
                 }
             }
-            _ => return Err(Error::EntryKindMismatch(self.entry_position)),
+            // CR 601.2i + CR 602.2b: finalization settles a spell or an
+            // activated ability in place, so any other pairing changes the
+            // entry's kind or names a kind that is never finalized. Each kind
+            // is listed so a new one must be classified here.
+            (
+                StackEntryKind::Spell { .. }
+                | StackEntryKind::ActivatedAbility { .. }
+                | StackEntryKind::TriggeredAbility { .. }
+                | StackEntryKind::KeywordAction { .. }
+                | StackEntryKind::CombatDamage { .. },
+                StackEntryKind::Spell { .. }
+                | StackEntryKind::ActivatedAbility { .. }
+                | StackEntryKind::TriggeredAbility { .. }
+                | StackEntryKind::KeywordAction { .. }
+                | StackEntryKind::CombatDamage { .. },
+            ) => return Err(Error::EntryKindMismatch(self.entry_position)),
         }
         Ok(())
     }
