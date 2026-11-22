@@ -7,16 +7,17 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityTag, ChoiceType, ControllerRef, CountScope, CyclingHistoryWindow, Effect, FilterProp,
-    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    AbilityTag, ChoiceType, Comparator, ControllerRef, CountScope, CyclingHistoryWindow, Effect,
+    FilterProp, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{
     CastPaymentMode, CyclingOccurrence, CyclingRecord, GameState, ManaChoice, ManaChoicePrompt,
-    NamedChoiceSourceBinding, StackEntryKind, WaitingFor, ZoneDeparture,
+    NamedChoiceSourceBinding, PayCostKind, StackEntryKind, WaitingFor, ZoneDeparture,
 };
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::{ManaColor, ManaType};
 use engine::types::phase::Phase;
@@ -826,21 +827,8 @@ fn v5_exhaust_mana_flag_and_untagged_mana() {
     assert!(drawn.iter().all(|id| zone(&runner, *id) == Zone::Hand));
 }
 
-fn contains_strict_failure(value: &serde_json::Value, name: &str) -> bool {
-    value["type"] == "Unimplemented" && value["name"] == name
-        || match value {
-            serde_json::Value::Object(fields) => fields
-                .values()
-                .any(|value| contains_strict_failure(value, name)),
-            serde_json::Value::Array(items) => items
-                .iter()
-                .any(|value| contains_strict_failure(value, name)),
-            _ => false,
-        }
-}
-
 #[test]
-fn phase5_printed_yidaro_branches_and_phoenix_stays_strict() {
+fn printed_yidaro_and_phoenix_cycling_conditions() {
     let parse = |text, name, keywords: &[&str], subtypes: &[&str]| {
         parse_oracle_text(
             text,
@@ -882,10 +870,7 @@ fn phase5_printed_yidaro_branches_and_phoenix_stays_strict() {
         .iter()
         .find(|trigger| trigger.mode == TriggerMode::Phase && trigger.phase == Some(Phase::End))
         .expect("Phoenix end-step trigger");
-    assert!(contains_strict_failure(
-        &serde_json::to_value(end).unwrap(),
-        "unparsed_condition"
-    ));
+    assert_phoenix_definition(end);
 }
 
 fn cycle_record(name: &str, turn: u32) -> CyclingRecord {
@@ -2844,4 +2829,547 @@ fn phase5_v3_departed_source_keeps_only_the_selected_branch() {
         finish_yidaro_draw(&mut runner, cycle);
         assert!(runner.state().stack.is_empty());
     }
+}
+
+const PHOENIX: &str = "Spellpyre Phoenix";
+
+fn phoenix_guard() -> TriggerCondition {
+    TriggerCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::CardsCycled {
+                scope: CountScope::Controller,
+                window: CyclingHistoryWindow::ThisTurn,
+                filter: None,
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 2 },
+    }
+}
+
+fn assert_phoenix_definition(trigger: &TriggerDefinition) {
+    assert_eq!(trigger.trigger_zones, [Zone::Graveyard]);
+    assert_eq!(trigger.condition, Some(phoenix_guard()));
+    assert!(trigger.valid_target.is_none() && !trigger.optional);
+    let body = trigger.execute.as_deref().expect("printed Phoenix return");
+    assert!(matches!(
+        body.effect.as_ref(),
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Hand,
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    ));
+    assert!(body.target_prompt.is_none());
+    assert!(body.sub_ability.is_none() && body.else_ability.is_none());
+}
+
+fn phoenix_scenario() -> GameScenario {
+    let mut scenario = main_phase();
+    for player in [P0, P1] {
+        scenario.with_library_top(player, &["Island"; 8]);
+    }
+    scenario
+}
+
+fn finish_phoenix_wraith_cycle(runner: &mut GameRunner, player: PlayerId, card: ObjectId) {
+    priority_for(runner, player, 2);
+    let index = wraith_index(runner, card);
+    assert!(offered(runner, card).contains(&index));
+    let life = runner.life(player);
+    let events = act(runner, activation(card, index, CastPaymentMode::Auto));
+    assert_eq!(cycle_events(&events), [(player, card)]);
+    assert_cycle_draw_count(&events, player, 0);
+    assert_eq!(runner.life(player), life - 2);
+    assert_eq!(zone(runner, card), Zone::Graveyard);
+    assert_eq!(runner.state().stack.len(), 1);
+    let entry = runner
+        .state()
+        .stack
+        .back()
+        .expect("placed cycling activation");
+    assert_eq!(entry.controller, player);
+    assert!(
+        matches!(entry.kind, StackEntryKind::ActivatedAbility { source_id, .. } if source_id == card)
+    );
+    let entry_id = entry.id;
+    let events = pass_top_entry(runner, entry_id);
+    assert_cycle_draw_count(&events, player, 1);
+    assert!(runner.state().stack.is_empty());
+}
+
+fn assert_phoenix_history(runner: &GameRunner, player: PlayerId, turns: &[u32]) {
+    let rows = runner
+        .state()
+        .cycles_completed_this_game_by_player
+        .get(&player)
+        .into_iter()
+        .flatten();
+    let expected: Vec<_> = turns
+        .iter()
+        .map(|&turn| cycle_record("Street Wraith", turn))
+        .collect();
+    assert_eq!(
+        rows.collect::<Vec<_>>(),
+        expected.iter().collect::<Vec<_>>()
+    );
+}
+
+fn enter_phoenix_end_step(runner: &mut GameRunner, active: PlayerId, sources: &[ObjectId]) {
+    for source in sources {
+        let definition = runner.state().objects[source]
+            .base_trigger_definitions
+            .iter()
+            .find(|trigger| trigger.mode == TriggerMode::Phase && trigger.phase == Some(Phase::End))
+            .expect("exported Phoenix end-step ability");
+        assert_phoenix_definition(definition);
+    }
+    assert_ne!(runner.state().phase, Phase::End);
+    let turn = runner.state().turn_number;
+    for _ in 0..48 {
+        let (_, action) = next_turn_action(runner.state());
+        let events = act(runner, action);
+        assert_eq!(runner.state().turn_number, turn);
+        if events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PhaseChanged { phase: Phase::End }))
+        {
+            assert_eq!(runner.state().phase, Phase::End);
+            assert_eq!(runner.state().active_player, active);
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == active)
+            );
+            return;
+        }
+    }
+    panic!("expected the public end-step event");
+}
+
+fn assert_phoenix_entry(runner: &GameRunner, source: ObjectId, player: PlayerId) -> ObjectId {
+    let entry = runner
+        .state()
+        .stack
+        .back()
+        .expect("Phoenix trigger must stack");
+    assert_eq!(entry.controller, player);
+    let StackEntryKind::TriggeredAbility {
+        source_id,
+        condition,
+        trigger_event,
+        ability,
+        ..
+    } = &entry.kind
+    else {
+        panic!("expected a triggered ability")
+    };
+    assert_eq!(*source_id, source);
+    assert_eq!(*condition, Some(phoenix_guard()));
+    assert!(matches!(
+        trigger_event,
+        Some(GameEvent::PhaseChanged { phase: Phase::End })
+    ));
+    let bound = &ability
+        .trigger_source
+        .as_ref()
+        .expect("bound Phoenix source")
+        .identity;
+    assert_eq!(bound.expected_zone, Zone::Graveyard);
+    assert_eq!(
+        bound.reference,
+        ObjectIncarnationRef::of(source, runner.state().objects[&source].incarnation)
+    );
+    assert!(ability.targets.is_empty() && ability.chosen_target_slots.slots().is_empty());
+    entry.id
+}
+
+fn assert_phoenix_move(events: &[GameEvent], source: ObjectId, origin: Zone, destination: Zone) {
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, GameEvent::ZoneChanged {
+        object_id, from: Some(from), to, ..
+    } if *object_id == source && *from == origin && *to == destination)));
+}
+
+fn resolve_phoenix_return(
+    runner: &mut GameRunner,
+    source: ObjectId,
+    owner: PlayerId,
+    entry: ObjectId,
+) {
+    let events = pass_top_entry(runner, entry);
+    assert_phoenix_move(&events, source, Zone::Graveyard, Zone::Hand);
+    assert_eq!(zone(runner, source), Zone::Hand);
+    assert!(runner.state().players[usize::from(owner.0)]
+        .hand
+        .contains(&source));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+fn phoenix_with_two_cycles(
+    mut scenario: GameScenario,
+    source: ObjectId,
+    other_sources: &[ObjectId],
+) -> (GameRunner, ObjectId) {
+    let wraiths = [street_wraith(&mut scenario), street_wraith(&mut scenario)];
+    let mut runner = scenario.build();
+    let turn = runner.state().turn_number;
+    for wraith in wraiths {
+        finish_phoenix_wraith_cycle(&mut runner, P0, wraith);
+    }
+    assert_phoenix_history(&runner, P0, &[turn, turn]);
+    let sources: Vec<_> = std::iter::once(source)
+        .chain(other_sources.iter().copied())
+        .collect();
+    enter_phoenix_end_step(&mut runner, P0, &sources);
+    assert_eq!(runner.state().stack.len(), 1);
+    let entry = assert_phoenix_entry(&runner, source, P0);
+    (runner, entry)
+}
+
+#[test]
+fn phase6_v2_two_cycles_return_phoenix() {
+    let mut scenario = phoenix_scenario();
+    let source = printed(&mut scenario, P0, PHOENIX, Zone::Graveyard);
+    let (mut runner, entry) = phoenix_with_two_cycles(scenario, source, &[]);
+    resolve_phoenix_return(&mut runner, source, P0, entry);
+    assert!(runner.state().stack.is_empty());
+}
+
+#[test]
+fn phase6_v3_zero_cycles_or_one_in_each_turn_do_not_trigger() {
+    for across_turns in [false, true] {
+        let mut scenario = phoenix_scenario();
+        let source = printed(&mut scenario, P0, PHOENIX, Zone::Graveyard);
+        let [first, second] = [street_wraith(&mut scenario), street_wraith(&mut scenario)];
+        let mut runner = scenario.build();
+        let first_turn = runner.state().turn_number;
+        let active = if across_turns {
+            finish_phoenix_wraith_cycle(&mut runner, P0, first);
+            advance_turn(&mut runner);
+            finish_phoenix_wraith_cycle(&mut runner, P0, second);
+            let current_turn = runner.state().turn_number;
+            assert_ne!(first_turn, current_turn);
+            assert_phoenix_history(&runner, P0, &[first_turn, current_turn]);
+            P1
+        } else {
+            assert_phoenix_history(&runner, P0, &[]);
+            P0
+        };
+        enter_phoenix_end_step(&mut runner, active, &[source]);
+        assert!(runner.state().stack.is_empty());
+        assert_eq!(zone(&runner, source), Zone::Graveyard);
+    }
+}
+
+fn announce_phoenix_test_spell(runner: &mut GameRunner, spell: ObjectId) -> Vec<GameEvent> {
+    let card_id = runner.state().objects[&spell].card_id;
+    act(
+        runner,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+}
+
+fn resolve_phoenix_test_spell(runner: &mut GameRunner, spell: ObjectId) -> Vec<GameEvent> {
+    let stack = runner.state().stack.back().expect("cast spell on top");
+    assert_eq!(stack.source_id, spell);
+    assert!(matches!(stack.kind, StackEntryKind::Spell { .. }));
+    let entry = stack.id;
+    pass_top_entry(runner, entry)
+}
+
+fn cast_phoenix_test_targeted_spell(
+    runner: &mut GameRunner,
+    spell: ObjectId,
+    target: ObjectId,
+    player: PlayerId,
+) -> Vec<GameEvent> {
+    announce_phoenix_test_spell(runner, spell);
+    let WaitingFor::TargetSelection {
+        player: choosing,
+        selection,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("expected the printed spell's target selection")
+    };
+    assert_eq!(*choosing, player);
+    let target = TargetRef::Object(target);
+    assert!(selection.current_legal_targets.contains(&target));
+    act(
+        runner,
+        GameAction::ChooseTarget {
+            target: Some(target),
+        },
+    );
+    resolve_phoenix_test_spell(runner, spell)
+}
+
+#[test]
+fn phase6_v4_cycles_predate_graveyard_entry_on_opponents_turn() {
+    let mut scenario = phoenix_scenario();
+    let source = printed(&mut scenario, P0, PHOENIX, Zone::Battlefield);
+    // Give Murder a second legal target so casting opens the target prompt.
+    let decoy = scenario.add_vanilla(P1, 1, 1);
+    let wraiths = [street_wraith(&mut scenario), street_wraith(&mut scenario)];
+    let murder = printed(&mut scenario, P1, "Murder", Zone::Hand);
+    let swamps = [(); 3].map(|()| scenario.add_basic_land(P1, ManaColor::Black));
+    let mut runner = scenario.build();
+    advance_turn(&mut runner);
+    assert_eq!(runner.state().active_player, P1);
+    let turn = runner.state().turn_number;
+    for wraith in wraiths {
+        finish_phoenix_wraith_cycle(&mut runner, P0, wraith);
+        assert_eq!(zone(&runner, source), Zone::Battlefield);
+    }
+    assert_phoenix_history(&runner, P0, &[turn, turn]);
+    assert_phoenix_history(&runner, P1, &[]);
+    priority_for(&mut runner, P1, 2);
+    for swamp in swamps {
+        tap_land(&mut runner, swamp);
+    }
+    let events = cast_phoenix_test_targeted_spell(&mut runner, murder, source, P1);
+    assert_phoenix_move(&events, source, Zone::Battlefield, Zone::Graveyard);
+    assert_eq!(zone(&runner, decoy), Zone::Battlefield);
+    enter_phoenix_end_step(&mut runner, P1, &[source]);
+    assert_eq!(runner.state().stack.len(), 1);
+    let entry = assert_phoenix_entry(&runner, source, P0);
+    resolve_phoenix_return(&mut runner, source, P0, entry);
+    assert!(runner.state().stack.is_empty());
+}
+
+#[test]
+fn phase6_v5_same_physical_card_counts_twice() {
+    let mut scenario = phoenix_scenario();
+    let source = printed(&mut scenario, P0, PHOENIX, Zone::Graveyard);
+    let wraith = street_wraith(&mut scenario);
+    let raise_dead = printed(&mut scenario, P0, "Raise Dead", Zone::Hand);
+    let swamp = scenario.add_basic_land(P0, ManaColor::Black);
+    let mut runner = scenario.build();
+    let turn = runner.state().turn_number;
+    finish_phoenix_wraith_cycle(&mut runner, P0, wraith);
+    assert_phoenix_history(&runner, P0, &[turn]);
+    let discarded = runner.state().objects[&wraith].incarnation;
+    tap_land(&mut runner, swamp);
+    return_with_raise_dead(&mut runner, raise_dead, wraith);
+    assert_ne!(runner.state().objects[&wraith].incarnation, discarded);
+    finish_phoenix_wraith_cycle(&mut runner, P0, wraith);
+    assert_phoenix_history(&runner, P0, &[turn, turn]);
+    enter_phoenix_end_step(&mut runner, P0, &[source]);
+    assert_eq!(runner.state().stack.len(), 1);
+    let entry = assert_phoenix_entry(&runner, source, P0);
+    resolve_phoenix_return(&mut runner, source, P0, entry);
+    assert!(runner.state().stack.is_empty());
+}
+
+#[test]
+fn phase6_v6_other_players_cycles_and_battlefield_copies_are_excluded() {
+    let mut scenario = phoenix_scenario();
+    let source = printed(&mut scenario, P0, PHOENIX, Zone::Graveyard);
+    let wraiths = [(); 2].map(|()| printed(&mut scenario, P1, "Street Wraith", Zone::Hand));
+    let mut runner = scenario.build();
+    advance_turn(&mut runner);
+    for wraith in wraiths {
+        finish_phoenix_wraith_cycle(&mut runner, P1, wraith);
+    }
+    let turn = runner.state().turn_number;
+    assert_phoenix_history(&runner, P1, &[turn, turn]);
+    assert_phoenix_history(&runner, P0, &[]);
+    enter_phoenix_end_step(&mut runner, P1, &[source]);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(zone(&runner, source), Zone::Graveyard);
+
+    let mut scenario = phoenix_scenario();
+    let source = printed(&mut scenario, P0, PHOENIX, Zone::Graveyard);
+    let battlefield = printed(&mut scenario, P0, PHOENIX, Zone::Battlefield);
+    let (mut runner, entry) = phoenix_with_two_cycles(scenario, source, &[battlefield]);
+    resolve_phoenix_return(&mut runner, source, P0, entry);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(zone(&runner, battlefield), Zone::Battlefield);
+}
+
+fn resolve_phoenix_without_return(
+    runner: &mut GameRunner,
+    entry: ObjectId,
+    source: ObjectId,
+    expected_zone: Zone,
+) {
+    assert_eq!(runner.state().stack.len(), 1);
+    let events = pass_top_entry(runner, entry);
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, GameEvent::ZoneChanged {
+        object_id, ..
+    } if *object_id == source)));
+    assert_eq!(zone(runner, source), expected_zone);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn phase6_v7_exiled_source_leaves_trigger_pending() {
+    let mut scenario = phoenix_scenario();
+    let source = printed(&mut scenario, P0, PHOENIX, Zone::Graveyard);
+    let decoy = printed(&mut scenario, P0, PHOENIX, Zone::Battlefield);
+    let cremate = printed(&mut scenario, P0, "Cremate", Zone::Hand);
+    let swamp = scenario.add_basic_land(P0, ManaColor::Black);
+    let (mut runner, entry) = phoenix_with_two_cycles(scenario, source, &[decoy]);
+    tap_land(&mut runner, swamp);
+    let events = cast_phoenix_test_targeted_spell(&mut runner, cremate, source, P0);
+    assert_phoenix_move(&events, source, Zone::Graveyard, Zone::Exile);
+    let turn = runner.state().turn_number;
+    assert_phoenix_history(&runner, P0, &[turn, turn]);
+    resolve_phoenix_without_return(&mut runner, entry, source, Zone::Exile);
+    assert_eq!(zone(&runner, decoy), Zone::Battlefield);
+}
+
+#[test]
+fn phase6_v7_same_card_back_in_graveyard_has_a_new_incarnation() {
+    let mut scenario = phoenix_scenario();
+    let source = printed(&mut scenario, P0, PHOENIX, Zone::Graveyard);
+    let mannequin = printed(&mut scenario, P0, "Makeshift Mannequin", Zone::Hand);
+    let rites = printed(&mut scenario, P0, "Village Rites", Zone::Hand);
+    let other_creature = scenario.add_vanilla(P0, 1, 1);
+    let swamps = [(); 5].map(|()| scenario.add_basic_land(P0, ManaColor::Black));
+    let (mut runner, entry) = phoenix_with_two_cycles(scenario, source, &[]);
+    let card_id = runner.state().objects[&source].card_id;
+    let incarnation = runner.state().objects[&source].incarnation;
+    for swamp in swamps {
+        tap_land(&mut runner, swamp);
+    }
+    let events = cast_phoenix_test_targeted_spell(&mut runner, mannequin, source, P0);
+    assert_phoenix_move(&events, source, Zone::Graveyard, Zone::Battlefield);
+    assert_eq!(runner.state().stack.front().unwrap().id, entry);
+    announce_phoenix_test_spell(&mut runner, rites);
+    let WaitingFor::PayCost {
+        player: P0,
+        kind: PayCostKind::Sacrifice,
+        choices,
+        count: 1,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("expected Village Rites' sacrifice cost selection")
+    };
+    assert!(choices.contains(&source) && choices.contains(&other_creature));
+    let events = act(
+        &mut runner,
+        GameAction::SelectCards {
+            cards: vec![source],
+        },
+    );
+    assert_phoenix_move(&events, source, Zone::Battlefield, Zone::Graveyard);
+    resolve_phoenix_test_spell(&mut runner, rites);
+
+    let top = runner
+        .state()
+        .stack
+        .back()
+        .expect("original Phoenix trigger");
+    if top.id != entry {
+        assert!(matches!(&top.kind, StackEntryKind::TriggeredAbility {
+            source_id,
+            trigger_event: Some(GameEvent::ZoneChanged { to: Zone::Battlefield, .. }),
+            ..
+        } if *source_id == source));
+        let enters_entry = top.id;
+        pass_top_entry(&mut runner, enters_entry);
+        if matches!(runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == source)
+        {
+            act(
+                &mut runner,
+                GameAction::DecideOptionalEffect { accept: false },
+            );
+        }
+    }
+
+    let current = &runner.state().objects[&source];
+    assert_eq!(current.card_id, card_id);
+    assert_eq!(current.zone, Zone::Graveyard);
+    assert_ne!(current.incarnation, incarnation);
+    let pending = runner
+        .state()
+        .stack
+        .back()
+        .expect("original Phoenix trigger");
+    assert_eq!(pending.id, entry);
+    assert_eq!(pending.controller, P0);
+    assert_eq!(
+        pending
+            .ability()
+            .unwrap()
+            .trigger_source
+            .as_ref()
+            .unwrap()
+            .identity
+            .reference,
+        ObjectIncarnationRef::of(source, incarnation)
+    );
+    let turn = runner.state().turn_number;
+    assert_phoenix_history(&runner, P0, &[turn, turn]);
+    resolve_phoenix_without_return(&mut runner, entry, source, Zone::Graveyard);
+}
+
+#[test]
+fn phase6_v8_resolution_rechecks_the_live_ledger() {
+    let mut scenario = phoenix_scenario();
+    let source = printed(&mut scenario, P0, PHOENIX, Zone::Graveyard);
+    let (mut control, entry) = phoenix_with_two_cycles(scenario, source, &[]);
+    let mut changed = GameRunner::from_state(control.state().clone());
+    // CR 603.4 + CR 608.2a: isolate the resolution recheck with a test-only
+    // ledger edit. The same graveyard incarnation and original entry still exist.
+    let turn = changed.state().turn_number;
+    assert_eq!(
+        changed
+            .state_mut()
+            .cycles_completed_this_game_by_player
+            .get_mut(&P0)
+            .unwrap()
+            .pop_back(),
+        Some(cycle_record("Street Wraith", turn))
+    );
+    assert_phoenix_history(&changed, P0, &[turn]);
+    assert_eq!(assert_phoenix_entry(&changed, source, P0), entry);
+    resolve_phoenix_return(&mut control, source, P0, entry);
+    assert!(control.state().stack.is_empty());
+    resolve_phoenix_without_return(&mut changed, entry, source, Zone::Graveyard);
+}
+
+#[test]
+fn phase6_v9_multiple_qualifying_players_stack_in_apnap_order() {
+    let mut scenario = phoenix_scenario();
+    let players = [P0, P1];
+    let sources = players.map(|player| printed(&mut scenario, player, PHOENIX, Zone::Graveyard));
+    let wraiths = players.map(|player| {
+        [(); 2].map(|()| printed(&mut scenario, player, "Street Wraith", Zone::Hand))
+    });
+    let mut runner = scenario.build();
+    let turn = runner.state().turn_number;
+    for (player, cards) in players.into_iter().zip(wraiths) {
+        for card in cards {
+            finish_phoenix_wraith_cycle(&mut runner, player, card);
+        }
+        assert_phoenix_history(&runner, player, &[turn, turn]);
+    }
+    enter_phoenix_end_step(&mut runner, P0, &sources);
+    assert_eq!(runner.state().stack.len(), 2);
+    // CR 603.3b: The nonactive player's trigger resolves first.
+    let nonactive = assert_phoenix_entry(&runner, sources[1], P1);
+    resolve_phoenix_return(&mut runner, sources[1], P1, nonactive);
+    assert_eq!(zone(&runner, sources[0]), Zone::Graveyard);
+    let active = assert_phoenix_entry(&runner, sources[0], P0);
+    resolve_phoenix_return(&mut runner, sources[0], P0, active);
+    assert!(runner.state().stack.is_empty());
 }

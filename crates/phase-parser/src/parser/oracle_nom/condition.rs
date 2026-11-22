@@ -34,11 +34,11 @@ use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     is_any_target_filter, AbilityCondition, AggregateFunction, AttachmentReferent,
     AttackedYouScope, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric,
-    CommanderOwnership, Comparator, ControllerRef, CountScope, DamageChannel, DamageGroupKey,
-    DamageKindFilter, FilterProp, NumberQuality, ObjectProperty, ObjectScope, Parity, PlayerFilter,
-    PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality,
-    SharedQualityRelation, StaticCondition, TargetFilter, TrackedAnaphorSource, TypeFilter,
-    TypedFilter, ZoneRef,
+    CommanderOwnership, Comparator, ControllerRef, CountScope, CyclingHistoryWindow, DamageChannel,
+    DamageGroupKey, DamageKindFilter, FilterProp, NumberQuality, ObjectProperty, ObjectScope,
+    Parity, PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr,
+    QuantityRef, SharedQuality, SharedQualityRelation, StaticCondition, TargetFilter,
+    TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -199,18 +199,49 @@ pub fn parse_condition(input: &str) -> OracleResult<'_, StaticCondition> {
 pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         parse_named_game_cycling_condition,
+        parse_current_turn_cycling_condition,
         parse_condition_connective,
         parse_single_inner_condition,
     ))
     .parse(input)
 }
 
+fn parse_cycling_history_prefix(input: &str) -> OracleResult<'_, &str> {
+    preceded(parse_controller_action_history_subject, tag("cycled ")).parse(input)
+}
+
 pub(crate) fn parse_named_cycling_head(input: &str) -> OracleResult<'_, &str> {
-    preceded(
-        (parse_controller_action_history_subject, tag("cycled ")),
-        tag("a card named "),
+    preceded(parse_cycling_history_prefix, tag("a card named ")).parse(input)
+}
+
+/// CR 109.5 + CR 702.29a + CR 702.29f: Count the controller's completed
+/// cycling activations, including typecycling, in the current turn.
+fn parse_current_turn_cycling_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, (threshold, comparator)) = terminated(
+        preceded(
+            parse_cycling_history_prefix,
+            verify(parse_numeric_threshold_suffix, |(_, cmp)| {
+                *cmp == Comparator::GE
+            }),
+        ),
+        (tag(" cards "), tag("this turn"), peek(alt((tag(","), eof)))),
     )
-    .parse(input)
+    .parse(input)?;
+    let value = i32::try_from(threshold).map_err(|_| oracle_err(input))?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::CardsCycled {
+                    scope: CountScope::Controller,
+                    window: CyclingHistoryWindow::ThisTurn,
+                    filter: None,
+                },
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed { value },
+        },
+    ))
 }
 
 /// CR 109.5 + CR 608.2h: the trigger controller's history is read at resolution.
@@ -28988,5 +29019,43 @@ fn named_cycling_guard_requires_a_complete_whole_game_minimum() {
         "you cycled a card named Street Wraith four or more times this game during your turn",
     ] {
         assert!(parse_inner_condition(malformed).is_err(), "{malformed}");
+    }
+}
+
+#[test]
+fn unrestricted_cycling_guard_requires_a_complete_current_turn_minimum() {
+    for (input, rest, value) in [
+        (
+            "you cycled two or more cards this turn, return this card",
+            ", return this card",
+            2,
+        ),
+        ("you cycled three or more cards this turn", "", 3),
+    ] {
+        assert_eq!(
+            parse_inner_condition(input),
+            Ok((
+                rest,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::CardsCycled {
+                            scope: CountScope::Controller,
+                            window: CyclingHistoryWindow::ThisTurn,
+                            filter: None,
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value },
+                }
+            )),
+        );
+    }
+    for guard in [
+        "you cycled two or more cards this turnip",
+        "you cycled two or more cards this game",
+        "you cycled two or more cards this turn with flying",
+        "you cycled two or fewer cards this turn",
+    ] {
+        assert!(parse_inner_condition(guard).is_err(), "{guard}");
     }
 }

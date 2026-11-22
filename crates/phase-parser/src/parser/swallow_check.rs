@@ -38,7 +38,6 @@ use super::oracle_target::{
 };
 use super::oracle_trigger::parse_distributed_x_cost_condition;
 use super::swallow_evidence::UnitEvidence;
-use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastManaObjectScope,
     CastManaSpentMetric, CastingPermission, ChooseFromZoneConstraint, CoinFlipRun,
@@ -50,6 +49,7 @@ use crate::types::ability::{
     StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
     TriggerDefinition, UnlessPayScaling, ZoneOwner,
 };
+use crate::types::ability::{CyclingHistoryWindow, TurnWindow};
 use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
 };
@@ -5878,6 +5878,9 @@ fn detect_duration_this_turn(
                 ..
             } | QuantityRef::SpellsCast {
                 window: TurnWindow::ThisTurn,
+                ..
+            } | QuantityRef::CardsCycled {
+                window: CyclingHistoryWindow::ThisTurn,
                 ..
             } | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
                 | QuantityRef::EnteredThisTurn { .. }

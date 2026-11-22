@@ -4161,3 +4161,95 @@ fn kogla_and_yidaro_discard_shuffle_draw_two_layer() {
     ));
     assert!(draw.sub_ability.is_none());
 }
+
+#[test]
+fn spellpyre_phoenix_turn_history_two_layer() {
+    use crate::types::ability::{Comparator, CountScope, CyclingHistoryWindow};
+    use crate::types::{phase::Phase, triggers::TriggerMode, zones::Zone};
+
+    let (ir, lowered) = parse_two_layer_with_keywords(
+        "Flying\nWhen this creature enters, you may return target instant or sorcery card with a cycling ability from your graveyard to your hand.\nAt the beginning of each end step, if you cycled two or more cards this turn, return this card from your graveyard to your hand.",
+        "Spellpyre Phoenix",
+        &["Flying"],
+        &["Creature"],
+        &["Phoenix"],
+    );
+    let condition = Some(TriggerCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::CardsCycled {
+                scope: CountScope::Controller,
+                window: CyclingHistoryWindow::ThisTurn,
+                filter: None,
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 2 },
+    });
+    let trigger_ir = ir
+        .items
+        .iter()
+        .find_map(|item| match &item.node {
+            OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger))
+                if trigger.condition == TriggerMode::Phase
+                    && trigger.partial_def.phase == Some(Phase::End) =>
+            {
+                Some(trigger)
+            }
+            _ => None,
+        })
+        .expect("parsed Phoenix end-step trigger");
+    assert_eq!(trigger_ir.modifiers.intervening_if, condition);
+
+    let end = lowered
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::Phase && trigger.phase == Some(Phase::End))
+        .expect("lowered Phoenix end-step trigger");
+    assert_eq!(end.condition, condition);
+    assert_eq!(end.trigger_zones, [Zone::Graveyard]);
+    assert!(end.valid_target.is_none());
+    assert!(!end.optional);
+    let execute = end.execute.as_deref().expect("printed self-return");
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Hand,
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    ));
+    assert!(execute.target_prompt.is_none());
+    assert!(execute.sub_ability.is_none() && execute.else_ability.is_none());
+    assert!(!ability_has_unimplemented(execute));
+
+    for guard in [
+        "you cycled two or more cards this turnip",
+        "you cycled two or more cards this game",
+        "you cycled two or more cards this turn with flying",
+    ] {
+        let (_, malformed) = parse_two_layer(
+            &format!("At the beginning of each end step, if {guard}, return this card from your graveyard to your hand."),
+            "Spellpyre Phoenix",
+            &["Creature"],
+            &["Phoenix"],
+        );
+        let trigger = malformed
+            .triggers
+            .iter()
+            .find(|trigger| trigger.mode == TriggerMode::Phase && trigger.phase == Some(Phase::End))
+            .expect("end-step trigger with rejected guard");
+        let execute = trigger.execute.as_deref().expect("strict failure body");
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::Unimplemented { name, .. }
+            if name == "unparsed_condition"),
+            "{guard}: {execute:?}"
+        );
+        assert!(
+            execute.sub_ability.is_none() && execute.else_ability.is_none(),
+            "{guard}"
+        );
+    }
+    insta::assert_json_snapshot!("spellpyre_phoenix_turn_history_ir", &ir);
+    insta::assert_json_snapshot!("spellpyre_phoenix_turn_history_lowered", &lowered);
+}
