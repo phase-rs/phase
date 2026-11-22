@@ -354,7 +354,9 @@ fn v4_o1a_body_under_a_non_consuming_head_gaps() {
         "V4 reach-guard: the GrantCastingPermission head must be present"
     );
     assert!(
-        gap_names(&parsed).contains(&"unparsed_replacement".to_string()),
+        gap_names(&parsed)
+            .iter()
+            .any(|i| i == "unparsed_replacement"),
         "V4: the EVENT guard's body must be recorded as an unparsed_replacement, got {:?}",
         gaps(&parsed)
     );
@@ -748,7 +750,9 @@ fn v12_unowned_rider_with_no_parent_gaps_and_keeps_the_following_clause() {
         "V12 reach-guard: the printed \"Draw a card.\" must still be present and lowered"
     );
     assert!(
-        gap_names(&parsed).contains(&"unparsed_replacement".to_string()),
+        gap_names(&parsed)
+            .iter()
+            .any(|i| i == "unparsed_replacement"),
         "V12: the EVENT-guarded rider must gap, got {:?}",
         gaps(&parsed)
     );
@@ -781,7 +785,7 @@ fn v13p_dispatcher_named_gap_is_not_re_derived_as_a_guard_gap() {
 
     let names = gap_names(&parsed);
     assert!(
-        names.contains(&"replacement_structure".to_string()),
+        names.iter().any(|i| i == "replacement_structure"),
         "V13p: the dispatcher must name this gap, got {:?}",
         gaps(&parsed)
     );

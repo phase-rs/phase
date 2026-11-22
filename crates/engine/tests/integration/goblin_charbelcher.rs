@@ -743,7 +743,7 @@ fn reordered_reveal_is_not_republished_at_its_new_occurrence() {
                     card_ids,
                     card_names,
                     ..
-                } if card_names.contains(&"Forest".to_string()) => {
+                } if card_names.iter().any(|i: &String| i == "Forest") => {
                     Some((card_ids.clone(), card_names.clone()))
                 }
                 _ => None,

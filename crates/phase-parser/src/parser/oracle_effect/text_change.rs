@@ -88,6 +88,7 @@ pub(super) fn try_parse_text_change_clause(tp: TextPair<'_>) -> Option<ParsedEff
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::Choose {
             chooser: ControllerRef::You,
             choice_type: ChoiceType::Labeled { options },

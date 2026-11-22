@@ -4368,15 +4368,15 @@ mod tests {
         load_and_hydrate_decks(&mut state, &payload, Some(&db));
 
         assert!(
-            state.all_creature_types.contains(&"Saproling".to_string()),
+            state.all_creature_types.iter().any(|i| i == "Saproling"),
             "Saproling must be recognized via corpus seeding (#1471 Coat of Arms)"
         );
         assert!(
-            state.all_creature_types.contains(&"Golem".to_string()),
+            state.all_creature_types.iter().any(|i| i == "Golem"),
             "Golem must be recognized via corpus seeding (#1472 Morophon)"
         );
         assert!(
-            state.all_creature_types.contains(&"Bear".to_string()),
+            state.all_creature_types.iter().any(|i| i == "Bear"),
             "deck-listed subtype must still appear"
         );
         // Sorted and deduped.
@@ -4406,7 +4406,7 @@ mod tests {
 
         let mut state = GameState::new_two_player(42);
         load_and_hydrate_decks(&mut state, &payload, None);
-        assert!(state.all_creature_types.contains(&"Bear".to_string()));
+        assert!(state.all_creature_types.iter().any(|i| i == "Bear"));
     }
 
     #[test]
@@ -4437,8 +4437,8 @@ mod tests {
         load_deck_into_state(&mut state, &payload);
 
         // Commander creature subtypes are collected for Changeling CDA
-        assert!(state.all_creature_types.contains(&"Angel".to_string()));
-        assert!(state.all_creature_types.contains(&"Cleric".to_string()));
+        assert!(state.all_creature_types.iter().any(|i| i == "Angel"));
+        assert!(state.all_creature_types.iter().any(|i| i == "Cleric"));
     }
 
     fn twin_face_json(oracle_id: &str) -> serde_json::Value {

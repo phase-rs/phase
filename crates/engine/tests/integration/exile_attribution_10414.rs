@@ -83,15 +83,16 @@ use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, QuantityExpr, ReplacementDefinition, ReplacementMode,
-    TargetFilter,
+    AbilityDefinition, AbilityKind, Duration, Effect, QuantityExpr, ReplacementDefinition,
+    ReplacementMode, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    PersistedGameState, PersistedRestoreFinalization, ReplacementChoiceKind, WaitingFor,
+    BatchCompletion, PersistedGameState, PersistedRestoreFinalization, ReplacementChoiceKind,
+    StagedBatchMemberState, WaitingFor,
 };
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{LogicalZoneChangeGroupId, ObjectId};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -329,6 +330,43 @@ fn drive_answering_zone_choices(runner: &mut GameRunner) -> ZoneChoicePrompts {
     panic!(
         "drive_answering_zone_choices did not settle: {:?}",
         runner.state().waiting_for
+    );
+}
+
+/// CR 101.4c + CR 616.1 (this PR's staged population): a mass exile
+/// is one simultaneous event, so every land is consulted before any prompt and
+/// P1, who owns both lands, first chooses which land's optional replacement to
+/// make. Pin that order prompt (P1, exactly the two lands) and make the first
+/// announced land's decision first, which publishes its replacement choice; the
+/// remaining one is then asked without a selection.
+fn make_first_land_decision_first(runner: &mut GameRunner, lands: [ObjectId; 2]) {
+    let WaitingFor::ReplacementDecisionOrder { player, objects } =
+        runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected P1's held land decisions, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P1);
+    let mut held = objects.clone();
+    held.sort();
+    let mut expected = lands.to_vec();
+    expected.sort();
+    assert_eq!(held, expected, "P1 holds one optional decision per land");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![objects[0]],
+        })
+        .expect("P1 makes the first announced land's decision first");
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| pending.proposed.affected_object_id()),
+        Some(objects[0]),
+        "the selected land's choice is published"
     );
 }
 
@@ -1315,13 +1353,12 @@ fn aethersnatch_mudhole_replacement_pause() -> (GameRunner, [ObjectId; 2], Objec
             .act(GameAction::PassPriority)
             .expect("resolve the stolen Mudhole");
     }
-    let pending = runner
-        .state()
-        .active_change_zone_frame()
-        .and_then(|frame| frame.pending.as_ref())
-        .expect("the actual stolen spell parks its mass-exile family");
-    assert_eq!(pending.controller, P2);
-    assert_eq!(pending.performed_by, P1);
+    // CR 101.4c + CR 616.1 (this PR): P1's order prompt for the staged mass
+    // exile comes first; the family is then read from the staged owner.
+    make_first_land_decision_first(&mut runner, lands);
+    let roles = subject_exile_roles(&runner);
+    assert_eq!(roles.controller, P2);
+    assert_eq!(roles.performed_by, P1);
     let continuation = runner
         .state()
         .resolution_stack
@@ -1356,10 +1393,17 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
     let (mut runner, [land_a, land_b], relic, mudhole) = mudhole_replacement_fixture(false);
 
     let outcome = runner.cast(mudhole).target_player(P1).resolve();
+    // CR 101.4c + CR 616.1 (this PR): the staged mass exile asks P1's order
+    // prompt before the first replacement prompt.
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::ReplacementDecisionOrder { player: P1, .. }
+    ));
+    make_first_land_decision_first(&mut runner, [land_a, land_b]);
 
     // First prompt: the first land is parked on the replacement choice and the
-    // second sits in the pending frame, carrying the subject as its performer.
-    match outcome.final_waiting_for() {
+    // second is still in the staged population, carrying the subject as its performer.
+    match &runner.state().waiting_for {
         WaitingFor::ReplacementChoice { player, kind, .. } => {
             assert_eq!(
                 *player, P1,
@@ -1369,12 +1413,11 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
         }
         other => panic!("expected the first replacement prompt; got {other:?}"),
     }
-    let frame = runner
-        .state()
-        .active_change_zone_frame()
-        .and_then(|frame| frame.pending.as_ref())
-        .expect("the paused mass move stashed a pending frame");
-    assert_eq!(frame.remaining.len(), 1, "one land is still to be moved");
+    assert_eq!(
+        lands_awaiting_a_decision(&runner),
+        2,
+        "the parked land and one more land still await a decision"
+    );
 
     runner
         .act(GameAction::ChooseReplacement { index: 1 })
@@ -1388,13 +1431,9 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
         }
         other => panic!("expected the second replacement prompt; got {other:?}"),
     }
-    let frame = runner
-        .state()
-        .active_change_zone_frame()
-        .and_then(|frame| frame.pending.as_ref())
-        .expect("the resumed member re-parked with a pending frame");
-    assert!(
-        frame.remaining.is_empty(),
+    assert_eq!(
+        lands_awaiting_a_decision(&runner),
+        1,
         "the last land is the one parked"
     );
 
@@ -1426,6 +1465,8 @@ fn mudhole_replacement_pause_resume_records_the_subject() {
 fn mudhole_typed_continuation_completes_after_replacement_pauses() {
     let (mut runner, lands, relic, mudhole) = mudhole_replacement_fixture(true);
     runner.cast(mudhole).target_player(P1).resolve();
+    // CR 101.4c + CR 616.1 (this PR): the order prompt of the staged mass exile.
+    make_first_land_decision_first(&mut runner, lands);
     for _ in lands {
         assert!(matches!(
             runner.state().waiting_for,
@@ -1459,6 +1500,8 @@ fn mudhole_typed_continuation_completes_after_replacement_pauses() {
 fn paused_subject_exile_restore_preserves_actor_before_public_resume() {
     let (mut runner, lands, _, mudhole) = mudhole_replacement_fixture(true);
     runner.cast(mudhole).target_player(P1).resolve();
+    // CR 101.4c + CR 616.1 (this PR): the order prompt of the staged mass exile.
+    make_first_land_decision_first(&mut runner, lands);
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::ReplacementChoice { player: P1, .. }
@@ -1506,6 +1549,45 @@ fn wire_state_mut(wire: &mut serde_json::Value) -> &mut serde_json::Value {
     }
 }
 
+/// Remove the recorded `performed_by` of the parked mass-exile family. A
+/// legacy `ChangeZone` frame records it once on its family carrier (the object
+/// holding the controller, performer, logical group and unprocessed members);
+/// The staged population records it on each member's request.
+fn remove_recorded_actor_of_parked_family(value: &mut serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            let family_carrier = [
+                "controller",
+                "performed_by",
+                "remaining",
+                "logical_zone_change_group",
+            ]
+            .iter()
+            .all(|key| map.contains_key(*key));
+            let member_request = ["object_id", "destination", "performed_by"]
+                .iter()
+                .all(|key| map.contains_key(*key));
+            if family_carrier || member_request {
+                map.remove("performed_by");
+                return true;
+            }
+            let mut removed = false;
+            for child in map.values_mut() {
+                removed |= remove_recorded_actor_of_parked_family(child);
+            }
+            removed
+        }
+        serde_json::Value::Array(items) => {
+            let mut removed = false;
+            for child in items {
+                removed |= remove_recorded_actor_of_parked_family(child);
+            }
+            removed
+        }
+        _ => false,
+    }
+}
+
 fn restore_public_saved_runner(wire: serde_json::Value) -> GameRunner {
     let state = serde_json::from_value::<PersistedGameState>(wire)
         .expect("the public reader accepts the saved state")
@@ -1514,6 +1596,85 @@ fn restore_public_saved_runner(wire: serde_json::Value) -> GameRunner {
         .finalize_immediately()
         .expect("the public saved game restores");
     GameRunner::from_state(state)
+}
+
+struct SubjectExileRoles {
+    controller: PlayerId,
+    performed_by: PlayerId,
+    group: LogicalZoneChangeGroupId,
+    duration: Option<Duration>,
+    exile_controller: Option<PlayerId>,
+}
+
+/// The parked mass-exile family's recorded roles. CR 101.4c + CR 616.1 (this
+/// PR): the population is a staged batch whose owner records them, not an
+/// active `ChangeZone` frame's `pending`; a family parked in such a frame
+/// (a saved legacy shape) is still read from it.
+fn subject_exile_roles(runner: &GameRunner) -> SubjectExileRoles {
+    let state = runner.state();
+    if let Some(pending) = state
+        .active_change_zone_frame()
+        .and_then(|frame| frame.pending.as_ref())
+    {
+        return SubjectExileRoles {
+            controller: pending.controller,
+            performed_by: pending.performed_by,
+            group: pending.logical_zone_change_group.logical_group_id,
+            duration: pending.duration.clone(),
+            exile_controller: state
+                .pending_replacement
+                .as_ref()
+                .expect("the actual replacement remains pending")
+                .exile_controller,
+        };
+    }
+    let owner = state
+        .active_batch_delivery()
+        .expect("the current mass move owns its staged population");
+    let paused = owner.paused_current.as_ref().expect("the member is paused");
+    let request = &owner
+        .staged
+        .as_ref()
+        .expect("the current population is staged")
+        .members
+        .iter()
+        .find(|member| member.identity == paused.member)
+        .expect("the paused member belongs to this exact population")
+        .request;
+    let Some(BatchCompletion::ChangeZonePopulationSettled { tail, .. }) = owner.completion.as_ref()
+    else {
+        panic!("the staged population retains its ChangeZone completion")
+    };
+    SubjectExileRoles {
+        controller: tail.controller,
+        performed_by: request.performed_by.expect("the move captures its actor"),
+        group: owner.logical_zone_change_group.logical_group_id,
+        duration: request.exile_duration.clone(),
+        exile_controller: request.exile_controller,
+    }
+}
+
+/// CR 101.4c + CR 616.1 (this PR's staged population): how many lands still
+/// await a replacement decision (the asked one and the held ones); an answered
+/// land waits for the population's simultaneous delivery.
+fn lands_awaiting_a_decision(runner: &GameRunner) -> usize {
+    runner
+        .state()
+        .active_batch_delivery()
+        .and_then(|owner| owner.staged.as_ref())
+        .expect("the mass move is a staged population")
+        .members
+        .iter()
+        .filter(|member| {
+            matches!(
+                member.state,
+                StagedBatchMemberState::Unconsulted
+                    | StagedBatchMemberState::OuterConsulting
+                    | StagedBatchMemberState::InnerConsulting
+                    | StagedBatchMemberState::PreventedWithChild
+            )
+        })
+        .count()
 }
 
 fn assert_restored_subject_exile_roles(runner: &GameRunner, controller: PlayerId) {
@@ -1525,23 +1686,17 @@ fn assert_restored_subject_exile_roles(runner: &GameRunner, controller: PlayerId
             ..
         }
     ));
-    let pending = runner
-        .state()
-        .active_change_zone_frame()
-        .and_then(|frame| frame.pending.as_ref())
-        .expect("the restored mass move retains its family");
-    assert_eq!(pending.performed_by, P1, "preserve the recorded actor");
+    // CR 101.4c + CR 616.1 (this PR): the family is read from the staged owner.
+    let roles = subject_exile_roles(runner);
+    assert_eq!(roles.performed_by, P1, "preserve the recorded actor");
     assert_eq!(
-        pending.controller, controller,
+        roles.controller, controller,
         "preserve the actual resolving family's controller"
     );
+    // CR 101.4c + CR 616.1 (this PR): the paused member's anchor is recorded
+    // on its staged request, which `subject_exile_roles` reads.
     assert_eq!(
-        runner
-            .state()
-            .pending_replacement
-            .as_ref()
-            .expect("the actual replacement remains pending")
-            .exile_controller,
+        roles.exile_controller,
         Some(controller),
         "the exact paused member retains its independent duration/link anchor"
     );
@@ -1551,13 +1706,9 @@ fn assert_restored_subject_exile_roles(runner: &GameRunner, controller: PlayerId
 fn aethersnatch_mudhole_current_restore_preserves_actual_controller_and_subject() {
     let (runner, lands, relic, mudhole) = aethersnatch_mudhole_replacement_pause();
     assert_restored_subject_exile_roles(&runner, P2);
-    let pending = runner
-        .state()
-        .active_change_zone_frame()
-        .and_then(|frame| frame.pending.as_ref())
-        .unwrap();
-    let group = pending.logical_zone_change_group.logical_group_id;
-    let duration = pending.duration.clone();
+    let roles = subject_exile_roles(&runner);
+    let group = roles.group;
+    let duration = roles.duration;
     let snapshots = [
         serde_json::to_value(PersistedGameState::Raw(Box::new(runner.state().clone()))),
         serde_json::to_value(PersistedGameState::capture(runner.state().clone())),
@@ -1567,13 +1718,9 @@ fn aethersnatch_mudhole_current_restore_preserves_actual_controller_and_subject(
         let mut restored =
             restore_public_saved_runner(snapshot.expect("serialize the actual stolen-spell pause"));
         assert_restored_subject_exile_roles(&restored, P2);
-        let pending = restored
-            .state()
-            .active_change_zone_frame()
-            .and_then(|frame| frame.pending.as_ref())
-            .unwrap();
-        assert_eq!(pending.logical_zone_change_group.logical_group_id, group);
-        assert_eq!(pending.duration, duration);
+        let roles = subject_exile_roles(&restored);
+        assert_eq!(roles.group, group);
+        assert_eq!(roles.duration, duration);
         assert_eq!(
             restored
                 .state()
@@ -1777,8 +1924,10 @@ fn deployed_v11_subject_exile_restore_refuses_contradictory_recorded_continuatio
 
 #[test]
 fn subject_exile_restore_keeps_explicit_actor_and_current_missing_actor_is_strict() {
-    let (mut runner, _, _, mudhole) = mudhole_replacement_fixture(true);
+    let (mut runner, lands, _, mudhole) = mudhole_replacement_fixture(true);
     runner.cast(mudhole).target_player(P1).resolve();
+    // CR 101.4c + CR 616.1 (this PR): the order prompt of the staged mass exile.
+    make_first_land_decision_first(&mut runner, lands);
     let (transferred, _, _, _) = aethersnatch_mudhole_replacement_pause();
     for (runner, controller) in [(runner, P0), (transferred, P2)] {
         for version in [11, 12] {
@@ -1791,15 +1940,12 @@ fn subject_exile_restore_keeps_explicit_actor_and_current_missing_actor_is_stric
             assert_restored_subject_exile_roles(&restored, controller);
             if version == 12 {
                 let state = wire_state_mut(&mut wire);
-                state["resolution_frames"]["frames"]
-                    .as_array_mut()
-                    .unwrap()
-                    .iter_mut()
-                    .find(|frame| frame["type"] == "ChangeZone")
-                    .unwrap()["data"]["pending"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("performed_by");
+                // CR 101.4c + CR 616.1 (this PR): the parked family's performer is
+                // recorded on the staged members' requests, not on a `ChangeZone`
+                // frame's carrier.
+                assert!(remove_recorded_actor_of_parked_family(
+                    &mut state["resolution_frames"]
+                ));
                 let error = serde_json::from_value::<PersistedGameState>(wire)
                     .expect_err("current saves must never migrate a missing actor")
                     .to_string();

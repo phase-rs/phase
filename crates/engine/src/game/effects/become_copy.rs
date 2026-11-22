@@ -994,7 +994,7 @@ mod tests {
         assert_eq!(source.toughness, Some(2));
         assert_eq!(source.color, vec![ManaColor::Green]);
         assert!(source.card_types.core_types.contains(&CoreType::Creature));
-        assert!(source.card_types.subtypes.contains(&"Bear".to_string()));
+        assert!(source.card_types.subtypes.iter().any(|i| i == "Bear"));
         assert!(source.keywords.contains(&Keyword::Trample));
     }
 
@@ -1424,8 +1424,8 @@ mod tests {
 
         let source = state.objects.get(&source_id).unwrap();
         assert_eq!(source.name, "Target Bear");
-        assert!(source.card_types.subtypes.contains(&"Bear".to_string()));
-        assert!(source.card_types.subtypes.contains(&"Bird".to_string()));
+        assert!(source.card_types.subtypes.iter().any(|i| i == "Bear"));
+        assert!(source.card_types.subtypes.iter().any(|i| i == "Bird"));
         assert!(source.keywords.contains(&Keyword::Flying));
     }
 
@@ -2420,7 +2420,8 @@ mod tests {
             state.objects[&donor]
                 .card_types
                 .subtypes
-                .contains(&"Dragon".to_string()),
+                .iter()
+                .any(|i| i == "Dragon"),
             "reach guard: the donor's characteristic-defining Changeling static must apply"
         );
 
@@ -2452,7 +2453,8 @@ mod tests {
             !copied_effigy
                 .card_types
                 .subtypes
-                .contains(&"Dragon".to_string()),
+                .iter()
+                .any(|i| i == "Dragon"),
             "the noncreature Artifact copy must not retain a creature subtype from the donor CDA"
         );
         assert!(
@@ -2501,7 +2503,8 @@ mod tests {
             !copied_artifact
                 .card_types
                 .subtypes
-                .contains(&"Dragon".to_string()),
+                .iter()
+                .any(|i| i == "Dragon"),
             "a later Copy Artifact copy must not regain the donor's creature subtype"
         );
         assert!(
