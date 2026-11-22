@@ -4223,6 +4223,8 @@ fn spellpyre_phoenix_turn_history_two_layer() {
     assert!(execute.sub_ability.is_none() && execute.else_ability.is_none());
     assert!(!ability_has_unimplemented(execute));
 
+    // No printed card has these malformed guard shapes. Spellpyre Phoenix is the
+    // nearest printed card (CR 603.4 intervening-if).
     for guard in [
         "you cycled two or more cards this turnip",
         "you cycled two or more cards this game",

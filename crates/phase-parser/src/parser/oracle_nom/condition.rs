@@ -29024,7 +29024,15 @@ fn named_cycling_guard_requires_a_complete_whole_game_minimum() {
 
 #[test]
 fn unrestricted_cycling_guard_requires_a_complete_current_turn_minimum() {
+    // No printed card has the altered threshold, truncated return instruction, or
+    // malformed guard shapes below. Spellpyre Phoenix is the nearest printed card
+    // (CR 603.4 intervening-if).
     for (input, rest, value) in [
+        (
+            "you cycled two or more cards this turn, return this card from your graveyard to your hand.",
+            ", return this card from your graveyard to your hand.",
+            2,
+        ),
         (
             "you cycled two or more cards this turn, return this card",
             ", return this card",
