@@ -714,7 +714,7 @@ fn gideons_intervention_blocks_the_named_spell_but_not_another() {
     );
 }
 
-/// The W/H1/H2 board: P0 holds the Intervention and the real split card, P0
+/// The fused-prevention board: P0 holds the Intervention and the real split card, P0
 /// has the Intervention's {2}{W}{W} and enough for the fused {4}{B}{R}, and
 /// three real Grizzly Bears are in P0's library so Toil has cards to draw.
 fn fused_prevention_board(name: &str) -> (GameRunner, ObjectId, ObjectId) {
@@ -878,7 +878,7 @@ fn gideons_intervention_front_half_named_prevents_fused_damage() {
 
 /// Hostile control: a name neither half has leaves the fused spell's damage
 /// untouched. The damage event itself proves the shield was not missing a
-/// damage step, which is what W's 18 has to mean.
+/// damage step, so the 16 life is the unshielded outcome.
 #[test]
 fn gideons_intervention_unrelated_name_does_not_prevent_fused_damage() {
     let (mut runner, _intervention, toil) = fused_prevention_board(NAMED_CARD);
@@ -998,7 +998,7 @@ fn gideons_intervention_unfused_right_half_does_not_have_the_other_half_name() {
     );
 }
 
-/// B1/B2/B3/B4 board: P0 has the naming permanent in hand and the {2}{W}{W} to
+/// The opponent-casting board: P0 has the naming permanent in hand and the {2}{W}{W} to
 /// cast it; P1 holds the real Toil // Trouble with the fused {4}{B}{R} and two
 /// real Grizzly Bears to draw.
 fn opponent_chosen_name_board(permanent: &str, name: &str) -> (GameRunner, ObjectId, ObjectId) {
