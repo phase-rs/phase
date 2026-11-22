@@ -21,7 +21,6 @@ use crate::parser::oracle_ir::diagnostic::{
     ClauseGap, ClauseGapKind, OracleDiagnostic, OracleItemId, OracleSourceSpan, SpanPrecision,
 };
 use crate::parser::oracle_util::normalize_card_name_refs;
-use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
     ActivationRestriction, AdditionalCost, AggregateFunction, AttachmentReferent, AttackSubject,
@@ -40,6 +39,7 @@ use crate::types::ability::{
     StackAbilityKind, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
     TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
+use crate::types::ability::{CombatDamageScope, TurnWindow};
 use crate::types::ability_visit::{ability_tree_any, visit_direct_effect_ability_payloads};
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, SubtypeSet};
@@ -10804,6 +10804,12 @@ enum StructuralFeature {
     /// spends it on that damage in full. The card parses, and with no limited shield on a shared
     /// recipient it works, so nothing else in coverage can see it.
     SharedShieldSplitUnoffered,
+    /// CR 614.6 + CR 615.5 + CR 616.1: a combat damage substitute can move a chosen or
+    /// filtered permanent other than its own source off the battlefield during the modified
+    /// damage event. Combat may run another recipient's prevention rider before that move,
+    /// leaving an effect the rider depends on in play (Command Zone #348). Putting counters
+    /// on the substitute's own source leaves those permanents on the battlefield.
+    DamageSubstituteCrossRecipientOrder,
 }
 
 impl StructuralFeature {
@@ -10829,6 +10835,9 @@ impl StructuralFeature {
             InertProtectionQualityGrant => "structural:inert_protection_quality_grant",
             CounterExileRiderTailDropped => "structural:counter_exile_rider_tail_dropped",
             SharedShieldSplitUnoffered => "structural:shared_shield_split_unoffered",
+            DamageSubstituteCrossRecipientOrder => {
+                "structural:damage_substitute_cross_recipient_order"
+            }
         }
     }
 
@@ -10863,6 +10872,7 @@ impl StructuralFeature {
             // Hill Giant's or the Rumbling Baloth's damage in full, giving 3/20 or 0/23; the
             // 2-and-2 split, 2/21, is never offered).
             SharedShieldSplitUnoffered => FeatureSupport::Unhandled,
+            DamageSubstituteCrossRecipientOrder => FeatureSupport::Unhandled,
         }
     }
 }
@@ -10884,9 +10894,7 @@ fn extract_card_features(face: &CardFace, features: &mut HashMap<String, Feature
         extract_trigger_features(trig, features, TokenStaticTraversal::Include);
     }
     for repl in &face.replacements {
-        visit_replacement_ability_payloads(repl, |token_static_traversal, payload| {
-            extract_ability_features_with_token_statics(payload, features, token_static_traversal);
-        });
+        extract_replacement_features(repl, features);
     }
     // Static abilities and all definitions they grant.
     for stat in &face.static_abilities {
@@ -10910,6 +10918,94 @@ fn extract_card_features(face: &CardFace, features: &mut HashMap<String, Feature
     if face.modal.is_some() {
         emit_structural(features, StructuralFeature::SpellModal);
     }
+}
+
+fn extract_replacement_features(
+    replacement: &ReplacementDefinition,
+    features: &mut HashMap<String, FeatureSupport>,
+) {
+    if replacement.combat_scope != Some(CombatDamageScope::NoncombatOnly)
+        && super::replacement::is_damage_substitution(replacement)
+        && replacement
+            .execute
+            .as_deref()
+            .is_some_and(substitute_can_remove_other_permanent)
+    {
+        emit_structural(
+            features,
+            StructuralFeature::DamageSubstituteCrossRecipientOrder,
+        );
+    }
+    visit_replacement_ability_payloads(replacement, |traversal, payload| {
+        extract_ability_features_with_token_statics(payload, features, traversal);
+    });
+}
+
+fn substitute_can_remove_other_permanent(def: &AbilityDefinition) -> bool {
+    let moves_permanent = |target: &TargetFilter, origin: Option<Zone>| {
+        let zones = target.population_zones();
+        (matches!(target, TargetFilter::Any) || target.names_enumerable_population())
+            && origin.is_none_or(|zone| zone == Zone::Battlefield)
+            && (zones.is_empty() || zones.contains(&Zone::Battlefield))
+    };
+    let removes_permanent = match def.effect.as_ref() {
+        Effect::Sacrifice { target, .. }
+        | Effect::ChooseAndSacrificeRest {
+            sacrifice_filter: target,
+            ..
+        }
+        | Effect::Destroy { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::ExileFaceDownPile { object: target, .. }
+        | Effect::PutAtLibraryPosition { target, .. }
+        | Effect::PutOnTopOrBottom { target, .. } => moves_permanent(target, None),
+        Effect::Bounce {
+            target,
+            destination,
+            ..
+        }
+        | Effect::BounceAll {
+            target,
+            destination,
+            ..
+        } => *destination != Some(Zone::Battlefield) && moves_permanent(target, None),
+        Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            ..
+        }
+        | Effect::ChangeZoneAll {
+            origin,
+            destination,
+            target,
+            ..
+        } => *destination != Zone::Battlefield && moves_permanent(target, *origin),
+        _ => false,
+    };
+    if removes_permanent
+        || def
+            .sub_ability
+            .iter()
+            .chain(&def.else_ability)
+            .map(Box::as_ref)
+            .chain(&def.mode_abilities)
+            .any(substitute_can_remove_other_permanent)
+    {
+        return true;
+    }
+    let mut found = false;
+    visit_direct_effect_ability_payloads(&def.effect, |edge, payload| {
+        if !matches!(
+            edge,
+            DirectEffectPayloadEdge::CreateDelayedTriggerEffect
+                | DirectEffectPayloadEdge::CreateDrawReplacementEffect
+                | DirectEffectPayloadEdge::CreateBoonTrigger
+        ) {
+            found |= substitute_can_remove_other_permanent(payload);
+        }
+    });
+    found
 }
 
 /// TRACKED-SET-RETURN-DEFECT detector — see
@@ -11306,9 +11402,9 @@ fn extract_ability_features_with_token_statics(
         extract_ability_features_with_token_statics(mode_ab, features, token_static_traversal);
     }
     extract_effect_static_carrier_features(&def.effect, features, token_static_traversal);
-    visit_effect_replacement_ability_payloads(&def.effect, |payload_traversal, payload| {
-        extract_ability_features_with_token_statics(payload, features, payload_traversal);
-    });
+    if let Effect::AddTargetReplacement { replacement, .. } = def.effect.as_ref() {
+        extract_replacement_features(replacement, features);
+    }
     visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
         extract_ability_features_with_token_statics(payload, features, token_static_traversal);
     });
@@ -11356,9 +11452,7 @@ fn extract_modification_features(
             extract_trigger_features(trigger, features, token_static_traversal);
         }
         ContinuousModification::GrantReplacement { replacement } => {
-            visit_replacement_ability_payloads(replacement, |payload_traversal, payload| {
-                extract_ability_features_with_token_statics(payload, features, payload_traversal);
-            });
+            extract_replacement_features(replacement, features);
         }
         ContinuousModification::GrantStaticAbility { definition } => {
             extract_static_features(definition, features, token_static_traversal);
@@ -16967,14 +17061,18 @@ mod tests {
         &'static [&'static str],
     );
 
-    /// CR 614.1a + CR 616.1 + CR 702.16e: a damage substitution (every replacement the runtime's
-    /// `replacement::is_damage_substitution` selects) is offered beside protection's prevention,
-    /// so its affected player orders them, and it carries no coverage gap: Soul-Scar Mage, Szadek,
-    /// Undead Alchemist, and the "If damage would be dealt to …, … instead" lines (Phytohydra,
-    /// Force Bubble).
+    const CROSS_RECIPIENT_ORDER_GAP: &str =
+        "ResolverFeature:structural:damage_substitute_cross_recipient_order";
+
     #[test]
-    fn a_damage_substitution_has_no_coverage_gap() {
-        let cases: [DamageShieldCase; 5] = [
+    fn damage_substitutions_that_leave_other_permanents_in_play_have_no_order_gap() {
+        let cases: [DamageShieldCase; 6] = [
+            (
+                "Delaying Shield",
+                "If damage would be dealt to you, put that many delay counters on this enchantment instead.\nAt the beginning of your upkeep, remove all delay counters from this enchantment. For each delay counter removed this way, you lose 1 life unless you pay {1}{W}.",
+                &[],
+                &["Enchantment"],
+            ),
             (
                 "Soul-Scar Mage",
                 "Prowess\nIf a source you control would deal noncombat damage to a creature an opponent controls, put that many -1/-1 counters on that creature instead.",
@@ -17014,7 +17112,13 @@ mod tests {
                     .any(crate::game::replacement::is_damage_substitution),
                 "{name}: reach guard — the substitution parses"
             );
-            assert_eq!(card_face_gaps(&face), Vec::<String>::new(), "{name}");
+            let mut features = HashMap::new();
+            extract_card_features(&face, &mut features);
+            assert!(
+                !features
+                    .contains_key(StructuralFeature::DamageSubstituteCrossRecipientOrder.tag()),
+                "{name}"
+            );
         }
     }
 
@@ -17143,75 +17247,105 @@ mod tests {
         }
     }
 
+    const COMBAT_DAMAGE_RIDER_CASES: [DamageShieldCase; 5] = [
+        (
+            "Battletide Alchemist",
+            "If a source would deal damage to a player, you may prevent X of that damage, where X is the number of Clerics you control.",
+            &[],
+            &["Creature"],
+        ),
+        (
+            "Dralnu, Lich Lord",
+            "If damage would be dealt to Dralnu, sacrifice that many permanents instead.\n{T}: Target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost. (You may cast that card from your graveyard for its flashback cost. Then exile it.)",
+            &[],
+            &["Creature"],
+        ),
+        (
+            "Channel Harm",
+            "Prevent all damage that would be dealt to you and permanents you control this turn by sources you don't control. If damage is prevented this way, you may have Channel Harm deal that much damage to target creature.",
+            &[],
+            &["Instant"],
+        ),
+        (
+            "Nefarious Lich",
+            "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game.",
+            &[],
+            &["Enchantment"],
+        ),
+        (
+            "Outfitted Jouster",
+            "When Outfitted Jouster enters, conjure a card named Steelclaw Lance and a card named Brawler's Plate onto the battlefield and attach them to Outfitted Jouster.\nIf damage would be dealt to Outfitted Jouster while it's equipped, prevent that damage. When damage is prevented this way, sacrifice an Equipment attached to Outfitted Jouster.",
+            &[],
+            &["Creature"],
+        ),
+    ];
+
+    #[test]
+    fn damage_substitute_cross_recipient_order_tags_permanent_removal() {
+        for (name, oracle, keywords, types) in COMBAT_DAMAGE_RIDER_CASES {
+            let face = counter_rider_face(name, oracle, keywords, types);
+            let mut features = HashMap::new();
+            extract_card_features(&face, &mut features);
+            assert_eq!(
+                features.contains_key(StructuralFeature::DamageSubstituteCrossRecipientOrder.tag()),
+                name == "Dralnu, Lich Lord",
+                "{name}"
+            );
+        }
+    }
+
     /// CR 608.2d + CR 510.2 + CR 616.1: a combat damage batch asks a damage replacement's or
-    /// prevention rider's own choice at the leg or after the batch's damage (CR 615.5), so none
-    /// of these cards reports a structural resolver gap: Battletide Alchemist's "may", Dralnu's
-    /// and Outfitted Jouster's sacrifice, Nefarious Lich's exile and Channel Harm's "may". This
-    /// checks only the structural family. Each card's other gaps stay, each kept by its
-    /// confirmed-misparse row: the engine runs Outfitted Jouster's rider once per damage event,
-    /// not once for damage prevented simultaneously (CR 615.13), and Nefarious Lich has its own
-    /// misparse.
+    /// prevention rider's own choice at the leg or after the batch's damage. Dralnu reports
+    /// only the cross-recipient substitution order gap. Nefarious Lich and Outfitted Jouster
+    /// report only their committed confirmed-misparse rows. Jouster's delayed trigger
+    /// (CR 603.7a) currently runs as a rider once per damage event instead of triggering once
+    /// per simultaneous prevention application (CR 615.13).
     #[test]
     fn a_combat_damage_rider_choice_is_not_a_coverage_gap() {
         use crate::types::ability::SubAbilityLink;
         const STRUCTURAL: &str = "ResolverFeature:structural:";
-        let cards: [DamageShieldCase; 5] = [
-            (
-                "Battletide Alchemist",
-                "If a source would deal damage to a player, you may prevent X of that damage, where X is the number of Clerics you control.",
-                &[],
-                &["Creature"],
-            ),
-            (
-                "Dralnu, Lich Lord",
-                "If damage would be dealt to Dralnu, sacrifice that many permanents instead.\n{T}: Target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost. (You may cast that card from your graveyard for its flashback cost. Then exile it.)",
-                &[],
-                &["Creature"],
-            ),
-            (
-                "Channel Harm",
-                "Prevent all damage that would be dealt to you and permanents you control this turn by sources you don't control. If damage is prevented this way, you may have Channel Harm deal that much damage to target creature.",
-                &[],
-                &["Instant"],
-            ),
-            (
-                "Nefarious Lich",
-                "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game.",
-                &[],
-                &["Enchantment"],
-            ),
-            (
-                "Outfitted Jouster",
-                "When Outfitted Jouster enters, conjure a card named Steelclaw Lance and a card named Brawler's Plate onto the battlefield and attach them to Outfitted Jouster.\nIf damage would be dealt to Outfitted Jouster while it's equipped, prevent that damage. When damage is prevented this way, sacrifice an Equipment attached to Outfitted Jouster.",
-                &[],
-                &["Creature"],
-            ),
-        ];
-        for (name, oracle, keywords, types) in cards {
-            let face = counter_rider_face(name, oracle, keywords, types);
+        for (name, oracle, keywords, types) in COMBAT_DAMAGE_RIDER_CASES {
+            let mut face = counter_rider_face(name, oracle, keywords, types);
             // Reach guard: the parse holds its damage shield: a damage replacement with an action
             // (or its own "may"), or a prevention effect whose rider is its `ContinuationStep` sub.
             let shield = face.replacements.iter().any(|repl| {
                 matches!(
                     repl.event,
                     ReplacementEvent::DamageDone | ReplacementEvent::DealtDamage
-                ) && (repl.execute.is_some() || !matches!(repl.mode, ReplacementMode::Mandatory))
+                ) && (repl.execute.as_deref().is_some_and(|execute| {
+                    !matches!(execute.effect.as_ref(), Effect::Unimplemented { .. })
+                }) || !matches!(repl.mode, ReplacementMode::Mandatory))
             }) || face.abilities.iter().any(|def| {
                 matches!(&*def.effect, Effect::PreventDamage { .. })
-                    && def
-                        .sub_ability
-                        .as_deref()
-                        .is_some_and(|sub| sub.sub_link == SubAbilityLink::ContinuationStep)
+                    && def.sub_ability.as_deref().is_some_and(|sub| {
+                        sub.sub_link == SubAbilityLink::ContinuationStep
+                            && !matches!(sub.effect.as_ref(), Effect::Unimplemented { .. })
+                    })
             });
             assert!(
                 shield,
                 "{name}: reach guard — the parse holds its damage shield"
             );
-            let gaps = card_face_gaps(&face);
-            assert!(
-                !gaps.iter().any(|gap| gap.starts_with(STRUCTURAL)),
-                "{name}: no structural resolver gap: {gaps:?}"
-            );
+            let misparse = match name {
+                "Nefarious Lich" => Some(("nefarious lich", MisparseClass::WrongPlayer)),
+                "Outfitted Jouster" => Some(("outfitted jouster", MisparseClass::TriggerWrong)),
+                _ => None,
+            };
+            let mut expected_gaps: Vec<_> = misparse
+                .map(|(key, class)| {
+                    let entry = ConfirmedMisparses::committed()
+                        .get(key)
+                        .unwrap_or_else(|| panic!("{name}: missing committed misparse"));
+                    assert_eq!(entry.class, class, "{name}");
+                    face.metadata.confirmed_misparse = Some(entry.class);
+                    class.handler()
+                })
+                .into_iter()
+                .collect();
+            if name == "Dralnu, Lich Lord" {
+                expected_gaps.push(CROSS_RECIPIENT_ORDER_GAP);
+            }
+            assert_eq!(card_face_gaps(&face), expected_gaps, "{name}");
         }
         // Instrument control: the structural family is reported where it applies (Rakdos Charm's
         // `shared_shield_split_unoffered`), so the negative above is not vacuous.

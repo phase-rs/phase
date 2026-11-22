@@ -251,8 +251,7 @@ fn proposed_life_gain(
 
 /// CR 616.1: can this gain's replacement pipeline open a choice? CR 614.6 +
 /// CR 616.2: also check whether a substitute's action opens a choice on this
-/// board. Probe the ordinary staging path on a clone so the substitute uses
-/// the same controller, amount, and replacement pipeline as the live gain.
+/// board using the read-only replacement candidate scan.
 /// A zero or prohibited gain (CR 119.7) never reaches the pipeline.
 pub(crate) fn life_gain_may_prompt(state: &GameState, player_id: PlayerId, amount: u32) -> bool {
     let Some(event) = proposed_life_gain(state, player_id, amount) else {
@@ -264,12 +263,7 @@ pub(crate) fn life_gain_may_prompt(state: &GameState, player_id: PlayerId, amoun
         replacement::replacement_registry(),
     );
     causes.may_open_player_choice()
-        || (causes.contains(replacement::ReplacementPromptCause::MandatoryLifeGainSubstitute) && {
-            let _probe = crate::game::engine::SimulationProbeGuard::enter();
-            replacement::without_proposed_event_recording(|| {
-                stage_life_gain(&mut state.clone(), player_id, amount, &mut Vec::new()).is_err()
-            })
-        })
+        || causes.contains(replacement::ReplacementPromptCause::LifeGainSubstituteMayPrompt)
 }
 
 /// CR 616.1: can the life-loss event itself open a replacement choice?

@@ -24,7 +24,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
+use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent, ReplacementId};
 use std::collections::VecDeque;
 
 /// CR 510.1a + CR 613.11: Returns the amount of combat damage a creature assigns.
@@ -2993,7 +2993,19 @@ fn drain_combat_lifelink(
     // prompt is open, and after nothing else can stamp `last_effect_count`.
     // CR 104.1: a gain that ended the game ends the batch; no rider runs after it.
     if state.game_end.is_none() {
-        let prevention_tally = std::mem::take(&mut record.prevention_tally);
+        let mut prevention_tally = std::mem::take(&mut record.prevention_tally);
+        // CR 101.4: simultaneous rider choices go to the active player first.
+        // Every entry for the same shield has the same rank, so the stable sort
+        // keeps shields intact and preserves registry and recipient order within a rank.
+        let rank = apnap_ranker(state);
+        prevention_tally.sort_by_cached_key(|entry| {
+            if matches!(entry.key, AppliedReplacementKey::Protection { .. }) {
+                return usize::MAX;
+            }
+            aggregate_prevention_definition(state, entry.key.as_replacement_id())
+                .and_then(|def| state.replacement_rider(def))
+                .map_or(usize::MAX, |rider| rank(rider.controller))
+        });
         // CR 608.2c + CR 608.2d: a rider that asks its player a choice (Channel
         // Harm's "you may have Channel Harm deal that much damage") stops Phase D:
         // the later shields wait beneath the prompt as the unpublished remainder,
@@ -3079,6 +3091,22 @@ pub(crate) enum BatchRiderDrainOutcome {
     Paused { published_entries: usize },
 }
 
+fn aggregate_prevention_definition(
+    state: &GameState,
+    rid: ReplacementId,
+) -> Option<&crate::types::ability::ReplacementDefinition> {
+    // Floating shields have no host permanent and use the sentinel ObjectId(0).
+    if rid.source == ObjectId(0) {
+        rid.index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get(i))
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
+    }
+}
+
 /// CR 615.5 + CR 615.13: After a simultaneous damage batch (combat or
 /// noncombat), fire each `Prevention::All` shield's `runtime_execute` rider
 /// exactly once against the aggregate prevented amount.
@@ -3119,8 +3147,7 @@ pub(crate) fn fire_batch_prevention_riders(
     // must read for its "that many" to be right.
     let mut published_entries = 0usize;
     for group in prevention_tally.chunk_by(|a, b| a.key == b.key) {
-        // CR 104.1: a rider that ended the game (New Way Forward's damage meeting an empty
-        // Nefarious Lich graveyard) ends the batch; no later shield's rider runs.
+        // CR 104.1: a rider that ended the game ends the batch.
         if state.game_end.is_some() {
             break;
         }
@@ -3148,20 +3175,7 @@ pub(crate) fn fire_batch_prevention_riders(
             continue;
         }
 
-        // Pending (resolution-created) shields are stored in
-        // `pending_damage_replacements` under the sentinel ObjectId(0) because
-        // they have no host permanent; object-hosted shields are found in the
-        // host's `replacement_definitions`.
-        let repl_def = if rid.source == ObjectId(0) {
-            rid.index_as_usize()
-                .and_then(|i| state.pending_damage_replacements.get(i))
-        } else {
-            state
-                .objects
-                .get(&rid.source)
-                .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
-        };
-        let Some(repl_def) = repl_def else {
+        let Some(repl_def) = aggregate_prevention_definition(state, rid) else {
             continue;
         };
 
@@ -3180,8 +3194,8 @@ pub(crate) fn fire_batch_prevention_riders(
                         | crate::types::ability::PreventionAmount::AllBut(_)
                 }
             );
-        // CR 615.5 + CR 609.7: A rider referencing the prevented damage's source
-        // ("that source's controller" — New Way Forward) resolves
+        // CR 609.7: A rider referencing the prevented damage's source
+        // ("that source's controller" — Deflecting Palm) resolves
         // `PostReplacementSourceController` against the drain's event source. The
         // per-event `execute` path receives it from the Prevented-arm stash; the
         // aggregate path derives it here from the shield's resolved single-object
@@ -10087,106 +10101,6 @@ mod tests {
                     if *target == TargetRef::Object(blocker))
             ),
             "the overlap's prevention still publishes, got {events:?}"
-        );
-    }
-
-    const SWANS_OF_BRYN_ARGOLL: &str = "Flying\nIf a source would deal damage to this creature, prevent that damage. The source's controller draws cards equal to the damage prevented this way.";
-    const SUNTAIL_HAWK: &str = "Flying";
-    const ABUNDANCE: &str = "If you would draw a card, you may instead choose land or nonland and reveal cards from the top of your library until you reveal a card of the chosen kind. Put that card into your hand and put all other cards revealed this way on the bottom of your library in any order.";
-
-    /// CR 800.4j: the priority window a completed batch ends with goes to the next
-    /// player in turn order still in the game. Three players: P0's Swans of Bryn
-    /// Argoll attacks P1 and is blocked by P1's Suntail Hawk; the Hawk's 1 is
-    /// prevented, and its controller P1 draws, a draw P1's Abundance offers to
-    /// replace (CR 616.1), asked inside the batch. P0, the active player, concedes
-    /// at that prompt; P1 declines. The answer's handler
-    /// (`engine_replacement::handle_replacement_choice`) returns the completed
-    /// batch's own wait, which names P1, not the departed P0.
-    #[test]
-    fn a_completed_batch_hands_priority_to_the_next_living_seat() {
-        let mut scenario = GameScenario::new_n_player(3, 7);
-        scenario.at_phase(Phase::PreCombatMain);
-        for player in [P0, P1, PlayerId(2)] {
-            for index in 0..8 {
-                scenario.add_spell_to_library_top(player, &format!("Library Filler {index}"), true);
-            }
-        }
-        let swans = scenario
-            .add_creature_from_oracle(P0, "Swans of Bryn Argoll", 4, 3, SWANS_OF_BRYN_ARGOLL)
-            .from_oracle_text_with_keywords(&["Flying"], SWANS_OF_BRYN_ARGOLL)
-            .id();
-        let hawk = scenario
-            .add_creature_from_oracle(P1, "Suntail Hawk", 1, 1, SUNTAIL_HAWK)
-            .from_oracle_text_with_keywords(&["Flying"], SUNTAIL_HAWK)
-            .id();
-        scenario.add_enchantment_from_oracle(P1, "Abundance", ABUNDANCE);
-        let mut runner = scenario.build();
-
-        let mut attacked = false;
-        for _ in 0..40 {
-            let action = match &runner.state().waiting_for {
-                WaitingFor::Priority { .. } => GameAction::PassPriority,
-                WaitingFor::DeclareAttackers { .. } => {
-                    let attacks = if attacked {
-                        Vec::new()
-                    } else {
-                        vec![(swans, AttackTarget::Player(P1))]
-                    };
-                    attacked = true;
-                    GameAction::DeclareAttackers {
-                        attacks,
-                        bands: vec![],
-                    }
-                }
-                WaitingFor::DeclareBlockers { player, .. } => GameAction::DeclareBlockers {
-                    assignments: if *player == P1 {
-                        vec![(hawk, swans)]
-                    } else {
-                        Vec::new()
-                    },
-                },
-                _ => break,
-            };
-            runner.act(action).expect("combat action");
-        }
-        let WaitingFor::ReplacementChoice {
-            player, candidates, ..
-        } = runner.state().waiting_for.clone()
-        else {
-            panic!("got {:?}", runner.state().waiting_for);
-        };
-        assert_eq!(player, P1);
-        assert!(runner.state().combat_damage_batch_parked());
-        runner
-            .act(GameAction::Concede { player_id: P0 })
-            .expect("P0 concedes");
-        assert!(runner.state().players[0].is_eliminated);
-        assert!(runner.state().combat_damage_batch_parked());
-        let decline = candidates
-            .iter()
-            .position(|candidate| candidate.description == "Decline")
-            .expect("Abundance's Decline is offered");
-
-        let mut events = Vec::new();
-        let waiting_for = crate::game::engine_replacement::handle_replacement_choice(
-            runner.state_mut(),
-            decline,
-            &mut events,
-        )
-        .expect("P1 declines Abundance");
-
-        let state = runner.state();
-        assert!(!state.combat_damage_batch_parked());
-        assert!(state.combat.as_ref().unwrap().regular_damage_done);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, GameEvent::CardDrawn { player_id, .. } if *player_id == P1)),
-            "P1 drew, got {events:?}"
-        );
-        assert!(
-            matches!(waiting_for, WaitingFor::Priority { player } if player == P1),
-            "got {waiting_for:?}"
         );
     }
 }

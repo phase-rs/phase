@@ -3995,9 +3995,11 @@ fn test_of_faiths_counter_order_is_asked_behind_phytohydras() {
         }
         // The substitute's order, then at least one from Test of Faith's counters.
         assert!(counter_orders.len() >= 2, "{label}: {asked:?}");
-        assert_eq!(
-            counter_orders[0].1, 0,
-            "{label}: the substitute's order comes first"
+        let additions = counters_added_to(&combat.events, hydra);
+        let actors: Vec<_> = additions.iter().map(|&(_, actor)| actor).collect();
+        assert!(
+            actors.starts_with(&[P1, P0]) && actors[1..].iter().all(|&actor| actor == P0),
+            "{label}: Phytohydra's counter event must precede Test of Faith: {additions:?}"
         );
         assert_eq!(runner.state().objects[&hydra].damage_marked, 0, "{label}");
         totals.push(plus_counters(&runner, hydra));
@@ -4054,6 +4056,12 @@ fn gatta_and_luzzus_counter_order_is_asked_after_the_batch() {
         match counter_sources {
             Some((scales, season)) => {
                 assert!(!combat.prompts.is_empty(), "{label}");
+                let damage = dealt(&combat.events, bears, blocker);
+                assert!(
+                    matches!(damage.as_slice(), [(index, 2)] if *index < combat.answered_at[0]),
+                    "{label}: Bears' damage {damage:?} must precede the first answer at {}",
+                    combat.answered_at[0]
+                );
                 assert!(
                     combat.choosers.iter().all(|&chooser| chooser == P0),
                     "{label}"
@@ -4451,13 +4459,11 @@ fn double_strike_asks_abundance_for_the_swans_draw_in_each_damage_step() {
     }
 }
 
-/// P2: a "may" park at the aggregate drain (Phase D). P1's New Way Forward: "When damage is
-/// prevented this way, New Way Forward deals that much damage to that source's controller and you
-/// draw that many cards." Its chosen source is P0's unblocked Grizzly Bears, so P0 is dealt 2 and
-/// P1 draws 2 (CR 121.2), each draw meeting P1's Abundance ("you may instead …"), which P1 is
-/// asked after the batch's damage (CR 615.5, CR 616.1). The first answer leaves the batch parked
-/// on the second. Declining both draws 2; accepting both and choosing nonland draws none and
-/// still puts 2 cards in P1's hand. Without Abundance, 2 draws and nothing is asked.
+/// strict-failure: the engine resolves New Way Forward's payoff as an immediate rider inside
+/// the combat batch. "When damage is prevented this way" creates a delayed triggered ability
+/// (CR 603.7a) that triggers when the shield prevents damage (CR 615.13). Its damage and draws
+/// happen when it resolves from the stack (CR 603.3).
+/// The two Abundance prompts while the batch is parked record the current engine timing.
 #[test]
 fn new_way_forwards_draws_ask_abundance() {
     for (abundance, accept) in [(true, false), (true, true), (false, false)] {
@@ -4525,7 +4531,7 @@ fn new_way_forwards_draws_ask_abundance() {
         if abundance {
             assert_eq!(combat.prompts.len(), 2, "{label}");
             assert_eq!(combat.choosers, vec![P1, P1], "{label}");
-            // Both prompts stand with the batch parked: the first answer left it parked.
+            // strict-failure: both draws currently ask inside the combat batch.
             assert_eq!(parked_at_prompt, vec![true, true], "{label}");
         } else {
             assert!(combat.prompts.is_empty(), "{label}");
@@ -5137,6 +5143,54 @@ fn channel_harms_may_reads_the_prevented_amount_inside_a_resolving_trigger() {
         }
         assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
         assert_eq!(runner.state().objects[&bears].damage_marked, 0);
+    }
+}
+
+/// CR 101.4: simultaneous Channel Harm choices start with the active player even when
+/// the nonactive player's shield was created first.
+#[test]
+fn simultaneous_channel_harm_riders_ask_in_apnap_order() {
+    let mut scenario = rider_board();
+    let attacker = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let blocker = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let p0_courser = scenario.add_creature(P0, "Centaur Courser", 3, 3).id();
+    let p1_courser = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
+    let p0_harm = spell(&mut scenario, "Channel Harm", CHANNEL_HARM, true);
+    let p1_harm = scenario
+        .add_spell_to_hand_from_oracle(P1, "Channel Harm", true, CHANNEL_HARM)
+        .id();
+    let mut runner = scenario.build();
+    let mut events = cast_by_p1(&mut runner, p1_harm);
+    drive(
+        &mut runner,
+        &mut vec![TargetRef::Object(p1_courser)],
+        &mut events,
+    );
+    assert_settled(&runner);
+    cast(&mut runner, p0_harm, vec![TargetRef::Object(p0_courser)]);
+
+    let mut choosers = Vec::new();
+    let combat = fight_answering(&mut runner, &[attacker], &[(blocker, attacker)], |state| {
+        let WaitingFor::OptionalEffectChoice { player, .. } = state.waiting_for else {
+            panic!("expected Channel Harm's may, got {:?}", state.waiting_for);
+        };
+        choosers.push(player);
+        GameAction::DecideOptionalEffect { accept: true }
+    });
+
+    assert_eq!(
+        choosers,
+        [P0, P1],
+        "Channel Harm's may choices follow APNAP"
+    );
+    assert_batch_settled(&runner);
+    assert_eq!(prevented(&combat.events), 2);
+    for id in [attacker, blocker] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&id].damage_marked, 0);
+    }
+    for id in [p0_courser, p1_courser] {
+        assert_eq!(runner.state().objects[&id].damage_marked, 2);
     }
 }
 
@@ -7019,6 +7073,44 @@ fn an_answer_after_the_active_players_concession_finishes_the_batch() {
         3
     );
     assert_eq!(state.players[1].life, 20);
+}
+
+/// CR 615.5 + CR 800.4j: P1's Hawk deals 1 to P0's Swans. The prevention rider
+/// makes P1 draw, and Abundance asks P1 before the batch finishes. After P0
+/// concedes, P1's decline settles the batch and returns priority to P1.
+#[test]
+fn a_completed_batch_hands_priority_to_the_next_living_seat() {
+    let mut scenario = three_player_rider_board();
+    let swans = creature_with_keywords(
+        &mut scenario,
+        P0,
+        "Swans of Bryn Argoll",
+        (4, 3),
+        &["Flying"],
+        SWANS_OF_BRYN_ARGOLL,
+    );
+    let hawk = creature_with_keywords(
+        &mut scenario,
+        P1,
+        "Suntail Hawk",
+        (1, 1),
+        &["Flying"],
+        SUNTAIL_HAWK,
+    );
+    scenario.add_enchantment_from_oracle(P1, "Abundance", ABUNDANCE);
+    let mut runner = scenario.build();
+    to_the_first_combat_prompt(
+        &mut runner,
+        &[(swans, AttackTarget::Player(P1))],
+        P1,
+        &[(hawk, swans)],
+    );
+    active_player_concedes_at_p1s_prompt(&mut runner);
+    let decline = answering_abundance(false)(runner.state());
+    let result = runner.act(decline).expect("P1 declines Abundance");
+
+    assert_the_answer_finished_the_batch_for_the_next_seat(&runner, &result);
+    assert_eq!(cards_drawn(&result.events, P1), 1);
 }
 
 /// The same departure at a replacement choice the batch's substitute asks, answered through

@@ -11416,8 +11416,8 @@ pub(crate) enum ReplacementPromptCause {
     /// as a `PostReplacementContinuation` and drained through an arbitrary
     /// `ResolvedAbility`, which can set a non-priority `waiting_for`.
     MandatoryBodyContinuation,
-    /// CR 614.6: a life gain can be replaced by an action of another kind.
-    MandatoryLifeGainSubstitute,
+    /// CR 614.6: a mandatory life gain substitute can open its own choice.
+    LifeGainSubstituteMayPrompt,
     /// CR 616.1: two or more candidates whose ordering is material — the
     /// affected player orders them.
     OrderingMaterial,
@@ -11429,7 +11429,7 @@ impl ReplacementPromptCause {
             ReplacementPromptCause::OptionalCandidate => 1 << 0,
             ReplacementPromptCause::MandatoryBodyContinuation => 1 << 1,
             ReplacementPromptCause::OrderingMaterial => 1 << 2,
-            ReplacementPromptCause::MandatoryLifeGainSubstitute => 1 << 3,
+            ReplacementPromptCause::LifeGainSubstituteMayPrompt => 1 << 3,
         }
     }
 }
@@ -11514,9 +11514,11 @@ pub(crate) fn proposed_event_prompt_cause(
             if matches!(event, ProposedEvent::LifeGain { .. })
                 && def.quantity_modification.is_none()
                 && gain_life_execute_substitutes_event_type(state, *rid)
+                && (candidates.len() > 1
+                    || life_gain_substitute_may_prompt(state, event, *rid, def, registry))
             {
                 causes = causes.union(ReplacementPromptCauses::of(
-                    ReplacementPromptCause::MandatoryLifeGainSubstitute,
+                    ReplacementPromptCause::LifeGainSubstituteMayPrompt,
                 ));
             }
         }
@@ -11528,6 +11530,89 @@ pub(crate) fn proposed_event_prompt_cause(
         ));
     }
     causes
+}
+
+/// CR 614.6 + CR 121.2a: classify a plain draw substitute at both draw stages.
+/// Other substitutes and draw paths that may change replacement applicability
+/// are conservatively staged early.
+fn life_gain_substitute_may_prompt(
+    state: &GameState,
+    event: &ProposedEvent,
+    rid: ReplacementId,
+    def: &ReplacementDefinition,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+) -> bool {
+    let (
+        ProposedEvent::LifeGain {
+            player_id, amount, ..
+        },
+        Some(execute),
+    ) = (event, def.execute.as_deref())
+    else {
+        return true;
+    };
+    let Effect::Draw {
+        target: TargetFilter::Controller,
+        count: QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        },
+    } = execute.effect.as_ref()
+    else {
+        return true;
+    };
+    if def.runtime_execute.is_some()
+        || execute.optional
+        || execute.sub_ability.is_some()
+        || execute.else_ability.is_some()
+        || execute.repeat_for.is_some()
+        || execute.modal.is_some()
+        || execute.unless_pay.is_some()
+        || state
+            .objects
+            .get(&rid.source)
+            .map(|source| source.controller)
+            != Some(*player_id)
+    {
+        return true;
+    }
+
+    let draw_may_prompt = [
+        (DrawEventStage::Instruction, *amount),
+        (DrawEventStage::Individual, 1),
+    ]
+    .into_iter()
+    .any(|(stage, count)| {
+        !proposed_event_prompt_cause(
+            state,
+            &ProposedEvent::Draw {
+                player_id: *player_id,
+                count,
+                stage,
+                applied: HashSet::new(),
+            },
+            registry,
+        )
+        .is_empty()
+    });
+    // A draw can be reshaped before delivery, a later individual draw can
+    // meet a new replacement, and the Library-to-Hand move can itself prompt.
+    let may_affect_delivery = |def: &ReplacementDefinition| {
+        def.event == ReplacementEvent::Draw
+            || (matches!(
+                def.event,
+                ReplacementEvent::ChangeZone
+                    | ReplacementEvent::Moved
+                    | ReplacementEvent::Counter
+                    | ReplacementEvent::Attached
+            ) && def.destination_zone.is_none_or(|zone| zone == Zone::Hand))
+    };
+    draw_may_prompt
+        || super::functioning_abilities::active_replacements(state)
+            .any(|(_, _, def)| may_affect_delivery(def))
+        || state
+            .pending_damage_replacements
+            .iter()
+            .any(may_affect_delivery)
 }
 
 /// CR 732.2a: does this proposed event's applier write a board axis the
@@ -11678,13 +11763,6 @@ pub(crate) fn record_proposed_events<F: FnOnce()>(f: F) -> Vec<ProposedEvent> {
         .unwrap_or_default();
     drop(guard);
     recorded
-}
-
-/// Keep speculative events out of an enclosing recording of live proposals.
-pub(crate) fn without_proposed_event_recording<T>(f: impl FnOnce() -> T) -> T {
-    let _guard =
-        ProposedEventRecorderGuard(PROPOSED_EVENT_RECORDER.with(|cell| cell.borrow_mut().take()));
-    f()
 }
 
 /// The recorder hook. Called once per `pipeline_loop` entry, before any
