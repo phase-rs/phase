@@ -7328,28 +7328,69 @@ fn channel_harms_may_is_asked_in_each_combat_damage_step() {
 /// before P1 orders the poison result's replacements (CR 120.4c + CR 616.1).
 #[test]
 fn active_players_lifelink_substitute_prompts_before_defenders_poison_order() {
-    lifelink_substitute_and_poison_order(P0);
+    lifelink_substitute_and_poison_order(DrawReplacement::Abundance(P0));
 }
 
 #[test]
 fn defenders_poison_order_precedes_lifelink_draws_with_defenders_abundance() {
-    lifelink_substitute_and_poison_order(P1);
+    lifelink_substitute_and_poison_order(DrawReplacement::Abundance(P1));
 }
 
-fn lifelink_substitute_and_poison_order(abundance_controller: PlayerId) {
+/// CR 121.2a: Alms Collector needs a draw instruction of at least two cards.
+#[test]
+fn defenders_poison_order_precedes_single_lifelink_draw_with_alms_collector() {
+    lifelink_substitute_and_poison_order(DrawReplacement::AlmsCollector);
+}
+
+#[derive(Clone, Copy)]
+enum DrawReplacement {
+    Abundance(PlayerId),
+    AlmsCollector,
+}
+
+fn lifelink_substitute_and_poison_order(draw_replacement: DrawReplacement) {
+    const ALMS_COLLECTOR: &str = "Flash\nIf an opponent would draw two or more cards, instead you and that player each draw a card.";
+    const VAMPIRE_OF_THE_DIRE_MOON: &str = "Deathtouch (Any amount of damage this deals to a creature is enough to destroy it.)\nLifelink (Damage dealt by this creature also causes you to gain that much life.)";
     const GLISTENER_ELF: &str = "Infect (This creature deals damage to creatures in the form of -1/-1 counters and to players in the form of poison counters.)";
     const VORINCLEX: &str = "Trample, haste\nIf you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
 
     for (first, poison) in [(P0, 1), (P1, 0)] {
         let mut scenario = rider_board();
-        let nighthawk = creature_with_keywords(
-            &mut scenario,
-            P0,
-            "Vampire Nighthawk",
-            (2, 3),
-            &["Flying", "Deathtouch", "Lifelink"],
-            VAMPIRE_NIGHTHAWK,
-        );
+        let (vampire, draw_source, expected_draws) = match draw_replacement {
+            DrawReplacement::Abundance(controller) => (
+                creature_with_keywords(
+                    &mut scenario,
+                    P0,
+                    "Vampire Nighthawk",
+                    (2, 3),
+                    &["Flying", "Deathtouch", "Lifelink"],
+                    VAMPIRE_NIGHTHAWK,
+                ),
+                scenario
+                    .add_enchantment_from_oracle(controller, "Abundance", ABUNDANCE)
+                    .id(),
+                2,
+            ),
+            DrawReplacement::AlmsCollector => (
+                creature_with_keywords(
+                    &mut scenario,
+                    P0,
+                    "Vampire of the Dire Moon",
+                    (1, 1),
+                    &["Deathtouch", "Lifelink"],
+                    VAMPIRE_OF_THE_DIRE_MOON,
+                ),
+                creature_with_keywords(
+                    &mut scenario,
+                    P1,
+                    "Alms Collector",
+                    (3, 4),
+                    &["Flash"],
+                    ALMS_COLLECTOR,
+                ),
+                1,
+            ),
+        };
         let elf = creature_with_keywords(
             &mut scenario,
             P0,
@@ -7369,16 +7410,14 @@ fn lifelink_substitute_and_poison_order(abundance_controller: PlayerId) {
             )
         });
         scenario.add_enchantment_from_oracle(P0, "Nefarious Lich", NEFARIOUS_LICH);
-        let abundance = scenario
-            .add_enchantment_from_oracle(abundance_controller, "Abundance", ABUNDANCE)
-            .id();
-        let active_player_has_abundance = abundance_controller == P0;
+        let active_player_has_abundance =
+            matches!(draw_replacement, DrawReplacement::Abundance(P0));
         let expected_draws_before_order = if active_player_has_abundance { 2 } else { 0 };
         let mut runner = scenario.build();
         let hand_before = hand_size(&runner, P0);
         let mut decline = answering_abundance(false);
         let mut draw_prompts = 0;
-        let combat = fight_driving(&mut runner, &[nighthawk, elf], &[], |runner| {
+        let combat = fight_driving(&mut runner, &[vampire, elf], &[], |runner| {
             let state = runner.state();
             assert!(state.pending_combat_lifelink.is_some());
             assert_eq!(state.players[1].poison_counters, 0);
@@ -7408,7 +7447,7 @@ fn lifelink_substitute_and_poison_order(abundance_controller: PlayerId) {
                     };
                 }
                 assert_eq!(*player, P0);
-                assert!(candidates.iter().any(|c| c.source_id == abundance));
+                assert!(candidates.iter().any(|c| c.source_id == draw_source));
                 draw_prompts += 1;
             }
             decline(state)
@@ -7421,10 +7460,11 @@ fn lifelink_substitute_and_poison_order(abundance_controller: PlayerId) {
             &[P1]
         };
         assert_eq!(combat.choosers, expected_choosers);
-        assert_eq!(cards_drawn(&combat.events, P0), 2);
-        assert_eq!(hand_size(&runner, P0) - hand_before, 2);
+        assert_eq!(cards_drawn(&combat.events, P0), expected_draws);
+        assert_eq!(cards_drawn(&combat.events, P1), 0);
+        assert_eq!(hand_size(&runner, P0) - hand_before, expected_draws);
         assert_eq!(life(&runner, P0), 20);
-        assert_eq!(life(&runner, P1), 18);
+        assert_eq!(life(&runner, P1), 20 - expected_draws as i32);
         assert_eq!(runner.state().players[1].poison_counters, poison);
     }
 }

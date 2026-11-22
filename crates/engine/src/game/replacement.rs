@@ -11547,8 +11547,8 @@ pub(crate) fn proposed_event_prompt_cause(
 }
 
 /// CR 614.6 + CR 121.2a: classify a plain draw substitute at both draw stages.
-/// Other substitutes and draw paths that may change replacement applicability
-/// are conservatively staged early.
+/// Other substitutes and draws with applicable delivery replacements are
+/// conservatively staged early.
 fn life_gain_substitute_may_prompt(
     state: &GameState,
     event: &ProposedEvent,
@@ -11581,75 +11581,34 @@ fn life_gain_substitute_may_prompt(
         || execute.repeat_for.is_some()
         || execute.modal.is_some()
         || execute.unless_pay.is_some()
-        || state
-            .objects
-            .get(&rid.source)
-            .map(|source| source.controller)
-            != Some(*player_id)
+        || state.objects.get(&rid.source).is_none_or(|source| {
+            !replacement_player_scope_matches(None, *player_id, source.controller)
+        })
     {
         return true;
     }
 
-    let draw_may_prompt = [
+    let has_replacement = |event| !find_applicable_replacements(state, &event, registry).is_empty();
+    [
         (DrawEventStage::Instruction, *amount),
         (DrawEventStage::Individual, 1),
     ]
     .into_iter()
     .any(|(stage, count)| {
-        !proposed_event_prompt_cause(
-            state,
-            &ProposedEvent::Draw {
-                player_id: *player_id,
-                count,
-                stage,
-                applied: HashSet::new(),
-            },
-            registry,
-        )
-        .is_empty()
-    });
-    // A draw can be reshaped before delivery, a later individual draw can
-    // meet a new replacement, and the Library-to-Hand move can itself prompt.
-    let may_affect_delivery = |source, controller, def: &ReplacementDefinition| match def.event {
-        ReplacementEvent::Draw => {
-            replacement_player_scope_matches(def.valid_player.as_ref(), *player_id, controller)
-        }
-        ReplacementEvent::ChangeZone
-        | ReplacementEvent::Moved
-        | ReplacementEvent::Counter
-        | ReplacementEvent::Attached => {
-            def.destination_zone.is_none_or(|zone| zone == Zone::Hand)
-                && state.library_of(*player_id).iter().any(|&card| {
-                    let delivery =
-                        ProposedEvent::zone_change(card, Zone::Library, Zone::Hand, None);
-                    registry
-                        .get(&def.event)
-                        .is_none_or(|handler| (handler.matcher)(&delivery, source, state))
-                        && def.valid_card.as_ref().is_none_or(|filter| {
-                            replacement_valid_card_matches(
-                                def,
-                                &delivery,
-                                state,
-                                filter,
-                                source,
-                                Some(controller),
-                            )
-                        })
-                })
-        }
-        _ => false,
-    };
-    draw_may_prompt
-        || super::functioning_abilities::active_replacements(state).any(|(_, source, def)| {
-            may_affect_delivery(source.id, replacement_source_player(source), def)
+        has_replacement(ProposedEvent::Draw {
+            player_id: *player_id,
+            count,
+            stage,
+            applied: HashSet::new(),
         })
-        || live_floating_replacements(state).any(|(source, def)| {
-            may_affect_delivery(
-                source,
-                def.source_controller.unwrap_or(state.active_player),
-                def,
-            )
-        })
+    }) || state.library_of(*player_id).iter().any(|&card| {
+        has_replacement(ProposedEvent::zone_change(
+            card,
+            Zone::Library,
+            Zone::Hand,
+            None,
+        ))
+    })
 }
 
 /// CR 732.2a: does this proposed event's applier write a board axis the
