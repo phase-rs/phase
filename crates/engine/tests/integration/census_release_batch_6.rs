@@ -1,13 +1,13 @@
-//! Runtime witnesses for the `confirmed-misparses.toml` rows released in batch 6: five census rows whose cited clauses
+//! Runtime witnesses for the `confirmed-misparses.toml` rows released in batch 6: census rows whose cited clauses
 //! the engine already handles, one witness group per clause shape. Every released card is the printed card
 //! (printed cost, type line, P/T and verbatim Oracle text, loaded from the card database through `add_real_card`)
 //! and is driven through the public `GameRunner` actions. Only textless library fillers are synthetic; every support
-//! card, including those that carry an ability (Murder, Lightning Bolt, Shock, the library cards), is a
+//! card, including those that carry an ability (Murder, the library cards), is a
 //! printed card.
 //!
 //! Each group asserts the prompt the engine shows (actor and offered cards) before the resolved effect, and ends
 //! with an empty stack and priority. Controls (a third legendary creature, a creature card that does not share the
-//! shape, a declined optional cast) are there to fail if the clause were parsed wrongly.
+//! shape) are there to fail if the clause were parsed wrongly.
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::TargetRef;
@@ -420,151 +420,6 @@ fn sublime_archangel_exalted_does_not_trigger_when_two_creatures_attack() {
             && matches!(r.state().waiting_for, WaitingFor::Priority { .. })
     });
     assert_settled(&runner, "Sublime Archangel (two attackers)");
-}
-
-// ---------------------------------------------------------------------------------------------
-// "Copy that card three times. You may cast the copies without paying their mana costs." (Mnemonic Deluge)
-// ---------------------------------------------------------------------------------------------
-
-#[test]
-fn mnemonic_deluge_copies_the_exiled_card_three_times_and_casts_the_copies() {
-    let mut scenario = table();
-    let deluge = scenario.add_real_card(P0, "Mnemonic Deluge", Zone::Hand, db());
-    let bolt = scenario.add_real_card(P1, "Lightning Bolt", Zone::Graveyard, db());
-    let shock = scenario.add_real_card(P0, "Shock", Zone::Graveyard, db());
-    let axe = scenario.add_real_card(P1, "Lava Axe", Zone::Graveyard, db());
-    let giant = scenario.add_real_card(P0, "Hill Giant", Zone::Graveyard, db());
-    let mut runner = scenario.build();
-    cast(&mut runner, deluge);
-    assert_eq!(
-        offered_targets(&runner),
-        sorted(vec![bolt, shock, axe]),
-        "instant and sorcery cards in any graveyard, not the creature card {giant:?}"
-    );
-    choose_object(&mut runner, bolt);
-    let pool_after_cast = runner.state().players[P0.0 as usize].mana_pool.total();
-    assert_eq!(
-        pool_after_cast,
-        pool().len() - 9,
-        "Mnemonic Deluge's printed {{6}}{{U}}{{U}}{{U}} was paid"
-    );
-    let mut offers = 0;
-    for _ in 0..40 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
-            WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass");
-            }
-            WaitingFor::CopyRetarget {
-                player,
-                target_slots,
-                ..
-            } => {
-                assert_eq!(player, P0, "the caster announces the copy's target");
-                assert!(
-                    target_slots[0]
-                        .legal_alternatives
-                        .contains(&TargetRef::Player(P1)),
-                    "any target: the opponent is offered"
-                );
-                runner
-                    .act(GameAction::ChooseTarget {
-                        target: Some(TargetRef::Player(P1)),
-                    })
-                    .expect("the copy targets the opponent");
-            }
-            WaitingFor::ChooseFromZoneChoice { player, cards, .. } => {
-                assert_eq!(player, P0, "its controller may cast the copy");
-                assert_eq!(
-                    cards,
-                    vec![bolt],
-                    "the copied card is the exiled Lightning Bolt"
-                );
-                offers += 1;
-                runner
-                    .act(GameAction::SelectCards { cards })
-                    .expect("cast a copy of it");
-            }
-            other => panic!("Mnemonic Deluge: unexpected prompt {other:?}"),
-        }
-    }
-    assert_eq!(offers, 3, "three copies are offered");
-    let bolts = runner
-        .state()
-        .objects
-        .values()
-        .filter(|o| o.name == "Lightning Bolt")
-        .count();
-    assert_eq!(
-        bolts, 1,
-        "the cast copies ceased to exist: only the exiled original remains"
-    );
-    assert_eq!(
-        runner.state().players[P1.0 as usize].life,
-        11,
-        "three Lightning Bolt copies hit for 3"
-    );
-    assert_eq!(
-        runner.state().players[P0.0 as usize].mana_pool.total(),
-        pool_after_cast,
-        "the copies were cast without paying their mana costs"
-    );
-    assert_eq!(
-        zone_of(&runner, bolt),
-        Zone::Exile,
-        "the original was exiled"
-    );
-    assert_eq!(
-        zone_of(&runner, shock),
-        Zone::Graveyard,
-        "the other card was not chosen"
-    );
-    assert_eq!(
-        zone_of(&runner, deluge),
-        Zone::Exile,
-        "Mnemonic Deluge exiles itself"
-    );
-    assert_settled(&runner, "Mnemonic Deluge");
-}
-
-/// Control: "You may cast the copies" -- declining every copy casts none (no damage), while the
-/// first sentence still exiled the card and the last still exiles Mnemonic Deluge.
-#[test]
-fn mnemonic_deluge_casting_none_of_the_copies_deals_no_damage() {
-    let mut scenario = table();
-    let deluge = scenario.add_real_card(P0, "Mnemonic Deluge", Zone::Hand, db());
-    let bolt = scenario.add_real_card(P1, "Lightning Bolt", Zone::Graveyard, db());
-    let shock = scenario.add_real_card(P0, "Shock", Zone::Graveyard, db());
-    let mut runner = scenario.build();
-    cast(&mut runner, deluge);
-    choose_object(&mut runner, bolt);
-    let mut offers = 0;
-    for _ in 0..40 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
-            WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass");
-            }
-            WaitingFor::ChooseFromZoneChoice { player, .. } => {
-                assert_eq!(player, P0);
-                offers += 1;
-                runner
-                    .act(GameAction::SelectCards { cards: vec![] })
-                    .expect("cast no copy");
-            }
-            other => panic!("Mnemonic Deluge (declined): unexpected prompt {other:?}"),
-        }
-    }
-    assert_eq!(offers, 3, "the three copies were offered and declined");
-    assert_eq!(
-        runner.state().players[P1.0 as usize].life,
-        20,
-        "no copy was cast"
-    );
-    assert_eq!(zone_of(&runner, bolt), Zone::Exile);
-    assert_eq!(zone_of(&runner, shock), Zone::Graveyard);
-    assert_eq!(zone_of(&runner, deluge), Zone::Exile);
-    assert_settled(&runner, "Mnemonic Deluge declined");
 }
 
 // ---------------------------------------------------------------------------------------------

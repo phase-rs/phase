@@ -1529,6 +1529,7 @@ face = [
   { key = "mizzix, replica rider", class = "wrong_object", clauses = ["If the copy is a permanent spell, it gains haste and \"At the beginning of your end step, sacrifice this permanent.\""] },
   { key = "mjölnir, hammer of thor", class = "target_wrong", clauses = ["Equip worthy {1}"] },
   { key = "mnemonic betrayal", class = "wrong_zone", clauses = ["At the beginning of the next end step, if any of those cards remain exiled, return them to their owners' graveyards."] },
+  { key = "mnemonic deluge", class = "wrong_count", clauses = ["Copy that card three times.", "You may cast the copies without paying their mana costs."] },
   { key = "mob mentality", class = "trigger_wrong", clauses = ["Whenever all non-Wall creatures you control attack, enchanted creature gets +X/+0 until end of turn, where X is the number of attacking creatures."] },
   { key = "mogg assassin", class = "wrong_object", clauses = ["If you win the flip, destroy the creature you chose. If you lose the flip, destroy the creature your opponent chose."] },
   { key = "mogg maniac", class = "target_wrong", clauses = ["Whenever this creature is dealt damage, it deals that much damage to target opponent or planeswalker."] },
