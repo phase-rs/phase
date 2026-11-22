@@ -18396,12 +18396,38 @@ fn persistent_exile_play_permission_pick_up_the_pace_attack_gate() {
             .all(|ability| !matches!(ability.effect.as_ref(), Effect::CastFromZone { .. })),
         "the permission must not fall through to a one-shot CastFromZone effect"
     );
+    fn walk<'a>(ability: &'a AbilityDefinition, effects: &mut Vec<&'a Effect>) {
+        effects.push(&ability.effect);
+        if let Some(sub) = &ability.sub_ability {
+            walk(sub, effects);
+        }
+    }
+    let mut effects = Vec::new();
+    for ability in &parsed.abilities {
+        walk(ability, &mut effects);
+    }
     assert!(
-        parsed.parse_warnings.iter().all(|warning| {
-            warning.to_string().split_whitespace().next() != Some("Swallow:Condition_AsLongAs")
-        }),
-        "the condition must not be reported as swallowed: {:?}",
-        parsed.parse_warnings
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::Unimplemented { .. })),
+        "Pick Up the Pace must not emit Effect::Unimplemented: {effects:?}"
+    );
+    let swallowed_condition: Vec<_> = parsed
+        .parse_warnings
+        .iter()
+        .filter(|warning| {
+            matches!(
+                warning,
+                crate::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
+                    detector,
+                    ..
+                } if detector == "Condition_AsLongAs"
+            )
+        })
+        .collect();
+    assert!(
+        swallowed_condition.is_empty(),
+        "the condition must not be reported as swallowed: {swallowed_condition:?}"
     );
 }
 

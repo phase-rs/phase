@@ -3536,13 +3536,7 @@ pub(crate) fn try_parse_persistent_exile_play_permission(
         Some((rest, condition)) => (rest, Some(condition)),
         None => (rest, None),
     };
-    let condition = match (leading_condition, trailing_condition) {
-        (Some(leading), Some(trailing)) => Some(StaticCondition::And {
-            conditions: vec![leading, trailing],
-        }),
-        (Some(condition), None) | (None, Some(condition)) => Some(condition),
-        (None, None) => None,
-    };
+    let condition = super::evasion::combine_conditions(leading_condition, trailing_condition);
 
     // Optional "you may look at cards exiled with <self>, and " preamble
     // (CR 601.3f). When present, the play clause uses the "those cards" anaphor
