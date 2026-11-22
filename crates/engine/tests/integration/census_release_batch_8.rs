@@ -8,7 +8,8 @@
 //! One group per clause shape. The Goblin Recruiter group asserts the prompt the engine shows
 //! (actor, offered cards, count, reveal, ordering) before the effect; every group has controls
 //! that would fail if the clause counted wrongly (a card the filter must not offer, a different
-//! count, an empty answer), and ends with an empty stack and priority.
+//! count, an empty answer), and ends with priority and, unless a test says otherwise, an empty
+//! stack.
 use engine::database::card_db::CardDatabase;
 use engine::game::engine::EngineError;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -426,7 +427,7 @@ fn assert_still_target_selection(r: &GameRunner, what: &str) {
 }
 
 /// The discard restriction — not the X prompt's range and not target legality
-/// (CR 601.2b + CR 601.2h: the announced cost must be payable) — refuses an
+/// (CR 107.3a + CR 602.2b + CR 601.2h: X is announced, then the cost must be payable) — refuses an
 /// in-range X that no card in P0's hand matches. `spell` (a legal target for
 /// that X) is P1's only stack object; `highest` is the highest mana value among
 /// `hand`, where the X prompt's maximum caps.
@@ -482,11 +483,11 @@ fn kozilek_refuses_in_range_x_without_a_matching_discard(
     }
 }
 
-/// F2a: an X inside the prompt's range whose target is legal but whose discard
+/// An X inside the prompt's range whose target is legal but whose discard
 /// is not — only the cost restriction "mana value X" can refuse it.
 #[test]
 fn kozilek_rejects_an_in_range_x_with_a_matching_target_but_no_matching_discard() {
-    // The reviewer's shape: X = 1 is in range (the hand tops out at three) and
+    // X = 1 is in range (the hand tops out at three) and
     // the stack's Shock has mana value one, but no card in hand does.
     kozilek_refuses_in_range_x_without_a_matching_discard(
         &["Divination", "Grizzly Bears"],
@@ -504,7 +505,7 @@ fn kozilek_rejects_an_in_range_x_with_a_matching_target_but_no_matching_discard(
     );
 }
 
-/// F2b: with a matching discard in hand, the target restriction "mana value X"
+/// With a matching discard in hand, the target restriction "mana value X"
 /// is the only thing that can refuse a mismatched target spell, and the
 /// prompt's legal set names exactly the spells of the announced mana value.
 /// P1's second MV-2 spell keeps the target choice genuinely ambiguous: a
@@ -513,10 +514,10 @@ fn kozilek_rejects_an_in_range_x_with_a_matching_target_but_no_matching_discard(
 #[test]
 fn kozilek_rejects_a_target_whose_mana_value_is_not_x_even_with_a_matching_discard() {
     let (mut r, kozilek, p0_hand, p1_spells) = kozilek_facing_p1_spells(
-        &["Grizzly Bears"],
+        &["Grizzly Bears", "Forest"],
         &["Phyrexian Arena", "Shock", "Grizzly Bears", "Grizzly Bears"],
     );
-    let p0_bears = p0_hand[0];
+    let (p0_bears, p0_forest) = (p0_hand[0], p0_hand[1]);
     let [arena, shock, bears, bears_copy] =
         [p1_spells[0], p1_spells[1], p1_spells[2], p1_spells[3]];
     r.act(GameAction::ActivateAbility {
@@ -529,7 +530,7 @@ fn kozilek_rejects_a_target_whose_mana_value_is_not_x_even_with_a_matching_disca
     assert_eq!(min, 0, "the X prompt's minimum is the printed floor");
     assert_eq!(
         max, 2,
-        "the only card in hand has mana value two, so the prompt caps X there"
+        "the hand holds mana values zero and two, so the prompt caps X at two"
     );
     r.act(GameAction::ChooseX { value: 2 })
         .expect("X = 2 matches the Grizzly Bears in hand");
@@ -553,6 +554,12 @@ fn kozilek_rejects_a_target_whose_mana_value_is_not_x_even_with_a_matching_disca
     offered.sort();
     let mut expected = vec![TargetRef::Object(bears), TargetRef::Object(bears_copy)];
     expected.sort();
+    let mut current = selection.current_legal_targets.clone();
+    current.sort();
+    assert_eq!(
+        current, expected,
+        "the prompt's progress record, which ChooseTarget is checked against, lists the same set"
+    );
     assert_eq!(
         offered, expected,
         "X = 2 offers exactly the two MV-2 spells; Arena (MV 3) and Shock (MV 1) \
@@ -614,7 +621,7 @@ fn kozilek_rejects_a_target_whose_mana_value_is_not_x_even_with_a_matching_disca
     assert_eq!(
         *choices,
         vec![p0_bears],
-        "the cost restriction \"mana value X\" offers only the MV-2 card in hand"
+        "the cost restriction \"mana value X\" offers the MV-2 card and not the MV-0 Forest"
     );
     r.act(GameAction::SelectCards {
         cards: vec![p0_bears],
@@ -640,12 +647,17 @@ fn kozilek_rejects_a_target_whose_mana_value_is_not_x_even_with_a_matching_disca
         Zone::Graveyard,
         "the announced card was discarded"
     );
+    assert_eq!(
+        zone_of(&r, p0_forest),
+        Zone::Hand,
+        "only the card of the announced mana value was discarded"
+    );
     assert!(
-        r.state().graveyard_of(P1).iter().any(|&id| id == bears),
+        r.state().graveyard_of(P1).contains(&bears),
         "the countered spell went to its owner's graveyard"
     );
     assert!(
-        r.state().graveyard_of(P0).iter().any(|&id| id == p0_bears),
+        r.state().graveyard_of(P0).contains(&p0_bears),
         "the discard went to P0's graveyard"
     );
     let stack_ids: Vec<ObjectId> = r.state().stack.iter().map(|entry| entry.id).collect();
