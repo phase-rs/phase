@@ -1500,6 +1500,7 @@ fn pick_up_the_pace_tracks_current_turn_attacks_for_linked_exile_play() {
     let first_goblin = scenario.add_real_card(P0, "Raging Goblin", Zone::Hand, db);
     let second_goblin = scenario.add_real_card(P0, "Raging Goblin", Zone::Hand, db);
     let mountain = scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    let second_mountain = scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
     let first_exiled_spell = scenario.add_real_card(P0, "Shock", Zone::Library, db);
     // The two draw steps between the attacks consume these fillers, leaving the
     // land on top for the second attack's trigger.
@@ -1678,6 +1679,12 @@ fn pick_up_the_pace_tracks_current_turn_attacks_for_linked_exile_play() {
         .expect("the opponent may decline to block the second attack");
     runner.combat_damage();
     runner.advance_to_phase(Phase::PostCombatMain);
+    runner.activate(second_mountain, 0).resolve();
+    let retained_spell_actions = legal_actions(runner.state());
+    assert!(
+        can_cast(&runner, first_exiled_spell),
+        "CR 611.3a: the first linked spell must become castable again after a later attack; legal actions: {retained_spell_actions:?}"
+    );
     let second_land_actions = legal_actions(runner.state());
     assert!(
         can_play_land(&runner, second_exiled_land),
