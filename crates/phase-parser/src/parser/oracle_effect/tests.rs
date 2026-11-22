@@ -4771,6 +4771,32 @@ fn mass_exile_population_union_declines_orphan_instruction_tail() {
     );
 }
 
+/// Tested fence: a union whose legs all name one zone and are joined by a repeated "all" is not
+/// claimed (no cross-zone operation to unify), so the second population stays an honest gap
+/// instead of a second chained exile (the same parse the generic path gave before the union).
+/// Reach guard: the first leg parsed as a graveyard mass exile.
+#[test]
+fn mass_exile_same_zone_repeated_all_union_stays_an_honest_gap() {
+    let def = parse_effect_chain(
+        "Exile all artifact cards from all graveyards and all creature cards from all graveyards.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::ChangeZoneAll { .. }),
+        "reach guard: first leg is a graveyard mass exile, got {:?}",
+        def.effect
+    );
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("the second population is chained");
+    assert!(
+        matches!(&*sub.effect, Effect::Unimplemented { .. }),
+        "the same-zone repeated-all conjunct must stay unsupported, got {:?}",
+        sub.effect
+    );
+}
+
 /// CR 400.1 + CR 608.2c: the union refuses an operand whose anaphoric player's zone the filter
 /// would drop, exactly as the generic exile path does (Elder Brain's "from that player's hand"):
 /// accepting it would sweep every player's hand. Reach guard: the same shape without the
