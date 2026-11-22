@@ -1452,8 +1452,7 @@ fn legacy_save_without_entry_token_status(state: &GameState) -> PersistedGameSta
     serde_json::from_value(save).unwrap()
 }
 
-#[test]
-fn legacy_entry_token_status_is_recovered_for_same_incarnation() {
+fn legacy_bears_entry() -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let gyome = scenario
@@ -1474,7 +1473,12 @@ fn legacy_entry_token_status_is_recovered_for_same_incarnation() {
         .resolve()
         .assert_zone(&[bears], Zone::Battlefield);
     assert_priority(&runner);
+    (runner, gyome, bears)
+}
 
+#[test]
+fn legacy_entry_token_status_is_recovered_for_same_incarnation() {
+    let (runner, gyome, _) = legacy_bears_entry();
     let restored = legacy_save_without_entry_token_status(runner.state())
         .into_game_state()
         .unwrap();
@@ -1482,6 +1486,27 @@ fn legacy_entry_token_status_is_recovered_for_same_incarnation() {
         restored.battlefield_entries_this_turn[0].token_status,
         Some(EntryTokenStatus::Nontoken)
     );
+    assert_gyome_food_delta(&mut GameRunner::from_state(restored), gyome, 1);
+}
+
+#[test]
+fn legacy_entry_token_status_is_recovered_from_entrant_object_only() {
+    let (mut runner, gyome, bears) = legacy_bears_entry();
+    let state = runner.state_mut();
+    assert!(state
+        .zone_changes_this_turn
+        .iter()
+        .any(|change| { change.object_id == bears && change.to_zone == Zone::Battlefield }));
+    state.zone_changes_this_turn.clear();
+    state.instruction_boundary_marks.clear();
+    state.battlefield_entry_observations = Default::default();
+
+    let legacy = legacy_save_without_entry_token_status(state);
+    let restored = legacy.into_game_state().unwrap();
+    assert_eq!(restored.objects[&bears].zone, Zone::Battlefield);
+    let entry = &restored.battlefield_entries_this_turn[0];
+    assert_eq!(entry.object_id, bears);
+    assert_eq!(entry.token_status, Some(EntryTokenStatus::Nontoken));
     assert_gyome_food_delta(&mut GameRunner::from_state(restored), gyome, 1);
 }
 

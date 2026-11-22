@@ -21,7 +21,7 @@ use crate::parser::oracle_ir::diagnostic::{
     ClauseGap, ClauseGapKind, OracleDiagnostic, OracleItemId, OracleSourceSpan, SpanPrecision,
 };
 use crate::parser::oracle_util::normalize_card_name_refs;
-use crate::types::ability::TurnWindow;
+use crate::types::ability::{filter_grammar_any, FilterGrammarNode, TurnWindow};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
     ActivationRestriction, AdditionalCost, AggregateFunction, AttachmentReferent, AttackSubject,
@@ -12762,7 +12762,17 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         // `cargo run --profile tool --bin coverage-report -- data --all`.
         QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => (
             "BattlefieldEntriesThisTurn",
-            if crate::types::ability::ledger_filter_is_evaluable(filter) {
+            // CR 611.3c: continuous effects apply as permanents enter. An effect's
+            // final instruction can still record pre-layer types instead of entry-time
+            // types, so coverage withholds support for reads that use token identity.
+            if crate::types::ability::ledger_filter_is_evaluable(filter)
+                && !filter_grammar_any(filter, &|node| {
+                    matches!(
+                        node,
+                        FilterGrammarNode::Prop(FilterProp::Token | FilterProp::NonToken)
+                    )
+                })
+            {
                 Handled
             } else {
                 Unhandled
@@ -24897,12 +24907,6 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             ("BattlefieldEntriesThisTurn", FeatureSupport::Handled),
             "(a2) FaceDown is captured on the entry snapshot"
         );
-        for prop in [FilterProp::Token, FilterProp::NonToken] {
-            assert_eq!(
-                quantity_ref_feature(&ledger(vec![prop])),
-                ("BattlefieldEntriesThisTurn", FeatureSupport::Handled)
-            );
-        }
         // (b)/(c) vacuity controls — the feature stays Handled for evaluable filters.
         assert_eq!(
             quantity_ref_feature(&ledger(vec![])),
@@ -24935,6 +24939,43 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled),
             "(d) CR 608.2i: an Or disjunct the matcher drops is a silent partial count of a \
              look-back read"
+        );
+    }
+
+    #[test]
+    fn battlefield_entries_coverage_fences_token_identity() {
+        let creature = |properties| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties,
+            })
+        };
+        let feature = |filter| {
+            quantity_ref_feature(&QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::Controller,
+                filter,
+            })
+        };
+
+        assert_eq!(
+            feature(creature(vec![FilterProp::NonToken])),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled)
+        );
+        assert_eq!(
+            feature(creature(vec![])),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Handled)
+        );
+        assert_eq!(
+            feature(TargetFilter::And {
+                filters: vec![
+                    creature(vec![]),
+                    TargetFilter::Or {
+                        filters: vec![creature(vec![]), creature(vec![FilterProp::Token])],
+                    },
+                ],
+            }),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled)
         );
     }
 
