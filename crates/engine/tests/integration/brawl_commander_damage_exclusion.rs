@@ -1,6 +1,5 @@
 //! CR 903.12h: Brawl games do not use CR 704.6c's 21 commander-damage loss.
 
-use std::io::BufReader;
 use std::sync::Arc;
 
 use engine::database::card_db::CardDatabase;
@@ -21,7 +20,6 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replay::{ReplayHeader, ReplayLog};
 use engine::types::zones::Zone;
-use flate2::read::GzDecoder;
 
 const GHALTA_PRIMAL_HUNGER: &str = "This spell costs {X} less to cast, where X is the total power of creatures you control.\nTrample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)";
 
@@ -263,13 +261,7 @@ fn legacy_brawl_replay_loads_with_its_recorded_threshold() {
 }
 
 fn fixture_db() -> Arc<CardDatabase> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/integration_cards.json.gz");
-    let file = std::fs::File::open(path).expect("fixture opens");
-    Arc::new(
-        CardDatabase::from_export_reader(GzDecoder::new(BufReader::new(file)))
-            .expect("fixture loads"),
-    )
+    Arc::new(CardDatabase::from_integration_fixture().expect("fixture loads"))
 }
 
 fn commander_deck(commander: &str, land: &str, lands: usize) -> PlayerDeckList {

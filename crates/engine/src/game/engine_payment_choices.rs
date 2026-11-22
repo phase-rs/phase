@@ -1117,16 +1117,17 @@ pub(crate) fn begin_player_scope_token_unless_sacrifice(
     let Some(modifier) = ability.unless_pay.as_ref() else {
         return false;
     };
-    let AbilityCost::Sacrifice(cost) = &modifier.cost else {
+    let Some(costs::SingleChoicePayment::SacrificeOne { .. }) =
+        costs::single_choice_payment(&modifier.cost)
+    else {
         return false;
     };
     // The scoped resolver owns the actual payer. Oracle lowering can preserve
     // an anaphoric "they" as `Player` before the outer player scope is applied.
     if !matches!(
-        (&modifier.payer, &cost.requirement, &ability.effect),
+        (&modifier.payer, &ability.effect),
         (
             TargetFilter::ScopedPlayer | TargetFilter::Player,
-            SacrificeRequirement::Count { count: 1 },
             Effect::Token {
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 ..
@@ -1315,11 +1316,10 @@ fn handle_player_scope_token_unless_payment(
     if !pay {
         return finish_player_scope_token_unless_payment(state, player, false, events);
     }
-    let AbilityCost::Sacrifice(cost) = cost else {
-        unreachable!("aggregate parser gate admits only sacrifice costs")
-    };
-    let SacrificeRequirement::Count { count: 1 } = cost.requirement else {
-        unreachable!("aggregate parser gate admits exactly one sacrifice")
+    let Some(costs::SingleChoicePayment::SacrificeOne { target }) =
+        costs::single_choice_payment(&cost)
+    else {
+        unreachable!("admitted by begin_player_scope_token_unless_sacrifice")
     };
     let pending_effect = state
         .pending_player_scope_unless_payment
@@ -1328,7 +1328,7 @@ fn handle_player_scope_token_unless_payment(
         .pending_effect
         .clone();
     let eligible =
-        eligible_unless_sacrifice_permanents(state, player, pending_effect.source_id, &cost.target);
+        eligible_unless_sacrifice_permanents(state, player, pending_effect.source_id, target);
     if eligible.is_empty() {
         return finish_player_scope_token_unless_payment(state, player, false, events);
     }
@@ -1427,6 +1427,20 @@ pub(super) fn handle_unless_payment(
             "CR 614.17b: a player can't choose to pay a cost that includes an event that can't happen"
                 .to_string(),
         ));
+    }
+    // CR 101.4 + CR 118.12a: an answer to an open choose-all-then-act poll is
+    // recorded, not paid; nothing happens until every seat has answered.
+    if effects::simultaneous_unless::binds(state, player, pending_effect.source_id) {
+        let event_start = events.len();
+        let waiting_for = match effects::simultaneous_unless::answer_branch(state, pay, &cost)
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+        {
+            effects::simultaneous_unless::WalkOutcome::Prompted => state.waiting_for.clone(),
+            effects::simultaneous_unless::WalkOutcome::Complete => {
+                settle_simultaneous_unless(state, events, SettlePipeline::RunFrom { event_start })?
+            }
+        };
+        return Ok(action_result(events, waiting_for));
     }
 
     let mut payment_failed = !pay;
@@ -2596,33 +2610,39 @@ pub(crate) fn awaits_payment_continuation(state: &GameState) -> bool {
     payment_continuation_prompt(state).is_some_and(|prompt| prompt == state.waiting_for)
 }
 
-/// CR 605.3a: whether the open unless-payment prompt asks for no mana: its
-/// cost is draws only (Psychic Vortex's upkeep, Decoy Gambit's "has you draw a
-/// card"), at the offer and at the continuation of a repeated payment alike.
-/// A mana ability is activated with priority or when a rule or effect asks for
-/// a mana payment; the payer of a draw cost has neither while the ability
-/// resolves (CR 117.1d). The one mana-window authority of an unless payment:
-/// the tap preflight, the tap and activation handlers and the legal-action
-/// lists (`ai_support::mana_action_player`) read it. Every other unless cost
-/// keeps the window it had. Taking back an earlier tap (`UntapLandForMana`)
-/// activates nothing and is admitted at every unless payment, as before.
+/// CR 605.3a + CR 117.1d + CR 608.2g: whether the open unless-payment prompt
+/// asks for no mana: its cost includes no mana payment
+/// (`costs::cost_asks_for_mana`): a sacrifice (Bellowing Mauler), life
+/// (Dwarven Forge-Chanter's Ward—Pay 2 life), draws (Psychic Vortex's upkeep),
+/// a cost that adds mana (Braid of Fire's upkeep), at the offer and at the
+/// continuation of a repeated payment alike. A mana ability is activated with
+/// priority or when a rule or effect asks for a mana payment; the payer of
+/// such a cost has neither while the ability resolves. The one mana-window
+/// authority of an unless payment: the tap preflight, the tap and activation
+/// handlers and the legal-action lists (`ai_support::mana_action_player`) read
+/// it. Every unless cost that asks for mana keeps its window. Taking back an
+/// earlier tap (`UntapLandForMana`) activates nothing and is admitted at every
+/// unless payment, as before. The branch choice and pick prompts of an unless
+/// payment (CR 118.12a: `UnlessPaymentChooseCost`, `WardSacrificeChoice`,
+/// `WardDiscardChoice`, `UnlessBounceChoice`) have no mana arm in the reducer,
+/// the tap preflight or the legal-action lists, so they open no window.
 pub(crate) fn unless_prompt_asks_for_no_mana(state: &GameState) -> bool {
     matches!(
         &state.waiting_for,
-        WaitingFor::UnlessPayment { cost, .. } if costs::cost_is_only_draws(cost)
+        WaitingFor::UnlessPayment { cost, .. } if !costs::cost_asks_for_mana(cost)
     )
 }
 
-/// CR 605.3a: refuse a mana action at an unless payment of draws
+/// CR 605.3a: refuse a mana action at an unless payment that asks for no mana
 /// ([`unless_prompt_asks_for_no_mana`]). At the continuation of a repeated
 /// payment the refusal also protects the owed cursor: a mana ability that
 /// paused on a replacement choice would take the slot the cursor is parked in
 /// (`GameState::pending_cost_move_resume`), after which the prompt would read
 /// as a fresh choice.
-pub(crate) fn refuse_mana_at_draw_only_payment(state: &GameState) -> Result<(), EngineError> {
+pub(crate) fn refuse_mana_where_none_is_asked(state: &GameState) -> Result<(), EngineError> {
     if unless_prompt_asks_for_no_mana(state) {
         return Err(EngineError::InvalidAction(
-            "CR 605.3a: a payment of draws asks for no mana".to_string(),
+            "CR 605.3a: this payment asks for no mana".to_string(),
         ));
     }
     Ok(())
@@ -3001,7 +3021,7 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
     selection: &ManaSourceSelection,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    refuse_mana_at_draw_only_payment(state)?;
+    refuse_mana_where_none_is_asked(state)?;
     let WaitingFor::UnlessPayment {
         player,
         cost,
@@ -3084,7 +3104,7 @@ pub(super) fn handle_unless_payment_activate_ability(
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    refuse_mana_at_draw_only_payment(state)?;
+    refuse_mana_where_none_is_asked(state)?;
     let WaitingFor::UnlessPayment {
         player,
         cost,
@@ -3152,6 +3172,16 @@ pub(super) fn handle_ward_discard_choice(
     chosen: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if let WaitingFor::WardDiscardChoice {
+        player,
+        pending_effect,
+        ..
+    } = &waiting_for
+    {
+        if effects::simultaneous_unless::binds(state, *player, pending_effect.source_id) {
+            return answer_simultaneous_unless_pick(state, &waiting_for, &chosen, events);
+        }
+    }
     let WaitingFor::WardDiscardChoice {
         player,
         cards: legal_cards,
@@ -3398,7 +3428,7 @@ pub(crate) fn prepare_unless_selection_payment(
     }
 }
 
-fn eligible_unless_sacrifice_permanents(
+pub(crate) fn eligible_unless_sacrifice_permanents(
     state: &GameState,
     player: PlayerId,
     sac_source: ObjectId,
@@ -3975,6 +4005,16 @@ pub(super) fn handle_ward_sacrifice_choice(
     chosen: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if let WaitingFor::WardSacrificeChoice {
+        player,
+        pending_effect,
+        ..
+    } = &waiting_for
+    {
+        if effects::simultaneous_unless::binds(state, *player, pending_effect.source_id) {
+            return answer_simultaneous_unless_pick(state, &waiting_for, &chosen, events);
+        }
+    }
     let WaitingFor::WardSacrificeChoice {
         player,
         permanents,
@@ -4430,6 +4470,99 @@ pub(crate) fn set_active_priority(state: &mut GameState) {
     let player = living_priority_seat(state);
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
+}
+
+/// CR 101.4: a pick answering an open choose-all-then-act poll. The last
+/// answer settles the poll; the reducer epilogue runs this action's post-action
+/// pipeline when the settle leaves a priority wait (the ward-choice arms return
+/// their wait to it).
+fn answer_simultaneous_unless_pick(
+    state: &mut GameState,
+    prompt: &WaitingFor,
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let event_start = events.len();
+    match effects::simultaneous_unless::answer_pick(state, prompt, chosen)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+    {
+        effects::simultaneous_unless::WalkOutcome::Prompted => Ok(state.waiting_for.clone()),
+        effects::simultaneous_unless::WalkOutcome::Complete => settle_simultaneous_unless(
+            state,
+            events,
+            SettlePipeline::ReducerEpilogue { event_start },
+        ),
+    }
+}
+
+/// Who runs the post-action pipeline after a poll's last answer is settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettlePipeline {
+    /// The answering handler returns its result directly, so the settle runs
+    /// the pipeline over the action's events from `event_start`.
+    RunFrom { event_start: usize },
+    /// The answering handler returns its wait to the reducer, whose epilogue
+    /// runs the pipeline under a priority wait. Any other wait the settle leaves
+    /// gets no pipeline there, so the settle runs it over the action's events
+    /// from `event_start`, as `RunFrom` does.
+    ReducerEpilogue { event_start: usize },
+}
+
+/// CR 101.4 + CR 608.2f: the last answer of a choose-all-then-act poll is in;
+/// every chosen action happens together and the resolution continues.
+/// CR 117.3b + CR 800.4j: priority is provisionally the active player's (or the
+/// next living seat's), the seat the completed resolution's own grant names.
+/// Exactly one post-action pipeline runs for the answer (CR 603.3 triggers,
+/// CR 704.3 state-based actions). A delivery paused on a CR 616.1 replacement
+/// choice leaves that choice as the wait; its resume runs the rest.
+fn settle_simultaneous_unless(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    pipeline: SettlePipeline,
+) -> Result<WaitingFor, EngineError> {
+    // Taking the carrier releases the poll's hold on its resolution, so no
+    // priority wait ever coexists with a live carrier (CR 117.2e).
+    let carrier = state.pending_simultaneous_unless.take().ok_or_else(|| {
+        EngineError::InvalidAction("CR 101.4: no unless poll to settle".to_string())
+    })?;
+    set_active_priority(state);
+    match effects::simultaneous_unless::deliver(state, *carrier, events, 0)
+        .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?
+    {
+        effects::simultaneous_unless::DeliveryOutcome::Paused => {
+            return Ok(state.waiting_for.clone());
+        }
+        effects::simultaneous_unless::DeliveryOutcome::Delivered { .. } => {}
+    }
+    resume_pending_continuation_if_priority(state, events)?;
+    let pipeline_start = match pipeline {
+        SettlePipeline::RunFrom { event_start } => Some(event_start),
+        // CR 603.2 + CR 603.3 + CR 616.1: a delivery whose later work left a
+        // non-priority wait leaves the reducer epilogue no pipeline to run.
+        // A delivery paused on a step's or the batch's CR 616.1
+        // choice holds its completed events
+        // (`SimultaneousUnlessDelivery.held_events` / the batch's
+        // `deferred_events`), so no pipeline collects them before the delivery
+        // completes (CR 603.10). This pipeline collects the triggers of the
+        // events that remain in the buffer. The collected triggers wait in the
+        // deferred queue until a player would receive priority.
+        SettlePipeline::ReducerEpilogue { event_start } => {
+            (!matches!(state.waiting_for, WaitingFor::Priority { .. })).then_some(event_start)
+        }
+    };
+    if let Some(event_start) = pipeline_start {
+        let default_wf = state.waiting_for.clone();
+        let wf = engine_priority::run_post_action_pipeline_from(
+            state,
+            events,
+            event_start,
+            &default_wf,
+            false,
+            false,
+        )?;
+        state.waiting_for = wf;
+    }
+    Ok(state.waiting_for.clone())
 }
 
 fn action_result(events: &mut Vec<GameEvent>, waiting_for: WaitingFor) -> ActionResult {

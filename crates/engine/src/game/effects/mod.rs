@@ -250,6 +250,7 @@ pub mod separate_piles;
 pub mod set_class_level;
 pub mod set_room_door_lock;
 pub mod shuffle;
+pub(crate) mod simultaneous_unless;
 pub mod skip_next_step;
 pub mod skip_next_turn;
 pub mod solve_case;
@@ -1603,6 +1604,20 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         crate::game::engine_resolution_choices::settle_pending_library_search_delivery(
             state, events,
         );
+    }
+    // CR 101.4 + CR 614.1 + CR 608.2c: a choose-all-then-act delivery parked on
+    // a step's prompt resumes its remaining steps once that step has fully
+    // settled, and before any later instruction of its resolution runs.
+    if simultaneous_unless::delivery_is_parked(state) {
+        if simultaneous_unless::delivery_may_resume(state) {
+            simultaneous_unless::resume_parked_delivery(state, events);
+        }
+        // CR 608.2c: while the delivery is parked, no later instruction runs.
+        if simultaneous_unless::delivery_is_parked(state)
+            || !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        {
+            return;
+        }
     }
     // The continuation — the completed ChangeZone's chained downstream, or any
     // other parked chain — runs only once the inner iteration finished without
@@ -5611,6 +5626,9 @@ pub(crate) fn apply_parent_chain_context(
     // context wholesale, so preserve the node-local intent while inheriting
     // the remaining casting-time facts from its parent.
     let child_face_down_in_exile = child.context.face_down_in_exile;
+    // CR 118.12: the discard cause is the node's own — a cost-paying delivery
+    // node never makes a chained instruction's discard a cost.
+    let child_discard_cause = child.context.discard_cause;
     // CR 610.3a / CR 610.3b: `check_exile_returns` latches a specified "until" event on the
     // exact duration-bearing ChangeZone node it happened for (after the activation or trigger,
     // before that node's initial zone change). Like the face-down marker, the
@@ -5636,6 +5654,7 @@ pub(crate) fn apply_parent_chain_context(
     child.context.settled_damage_guards = child_settled_guards;
     child.context.parked_damage_batch = child_parked_batch;
     child.context.face_down_in_exile |= child_face_down_in_exile;
+    child.context.discard_cause = child_discard_cause;
     // CR 608.2c: a phase action's resolved population is a one-hop input to
     // the application-filter consumer the phase branch bound it to. It is not
     // a producer's `forward_result` antecedent for the rest of the chain: a
@@ -9954,6 +9973,7 @@ fn instruction_outlives_declined_gate(
         sub_link: _,
         sibling_condition: _,
         instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the CR 101.4 admission authority (`simultaneous_unless::admits`)
         // CR 611.2e: when the instruction's continuous effect starts, not what
         // it names.
         entry_onset: _,
@@ -12716,6 +12736,7 @@ fn static_mode_reads_filter_population(
         // Filter-free: nothing to read.
         StaticMode::Continuous
         | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::LethalDamageDeterminedByPower
         | StaticMode::CantAttack
         | StaticMode::CantBlock
         | StaticMode::CantAttackOrBlock
@@ -14631,30 +14652,31 @@ fn fan_out_head_is_allowlisted(head: &ResolvedAbility) -> bool {
         optional_player: _, // selects the optional actor; `optional` records the choice
         sibling_condition: _, // replication marker for `condition`, evaluates nothing itself
         instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
-        player_scope: _,     // cleared on the per-seat template by the split
-        starting_with: _,    // APNAP start of the fan-out, fixed before the first seat
-        announced_x: _,      // announce-time count
-        multi_target: _,     // announce-time target-count bounds
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the CR 101.4 admission authority (`simultaneous_unless::admits`)
+        player_scope: _,  // cleared on the per-seat template by the split
+        starting_with: _, // APNAP start of the fan-out, fixed before the first seat
+        announced_x: _,   // announce-time count
+        multi_target: _,  // announce-time target-count bounds
         target_constraints: _, // announce-time cross-target legality
-        distribution: _,     // announce-time portions
-        distribute: _,       // announce-time division
-        targets: _,          // announced targets, already resolved
+        distribution: _,  // announce-time portions
+        distribute: _,    // announce-time division
+        targets: _,       // announced targets, already resolved
         declares_chosen_group: _, // announce-time identity
         reads_chosen_group: _, // bound selected targets
         declares_return_result: _, // publication marker
         reads_return_result: _, // consumes a settled value
-        source_id: _,        // object id
-        cast_occurrence: _,  // cast provenance
+        source_id: _,     // object id
+        cast_occurrence: _, // cast provenance
         source_incarnation: _, // self-transform epoch latch
         announced_source_incarnation: _, // announcement-time source epoch
         chosen_target_slots: _, // CR 115.1 announced-target record
         noted_mana_payment: _, // activation-payment snapshot
-        trigger_source: _,   // trigger provenance
+        trigger_source: _, // trigger provenance
         trigger_definition_ref: _, // trigger provenance
-        delayed_origin: _,   // delayed-trigger identity
+        delayed_origin: _, // delayed-trigger identity
         force_block_attacker: _, // force-block referent
         target_incarnations: _, // CR 400.7 referent pins
-        target_pins: _,      // CR 400.7 selected-target pins
+        target_pins: _,   // CR 400.7 selected-target pins
         legacy_selected_target_incarnations: _,
         illegal_target_slots: _,         // CR 608.2b legality stamp
         unjudged_target_slots: _,        // CR 608.2b legality stamp
@@ -21513,6 +21535,24 @@ fn repeat_for_outermost_with_scope_or_unless(ability: &ResolvedAbility) -> bool 
         && (ability.player_scope.is_some() || ability.unless_pay.is_some())
 }
 
+/// CR 608.2h: the outermost counted repeat's iteration count, determined once
+/// against the hydrated ability (event-context targets bound, so a count that
+/// reads the trigger's object reads it as it last existed), with the hydrated
+/// ability it was determined against. The single count authority for both the
+/// round-by-round driver and the CR 101.4 choose-all-then-act coordinator.
+fn outermost_repeat_count<'a>(
+    state: &GameState,
+    ability: &'a ResolvedAbility,
+) -> (Cow<'a, ResolvedAbility>, usize) {
+    let hydrated = hydrate_event_context_targets(state, ability);
+    let count = match hydrated.repeat_for.as_ref() {
+        Some(qty) => crate::game::quantity::resolve_quantity_with_targets(state, qty, &hydrated)
+            .max(0) as usize,
+        None => 1,
+    };
+    (hydrated, count)
+}
+
 /// CR 608.2c: Drive a `repeat_for` loop whose iterations each run the full
 /// `resolve_chain_body` (scoped fan-out + unless-pay + effect) with
 /// `repeat_for` cleared so the inner pass does not re-enter this driver.
@@ -21523,13 +21563,8 @@ fn drive_repeat_for_outermost(
     depth: u32,
     mut payment_choice: Option<AutoMayChoice>,
 ) -> Result<ResolutionProgress, EffectError> {
-    let hydrated = hydrate_event_context_targets(state, ability);
+    let (hydrated, base_iterations) = outermost_repeat_count(state, ability);
     let effective = hydrated.as_ref();
-    let base_iterations = if let Some(ref qty) = effective.repeat_for {
-        crate::game::quantity::resolve_quantity_with_targets(state, qty, effective).max(0) as usize
-    } else {
-        1
-    };
 
     let mut iteration = 0usize;
     while iteration < base_iterations {
@@ -25093,12 +25128,14 @@ pub(crate) fn drain_pending_discard_batch(
     match cursor {
         DiscardBatchCursor::All { remaining } => {
             for (i, obj_id) in remaining.iter().enumerate() {
+                // CR 701.9a vs CR 118.12: the batch's own cause.
                 if let discard::DiscardOutcome::NeedsReplacementChoice(chooser) =
-                    discard::discard_caused_by_effect_with_source_and_frame(
+                    discard::discard_with_cause_and_frame(
                         state,
                         *obj_id,
                         batch.player,
                         Some(batch.source_id),
+                        batch.cause,
                         batch.discard_frame,
                         events,
                     )
@@ -25129,7 +25166,7 @@ pub(crate) fn drain_pending_discard_batch(
                     source_id: batch.source_id,
                     count: remaining,
                     eligible: pool,
-                    cause: discard::DiscardCause::Effect,
+                    cause: batch.cause,
                     discard_frame: batch.discard_frame,
                 },
                 events,
@@ -25160,11 +25197,12 @@ pub(crate) fn drain_pending_discard_batch(
                 }
                 let player = state.objects[&card.object_id].owner;
                 if let discard::DiscardOutcome::NeedsReplacementChoice(chooser) =
-                    discard::discard_caused_by_effect_with_source_and_frame(
+                    discard::discard_with_cause_and_frame(
                         state,
                         card.object_id,
                         player,
                         Some(batch.source_id),
+                        batch.cause,
                         batch.discard_frame,
                         events,
                     )
@@ -27076,6 +27114,10 @@ fn resolve_chain_body(
     if repeat_for_outermost_with_scope_or_unless(ability)
         && !has_member_driven_repeat_after_hydration(state, ability)
     {
+        // CR 101.4 + CR 608.2h: Viper-class instances are chosen first, acted together.
+        if simultaneous_unless::admits(ability) {
+            return simultaneous_unless::start(state, ability, events, depth);
+        }
         return drive_repeat_for_outermost(state, ability, events, depth, payment_choice);
     }
 
@@ -50647,6 +50689,7 @@ mod tests {
                     0,
                 ),
                 discard_frame: None,
+                cause: crate::types::game_state::DiscardCause::Effect,
                 fan_out,
                 preceding_events: Vec::new(),
             }));
