@@ -18767,6 +18767,18 @@ fn hunger_tide_rises_chapter_iv_sacrifice_search_put_chain() {
         "expected Shuffle tail, got {:?}",
         shuffle.effect
     );
+    // CR 701.23a + CR 608.2c: the printed "If you search your library this way" guard is carried on
+    // the Shuffle (reach guard: the Shuffle tail above is the node asserted here).
+    assert_eq!(
+        shuffle.condition,
+        Some(AbilityCondition::ScopedPlayerMatches {
+            filter: crate::types::ability::PlayerFilter::PerformedActionThisWay {
+                relation: crate::types::ability::PlayerRelation::Controller,
+                action: crate::types::event_kinds::PlayerActionKind::SearchedLibrary,
+            },
+        }),
+        "the shuffle must be gated on the controller's library search"
+    );
 }
 
 /// CR 608.2c + CR 117.3a + CR 701.23a: Winds of
@@ -66706,6 +66718,103 @@ fn claim_jumper_parses_repeat_once_while_opponent_lands() {
         "Claim Jumper repeats once, got {:?}",
         trigger.repeat_until
     );
+    // CR 608.2c + CR 701.23a: the guard lowers on the chain's `Shuffle`, a descendant of the root
+    // that carries `repeat_until` (placement only: no claim about how many times it runs).
+    // Reach guard: the root is the library search itself.
+    assert!(
+        matches!(&*trigger.effect, Effect::SearchLibrary { .. }),
+        "the repeat root is the library search, got {:?}",
+        trigger.effect
+    );
+    let shuffle = find_effect_node(trigger.sub_ability.as_deref(), |effect| {
+        matches!(effect, Effect::Shuffle { .. })
+    })
+    .expect("the printed shuffle is below the repeat root");
+    assert_eq!(shuffle.condition, Some(controller_searched_library_gate()));
+}
+
+/// The `ScopedPlayerMatches { PerformedActionThisWay { Controller, SearchedLibrary } }` gate that
+/// "If you search your library this way" lowers to (CR 701.23a + CR 608.2c).
+fn controller_searched_library_gate() -> AbilityCondition {
+    AbilityCondition::ScopedPlayerMatches {
+        filter: crate::types::ability::PlayerFilter::PerformedActionThisWay {
+            relation: crate::types::ability::PlayerRelation::Controller,
+            action: crate::types::event_kinds::PlayerActionKind::SearchedLibrary,
+        },
+    }
+}
+
+/// First node of the `sub_ability` chain starting at `node` whose effect satisfies `is_wanted`.
+fn find_effect_node(
+    mut node: Option<&AbilityDefinition>,
+    is_wanted: impl Fn(&Effect) -> bool,
+) -> Option<&AbilityDefinition> {
+    while let Some(link) = node {
+        if is_wanted(&*link.effect) {
+            return Some(link);
+        }
+        node = link.sub_ability.as_deref();
+    }
+    None
+}
+
+/// CR 701.23a + CR 701.24a + CR 608.2c: Unlucky Cabbage Merchant ("If you search your library this way,
+/// put this creature on the bottom of its owner's library, then shuffle.") lowers the guard onto the
+/// head clause it guards, the `PutAtLibraryPosition`, not onto a `Shuffle`. Parse-only: the card stays
+/// unsupported (its "then shuffle" is not parsed), so no support is claimed here.
+#[test]
+fn unlucky_cabbage_merchant_guard_lands_on_the_put_on_bottom_clause() {
+    let parsed = parse_oracle_text(
+        "When this creature enters, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this token: You gain 3 life.\")\nWhenever you sacrifice a Food, you may search your library for a basic land card and put it onto the battlefield tapped. If you search your library this way, put this creature on the bottom of its owner's library, then shuffle.",
+        "Unlucky Cabbage Merchant",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let sacrifice_trigger = parsed
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_deref())
+        .find(|execute| {
+            find_effect_node(Some(*execute), |effect| {
+                matches!(effect, Effect::SearchLibrary { .. })
+            })
+            .is_some()
+        })
+        .expect("reach guard: the Food-sacrifice trigger carries the library search");
+    let put_on_bottom = find_effect_node(Some(sacrifice_trigger), |effect| {
+        matches!(effect, Effect::PutAtLibraryPosition { .. })
+    })
+    .expect("the put-on-bottom clause is parsed");
+    assert_eq!(
+        put_on_bottom.condition,
+        Some(controller_searched_library_gate())
+    );
+}
+
+/// CR 701.24a + CR 608.2c: negative with a reach guard. A tutor that shuffles with no "this way" guard
+/// (Demonic Tutor: "Search your library for a card, put that card into your hand, then shuffle.") keeps an
+/// unconditional `Shuffle`; the gate is not applied to every shuffle after a search.
+#[test]
+fn unguarded_tutor_shuffle_stays_unconditional() {
+    use crate::types::ability::AbilityKind;
+    let def = parse_effect_chain(
+        "Search your library for a card, put that card into your hand, then shuffle.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        find_effect_node(Some(&def), |effect| matches!(
+            effect,
+            Effect::SearchLibrary { .. }
+        ))
+        .is_some(),
+        "reach guard: the tutor parsed its library search"
+    );
+    let shuffle = find_effect_node(Some(&def), |effect| {
+        matches!(effect, Effect::Shuffle { .. })
+    })
+    .expect("the tutor parsed its shuffle");
+    assert_eq!(shuffle.condition, None);
 }
 
 /// CR 705.2 + CR 608.2c: the resolution-scoped coin-flip loop gate — the flip

@@ -71312,6 +71312,48 @@ mod tests {
         assert!(!ungated.has_performed_action_this_way_gate());
     }
 
+    /// CR 608.2c: two different players' searches in one chain body are both kept (union, not overwrite),
+    /// and the controller-relative gate still answers only for the controller.
+    #[test]
+    fn performed_action_stamp_keeps_each_players_search() {
+        use crate::types::events::PlayerActionKind;
+        let state = GameState::new_two_player(42);
+        let searched = |player| (player, PlayerActionKind::SearchedLibrary);
+        let mut chain = build_resolved_from_def(
+            &AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Shuffle {
+                    target: TargetFilter::Controller,
+                },
+            ),
+            ObjectId(9002),
+            PlayerId(0),
+        );
+        chain.record_performed_actions_this_way_recursive(&[searched(PlayerId(0))]);
+        chain.record_performed_actions_this_way_recursive(&[searched(PlayerId(1))]);
+        assert_eq!(
+            chain.context.performed_actions_this_way.as_slice(),
+            &[searched(PlayerId(0)), searched(PlayerId(1))]
+        );
+        let controller_gate = PlayerFilter::PerformedActionThisWay {
+            relation: PlayerRelation::Controller,
+            action: PlayerActionKind::SearchedLibrary,
+        };
+        assert!(scoped_player_matches_filter(
+            &state,
+            &chain,
+            PlayerId(0),
+            &controller_gate
+        ));
+        // The opponent's search does not satisfy the controller-relative gate.
+        assert!(!scoped_player_matches_filter(
+            &state,
+            &chain,
+            PlayerId(1),
+            &controller_gate
+        ));
+    }
+
     /// CR 102.2 / CR 102.3 + CR 109.5: the production
     /// `ScopedPlayerMatches` evaluator uses canonical team topology and the
     /// printed controller preserved in `original_controller`. This test covers

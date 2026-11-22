@@ -286,10 +286,11 @@ fn chain(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
 //     `PerformedActionThisWay { Controller, SearchedLibrary }` on the sentence's own `Shuffle`
 //     (`library_search_this_way.rs`), true only when the chain's own search looked through the
 //     library (a `CantSearchLibrary` effect leaves a graveyard-only search without it).
-//     Gapping it would DELETE a correctly-represented instruction, and two pre-existing rows
-//     assert that `Shuffle` on this very sentence:
+//     Gapping it would DELETE a correctly-represented instruction, and two rows assert the
+//     gated `Shuffle` on this very sentence:
 //     `oracle_effect::tests::hunger_tide_rises_chapter_iv_sacrifice_search_put_chain` and
-//     `oracle_effect::tests::claim_jumper_parses_repeat_once_while_opponent_lands`.
+//     `oracle_effect::tests::claim_jumper_parses_repeat_once_while_opponent_lands` (the latter
+//     asserted no `Shuffle` before the guard was lowered).
 //
 // The claim V1 was meant to carry — a non-candidate guard gaps at the seam with no body
 // emitted — is true of the EVENT reading, and V13 already carries exactly that claim at
