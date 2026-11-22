@@ -14489,7 +14489,7 @@ mod tests {
     /// ability's source; a blank context, another tail and a window decline.
     #[test]
     fn source_is_blocking_relative_binds_only_for_the_source() {
-        let mut armed = ParseContext {
+        let armed = ParseContext {
             subject: Some(TargetFilter::SelfRef),
             ..ParseContext::default()
         };
@@ -24102,7 +24102,7 @@ mod tests {
         assert_eq!(consumed, " that target this creature".len());
 
         // Plural verb + bare "it": binds only under an armed context.
-        let mut self_ref_ctx = ParseContext {
+        let self_ref_ctx = ParseContext {
             subject: Some(TargetFilter::SelfRef),
             ..ParseContext::default()
         };
