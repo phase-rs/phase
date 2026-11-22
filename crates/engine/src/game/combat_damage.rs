@@ -1681,6 +1681,17 @@ pub fn combat_damage_to_defender(
     // CR 702.4b: the attacker assigns in the regular step if it has double strike,
     // or if it never had first strike and so has not assigned at all yet.
     if !has_departed(attacker_id) && (has_double_strike || !attacker_strikes_first) {
+        let Some(attacker) = regular_state.objects.get(&attacker_id) else {
+            return to_player as i32;
+        };
+        // CR 510.1a + CR 613.11: the regular step assigns from the attacker as the first
+        // step left it (an umbra armor Aura it lost no longer pumps it); 0 assigns nothing.
+        let power = combat_damage_amount(attacker);
+        if power == 0 {
+            return to_player as i32;
+        }
+        let has_trample = attacker.has_keyword(&Keyword::Trample);
+        let has_deathtouch = attacker.has_keyword(&Keyword::Deathtouch);
         // CR 506.4: a blocker removed from combat is no longer owed lethal damage. Each
         // remaining blocker is owed it counting what the first step marked on it
         // (CR 702.19b), measured on the battlefield
@@ -1822,6 +1833,9 @@ fn preview_first_step(
     {
         return None;
     }
+    // CR 613.1: settle continuous effects on the board the step left (an Aura destroyed by
+    // umbra armor stops pumping its creature) before the regular step reads it.
+    crate::game::layers::flush_layers(&mut preview);
     Some((preview, before))
 }
 

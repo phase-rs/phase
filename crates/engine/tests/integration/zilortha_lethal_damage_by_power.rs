@@ -826,14 +826,8 @@ fn fully_redirected_infect_damage_deals_the_creature_nothing() {
     );
 }
 
-/// P0's Ghalta, Primal Hunger (12/12, "Trample") wearing Battle Mastery, cast onto it from P0's
-/// hand, against P1's Zilortha and `partner` (a textless P1 creature). Returns the runner,
-/// Ghalta, Zilortha and the partner.
-fn ghalta_board(
-    partner: (&str, i32, i32),
-    defender: impl FnOnce(&mut GameScenario),
-) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
-    let mut scenario = board();
+/// P0's Ghalta, Primal Hunger (12/12, "Trample") and Battle Mastery in P0's hand, not yet cast.
+fn ghalta_and_battle_mastery(scenario: &mut GameScenario) -> (ObjectId, ObjectId) {
     let ghalta = scenario
         .add_creature(P0, "Ghalta, Primal Hunger", 12, 12)
         .as_legendary()
@@ -847,6 +841,18 @@ fn ghalta_board(
         .with_mana_cost(ManaCost::zero())
         .from_oracle_text_with_keywords(&["Enchant"], BATTLE_MASTERY)
         .id();
+    (ghalta, mastery)
+}
+
+/// P0's Ghalta, Primal Hunger (12/12, "Trample") wearing Battle Mastery, cast onto it from P0's
+/// hand, against P1's Zilortha and `partner` (a textless P1 creature). Returns the runner,
+/// Ghalta, Zilortha and the partner.
+fn ghalta_board(
+    partner: (&str, i32, i32),
+    defender: impl FnOnce(&mut GameScenario),
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = board();
+    let (ghalta, mastery) = ghalta_and_battle_mastery(&mut scenario);
     let z = zilortha(&mut scenario, P1);
     let (name, power, toughness) = partner;
     let partner = scenario.add_creature(P1, name, power, toughness).id();
@@ -1258,6 +1264,54 @@ fn zilortha_regeneration_alone_opens_first_strike_forecast() {
     assert_eq!(forecast, actual);
 }
 
+fn spider_umbra(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    scenario
+        .add_spell_to_hand(player, "Spider Umbra", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::zero())
+        .from_oracle_text_with_keywords(
+            &["Enchant", "Umbra armor"],
+            "Enchant creature\nEnchanted creature gets +1/+1 and has reach. (It can block creatures with flying.)\nUmbra armor (If enchanted permanent would be destroyed, instead remove all damage from it and destroy this Aura.)",
+        )
+        .id()
+}
+
+#[test]
+fn zilortha_forecast_uses_power_after_attacker_loses_umbra() {
+    let mut scenario = board();
+    scenario.with_life(P1, 30);
+    let (ghalta, mastery) = ghalta_and_battle_mastery(&mut scenario);
+    let umbra = spider_umbra(&mut scenario, P0);
+    let glissa = printed(
+        &mut scenario,
+        P1,
+        "Glissa, the Traitor",
+        (3, 3),
+        &["First strike", "Deathtouch"],
+        "First strike, deathtouch\nWhenever a creature an opponent controls dies, you may return target artifact card from your graveyard to your hand.",
+    );
+    let mut runner = scenario.build();
+    cast_at(&mut runner, mastery, ghalta);
+    cast_at(&mut runner, umbra, ghalta);
+    let life_before = runner.life(P1);
+
+    attack_and_block(&mut runner, &[ghalta], &[(glissa, ghalta)]);
+    assert_eq!(prompt_minimum(&runner, glissa), 3);
+    let forecast = combat_damage_to_defender(runner.state(), ghalta, &[glissa]);
+
+    assign(&mut runner, glissa, 3, 10).expect("Ghalta assigns 13 with Spider Umbra");
+    assert_eq!(zone(&runner, glissa), Zone::Graveyard);
+    assert_eq!(zone(&runner, umbra), Zone::Graveyard);
+    assert_eq!(zone(&runner, ghalta), Zone::Battlefield);
+    assert_eq!(life_before - runner.life(P1), 10);
+
+    finish_combat(&mut runner);
+    let actual = life_before - runner.life(P1);
+    assert_eq!(actual, 22);
+    assert_eq!(forecast, actual);
+}
+
 #[test]
 fn zilortha_forecast_falls_back_when_destruction_replacement_needs_choice() {
     let (mut runner, ghalta, hydra, (z, yargle, umbra, regenerate)) = hydra_combat_board(
@@ -1268,16 +1322,7 @@ fn zilortha_forecast_falls_back_when_destruction_replacement_needs_choice() {
                 .add_creature(P1, "Yargle, Glutton of Urborg", 9, 3)
                 .as_legendary()
                 .id();
-            let umbra = scenario
-                .add_spell_to_hand(P1, "Spider Umbra", false)
-                .as_enchantment()
-                .with_subtypes(vec!["Aura"])
-                .with_mana_cost(ManaCost::zero())
-                .from_oracle_text_with_keywords(
-                    &["Enchant", "Umbra armor"],
-                    "Enchant creature\nEnchanted creature gets +1/+1 and has reach. (It can block creatures with flying.)\nUmbra armor (If enchanted permanent would be destroyed, instead remove all damage from it and destroy this Aura.)",
-                )
-                .id();
+            let umbra = spider_umbra(scenario, P1);
             (z, yargle, umbra, regenerate_spell(scenario))
         },
         |runner, &(z, _, umbra, _)| {
