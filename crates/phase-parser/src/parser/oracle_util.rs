@@ -1299,6 +1299,22 @@ pub fn parse_ordinal(text: &str) -> Option<(u32, &str)> {
     None
 }
 
+/// Parse an ordinal list at the start of text: `<ordinal>` followed by any
+/// number of `or <ordinal>` items ("first or second", "first or second or third").
+/// Returns the ordinals in written order and the remaining text, or `None` when
+/// the text does not start with an ordinal or an `or` is not followed by one.
+/// A single ordinal yields a one-element list.
+pub fn parse_ordinal_list(text: &str) -> Option<(Vec<u32>, &str)> {
+    let (first, mut rest) = parse_ordinal(text)?;
+    let mut ordinals = vec![first];
+    while let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>("or ").parse(rest) {
+        let (next, remainder) = parse_ordinal(after_or)?;
+        ordinals.push(next);
+        rest = remainder;
+    }
+    Some((ordinals, rest))
+}
+
 /// Parse mana symbols like `{2}{W}{U}` at the start of text.
 /// Returns (ManaCost, remaining_text) or None.
 ///
@@ -3244,6 +3260,25 @@ mod tests {
     use super::*;
     use crate::types::mana::ManaCostShard;
     use nom::Parser;
+
+    #[test]
+    fn parse_ordinal_list_handles_single_and_or_lists() {
+        assert_eq!(
+            parse_ordinal_list("second card each turn"),
+            Some((vec![2], "card each turn"))
+        );
+        assert_eq!(
+            parse_ordinal_list("first or second card"),
+            Some((vec![1, 2], "card"))
+        );
+        assert_eq!(
+            parse_ordinal_list("first or second or third card"),
+            Some((vec![1, 2, 3], "card"))
+        );
+        assert_eq!(parse_ordinal_list("card each turn"), None);
+        // A dangling "or" that is not followed by an ordinal is not a list.
+        assert_eq!(parse_ordinal_list("first or card"), None);
+    }
 
     fn tp(text: &str) -> (String, String) {
         (text.to_string(), text.to_lowercase())

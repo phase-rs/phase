@@ -8255,6 +8255,22 @@ impl TypedFilter {
             || !self.properties.is_empty()
     }
 
+    /// Whether best-effort target parsing retained no standalone selection constraint.
+    ///
+    /// CR 115.1a + CR 115.1c: a target phrase describes the affected object or
+    /// player. An empty filter or `Another` alone does not preserve that
+    /// description; the latter only excludes a relative referent. CR 115.4:
+    /// damage-target wording has its own domain, which this filter alone
+    /// cannot establish. Every other property remains a real constraint.
+    pub fn lacks_standalone_selection_constraint(&self) -> bool {
+        self.type_filters.is_empty()
+            && self.controller.is_none()
+            && self
+                .properties
+                .iter()
+                .all(|property| *property == FilterProp::Another)
+    }
+
     pub fn normalized(mut self) -> Self {
         self.type_filters = normalized_type_filters(self.type_filters);
         self.properties = normalized_filter_props(self.properties);
@@ -17593,11 +17609,13 @@ impl Comparator {
     }
 }
 
-/// CR 508.1 / CR 508.1b: Subject axis for counting members of a triggering
-/// `AttackersDeclared` event.
+/// CR 508.1a + CR 508.1b: Subject axis for counting declared attackers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AttackersDeclaredCountSubject {
+    /// CR 508.1a + CR 508.4: Count creatures declared as attackers in this combat,
+    /// optionally excluding the source's observed incarnation (CR 400.7).
+    CurrentCombat { exclude_source: SourceExclusion },
     /// Count attackers whose controller matches `scope` relative to the trigger
     /// controller. `filter` is the optional condition-level type axis (CR
     /// 508.1): when `Some(f)`, only attackers whose object matches `f` are
@@ -20399,7 +20417,7 @@ pub fn is_direct_resolution_optional_payment_branch(cost: &AbilityCost) -> bool 
 /// absent: the optional-branch selector intercepts it before this executor and
 /// rewrites the completed frame to an empty prepaid composite.
 pub fn supported_at_resolution(cost: &AbilityCost) -> bool {
-    use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
+    use crate::types::ability::{BeholdCostAction, CardSelectionMode, DiscardSelfScope};
     match cost {
         AbilityCost::Mana { .. }
         | AbilityCost::ManaDynamic { .. }
@@ -20428,6 +20446,14 @@ pub fn supported_at_resolution(cost: &AbilityCost) -> bool {
         // CR 118.3: The shared effect-cost predicate admits only deterministic
         // payment effects that the authority resolves directly.
         AbilityCost::EffectCost { .. } if cost.supports_effect_cost_payment() => true,
+        // CR 614.12a + CR 118.3 + CR 701.4a: a single-object "behold a [quality]"
+        // replacement cost has an interactive resolution path.
+        AbilityCost::Behold {
+            count: 1,
+            action: BeholdCostAction::ChooseOrReveal,
+            type_choice: None,
+            ..
+        } => true,
         AbilityCost::Discard { .. }
         | AbilityCost::Sacrifice(_)
         | AbilityCost::Tap
@@ -21915,6 +21941,20 @@ impl LibraryPosition {
     /// Serde skip-helper: `Top` is the default and is omitted from JSON.
     pub fn is_top(&self) -> bool {
         matches!(self, Self::Top)
+    }
+
+    /// CR 401.4 + CR 401.7: whether several arrivals at this position are
+    /// grouped into one owner arrangement prompt. The one position contract for
+    /// both the staged producer and checked persistence: fixed positions (`Top`,
+    /// `Bottom`, a numbered slot, and a statically known "beneath the top X") are
+    /// arrangeable; a depth known only at resolution time and the random Alchemy
+    /// slot are not.
+    pub fn is_owner_arrangeable(&self) -> bool {
+        match self {
+            Self::Top | Self::Bottom | Self::NthFromTop { .. } => true,
+            Self::BeneathTop { depth } => matches!(depth, QuantityExpr::Fixed { .. }),
+            Self::RandomWithinTop { .. } => false,
+        }
     }
 }
 
@@ -41073,13 +41113,15 @@ pub enum TriggerCondition {
     ChosenLabelIs { label: String },
 
     /// CR 506.2 + CR 508.1 + CR 508.1b + CR 603.4: Intervening-if comparison
-    /// over the current attack declaration. Handles "attacks with N or more
+    /// over the current attack declaration or the current combat’s declaration
+    /// history. Handles "attacks with N or more
     /// creatures", "none of those creatures attacked you", and attack-target
     /// count gates such as "two or more of those creatures are attacking you
     /// and/or planeswalkers you control."
     ///
     /// The `subject` axis selects what is counted (attackers by controller, or
-    /// attacks by their announced target); the `Controller` subject also carries
+    /// attacks by their announced target, or declarations in this combat); the
+    /// `Controller` subject also carries
     /// the optional condition-level type filter (CR 508.1) so "you attack with
     /// two or more Dinosaurs" counts only Dinosaur attackers. `comparator` and
     /// `count` express the threshold (`GE 2` for "two or more", `EQ 0` for
@@ -41621,13 +41663,14 @@ pub enum ReplacementCondition {
     Unrecognized { text: String },
 }
 
-/// The historical wire shape of `NthSpellThisTurn` represented an exact ordinal.
+/// The historical wire shape of `NthSpellThisTurn` (and `NthDrawThisTurn`) represented an
+/// exact ordinal.
 /// Keep that meaning when a persisted export has no comparator field.
-fn default_nth_spell_comparator() -> Comparator {
+fn default_exact_ordinal_comparator() -> Comparator {
     Comparator::EQ
 }
 
-fn is_default_nth_spell_comparator(comparator: &Comparator) -> bool {
+fn is_default_exact_ordinal_comparator(comparator: &Comparator) -> bool {
     *comparator == Comparator::EQ
 }
 
@@ -41674,16 +41717,24 @@ pub enum TriggerConstraint {
     NthSpellThisTurn {
         n: u32,
         #[serde(
-            default = "default_nth_spell_comparator",
-            skip_serializing_if = "is_default_nth_spell_comparator"
+            default = "default_exact_ordinal_comparator",
+            skip_serializing_if = "is_default_exact_ordinal_comparator"
         )]
         comparator: Comparator,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
     },
-    /// "Whenever you draw your Nth card each turn" — fires exactly when the
-    /// triggering draw event's per-turn ordinal equals `n`.
-    NthDrawThisTurn { n: u32 },
+    /// "Whenever you draw your Nth card each turn" — the triggering draw event's
+    /// per-turn ordinal satisfies `comparator` against `n`. `EQ` preserves exact
+    /// ordinals; `LE` covers a contiguous prefix such as "your first or second card."
+    NthDrawThisTurn {
+        n: u32,
+        #[serde(
+            default = "default_exact_ordinal_comparator",
+            skip_serializing_if = "is_default_exact_ordinal_comparator"
+        )]
+        comparator: Comparator,
+    },
     /// "At the beginning of each opponent's [phase]"
     OnlyDuringOpponentsTurn,
     /// CR 505.1: Trigger fires only during the controller's main phase

@@ -153,6 +153,7 @@ fn resolve_sigil(runner: &mut GameRunner, sigil: ObjectId, expected: [i32; 3]) {
             | WaitingFor::EnlistChoice { .. }
             | WaitingFor::GameOver { .. }
             | WaitingFor::ReplacementChoice { .. }
+            | WaitingFor::ReplacementDecisionOrder { .. }
             | WaitingFor::EntryControllerChoice { .. }
             | WaitingFor::OrderTriggers { .. }
             | WaitingFor::CopyTargetChoice { .. }

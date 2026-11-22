@@ -2809,6 +2809,100 @@ fn intervening_if_source_attacked_this_turn_populates_condition() {
 }
 
 #[test]
+fn kytheon_end_of_combat_parses_condition_and_transformed_return() {
+    let trigger = parse_trigger_line(
+        "At end of combat, if Kytheon and at least two other creatures attacked this combat, exile Kytheon, then return him to the battlefield transformed under his owner's control.",
+        "Kytheon, Hero of Akros",
+    );
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert_eq!(trigger.phase, Some(Phase::EndCombat));
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::And {
+            conditions: vec![
+                TriggerCondition::SourceAttackedThisCombat,
+                TriggerCondition::AttackersDeclaredCount {
+                    subject: AttackersDeclaredCountSubject::CurrentCombat {
+                        exclude_source: SourceExclusion::Exclude,
+                    },
+                    comparator: Comparator::GE,
+                    count: 2,
+                },
+            ],
+        })
+    );
+    let exile = trigger.execute.as_deref().expect("exile instruction");
+    assert!(matches!(
+        exile.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    ));
+    // CR 608.2c: "him" is the card the exile instruction just moved.
+    let return_ability = exile.sub_ability.as_deref().expect("return instruction");
+    assert!(matches!(
+        return_ability.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            target: TargetFilter::ParentTarget,
+            enter_transformed: true,
+            enters_under: None,
+            ..
+        }
+    ));
+}
+
+// Synthetic grammar test: no printed card puts this combat count in a
+// sentence-local "Then if" clause. The nearest printed card is Kytheon, Hero
+// of Akros, whose "if" directly follows the trigger condition, so CR 603.4
+// makes it an intervening-if gate there.
+#[test]
+fn sentence_local_combat_count_does_not_gate_the_trigger() {
+    let trigger = parse_trigger_line(
+        "At end of combat, draw a card. Then if Kytheon and at least two other creatures attacked this combat, draw a card.",
+        "Kytheon, Hero of Akros",
+    );
+    assert_eq!(trigger.condition, None);
+    assert!(matches!(
+        trigger
+            .execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+}
+
+#[test]
+fn fearless_swashbuckler_keeps_typed_attack_event_counts() {
+    let trigger = parse_trigger_line(
+        "Whenever you attack, if a Pirate and a Vehicle attacked this combat, draw three cards, then discard two cards.",
+        "Fearless Swashbuckler",
+    );
+    let Some(TriggerCondition::And { conditions }) = trigger.condition else {
+        panic!("expected separate Pirate and Vehicle predicates");
+    };
+    assert_eq!(conditions.len(), 2);
+    for (condition, noun) in conditions.iter().zip(["pirate", "vehicle"]) {
+        let (remainder, filter) = parse_type_phrase_nom(noun).expect("typed noun");
+        assert!(remainder.is_empty());
+        assert_ne!(filter, TargetFilter::Any);
+        assert_eq!(
+            condition,
+            &TriggerCondition::AttackersDeclaredCount {
+                subject: AttackersDeclaredCountSubject::Controller {
+                    scope: ControllerRef::You,
+                    filter: Some(filter),
+                },
+                comparator: Comparator::GE,
+                count: 1,
+            }
+        );
+    }
+}
+
+#[test]
 fn tolsimir_midnights_light_preserves_combat_source_and_event_attacker_axes() {
     let trigger = parse_trigger_line(
         "Whenever a Wolf you control attacks, if Tolsimir, Midnight's Light attacked this combat, \
@@ -17593,10 +17687,74 @@ fn trigger_nth_draw_second() {
     );
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthDrawThisTurn { n: 2 })
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 2,
+            comparator: crate::types::ability::Comparator::EQ,
+        })
     );
 }
 
+#[test]
+fn trigger_nth_draw_first_or_second_card() {
+    let def = parse_trigger_line(
+        "Whenever you draw your first or second card each turn, put an ingenuity counter on Lady Octopus.",
+        "Lady Octopus, Inspired Inventor",
+    );
+    assert_eq!(def.mode, TriggerMode::Drawn);
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ))
+    );
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 2,
+            comparator: crate::types::ability::Comparator::LE,
+        })
+    );
+    assert!(
+        matches!(
+            def.execute.as_ref().map(|execute| execute.effect.as_ref()),
+            Some(Effect::PutCounter { .. })
+        ),
+        "the draw trigger body must remain parsed: {def:?}"
+    );
+}
+
+// No printed card uses these wordings; they guard the building block's refusal arms.
+// A non-prefix ordinal list ("second or third", "first or third") must not be read as a
+// contiguous "N or earlier" prefix, so no `NthDrawThisTurn` constraint is produced.
+// Each negative is paired with the same-shaped, positive "first or second" reach guard.
+#[test]
+fn trigger_nth_draw_non_prefix_ordinal_lists_are_refused() {
+    for text in [
+        "Whenever you draw your second or third card each turn, put an ingenuity counter on Lady Octopus.",
+        "Whenever you draw your first or third card each turn, put an ingenuity counter on Lady Octopus.",
+    ] {
+        let reach_guard = parse_trigger_line(
+            "Whenever you draw your first or second card each turn, put an ingenuity counter on Lady Octopus.",
+            "Lady Octopus, Inspired Inventor",
+        );
+        assert_eq!(
+            reach_guard.constraint,
+            Some(TriggerConstraint::NthDrawThisTurn {
+                n: 2,
+                comparator: crate::types::ability::Comparator::LE,
+            }),
+            "reach guard: the same-shaped first-or-second line must produce LE 2"
+        );
+        let def = parse_trigger_line(text, "Lady Octopus, Inspired Inventor");
+        assert!(
+            !matches!(
+                def.constraint,
+                Some(TriggerConstraint::NthDrawThisTurn { .. })
+            ),
+            "{text:?} must not produce NthDrawThisTurn: {def:?}"
+        );
+    }
+}
 #[test]
 fn trigger_nth_draw_you_in_a_turn_phrasing() {
     // CR 603.2: "When you draw your Nth card in a turn" (Sneaky Snacker phrasing)
@@ -17614,7 +17772,10 @@ fn trigger_nth_draw_you_in_a_turn_phrasing() {
     );
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthDrawThisTurn { n: 3 })
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 3,
+            comparator: crate::types::ability::Comparator::EQ,
+        })
     );
 }
 
@@ -17633,7 +17794,10 @@ fn trigger_nth_draw_opponent_second() {
     );
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthDrawThisTurn { n: 2 })
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 2,
+            comparator: crate::types::ability::Comparator::EQ,
+        })
     );
 }
 
@@ -17647,7 +17811,10 @@ fn trigger_nth_draw_any_player() {
     assert_eq!(def.valid_target, None);
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthDrawThisTurn { n: 3 })
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 3,
+            comparator: crate::types::ability::Comparator::EQ,
+        })
     );
 }
 
@@ -17665,7 +17832,10 @@ fn trigger_nth_draw_any_player_during_their_turn() {
     assert_eq!(def.valid_target, None);
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthDrawThisTurn { n: 2 })
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 2,
+            comparator: crate::types::ability::Comparator::EQ,
+        })
     );
     assert_eq!(
         def.condition,

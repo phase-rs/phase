@@ -28,6 +28,7 @@ use crate::types::zones::Zone;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{
     classify_quoted_inner, parse_static_line_multi, promote_nested_ability_quotes,
+    strip_enclosing_sentence_comma,
 };
 use super::super::oracle_target::parse_target_with_ctx;
 use super::super::oracle_util::{
@@ -1490,9 +1491,10 @@ fn push_parsed_statics(
         let token_refs = granting_self_reference_count(&normalized).saturating_sub(creator_refs);
         (normalized, token_refs)
     };
-    let mut defs = parse_static_line_multi(&static_text);
+    let static_text = strip_enclosing_sentence_comma(&static_text);
+    let mut defs = parse_static_line_multi(static_text);
     if defs.is_empty() {
-        let modifications = classify_quoted_inner(&static_text);
+        let modifications = classify_quoted_inner(static_text);
         if !modifications.is_empty() {
             defs.push(
                 StaticDefinition::continuous()
@@ -1801,15 +1803,19 @@ fn known_role_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> 
 }
 
 /// Strip trailing dynamic/attachment clauses from a token "with …" keyword phrase.
-fn strip_token_keyword_clause_suffixes(text: &str) -> &str {
-    let mut clause = text;
-    if let Ok((_, head)) = take_until::<_, _, nom::error::Error<&str>>("\"").parse(clause) {
-        clause = head;
-    }
+///
+/// CR 111.3 + CR 702.122a: the keyword list is the text OUTSIDE every quoted span
+/// ("with flying, "This creature gets ...," and crew 2" keeps `flying` and `crew 2`);
+/// quoted abilities are parsed separately as token static/granted abilities. Quote
+/// masking is [`nom_primitives::strip_double_quoted_spans`], which passes an
+/// unterminated quote through unchanged.
+fn strip_token_keyword_clause_suffixes(text: &str) -> String {
+    let outside = nom_primitives::strip_double_quoted_spans(text);
+    let mut clause: &str = &outside;
     for marker in [" where ", " equal to ", " attached ", " named "] {
         clause = truncate_token_keyword_clause_before(clause, marker);
     }
-    clause
+    clause.to_string()
 }
 
 /// Strip a token keyword clause at the first `marker` (e.g. `" equal to "`).
@@ -1831,7 +1837,8 @@ pub(super) fn parse_token_keyword_clause(text: &str) -> Vec<Keyword> {
         return Vec::new();
     };
 
-    let raw_clause = strip_token_keyword_clause_suffixes(after_with)
+    let stripped = strip_token_keyword_clause_suffixes(after_with);
+    let raw_clause = stripped
         .trim()
         .trim_end_matches(&['.', ','][..])
         .trim_end_matches(" and")
@@ -4885,5 +4892,186 @@ mod token_attachment_connector_tests {
                 "{text:?} host binding mismatch, got {attach_to:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod quoted_token_static_trailing_comma_tests {
+    use super::*;
+    use crate::parser::oracle_effect::StaticMode;
+
+    fn assert_dynamic_for_each_count(statics: &[StaticDefinition], token: &str) {
+        let modifications: Vec<_> = statics
+            .iter()
+            .flat_map(|def| def.modifications.iter())
+            .collect();
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::AddDynamicPower { .. }
+            )),
+            "{token}: expected dynamic power, got {modifications:?}"
+        );
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::AddDynamicToughness { .. }
+            )),
+            "{token}: expected dynamic toughness, got {modifications:?}"
+        );
+        assert!(
+            !modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::AddPower { .. }
+                    | ContinuousModification::AddToughness { .. }
+            )),
+            "{token}: the quoted +1/+1 must not fall back to fixed modifiers: {modifications:?}"
+        );
+    }
+
+    fn assert_grants_trigger(statics: &[StaticDefinition], token: &str) {
+        assert!(
+            statics
+                .iter()
+                .flat_map(|def| def.modifications.iter())
+                .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })),
+            "{token}: expected a GrantTrigger modification, got {statics:?}"
+        );
+    }
+
+    fn assert_cant_block(statics: &[StaticDefinition], token: &str) {
+        assert!(
+            statics.iter().any(|def| def.mode == StaticMode::CantBlock),
+            "{token}: expected a CantBlock static, got {statics:?}"
+        );
+    }
+
+    fn token_statics(clause: &str) -> Vec<StaticDefinition> {
+        let effect = try_parse_token(&clause.to_lowercase(), clause, &mut ParseContext::default())
+            .unwrap_or_else(|| panic!("token clause must parse: {clause}"));
+        let Effect::Token {
+            static_abilities, ..
+        } = effect
+        else {
+            panic!("expected Effect::Token for {clause}");
+        };
+        static_abilities
+    }
+
+    /// CR 111.3 + CR 613.4c: Oracle prints a token's quoted ability followed by a
+    /// sentence comma that sits INSIDE the closing quote ("... you control,"). The
+    /// comma is clause punctuation, not part of the ability, so `push_parsed_statics`
+    /// must yield the same result with and without it. Each row is the verbatim
+    /// printed token clause (Scryfall Oracle text) of one card:
+    /// - Vren, the Relentless, The Bear Force Pilot and The Bear Force Pilot Runner:
+    ///   a for-each `+1/+1` static body ending the quote.
+    /// - The Mycotyrant: a keyword-like restriction static body ("This token can't
+    ///   block,"), including its "where X is ..." rider and reminder text.
+    /// - Tend the Pests: a granted triggered ability ("When this token dies, you gain
+    ///   1 life,"), which reaches the `classify_quoted_inner` fallback fed by the same
+    ///   comma strip.
+    ///
+    /// Tangled Colony is excluded: its "where X is the amount of damage dealt to it
+    /// this turn" rider is unsupported, so production never sends its quoted body to
+    /// `push_parsed_statics`.
+    #[test]
+    fn quoted_token_static_ignores_trailing_sentence_comma() {
+        type Check = fn(&[StaticDefinition], &str);
+        // (token, clause prefix up to the opening quote, quoted body, clause suffix, check)
+        let rows: [(&str, &str, &str, &str, Check); 5] = [
+            (
+                "Vren, the Relentless",
+                "Create X 1/1 black Rat creature tokens with ",
+                "This token gets +1/+1 for each other Rat you control",
+                " where X is the number of creatures that were exiled under your opponents' control this turn.",
+                assert_dynamic_for_each_count,
+            ),
+            (
+                "The Bear Force Pilot",
+                "Create a 0/0 colorless artifact Vehicle token with flying, ",
+                "This creature gets +1/+1 for each Bear you control",
+                " and crew 2.",
+                assert_dynamic_for_each_count,
+            ),
+            (
+                "The Bear Force Pilot Runner",
+                "Create a 0/0 colorless Vehicle artifact token with flying, ",
+                "This creature gets +1/+1 for each Bear you control",
+                " and crew 2.",
+                assert_dynamic_for_each_count,
+            ),
+            (
+                "The Mycotyrant",
+                "create X 1/1 black Fungus creature tokens with ",
+                "This token can't block",
+                " where X is the number of times you descended this turn. (You descend each time a permanent card is put into your graveyard from anywhere.)",
+                assert_cant_block,
+            ),
+            (
+                "Tend the Pests",
+                "Create X 1/1 black and green Pest creature tokens with ",
+                "When this token dies, you gain 1 life",
+                " where X is the sacrificed creature's power.",
+                assert_grants_trigger,
+            ),
+        ];
+        for (token, prefix, body, suffix, check) in rows {
+            let printed = token_statics(&format!("{prefix}\"{body},\"{suffix}"));
+            let bare = token_statics(&format!("{prefix}\"{body}\"{suffix}"));
+            assert!(
+                !printed.is_empty(),
+                "{token}: reach guard, no statics parsed"
+            );
+            assert_eq!(
+                printed, bare,
+                "{token}: the trailing sentence comma changed the parse"
+            );
+            check(&printed, token);
+        }
+    }
+
+    fn token_keywords(clause: &str) -> Vec<Keyword> {
+        let effect = try_parse_token(&clause.to_lowercase(), clause, &mut ParseContext::default())
+            .unwrap_or_else(|| panic!("token clause must parse: {clause}"));
+        let Effect::Token { keywords, .. } = effect else {
+            panic!("expected Effect::Token for {clause}");
+        };
+        keywords
+    }
+
+    /// CR 702.122a + CR 111.3: keywords printed AFTER a token's quoted ability are
+    /// still part of the token's keyword list (The Bear Force Pilot and its Runner
+    /// print `with flying, "...," and crew 2`).
+    #[test]
+    fn token_keywords_survive_a_quoted_ability_in_the_middle() {
+        for clause in [
+            "Create a 0/0 colorless artifact Vehicle token with flying, \"This creature gets +1/+1 for each Bear you control,\" and crew 2.",
+            "Create a 0/0 colorless Vehicle artifact token with flying, \"This creature gets +1/+1 for each Bear you control,\" and crew 2.",
+        ] {
+            assert_eq!(
+                token_keywords(clause),
+                vec![
+                    Keyword::Flying,
+                    Keyword::Crew {
+                        power: 2,
+                        once_per_turn: None
+                    }
+                ],
+                "{clause}"
+            );
+            assert!(!token_statics(clause).is_empty(), "{clause}: static kept");
+        }
+    }
+
+    /// Negative control: Into the Fae Court's printed clause ENDS in a quoted
+    /// ability and keeps only the keywords before it.
+    #[test]
+    fn token_keyword_clause_ending_in_quote_is_unchanged() {
+        assert_eq!(
+            parse_token_keyword_clause(
+                "with flying and \"This token can block only creatures with flying.\""
+            ),
+            vec![Keyword::Flying]
+        );
     }
 }

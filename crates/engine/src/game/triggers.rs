@@ -6641,7 +6641,7 @@ fn collect_owner_logical_zone_trigger_segment(
 
 /// CR 603.10 + CR 603.6a + CR 611.2e: which collector checks the ordinary enter triggers of a
 /// logical zone-change owner's battlefield-entry occurrences.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum EntryOccurrenceCollector {
     /// The owner checks the entry at the instruction's completion: when no later instruction of
     /// this resolution can apply an effect with the entry; when one that starts after the entry
@@ -6651,6 +6651,7 @@ pub(crate) enum EntryOccurrenceCollector {
     /// earlier action, or a resume with members still to deliver). In every case but the first
     /// the "is/has" effect does not exist yet (known gap: an observer keyed on that effect alone
     /// misses the entry).
+    #[default]
     Owner,
     /// A later instruction may still apply an "is/has" effect simultaneously with the entry
     /// (CR 611.2e) and no instruction that starts after the entry may act on a moved object
@@ -6658,10 +6659,18 @@ pub(crate) enum EntryOccurrenceCollector {
     /// the entry: the post-action collector of this action checks the entry, after that effect
     /// exists unless the instruction applying it pauses first (known gap: a multi-host
     /// ReturnAsAura host choice, CR 303.4f).
+    /// Destroy also selects this policy directly for its replacement-created entries: the
+    /// ordinary instruction-aware collector checks those entries while the owner retains
+    /// collection of the announced departures.
     AfterSimultaneousEntryEffects,
 }
 
 impl EntryOccurrenceCollector {
+    /// Serde skip-helper: the owner collector is the absent field.
+    pub(crate) fn is_owner(&self) -> bool {
+        matches!(self, Self::Owner)
+    }
+
     /// The collector for one logical zone-change `group` that the current action delivers
     /// whole: its retained occurrences plus `unretained_events`, the delivery output not yet
     /// appended to it. See [`Self::for_group_delivered_by`].
@@ -6688,13 +6697,11 @@ impl EntryOccurrenceCollector {
         })
     }
 
-    /// CR 603.2c + CR 603.10a: the hand-off is all-or-nothing per logical group. The group's
-    /// zone changes are one event, and the owner's latched batched pass and the post-action
-    /// collector would each see "one or more" of its occurrences, but a batched trigger triggers
-    /// only once for the event. So the owner hands off only when every zone-change occurrence
-    /// of the group is a battlefield entry delivered by this action; one that ends in another
-    /// zone (Storm of Souls' return with one member exiled instead) or was delivered by an
-    /// earlier action keeps the whole group with the owner.
+    /// CR 603.2c + CR 603.10a: ChangeZone's simultaneous-entry-effect handoff is
+    /// all-or-nothing per logical group. Its owner and post-action batched passes must not each
+    /// see part of the same entry event. A non-entry or an earlier action's entry therefore
+    /// keeps that whole group with its owner. Destroy's replacement-created entries use the
+    /// per-occurrence policy directly, without this whole-entry-group narrowing.
     fn for_group_delivered_by<'a>(
         self,
         group: &'a LogicalZoneChangeGroup,
@@ -6724,11 +6731,11 @@ impl EntryOccurrenceCollector {
 }
 
 /// CR 603.10 + CR 611.2e: does the logical owner itself check `event`'s ordinary triggers?
-/// Only moves to the battlefield are handed off. A move to the battlefield from a graveyard is
-/// handed off whole, its CR 603.10a leaves-the-graveyard half included. The completion sites
-/// pick the collector through [`EntryOccurrenceCollector::for_group`] /
-/// [`EntryOccurrenceCollector::within_action`], so under `AfterSimultaneousEntryEffects` every
-/// zone-change occurrence of the group is a battlefield entry and the owner keeps none of them.
+/// Only moves to the battlefield are handed off, including their leaves-the-graveyard half.
+/// ChangeZone selects this policy through [`EntryOccurrenceCollector::for_group`] /
+/// [`EntryOccurrenceCollector::within_action`] for a whole entry group. Destroy selects it
+/// directly for replacement-created entries in a mixed population; the owner still collects
+/// all of that population's non-entry occurrences.
 fn owner_collects_occurrence(collector: EntryOccurrenceCollector, event: &GameEvent) -> bool {
     match collector {
         EntryOccurrenceCollector::Owner => true,
@@ -6768,14 +6775,13 @@ pub(crate) fn complete_logical_zone_trigger_collection(
 /// CR 603.10 + CR 603.6a + CR 611.2e: under
 /// `EntryOccurrenceCollector::AfterSimultaneousEntryEffects` the owner checks no ordinary
 /// trigger for its battlefield-entry occurrences (segment, settlement, or latched batched pass).
-/// A handed-off entry therefore carries no witness in `deferred_triggers`, so the post-action
-/// collector of this action is its sole collector and checks it once (CR 603.2c), after the
-/// resolution's simultaneous "is/has" effects exist when no instruction pauses before applying
-/// one (a multi-host ReturnAsAura host choice is a known gap). It is chosen only when no
-/// instruction that starts after the entry acts on a moved object, so that collector reads no
-/// change CR 608.2c makes after the entry (`effects::entry_occurrence_collector`), and only for
-/// a group whose every zone-change occurrence is such an entry
-/// ([`EntryOccurrenceCollector::for_group`], CR 603.2c).
+/// A handed-off entry therefore carries no witness in `deferred_triggers`, so the ordinary
+/// collector is its sole collector and checks it once (CR 603.2c). ChangeZone chooses this only
+/// for a whole entry group with no later instruction acting on a moved object; collection
+/// waits for the resolution's simultaneous "is/has" effects unless their instruction pauses
+/// first (a multi-host ReturnAsAura host choice is a known gap). Destroy instead selects the
+/// policy directly: replacement-created entries reach the ordinary raw instruction-aware
+/// collector, while this owner keeps every departure and retains all occurrences for settlement.
 pub(crate) fn complete_logical_zone_trigger_collection_for(
     state: &mut GameState,
     group: &mut LogicalZoneChangeGroup,
@@ -6992,28 +6998,33 @@ fn mirror_logical_zone_change_entry_stamps(state: &mut GameState, group: &Logica
 /// occurrence ordinal keeps byte-identical events distinct, so the generic
 /// collector still sees every unrelated event from the same action exactly
 /// once.
+/// CR 603.7b: an ordinary-only claim preserves the event for delayed triggers
+/// whose next matching occurrence has not yet been collected.
 pub(crate) fn mark_logical_zone_events_consumed_before_priority(
     state: &mut GameState,
     group: &LogicalZoneChangeGroup,
     events: &[GameEvent],
+    scope: ConsumedTriggerEventScope,
 ) {
     mark_logical_zone_events_consumed_before_priority_for(
         state,
         group,
         events,
         EntryOccurrenceCollector::Owner,
+        scope,
     );
 }
 
 /// `mark_logical_zone_events_consumed_before_priority` restricted to the occurrences
-/// `collector` left with the owner. A handed-off entry stays unclaimed, so the post-action
-/// collector checks it once the resolution's simultaneous "is/has" effects exist
-/// (CR 603.2c + CR 603.10 + CR 611.2e).
+/// `collector` left with the owner. A handed-off entry stays unclaimed for the ordinary
+/// collector: after simultaneous entry effects for ChangeZone, or with the raw instruction's
+/// departure window for Destroy's replacement-created entries.
 pub(crate) fn mark_logical_zone_events_consumed_before_priority_for(
     state: &mut GameState,
     group: &LogicalZoneChangeGroup,
     events: &[GameEvent],
     collector: EntryOccurrenceCollector,
+    scope: ConsumedTriggerEventScope,
 ) {
     let mut unclaimed_owned_zone_events: Vec<_> = group
         .all_origin_occurrences
@@ -7038,7 +7049,7 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority_for(
                     ConsumedTriggerEventOccurrence {
                         event: event.clone(),
                         occurrence: trigger_event_occurrence(events, index),
-                        scope: ConsumedTriggerEventScope::AllCollectors,
+                        scope,
                     }
                 })
         })
@@ -7075,6 +7086,9 @@ fn collect_logical_zone_trigger_settlement_for(
         .filter(|event| owner_collects_occurrence(collector, event))
         .cloned()
         .collect();
+    // CR 603.10a: departed observers read their retained pre-departure triggers;
+    // members with no such triggers cannot observe another member's departure.
+    let observer_index = CoDepartureObserverIndex::build(state, &all_events);
     let mut pending = Vec::new();
 
     for member_index in 0..group.prospective_battlefield_members.len() {
@@ -7082,7 +7096,15 @@ fn collect_logical_zone_trigger_settlement_for(
         if matches!(
             group.terminal_outcomes[member_index],
             LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft
+                | LogicalZoneChangeTerminalOutcome::Preempted
         ) {
+            continue;
+        }
+        let moved = matches!(
+            group.terminal_outcomes[member_index],
+            LogicalZoneChangeTerminalOutcome::Moved { .. }
+        );
+        if moved && !observer_index.may_observe(member.object_id) {
             continue;
         }
         let source_context = group.settlement_member_source_context(member_index)?;
@@ -7091,6 +7113,10 @@ fn collect_logical_zone_trigger_settlement_for(
                 || !owner_collects_occurrence(collector, &occurrence.event)
             {
                 continue;
+            }
+            #[cfg(feature = "test-support")]
+            if moved {
+                super::perf_counters::record_co_departure_observer_resolution();
             }
             let mut batched_this_pass = HashSet::new();
             let mut registered_this_event = HashSet::new();
@@ -17475,23 +17501,27 @@ pub(crate) fn filter_consumed_trigger_events(
 /// 1. `consumed` — occurrences explicitly claimed by
 ///    [`mark_logical_zone_events_consumed_before_priority`]. Required wherever an
 ///    intervening `drain_deferred_trigger_queue` has already emptied
-///    `deferred_triggers`. Only three owners mark, and their ordinals are NOT
+///    `deferred_triggers`. Four sites mark, and their ordinals are NOT
 ///    uniformly exact: `effects/mod.rs` passes the whole action buffer (exact);
-///    `zone_pipeline.rs`'s synchronous-completion site passes a sub-slice, so its
-///    ordinals are rebased; and `zone_pipeline.rs`'s batch-drain site passes the
-///    whole buffer only after `drain_pending_batch_deliveries` has moved it out
-///    and re-assembled it, so its ordinals are computed against a re-ordered
-///    buffer. See the warning on [`filter_consumed_trigger_events_from`].
+///    `zone_pipeline.rs`'s two synchronous-completion sites pass sub-slices, so
+///    their ordinals are rebased; its batch-drain site passes the whole buffer
+///    only after `drain_pending_batch_deliveries` has moved it out and
+///    re-assembled it, so its ordinals use a re-ordered buffer. See the warning
+///    on [`filter_consumed_trigger_events_from`]. Staged ChangeZone and Destroy
+///    population completions claim ordinary collectors only; legacy drains and
+///    the shared synchronous arm of `move_arranged_batch_then` claim all
+///    collectors. Its callers are `move_owner_arranged_batch_then`,
+///    `move_objects_simultaneously_then`, and `move_component_batch_then`.
 /// 2. `state.deferred_triggers` — the `ZoneChanged` values carried by contexts
 ///    that [`complete_logical_zone_trigger_collection`] and
 ///    [`append_and_collect_logical_zone_trigger_segment`] already queued. This is
 ///    the only witness for the four owners that deliberately do NOT mark
 ///    (`effects/change_zone.rs` x2, `engine_resolution_choices.rs` x2). Do NOT
-///    "fix" that asymmetry by adding `mark_`: claiming an occurrence also hides
-///    it from `check_delayed_triggers` (`engine_priority.rs`), which would
-///    silently kill the CR 603.7b leaves-the-battlefield delayed family (an
-///    ability triggers only the next time its trigger event occurs; hide the
-///    event and it never triggers).
+///    add an `AllCollectors` claim where only ordinary triggers were collected:
+///    it also hides the occurrence from `check_delayed_triggers`
+///    (`engine_priority.rs`), silently killing the CR 603.7b
+///    leaves-the-battlefield delayed family. An ordinary-only claim preserves
+///    that family's next matching occurrence.
 ///
 /// WITNESS 2 IS A BOUND, NOT AN OCCURRENCE COUNT. `deferred_triggers` holds one
 /// context per matching observer, not one entry per occurrence (every zone-change
@@ -20820,12 +20850,12 @@ fn check_trigger_constraint_with_ref(
         }
         // CR 121.2: Use the ordinal stamped onto the individual draw event
         // rather than the final per-turn count after a multi-card draw batch.
-        TriggerConstraint::NthDrawThisTurn { n } => {
+        TriggerConstraint::NthDrawThisTurn { n, comparator } => {
             let nth_in_turn = match event {
                 Some(GameEvent::CardDrawn { nth_in_turn, .. }) => *nth_in_turn,
                 _ => return false,
             };
-            nth_in_turn == *n
+            comparator.evaluate(nth_in_turn as i32, *n as i32)
         }
         // CR 716.2a: "When this Class becomes level N" — fire only at the specified level.
         // CR 716.2d: an absent stored level reads as 1 (`GameObject::level`).
@@ -21402,33 +21432,13 @@ fn evaluate_trigger_condition_with_source(
                 co_attacker_count >= *minimum as usize
             })
         }
-        // CR 506.2 + CR 508.1 + CR 508.1b + CR 603.4: Compare a count over the
-        // current attack declaration, either by attacker controller (optionally
-        // narrowed to a typed class, e.g. "two or more Dinosaurs") or by the
-        // announced attack target.
+        // CR 508.1a + CR 508.1b + CR 603.4: Compare the scoped declaration count.
         TriggerCondition::AttackersDeclaredCount {
             subject,
             comparator,
             count,
-        } => {
-            let Some(GameEvent::AttackersDeclared {
-                attacker_ids,
-                attacks,
-                ..
-            }) = trigger_event
-            else {
-                return false;
-            };
-            let actual = attackers_declared_count(
-                state,
-                attacker_ids,
-                attacks,
-                controller,
-                source_context,
-                subject,
-            );
-            comparator.evaluate(actual as i32, *count as i32)
-        }
+        } => attackers_declared_count(state, trigger_event, controller, source_context, subject)
+            .is_some_and(|actual| comparator.evaluate(actual as i32, *count as i32)),
         // CR 719.2: True when the source Case is unsolved and its solve condition is met.
         TriggerCondition::SolveConditionMet => source_context.is_some_and(|source| {
             source
@@ -22683,14 +22693,39 @@ pub(crate) fn exploit_record_matches_dying_object(
 
 fn attackers_declared_count(
     state: &GameState,
-    attacker_ids: &[ObjectId],
-    attacks: &[(ObjectId, crate::game::combat::AttackTarget)],
+    trigger_event: Option<&GameEvent>,
     trigger_controller: PlayerId,
     source_context: Option<&TriggerSourceContext>,
     subject: &crate::types::ability::AttackersDeclaredCountSubject,
-) -> usize {
-    match subject {
-        crate::types::ability::AttackersDeclaredCountSubject::Controller { scope, filter } => {
+) -> Option<usize> {
+    use crate::types::ability::{AttackersDeclaredCountSubject, SourceExclusion};
+
+    let declaration = match trigger_event {
+        Some(GameEvent::AttackersDeclared {
+            attacker_ids,
+            attacks,
+            ..
+        }) => Some((attacker_ids, attacks)),
+        _ => None,
+    };
+    let count = match subject {
+        AttackersDeclaredCountSubject::CurrentCombat { exclude_source } => {
+            // CR 508.4 + CR 506.4: This ledger records declarations and survives
+            // removal from combat. Exclusion uses the observed incarnation (CR 400.7).
+            let excluded = match exclude_source {
+                SourceExclusion::Include => None,
+                SourceExclusion::Exclude => Some(source_context?.identity.reference),
+            };
+            state.combat.as_ref().map_or(0, |combat| {
+                combat
+                    .attacking_incarnations_this_combat
+                    .iter()
+                    .filter(|&&attacker| Some(attacker) != excluded)
+                    .count()
+            })
+        }
+        AttackersDeclaredCountSubject::Controller { scope, filter } => {
+            let (attacker_ids, _) = declaration?;
             // `TriggeringPlayer` reads the controller of the first attacker in
             // the (possibly per-attacker narrowed) event. Under shared team
             // turns one combined declaration can hold several attacking
@@ -22748,11 +22783,12 @@ fn attackers_declared_count(
                 })
                 .count()
         }
-        crate::types::ability::AttackersDeclaredCountSubject::AttackTarget {
+        AttackersDeclaredCountSubject::AttackTarget {
             controller,
             attacked,
             filter,
-        } => attacks
+        } => declaration?
+            .1
             .iter()
             .filter(|(attacker_id, target)| {
                 attack_target_matches_controller_scope(
@@ -22775,7 +22811,8 @@ fn attackers_declared_count(
                 })
             })
             .count(),
-    }
+    };
+    Some(count)
 }
 
 /// CR 603.4 + CR 608.2h + CR 400.7 + CR 508.1: evaluate the resolution
@@ -22924,6 +22961,8 @@ fn condition_is_attack_event_only(
                 && matches!(trigger.mode, TriggerMode::Attacks)
         }
         TriggerCondition::AttackersDeclaredCount { subject, .. } => match subject {
+            // CR 603.4: The combat ledger is available for the resolution recheck.
+            crate::types::ability::AttackersDeclaredCountSubject::CurrentCombat { .. } => false,
             crate::types::ability::AttackersDeclaredCountSubject::Controller { .. } => {
                 trigger_mode_uses_attack_declaration_count(&trigger.mode)
             }
@@ -27407,6 +27446,87 @@ pub mod tests {
             comparator: Comparator::GE,
             count: 1,
         }
+    }
+
+    #[test]
+    fn current_combat_attacker_count_uses_incarnations_and_resets_between_combats() {
+        use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+        use crate::types::ability::SourceExclusion;
+
+        let mut state = setup();
+        let player = PlayerId(0);
+        let source = make_creature(&mut state, player, "Source", 2, 2);
+        let other = make_creature(&mut state, player, "Other attacker", 2, 2);
+        let source_ref = ObjectIncarnationRef::from_object(&state.objects[&source]);
+        let other_ref = ObjectIncarnationRef::from_object(&state.objects[&other]);
+        // CR 506.4 + CR 508.4: An attacker removed from combat still attacked.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                source,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            )],
+            attacking_incarnations_this_combat: [source_ref, other_ref].into_iter().collect(),
+            ..CombatState::default()
+        });
+        state.creatures_attacked_this_turn.extend([source, other]);
+
+        let condition = |exclude_source, count| TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::CurrentCombat { exclude_source },
+            comparator: Comparator::EQ,
+            count,
+        };
+        let excluded = condition(SourceExclusion::Exclude, 1);
+        let included = condition(SourceExclusion::Include, 2);
+        assert!(check_trigger_condition(
+            &state,
+            &excluded,
+            player,
+            Some(source),
+            None
+        ));
+        assert!(check_trigger_condition(
+            &state, &included, player, None, None
+        ));
+        assert!(!check_trigger_condition(
+            &state, &excluded, player, None, None
+        ));
+
+        state.combat = Some(CombatState::default());
+        assert!(!check_trigger_condition(
+            &state, &included, player, None, None
+        ));
+        assert!(check_trigger_condition(
+            &state,
+            &condition(SourceExclusion::Include, 0),
+            player,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn current_combat_attacker_count_survives_as_resolution_condition() {
+        use crate::types::ability::SourceExclusion;
+
+        let trigger = make_trigger(TriggerMode::Phase);
+        let condition = TriggerCondition::And {
+            conditions: vec![
+                TriggerCondition::SourceAttackedThisCombat,
+                TriggerCondition::AttackersDeclaredCount {
+                    subject: AttackersDeclaredCountSubject::CurrentCombat {
+                        exclude_source: SourceExclusion::Exclude,
+                    },
+                    comparator: Comparator::GE,
+                    count: 2,
+                },
+            ],
+        };
+        // CR 603.4: Preserve both conjuncts for the resolution-time check.
+        assert_eq!(
+            stack_condition_for_trigger(&trigger, &condition),
+            Some(condition)
+        );
     }
 
     #[test]
@@ -38523,7 +38643,10 @@ pub mod tests {
             trigger.valid_target = Some(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::You),
             ));
-            trigger.constraint = Some(TriggerConstraint::NthDrawThisTurn { n: 3 });
+            trigger.constraint = Some(TriggerConstraint::NthDrawThisTurn {
+                n: 3,
+                comparator: Comparator::EQ,
+            });
             trigger.execute = Some(Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
@@ -39785,7 +39908,10 @@ pub mod tests {
         state.players[1].cards_drawn_this_turn = 4;
 
         let mut trig_def = make_trigger(TriggerMode::Drawn);
-        trig_def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n: 2 });
+        trig_def.constraint = Some(TriggerConstraint::NthDrawThisTurn {
+            n: 2,
+            comparator: Comparator::EQ,
+        });
 
         let controller = PlayerId(0);
         let event = GameEvent::CardDrawn {
@@ -59027,6 +59153,23 @@ pub mod tests {
         crate::game::effects::change_zone::resolve_all(&mut state, &ability, &mut events)
             .expect("mass change-zone resolves (pausing on the first MayCost member)");
 
+        // CR 101.4c + CR 616.1: the staged sweep consulted all three members,
+        // so P0 holds both pausing members' decisions and first chooses which
+        // to make; announcement order keeps the original sequence.
+        assert_eq!(
+            state.waiting_for,
+            WaitingFor::ReplacementDecisionOrder {
+                player: PlayerId(0),
+                objects: vec![member_b, observer],
+            }
+        );
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![member_b],
+            },
+        )
+        .expect("P0 makes member B's decision first (announcement order)");
         // Resolve each replacement choice (accept, index 0) until the batch
         // settles. Keeping the real repeated-choice path proves the logical
         // group preserves its authority across each pause/resume boundary.
@@ -59164,6 +59307,70 @@ pub mod tests {
                 );
             }
         }
+    }
+
+    /// R4c (option i): the staged ChangeZone family parks a
+    /// `[ChangeZone{awaiting_batch}, BatchDelivery]` pair instead of a legacy
+    /// `pending` carrier. Assert that exact staged representation and return
+    /// the batch owner that now owns the logical group.
+    fn assert_staged_change_zone_owner(
+        state: &GameState,
+    ) -> &crate::types::game_state::PendingBatchDeliveries {
+        let marker = state
+            .resolution_stack
+            .iter()
+            .find_map(|frame| match frame {
+                crate::types::resolution::ResolutionFrame::ChangeZone(frame)
+                    if frame.awaiting_batch.is_some() =>
+                {
+                    Some(&**frame)
+                }
+                _ => None,
+            })
+            .expect("staged ChangeZone marker is parked");
+        assert!(
+            marker.pending.is_none(),
+            "a staged marker owns no legacy iteration suffix"
+        );
+        let group_id = marker
+            .awaiting_batch
+            .expect("checked awaiting_batch marker")
+            .group_id;
+        state
+            .resolution_stack
+            .iter()
+            .find_map(|frame| match frame {
+                crate::types::resolution::ResolutionFrame::BatchDelivery(batch)
+                    if batch.is_change_zone_population()
+                        && batch.logical_zone_change_group.logical_group_id == group_id =>
+                {
+                    Some(&**batch)
+                }
+                _ => None,
+            })
+            .expect("staged ChangeZone batch matching the marker is parked")
+    }
+
+    /// The logical group of a parked staged ChangeZone owner (the batch child is
+    /// the single logical owner; the marker holds no group).
+    fn staged_change_zone_group(
+        state: &GameState,
+    ) -> &crate::types::game_state::LogicalZoneChangeGroup {
+        // A one-member population keeps the legacy carrier (>=2 is the staged
+        // threshold); both representations own the exact logical group while
+        // parked, and exactly one of them is present.
+        if let Some(frame) = state.active_change_zone_frame() {
+            assert!(
+                frame.pending.is_some(),
+                "singleton ChangeZone carrier is parked as a legacy iteration"
+            );
+            return &frame
+                .pending
+                .as_ref()
+                .expect("checked legacy pending carrier")
+                .logical_zone_change_group;
+        }
+        &assert_staged_change_zone_owner(state).logical_zone_change_group
     }
 
     /// A batched trigger carries its complete match set in the stack side table
@@ -59950,12 +60157,12 @@ pub mod tests {
                     "{carrier:?} slot {paused_index} must reach the real replacement prompt"
                 );
                 match carrier {
-                    LogicalZoneProductionCarrier::ChangeZone => assert!(
-                        state
-                            .active_change_zone_frame()
-                            .is_some_and(|frame| frame.pending.is_some()),
-                        "ChangeZone slot {paused_index} must retain its production carrier"
-                    ),
+                    LogicalZoneProductionCarrier::ChangeZone => {
+                        // R4c: the staged representation is marker + batch; the
+                        // marker owns no legacy suffix and the batch owns the
+                        // exact logical group.
+                        assert_staged_change_zone_owner(&state);
+                    }
                     LogicalZoneProductionCarrier::BatchDelivery => assert!(
                         state.active_batch_delivery().is_some(),
                         "BatchDelivery slot {paused_index} must retain its production carrier"
@@ -60041,6 +60248,30 @@ pub mod tests {
 
             let mut events = Vec::new();
             resolve_ltb_production_carrier(&mut state, carrier, ObjectId(91_100), &mut events);
+
+            // CR 101.4c + CR 616.1: the staged ChangeZone population's sweep
+            // consults every member before asking, so P0 holds both pausing
+            // members' decisions and first chooses which to make. That prompt
+            // also survives the save; announcement order keeps the original
+            // sequence. The BounceAll carrier still pauses member by member.
+            if matches!(carrier, LogicalZoneProductionCarrier::ChangeZone) {
+                assert_eq!(
+                    state.waiting_for,
+                    WaitingFor::ReplacementDecisionOrder {
+                        player: PlayerId(0),
+                        objects: vec![last, observer],
+                    }
+                );
+                let saved =
+                    serde_json::to_value(&state).expect("the parked decision order serializes");
+                state =
+                    serde_json::from_value(saved).expect("the parked decision order deserializes");
+                crate::game::engine::apply_as_current(
+                    &mut state,
+                    GameAction::SelectCards { cards: vec![last] },
+                )
+                .expect("P0 makes the last member's decision first (announcement order)");
+            }
 
             for pause in 1..=2 {
                 assert!(
@@ -60408,12 +60639,11 @@ pub mod tests {
                     "{carrier:?} all_origins={all_origins}: the batched observer remains in its declared off-zone source zone"
                 );
                 match carrier {
-                    LogicalZoneProductionCarrier::ChangeZone => assert!(
-                        state
-                            .active_change_zone_frame()
-                            .is_some_and(|frame| frame.pending.is_some()),
-                        "ChangeZone must retain the mixed-origin owner while parked"
-                    ),
+                    LogicalZoneProductionCarrier::ChangeZone => {
+                        // R4c: the mixed-origin population is owned by the staged
+                        // batch child, with the marker as its structural parent.
+                        assert_staged_change_zone_owner(&state);
+                    }
                     LogicalZoneProductionCarrier::BatchDelivery => assert!(
                         state.active_batch_delivery().is_some(),
                         "BatchDelivery must retain the mixed-origin owner while parked"
@@ -60773,11 +61003,22 @@ pub mod tests {
                 Zone::Battlefield,
                 &mut events,
             );
-            assert_eq!(
-                state.objects[&early].zone,
-                Zone::Battlefield,
-                "{carrier:?} positive reach guard: the graveyard member supplies the immediately-before occurrence before the real ordering pause"
-            );
+            // R4c staged order: the immediately-before occurrence is captured
+            // from the initial board, and the member itself is still in its
+            // origin zone at the later consultation pause (approvals precede
+            // delivery).
+            match carrier {
+                LogicalZoneProductionCarrier::ChangeZone => assert_eq!(
+                    state.objects[&early].zone,
+                    Zone::Graveyard,
+                    "{carrier:?} staged approvals precede delivery: the graveyard member supplies the immediately-before occurrence while still in its origin zone"
+                ),
+                LogicalZoneProductionCarrier::BatchDelivery => assert_eq!(
+                    state.objects[&early].zone,
+                    Zone::Battlefield,
+                    "{carrier:?} sequential delivery moves the early member before the later pause"
+                ),
+            }
             assert!(
                 matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
                 "{carrier:?} positive reach guard: two material Moved redirects surface the CR 616.1 production prompt"
@@ -60792,6 +61033,11 @@ pub mod tests {
             )
             .expect("the ordering choice resumes the saved logical owner");
 
+            assert_eq!(
+                state.objects[&early].zone,
+                Zone::Battlefield,
+                "{carrier:?} the early member is delivered after the pause and supplies the immediately-after observation"
+            );
             assert!(
                 state.objects[&recipient].zone == Zone::Battlefield
                     && state.objects[&provider].zone == Zone::Battlefield,
@@ -61339,13 +61585,7 @@ pub mod tests {
                     "{carrier:?} co_departing={co_departing}: positive reach guard reaches the saved replacement"
                 );
                 let logical_group = match carrier {
-                    LogicalZoneProductionCarrier::ChangeZone => {
-                        &state
-                            .active_change_zone_frame()
-                            .and_then(|frame| frame.pending.as_ref())
-                            .expect("ChangeZone suppressor owner is parked")
-                            .logical_zone_change_group
-                    }
+                    LogicalZoneProductionCarrier::ChangeZone => staged_change_zone_group(&state),
                     LogicalZoneProductionCarrier::BatchDelivery => {
                         &state
                             .active_batch_delivery()
@@ -61548,13 +61788,7 @@ pub mod tests {
                 "{carrier:?} positive reach guard parks the simultaneous entry"
             );
             let logical_group = match carrier {
-                LogicalZoneProductionCarrier::ChangeZone => {
-                    &state
-                        .active_change_zone_frame()
-                        .and_then(|frame| frame.pending.as_ref())
-                        .expect("ChangeZone entering-suppressor owner is parked")
-                        .logical_zone_change_group
-                }
+                LogicalZoneProductionCarrier::ChangeZone => staged_change_zone_group(&state),
                 LogicalZoneProductionCarrier::BatchDelivery => {
                     &state
                         .active_batch_delivery()
@@ -61854,10 +62088,13 @@ pub mod tests {
                 matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
                 "{carrier:?} positive reach guard parks after the observer is in its off-zone trigger zone"
             );
+            // R4c staged order: every member is approved before any delivery,
+            // so at this consultation pause the earlier observer has not moved
+            // yet; the later assertions pin that it does move on delivery.
             assert_eq!(
                 state.objects[&observer].zone,
-                Zone::Graveyard,
-                "{carrier:?} positive reach guard moves the observer before the later segment"
+                Zone::Battlefield,
+                "{carrier:?} staged approvals precede delivery: the early observer is still in its origin zone at the later consultation pause"
             );
             let saved =
                 serde_json::to_value(&state).expect("parked early-observer carrier serializes");
