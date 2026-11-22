@@ -109,7 +109,15 @@ pub fn resolve(
         // Build the flat per-kind branch set. For an `AddOrRemove` clause each
         // kind contributes a remove branch then an add branch (matching the
         // printed Oracle order "remove ... or put ...").
+        //
+        // CR 608.2c + CR 122.1: "Choose a counter on target ... Remove that
+        // counter ... or put another of those counters on it" (Clockspinning).
+        // The preceding instruction chose the kind; "that counter" is that
+        // kind, so only its branches are offered.
         None => {
+            if let Some(chosen) = super::choose_counter_kind::chosen_counter_kind(state) {
+                kinds.retain(|kind| *kind == chosen);
+            }
             for kind in kinds {
                 if adjustment.allows_remove() {
                     branches.push(remove_counter_branch(kind.clone(), &count));

@@ -29800,6 +29800,28 @@ fn static_cant_pay_life_or_sacrifice_nonland_permanents_emits_cost_locks() {
     )));
 }
 
+/// CR 701.21a + CR 101.2: Quark, Humble Proprietor's printed static line. The
+/// subject is the controller and the object phrase is Treasure tokens; no other
+/// static mode claims the line.
+#[test]
+fn static_cant_sacrifice_treasure_tokens_is_a_player_scoped_prohibition() {
+    let def = parse_static_line("You can't sacrifice Treasure tokens.").unwrap();
+    let StaticMode::CantSacrifice {
+        who: ProhibitionScope::Controller,
+        filter: TargetFilter::Typed(filter),
+    } = &def.mode
+    else {
+        panic!(
+            "expected a controller-scoped CantSacrifice, got {:?}",
+            def.mode
+        );
+    };
+    assert!(filter
+        .type_filters
+        .contains(&TypeFilter::Subtype("Treasure".to_string())));
+    assert!(filter.properties.contains(&FilterProp::Token));
+}
+
 #[test]
 fn static_life_total_cant_change_emits_both_locks_self_scope() {
     // CR 119.7 + CR 119.8: Platinum Emperion — "Your life total can't change."

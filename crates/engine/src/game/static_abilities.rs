@@ -2684,6 +2684,13 @@ pub(crate) fn object_cant_be_sacrificed_by(
     actor: PlayerId,
     object_id: ObjectId,
 ) -> bool {
+    // CR 701.21a + CR 101.2: a player-scoped "can't sacrifice <filter>" static
+    // (Quark, Humble Proprietor) bars its scoped actors from sacrificing the
+    // matching permanents. It joins the object bars below so selection pools,
+    // cost guards and execution (`sacrifice_permanent`) all see one answer.
+    if player_cant_sacrifice(state, actor, object_id) {
+        return true;
+    }
     let mode = StaticMode::Other("CantBeSacrificed".to_string());
     // Shared resolution-grant bar predicate (pin + gates + mode),
     // actor-agnostic: the caller pairs it with the stored binding below.

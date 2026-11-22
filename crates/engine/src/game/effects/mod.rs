@@ -12668,7 +12668,7 @@ fn static_mode_reads_filter_population(
             CostPaymentProhibition::Sacrifice { filter } => has_filter(filter),
             CostPaymentProhibition::PayLife => false,
         },
-        StaticMode::CantSacrifice { filter, .. } => has_filter(filter),
+        StaticMode::CantSacrifice { filter, who: _ } => has_filter(filter),
         StaticMode::PlayerProtection(inner0) => has_protection(inner0),
         StaticMode::MustAttackDefender { defender } => match defender {
             RequiredDefender::Matching { filter } => has_player(filter),
@@ -60715,7 +60715,7 @@ mod tests {
                     replacement_row(replacement)
                 })),
             ),
-            // The 13 filter-bearing `StaticMode` variants.
+            // The 14 filter-bearing `StaticMode` variants.
             (
                 "StaticMode::CantBeActivated",
                 effect_row(Box::new(move |source_filter| {
@@ -60782,6 +60782,15 @@ mod tests {
                         source_filter,
                         trigger_source_filter: None,
                         events: vec![],
+                    })
+                })),
+            ),
+            (
+                "StaticMode::CantSacrifice",
+                effect_row(Box::new(move |filter| {
+                    with_mode(StaticMode::CantSacrifice {
+                        who: ProhibitionScope::AllPlayers,
+                        filter,
                     })
                 })),
             ),

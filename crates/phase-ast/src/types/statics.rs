@@ -3681,7 +3681,7 @@ impl fmt::Display for StaticMode {
                 None => write!(f, "ActivateAsInstant({cost_category:?})"),
             },
             StaticMode::CantPayCost { who, cost } => write!(f, "CantPayCost({who},{cost})"),
-            StaticMode::CantSacrifice { who, .. } => write!(f, "CantSacrifice({who})"),
+            StaticMode::CantSacrifice { who, filter: _ } => write!(f, "CantSacrifice({who})"),
             StaticMode::CantGainLife => write!(f, "CantGainLife"),
             StaticMode::CantLoseLife => write!(f, "CantLoseLife"),
             StaticMode::PlayerProtection(target) => {

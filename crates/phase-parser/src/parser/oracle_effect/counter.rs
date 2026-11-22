@@ -2170,6 +2170,23 @@ mod tests {
         ));
     }
 
+    /// CR 608.2c + CR 122.1: Dathon, His Heart Open's second sentence, "Put
+    /// another counter of that kind on it", is the same placement as "an
+    /// additional counter" with the anaphoric `it` bound to the parent target.
+    #[test]
+    fn put_chosen_counter_accepts_another_for_the_anaphoric_recipient() {
+        let effect = try_parse_put_chosen_counter("another counter of that kind on it.")
+            .expect("Dathon put clause must parse");
+        assert!(matches!(
+            effect,
+            Effect::PutChosenCounter {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                target_condition: None,
+            }
+        ));
+    }
+
     /// CR 608.2c: Crystalline Giant's source-self consumer. This was a
     /// deliberate strict gap for as long as its producer — the printed-list
     /// random choice — could not bind a kind into resolution state. That
