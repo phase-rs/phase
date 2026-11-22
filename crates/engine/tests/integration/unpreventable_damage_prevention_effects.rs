@@ -19,15 +19,18 @@
 //! A combat damage batch whose replacement or prevention asks a player a choice parks on it, and
 //! the player is asked (CR 608.2d, CR 616.1): a substitute's own choice (Nefarious Lich's exile,
 //! Dralnu, Lich Lord's sacrifice), a choice the rider's event meets (Abundance and Zur's Weirding
-//! on Swans of Bryn Argoll's draws), and, after the batch's damage, an aggregate prevention
-//! rider's own choice (Channel Harm's "may", Gatta and Luzzu's counter order; CR 615.5). No player
-//! receives priority while it is parked (CR 510.2): the action that answers the last choice
-//! finishes the batch, and the batch takes custody of every answer's events, so their triggers are
-//! collected once and put on the stack with the combat damage step's own, in one APNAP process
-//! (CR 510.3a, CR 603.3b). Each driver here checks that no priority window opens while the batch
-//! is parked. Inside a leg, a damage substitution's action precedes an earlier rider, and either
-//! one's prompt parks the leg (CR 614.6 + CR 615.5, CR 616.1g). The rider-pause sections hold
-//! those rows; the Ironscale Hydra rows are in `ironscale_hydra_combat_prevention`.
+//! on Swans of Bryn Argoll's draws), and, after the batch's damage, an aggregate prevention rider's
+//! own choice (Channel Harm's "may", Gatta and Luzzu's counter order; CR 615.5). No player receives
+//! priority while it is parked (CR 510.2): the action that answers the last choice finishes the
+//! batch, and the batch takes custody of every answer's events, so their triggers are collected
+//! once and put on the stack with the combat damage step's own, in one APNAP process (CR 510.3a,
+//! CR 603.3b). One known gap: a trigger already collected for all collectors while the batch is
+//! parked, such as one from a player's concession (CR 104.3a, CR 800.4a), is placed in a separate
+//! process after the batch's (Command Zone #353). Each driver here checks that no priority window
+//! opens while the batch is parked. Inside a leg, a damage substitution's action precedes an
+//! earlier rider, and either one's prompt parks the leg (CR 614.6 + CR 615.5, CR 616.1g). The
+//! rider-pause sections hold those rows; the Ironscale Hydra rows are in
+//! `ironscale_hydra_combat_prevention`.
 
 use engine::game::combat::AttackTarget;
 use engine::game::effects::attach::attach_to;

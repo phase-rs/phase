@@ -581,6 +581,10 @@ impl ParkedCombatDamageAnswer {
 /// delivery claimed it for ordinary collection. The batch uses it to move
 /// the queued context into its placement instead of rescanning it. A claim
 /// covering delayed collectors still excludes the occurrence (CR 603.7b).
+/// Known gap: an occurrence claimed for all collectors while the batch is
+/// parked (a concession's departure, CR 800.4a) has no witness here, so its
+/// queued context is placed after the batch's placement, not in it
+/// (Command Zone #353).
 ///
 /// The start is clamped: an anchor taken before the answer can exceed a buffer
 /// the answer shortened (`collect_answer_slice_matching` documents this for
