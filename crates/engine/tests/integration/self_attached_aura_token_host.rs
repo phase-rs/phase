@@ -262,9 +262,7 @@ fn for_each_role_tokens_enchant_their_own_iteration_host() {
         return;
     };
     if db.get_face_by_name("Asinine Antics").is_none() {
-        eprintln!(
-            "skipping the shipped replay: Asinine Antics is not in integration_cards/"
-        );
+        eprintln!("skipping the shipped replay: Asinine Antics is not in integration_cards/");
         return;
     }
     let mut scenario = GameScenario::new();
