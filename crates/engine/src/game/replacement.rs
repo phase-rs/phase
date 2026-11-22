@@ -9272,6 +9272,20 @@ fn entrant_keeps_as_enters_roll(
     })
 }
 
+/// CR 614.1a: compare an affected player with the replacement's source player.
+fn replacement_player_scope_matches(
+    scope: Option<&crate::types::ability::ReplacementPlayerScope>,
+    player: PlayerId,
+    source_player: PlayerId,
+) -> bool {
+    use crate::types::ability::ReplacementPlayerScope;
+    match scope {
+        Some(ReplacementPlayerScope::Opponent) => player != source_player,
+        Some(ReplacementPlayerScope::You) | None => player == source_player,
+        Some(ReplacementPlayerScope::AnyPlayer) => true,
+    }
+}
+
 fn object_replacement_candidate_applies_on_entry_board(
     state: &GameState,
     event: &ProposedEvent,
@@ -11596,23 +11610,46 @@ fn life_gain_substitute_may_prompt(
     });
     // A draw can be reshaped before delivery, a later individual draw can
     // meet a new replacement, and the Library-to-Hand move can itself prompt.
-    let may_affect_delivery = |def: &ReplacementDefinition| {
-        def.event == ReplacementEvent::Draw
-            || (matches!(
-                def.event,
-                ReplacementEvent::ChangeZone
-                    | ReplacementEvent::Moved
-                    | ReplacementEvent::Counter
-                    | ReplacementEvent::Attached
-            ) && def.destination_zone.is_none_or(|zone| zone == Zone::Hand))
+    let may_affect_delivery = |source, controller, def: &ReplacementDefinition| match def.event {
+        ReplacementEvent::Draw => {
+            replacement_player_scope_matches(def.valid_player.as_ref(), *player_id, controller)
+        }
+        ReplacementEvent::ChangeZone
+        | ReplacementEvent::Moved
+        | ReplacementEvent::Counter
+        | ReplacementEvent::Attached => {
+            def.destination_zone.is_none_or(|zone| zone == Zone::Hand)
+                && state.library_of(*player_id).iter().any(|&card| {
+                    let delivery =
+                        ProposedEvent::zone_change(card, Zone::Library, Zone::Hand, None);
+                    registry
+                        .get(&def.event)
+                        .is_none_or(|handler| (handler.matcher)(&delivery, source, state))
+                        && def.valid_card.as_ref().is_none_or(|filter| {
+                            replacement_valid_card_matches(
+                                def,
+                                &delivery,
+                                state,
+                                filter,
+                                source,
+                                Some(controller),
+                            )
+                        })
+                })
+        }
+        _ => false,
     };
     draw_may_prompt
-        || super::functioning_abilities::active_replacements(state)
-            .any(|(_, _, def)| may_affect_delivery(def))
-        || state
-            .pending_damage_replacements
-            .iter()
-            .any(may_affect_delivery)
+        || super::functioning_abilities::active_replacements(state).any(|(_, source, def)| {
+            may_affect_delivery(source.id, replacement_source_player(source), def)
+        })
+        || live_floating_replacements(state).any(|(source, def)| {
+            may_affect_delivery(
+                source,
+                def.source_controller.unwrap_or(state.active_player),
+                def,
+            )
+        })
 }
 
 /// CR 732.2a: does this proposed event's applier write a board axis the

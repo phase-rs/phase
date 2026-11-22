@@ -7328,6 +7328,15 @@ fn channel_harms_may_is_asked_in_each_combat_damage_step() {
 /// before P1 orders the poison result's replacements (CR 120.4c + CR 616.1).
 #[test]
 fn active_players_lifelink_substitute_prompts_before_defenders_poison_order() {
+    lifelink_substitute_and_poison_order(P0);
+}
+
+#[test]
+fn defenders_poison_order_precedes_lifelink_draws_with_defenders_abundance() {
+    lifelink_substitute_and_poison_order(P1);
+}
+
+fn lifelink_substitute_and_poison_order(abundance_controller: PlayerId) {
     const GLISTENER_ELF: &str = "Infect (This creature deals damage to creatures in the form of -1/-1 counters and to players in the form of poison counters.)";
     const VORINCLEX: &str = "Trample, haste\nIf you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
 
@@ -7361,8 +7370,10 @@ fn active_players_lifelink_substitute_prompts_before_defenders_poison_order() {
         });
         scenario.add_enchantment_from_oracle(P0, "Nefarious Lich", NEFARIOUS_LICH);
         let abundance = scenario
-            .add_enchantment_from_oracle(P0, "Abundance", ABUNDANCE)
+            .add_enchantment_from_oracle(abundance_controller, "Abundance", ABUNDANCE)
             .id();
+        let active_player_has_abundance = abundance_controller == P0;
+        let expected_draws_before_order = if active_player_has_abundance { 2 } else { 0 };
         let mut runner = scenario.build();
         let hand_before = hand_size(&runner, P0);
         let mut decline = answering_abundance(false);
@@ -7377,10 +7388,14 @@ fn active_players_lifelink_substitute_prompts_before_defenders_poison_order() {
             {
                 if *player == P1 {
                     assert_eq!(
-                        draw_prompts, 2,
-                        "P0's Abundance must precede P1's poison order"
+                        draw_prompts, expected_draws_before_order,
+                        "Only P0's Abundance may prompt before P1's poison order"
                     );
-                    assert_eq!(hand_size(runner, P0) - hand_before, 2);
+                    assert_eq!(
+                        hand_size(runner, P0) - hand_before,
+                        expected_draws_before_order,
+                        "P0's prompt-free draws must wait for P1's poison order"
+                    );
                     assert_eq!(candidates.len(), 2);
                     assert!(vorinclex
                         .iter()
@@ -7400,7 +7415,12 @@ fn active_players_lifelink_substitute_prompts_before_defenders_poison_order() {
         });
 
         assert_batch_settled(&runner);
-        assert_eq!(combat.choosers, [P0, P0, P1]);
+        let expected_choosers: &[PlayerId] = if active_player_has_abundance {
+            &[P0, P0, P1]
+        } else {
+            &[P1]
+        };
+        assert_eq!(combat.choosers, expected_choosers);
         assert_eq!(cards_drawn(&combat.events, P0), 2);
         assert_eq!(hand_size(&runner, P0) - hand_before, 2);
         assert_eq!(life(&runner, P0), 20);

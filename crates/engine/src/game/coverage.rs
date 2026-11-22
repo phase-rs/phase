@@ -17112,6 +17112,7 @@ mod tests {
                     .any(crate::game::replacement::is_damage_substitution),
                 "{name}: reach guard — the substitution parses"
             );
+            assert_eq!(card_face_gaps(&face), Vec::<String>::new(), "{name}");
             let mut features = HashMap::new();
             extract_card_features(&face, &mut features);
             assert!(
