@@ -25,9 +25,9 @@
 //! finishes the batch, and the batch takes custody of every answer's events, so their triggers are
 //! collected once and put on the stack with the combat damage step's own, in one APNAP process
 //! (CR 510.3a, CR 603.3b). Each driver here checks that no priority window opens while the batch
-//! is parked. Inside a leg, an earlier rider drained ahead of a damage substitution still settles
-//! its pauses in the batch (strict-failure, Command Zone #267), and a card whose replacement asks
-//! such a choice still reports unsupported
+//! is parked. Inside a leg, a damage substitution's action precedes an earlier rider, and either
+//! one's prompt parks the leg (CR 614.6 + CR 615.5, CR 616.1g). A card whose replacement asks such
+//! a choice still reports unsupported
 //! (`ResolverFeature:structural:damage_replacement_choice_unasked_in_combat`). The rider-pause
 //! sections hold those rows; the Ironscale Hydra rows are in `ironscale_hydra_combat_prevention`.
 
@@ -3282,7 +3282,7 @@ fn a_wither_leg_pauses_on_its_counters_inside_a_resumed_combat_batch() {
 }
 
 // ---------------------------------------------------------------------------
-// Rider pauses inside a combat batch (CR 510.2, CR 616.1; Command Zone #140)
+// Rider pauses inside a combat batch, asked at the leg (CR 510.2, CR 616.1, CR 616.1g)
 // ---------------------------------------------------------------------------
 
 const HARDENED_SCALES: &str = "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.";
@@ -3662,6 +3662,350 @@ fn phytohydras_counter_order_is_asked_inside_the_batch() {
         bolt_at(&mut runner, bolt, courser);
         assert_eq!(runner.state().objects[&courser].zone, Zone::Graveyard);
     }
+}
+
+/// The +1/+1 counters on `id`, read from a state at a prompt.
+fn plus_counters_in(state: &GameState, id: ObjectId) -> u32 {
+    state.objects[&id]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Whether a `ReplacementChoice` up in `state` is the damage order, offering Test of Faith's
+/// shield (summarized under the creature it protects, so it is picked by its description).
+fn offers_test_of_faiths_shield(state: &GameState) -> bool {
+    matches!(&state.waiting_for, WaitingFor::ReplacementChoice { candidates, .. }
+        if candidates.iter().any(|c| c.description == TEST_OF_FAITH_SHIELD))
+}
+
+/// The damage order's answer: Test of Faith's shield first, or the other effect first.
+fn answer_damage_order(state: &GameState, shield_first: bool) -> GameAction {
+    let WaitingFor::ReplacementChoice { candidates, .. } = &state.waiting_for else {
+        panic!("expected the damage order, got {:?}", state.waiting_for);
+    };
+    let index = candidates
+        .iter()
+        .position(|c| (c.description == TEST_OF_FAITH_SHIELD) == shield_first)
+        .unwrap_or_else(|| panic!("not offered: {candidates:?}"));
+    GameAction::ChooseReplacement { index }
+}
+
+/// The `CounterAdded` events on `id`, in order, as (count, actor).
+fn counters_added_to(events: &[GameEvent], id: ObjectId) -> Vec<(u32, PlayerId)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::CounterAdded {
+                object_id,
+                counter_type: CounterType::Plus1Plus1,
+                count,
+                actor,
+            } if *object_id == id => Some((*count, *actor)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What P1 sacrifices for Dralnu, Lich Lord's 1 left after Test of Faith's shield.
+#[derive(Clone, Copy, Debug)]
+enum DralnuSacrifice {
+    HardenedScales,
+    GrizzlyBears,
+}
+
+/// One combat on L1's board, after it settled.
+struct DralnuFight {
+    runner: GameRunner,
+    combat: Combat,
+    /// Each sacrifice prompt as it was asked: (chooser, count, Dralnu offered, Dralnu's +1/+1
+    /// counters, the combat damage batch parked).
+    sacrifices: Vec<(PlayerId, usize, bool, u32, bool)>,
+    dralnu: ObjectId,
+    scales: ObjectId,
+    bears: [ObjectId; 2],
+    courser: ObjectId,
+    baloth: ObjectId,
+}
+
+/// L1's board: P1's Dralnu, Lich Lord (3/3) under P0's Test of Faith blocks P0's Rumbling Baloth
+/// (4/4), with P1's Hardened Scales, two Grizzly Bears and a Centaur Courser (five permanents).
+/// `shield_first` is P1's damage order (CR 616.1); `sacrifice` answers a sacrifice of 1, and a
+/// sacrifice of 4 takes every permanent but Dralnu.
+fn dralnu_under_test_of_faith(shield_first: bool, sacrifice: DralnuSacrifice) -> DralnuFight {
+    let mut scenario = rider_board();
+    let dralnu = scenario
+        .add_creature_from_oracle(P1, "Dralnu, Lich Lord", 3, 3, DRALNU_LICH_LORD)
+        .id();
+    let scales = scenario
+        .add_enchantment_from_oracle(P1, "Hardened Scales", HARDENED_SCALES)
+        .id();
+    let bears = [
+        scenario.add_creature(P1, "Grizzly Bears", 2, 2).id(),
+        scenario.add_creature(P1, "Grizzly Bears", 2, 2).id(),
+    ];
+    let courser = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
+    let baloth = scenario.add_creature(P0, "Rumbling Baloth", 4, 4).id();
+    let faith = spell(&mut scenario, "Test of Faith", TEST_OF_FAITH, true);
+    let mut runner = scenario.build();
+    cast(&mut runner, faith, vec![TargetRef::Object(dralnu)]);
+    let mut sacrifices = Vec::new();
+
+    let combat = fight_answering(
+        &mut runner,
+        &[baloth],
+        &[(dralnu, baloth)],
+        |state| match &state.waiting_for {
+            WaitingFor::ReplacementChoice { .. } => {
+                assert!(
+                    offers_test_of_faiths_shield(state),
+                    "only the damage order is asked: {:?}",
+                    state.waiting_for
+                );
+                answer_damage_order(state, shield_first)
+            }
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                effect_kind,
+                ..
+            } => {
+                assert_eq!(*effect_kind, EffectKind::Sacrifice);
+                sacrifices.push((
+                    *player,
+                    *count,
+                    cards.contains(&dralnu),
+                    plus_counters_in(state, dralnu),
+                    state.pending_combat_lifelink.is_some(),
+                ));
+                let picked = match (*count, sacrifice) {
+                    (1, DralnuSacrifice::HardenedScales) => vec![scales],
+                    (1, DralnuSacrifice::GrizzlyBears) => vec![bears[0]],
+                    _ => cards.iter().copied().filter(|&c| c != dralnu).collect(),
+                };
+                GameAction::SelectCards { cards: picked }
+            }
+            other => panic!("an unexpected prompt: {other:?}"),
+        },
+    );
+
+    assert_batch_settled(&runner);
+    DralnuFight {
+        runner,
+        combat,
+        sacrifices,
+        dralnu,
+        scales,
+        bears,
+        courser,
+        baloth,
+    }
+}
+
+/// L1, CR 614.6 + CR 615.5 + CR 616.1: a damage substitution's action precedes an earlier
+/// prevention rider inside a combat leg. Test of Faith: "Prevent the next 3 damage that would be
+/// dealt to target creature this turn. For each 1 damage prevented this way, put a +1/+1 counter
+/// on that creature." Dralnu, Lich Lord: "If damage would be dealt to Dralnu, sacrifice that many
+/// permanents instead." Hardened Scales: "If one or more +1/+1 counters would be put on a
+/// creature you control, that many plus one +1/+1 counters are put on it instead."
+///
+/// P1 orders the shield first (CR 616.1; Dralnu's controller chooses). It prevents 3 of the
+/// Baloth's 4, and the remaining 1 is replaced by P1's sacrifice of one permanent, P1's choice
+/// (CR 608.2d, CR 701.21a), asked with the batch parked and no counter yet put. The modified event
+/// happens when the damage would have, and the shield's counters take place immediately afterward
+/// (CR 615.5), so with Hardened Scales sacrificed they meet no replacement: 3 counters, and no
+/// order is asked after the sacrifice. Dralnu is dealt no damage and deals its 3 to the Baloth
+/// (CR 510.2).
+#[test]
+fn dralnus_sacrifice_precedes_test_of_faiths_counters_in_combat() {
+    let DralnuFight {
+        runner,
+        combat,
+        sacrifices,
+        dralnu,
+        scales,
+        baloth,
+        ..
+    } = dralnu_under_test_of_faith(true, DralnuSacrifice::HardenedScales);
+
+    // The order prompt, to P1, offering the substitution and the shield, both under Dralnu.
+    assert_eq!(combat.prompts, vec![vec![dralnu, dralnu]]);
+    assert_eq!(combat.choosers, vec![P1]);
+    // The sacrifice is asked before any counter, with the batch parked.
+    assert_eq!(sacrifices, vec![(P1, 1, true, 0, true)]);
+    assert_eq!(runner.state().objects[&scales].zone, Zone::Graveyard);
+    let scales_left = combat
+        .events
+        .iter()
+        .position(|event| {
+            matches!(event, GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Graveyard, .. }
+                if *object_id == scales)
+        })
+        .expect("Hardened Scales is sacrificed");
+    let counter_events: Vec<usize> = combat
+        .events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            matches!(event, GameEvent::CounterAdded { object_id, .. } if *object_id == dralnu)
+        })
+        .map(|(position, _)| position)
+        .collect();
+    assert!(
+        !counter_events.is_empty(),
+        "Test of Faith's counters are put"
+    );
+    assert!(
+        counter_events
+            .iter()
+            .all(|&position| position > scales_left),
+        "Hardened Scales leaves before the counters: {counter_events:?} vs {scales_left}"
+    );
+    // Every counter is Test of Faith's, put by its controller.
+    assert!(counters_added_to(&combat.events, dralnu)
+        .iter()
+        .all(|&(_, actor)| actor == P0));
+    assert_eq!(plus_counters(&runner, dralnu), 3);
+    assert_eq!(runner.state().objects[&dralnu].damage_marked, 0);
+    assert_eq!(runner.state().objects[&dralnu].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&baloth].damage_marked, 3);
+}
+
+/// L1's sibling and negative. With a Grizzly Bears sacrificed instead, Hardened Scales stays and
+/// the shield's counters meet it after the sacrifice. Ordered Dralnu first, Dralnu replaces all
+/// 4 (CR 614.6): P1 sacrifices four permanents, Dralnu offered among them (Dralnu ruling: "Dralnu
+/// may be one of the permanents you sacrifice while applying its replacement effect."), and the
+/// shield never applies, so no counter is put.
+#[test]
+fn dralnus_sacrifice_with_hardened_scales_kept_or_dralnu_first() {
+    let DralnuFight {
+        runner,
+        combat,
+        sacrifices,
+        dralnu,
+        scales,
+        bears,
+        baloth,
+        ..
+    } = dralnu_under_test_of_faith(true, DralnuSacrifice::GrizzlyBears);
+    assert_eq!(combat.prompts.len(), 1);
+    assert_eq!(sacrifices, vec![(P1, 1, true, 0, true)]);
+    assert_eq!(runner.state().objects[&bears[0]].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&scales].zone, Zone::Battlefield);
+    // strict-failure: the card reads one counter event of 3 under Hardened Scales, 4 counters
+    // (CR 615.5). "For each 1 damage prevented this way" parses as one counter repeated per
+    // damage (Command Zone #174), three events of 2: 6.
+    assert!(
+        [4, 6].contains(&plus_counters(&runner, dralnu)),
+        "got {}",
+        plus_counters(&runner, dralnu)
+    );
+    assert_eq!(runner.state().objects[&dralnu].damage_marked, 0);
+    assert_eq!(runner.state().objects[&baloth].damage_marked, 3);
+
+    let DralnuFight {
+        runner,
+        combat,
+        sacrifices,
+        dralnu,
+        scales,
+        bears,
+        courser,
+        baloth,
+    } = dralnu_under_test_of_faith(false, DralnuSacrifice::HardenedScales);
+    assert_eq!(combat.prompts.len(), 1);
+    assert_eq!(sacrifices, vec![(P1, 4, true, 0, true)]);
+    for id in [scales, bears[0], bears[1], courser] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Graveyard);
+    }
+    assert_eq!(runner.state().objects[&dralnu].zone, Zone::Battlefield);
+    assert_eq!(plus_counters(&runner, dralnu), 0);
+    assert!(counters_added_to(&combat.events, dralnu).is_empty());
+    assert_eq!(runner.state().objects[&dralnu].damage_marked, 0);
+    assert_eq!(runner.state().objects[&baloth].damage_marked, 3);
+}
+
+/// L3, CR 616.1 + CR 616.1g: an earlier rider's own order prompt inside a combat leg is asked,
+/// not answered in its player's place. Phytohydra: "If damage would be dealt to this creature,
+/// put that many +1/+1 counters on it instead." P1's Phytohydra under P0's Test of Faith blocks
+/// P0's Rumbling Baloth (4/4), with P1's Hardened Scales and Doubling Season. P1 orders the shield
+/// first: it prevents 3, and Phytohydra replaces the last 1 with 1 counter, the modified event
+/// (CR 614.6), whose counter meets both counter replacements, an order P1 chooses with no counter
+/// yet put. Test of Faith's counters follow immediately afterward (CR 615.5) and meet both
+/// again, an order asked of P1 too. Every prompt is asked with the batch parked.
+#[test]
+fn test_of_faiths_counter_order_is_asked_behind_phytohydras() {
+    let mut totals = Vec::new();
+    for scales_first in [true, false] {
+        let label = format!("scales first: {scales_first}");
+        let mut scenario = rider_board();
+        let hydra = scenario
+            .add_creature_from_oracle(P1, "Phytohydra", 1, 1, PHYTOHYDRA)
+            .id();
+        let (scales, season) = scales_and_season(&mut scenario, P1);
+        let baloth = scenario.add_creature(P0, "Rumbling Baloth", 4, 4).id();
+        let faith = spell(&mut scenario, "Test of Faith", TEST_OF_FAITH, true);
+        let mut runner = scenario.build();
+        cast(&mut runner, faith, vec![TargetRef::Object(hydra)]);
+        // (the damage order, Phytohydra's +1/+1 counters, the batch parked), per prompt.
+        let mut asked: Vec<(bool, u32, bool)> = Vec::new();
+
+        let combat = fight_answering(&mut runner, &[baloth], &[(hydra, baloth)], |state| {
+            let damage_order = offers_test_of_faiths_shield(state);
+            asked.push((
+                damage_order,
+                plus_counters_in(state, hydra),
+                state.pending_combat_lifelink.is_some(),
+            ));
+            if damage_order {
+                return answer_damage_order(state, true);
+            }
+            let WaitingFor::ReplacementChoice { candidates, .. } = &state.waiting_for else {
+                panic!("an unexpected prompt: {:?}", state.waiting_for);
+            };
+            let prefer = if scales_first { scales } else { season };
+            let index = candidates
+                .iter()
+                .position(|c| c.source_id == prefer)
+                .unwrap_or_else(|| panic!("not offered: {candidates:?}"));
+            GameAction::ChooseReplacement { index }
+        });
+
+        assert_batch_settled(&runner);
+        assert!(
+            combat.choosers.iter().all(|&chooser| chooser == P1),
+            "{label}"
+        );
+        assert!(asked.iter().all(|&(_, _, parked)| parked), "{label}");
+        assert_eq!(asked[0], (true, 0, true), "{label}: the damage order first");
+        let counter_orders = &asked[1..];
+        assert!(
+            counter_orders
+                .iter()
+                .all(|&(damage_order, _, _)| !damage_order),
+            "{label}"
+        );
+        for prompt in &combat.prompts[1..] {
+            assert_eq!(offered(prompt), offered(&[scales, season]), "{label}");
+        }
+        // The substitute's order, then at least one from Test of Faith's counters.
+        assert!(counter_orders.len() >= 2, "{label}: {asked:?}");
+        assert_eq!(
+            counter_orders[0].1, 0,
+            "{label}: the substitute's order comes first"
+        );
+        assert_eq!(runner.state().objects[&hydra].damage_marked, 0, "{label}");
+        totals.push(plus_counters(&runner, hydra));
+    }
+    // strict-failure: the card reads one event of 3 for Test of Faith's counters: Hardened Scales
+    // first everywhere (1+1)×2 + (3+1)×2 = 12, Doubling Season first 1×2+1 + 3×2+1 = 10
+    // (CR 616.1, CR 616.1f). "For each 1 damage prevented this way" parses as one counter repeated
+    // per damage (Command Zone #174), three events of 1: 16 and 12.
+    assert!([12, 16].contains(&totals[0]), "Scales first: {totals:?}");
+    assert!([10, 12].contains(&totals[1]), "Season first: {totals:?}");
+    assert!(totals[1] < totals[0], "{totals:?}");
 }
 
 /// P3: CR 616.1 at the aggregate drain (Phase D, CR 615.5). Gatta and Luzzu: "If damage would be

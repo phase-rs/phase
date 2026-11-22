@@ -14,10 +14,9 @@
 //! - A rider that picks from a population acts on what the player picks, and the spell's next
 //!   instruction follows all of it (CR 608.2c, CR 608.2d): Lightning Helix's "and you gain 3
 //!   life" under Nefarious Lich.
-//! - Combat damage can't pause for a CR 616.1 order choice yet (Command Zone #140), so the engine
-//!   answers each order park inside a batch with its first candidate instead of dropping the
-//!   damage (CR 510.2). That is not the player's pick, so those rows are strict failures; candidate
-//!   order is scan order, so they assert the set the player could reach, never one member.
+//! - A combat damage batch asks each CR 616.1 order and each prompt a replacement's action or
+//!   rider raises, at the leg (CR 510.2 rules out a priority window, not these choices); a
+//!   substitution's action precedes an earlier rider there as elsewhere (CR 614.6 + CR 615.5).
 //! - A spell's later instruction runs once, behind its remaining recipients, whichever
 //!   replacement answer reaches it.
 
@@ -3856,8 +3855,8 @@ pub(super) fn cast_temper_at_one(runner: &mut GameRunner, temper: ObjectId, targ
 /// are ordered by P1 (CR 616.1). Test of Faith first prevents 3 and puts 3 counters, and
 /// Phytohydra replaces the last 1 with 1 more: 4. Phytohydra first replaces all 4 with 4
 /// counters and leaves the shield unused. Phytohydra is dealt no damage, and no rider is left.
-/// In combat Test of Faith's counters are put before Phytohydra's; by CR 614.6 + CR 615.5
-/// Phytohydra's come first (strict-failure, Command Zone #267).
+/// Phytohydra's counter is the modified event (CR 614.6), and Test of Faith's follow it
+/// immediately afterward (CR 615.5).
 #[test]
 fn a_resident_rider_from_another_recipient_is_not_lost() {
     let mut scenario = scenario();
@@ -3897,6 +3896,40 @@ fn a_resident_rider_from_another_recipient_is_not_lost() {
             ),
             "one order prompt"
         );
+        if faith_first {
+            // CR 614.6 + CR 615.5: Phytohydra's counter (its controller P1's) is put before every
+            // one of Test of Faith's (its controller P0's).
+            let actors: Vec<(u32, PlayerId)> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::CounterAdded {
+                        object_id,
+                        counter_type: CounterType::Plus1Plus1,
+                        count,
+                        actor,
+                    } if *object_id == hydra => Some((*count, *actor)),
+                    _ => None,
+                })
+                .collect();
+            let phytohydras = actors
+                .iter()
+                .position(|&(_, actor)| actor == P1)
+                .expect("Phytohydra's counter is put");
+            assert_eq!(actors[phytohydras], (1, P1), "{actors:?}");
+            let test_of_faiths: Vec<usize> = actors
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, actor))| *actor == P0)
+                .map(|(position, _)| position)
+                .collect();
+            assert!(!test_of_faiths.is_empty(), "{actors:?}");
+            assert!(
+                test_of_faiths
+                    .iter()
+                    .all(|&position| position > phytohydras),
+                "{actors:?}"
+            );
+        }
         assert_eq!(plus_counters(&runner, hydra), 4);
         assert_eq!(damage(&runner, hydra), 0);
         assert!(!runner.state().has_post_replacement_drain());

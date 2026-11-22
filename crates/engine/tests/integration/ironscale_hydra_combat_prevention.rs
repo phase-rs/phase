@@ -436,7 +436,7 @@ fn ironscale_two_hydras_each_rider_binds_its_own_host() {
 }
 
 // ---------------------------------------------------------------------------
-// Rider pauses inside a combat batch (CR 510.2, CR 616.1; Command Zone #140)
+// Rider pauses inside a combat batch, asked at the leg (CR 510.2, CR 616.1, CR 616.1g)
 // ---------------------------------------------------------------------------
 
 const HARDENED_SCALES: &str = "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.";

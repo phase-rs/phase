@@ -46,9 +46,8 @@ crates/engine/src/game/replacement.rs	apply_single_replacement	stash	2
 crates/engine/src/game/replacement.rs	apply_single_replacement	template	5
 crates/engine/src/game/replacement.rs	continue_replacement_impl	template	1
 crates/engine/src/game/replacement.rs	drain_combat_damage_continuation	consumer	1
-crates/engine/src/game/replacement.rs	drain_combat_damage_rider	consumer	1
 crates/engine/src/game/replacement.rs	drain_damage_rider	consumer	1
-crates/engine/src/game/replacement.rs	stash_damage_substitute	stash	3
+crates/engine/src/game/replacement.rs	stash_damage_substitute	stash	2
 crates/engine/src/game/replacement.rs	token_entry_awaits_own_entry_settlement	resolved	1
 crates/engine/src/game/replacement.rs	token_entry_awaits_own_entry_settlement	template	1
 crates/engine/src/game/stack.rs	resolve_top	consumer	1

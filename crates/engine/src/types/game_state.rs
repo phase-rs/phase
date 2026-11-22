@@ -30021,9 +30021,9 @@ declare_game_state! {
     /// return type.
     pub combat_prevention_tally: Option<HashMap<(AppliedReplacementKey, TargetRef), i32>>,
     /// CR 510.2 + CR 615.13: which simultaneous batch opened `combat_prevention_tally`: a combat
-    /// damage step's (CR 510.2), whose rider pauses settle inside the batch, or a noncombat
-    /// instruction's, whose riders wait for its damage. Opened and restored with the tally, so
-    /// execution-local and excluded from serialization and equality like it.
+    /// damage step's (CR 510.2) or a noncombat instruction's, whose riders wait for its damage.
+    /// Opened and restored with the tally, so execution-local and excluded from serialization and
+    /// equality like it.
     #[serde(skip)]
     pub(crate) prevention_tally_batch: Option<DamageBatchKind>,
     /// CR 510.2 + CR 700.1 + CR 615.8 + CR 611.3a: what one simultaneous damage batch has
@@ -33713,12 +33713,12 @@ pub(crate) struct DamageBatchLedger {
     /// A printed guard reads once for the whole batch (Undergrowth Champion ruling: "its
     /// prevention effect will apply once to all that damage").
     pub(crate) settled_guards: Vec<crate::types::ability::SettledDamageGuard>,
-    /// CR 615.5 + CR 608.2c: the frame of the first noncombat rider in this batch that left its
-    /// prompt standing. The batch's later riders queue behind it
-    /// (`replacement::damage_rider_placement`). In combat a settled leg's own continuation parks
-    /// the pass (`replacement::drain_combat_damage_continuation`), and only the in-leg
-    /// earlier-rider and aggregate drains settle their pauses (`drain_combat_damage_rider`), so
-    /// it is never set there.
+    /// CR 615.5 + CR 608.2c: the frame of the first rider in this batch that left its prompt
+    /// standing (`replacement::drain_damage_rider`). A noncombat batch's later riders queue
+    /// behind it (`replacement::damage_rider_placement`). In combat it is a leg's: a damage
+    /// substitution's action that ran ahead of an earlier rider and paused (Dralnu, Lich Lord's
+    /// sacrifice before Test of Faith's counters); `replacement::settle_combat_damage_replacement`
+    /// takes it and parks the pass on that prompt, so it never outlives the leg.
     pub(crate) paused_rider: Option<PostReplacementFrameId>,
     /// CR 614.6 + CR 615.5 + CR 616.1: `Some` while a two-phase noncombat batch is settling its
     /// original replacement choices. A damage replacement's action or rider is held here
