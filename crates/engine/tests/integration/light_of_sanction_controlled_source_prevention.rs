@@ -5,7 +5,7 @@
 //! CR 615.1 + CR 615.1a: a continuous effect that says "prevent" is a
 //!   prevention effect ("shield") that watches for a damage event and prevents
 //!   the damage.
-//! CR 615.2 + CR 609.7b: the shield applies to damage from a source with the
+//! CR 615.2 + CR 609.7c: the shield applies to damage from a source with the
 //!   stated properties and rechecks those properties when that source would
 //!   deal damage.
 //! CR 609.7c: a static ability's shield applies to sources that are permanents
@@ -183,7 +183,7 @@ fn assert_combat_settled(runner: &GameRunner) {
     );
 }
 
-/// CR 615.1a + CR 615.2 + CR 609.7b + CR 609.7c: the shield is scoped on both
+/// CR 615.1a + CR 615.2 + CR 609.7c: the shield is scoped on both
 /// axes — recipient "creatures you control" and source "sources you control" —
 /// so P0's own Lightning Bolt aimed at P0's own creature deals no damage.
 #[test]
@@ -264,7 +264,7 @@ fn light_of_sanction_prevents_its_controllers_bolt_on_its_controllers_creature()
     assert_settled(&runner, P0);
 }
 
-/// CR 615.2 + CR 609.7b: the source axis is "sources you control". P1's Bolt is
+/// CR 615.2 + CR 609.7c: the source axis is "sources you control". P1's Bolt is
 /// controlled by P1, so the shield does not apply and the 3 damage is marked.
 #[test]
 fn light_of_sanction_does_not_prevent_its_opponents_bolt_on_its_controllers_creature() {

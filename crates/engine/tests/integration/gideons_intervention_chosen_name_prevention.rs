@@ -5,7 +5,7 @@
 //! sources with the chosen name."
 //!
 //! CR 614.1c: "As [this permanent] enters ... choose" is a replacement effect.
-//! CR 201.2 + CR 608.2d: a chosen card name is public and is checked by name.
+//! CR 201.2 + CR 201.4: a chosen card name is public and is checked by name.
 //! CR 101.2: a "can't" restriction takes precedence over permission.
 //! CR 604.1: the static abilities are simply true while the enchantment is on
 //!   the battlefield.

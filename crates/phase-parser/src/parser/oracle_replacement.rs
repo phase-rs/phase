@@ -16733,7 +16733,7 @@ fn parse_damage_recipient_terminator(input: &str) -> OracleResult<'_, ()> {
                 tag::<_, _, OracleError<'_>>(", you may prevent"),
             ))),
         ),
-        // CR 615.1a + CR 609.7b: a trailing passive source clause ("... by sources
+        // CR 615.1a + CR 609.7c: a trailing passive source clause ("... by sources
         // with the chosen name") ends the recipient phrase. It is matched via `peek`
         // and left for the source extractor, which fails closed on a subject it
         // cannot read, so no shield is ever installed unscoped.
@@ -18149,6 +18149,7 @@ mod tests {
                 "prevent all combat damage that would be dealt to ~ by creatures blocking this creature.",
                 typed(vec![TypeFilter::Creature], vec![FilterProp::BlockingSource]),
             ),
+            // "The last chosen color" (Chromatic Armor): re-choice persistence is unverified, so it fails closed.
             (
                 "prevent all damage that would be dealt to enchanted creature by sources of the last chosen color.",
                 DamageSourceScope::Unrecognized,

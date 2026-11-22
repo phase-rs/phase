@@ -95,7 +95,7 @@ fn parsed_gaps_and_damage_shield(
     (gaps, shield)
 }
 
-/// CR 615.1a + CR 609.7b: Bronze Horse's shield is scoped to "spells that target it"
+/// CR 615.1a + CR 609.7c: Bronze Horse's shield is scoped to "spells that target it"
 /// (a spell source whose targets include the host). The gate and the source scope
 /// both parse, so the line yields the gated, source-scoped shield and no gap. The
 /// runtime behaviour is witnessed in `bronze_horse_targeting_spell_prevention`.
