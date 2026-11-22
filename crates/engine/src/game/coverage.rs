@@ -21,7 +21,7 @@ use crate::parser::oracle_ir::diagnostic::{
     ClauseGap, ClauseGapKind, OracleDiagnostic, OracleItemId, OracleSourceSpan, SpanPrecision,
 };
 use crate::parser::oracle_util::normalize_card_name_refs;
-use crate::types::ability::{filter_grammar_any, FilterGrammarNode, TurnWindow};
+use crate::types::ability::{filter_contains_filter_prop, TurnWindow};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
     ActivationRestriction, AdditionalCost, AggregateFunction, AttachmentReferent, AttackSubject,
@@ -12766,11 +12766,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             // final instruction can still record pre-layer types instead of entry-time
             // types, so coverage withholds support for reads that use token identity.
             if crate::types::ability::ledger_filter_is_evaluable(filter)
-                && !filter_grammar_any(filter, &|node| {
-                    matches!(
-                        node,
-                        FilterGrammarNode::Prop(FilterProp::Token | FilterProp::NonToken)
-                    )
+                && !filter_contains_filter_prop(filter, &|prop| {
+                    matches!(prop, FilterProp::Token | FilterProp::NonToken)
                 })
             {
                 Handled

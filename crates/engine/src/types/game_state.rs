@@ -36918,9 +36918,9 @@ impl GameState {
         {
             return Ok(());
         }
-        // CR 111.1 + CR 400.7: token identity is fixed per object. The entry's own
-        // zone-change record captured it as the entrant arrived, so it answers even after
-        // the entrant has left; an entrant still in `objects` answers for itself.
+        // CR 111.1 + CR 730.2d: the entry's zone-change record preserves token status at
+        // arrival. The live object answers only when its status cannot have changed since
+        // entry; a merged permanent's follows its topmost component.
         let mut unmatched_changes: Vec<&ZoneChangeRecord> =
             self.battlefield_entry_zone_changes().collect();
         let mut repairs = Vec::new();
@@ -36936,6 +36936,11 @@ impl GameState {
                 None => self
                     .objects
                     .get(&entry.object_id)
+                    .filter(|object| {
+                        object.merged_components.is_empty()
+                            && object.merge_kind.is_none()
+                            && object.pre_merge_is_token.is_none()
+                    })
                     .map(|object| object.is_token)
                     .ok_or(
                         PersistedRestoreError::UnrecoverableBattlefieldEntryTokenStatus {

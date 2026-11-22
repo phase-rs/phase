@@ -16,6 +16,7 @@
 //! creatures you control and count each one that entered this turn" — a LIVE set
 //! (CR 608.2h). That form must NOT migrate.
 
+use engine::game::merge::{merge_object_onto, MergeSide};
 use engine::game::quantity::resolve_quantity;
 use engine::game::restrictions::{check_activation_restrictions, record_battlefield_entry};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -1548,6 +1549,78 @@ fn legacy_entry_token_status_is_recovered_after_the_entrant_leaves() {
         Some(EntryTokenStatus::Nontoken)
     );
     assert_gyome_food_delta(&mut GameRunner::from_state(restored), gyome, 1);
+}
+
+#[test]
+fn legacy_entry_token_status_is_recovered_from_record_after_token_ceases_to_exist() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let gyome = scenario
+        .add_creature(P0, "Gyome, Master Chef", 5, 3)
+        .from_oracle_text_with_keywords(&["Trample"], GYOME)
+        .id();
+    let soldiers = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Raise the Alarm",
+            true,
+            "Create two 1/1 white Soldier creature tokens.",
+        )
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .cast(soldiers)
+        .resolve()
+        .assert_zone(&[soldiers], Zone::Graveyard);
+    let entry = &runner.state().battlefield_entries_this_turn[0];
+    let token = entry.object_id;
+    assert_eq!(entry.token_status, Some(EntryTokenStatus::Token));
+    assert!(entry.core_types.contains(&CoreType::Creature));
+    assert_eq!(runner.state().objects[&token].zone, Zone::Battlefield);
+
+    runner.cast(murder).target_objects(&[token]).resolve();
+    assert_priority(&runner);
+    let state = runner.state();
+    assert!(state.zone_changes_this_turn.iter().any(|change| {
+        change.object_id == token
+            && change.from_zone == Some(Zone::Battlefield)
+            && change.to_zone == Zone::Graveyard
+    }));
+    // CR 111.7 + CR 704.5d: the token ceases to exist in the graveyard.
+    assert!(!state.objects.contains_key(&token));
+
+    let restored = legacy_save_without_entry_token_status(state)
+        .into_game_state()
+        .unwrap();
+    let entry = &restored.battlefield_entries_this_turn[0];
+    assert_eq!(entry.object_id, token);
+    assert_eq!(entry.token_status, Some(EntryTokenStatus::Token));
+    assert_gyome_food_delta(&mut GameRunner::from_state(restored), gyome, 0);
+}
+
+#[test]
+fn legacy_entry_token_status_refuses_a_merged_entrant_without_its_record() {
+    let (mut runner, component, bears) = legacy_bears_entry();
+    let state = runner.state_mut();
+    merge_object_onto(state, component, bears, MergeSide::Bottom, &mut Vec::new());
+    state.battlefield.retain(|&id| id != component);
+    assert_eq!(state.objects[&bears].merged_components, [bears, component]);
+    state.zone_changes_this_turn.clear();
+    state.instruction_boundary_marks.clear();
+    state.battlefield_entry_observations = Default::default();
+
+    let result = legacy_save_without_entry_token_status(state)
+        .prepare_for_restore(PersistedRestoreFinalization::Immediate);
+    assert!(matches!(
+        result,
+        Err(PersistedRestoreError::UnrecoverableBattlefieldEntryTokenStatus { object_id })
+            if object_id == bears
+    ));
 }
 
 #[test]
