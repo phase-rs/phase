@@ -26,6 +26,7 @@ use engine::game::combat::AttackTarget;
 use engine::game::combat_damage::combat_damage_to_defender;
 use engine::game::coverage::unimplemented_mechanics;
 use engine::game::engine::EngineError;
+use engine::game::replacement::replacement_choice_waiting_for;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{ChoiceType, ControllerRef, TargetFilter, TargetRef, TypedFilter};
@@ -37,6 +38,7 @@ use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::proposed_event::ProposedEvent;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
@@ -1066,6 +1068,7 @@ fn zilortha_protected_after_blocks_stays_in_double_strike_forecast() {
 fn hydra_combat_board<T>(
     counters: u32,
     defender: impl FnOnce(&mut GameScenario) -> T,
+    prepare_defender: impl FnOnce(&mut GameRunner, &T),
 ) -> (GameRunner, ObjectId, ObjectId, T) {
     let mut scenario = board();
     scenario.with_life(P1, 30);
@@ -1119,6 +1122,7 @@ fn hydra_combat_board<T>(
     ));
     assert!(outcome.state().stack.is_empty());
 
+    prepare_defender(&mut runner, &defender);
     runner.advance_to_phase(Phase::PreCombatMain);
     assert_eq!(runner.state().active_player, P0);
     cast_at(&mut runner, mastery, ghalta);
@@ -1128,7 +1132,7 @@ fn hydra_combat_board<T>(
 
 #[test]
 fn zilortha_combat_forecast_drops_hydra_after_prevention_removes_its_counters() {
-    let (mut runner, ghalta, hydra, ()) = hydra_combat_board(12, |_| {});
+    let (mut runner, ghalta, hydra, ()) = hydra_combat_board(12, |_| {}, |_, _| {});
     let p1_life = runner.life(P1);
     runner.advance_to_combat();
     runner
@@ -1169,19 +1173,14 @@ fn zilortha_combat_forecast_drops_hydra_after_prevention_removes_its_counters() 
 
 #[test]
 fn zilortha_combat_forecast_drops_regenerated_blocker() {
-    let (mut runner, ghalta, hydra, (bears, regenerate)) = hydra_combat_board(2, |scenario| {
-        let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
-        let regenerate = scenario
-            .add_spell_to_hand_from_oracle(
-                P1,
-                "Regenerate",
-                true,
-                "Regenerate target creature. (The next time that creature would be destroyed this turn, instead tap it, remove it from combat, and heal all damage on it.)",
-            )
-            .with_mana_cost(ManaCost::zero())
-            .id();
-        (bears, regenerate)
-    });
+    let (mut runner, ghalta, hydra, (bears, regenerate)) = hydra_combat_board(
+        2,
+        |scenario| {
+            let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+            (bears, regenerate_spell(scenario))
+        },
+        |_, _| {},
+    );
     runner.act(GameAction::PassPriority).unwrap();
     cast_at(&mut runner, regenerate, bears);
 
@@ -1217,4 +1216,104 @@ fn zilortha_combat_forecast_drops_regenerated_blocker() {
         forecast, actual,
         "forecast must match the actual trample damage"
     );
+}
+
+fn regenerate_spell(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Regenerate",
+            true,
+            "Regenerate target creature. (The next time that creature would be destroyed this turn, instead tap it, remove it from combat, and heal all damage on it.)",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id()
+}
+
+#[test]
+fn zilortha_regeneration_alone_opens_first_strike_forecast() {
+    let mut regenerate = None;
+    let (mut runner, ghalta, z, yargle) =
+        ghalta_board(("Yargle, Glutton of Urborg", 9, 3), |scenario| {
+            regenerate = Some(regenerate_spell(scenario));
+        });
+    runner.act(GameAction::PassPriority).unwrap();
+    cast_at(&mut runner, regenerate.unwrap(), z);
+    let life_before = runner.life(P1);
+
+    attack_and_block(&mut runner, &[ghalta], &[(z, ghalta), (yargle, ghalta)]);
+    let forecast = combat_damage_to_defender(runner.state(), ghalta, &[z, yargle]);
+    assign_split(&mut runner, vec![(z, 7), (yargle, 5)], 0);
+    runner.combat_damage();
+
+    assert_eq!(zone(&runner, z), Zone::Battlefield);
+    assert!(runner.state().objects[&z].tapped);
+    assert_eq!(marked(&runner, z), 0);
+    assert_eq!(marked(&runner, yargle), 5);
+    assert_eq!(prompt_minimum(&runner, yargle), 4);
+    assign(&mut runner, yargle, 4, 8).expect("Yargle still measures lethal damage by power");
+    finish_combat(&mut runner);
+    let actual = life_before - runner.life(P1);
+    assert_eq!(actual, 8);
+    assert_eq!(forecast, actual);
+}
+
+#[test]
+fn zilortha_forecast_falls_back_when_destruction_replacement_needs_choice() {
+    let (mut runner, ghalta, hydra, (z, yargle, umbra, regenerate)) = hydra_combat_board(
+        1,
+        |scenario| {
+            let z = zilortha(scenario, P1);
+            let yargle = scenario
+                .add_creature(P1, "Yargle, Glutton of Urborg", 9, 3)
+                .as_legendary()
+                .id();
+            let umbra = scenario
+                .add_spell_to_hand(P1, "Spider Umbra", false)
+                .as_enchantment()
+                .with_subtypes(vec!["Aura"])
+                .with_mana_cost(ManaCost::zero())
+                .from_oracle_text_with_keywords(
+                    &["Enchant", "Umbra armor"],
+                    "Enchant creature\nEnchanted creature gets +1/+1 and has reach. (It can block creatures with flying.)\nUmbra armor (If enchanted permanent would be destroyed, instead remove all damage from it and destroy this Aura.)",
+                )
+                .id();
+            (z, yargle, umbra, regenerate_spell(scenario))
+        },
+        |runner, &(z, _, umbra, _)| {
+            cast_at(runner, umbra, z);
+            assert_eq!(zone(runner, umbra), Zone::Battlefield);
+        },
+    );
+    runner.act(GameAction::PassPriority).unwrap();
+    cast_at(&mut runner, regenerate, z);
+
+    attack_and_block(
+        &mut runner,
+        &[ghalta],
+        &[(hydra, ghalta), (z, ghalta), (yargle, ghalta)],
+    );
+    assert_eq!(prompt_minimum(&runner, hydra), 1);
+    assert_eq!(prompt_minimum(&runner, z), 8);
+    assert_eq!(prompt_minimum(&runner, yargle), 9);
+    let forecast = combat_damage_to_defender(runner.state(), ghalta, &[hydra, z, yargle]);
+    // The assigned-damage fallback assumes Zilortha dies, then Yargle dies with 3 marked.
+    assert_eq!(forecast, 12);
+
+    assign_split(&mut runner, vec![(hydra, 1), (z, 8), (yargle, 3)], 0);
+    assert!(matches!(
+        runner.state().pending_replacement.as_ref().map(|pending| &pending.proposed),
+        Some(ProposedEvent::Destroy { object_id, .. }) if *object_id == z
+    ));
+    // CR 616.1: Zilortha's controller chooses between regeneration and umbra armor, so
+    // which creatures survive first strike depends on that choice.
+    let WaitingFor::ReplacementChoice { candidates, .. } =
+        replacement_choice_waiting_for(P1, runner.state())
+    else {
+        panic!("expected P1 to choose a destruction replacement");
+    };
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate.source_id == umbra));
 }

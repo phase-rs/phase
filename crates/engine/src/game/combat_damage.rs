@@ -711,7 +711,6 @@ fn damage_is_not_fixed(
     .is_empty()
 }
 
-#[allow(dead_code)] // Reachable only through the deferred crate-visible assessment API.
 fn lethal_destruction_is_not_fixed(state: &GameState, object_id: ObjectId) -> bool {
     let proposed = ProposedEvent::Destroy {
         object_id,
@@ -1773,11 +1772,11 @@ struct PredictedHit {
     deathtouch: bool,
 }
 
-/// CR 510.2 + CR 615.5: when some first-step damage is not fixed, run the step on a copy of
-/// the game, prevention riders included (protection granted after blocks, a Protean Hydra
-/// losing counters), then its state-based actions. Return the resulting state and the
-/// attacker's starting combat participation. `None` when the damage is fixed or the copy
-/// pauses for a player's choice; the caller then estimates from the assigned amounts.
+/// CR 510.2 + CR 615.5 + CR 614.6: run first-strike damage and its state-based actions on a
+/// copy when prevention or replacement could change the damage or a damaged creature's
+/// destruction. Return the resulting state and the attacker's starting combat participation.
+/// Return `None` when neither event can change or when damage or state-based actions pause
+/// for a player's choice. The caller then estimates from the assigned amounts.
 fn preview_first_step(
     state: &GameState,
     attacker: &GameObject,
@@ -1788,14 +1787,15 @@ fn preview_first_step(
         let DamageTarget::Object(target) = assignment.target else {
             return false;
         };
-        DamageContext::from_source(state, *source).is_some_and(|context| {
-            damage_is_not_fixed(
-                state,
-                &context,
-                &TargetRef::Object(target),
-                assignment.amount,
-            )
-        })
+        assignment.amount > 0
+            && (DamageContext::from_source(state, *source).is_some_and(|context| {
+                damage_is_not_fixed(
+                    state,
+                    &context,
+                    &TargetRef::Object(target),
+                    assignment.amount,
+                )
+            }) || lethal_destruction_is_not_fixed(state, target))
     });
     if !needs_preview {
         return None;
@@ -1811,7 +1811,17 @@ fn preview_first_step(
 
     // CR 704.3 + CR 704.5f + CR 704.5g + CR 704.5h: check for zero toughness and
     // lethal damage on the battlefield left by first strike, repeating after departures.
+    let waiting_for = preview.waiting_for.clone();
     sba::check_state_based_actions(&mut preview, &mut Vec::new());
+    // CR 616.1: a new choice can leave destruction unresolved on the copy.
+    if preview.waiting_for != waiting_for
+        && !matches!(
+            preview.waiting_for,
+            WaitingFor::Priority { .. } | WaitingFor::GameOver { .. }
+        )
+    {
+        return None;
+    }
     Some((preview, before))
 }
 
