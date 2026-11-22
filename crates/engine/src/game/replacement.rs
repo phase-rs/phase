@@ -9272,20 +9272,6 @@ fn entrant_keeps_as_enters_roll(
     })
 }
 
-/// CR 614.1a: compare an affected player with the replacement's source player.
-fn replacement_player_scope_matches(
-    scope: Option<&crate::types::ability::ReplacementPlayerScope>,
-    player: PlayerId,
-    source_player: PlayerId,
-) -> bool {
-    use crate::types::ability::ReplacementPlayerScope;
-    match scope {
-        Some(ReplacementPlayerScope::Opponent) => player != source_player,
-        Some(ReplacementPlayerScope::You) | None => player == source_player,
-        Some(ReplacementPlayerScope::AnyPlayer) => true,
-    }
-}
-
 fn object_replacement_candidate_applies_on_entry_board(
     state: &GameState,
     event: &ProposedEvent,
@@ -11581,9 +11567,10 @@ fn life_gain_substitute_may_prompt(
         || execute.repeat_for.is_some()
         || execute.modal.is_some()
         || execute.unless_pay.is_some()
-        || state.objects.get(&rid.source).is_none_or(|source| {
-            !replacement_player_scope_matches(None, *player_id, source.controller)
-        })
+        || state
+            .objects
+            .get(&rid.source)
+            .is_none_or(|source| source.controller != *player_id)
     {
         return true;
     }
