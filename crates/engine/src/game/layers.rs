@@ -16707,8 +16707,8 @@ mod tests {
         assert_eq!(live[0].origin, DefinitionOrigin::Characteristic);
     }
 
-    // Synthetic provenance fixture. Promise of Loyalty is the nearest printed
-    // card, and its resolution-origin grant is deferred to phase 3.
+    // Synthetic fixture isolating the graft rules. The Promise of Loyalty
+    // integration tests exercise the resolution-origin grant through a real cast.
     fn check_static_grant_removal(
         inner_origin: DefinitionOrigin,
         transient: bool,

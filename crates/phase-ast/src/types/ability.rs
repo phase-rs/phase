@@ -43306,8 +43306,9 @@ pub struct StaticDefinition {
     /// A transient `AddStaticMode` stamps `Resolution` in layer 6.
     /// `GrantStaticAbility` keeps the inner definition's origin for transient
     /// grants and forces `Characteristic` otherwise. Printed and quoted
-    /// definitions keep the default. Parsed rule effects declare their origin
-    /// with [`Self::resolution_installed`]. Origin participates in equality
+    /// definitions keep the default. Parsed rule effects carried by
+    /// `GrantStaticAbility` declare their origin with
+    /// [`Self::resolution_installed`]. Origin participates in equality
     /// so graft deduplication preserves resolution-installed definitions.
     #[serde(default, skip_serializing_if = "DefinitionOrigin::is_characteristic")]
     pub origin: DefinitionOrigin,
@@ -44012,10 +44013,13 @@ impl ReplacementChoiceAuthority {
 /// turn' doesn't modify any object's characteristics, so it's modifying the rules
 /// of the game."
 ///
-/// A continuous effect created by the RESOLUTION of a spell or ability (CR 611.2a)
-/// is merely STORED on a host object so the replacement pipeline or a restriction
-/// check can find it. It is not one of the object's abilities, so an
-/// ability-removing effect (CR 613.1f) leaves it in place.
+/// An object-hosted rule effect — a prevention shield or restriction created by
+/// the RESOLUTION of a spell or ability (CR 611.2a), or an untap prohibition
+/// created by exert (CR 701.43a) — is merely STORED on its host so the
+/// replacement pipeline or the relevant rules check can find it. It is not one of
+/// the object's abilities, so an ability-removing effect (CR 613.1f) leaves it in
+/// place. A quoted ability granted by resolution (CR 113.10) is an ability, not
+/// one of these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DefinitionOrigin {
     /// A printed or copiable characteristic (CR 613.1), or an ability derived

@@ -3440,7 +3440,8 @@ fn teyo_attack_direction_survives_imprisoned_in_the_moon() {
     );
     outcome.assert_zone(&[moon], Zone::Battlefield);
     assert_priority(&runner, P0);
-    // CR 613.1f: Teyo becomes a land and loses the original loyalty abilities.
+    // CR 613.1d + CR 613.1f: The Aura makes Teyo a land in layer 4 and removes
+    // its loyalty abilities in layer 6.
     assert_eq!(
         runner.state().objects[&teyo].card_types.core_types,
         [CoreType::Land]
@@ -3454,7 +3455,8 @@ fn teyo_attack_direction_survives_imprisoned_in_the_moon() {
     advance_to_player_main(&mut runner, P1);
     runner.advance_to_combat();
     assert_declare_attackers(&runner, P1);
-    // CR 508.1c: P2 is on P1's left in seat order. P0 is on the right.
+    // P2 is on P1's left in this fixture, P0 on the right. CR 508.1c requires
+    // the declaration to obey Teyo's resolved attack restriction.
     runner
         .declare_attackers(&[(attacker, AttackTarget::Player(P0))])
         .expect_err("Teyo rules out the other direction");
