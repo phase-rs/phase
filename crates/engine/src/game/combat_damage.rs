@@ -1528,6 +1528,12 @@ fn assign_attacker_damage(
 /// - CR 702.4b + CR 702.7b: first and double strike split combat into two damage
 ///   steps. Blockers killed in the first step are gone for the second, and a
 ///   first-striking blocker can kill the attacker before its regular-step damage.
+/// - CR 704.3 + CR 611.3b: the deaths between the steps are the repeated
+///   state-based-action check. A blocker that dies stops generating its static
+///   effects, so when it made lethal damage be measured by power (Zilortha,
+///   Strength Incarnate), a survivor's first-step damage is checked again against
+///   its toughness, and the regular step owes each survivor its lethal damage on
+///   that battlefield.
 /// - CR 702.2c: deathtouch makes 1 damage lethal, so a deathtouch trampler is
 ///   absorbed by almost nothing.
 ///
@@ -1548,7 +1554,7 @@ pub fn combat_damage_to_defender(
     // rule-modifying effect, and 0 under "assigns no combat damage". Reading raw
     // power here would make this helper contradict the combat it exists to predict.
     // CR 510.1a: a creature assigning 0 or less assigns no combat damage at all.
-    let power = combat_damage_amount(attacker) as i32;
+    let power = combat_damage_amount(attacker);
     if power == 0 {
         return 0;
     }
@@ -1562,23 +1568,8 @@ pub fn combat_damage_to_defender(
     // `resolve_combat_damage` does (`double_strike_deals_damage_twice`: an unblocked
     // 3/3 double striker deals 6). Plain first strike assigns in one step only.
     if blockers.is_empty() {
-        return if has_double_strike { power * 2 } else { power };
+        return if has_double_strike { power * 2 } else { power } as i32;
     }
-
-    // Remaining lethal per blocker, in the order the attacker would exhaust them. A
-    // hypothetical single-attacker exchange: no other attacker has committed damage.
-    let mut remaining: Vec<i32> = blockers
-        .iter()
-        .map(|&bid| {
-            lethal_damage::combat_lethal_damage_remaining(
-                state,
-                bid,
-                has_deathtouch,
-                AssignedThisStep::default(),
-            ) as i32
-        })
-        .collect();
-    remaining.sort_unstable();
 
     // CR 702.7b: which blockers assign their damage in the first-strike step.
     let first_strike_blockers: Vec<&GameObject> = blockers
@@ -1588,13 +1579,37 @@ pub fn combat_damage_to_defender(
         .collect();
 
     let mut to_player = 0;
-    let mut attacker_alive = true;
+    // CR 510.2: the damage the attacker deals each blocker in the first-strike step, which stays
+    // marked into the regular step (CR 120.6), and the creatures that step's state-based actions
+    // destroy.
+    let mut first_step_to_blockers: Vec<(ObjectId, u32)> = Vec::new();
+    let mut departed: Vec<ObjectId> = Vec::new();
 
     // CR 702.4b: the first combat damage step exists at all only if some
     // participant has first or double strike.
     if attacker_strikes_first || !first_strike_blockers.is_empty() {
+        let mut hits: Vec<PredictedHit> = Vec::new();
         if attacker_strikes_first {
-            to_player += assign_step_to_defender(&mut remaining, power, has_trample);
+            // A hypothetical single-attacker exchange: no other attacker has committed damage.
+            let slots = owed_slots(blockers.iter().map(|&bid| {
+                (
+                    bid,
+                    lethal_damage::combat_lethal_damage_remaining(
+                        state,
+                        bid,
+                        has_deathtouch,
+                        AssignedThisStep::default(),
+                    ),
+                )
+            }));
+            let step = assign_step_to_defender(&slots, power, has_trample);
+            to_player += step.to_player;
+            hits.extend(step.to_blockers.iter().map(|&(id, amount)| PredictedHit {
+                id,
+                amount,
+                deathtouch: has_deathtouch && amount > 0,
+            }));
+            first_step_to_blockers = step.to_blockers;
         }
         // CR 702.7b: first-striking blockers assign now, and can kill the attacker
         // before it ever reaches the regular step.
@@ -1610,30 +1625,49 @@ pub fn combat_damage_to_defender(
             .filter(|b| b.has_keyword(&Keyword::Deathtouch))
             .map(|b| combat_damage_amount(b))
             .sum();
-        // CR 702.7b + CR 704.5g + CR 704.5h + CR 702.12b: first-striking blockers destroy the
-        // attacker only through damage they actually assign: nonzero deathtouch damage, or
-        // marked plus first-strike damage that is lethal; an indestructible attacker is never
-        // destroyed by damage.
-        let destroyed = !attacker.has_keyword(&Keyword::Indestructible)
-            && attacker.toughness.is_some_and(|t| t > 0)
-            && (deathtouch_damage > 0
-                || lethal_damage::is_lethal_damage(
-                    state,
-                    attacker,
-                    attacker.damage_marked.saturating_add(first_strike_damage),
-                ));
-        if destroyed {
-            attacker_alive = false;
-        }
+        // CR 702.7b + CR 702.2b: first-striking blockers destroy the attacker only through
+        // damage they actually assign: nonzero deathtouch damage, or marked plus first-strike
+        // damage that is lethal.
+        hits.push(PredictedHit {
+            id: attacker_id,
+            amount: first_strike_damage,
+            deathtouch: deathtouch_damage > 0,
+        });
+        departed = first_step_departures(state, &hits);
     }
 
     // CR 702.4b: the attacker assigns in the regular step if it has double strike,
     // or if it never had first strike and so has not assigned at all yet.
-    if attacker_alive && (has_double_strike || !attacker_strikes_first) {
-        to_player += assign_step_to_defender(&mut remaining, power, has_trample);
+    if !departed.contains(&attacker_id) && (has_double_strike || !attacker_strikes_first) {
+        // CR 506.4: a destroyed blocker has left combat. Each survivor is owed lethal damage
+        // counting what the first step marked on it (CR 702.19b), measured on the battlefield
+        // the first step left: a departed creature's static no longer sets the basis
+        // (CR 611.3b). With no first-strike step this is the live remainder.
+        let slots = owed_slots(
+            blockers
+                .iter()
+                .filter(|bid| !departed.contains(bid))
+                .map(|&bid| {
+                    let first_step = first_step_to_blockers
+                        .iter()
+                        .find(|&&(id, _)| id == bid)
+                        .map_or(0, |&(_, amount)| amount);
+                    let owed = state.objects.get(&bid).map_or(1, |obj| {
+                        lethal_damage::lethal_damage_still_owed(
+                            state,
+                            obj,
+                            obj.damage_marked.saturating_add(first_step),
+                            has_deathtouch,
+                            &departed,
+                        )
+                    });
+                    (bid, owed)
+                }),
+        );
+        to_player += assign_step_to_defender(&slots, power, has_trample).to_player;
     }
 
-    to_player
+    to_player as i32
 }
 
 /// CR 510.2 + CR 120.3b + CR 120.3g + CR 702.70a: the board after each unblocked attacker deals one step of combat damage to its player and the selected triggers that damage fires resolve, on a copy; None when either stops for a choice.
@@ -1680,23 +1714,90 @@ pub fn preview_unblocked_combat_damage(
     Some(preview)
 }
 
-/// One combat damage step's worth of assignment from a single attacker, returning
-/// the damage that reaches the defending player and consuming the blockers it
-/// kills. See `combat_damage_to_defender` for the governing rules.
-fn assign_step_to_defender(remaining: &mut Vec<i32>, power: i32, has_trample: bool) -> i32 {
-    if remaining.is_empty() {
+/// One combat damage step's worth of assignment from a single attacker: the damage that
+/// reaches the defending player, and the damage assigned to each blocker.
+struct StepAssignment {
+    to_player: u32,
+    to_blockers: Vec<(ObjectId, u32)>,
+}
+
+/// Damage a forecast combat damage step deals one creature: `amount`, and whether its source
+/// has deathtouch (CR 702.2b: only nonzero damage counts).
+struct PredictedHit {
+    id: ObjectId,
+    amount: u32,
+    deathtouch: bool,
+}
+
+/// The blockers with the lethal damage owed to each, cheapest kill first. The sort is stable,
+/// so equally cheap blockers keep their block order.
+fn owed_slots(slots: impl Iterator<Item = (ObjectId, u32)>) -> Vec<(ObjectId, u32)> {
+    let mut slots: Vec<(ObjectId, u32)> = slots.collect();
+    slots.sort_by_key(|&(_, owed)| owed);
+    slots
+}
+
+/// CR 704.3 + CR 704.5g + CR 704.5h + CR 611.3b: the creatures the state-based actions after a
+/// forecast combat damage step destroy, given the damage that step deals (`hits`).
+///
+/// The check repeats while it destroys something (CR 704.3). A destroyed creature's static
+/// stops applying once it leaves the battlefield (CR 611.3b), so when it was the one making
+/// lethal damage be measured by power (Zilortha, Strength Incarnate), damage that was not
+/// lethal against a survivor's power can be lethal against its toughness at the next check.
+/// `lethal_damage::is_destroyed_by_lethal_damage` answers each check, on the battlefield the
+/// earlier checks left.
+fn first_step_departures(state: &GameState, hits: &[PredictedHit]) -> Vec<ObjectId> {
+    let mut departed: Vec<ObjectId> = Vec::new();
+    loop {
+        let destroyed: Vec<ObjectId> = hits
+            .iter()
+            .filter(|hit| !departed.contains(&hit.id))
+            .filter(|hit| {
+                state.objects.get(&hit.id).is_some_and(|obj| {
+                    lethal_damage::is_destroyed_by_lethal_damage(
+                        state,
+                        obj,
+                        obj.damage_marked.saturating_add(hit.amount),
+                        obj.dealt_deathtouch_damage || hit.deathtouch,
+                        &departed,
+                    )
+                })
+            })
+            .map(|hit| hit.id)
+            .collect();
+        if destroyed.is_empty() {
+            return departed;
+        }
+        departed.extend(destroyed);
+    }
+}
+
+/// One combat damage step's worth of assignment from a single attacker against `slots`, the
+/// blockers in the order `owed_slots` gives. See `combat_damage_to_defender` for the governing
+/// rules.
+fn assign_step_to_defender(
+    slots: &[(ObjectId, u32)],
+    power: u32,
+    has_trample: bool,
+) -> StepAssignment {
+    if slots.is_empty() {
         // CR 702.19d: blocked, but nothing is blocking it now — a trampler assigns
         // everything to the player. CR 510.1c: without trample it assigns nothing.
-        return if has_trample { power } else { 0 };
+        return StepAssignment {
+            to_player: if has_trample { power } else { 0 },
+            to_blockers: Vec::new(),
+        };
     }
 
-    let total_lethal: i32 = remaining.iter().sum();
+    let total_lethal: u32 = slots.iter().map(|&(_, owed)| owed).sum();
 
     // CR 702.19b: excess reaches the player only once EVERY blocker has been
     // assigned lethal damage.
     if has_trample && power > total_lethal {
-        remaining.clear();
-        return power - total_lethal;
+        return StepAssignment {
+            to_player: power - total_lethal,
+            to_blockers: slots.to_vec(),
+        };
     }
 
     // Otherwise every point is spent on blockers. Kill the cheapest first — the
@@ -1708,18 +1809,19 @@ fn assign_step_to_defender(remaining: &mut Vec<i32>, power: i32, has_trample: bo
     // the leftover budget instead understated the defender's exposure: a 5-power
     // double-strike trampler against one 0/6 was read as 0 through, when the first
     // step marks 5 and the regular step then needs only 1 more before trampling 4.
-    // `remaining` is sorted ascending, so the front is always the cheapest kill.
     let mut budget = power;
-    while let Some(&lethal) = remaining.first() {
-        if budget >= lethal {
-            budget -= lethal;
-            remaining.remove(0);
-        } else {
-            remaining[0] -= budget;
-            break;
-        }
+    let to_blockers = slots
+        .iter()
+        .map(|&(id, owed)| {
+            let amount = budget.min(owed);
+            budget -= amount;
+            (id, amount)
+        })
+        .collect();
+    StepAssignment {
+        to_player: 0,
+        to_blockers,
     }
-    0
 }
 
 /// CR 120.4a + CR 120.10: the excess-damage reading — how much of a hit on this creature is

@@ -7,11 +7,19 @@
 //! assignment minimum, the excess-damage reading (`combat_damage::lethal_damage_needed`), the
 //! combat predictor (`combat_damage::combat_damage_to_defender`) and the AI's survival estimate
 //! (`combat_damage::assess_combat_impact`).
+//!
+//! The combat predictor also asks these questions of a predicted battlefield: the one left after
+//! an earlier combat damage step's state-based actions. `is_destroyed_by_lethal_damage` and
+//! `lethal_damage_still_owed` take the objects predicted to have left it, whose static abilities
+//! then no longer set the basis (CR 611.3b). Everything else is the live reading.
 
 use crate::game::game_object::GameObject;
-use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
+use crate::game::static_abilities::{
+    carrier_static_applies, check_static_ability, functioning_static_carriers, StaticCheckContext,
+};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
+use crate::types::keywords::Keyword;
 use crate::types::statics::StaticMode;
 
 /// CR 120.6: the characteristic a creature's marked damage is checked against.
@@ -30,14 +38,33 @@ pub enum LethalDamageBasis {
 /// in that filter is the static's current controller, so a control change moves the effect, and
 /// it ends as soon as its source stops functioning.
 pub fn lethal_damage_basis(state: &GameState, object_id: ObjectId) -> LethalDamageBasis {
-    let power_basis = check_static_ability(
-        state,
-        StaticMode::LethalDamageDeterminedByPower,
-        &StaticCheckContext {
-            target_id: Some(object_id),
-            ..Default::default()
-        },
-    );
+    lethal_damage_basis_after(state, object_id, &[])
+}
+
+/// CR 611.3b: the lethal-damage basis for `object_id` once the `departed` objects have left the
+/// battlefield. A static ability's effect applies only while the permanent generating it is on
+/// the battlefield, so a departed carrier's `LethalDamageDeterminedByPower` no longer applies.
+///
+/// `departed` is a forecast's prediction (the creatures an earlier combat damage step will
+/// destroy); with none, this is the live reading. Every other gate is the live static lookup.
+fn lethal_damage_basis_after(
+    state: &GameState,
+    object_id: ObjectId,
+    departed: &[ObjectId],
+) -> LethalDamageBasis {
+    let mode = StaticMode::LethalDamageDeterminedByPower;
+    let context = StaticCheckContext {
+        target_id: Some(object_id),
+        ..Default::default()
+    };
+    let power_basis = if departed.is_empty() {
+        check_static_ability(state, mode, &context)
+    } else {
+        functioning_static_carriers(state, &mode)
+            .into_iter()
+            .filter(|carrier| !departed.contains(carrier))
+            .any(|carrier| carrier_static_applies(state, carrier, &mode, &context))
+    };
     if power_basis {
         LethalDamageBasis::Power
     } else {
@@ -56,7 +83,17 @@ pub fn lethal_damage_basis(state: &GameState, object_id: ObjectId) -> LethalDama
 /// 704.5g: "it has damage marked on it"). A creature with toughness 0 or less is put into its
 /// owner's graveyard by CR 704.5f, which is not a consequence of damage.
 pub fn lethal_damage_threshold(state: &GameState, obj: &GameObject) -> u32 {
-    let characteristic = match lethal_damage_basis(state, obj.id) {
+    lethal_damage_threshold_after(state, obj, &[])
+}
+
+/// `lethal_damage_threshold` once the `departed` objects have left the battlefield (CR 611.3b;
+/// see `lethal_damage_basis_after`).
+fn lethal_damage_threshold_after(
+    state: &GameState,
+    obj: &GameObject,
+    departed: &[ObjectId],
+) -> u32 {
+    let characteristic = match lethal_damage_basis_after(state, obj.id, departed) {
         LethalDamageBasis::Toughness => obj.toughness,
         LethalDamageBasis::Power => obj.power,
     };
@@ -69,7 +106,40 @@ pub fn lethal_damage_threshold(state: &GameState, obj: &GameObject) -> u32 {
 /// This does NOT apply CR 704.5g's "toughness greater than 0" precondition; callers that destroy
 /// apply it themselves.
 pub fn is_lethal_damage(state: &GameState, obj: &GameObject, total: u32) -> bool {
-    total > 0 && total >= lethal_damage_threshold(state, obj)
+    is_lethal_damage_after(state, obj, total, &[])
+}
+
+/// `is_lethal_damage` once the `departed` objects have left the battlefield (CR 611.3b).
+fn is_lethal_damage_after(
+    state: &GameState,
+    obj: &GameObject,
+    total: u32,
+    departed: &[ObjectId],
+) -> bool {
+    total > 0 && total >= lethal_damage_threshold_after(state, obj, departed)
+}
+
+/// CR 704.5g + CR 704.5h + CR 702.12b: the lethal-damage state-based action destroys `obj`, a
+/// creature with `marked` total damage that has (`dealt_deathtouch_damage`) or has not been dealt
+/// damage by a deathtouch source since state-based actions were last checked.
+///
+/// CR 704.5g: toughness greater than 0 and lethal damage marked. CR 704.5h + CR 702.2b:
+/// toughness greater than 0 and dealt deathtouch damage. CR 702.12b: an indestructible
+/// creature is destroyed by neither. Whether `obj` is a creature is the caller's question.
+///
+/// `departed` holds the objects a forecast predicts have already left the battlefield, whose
+/// static abilities no longer set the lethal-damage basis (CR 611.3b). The state-based action
+/// itself passes none: it reads the live battlefield.
+pub fn is_destroyed_by_lethal_damage(
+    state: &GameState,
+    obj: &GameObject,
+    marked: u32,
+    dealt_deathtouch_damage: bool,
+    departed: &[ObjectId],
+) -> bool {
+    obj.toughness.is_some_and(|toughness| toughness > 0)
+        && (dealt_deathtouch_damage || is_lethal_damage_after(state, obj, marked, departed))
+        && !obj.has_keyword(&Keyword::Indestructible)
 }
 
 /// CR 702.19b: combat damage other attackers have already committed to a creature earlier in
@@ -108,13 +178,35 @@ pub fn combat_lethal_damage_remaining(
     if assigned.from_deathtouch > 0 {
         return 0;
     }
-    let counted = obj.damage_marked.saturating_add(assigned.from_other);
+    lethal_damage_still_owed(
+        state,
+        obj,
+        obj.damage_marked.saturating_add(assigned.from_other),
+        source_has_deathtouch,
+        &[],
+    )
+}
+
+/// CR 702.19b + CR 702.2c: lethal damage an attacker still has to assign to `obj` before it may
+/// assign excess, given the `counted` damage already marked on it or committed to it.
+///
+/// The core of `combat_lethal_damage_remaining`. A forecast of a later combat damage step calls
+/// it directly, with the damage the earlier step marked counted in and the creatures that step's
+/// state-based actions destroyed as `departed`: once a departed creature's static stops setting
+/// the basis (CR 611.3b), the survivor's lethal damage is its toughness again.
+pub fn lethal_damage_still_owed(
+    state: &GameState,
+    obj: &GameObject,
+    counted: u32,
+    source_has_deathtouch: bool,
+    departed: &[ObjectId],
+) -> u32 {
     // CR 702.19b: already lethal (marked plus committed) — nothing more is owed. Checked before
     // the deathtouch rule, which only decides how much more makes a creature lethal.
-    if is_lethal_damage(state, obj, counted) {
+    if is_lethal_damage_after(state, obj, counted, departed) {
         return 0;
     }
-    let remaining = lethal_damage_threshold(state, obj).saturating_sub(counted);
+    let remaining = lethal_damage_threshold_after(state, obj, departed).saturating_sub(counted);
     // CR 702.2c + CR 702.19b: one damage from a deathtouch source is lethal. It never raises
     // the requirement above the ordinary remainder, which is 0 for a creature whose lethal
     // damage is 0 (a 0-power creature under the power basis).
@@ -318,5 +410,76 @@ mod tests {
         let (state, mine, theirs) = zilortha_board(true, 1, 5, 0);
         assert_eq!(remaining(&state, mine, false, 0, 1), 0);
         assert_eq!(remaining(&state, theirs, false, 0, 1), 4);
+    }
+
+    /// The board's Zilortha.
+    fn zilortha_id(state: &GameState) -> ObjectId {
+        *state
+            .battlefield
+            .iter()
+            .find(|id| state.objects[*id].name == "Zilortha, Strength Incarnate")
+            .expect("the board has Zilortha")
+    }
+
+    /// CR 704.5g + CR 611.3b: once Zilortha is predicted to have left the battlefield, a creature
+    /// it made survive by power is checked against its toughness. Deathtouch damage destroys
+    /// regardless (CR 704.5h); indestructible survives both (CR 702.12b).
+    #[test]
+    fn destruction_reads_the_basis_after_departures() {
+        let (mut state, mine, theirs) = zilortha_board(true, 9, 3, 0);
+        let z = zilortha_id(&state);
+        let obj = &state.objects[&mine];
+        assert!(!is_destroyed_by_lethal_damage(&state, obj, 5, false, &[]));
+        assert!(
+            is_destroyed_by_lethal_damage(&state, obj, 5, false, &[z]),
+            "5 damage on toughness 3 is lethal once Zilortha is gone"
+        );
+        assert!(
+            !is_destroyed_by_lethal_damage(&state, obj, 0, false, &[z]),
+            "CR 704.5g: no damage marked, no destruction"
+        );
+        assert!(is_destroyed_by_lethal_damage(&state, obj, 1, true, &[]));
+        assert!(
+            !is_destroyed_by_lethal_damage(&state, obj, 5, false, &[mine]),
+            "a departed object that carries no basis static changes nothing"
+        );
+        let other = &state.objects[&theirs];
+        assert!(is_destroyed_by_lethal_damage(&state, other, 3, false, &[]));
+        assert!(is_destroyed_by_lethal_damage(&state, other, 3, false, &[z]));
+
+        state
+            .objects
+            .get_mut(&mine)
+            .unwrap()
+            .keywords
+            .push(Keyword::Indestructible);
+        let obj = &state.objects[&mine];
+        assert!(!is_destroyed_by_lethal_damage(&state, obj, 5, false, &[z]));
+        assert!(!is_destroyed_by_lethal_damage(&state, obj, 5, true, &[z]));
+    }
+
+    /// CR 702.19b + CR 611.3b: the lethal damage still owed to a survivor counts its damage and
+    /// measures it on the battlefield the departures left: 12/8 with 5 counted owes 7 by power,
+    /// 3 by toughness once Zilortha is gone, and a deathtouch source owes at most 1.
+    #[test]
+    fn still_owed_reads_the_basis_after_departures() {
+        let (state, mine, theirs) = zilortha_board(true, 12, 8, 0);
+        let z = zilortha_id(&state);
+        let obj = &state.objects[&mine];
+        assert_eq!(lethal_damage_still_owed(&state, obj, 5, false, &[]), 7);
+        assert_eq!(lethal_damage_still_owed(&state, obj, 5, false, &[z]), 3);
+        assert_eq!(lethal_damage_still_owed(&state, obj, 5, true, &[z]), 1);
+        assert_eq!(
+            lethal_damage_still_owed(&state, obj, 8, true, &[z]),
+            0,
+            "already lethal by toughness: nothing more is owed, even to deathtouch"
+        );
+        assert_eq!(
+            lethal_damage_still_owed(&state, obj, 0, false, &[]),
+            combat_lethal_damage_remaining(&state, mine, false, AssignedThisStep::default()),
+            "with no departures it is the live combat remainder"
+        );
+        let other = &state.objects[&theirs];
+        assert_eq!(lethal_damage_still_owed(&state, other, 5, false, &[z]), 3);
     }
 }

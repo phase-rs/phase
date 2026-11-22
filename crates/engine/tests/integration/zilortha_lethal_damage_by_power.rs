@@ -13,14 +13,17 @@
 //! Incarnate, Lava Dart, Flame Slash, Flame Spill, Lightning Bolt, Unsummon, Disfigure, Giant
 //! Growth, Act of Treason, Darksteel Myr, Rith, Liberated Primeval, Colossal Dreadmaw, Charging
 //! Monstrosaur, Sedge Scorpion, War Mammoth, Archetype of Finality, Flumph, Ram Through,
-//! Putrefax, and the textless Yoked Ox (0/4). Every creature that carries a keyword under test
-//! is one of these printed cards; the remaining bodies are textless P/T fillers.
+//! Putrefax, Ghalta, Primal Hunger, Battle Mastery, and the textless Yoked Ox (0/4), Yargle,
+//! Glutton of Urborg (9/3) and Quakestrider Ceratops (12/8). Every creature that carries a
+//! keyword under test is one of these printed cards; the remaining bodies are textless P/T
+//! fillers.
 //!
 //! No printed creature has both deathtouch and trample of its own, so the deathtouch trampler
 //! is War Mammoth ("Trample") under Archetype of Finality ("Creatures you control have
 //! deathtouch.").
 
 use engine::game::combat::AttackTarget;
+use engine::game::combat_damage::combat_damage_to_defender;
 use engine::game::coverage::unimplemented_mechanics;
 use engine::game::engine::EngineError;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -30,6 +33,7 @@ use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CombatDamageAssignmentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -70,6 +74,11 @@ const FLUMPH: &str = "Defender, flying\nWhenever this creature is dealt damage, 
 const RAM_THROUGH: &str = "Target creature you control deals damage equal to its power to target \
      creature you don't control. If the creature you control has trample, excess damage is dealt \
      to that creature's controller instead.";
+const GHALTA: &str = "This spell costs {X} less to cast, where X is the total power of \
+     creatures you control.\nTrample (This creature can deal excess combat damage to the player \
+     or planeswalker it's attacking.)";
+const BATTLE_MASTERY: &str = "Enchant creature\nEnchanted creature has double strike. (It deals \
+     both first-strike and regular combat damage.)";
 const PUTREFAX: &str = "Trample, haste\nInfect (This creature deals damage to creatures in the \
      form of -1/-1 counters and to players in the form of poison counters.)\nAt the beginning of \
      the end step, sacrifice this creature.";
@@ -813,4 +822,126 @@ fn fully_redirected_infect_damage_deals_the_creature_nothing() {
         "CR 120.8: the Ox is dealt no damage: {:?}",
         damage_to(outcome.events(), ox)
     );
+}
+
+/// P0's Ghalta, Primal Hunger (12/12, "Trample") wearing Battle Mastery, cast onto it from P0's
+/// hand, against P1's Zilortha and `partner` (a textless P1 creature). Returns the runner,
+/// Ghalta, Zilortha and the partner.
+fn ghalta_board(partner: (&str, i32, i32)) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = board();
+    let ghalta = scenario
+        .add_creature(P0, "Ghalta, Primal Hunger", 12, 12)
+        .as_legendary()
+        .from_oracle_text_with_keywords(&["Trample"], GHALTA)
+        .id();
+    let mastery = scenario
+        .add_spell_to_hand(P0, "Battle Mastery", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::zero())
+        .from_oracle_text_with_keywords(&["Enchant"], BATTLE_MASTERY)
+        .id();
+    let z = zilortha(&mut scenario, P1);
+    let (name, power, toughness) = partner;
+    let partner = scenario.add_creature(P1, name, power, toughness).id();
+    let mut runner = scenario.build();
+
+    cast_at(&mut runner, mastery, ghalta);
+    assert_eq!(zone(&runner, mastery), Zone::Battlefield);
+    assert!(
+        runner.state().objects[&ghalta].has_keyword(&Keyword::DoubleStrike),
+        "reach guard: Battle Mastery gives Ghalta double strike"
+    );
+    (runner, ghalta, z, partner)
+}
+
+fn assign_split(runner: &mut GameRunner, assignments: Vec<(ObjectId, u32)>, trample_damage: u32) {
+    runner
+        .act(GameAction::AssignCombatDamage {
+            mode: CombatDamageAssignmentMode::Normal,
+            assignments,
+            trample_damage,
+            controller_damage: 0,
+        })
+        .expect("the assignment is legal");
+}
+
+/// Z18: CR 704.3 + CR 611.3b + CR 702.19d. Ghalta with Battle Mastery is blocked by Zilortha and
+/// Yargle (9/3). In the first-strike step it assigns 7 to Zilortha (lethal by its power 7) and 5
+/// to Yargle (not lethal by its power 9). Zilortha dies; its effect ends, so the repeated
+/// state-based-action check finds Yargle's 5 damage lethal against toughness 3 and destroys it.
+/// No creature is blocking in the regular step, so all 12 go to P1. The combat forecast, read
+/// on the declared block before any damage, agrees: 12.
+#[test]
+fn first_strike_death_of_zilortha_returns_survivors_to_toughness() {
+    let (mut runner, ghalta, z, yargle) = ghalta_board(("Yargle, Glutton of Urborg", 9, 3));
+    let p1_life = runner.life(P1);
+
+    attack_and_block(&mut runner, &[ghalta], &[(z, ghalta), (yargle, ghalta)]);
+    assert_eq!(
+        prompt_minimum(&runner, z),
+        7,
+        "Zilortha's lethal damage is its power"
+    );
+    assert_eq!(prompt_minimum(&runner, yargle), 9, "so is Yargle's");
+    assert_eq!(
+        combat_damage_to_defender(runner.state(), ghalta, &[z, yargle]),
+        12,
+        "the forecast drops both first-step deaths"
+    );
+
+    assign_split(&mut runner, vec![(z, 7), (yargle, 5)], 0);
+    // Through the first-strike step's state-based actions, to the next prompt or the end of
+    // combat.
+    runner.combat_damage();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "no regular-step prompt: nothing is blocking Ghalta, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone(&runner, z), Zone::Graveyard);
+    assert_eq!(
+        zone(&runner, yargle),
+        Zone::Graveyard,
+        "CR 704.3: 5 damage on toughness 3 is lethal once Zilortha is gone"
+    );
+    assert_eq!(runner.life(P1), p1_life - 12);
+    assert_eq!(zone(&runner, ghalta), Zone::Battlefield);
+}
+
+/// Z18b: the survivor control. Against Zilortha and Quakestrider Ceratops (12/8) the first step
+/// assigns 7 to Zilortha and 5 to the Ceratops. Zilortha dies; the Ceratops's 5 damage is not
+/// lethal against toughness 8, so it survives and still blocks. In the regular step Ghalta owes
+/// it 8 - 5 = 3 (its toughness, not its power 12 less 5) and tramples 9 over. The forecast
+/// agrees: 9.
+#[test]
+fn first_strike_survivor_owes_its_toughness_after_zilortha_dies() {
+    let (mut runner, ghalta, z, ceratops) = ghalta_board(("Quakestrider Ceratops", 12, 8));
+    let p1_life = runner.life(P1);
+
+    attack_and_block(&mut runner, &[ghalta], &[(z, ghalta), (ceratops, ghalta)]);
+    assert_eq!(prompt_minimum(&runner, z), 7);
+    assert_eq!(prompt_minimum(&runner, ceratops), 12);
+    assert_eq!(
+        combat_damage_to_defender(runner.state(), ghalta, &[z, ceratops]),
+        9,
+        "the forecast re-derives the survivor's remainder against toughness"
+    );
+
+    assign_split(&mut runner, vec![(z, 7), (ceratops, 5)], 0);
+    // Through the first-strike step's state-based actions, to the next prompt or the end of
+    // combat.
+    runner.combat_damage();
+    assert_eq!(zone(&runner, z), Zone::Graveyard);
+    assert_eq!(zone(&runner, ceratops), Zone::Battlefield);
+    assert_eq!(marked(&runner, ceratops), 5);
+    assert_eq!(
+        prompt_minimum(&runner, ceratops),
+        3,
+        "CR 702.19b: lethal damage counts the 5 marked, against toughness 8"
+    );
+    assign(&mut runner, ceratops, 3, 9).expect("3 is lethal for the Ceratops now");
+    finish_combat(&mut runner);
+    assert_eq!(runner.life(P1), p1_life - 9);
+    assert_eq!(zone(&runner, ceratops), Zone::Graveyard);
 }
