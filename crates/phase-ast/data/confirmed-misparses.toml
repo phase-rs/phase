@@ -891,6 +891,7 @@ face = [
   { key = "geralf, the fleshwright", class = "dropped_qualifier", clauses = ["Whenever you cast a spell during your turn other than your first spell that turn, create a 2/2 blue and black Zombie Rogue creature token.", "Whenever a Zombie you control enters, put a +1/+1 counter on it for each other Zombie that entered the battlefield under your control this turn."] },
   { key = "gerrard capashen", class = "target_wrong", clauses = ["At the beginning of your upkeep, you gain 1 life for each card in target opponent's hand."] },
   { key = "getaway barrel", class = "wrong_object", clauses = ["Put a random creature card from among them onto the battlefield."] },
+  { key = "ghastly conscription", class = "wrong_count", clauses = ["Exile all creature cards from target player's graveyard in a face-down pile", "then manifest those cards."] },
   { key = "ghost of ramirez depietro", class = "dropped_qualifier", clauses = ["Whenever Ghost of Ramirez DePietro deals combat damage to a player, choose up to one target card in a graveyard that was discarded or put there from a library this turn."] },
   { key = "ghosts of the innocent", class = "missing_effect", clauses = ["If a source would deal damage to a permanent or player, it deals half that damage, rounded down, to that permanent or player instead."] },
   { key = "giant fire beetles", class = "extra_effect", clauses = ["double team"] },

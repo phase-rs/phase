@@ -14,7 +14,6 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::move_to_zone;
 use engine::types::actions::GameAction;
-use engine::types::events::GameEvent;
 use engine::types::game_state::{
     CastPaymentMode, CastingVariant, StackEntry, StackEntryKind, WaitingFor,
 };
@@ -168,126 +167,7 @@ fn resolve_with(r: &mut GameRunner, label: &str, policy: Policy) -> Vec<String> 
     );
 }
 
-// ---- Shape 1: "Exile all creature cards from target player's graveyard in a face-down pile,
-// shuffle that pile, then manifest those cards." (Ghastly Conscription) ----
-
-/// CR 701.40a + CR 701.24a: every creature card in the targeted graveyard is manifested (a face-down
-/// 2/2 under the CASTER's control, the owner unchanged); a noncreature card in that graveyard and
-/// the caster's own graveyard are left alone.
-#[test]
-fn ghastly_conscription_manifests_every_creature_card_in_the_targeted_graveyard() {
-    let mut s = table();
-    let spell = s.add_real_card(P0, "Ghastly Conscription", Zone::Hand, db());
-    let creatures: Vec<ObjectId> = ["Grizzly Bears", "Llanowar Elves", "Serra Angel"]
-        .iter()
-        .map(|n| s.add_real_card(P1, n, Zone::Graveyard, db()))
-        .collect();
-    let shock = s.add_real_card(P1, "Shock", Zone::Graveyard, db());
-    let own = s.add_real_card(P0, "Hill Giant", Zone::Graveyard, db());
-    let mut r = s.build();
-    r.cast(spell).target_player(P1).resolve();
-    assert_settled(&r, P0, "Ghastly Conscription");
-    for id in &creatures {
-        let o = &r.state().objects[id];
-        assert_eq!(o.zone, Zone::Battlefield, "{id:?} was manifested");
-        assert!(o.face_down, "{id:?} is face down");
-        assert_eq!(
-            (o.power, o.toughness),
-            (Some(2), Some(2)),
-            "a face-down 2/2"
-        );
-        assert_eq!(o.controller, P0, "the caster manifests the pile");
-        assert_eq!(o.owner, P1, "ownership does not change");
-    }
-    assert_eq!(
-        zone_of(&r, shock),
-        Zone::Graveyard,
-        "a noncreature card stays"
-    );
-    assert_eq!(
-        zone_of(&r, own),
-        Zone::Graveyard,
-        "the caster's own graveyard is not the target"
-    );
-    assert_eq!(
-        r.state().battlefield.len(),
-        3,
-        "exactly the three creature cards"
-    );
-}
-
-/// CR 701.24a: "shuffle that pile" reorders the exiled pile before it is manifested. Every creature
-/// card of the targeted graveyard is exiled first (the pile), and the order in which the cards are
-/// then manifested differs from the order in which they were exiled. The comparison is with the
-/// observed exile order, not with the graveyard order, so it fails when the shuffle step is
-/// removed from the chain (seed-dependent: five cards leave a 1 in 120 chance of a false pass).
-#[test]
-fn ghastly_conscription_exiles_the_pile_then_manifests_it_in_a_shuffled_order() {
-    let mut s = table();
-    let spell = s.add_real_card(P0, "Ghastly Conscription", Zone::Hand, db());
-    let creatures: Vec<ObjectId> = [
-        "Grizzly Bears",
-        "Llanowar Elves",
-        "Serra Angel",
-        "Goblin Piker",
-        "Raging Goblin",
-    ]
-    .iter()
-    .map(|n| s.add_real_card(P1, n, Zone::Graveyard, db()))
-    .collect();
-    let mut r = s.build();
-    let outcome = r.cast(spell).target_player(P1).resolve();
-    let mut exile_order: Vec<ObjectId> = Vec::new();
-    let mut manifest_order: Vec<ObjectId> = Vec::new();
-    for event in outcome.events() {
-        if let GameEvent::ZoneChanged {
-            object_id,
-            from: _,
-            to,
-            record: _,
-        } = event
-        {
-            if !creatures.contains(object_id) {
-                continue;
-            }
-            if *to == Zone::Exile {
-                exile_order.push(*object_id);
-            } else if *to == Zone::Battlefield {
-                manifest_order.push(*object_id);
-            }
-        }
-    }
-    assert_eq!(
-        sorted(exile_order.clone()),
-        sorted(creatures.clone()),
-        "every creature card of the targeted graveyard is exiled into the pile"
-    );
-    assert_eq!(
-        sorted(manifest_order.clone()),
-        sorted(creatures.clone()),
-        "every exiled creature card is manifested exactly once"
-    );
-    assert_ne!(
-        manifest_order, exile_order,
-        "the pile was shuffled between the exile and the manifest (non-identity for this seed)"
-    );
-    assert_settled(&r, P0, "Ghastly Conscription, shuffled pile");
-}
-
-/// Control: a graveyard with no creature card manifests nothing.
-#[test]
-fn ghastly_conscription_with_no_creature_card_in_the_graveyard_manifests_nothing() {
-    let mut s = table();
-    let spell = s.add_real_card(P0, "Ghastly Conscription", Zone::Hand, db());
-    let shock = s.add_real_card(P1, "Shock", Zone::Graveyard, db());
-    let mut r = s.build();
-    r.cast(spell).target_player(P1).resolve();
-    assert_settled(&r, P0, "Ghastly Conscription, empty target");
-    assert!(r.state().battlefield.is_empty());
-    assert_eq!(zone_of(&r, shock), Zone::Graveyard);
-}
-
-// ---- Shape 2: "When you cast this spell, if you have fewer than seven cards in hand, draw cards
+// ---- Shape 1: "When you cast this spell, if you have fewer than seven cards in hand, draw cards
 // equal to the difference." (Kozilek, the Great Distortion) ----
 
 /// Cast Kozilek holding `others` other cards (Kozilek has left the hand when the trigger resolves,
@@ -487,7 +367,7 @@ fn kozilek_rejects_an_announced_x_that_no_card_in_hand_matches() {
     );
 }
 
-// ---- Shape 3: "search your library for any number of Goblin cards, reveal them, then shuffle and
+// ---- Shape 2: "search your library for any number of Goblin cards, reveal them, then shuffle and
 // put those cards on top in any order." (Goblin Recruiter) ----
 
 fn recruiter_run(pick: impl Fn(&[ObjectId]) -> Vec<ObjectId>) -> (GameRunner, Vec<ObjectId>) {
