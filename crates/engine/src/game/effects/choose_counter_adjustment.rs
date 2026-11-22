@@ -1,8 +1,10 @@
 //! CR 122.1 + CR 608.2d (Clockspinning): choose a kind of counter present on the
 //! single target permanent or suspended card, then add and/or remove one of that
-//! kind.
+//! kind. When a preceding `Effect::ChooseCounterKind` over the same target already
+//! bound the kind ("Choose a counter on target permanent ... put another of those
+//! counters on it"), only that kind's branches are offered.
 //!
-//! The chosen counter KIND is decided at resolution from the kinds actually
+//! Otherwise the chosen counter KIND is decided at resolution from the kinds actually
 //! present on the target (a runtime fact), so the per-kind branch set must be
 //! built here rather than at parse time. The resolver delegates to the existing
 //! `choose_one_of` machinery: it constructs a flat `Effect::ChooseOneOf` of

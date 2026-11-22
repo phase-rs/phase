@@ -329,9 +329,9 @@ fn casting_a_non_saga_enchantment_draws_without_damage() {
 }
 
 /// CR 603.1 + CR 121.1 + the Saga rider: casting a Saga draws the card AND
-/// has Dathon deal 2 damage to each opponent (P1: 20 -> 18). CR 714.3 / CR 714.2d: the Saga enters
-/// with its lore counter and Chapter I resolves (a 2/2 white Vigilance Knight
-/// token), driven to rest without any prompt.
+/// has Dathon deal 2 damage to each opponent (P1: 20 -> 18). CR 714.3a: the Saga
+/// enters with a lore counter and Chapter I resolves (a 2/2 white Vigilance
+/// Knight token), driven to rest without any prompt.
 #[test]
 fn casting_a_saga_also_deals_two_damage_to_each_opponent() {
     // Printed History of Benalia cost, read from the fixture: {1}{W}{W}.
