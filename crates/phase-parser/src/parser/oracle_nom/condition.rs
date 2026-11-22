@@ -7424,6 +7424,11 @@ fn parse_source_in_zone_condition(input: &str) -> OracleResult<'_, StaticConditi
         value(false, tag(" is")),
     ))
     .parse(rest)?;
+    // CR 113.6b + CR 603.4: "still" is a temporal qualifier on the same
+    // source-zone predicate, not a new subject or event anaphor. Keep it in
+    // this shared production so every supported zone and polarity accepts the
+    // same grammar without widening the source token set.
+    let (rest, _) = opt(tag(" still")).parse(rest)?;
     // CR 701.13a + CR 113.6b: passive "is exiled" is equivalent to "is in
     // exile" for source-referential intervening-if gates (Cosima, God of the
     // Voyage's granted landfall trigger: "if ~ is exiled"). Match the leading
@@ -14498,6 +14503,71 @@ mod tests {
                 }),
             },
         );
+    }
+
+    /// CR 113.6b + CR 603.4: the optional "still" qualifier belongs to the
+    /// shared source-zone production. The matrix keeps the zone vocabulary and
+    /// qualifier rules composable rather than adding a battlefield-only arm.
+    #[test]
+    fn source_zone_still_matrix_preserves_all_supported_zones() {
+        let cases = [
+            ("~ is still on the battlefield", Zone::Battlefield),
+            ("~ is still in your graveyard", Zone::Graveyard),
+            ("~ is still in exile", Zone::Exile),
+            ("~ is still in your hand", Zone::Hand),
+            ("~ is still in your library", Zone::Library),
+            ("~ is still in the command zone", Zone::Command),
+        ];
+        for (text, zone) in cases {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "remainder for {text:?}");
+            assert_eq!(
+                condition,
+                StaticCondition::SourceInZone { zone },
+                "condition for {text:?}"
+            );
+        }
+    }
+
+    /// CR 113.6c: negated source-zone forms retain their polarity while using
+    /// the same optional qualifier and zone matrix as affirmative forms.
+    #[test]
+    fn negated_source_zone_still_matrix_wraps_in_not() {
+        let cases = [
+            ("~ isn't still on the battlefield", Zone::Battlefield),
+            ("~ isn't still in your graveyard", Zone::Graveyard),
+            ("~ isn't still in exile", Zone::Exile),
+            ("~ isn't still in your hand", Zone::Hand),
+            ("~ isn't still in your library", Zone::Library),
+            ("~ isn't still in the command zone", Zone::Command),
+        ];
+        for (text, zone) in cases {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "remainder for {text:?}");
+            assert_eq!(
+                condition,
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::SourceInZone { zone }),
+                },
+                "condition for {text:?}"
+            );
+        }
+    }
+
+    /// CR 608.2c: source-zone grammar is source-referential only; target and
+    /// event anaphors must not be accepted by the shared production.
+    #[test]
+    fn source_zone_still_rejects_target_and_event_anaphors() {
+        for text in [
+            "target creature is still on the battlefield",
+            "that creature is still on the battlefield",
+            "this spell is still in your graveyard",
+        ] {
+            assert!(
+                parse_source_in_zone_condition(text).is_err(),
+                "non-source anaphor must be rejected: {text:?}"
+            );
+        }
     }
 
     // --- parse_reflexive_conditional_connector (CR 603.12 / 608.2c) ---
