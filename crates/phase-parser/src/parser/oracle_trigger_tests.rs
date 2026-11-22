@@ -10,11 +10,11 @@ use crate::parser::oracle_ir::effect_chain::PlayerScopeRewrite;
 use crate::parser::test_support::assert_no_unimplemented;
 use crate::types::ability::filter_contains_filter_prop;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    AggregateFunction, AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource,
-    CastingPermission, ChooseOneOfKind, CoinFlipRun, CombatHistoryScope, Comparator,
-    ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission, CountScope,
-    CounterTransferMode, DamageAmountScope, DamageAmountThreshold, DamageChannel,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
+    ActivationRestriction, AggregateFunction, AttackSubject, BounceSelection, CardSelectionMode,
+    CardTypeSetSource, CastingPermission, ChooseOneOfKind, CoinFlipRun, CombatHistoryScope,
+    Comparator, ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission,
+    CountScope, CounterTransferMode, DamageAmountScope, DamageAmountThreshold, DamageChannel,
     DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect,
     EffectScope, FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice,
     ObjectProperty, ObjectScope, PerPlayerScope, PerpetualGrantModification, PerpetualModification,
@@ -2806,6 +2806,100 @@ fn intervening_if_source_attacked_this_turn_populates_condition() {
     );
     assert_eq!(taigam.condition, expected);
     assert!(taigam.execute.is_some());
+}
+
+#[test]
+fn kytheon_end_of_combat_parses_condition_and_transformed_return() {
+    let trigger = parse_trigger_line(
+        "At end of combat, if Kytheon and at least two other creatures attacked this combat, exile Kytheon, then return him to the battlefield transformed under his owner's control.",
+        "Kytheon, Hero of Akros",
+    );
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert_eq!(trigger.phase, Some(Phase::EndCombat));
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::And {
+            conditions: vec![
+                TriggerCondition::SourceAttackedThisCombat,
+                TriggerCondition::AttackersDeclaredCount {
+                    subject: AttackersDeclaredCountSubject::CurrentCombat {
+                        exclude_source: SourceExclusion::Exclude,
+                    },
+                    comparator: Comparator::GE,
+                    count: 2,
+                },
+            ],
+        })
+    );
+    let exile = trigger.execute.as_deref().expect("exile instruction");
+    assert!(matches!(
+        exile.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    ));
+    // CR 608.2c: "him" is the card the exile instruction just moved.
+    let return_ability = exile.sub_ability.as_deref().expect("return instruction");
+    assert!(matches!(
+        return_ability.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            target: TargetFilter::ParentTarget,
+            enter_transformed: true,
+            enters_under: None,
+            ..
+        }
+    ));
+}
+
+// Synthetic grammar test: no printed card puts this combat count in a
+// sentence-local "Then if" clause. The nearest printed card is Kytheon, Hero
+// of Akros, whose "if" directly follows the trigger condition, so CR 603.4
+// makes it an intervening-if gate there.
+#[test]
+fn sentence_local_combat_count_does_not_gate_the_trigger() {
+    let trigger = parse_trigger_line(
+        "At end of combat, draw a card. Then if Kytheon and at least two other creatures attacked this combat, draw a card.",
+        "Kytheon, Hero of Akros",
+    );
+    assert_eq!(trigger.condition, None);
+    assert!(matches!(
+        trigger
+            .execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+}
+
+#[test]
+fn fearless_swashbuckler_keeps_typed_attack_event_counts() {
+    let trigger = parse_trigger_line(
+        "Whenever you attack, if a Pirate and a Vehicle attacked this combat, draw three cards, then discard two cards.",
+        "Fearless Swashbuckler",
+    );
+    let Some(TriggerCondition::And { conditions }) = trigger.condition else {
+        panic!("expected separate Pirate and Vehicle predicates");
+    };
+    assert_eq!(conditions.len(), 2);
+    for (condition, noun) in conditions.iter().zip(["pirate", "vehicle"]) {
+        let (remainder, filter) = parse_type_phrase_nom(noun).expect("typed noun");
+        assert!(remainder.is_empty());
+        assert_ne!(filter, TargetFilter::Any);
+        assert_eq!(
+            condition,
+            &TriggerCondition::AttackersDeclaredCount {
+                subject: AttackersDeclaredCountSubject::Controller {
+                    scope: ControllerRef::You,
+                    filter: Some(filter),
+                },
+                comparator: Comparator::GE,
+                count: 1,
+            }
+        );
+    }
 }
 
 #[test]
@@ -8709,6 +8803,225 @@ fn trigger_you_gain_life_pridemate_scopes_to_controller() {
     );
     assert_eq!(def.mode, TriggerMode::LifeGained);
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+}
+
+/// SHAPE: the full card lowers its counter, loyalty costs, token, and emblem.
+#[test]
+fn walker_short_counter_ajani_resolute() {
+    let parsed = parse_oracle_text(
+        "Whenever you gain life, put a loyalty counter on Ajani.\n[0]: You gain 1 life.\n[−4]: Create a 2/2 white Cat Soldier creature token named Ajani's Pridemate with \"Whenever you gain life, put a +1/+1 counter on this token.\"\n[−10]: You get an emblem with \"Creatures you control get +2/+2.\"",
+        "Ajani Resolute",
+        &[],
+        &["Legendary".into(), "Planeswalker".into()],
+        &["Ajani".into()],
+    );
+    let [life_gain] = parsed.triggers.as_slice() else {
+        panic!("expected one printed trigger, got {:?}", parsed.triggers);
+    };
+    // CR 109.5 + CR 119.9: one mandatory trigger for each controller life gain.
+    assert_eq!(life_gain.mode, TriggerMode::LifeGained);
+    assert_eq!(life_gain.valid_target, Some(TargetFilter::Controller));
+    assert!(!life_gain.optional);
+    assert_eq!(life_gain.condition, None);
+    assert_eq!(life_gain.constraint, None);
+    assert_eq!(life_gain.life_amount, None);
+    let execute = life_gain.execute.as_deref().expect("life-gain effect");
+    // CR 201.5c: the bare shortened name refers to Ajani Resolute itself.
+    assert_eq!(
+        *execute.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Loyalty,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }
+    );
+    assert!(!has_unimplemented(execute));
+
+    let [zero, minus_four, minus_ten] = parsed.abilities.as_slice() else {
+        panic!(
+            "expected three loyalty abilities, got {:?}",
+            parsed.abilities
+        );
+    };
+    // CR 606.4: all three loyalty costs retain their printed amounts.
+    for (ability, amount) in [(zero, 0), (minus_four, -4), (minus_ten, -10)] {
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert_eq!(ability.cost, Some(AbilityCost::Loyalty { amount }));
+        assert!(!has_unimplemented(ability));
+    }
+    assert_eq!(
+        *zero.effect,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        }
+    );
+    let Effect::Token {
+        name,
+        power: PtValue::Fixed(2),
+        toughness: PtValue::Fixed(2),
+        types,
+        colors,
+        count: QuantityExpr::Fixed { value: 1 },
+        static_abilities,
+        ..
+    } = minus_four.effect.as_ref()
+    else {
+        panic!("expected one 2/2 Pridemate, got {:?}", minus_four.effect);
+    };
+    // CR 111.3: the creation effect defines the token's name and ability.
+    assert_eq!(name, "Ajani's Pridemate");
+    assert_eq!(types, &["Creature", "Cat", "Soldier"]);
+    assert_eq!(colors, &[ManaColor::White]);
+    let [token_static] = static_abilities.as_slice() else {
+        panic!("expected one token ability, got {static_abilities:?}");
+    };
+    assert_eq!(token_static.affected, Some(TargetFilter::SelfRef));
+    let [ContinuousModification::GrantTrigger { trigger }] = token_static.modifications.as_slice()
+    else {
+        panic!("expected the token's life-gain trigger, got {token_static:?}");
+    };
+    assert_eq!(trigger.mode, TriggerMode::LifeGained);
+    assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
+    let token_execute = trigger.execute.as_deref().expect("token trigger effect");
+    assert_eq!(
+        *token_execute.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }
+    );
+    assert!(!has_unimplemented(token_execute));
+
+    let Effect::CreateEmblem { statics, triggers } = minus_ten.effect.as_ref() else {
+        panic!("expected an emblem, got {:?}", minus_ten.effect);
+    };
+    assert!(triggers.is_empty());
+    let [buff] = statics.as_slice() else {
+        panic!("expected one emblem static, got {statics:?}");
+    };
+    // CR 114.4: the creature buff functions from the command zone.
+    assert_eq!(buff.active_zones, [Zone::Command]);
+    assert_eq!(buff.mode, StaticMode::Continuous);
+    assert_eq!(
+        buff.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default()
+                .with_type(TypeFilter::Creature)
+                .controller(ControllerRef::You),
+        ))
+    );
+    assert_eq!(
+        buff.modifications,
+        [
+            ContinuousModification::AddPower { value: 2 },
+            ContinuousModification::AddToughness { value: 2 },
+        ]
+    );
+}
+
+/// SHAPE: the selected graveyard card and the counter's source stay distinct.
+#[test]
+fn walker_short_counter_liliana_the_repentant() {
+    let parsed = parse_oracle_text(
+        "Whenever another creature or planeswalker you control enters, mill two cards.\nExhaust — {5}{B}: Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on Liliana. Activate only as a sorcery. (Activate each exhaust ability only once.)",
+        "Liliana the Repentant",
+        &[],
+        &["Legendary".into(), "Creature".into()],
+        &["Human".into(), "Warlock".into()],
+    );
+    let [mill] = parsed.triggers.as_slice() else {
+        panic!("expected one printed trigger, got {:?}", parsed.triggers);
+    };
+    // CR 603.6a + CR 701.17a: the entering permanent triggers two cards milled.
+    assert_eq!(mill.mode, TriggerMode::ChangesZone);
+    assert_eq!(mill.destination, Some(Zone::Battlefield));
+    assert_eq!(
+        mill.valid_card,
+        Some(TargetFilter::Or {
+            filters: [TypeFilter::Creature, TypeFilter::Planeswalker]
+                .into_iter()
+                .map(|ty| {
+                    TargetFilter::Typed(
+                        TypedFilter::new(ty)
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::Another]),
+                    )
+                })
+                .collect(),
+        })
+    );
+    let mill_execute = mill.execute.as_deref().expect("mill trigger effect");
+    assert!(matches!(
+        *mill_execute.effect,
+        Effect::Mill {
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+            ..
+        }
+    ));
+    assert!(!has_unimplemented(mill_execute));
+
+    let [exhaust] = parsed.abilities.as_slice() else {
+        panic!("expected one exhaust ability, got {:?}", parsed.abilities);
+    };
+    // CR 702.177a: the exhaust ability retains its once-only restriction and cost.
+    assert_eq!(exhaust.kind, AbilityKind::Activated);
+    assert_eq!(exhaust.ability_tag, Some(AbilityTag::Exhaust));
+    assert_eq!(
+        exhaust.cost,
+        Some(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                generic: 5,
+                shards: vec![ManaCostShard::Black],
+            },
+        })
+    );
+    assert_eq!(
+        exhaust.activation_restrictions,
+        [
+            ActivationRestriction::AsSorcery,
+            ActivationRestriction::OnlyOnce
+        ]
+    );
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Battlefield,
+        target: TargetFilter::Or { filters },
+        ..
+    } = exhaust.effect.as_ref()
+    else {
+        panic!(
+            "expected a chosen return from the graveyard, got {:?}",
+            exhaust.effect
+        );
+    };
+    assert_eq!(
+        *filters,
+        [TypeFilter::Creature, TypeFilter::Planeswalker].map(|ty| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![ty],
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }],
+            })
+        })
+    );
+    // CR 608.2c + CR 201.5c: the next instruction places the counter on Liliana.
+    let counter = exhaust.sub_ability.as_deref().expect("counter instruction");
+    assert_eq!(counter.sub_link, SubAbilityLink::SequentialSibling);
+    assert_eq!(
+        *counter.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }
+    );
+    assert!(!has_unimplemented(exhaust));
 }
 
 // Negative test: "an opponent gains life" must remain opponent-scoped, not
@@ -17593,10 +17906,74 @@ fn trigger_nth_draw_second() {
     );
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthDrawThisTurn { n: 2 })
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 2,
+            comparator: crate::types::ability::Comparator::EQ,
+        })
     );
 }
 
+#[test]
+fn trigger_nth_draw_first_or_second_card() {
+    let def = parse_trigger_line(
+        "Whenever you draw your first or second card each turn, put an ingenuity counter on Lady Octopus.",
+        "Lady Octopus, Inspired Inventor",
+    );
+    assert_eq!(def.mode, TriggerMode::Drawn);
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ))
+    );
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 2,
+            comparator: crate::types::ability::Comparator::LE,
+        })
+    );
+    assert!(
+        matches!(
+            def.execute.as_ref().map(|execute| execute.effect.as_ref()),
+            Some(Effect::PutCounter { .. })
+        ),
+        "the draw trigger body must remain parsed: {def:?}"
+    );
+}
+
+// No printed card uses these wordings; they guard the building block's refusal arms.
+// A non-prefix ordinal list ("second or third", "first or third") must not be read as a
+// contiguous "N or earlier" prefix, so no `NthDrawThisTurn` constraint is produced.
+// Each negative is paired with the same-shaped, positive "first or second" reach guard.
+#[test]
+fn trigger_nth_draw_non_prefix_ordinal_lists_are_refused() {
+    for text in [
+        "Whenever you draw your second or third card each turn, put an ingenuity counter on Lady Octopus.",
+        "Whenever you draw your first or third card each turn, put an ingenuity counter on Lady Octopus.",
+    ] {
+        let reach_guard = parse_trigger_line(
+            "Whenever you draw your first or second card each turn, put an ingenuity counter on Lady Octopus.",
+            "Lady Octopus, Inspired Inventor",
+        );
+        assert_eq!(
+            reach_guard.constraint,
+            Some(TriggerConstraint::NthDrawThisTurn {
+                n: 2,
+                comparator: crate::types::ability::Comparator::LE,
+            }),
+            "reach guard: the same-shaped first-or-second line must produce LE 2"
+        );
+        let def = parse_trigger_line(text, "Lady Octopus, Inspired Inventor");
+        assert!(
+            !matches!(
+                def.constraint,
+                Some(TriggerConstraint::NthDrawThisTurn { .. })
+            ),
+            "{text:?} must not produce NthDrawThisTurn: {def:?}"
+        );
+    }
+}
 #[test]
 fn trigger_nth_draw_you_in_a_turn_phrasing() {
     // CR 603.2: "When you draw your Nth card in a turn" (Sneaky Snacker phrasing)
@@ -17614,7 +17991,10 @@ fn trigger_nth_draw_you_in_a_turn_phrasing() {
     );
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthDrawThisTurn { n: 3 })
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 3,
+            comparator: crate::types::ability::Comparator::EQ,
+        })
     );
 }
 
@@ -17633,7 +18013,10 @@ fn trigger_nth_draw_opponent_second() {
     );
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthDrawThisTurn { n: 2 })
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 2,
+            comparator: crate::types::ability::Comparator::EQ,
+        })
     );
 }
 
@@ -17647,7 +18030,10 @@ fn trigger_nth_draw_any_player() {
     assert_eq!(def.valid_target, None);
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthDrawThisTurn { n: 3 })
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 3,
+            comparator: crate::types::ability::Comparator::EQ,
+        })
     );
 }
 
@@ -17665,7 +18051,10 @@ fn trigger_nth_draw_any_player_during_their_turn() {
     assert_eq!(def.valid_target, None);
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthDrawThisTurn { n: 2 })
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 2,
+            comparator: crate::types::ability::Comparator::EQ,
+        })
     );
     assert_eq!(
         def.condition,

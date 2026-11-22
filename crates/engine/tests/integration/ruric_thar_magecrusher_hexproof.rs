@@ -2720,6 +2720,16 @@ fn horde_loss_then_toxic(toxic: bool, pair: bool) -> (usize, usize, usize, u32, 
             WaitingFor::DeclareBlockers { .. } => {
                 runner.declare_blockers(&[]).expect("no blocks");
             }
+            // CR 101.4c + CR 616.1: the redirected loss mills several cards at
+            // once, so their controller first picks whose replacement decision
+            // to make; announcement order keeps the original sequence.
+            WaitingFor::ReplacementDecisionOrder { objects, .. } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![objects[0]],
+                    })
+                    .expect("choose which simultaneous decision to make first");
+            }
             WaitingFor::ReplacementChoice { .. } => {
                 prompts += 1;
                 let state = runner.state();

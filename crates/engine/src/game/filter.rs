@@ -5899,6 +5899,7 @@ impl BattlefieldEntrantProjection {
             &mut events,
             staging.face.enters_transformed(),
             None,
+            None,
         );
         if scratch.objects.get(&entrant)?.zone != Zone::Battlefield {
             return None;
@@ -9376,6 +9377,33 @@ pub(crate) fn spell_object_matches_filter_with_announced_x(
     fused: bool,
     announced_x: Option<u32>,
 ) -> bool {
+    spell_object_matches_filter_with_view(
+        state,
+        spell_obj,
+        origin_zone,
+        caster,
+        filter,
+        source_id,
+        all_creature_types,
+        fused,
+        announced_x,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spell_object_matches_filter_with_view(
+    state: &GameState,
+    spell_obj: &GameObject,
+    origin_zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    all_creature_types: &[String],
+    fused: bool,
+    announced_x: Option<u32>,
+    projected_spell: Option<&GameObject>,
+) -> bool {
     let Some(source_obj) = state.objects.get(&source_id) else {
         return false;
     };
@@ -9405,6 +9433,7 @@ pub(crate) fn spell_object_matches_filter_with_announced_x(
             // itself from the command zone — Eminence must not reduce its
             // own cost).
             spell_object_id: Some(spell_obj.id),
+            projected_spell,
         }),
     )
 }
@@ -9445,6 +9474,7 @@ struct SpellFilterContext<'a> {
     /// `SpellCastRecord.spell_object_id` and is resolved in `game::quantity`'s
     /// own-cast exclusion arm, not through this context.
     spell_object_id: Option<ObjectId>,
+    projected_spell: Option<&'a GameObject>,
 }
 
 fn spell_object_matches_filter_inner(
@@ -9591,6 +9621,181 @@ fn spell_object_matches_filter_inner(
     }
 }
 
+pub(super) fn filter_reads_pt(filter: &TargetFilter) -> bool {
+    fn reads_pt(prop: &FilterProp) -> bool {
+        match prop {
+            FilterProp::PtComparison { .. }
+            | FilterProp::ToughnessGTPower
+            | FilterProp::PowerExceedsBase => true,
+            FilterProp::Not { prop } => reads_pt(prop),
+            FilterProp::AnyOf { props } => props.iter().any(reads_pt),
+            FilterProp::Token
+            | FilterProp::NonToken
+            | FilterProp::RepresentedByCard
+            | FilterProp::ControllerChoseLabel { .. }
+            | FilterProp::ControllerMatches { .. }
+            | FilterProp::WasPlayed
+            | FilterProp::CastThisTurn { .. }
+            | FilterProp::Attacking { .. }
+            | FilterProp::Blocking
+            | FilterProp::BlockingSource
+            | FilterProp::CombatRelation { .. }
+            | FilterProp::BlockStatus { .. }
+            | FilterProp::AttackingAlone
+            | FilterProp::BlockingAlone
+            | FilterProp::Tapped
+            | FilterProp::Untapped
+            | FilterProp::IsSaddled
+            | FilterProp::SaddledSource
+            | FilterProp::CrewedThisTurn { .. }
+            | FilterProp::ConvokedSource
+            | FilterProp::ProtectorMatches { .. }
+            | FilterProp::HasHasteOrControlledSinceTurnBegan
+            | FilterProp::WithKeyword { .. }
+            | FilterProp::HasKeywordKind { .. }
+            | FilterProp::WithoutKeyword { .. }
+            | FilterProp::WithoutKeywordKind { .. }
+            | FilterProp::CanEnchant { .. }
+            | FilterProp::Counters { .. }
+            | FilterProp::Cmc { .. }
+            | FilterProp::ManaValueParity { .. }
+            | FilterProp::ManaCostIn { .. }
+            | FilterProp::InZone { .. }
+            | FilterProp::Owned { .. }
+            | FilterProp::Foretold
+            | FilterProp::HasAdventure
+            | FilterProp::EnchantedBy
+            | FilterProp::EquippedBy
+            | FilterProp::AttachedTo { .. }
+            | FilterProp::HasAttachment { .. }
+            | FilterProp::HasAnyAttachmentOf { .. }
+            | FilterProp::Another
+            | FilterProp::Unpaired
+            | FilterProp::OtherThanTriggerObject
+            | FilterProp::HasColor { .. }
+            | FilterProp::PowerGTSource
+            | FilterProp::ColorCount { .. }
+            | FilterProp::ManaSymbolCount { .. }
+            | FilterProp::HasSupertype { .. }
+            | FilterProp::IsChosenCreatureType
+            | FilterProp::MostPrevalentCreatureTypeIn { .. }
+            | FilterProp::IsChosenColor
+            | FilterProp::IsChosenCardType
+            | FilterProp::MatchesLastChosenCardPredicate
+            | FilterProp::HasSingleTarget
+            | FilterProp::Modal
+            | FilterProp::PrepareSpell
+            | FilterProp::NotColor { .. }
+            | FilterProp::NotSupertype { .. }
+            | FilterProp::Suspected
+            | FilterProp::Renowned
+            | FilterProp::Goaded
+            | FilterProp::Prepared
+            | FilterProp::InTrackedSet { .. }
+            | FilterProp::Modified
+            | FilterProp::Historic
+            | FilterProp::NotHistoric
+            | FilterProp::DifferentNameFrom { .. }
+            | FilterProp::DistinctFrom { .. }
+            | FilterProp::InAnyZone { .. }
+            | FilterProp::SharesQuality { .. }
+            | FilterProp::WasDealtDamageThisTurn
+            | FilterProp::DealtDamageThisTurn { .. }
+            | FilterProp::EnteredThisTurn
+            | FilterProp::ControlledContinuouslySinceTurnBegan
+            | FilterProp::ZoneChangedThisTurn { .. }
+            | FilterProp::AttackedThisTurn { .. }
+            | FilterProp::BlockedThisTurn
+            | FilterProp::FoughtThisTurn
+            | FilterProp::AttackedOrBlockedThisTurn
+            | FilterProp::CountersPutOnThisTurn { .. }
+            | FilterProp::FaceDown
+            | FilterProp::Transformed
+            | FilterProp::TargetsOnly { .. }
+            | FilterProp::Targets { .. }
+            | FilterProp::CouldBeTargetedByTriggeringSpell
+            | FilterProp::HasXInManaCost
+            | FilterProp::HasXInActivationCost
+            | FilterProp::WasKicked
+            | FilterProp::HasManaAbility
+            | FilterProp::HasNoAbilities
+            | FilterProp::Named { .. }
+            | FilterProp::SameName
+            | FilterProp::SameNameAsParentTarget
+            | FilterProp::SameNameAsExiledBySource
+            | FilterProp::NameMatchesAnyPermanent { .. }
+            | FilterProp::IsCommander
+            | FilterProp::SharesCreatureTypeWithCommander
+            | FilterProp::Other { .. } => false,
+        }
+    }
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.iter().any(reads_pt),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_reads_pt)
+        }
+        TargetFilter::Not { filter } => filter_reads_pt(filter),
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
 fn spell_object_matches_property(
     record: &SpellCastRecord,
     zone: Zone,
@@ -9599,6 +9804,50 @@ fn spell_object_matches_property(
     context: Option<SpellFilterContext<'_>>,
 ) -> bool {
     match prop {
+        // CR 208.1 + CR 601.2f: a P/T-gated cost filter compares the proposed
+        // spell's projected power or toughness (layers 7a-7b, CR 613.4a-b, for the
+        // base scope) while its total cost is determined.
+        FilterProp::PtComparison {
+            stat,
+            scope,
+            comparator,
+            value,
+        } => context.is_some_and(|context| {
+            let Some(object) = context.projected_spell else {
+                return false;
+            };
+            let (power, toughness) = object_pt_pair(object, *scope);
+            let present = match stat {
+                PtStat::Power => power.is_some(),
+                PtStat::Toughness => toughness.is_some(),
+                PtStat::TotalPowerToughness => power.is_some() && toughness.is_some(),
+            };
+            present
+                && comparator.evaluate(
+                    object_pt_value(object, *stat, *scope),
+                    resolve_quantity(
+                        context.state,
+                        value,
+                        context.source_controller,
+                        context.source_id,
+                    ),
+                )
+        }),
+        // CR 208.1: compare the proposed spell's projected toughness with its power.
+        FilterProp::ToughnessGTPower => context
+            .and_then(|context| context.projected_spell)
+            .and_then(|object| object.toughness.zip(object.power))
+            .is_some_and(|(toughness, power)| toughness > power),
+        // CR 208.4b + CR 613.4b: base power is the value after characteristic-defining
+        // abilities and P/T-setting effects; current power includes every later change.
+        FilterProp::PowerExceedsBase => context
+            .and_then(|context| context.projected_spell)
+            .and_then(|object| {
+                object
+                    .power
+                    .zip(object_pt_pair(object, PtValueScope::Base).0)
+            })
+            .is_some_and(|(power, base)| power > base),
         // CR 601.2a + CR 400.11: a cast from outside the game (CR 707.13) is from no
         // zone, so no zone constraint holds — and its negation does.
         FilterProp::InZone { zone: required } => !record.from_outside_game && zone == *required,
@@ -10893,12 +11142,16 @@ fn pt_value_from_pair(stat: PtStat, power: Option<i32>, toughness: Option<i32>) 
 }
 
 fn object_pt_value(obj: &GameObject, stat: PtStat, scope: PtValueScope) -> i32 {
+    let (power, toughness) = object_pt_pair(obj, scope);
+    pt_value_from_pair(stat, power, toughness)
+}
+
+fn object_pt_pair(obj: &GameObject, scope: PtValueScope) -> (Option<i32>, Option<i32>) {
     match scope {
-        PtValueScope::Current => pt_value_from_pair(stat, obj.power, obj.toughness),
+        PtValueScope::Current => (obj.power, obj.toughness),
         // CR 208.4b + CR 613.4a-b: base P/T includes characteristic-defining
         // and setting effects, but excludes layer-7c modifications and counters.
-        PtValueScope::Base => pt_value_from_pair(
-            stat,
+        PtValueScope::Base => (
             obj.layer_base_power.or(obj.base_power),
             obj.layer_base_toughness.or(obj.base_toughness),
         ),
