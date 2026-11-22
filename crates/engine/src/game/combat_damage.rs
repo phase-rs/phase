@@ -1582,6 +1582,7 @@ pub fn combat_damage_to_defender(
     // regular step (CR 120.6), after state-based actions remove any destroyed creatures.
     let mut first_step_hits = Vec::new();
     let mut departed: Vec<ObjectId> = Vec::new();
+    let mut preview = None;
 
     // CR 702.4b: the first combat damage step exists at all only if some
     // participant has first or double strike.
@@ -1626,31 +1627,41 @@ pub fn combat_damage_to_defender(
                 },
             )
         }));
-        // The creatures this step can damage: the blockers when the attacker strikes first,
-        // and the attacker itself.
-        let struck: &[ObjectId] = if attacker_strikes_first {
-            blockers
-        } else {
-            &[]
-        };
-        let mut hits: Vec<PredictedHit> = struck
-            .iter()
-            .copied()
-            .chain(std::iter::once(attacker_id))
-            .map(|id| PredictedHit {
-                id,
-                amount: 0,
-                deathtouch: false,
-            })
-            .collect();
-        forecast_first_step_hits(state, &assignments, &mut hits);
-        departed = first_step_departures(state, &hits);
-        first_step_hits = hits;
+        preview = preview_first_step(state, &assignments);
+        if preview.is_none() {
+            // The creatures this step can damage: the blockers when the attacker strikes
+            // first, and the attacker itself.
+            let struck = if attacker_strikes_first {
+                blockers
+            } else {
+                &[]
+            };
+            first_step_hits = struck
+                .iter()
+                .copied()
+                .chain(std::iter::once(attacker_id))
+                .map(|id| PredictedHit {
+                    id,
+                    amount: 0,
+                    deathtouch: false,
+                })
+                .collect();
+            forecast_assigned_hits(state, &assignments, &mut first_step_hits);
+            departed = first_step_departures(state, &first_step_hits);
+        }
     }
 
+    let has_departed = |id| match &preview {
+        Some(preview) => state
+            .objects
+            .get(&id)
+            .is_some_and(|obj| !ObjectIncarnationRef::from_object(obj).is_current(preview)),
+        None => departed.contains(&id),
+    };
+    let regular_state = preview.as_ref().unwrap_or(state);
     // CR 702.4b: the attacker assigns in the regular step if it has double strike,
     // or if it never had first strike and so has not assigned at all yet.
-    if !departed.contains(&attacker_id) && (has_double_strike || !attacker_strikes_first) {
+    if !has_departed(attacker_id) && (has_double_strike || !attacker_strikes_first) {
         // CR 506.4: a destroyed blocker has left combat. Each survivor is owed lethal damage
         // counting what the first step marked on it (CR 702.19b), measured on the battlefield
         // the first step left: a departed creature's static no longer sets the basis
@@ -1658,15 +1669,15 @@ pub fn combat_damage_to_defender(
         let slots = owed_slots(
             blockers
                 .iter()
-                .filter(|bid| !departed.contains(bid))
+                .filter(|&&bid| !has_departed(bid))
                 .map(|&bid| {
                     let first_step = first_step_hits
                         .iter()
                         .find(|hit| hit.id == bid)
                         .map_or(0, |hit| hit.amount);
-                    let owed = state.objects.get(&bid).map_or(1, |obj| {
+                    let owed = regular_state.objects.get(&bid).map_or(1, |obj| {
                         lethal_damage::lethal_damage_still_owed(
-                            state,
+                            regular_state,
                             obj,
                             obj.damage_marked.saturating_add(first_step),
                             has_deathtouch,
@@ -1741,16 +1752,15 @@ struct PredictedHit {
     deathtouch: bool,
 }
 
-/// CR 510.2 + CR 615.6 + CR 702.16e: fills `hits` with the damage a forecast first-strike step
-/// deals each combatant, through the same simultaneous prevention and replacement pipeline as
-/// combat (protection granted after blocks, for example). The game is copied and the step run
-/// on the copy only when some assignment's damage is not fixed; if that copy stops for a
-/// player's choice, or no assignment is modified, the assigned amounts are the estimate.
-fn forecast_first_step_hits(
+/// CR 510.2 + CR 615.5: when some first-step damage is not fixed, run the step on a copy of
+/// the game, prevention riders included (protection granted after blocks, a Protean Hydra
+/// losing counters), then its state-based actions, and return that copy for the regular step
+/// to read. `None` when the damage is fixed or the copy pauses for a player's choice; the
+/// caller then estimates from the assigned amounts.
+fn preview_first_step(
     state: &GameState,
     assignments: &[(ObjectId, DamageAssignment)],
-    hits: &mut [PredictedHit],
-) {
+) -> Option<GameState> {
     let needs_preview = assignments.iter().any(|(source, assignment)| {
         let DamageTarget::Object(target) = assignment.target else {
             return false;
@@ -1764,22 +1774,30 @@ fn forecast_first_step_hits(
             )
         })
     });
-    if needs_preview {
-        let mut preview = state.clone();
-        if let CombatDamageBatch::Complete(_) =
-            apply_combat_damage(&mut preview, assignments, CombatDamageSubStep::FirstStrike)
-        {
-            for hit in hits {
-                if let (Some(before), Some(after)) =
-                    (state.objects.get(&hit.id), preview.objects.get(&hit.id))
-                {
-                    hit.amount = after.damage_marked.saturating_sub(before.damage_marked);
-                    hit.deathtouch = after.dealt_deathtouch_damage;
-                }
-            }
-            return;
-        }
+    if !needs_preview {
+        return None;
     }
+    let mut preview = state.clone();
+    if let CombatDamageBatch::Paused { .. } =
+        apply_combat_damage(&mut preview, assignments, CombatDamageSubStep::FirstStrike)
+    {
+        return None;
+    }
+
+    // CR 704.3 + CR 704.5f + CR 704.5g + CR 704.5h: check for zero toughness and
+    // lethal damage on the battlefield left by first strike, repeating after departures.
+    sba::check_state_based_actions(&mut preview, &mut Vec::new());
+    Some(preview)
+}
+
+/// Fills `hits` with the first-step damage as assigned, for a step whose damage is fixed (no
+/// prevention or replacement applies) or whose preview paused for a player's choice; a source
+/// with deathtouch marks nonzero damage as deathtouch damage (CR 702.2b).
+fn forecast_assigned_hits(
+    state: &GameState,
+    assignments: &[(ObjectId, DamageAssignment)],
+    hits: &mut [PredictedHit],
+) {
     for (source, assignment) in assignments {
         let DamageTarget::Object(target) = assignment.target else {
             continue;

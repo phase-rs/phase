@@ -34,7 +34,7 @@ use engine::types::events::GameEvent;
 use engine::types::game_state::{CombatDamageAssignmentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, ProtectionTarget};
-use engine::types::mana::{ManaColor, ManaCost};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
@@ -1057,6 +1057,100 @@ fn zilortha_protected_after_blocks_stays_in_double_strike_forecast() {
     assert_eq!(actual, 1);
     assert_eq!(zone(&runner, z), Zone::Battlefield);
     assert_eq!(zone(&runner, yargle), Zone::Graveyard);
+    assert_eq!(
+        forecast, actual,
+        "forecast must match the actual trample damage"
+    );
+}
+
+#[test]
+fn zilortha_combat_forecast_drops_hydra_after_prevention_removes_its_counters() {
+    let mut scenario = board();
+    scenario.at_phase(Phase::PostCombatMain);
+    scenario.with_library_top(P0, &["Island"]);
+    let hydra = scenario
+        .add_creature_to_hand_from_oracle(
+            P1,
+            "Protean Hydra",
+            0,
+            0,
+            "This creature enters with X +1/+1 counters on it.\n\
+             If damage would be dealt to this creature, prevent that damage and remove that many +1/+1 counters from it.\n\
+             Whenever a +1/+1 counter is removed from this creature, put two +1/+1 counters on it at the beginning of the next end step.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Green],
+            generic: 0,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P1,
+        vec![ManaUnit::new(ManaType::Green, hydra, false, vec![]); 13],
+    );
+    let ghalta = scenario
+        .add_creature(P0, "Ghalta, Primal Hunger", 12, 12)
+        .as_legendary()
+        .from_oracle_text_with_keywords(&["Trample"], GHALTA)
+        .with_color(vec![ManaColor::Green])
+        .id();
+    let mastery = scenario
+        .add_spell_to_hand(P0, "Battle Mastery", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::zero())
+        .from_oracle_text_with_keywords(&["Enchant"], BATTLE_MASTERY)
+        .id();
+    let mut runner = scenario.build();
+
+    let state = runner.state_mut();
+    state.active_player = P1;
+    state.priority_player = P1;
+    state.waiting_for = WaitingFor::Priority { player: P1 };
+
+    let outcome = runner.cast(hydra).x(12).resolve();
+    outcome.assert_zone(&[hydra], Zone::Battlefield);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+
+    runner.advance_to_phase(Phase::PreCombatMain);
+    assert_eq!(runner.state().active_player, P0);
+    cast_at(&mut runner, mastery, ghalta);
+    assert!(runner.state().objects[&ghalta].has_keyword(&Keyword::DoubleStrike));
+    let p1_life = runner.life(P1);
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(ghalta, AttackTarget::Player(P1))])
+        .unwrap();
+    for _ in 0..4 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareBlockers { player: P1, .. }
+    ));
+    runner.declare_blockers(&[(hydra, ghalta)]).unwrap();
+    assert_eq!(runner.state().objects[&hydra].toughness, Some(12));
+    let forecast = combat_damage_to_defender(runner.state(), ghalta, &[hydra]);
+
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+    // CR 615.5 + CR 704.5f: prevention removes all twelve counters, leaving Hydra at 0/0.
+    assert_eq!(zone(&runner, hydra), Zone::Graveyard);
+    assert_eq!(runner.life(P1), p1_life);
+    finish_combat(&mut runner);
+
+    // CR 702.19d: Ghalta assigns all regular-step damage to the defending player.
+    let actual = p1_life - runner.life(P1);
+    assert_eq!(actual, 12);
     assert_eq!(
         forecast, actual,
         "forecast must match the actual trample damage"
