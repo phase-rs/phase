@@ -2047,7 +2047,8 @@ fn kenku_artificer_declared_artifact_becomes_the_creature() {
         declared
             .card_types
             .subtypes
-            .contains(&"Homunculus".to_string()),
+            .iter()
+            .any(|i| i == "Homunculus"),
         "the declared artifact gains the Homunculus subtype, got {:?}",
         declared.card_types.subtypes
     );
@@ -2484,7 +2485,7 @@ fn rootwise_survivor_it_gains_haste_is_the_declared_land() {
         land.card_types.core_types
     );
     assert!(
-        land.card_types.subtypes.contains(&"Elemental".to_string()),
+        land.card_types.subtypes.iter().any(|i| i == "Elemental"),
         "the declared land gains the Elemental subtype, got {:?}",
         land.card_types.subtypes
     );

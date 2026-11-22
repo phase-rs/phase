@@ -1381,7 +1381,7 @@ pub(crate) fn profiles_conflict(p: &RwProfile, s: &GroupStructure) -> bool {
         read_mctrl: effective_span(p.reads_membership_ctrl, board_reads.set_membership),
         write_mctrl: membership_ctrl_of(board_writes, eff_external_ctrl, p.writes_membership_self),
     };
-    if feeds(
+    feeds(
         board_reads,
         board_writes,
         FeedContext::new(
@@ -1395,11 +1395,7 @@ pub(crate) fn profiles_conflict(p: &RwProfile, s: &GroupStructure) -> bool {
             },
             board_spans,
         ),
-    ) {
-        return true;
-    }
-
-    false
+    )
 }
 
 /// The membership-write census applying to an effective write set: external
@@ -1860,8 +1856,9 @@ fn flag_legacy_write_target(p: &mut RwProfile, target: &TargetFilter) {
 
 /// Record a per-member binding (`bind_per_member`) when an effect WRITE target names a per-member-bound
 /// referent (CR 603.10a, PR-6.75 c5) — the write path's counterpart to
-/// `member_bound_target_filter` read-position wiring. A `ChangeZone{TrackedSet}`
-/// return (Day of the Dragons) writes a per-source set ⇒ members diverge.
+/// `member_bound_target_filter` read-position wiring. A
+/// `ChangeZoneAll{origin: Exile, TrackedSetFiltered}` return (Day of the
+/// Dragons) writes a per-source set ⇒ members diverge.
 fn flag_member_bound_write_target(p: &mut RwProfile, target: &TargetFilter) {
     if member_bound_target_filter(target) {
         p.bind_per_member();
@@ -2213,7 +2210,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceIsEquipped
@@ -4947,6 +4944,7 @@ fn walk_definition(
         // intact, and no runtime path reaches such a tree. See
         // `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        linked_exile_return: _,
         face_down_in_exile: _,
         granting_object: _,
         // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
@@ -7896,7 +7894,7 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsEnchanted

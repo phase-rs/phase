@@ -927,6 +927,22 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             Classification::DeserializeOnlyOrRuntime,
         ),
         (
+            "src/game/zone_pipeline.rs",
+            "MemberDeliveryOwner",
+            None,
+            "population_devour_snapshot",
+            "Option<HashSet>",
+            Classification::DeserializeOnlyOrRuntime,
+        ),
+        (
+            "src/types/game_state.rs",
+            "StagedBatchDelivery",
+            None,
+            "population_devour_snapshot",
+            "Option<HashSet>",
+            Classification::Canonical(OPTION_HASH_SET),
+        ),
+        (
             "src/game/effects/choose_one_of.rs",
             "PromptRequest",
             None,

@@ -78,6 +78,7 @@ pub(crate) fn complete_discard_to_graveyard(
         face_down_profile: None,
         with_entry_effect: None,
         co_entrants: None,
+        merged_departure: None,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
@@ -1814,6 +1815,7 @@ mod tests {
         state.push_change_zone_frame(ChangeZoneFrame {
             pending: None,
             devour_eligible_snapshot: None,
+            awaiting_batch: None,
         });
         assert!(
             !hand_off_recruit_discard_result(&mut state, discard_frame),

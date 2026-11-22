@@ -4,6 +4,9 @@
 //! than `support` through `crate::<module>`, and every module with an insta snapshot; it may also
 //! hold modules from this range. `no_top_level_test_binaries` enforces that each file here is
 //! registered in exactly one shard root.
+// The auto-trait (`Send`) proof for the im-backed `GameState` exceeds the default
+// recursion limit of 128 (a future-incompatibility error on newer toolchains).
+#![recursion_limit = "512"]
 
 pub mod support;
 
@@ -51,6 +54,7 @@ mod all_creatures_chosen_type_static_9566;
 mod all_player_library_wheel;
 mod altcast_plural_instances;
 mod alternative_cost_defiler_offers;
+mod alternative_cycling_cost_keeps_discard;
 mod amass_the_components;
 mod ambitious_augmenter;
 mod ambuscade_one_sided_fight_anaphoric;
@@ -242,6 +246,7 @@ mod claim_jumper_repeat;
 mod cleanup_control_reversion_triggers;
 mod cleanup_discard_trigger_pipeline;
 mod cleave_text_changing_cost;
+mod clever_concealment_convoke_color_9117;
 mod client_wire_viewer_projection;
 mod clone_copy_artillery_halo_lki;
 mod clone_copy_modal_artillery_halo_lki;
