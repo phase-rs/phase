@@ -158,9 +158,9 @@ fn amplifire_reorder_ends_reveal_and_hides_cards_for_all_viewers() {
             })
             .expect("CardsRevealed must be present in filtered events");
         // Public reveal names:
-        assert!(card_names.contains(&"Lightning Bolt".to_string()));
-        assert!(card_names.contains(&"Mountain".to_string()));
-        assert!(card_names.contains(&"Hill Giant".to_string()));
+        assert!(card_names.iter().any(|i: &String| i == "Lightning Bolt"));
+        assert!(card_names.iter().any(|i: &String| i == "Mountain"));
+        assert!(card_names.iter().any(|i: &String| i == "Hill Giant"));
         // Library positions stay hidden:
         assert!(
             !card_ids.contains(&bolt),

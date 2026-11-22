@@ -2194,11 +2194,7 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
             mana_actions_include_meaningful_sacrifice(state, sweep.as_slice())
                 && sacrifice_for_mana_enables_followup(state, player)
         };
-    if !holds {
-        return true;
-    }
-
-    false
+    !holds
 }
 
 /// Viewer-scoped auto-pass recommendation for transport adapters.

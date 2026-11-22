@@ -77,7 +77,7 @@ use crate::types::ability::ResolvedAbility;
 
 /// Helper to find eligible cards for exile cost payment at resolution.
 /// Returns cards in the specified zone matching the filter, excluding the source.
-fn find_eligible_exile_targets(
+pub(super) fn find_eligible_exile_targets(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
@@ -1035,6 +1035,74 @@ pub(crate) fn record_delivered_cost_exile(
     }
 }
 
+/// CR 800.4f: an outstanding MayCost belongs to its latched payer, including
+/// when a different player owns the current inner replacement choice. An
+/// abandoned cost component is unpaid, not replacement-prevented-and-paid.
+pub(crate) fn settle_replacement_may_cost_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EngineError> {
+    let Some(PendingCostMoveResume::ReplacementMayCost {
+        current,
+        remaining,
+        outer_replacement: Some(outer),
+        ..
+    }) = state.pending_cost_move_resume.as_ref()
+    else {
+        return Ok(None);
+    };
+    let payer_left = outer
+        .choice_player
+        .is_some_and(|payer| !super::players::is_alive(state, payer));
+    let component_left = std::iter::once(current).chain(remaining.iter()).any(|id| {
+        state
+            .objects
+            .get(id)
+            .is_none_or(|object| !super::players::is_alive(state, object.owner))
+    });
+    let interrupted_component = state
+        .pending_replacement
+        .as_ref()
+        .filter(|pending| pending.proposed.affected_object_id() == Some(*current));
+    let component_impossible = interrupted_component.is_some_and(|pending| {
+        !super::replacement::replacement_event_survives(state, &pending.proposed)
+            || match pending.delivery_boundary_event() {
+                crate::types::proposed_event::ProposedEvent::ZoneChange { from, .. } => {
+                    remaining.iter().any(|id| {
+                        state
+                            .objects
+                            .get(id)
+                            .is_none_or(|object| object.zone != *from)
+                    })
+                }
+                _ => false,
+            }
+    });
+    if !payer_left
+        && !component_left
+        && !component_impossible
+        && super::replacement::replacement_event_survives(state, &outer.proposed)
+    {
+        return Ok(None);
+    }
+    let Some(PendingCostMoveResume::ReplacementMayCost {
+        current,
+        outer_replacement: Some(outer),
+        ..
+    }) = state.pending_cost_move_resume.take()
+    else {
+        unreachable!("the exact MayCost continuation was inspected above")
+    };
+    if state
+        .pending_replacement
+        .as_ref()
+        .is_some_and(|pending| pending.proposed.affected_object_id() == Some(current))
+    {
+        state.pending_replacement = None;
+    }
+    super::engine_replacement::settle_unpaid_replacement_may_cost(state, *outer, events).map(Some)
+}
+
 /// CR 614.12a + CR 616.1: Continue a forced MayCost exile after the inner
 /// replacement choice delivered or prevented its current object. The outer
 /// optional replacement resumes only after the whole cost has finished.
@@ -1042,6 +1110,9 @@ pub(crate) fn resume_replacement_may_cost_move(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if let Some(waiting) = settle_replacement_may_cost_after_departure(state, events)? {
+        return Ok(waiting);
+    }
     let Some(PendingCostMoveResume::ReplacementMayCost {
         source_id,
         current,
@@ -3149,8 +3220,28 @@ fn pay_ability_cost_inner(
         // interactive `WaitingFor::PayCost { kind: UnattachFrom }` detour before
         // this resume runs, so this arm is an idempotent no-op (mirrors the
         // non-self Exile/Sacrifice interactive-cost arms).
-        | AbilityCost::UnattachFrom { .. }
-        | AbilityCost::Behold { .. } => {}
+        | AbilityCost::UnattachFrom { .. } => {}
+        // CR 614.12a + CR 118.3 + CR 701.4a: resolution-time single-object
+        // Behold costs either auto-pay their sole candidate or pause for a
+        // selection; the replacement resume continues after that choice.
+        AbilityCost::Behold {
+            count: 1,
+            filter,
+            action: crate::types::ability::BeholdCostAction::ChooseOrReveal,
+            type_choice: None,
+        } if matches!(scope, PaymentScope::Resolution { .. }) => {
+            use super::effects::behold::{begin_behold, BeholdStart};
+            return Ok(
+                match begin_behold(state, player, source_id, filter, events) {
+                    BeholdStart::Unavailable => payment_failed("no eligible object to behold"),
+                    BeholdStart::Selected => PaymentOutcome::Paid,
+                    BeholdStart::Parked => PaymentOutcome::Paused {
+                        remaining_cost: None,
+                    },
+                },
+            );
+        }
+        AbilityCost::Behold { .. } => {}
         AbilityCost::Discard { .. } | AbilityCost::NinjutsuFamily { .. } => {
             // At Activation these shapes are intercepted by the interactive
             // WaitingFor detours before payment is invoked, so passing through
@@ -4218,6 +4309,20 @@ fn can_pay_resolution(
             );
             eligible.len() >= count
         }
+        // CR 614.12a + CR 118.3 + CR 701.4a: a single-object Behold
+        // replacement cost is payable only when a matching object exists.
+        AbilityCost::Behold {
+            count: 1,
+            filter,
+            action: crate::types::ability::BeholdCostAction::ChooseOrReveal,
+            type_choice: None,
+        } => !super::casting_costs::eligible_behold_choices(
+            state,
+            payer,
+            ability.source_id,
+            filter,
+        )
+        .is_empty(),
         // CR 118.12 + CR 701.26a: Resolution-time optional tap-creatures costs
         // are payable when enough currently untapped matching creatures can be
         // selected. The concrete selection is surfaced through WaitingFor::PayCost.

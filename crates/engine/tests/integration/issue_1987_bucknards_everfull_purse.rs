@@ -31,7 +31,11 @@ fn treasure_count_for_controller(state: &GameState, controller: PlayerId) -> usi
         .iter()
         .filter_map(|id| state.objects.get(id))
         .filter(|o| {
-            o.card_types.subtypes.contains(&"Treasure".to_string()) && o.controller == controller
+            o.card_types
+                .subtypes
+                .iter()
+                .any(|i: &String| i == "Treasure")
+                && o.controller == controller
         })
         .count()
 }
@@ -92,7 +96,11 @@ fn issue_1987_bucknards_parsed_oracle_creates_treasures_and_passes_right() {
             .battlefield
             .iter()
             .filter_map(|id| state.objects.get(id))
-            .filter(|o| o.card_types.subtypes.contains(&"Treasure".to_string()))
+            .filter(|o| o
+                .card_types
+                .subtypes
+                .iter()
+                .any(|i: &String| i == "Treasure"))
             .all(|o| o.card_types.core_types.contains(&CoreType::Artifact) && o.color.is_empty()),
         "Treasure tokens must be colorless artifacts"
     );

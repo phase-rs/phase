@@ -341,7 +341,23 @@ fn milled_trigger_fires_across_a_replacement_ordering_pause() {
     cast_tome_scour(&mut runner, tome_scour, P1);
 
     let mut ordering_prompts = 0usize;
+    let mut decision_orders = 0usize;
     for _ in 0..128 {
+        // CR 101.4c: the staged mill batch consults every milled card before
+        // any prompt, so P1 holds one decision per card and, while two or more
+        // remain, first chooses which to make (here in announcement order).
+        if let WaitingFor::ReplacementDecisionOrder { player, objects } =
+            runner.state().waiting_for.clone()
+        {
+            assert_eq!(player, P1, "the milled cards' owner orders its decisions");
+            decision_orders += 1;
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![objects[0]],
+                })
+                .expect("the decision order must accept a held decision");
+            continue;
+        }
         if matches!(
             runner.state().waiting_for,
             WaitingFor::ReplacementChoice { .. }
@@ -372,6 +388,14 @@ fn milled_trigger_fires_across_a_replacement_ordering_pause() {
         ordering_prompts > 0,
         "reach guard: two applicable graveyard diverts must raise at least one CR 616.1 \
          ordering prompt, else the paused-delivery path is never exercised"
+    );
+    assert_eq!(
+        ordering_prompts, 5,
+        "every milled card's CR 616.1 ordering prompt is asked"
+    );
+    assert_eq!(
+        decision_orders, 4,
+        "P1 orders its held decisions while two or more remain (5, 4, 3, 2)"
     );
     assert_eq!(
         runner.state().players[1].library.len(),

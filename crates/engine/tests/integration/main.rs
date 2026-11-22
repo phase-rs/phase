@@ -5,6 +5,10 @@
 // MEASURED, not assumed — the alternative already in this tree is `test_support.rs` / `support.rs`,
 // twin files kept equal by a comment asking a human to remember.
 #![recursion_limit = "512"]
+// Debug builds of this crate's large dispatch functions allocate stack frames above
+// clippy's 512 KB `large_unopt_stack_frames` default. Test threads run with
+// RUST_MIN_STACK = 16 MiB (.cargo/config.toml) and server runtime threads with 32 MiB.
+#![allow(clippy::large_unopt_stack_frames)]
 #[path = "../../src/source_census.rs"]
 mod source_census;
 
@@ -66,6 +70,7 @@ mod combo_floors;
 mod combo_infinite_pile;
 mod combo_table;
 mod combo_table_on_resolve;
+mod concede_resumed_family_sba;
 mod corpse_appraiser;
 mod counter_removed_last_counter_threshold;
 mod cr732_shortcut_journal_retention;
@@ -123,6 +128,7 @@ mod flamerush_rider_tapped_attacking_copy;
 mod food_chain_board;
 mod for_each_of_those_population;
 mod format_axis_census;
+mod forwarded_source_identity;
 mod freeform_commander_deck_rules;
 mod frenzy_attacker_unblocked_pump;
 mod frostcliff_siege_anchor_word_modes;
@@ -306,6 +312,7 @@ mod ureni_attack_trigger;
 mod vengeful_ancestor_goaded_attack_trigger;
 mod viewer_projection_ingest_gate;
 mod void_winnower_announced_x;
+mod vren_the_relentless;
 mod vrestin_menoptra_leader_5949;
 mod vulcan_mind_meld_exiler_plays;
 mod wba_fodder_multiset;

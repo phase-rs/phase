@@ -5,6 +5,9 @@
 //! `crate::<module>`, and every module with an insta snapshot; it may also hold modules from this
 //! range. `no_top_level_test_binaries` enforces that each file here is registered in exactly one
 //! shard root.
+// The auto-trait (`Send`) proof for the im-backed `GameState` exceeds the default
+// recursion limit of 128 (a future-incompatibility error on newer toolchains).
+#![recursion_limit = "512"]
 
 pub mod support;
 
@@ -463,6 +466,7 @@ mod omo_queen_of_vesuva;
 mod onakke_oathkeeper;
 mod one_ring_burden_upkeep_lethal;
 mod one_sided_fight_illegal_damage_source;
+mod open_the_vaults_staged_entry_answers;
 mod opening_play_draw_view;
 mod opponent_gains_control_from_you_trigger;
 mod opposition_agent_final;
@@ -504,6 +508,7 @@ mod palace_jailer;
 mod palantir_of_orthanc;
 mod panther_habit_equipped_prevention_scope;
 mod park_heights_pegasus_draw_condition_runtime;
+mod parked_draw_payment_and_staged_population_concessions;
 mod parker_luck;
 mod parser_oracle_casting;
 mod parser_oracle_static;
@@ -590,6 +595,7 @@ mod queen_velocity_upkeep;
 mod quest_counter_sacrifice_it_cost;
 mod quick_draw_target_opponent;
 mod quirion_ranger_activation;
+mod raffine_informant_departed_connive;
 mod rage_reflection_double_strike_grant;
 mod ral_crackling_wit_emblem_storm;
 mod rally_the_righteous_radiance_pump;

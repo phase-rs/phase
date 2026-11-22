@@ -5899,6 +5899,7 @@ impl BattlefieldEntrantProjection {
             &mut events,
             staging.face.enters_transformed(),
             None,
+            None,
         );
         if scratch.objects.get(&entrant)?.zone != Zone::Battlefield {
             return None;

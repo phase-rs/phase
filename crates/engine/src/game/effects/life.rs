@@ -439,7 +439,12 @@ pub fn apply_life_gain(
 }
 
 /// What staging one life gain produced (see [`stage_life_gain`]).
+///
+/// `Final` carries the event inline: every caller matches the result
+/// immediately, so boxing it would add an allocation per staged gain without
+/// saving retained state.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum StagedLifeGain {
     /// The final post-replacement `ProposedEvent::LifeGain`, NOT yet applied:
     /// the caller settles it later through [`apply_life_gain_after_replacement`].

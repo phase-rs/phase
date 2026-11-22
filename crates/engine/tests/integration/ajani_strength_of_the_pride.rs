@@ -173,8 +173,8 @@ fn minus_two_creates_named_cat_soldier_token() {
         "Pridemate is 2/2"
     );
     assert!(
-        object.card_types.subtypes.contains(&"Cat".to_string())
-            && object.card_types.subtypes.contains(&"Soldier".to_string()),
+        object.card_types.subtypes.iter().any(|i| i == "Cat")
+            && object.card_types.subtypes.iter().any(|i| i == "Soldier"),
         "Pridemate is a Cat Soldier; got {:?}",
         object.card_types.subtypes
     );
