@@ -1157,16 +1157,10 @@ fn phase2_v6_action_replay_seeks_across_cycle_placements() {
     use engine::types::actions::MulliganChoice;
     use engine::types::format::FormatConfig;
     use engine::types::replay::{ReplayHeader, ReplayLog};
-    use flate2::read::GzDecoder;
     use std::sync::Arc;
 
-    let db = Arc::new(
-        CardDatabase::from_compressed_export_cached(
-            &include_bytes!("../fixtures/integration_cards.json.gz")[..],
-            |gz| std::io::read_to_string(GzDecoder::new(gz)),
-        )
-        .expect("shared printed fixture"),
-    );
+    let db =
+        Arc::new(CardDatabase::from_integration_fixture_cached().expect("shared printed fixture"));
     // A seven-card opening hand from this nine-card deck always holds two Wraiths.
     let mut main_deck = vec!["Street Wraith".to_owned(); 4];
     main_deck.extend(vec!["Island".to_owned(); 5]);
