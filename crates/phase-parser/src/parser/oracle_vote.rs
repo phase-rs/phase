@@ -848,7 +848,7 @@ fn strip_leading_article(text: &str) -> &str {
 /// clause. Returns the unconsumed remainder, the matched choice (lowercase),
 /// whether the "...or the vote is tied" qualifier was present, and the inner
 /// effect text (trailing period stripped).
-fn parse_one_threshold_clause<'a>(
+pub(super) fn parse_one_threshold_clause<'a>(
     input: &'a str,
     choices: &[String],
 ) -> Option<(&'a str, String, bool, &'a str)> {

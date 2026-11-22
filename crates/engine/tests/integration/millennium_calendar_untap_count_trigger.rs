@@ -873,7 +873,7 @@ fn unwindowed_singular_untap_trigger_fires_exactly_once() {
 /// exactly one firing for two untaps (0 = the finding, 2 = double-fire).
 ///
 /// Fixture honesty: no printed card exhibits constrained+unwindowed+Untaps.
-/// Measured over the 7407-card `integration_cards.json.gz` fixture, exactly
+/// Measured over the 7407-card `integration_cards/` fixture, exactly
 /// five cards parse to `TriggerMode::Untaps` — Arbiter of the Ideal, Daring
 /// Thief, Felhide Spiritbinder, Fishing Pole, Ghostly Pilferer — all singular
 /// "becomes untapped" subjects, all `constraint: null`, all `condition:

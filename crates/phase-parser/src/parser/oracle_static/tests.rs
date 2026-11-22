@@ -44899,6 +44899,53 @@ fn edgar_exile_permission_tapped_rider_declines() {
     );
 }
 
+// ── CR 120.6 + CR 704.5g: LethalDamageDeterminedByPower (Zilortha) ─────────────
+
+/// Verbatim static line of Zilortha, Strength Incarnate (MTGJSON).
+const ZILORTHA_LETHAL_LINE: &str =
+    "Lethal damage dealt to creatures you control is determined by their power rather than their toughness.";
+
+#[test]
+fn lethal_damage_determined_by_power_parses_the_subject_filter() {
+    let def = parse_static_line(ZILORTHA_LETHAL_LINE).expect("Zilortha's static parses");
+    assert_eq!(def.mode, StaticMode::LethalDamageDeterminedByPower);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ))
+    );
+    assert_eq!(def.description.as_deref(), Some(ZILORTHA_LETHAL_LINE));
+
+    // Hostile grammar: only the power-for-toughness substitution, anchored to the sentence end.
+    for hostile in [
+        "Lethal damage dealt to creatures you control is determined by their toughness rather than their power.",
+        "Lethal damage dealt to creatures you control is determined by their power rather than their toughness and they have trample.",
+    ] {
+        let mode = parse_static_line(hostile).map(|d| d.mode);
+        assert_ne!(
+            mode,
+            Some(StaticMode::LethalDamageDeterminedByPower),
+            "{hostile}"
+        );
+    }
+    // The CR 510.1a Doran line is a different rule and keeps its own parse.
+    let doran = parse_static_line(
+        "Each creature assigns combat damage equal to its toughness rather than its power.",
+    )
+    .expect("Doran's static parses");
+    assert!(doran
+        .modifications
+        .contains(&ContinuousModification::AssignDamageFromToughness));
+}
+
+#[test]
+fn lethal_damage_determined_by_power_routes_as_a_static_line() {
+    assert!(crate::parser::oracle_classifier::is_static_pattern(
+        &ZILORTHA_LETHAL_LINE.to_lowercase()
+    ));
+}
+
 #[test]
 fn spell_cost_pt_qualifiers_parse_complete_static_definitions() {
     let goreclaw = "Creature spells you cast with power 4 or greater cost {2} less to cast.";

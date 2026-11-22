@@ -54,7 +54,8 @@ use crate::types::text_grammar::{
     separator_stops_keyword_list, starts_with_type_phrase_lead, KeywordMatch,
 };
 pub(crate) use crate::types::text_grammar::{
-    parse_combat_status_prefix, parse_without_keyword_suffix, starts_with_type_word,
+    parse_combat_status_prefix, parse_property_filter, parse_without_keyword_suffix,
+    starts_with_type_word,
 };
 
 /// CR 115.1: Whether a parsed target phrase used the "target" keyword
@@ -7438,6 +7439,44 @@ pub(crate) fn parse_block_pairing_clause(
     Ok((rest, (form, subject)))
 }
 
+/// CR 509.1g: the prenominal-relative current block pairing "<creatures> it's
+/// blocking" / "<creatures> it is blocking" (Wall of Vapor's "creatures it's
+/// blocking") — the active voice of the passive "blocked by it" clause, so it is
+/// the same `SubjectIsBlocker` relation. Splits the clause off the end of a
+/// lowercase damage-source subject and returns the head noun phrase with the
+/// `CombatRelation` prop to add to it. The bare pronoun binds only to the
+/// ability's own source (`resolve_relation_subject`), so a caller whose context
+/// is not armed for the source gets `None`. Deliberately NOT a form of
+/// `parse_block_pairing_clause`: that clause is a postnominal suffix read by the
+/// swallow audit over whole Oracle lines, and "it's blocking" also heads
+/// conditions ("if it's blocking") that audit must not claim.
+pub(crate) fn split_source_is_blocking_relative<'a>(
+    subject: &'a str,
+    ctx: &ParseContext,
+) -> Option<(&'a str, FilterProp)> {
+    let (_, (head, tail)) = nom_primitives::split_once_on(subject, " it's blocking")
+        .or_else(|_| nom_primitives::split_once_on(subject, " it is blocking"))
+        .ok()?;
+    all_consuming(terminated(
+        multispace0,
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(tail)
+    .ok()?;
+    let relation_subject = resolve_relation_subject(
+        CombatRelationSubjectWord::Pronoun,
+        CombatClauseKind::Pairing,
+        ctx,
+    )?;
+    Some((
+        head,
+        FilterProp::CombatRelation {
+            relation: BlockPairingForm::BlockedBy.relation(),
+            subject: relation_subject,
+        },
+    ))
+}
+
 /// One block-history clause: who blocked whom, against which partner, in which window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BlockHistoryClause {
@@ -10466,6 +10505,34 @@ pub(crate) fn parse_that_clause_suffix<'a>(
         }
     }
 
+    // CR 701.26a: "that's|that is|that are|that isn't|that aren't <tapped state>"
+    // ("blocking creatures that are tapped", New Master of Arms) — the
+    // relative-clause form of the tapped/untapped adjectives; the shared
+    // `parse_property_filter` word grammar keeps this position and the prefix
+    // position from disagreeing about which adjectives exist. Only the tapped
+    // state is read here: the other status adjectives ("that's attacking") stay
+    // with the suffix arms and callers that already own them. The boundary after
+    // the adjective is deliberately strict (end of clause, a comma, or a period):
+    // a continuation ("that are tapped and attacking") belongs to the token-spec
+    // and battlefield-entry paths that absorb their own qualifier runs.
+    if let Some((after_intro, intro_len, negated)) = parse_relative_clause_intro(trimmed) {
+        if let Ok((rest, prop @ (FilterProp::Tapped | FilterProp::Untapped))) =
+            parse_property_filter(after_intro)
+        {
+            if rest.chars().next().is_none_or(|c| c == '.' || c == ',') {
+                let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+                let prop = if negated {
+                    FilterProp::Not {
+                        prop: Box::new(prop),
+                    }
+                } else {
+                    prop
+                };
+                return Some((vec![prop], consumed));
+            }
+        }
+    }
+
     if let Some(parsed) = parse_color_relative_clause_suffix(trimmed, leading_ws) {
         return Some(parsed);
     }
@@ -10549,10 +10616,17 @@ pub(crate) fn parse_that_clause_suffix<'a>(
     }
 
     // --- CR 115.9b: "that targets [filter]" (.any() semantics) ---
-    // Must come AFTER "targets only" check above (longest match first).
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("targets ").parse(after_that) {
-        let targets_verb_len = "targets ".len();
-        if let Some((props, consumed)) = parse_targets_constraint(rest, that_len + targets_verb_len)
+    // Must come AFTER "targets only" check above (longest match first). The
+    // verb agrees with its subject's number: "that targets" (singular) and
+    // "that target" (plural — "spells that target it", Bronze Horse) are one
+    // predicate in two agreement spellings, like the "was/were dealt damage"
+    // rows below, not two FilterProps.
+    if let Ok((rest, _)) =
+        alt((tag::<_, _, OracleError<'_>>("targets "), tag("target "))).parse(after_that)
+    {
+        let targets_verb_len = after_that.len() - rest.len();
+        if let Some((props, consumed)) =
+            parse_targets_constraint(rest, that_len + targets_verb_len, ctx)
         {
             return Some((props, consumed));
         }
@@ -11725,7 +11799,7 @@ fn parse_targets_only_constraint(
     None
 }
 
-/// CR 115.9b: Parse the constraint after "that targets ".
+/// CR 115.9b: Parse the constraint after "that targets " / "that target ".
 /// Returns `(properties_to_add, total_bytes_consumed)`.
 ///
 /// Handles:
@@ -11734,7 +11808,17 @@ fn parse_targets_only_constraint(
 /// - "you or a [type]" → `Targets { Or(Controller, Typed) }`
 /// - "one or more [type phrase]" → strip prefix, then parse type phrase
 /// - "a/an [type phrase]" → `Targets { filter }`
-fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<FilterProp>, usize)> {
+///
+/// A bare "it" is ANAPHORIC, unlike the deictic "~" / "this creature": CR 608.2c
+/// lets it name the ability's source only when the parse context binds it there
+/// (`bare_pronoun_names_ability_source`); any other antecedent leaves the
+/// constraint unconsumed so the caller fails closed instead of silently
+/// binding the host.
+fn parse_targets_constraint(
+    text: &str,
+    prefix_len: usize,
+    ctx: &ParseContext,
+) -> Option<(Vec<FilterProp>, usize)> {
     // Strip "one or more " — redundant with .any() semantics
     let (text, extra_len) =
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("one or more ").parse(text) {
@@ -11751,8 +11835,9 @@ fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<Filter
         }];
         return Some((props, prefix_len + 1));
     }
-    // "it" with word boundary
-    if parse_word_bounded(text, "it").is_ok() {
+    // "it" with word boundary — CR 608.2c: bound to the source only when the
+    // parse context says so; otherwise the clause stays unconsumed (fail closed).
+    if parse_word_bounded(text, "it").is_ok() && bare_pronoun_names_ability_source(ctx) {
         let props = vec![FilterProp::Targets {
             filter: Box::new(TargetFilter::SelfRef),
         }];
@@ -14395,6 +14480,51 @@ mod tests {
             assert!(
                 parse_block_pairing_clause(declined).is_err(),
                 "{declined:?} must not parse as a block-pairing clause"
+            );
+        }
+    }
+
+    /// CR 509.1g: "creatures it's blocking" splits into its head noun phrase and
+    /// the `SubjectIsBlocker` pairing relation only under a context that names the
+    /// ability's source; a blank context, another tail and a window decline.
+    #[test]
+    fn source_is_blocking_relative_binds_only_for_the_source() {
+        let armed = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
+        let expected = FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope: None,
+            },
+            subject: CombatRelationSubject::Source,
+        };
+        for text in [
+            "creatures it's blocking",
+            "creatures it is blocking",
+            "creatures it's blocking.",
+        ] {
+            assert_eq!(
+                split_source_is_blocking_relative(text, &armed),
+                Some(("creatures", expected.clone())),
+                "{text:?}"
+            );
+            assert_eq!(
+                split_source_is_blocking_relative(text, &ParseContext::default()),
+                None,
+                "a blank context must not bind the bare pronoun: {text:?}"
+            );
+        }
+        for text in [
+            "creatures it's blocking this turn",
+            "creatures it's blocking and attacking",
+            "creatures blocking it",
+        ] {
+            assert_eq!(
+                split_source_is_blocking_relative(text, &armed),
+                None,
+                "{text:?}"
             );
         }
     }
@@ -23953,6 +24083,95 @@ mod tests {
         }
     }
 
+    /// CR 115.9b: the verb of a "that targets [filter]" clause agrees with its
+    /// subject's number — "that target" (plural, Bronze Horse's "spells that
+    /// target it") is the same predicate as "that targets". A bare "it" is
+    /// ANAPHORIC (CR 608.2c): it binds to the source only under a context armed
+    /// with the self-reference, and stays unbound otherwise, so the clause is
+    /// left unconsumed rather than silently naming the host.
+    #[test]
+    fn that_target_plural_agreement_and_ctx_gated_it() {
+        // Plural verb + deictic self-reference: parses under a blank context.
+        let result = parse_that_clause_suffix(" that target this creature,", None);
+        let (props, consumed) = result.expect("should parse");
+        assert_eq!(props.len(), 1);
+        assert!(matches!(
+            &props[0],
+            FilterProp::Targets { filter } if **filter == TargetFilter::SelfRef
+        ));
+        assert_eq!(consumed, " that target this creature".len());
+
+        // Plural verb + bare "it": binds only under an armed context.
+        let self_ref_ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
+        let (props, consumed) = parse_that_clause_suffix(" that target it.", Some(&self_ref_ctx))
+            .expect("an armed context binds the bare pronoun");
+        assert_eq!(props.len(), 1);
+        assert!(matches!(
+            &props[0],
+            FilterProp::Targets { filter } if **filter == TargetFilter::SelfRef
+        ));
+        assert_eq!(consumed, " that target it".len());
+
+        // Blank context: the bare "it" leaves the clause unconsumed (fail
+        // closed), for both agreement spellings.
+        for phrase in [" that target it.", " that targets it."] {
+            assert!(
+                parse_that_clause_suffix(phrase, None).is_none(),
+                "{phrase:?} must not bind a bare pronoun under a blank context"
+            );
+        }
+    }
+
+    /// CR 110.5 + CR 509.1a: "that are|that's|that is <status adjective>" — the
+    /// relative-clause form of the status adjectives the prefix position
+    /// accepts (New Master of Arms: "blocking creatures that are tapped"). The
+    /// boundary after the adjective is strict, so a conjunct continuation stays
+    /// unconsumed for the token-spec and attacking-defender arms to own.
+    #[test]
+    fn that_are_status_adjective_relative_clause() {
+        for (phrase, expected) in [
+            (" that are tapped", FilterProp::Tapped),
+            (" that's tapped.", FilterProp::Tapped),
+            (" that is tapped,", FilterProp::Tapped),
+            (" that are untapped.", FilterProp::Untapped),
+        ] {
+            let (props, consumed) = parse_that_clause_suffix(phrase, None)
+                .unwrap_or_else(|| panic!("{phrase:?} must parse"));
+            assert_eq!(props.len(), 1, "{phrase:?}");
+            assert_eq!(props[0], expected, "{phrase:?}");
+            assert_eq!(
+                consumed,
+                phrase.trim_end_matches(['.', ',']).len(),
+                "{phrase:?}"
+            );
+        }
+        // CR 110.5: the negated intro lowers to Not { <adjective> }.
+        let (props, _) = parse_that_clause_suffix(" that aren't tapped", None)
+            .expect("the negated status clause must parse");
+        assert_eq!(
+            props[0],
+            FilterProp::Not {
+                prop: Box::new(FilterProp::Tapped),
+            }
+        );
+        // Continuations belong to the token-spec and attacking-defender arms,
+        // not this one.
+        for declined in [
+            " that are tapped and attacking",
+            " that are attacking you",
+            " that are attacking",
+            " that are blocking",
+            " that are tapped this turn",
+        ] {
+            assert!(
+                parse_that_clause_suffix(declined, None).is_none(),
+                "{declined:?} must stay unconsumed"
+            );
+        }
+    }
     // ── VERB-01: Compound target type patterns ──
 
     #[test]

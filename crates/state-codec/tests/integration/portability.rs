@@ -2,7 +2,7 @@
 //! From the repo root (STATE_CODEC_CORPUS must be an absolute path):
 //! STATE_CODEC_CORPUS=/tmp/loop186-corpus.json cargo test -p state-codec --test integration \
 //!   portability::produce_native_portability_corpus -- --ignored --exact --nocapture
-//! Uses the committed integration_cards.json.gz, not generated card data.
+//! Uses the committed integration_cards/, not generated card data.
 //! Build same-HEAD WASM with ./scripts/build-wasm.sh release (or fresh Tilt wasm),
 //! then replay with the generated JS/WASM artifacts present:
 //! cd client && STATE_CODEC_CORPUS=/tmp/loop186-corpus.json pnpm exec vitest run \

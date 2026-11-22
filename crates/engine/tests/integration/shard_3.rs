@@ -277,6 +277,7 @@ mod gideon_blackblade_turn_conditional_creature_1155;
 mod gideon_jura_forced_attack_planeswalker;
 mod gideon_the_oathless;
 mod gideon_trials_emblem;
+mod gideons_intervention_chosen_name_prevention;
 mod gift_delivery_draw_sequence_migration;
 mod gift_recipient_phased_out_opponent;
 mod gift_token_identity;

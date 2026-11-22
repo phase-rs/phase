@@ -12737,6 +12737,7 @@ fn static_mode_reads_filter_population(
         // Filter-free: nothing to read.
         StaticMode::Continuous
         | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::LethalDamageDeterminedByPower
         | StaticMode::CantAttack
         | StaticMode::CantBlock
         | StaticMode::CantAttackOrBlock
