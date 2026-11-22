@@ -57,7 +57,6 @@ use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::resolution::ResolutionFrame;
 use engine::types::zones::Zone;
 
 const PHYTOTITAN: &str = "When this creature dies, return it to the battlefield tapped under its owner's control at the beginning of their next upkeep.";
@@ -798,21 +797,6 @@ fn merged_phytotitan_survivor_put_back_before_its_trigger_still_returns_its_comp
     assert!(runner.state().delayed_triggers.is_empty());
 }
 
-/// The members the parked `ChangeZone` iteration has not processed yet.
-fn parked_remaining(runner: &GameRunner) -> Vec<ObjectId> {
-    runner
-        .state()
-        .resolution_stack
-        .iter()
-        .filter_map(|frame| match frame {
-            ResolutionFrame::ChangeZone(frame) => frame.pending.as_ref(),
-            _ => None,
-        })
-        .last()
-        .map(|pending| pending.remaining.iter().map(|m| m.object_id).collect())
-        .unwrap_or_default()
-}
-
 /// CR 616.1e: answer a two-way entry tap-state ordering offered to P0.
 fn answer_tap_state_ordering(runner: &mut GameRunner, answer: &str) {
     let index = match &runner.state().waiting_for {
@@ -838,8 +822,9 @@ fn answer_tap_state_ordering(runner: &mut GameRunner, answer: &str) {
         .expect("answer the tap-state ordering");
 }
 
-/// M4 — a merged return through a CR 616.1 ordering pause keeps the other
-/// member pending and resumes it after the answer.
+/// M4 — a merged return stages both members' entries together; P0 holds both
+/// CR 616.1 tap-state orderings at once, picks which to make first (CR 101.4c),
+/// and the other member's ordering follows after the answer.
 fn merged_return_resumes_through_replacement_ordering(answer: &str) {
     let (mut runner, phytotitan, gemrazer, spells) = merged_board(|scenario| {
         scenario.add_creature_from_oracle(
@@ -855,22 +840,30 @@ fn merged_return_resumes_through_replacement_ordering(answer: &str) {
     only_delayed(&runner);
 
     let start = runner.state().turn_number;
-    drive_until(&mut runner, "the return's ordering prompt", |r| {
+    drive_until(&mut runner, "the return's decision-order prompt", |r| {
         (r.state().active_player == P0 && r.state().turn_number > start)
-            && matches!(r.state().waiting_for, WaitingFor::ReplacementChoice { .. })
+            && matches!(
+                r.state().waiting_for,
+                WaitingFor::ReplacementDecisionOrder { .. }
+            )
     });
-    let pending = parked_remaining(&runner);
-    assert_eq!(
-        pending.len(),
-        1,
-        "the other member waits in the parked iteration: {pending:?}"
-    );
-    assert!(
-        pending.contains(&phytotitan) || pending.contains(&gemrazer),
-        "{pending:?}"
-    );
+    let first = match &runner.state().waiting_for {
+        WaitingFor::ReplacementDecisionOrder { player, objects } => {
+            assert_eq!(*player, P0, "the entrants' controller orders (CR 616.1)");
+            assert_eq!(objects.len(), 2, "both members' decisions: {objects:?}");
+            assert!(
+                objects.contains(&phytotitan) && objects.contains(&gemrazer),
+                "{objects:?}"
+            );
+            objects[0]
+        }
+        other => panic!("expected the CR 101.4c decision order, got {other:?}"),
+    };
+    runner
+        .act(GameAction::SelectCards { cards: vec![first] })
+        .expect("P0 makes the first member's decision first");
     answer_tap_state_ordering(&mut runner, answer);
-    // Reach-guard: the resumed member meets its own ordering.
+    // Reach-guard: the other member meets its own ordering.
     answer_tap_state_ordering(&mut runner, answer);
     runner.advance_until_stack_empty();
 

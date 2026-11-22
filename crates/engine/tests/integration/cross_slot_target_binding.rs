@@ -27,7 +27,7 @@
 //!     the spell." (target_a = SelfRef, target_b = TriggeringSource.)
 //!
 //! None of the first three cards is in
-//! `crates/engine/tests/fixtures/integration_cards.json.gz`, so every board
+//! `crates/engine/tests/fixtures/integration_cards/`, so every board
 //! for T1/T2/T3/T5 is built from verbatim Oracle text via the
 //! `*_from_oracle` scenario helpers. T16 is a direct `validate_targets_in_
 //! chain` unit test on a hand-built stack-object ability (the plan's

@@ -102,7 +102,11 @@ fn omo_etb_grants_all_land_and_creature_types_through_pipeline() {
         "Forest", "Island", "Swamp", "Mountain", "Plains", "Desert", "Gate", "Locus",
     ] {
         assert!(
-            forest_obj.card_types.subtypes.contains(&name.to_string()),
+            forest_obj
+                .card_types
+                .subtypes
+                .iter()
+                .any(|i: &String| i == name),
             "land missing land type {name}; subtypes = {:?}",
             forest_obj.card_types.subtypes
         );

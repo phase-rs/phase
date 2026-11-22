@@ -473,7 +473,7 @@ pub(crate) fn fills_own_graveyard_parts(
     // CR 603.6a: "when this enters, mill three" lives on the trigger body.
     triggers
         .iter()
-        .any(|trigger| trigger.execute.as_deref().is_some_and(&chain_fills))
+        .any(|trigger| trigger.execute.as_deref().is_some_and(chain_fills))
 }
 
 /// The live-policy companion to [`fills_own_graveyard_parts`]: the same

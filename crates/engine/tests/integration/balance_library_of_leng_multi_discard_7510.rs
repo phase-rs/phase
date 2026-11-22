@@ -252,7 +252,7 @@ fn balance_multi_discard_routes_both_cards_to_library_top_when_leng_is_accepted(
         runner.state().players[0].library.iter().copied().take(2),
     );
     assert!(
-        !discarded.contains(&LIBRARY_SENTINEL.to_string()),
+        !discarded.iter().any(|i| i == LIBRARY_SENTINEL),
         "the sentinel must be buried beneath both discards, got library top {discarded:?}"
     );
     // Pin the exact depth, not just "not in the top two": the sentinel started
@@ -303,7 +303,7 @@ fn balance_multi_discard_routes_both_cards_to_library_top_when_leng_is_accepted(
         "the two cards drawn back must be exactly the two Leng put on top"
     );
     assert!(
-        !drawn.contains(&LIBRARY_SENTINEL.to_string()),
+        !drawn.iter().any(|i: &String| i == LIBRARY_SENTINEL),
         "drawing the sentinel means the discards went somewhere other than the top"
     );
 }

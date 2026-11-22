@@ -1871,7 +1871,7 @@ mod tests {
         // than dropping it.
         let (active, expected_pool_before) = {
             let state = session.shared_stack.as_mut().unwrap();
-            let mut orphaned: Vec<_> = state.main_stack.drain(..).collect();
+            let mut orphaned: Vec<_> = std::mem::take(&mut state.main_stack);
             orphaned.append(&mut state.piles[0]);
             state.inspected[0] = 0;
             assert!(state.piles[0].is_empty());

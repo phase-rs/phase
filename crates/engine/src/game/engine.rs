@@ -2944,6 +2944,13 @@ fn finish_action_boundary_with_lifecycle(
             EngineError::LifeChangeUnrepresentable { player },
         );
     }
+    // This transient, nonserialized producer-tail anchor expires at the first
+    // action boundary at the latest; depth-zero ability-chain exit retires it
+    // earlier for direct chains. Clearing here is retirement, not leak detection.
+    // In-action behavior is covered by devour_co_entry_regression's
+    // twilights_call_two_devourers_one_fodder_keeps_producer_tail_below_batch
+    // and twilights_call_two_devourers_under_censor_each_order_then_devour.
+    state.staged_population_parent = None;
     #[cfg(debug_assertions)]
     super::perf_counters::outside_take_cost(|| debug_assert_runtime_resolution_invariants(state));
     let lifecycle_facts = if reversed {
@@ -3014,9 +3021,9 @@ fn settle_finished_game(state: &mut GameState, result: &mut ActionResult) {
     }
 }
 
-/// CR 117.2e + CR 608.2c + CR 117.5: finish a resolution whose current pause a
-/// player's departure canceled (`elimination::DepartureResume`), then settle it
-/// as any action that completed one: the owed final part (CR 608.2n),
+/// CR 117.2e + CR 608.2c + CR 117.5: finish a resolution that a player's
+/// departure left unsettled (`elimination::DepartureResume::ResolutionTail`),
+/// then settle it as any action that completed one: the owed final part (CR 608.2n),
 /// state-based actions (CR 704.3), then the queued triggered abilities. The
 /// pipeline scans `events[scan_from..]` and skips every occurrence the departure
 /// already claimed (the departure collects its own triggers once, against the
@@ -3094,7 +3101,7 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
         // `departure_start` takes only what happened after it.
         let departure_start = result.events.len();
         match sba::check_state_based_actions_reporting_departure(state, &mut result.events) {
-            super::elimination::DepartureResume::ParkedZoneChangeTail => {
+            super::elimination::DepartureResume::ResolutionTail => {
                 settle_resolution_resumed_after_departure(
                     state,
                     &mut result.events,
@@ -9017,6 +9024,13 @@ fn resume_pending_continuation_pass(
             super::life_safety::observe_boundary_carrier(state);
             effects::resume_resolution_frames(state, events);
             effects::counters::resume_copy_target_entry_completions(state, events)?;
+            // CR 101.4 + CR 608.2c: a frame that retired in
+            // `resume_resolution_frames` (a post-replacement drain) may have
+            // been the last gate on a parked delivery; re-enter the drain so
+            // the delivery and then the later instructions resume.
+            if effects::simultaneous_unless::delivery_may_resume(state) {
+                effects::drain_pending_continuation(state, events);
+            }
         }
         resume_due_counter_cost_root(state, events)?;
         let mut drained_deferred_life = false;
@@ -11613,6 +11627,10 @@ pub(super) fn transient_reveal_outlives_action_boundary(state: &GameState) -> bo
         | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::RevealUntilBottomOrder { .. }
         | WaitingFor::RevealUntilKeptChoice { .. }
+        // CR 701.20a + CR 101.4c: choosing which of a staged population's
+        // replacement decisions to make first answers none of them, so cards
+        // revealed before the selection stay public across it.
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::DigBottomOrder { .. } => true,
         // CR 701.20a + CR 701.20d + CR 401.4: "Put the revealed cards on the
         // bottom of your library in any order" pauses for the pile's owner to
@@ -11852,9 +11870,10 @@ fn apply_action(
     // performs CR 800.4a object cleanup and advances `waiting_for` if the conceder
     // owned it (see `elimination::concede`), and queues what the departure triggered
     // (CR 603.6c), since no pipeline scans the departure's own events. When the
-    // departure canceled the current pause of a resolution still under way, the
-    // resolution is finished and the action settled through the post-action
-    // pipeline (`settle_resolution_resumed_after_departure`).
+    // departure left a resolution still under way unsettled (see
+    // `elimination::DepartureResume::ResolutionTail`), the resolution is finished
+    // and the action settled through the post-action pipeline
+    // (`settle_resolution_resumed_after_departure`).
     if let GameAction::Concede { player_id } = action {
         // CR 614.17a + CR 118.12: keep the pre-departure base so a staged
         // payment's already-accepted prefix (including a synchronous leg that
@@ -11863,13 +11882,13 @@ fn apply_action(
         let pre_action = state.payment_transaction.as_ref().map(|_| state.clone());
         let mut events = Vec::new();
         let departure = super::elimination::concede(state, player_id, &mut events);
-        // CR 117.2e + CR 608.2c + CR 117.5: the concession canceled the
-        // current pause of a parked zone-change owner while its resolution
-        // still owes a surviving tail. Finish that resolution, then settle
+        // CR 117.2e + CR 608.2c + CR 117.5: the concession left a resolution
+        // still under way unsettled (`DepartureResume::ResolutionTail`).
+        // Finish that resolution, then settle
         // the action as any action that completed one: the owed final part
         // (CR 608.2n), state-based actions (CR 704.3), then the triggered
         // abilities the departure queued together with the resumed ones.
-        if departure.resume == super::elimination::DepartureResume::ParkedZoneChangeTail {
+        if departure.resume == super::elimination::DepartureResume::ResolutionTail {
             let scan_from = events.len();
             settle_resolution_resumed_after_departure(state, &mut events, scan_from);
         }
@@ -15575,7 +15594,15 @@ fn apply_non_priority_pass_action(
                     let resumes_change_zone_iteration = state
                         .active_change_zone_frame()
                         .is_some_and(|frame| frame.pending.is_some());
-                    if !resumes_change_zone_iteration {
+                    // CR 608.2c: a staged ChangeZone batch owns the completion
+                    // event; its `ChangeZonePopulationSettled` tail emits the
+                    // single canonical `EffectResolved` after delivery.
+                    let staged_change_zone_owns_completion = state
+                        .active_batch_delivery()
+                        .is_some_and(
+                        crate::types::game_state::PendingBatchDeliveries::is_change_zone_population,
+                    );
+                    if !resumes_change_zone_iteration && !staged_change_zone_owns_completion {
                         events.push(crate::types::events::GameEvent::EffectResolved {
                             kind: crate::types::ability::EffectKind::ChangeZone,
                             source_id: pending.source_id,
@@ -19573,7 +19600,12 @@ fn handle_equip_activation(
             "You don't control this equipment".to_string(),
         ));
     }
-    if !obj.card_types.subtypes.contains(&"Equipment".to_string()) {
+    if !obj
+        .card_types
+        .subtypes
+        .iter()
+        .any(|i: &String| i == "Equipment")
+    {
         return Err(EngineError::InvalidAction(
             "Object is not an equipment".to_string(),
         ));
@@ -19795,7 +19827,12 @@ fn handle_crew_activation(
             "You don't control this Vehicle".to_string(),
         ));
     }
-    if !obj.card_types.subtypes.contains(&"Vehicle".to_string()) {
+    if !obj
+        .card_types
+        .subtypes
+        .iter()
+        .any(|i: &String| i == "Vehicle")
+    {
         return Err(EngineError::InvalidAction(
             "Object is not a Vehicle".to_string(),
         ));

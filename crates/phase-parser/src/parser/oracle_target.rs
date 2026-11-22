@@ -1,7 +1,9 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1, take_while1};
-use nom::character::complete::{multispace0, one_of, satisfy, space1};
-use nom::combinator::{cut, eof, map, map_opt, not, opt, peek, success, value, verify};
+use nom::character::complete::{multispace0, one_of, satisfy, space0, space1};
+use nom::combinator::{
+    all_consuming, cut, eof, map, map_opt, not, opt, peek, success, value, verify,
+};
 use nom::multi::{many0, many_till};
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
@@ -10,10 +12,10 @@ use crate::types::ability::{
     AggregateFunction, AttachmentKind, AttachmentReferent, BlockPairDirection, CardTypeSetSource,
     ChoiceType, CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator,
     ControllerRef, CostCategory, CountScope, CrewRelation, DamageKindFilter, FilterProp,
-    NameStickerSet, ObjectProperty, ObjectScope, Parity, ParitySource, PlayerFilter,
-    PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
-    ThisWayCause, TypeFilter, TypedFilter,
+    LinkedExileReturn, NameStickerSet, ObjectProperty, ObjectScope, Parity, ParitySource,
+    PlayerFilter, PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr,
+    QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
+    TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -26,8 +28,10 @@ use super::oracle_effect::{
     is_bare_object_pronoun, parse_multi_target_count_expr, parse_search_name_reference_suffix,
     resolve_it_pronoun,
 };
+use super::oracle_ir::ast::AnaphorNumber;
 use super::oracle_ir::context::{
-    bind_controller_phrase, ChosenColorQualifierScope, ParseContext, SpellAnaphorBinding,
+    bind_controller_phrase, ChainPriorPublishers, ChosenColorQualifierScope, ParseContext,
+    SpellAnaphorBinding,
 };
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
@@ -50,7 +54,8 @@ use crate::types::text_grammar::{
     separator_stops_keyword_list, starts_with_type_phrase_lead, KeywordMatch,
 };
 pub(crate) use crate::types::text_grammar::{
-    parse_combat_status_prefix, parse_without_keyword_suffix, starts_with_type_word,
+    parse_combat_status_prefix, parse_property_filter, parse_without_keyword_suffix,
+    starts_with_type_word,
 };
 
 /// CR 115.1: Whether a parsed target phrase used the "target" keyword
@@ -320,7 +325,7 @@ fn parse_card_or_cards_word(input: &str) -> super::oracle_nom::error::OracleResu
 /// CR 608.2c + CR 406.6 + CR 607.2a + CR 707.10 + CR 702.75a: Resolve a
 /// singular "the exiled card" / "copy the exiled card" anaphor to the
 /// correct binding. When an earlier clause in the SAME resolution chain
-/// already exiled a card (`chain_has_prior_exile_producer`), the anaphor
+/// already exiled a card (`ChainPriorPublishers::IncludesExile`), the anaphor
 /// refers to that same-chain exile and keeps its pre-existing binding
 /// (`same_chain_binding`, e.g. `TrackedSet{0}` or `ParentTarget`). Otherwise
 /// the referenced exile happened in an EARLIER, separately-resolved ability
@@ -330,13 +335,118 @@ fn parse_card_or_cards_word(input: &str) -> super::oracle_nom::error::OracleResu
 /// `exile_links` (CR 607.1/607.2a: linked abilities reference the same
 /// object across resolutions).
 pub(crate) fn resolve_singular_exiled_card_target(
-    chain_has_prior_exile_producer: bool,
+    chain: ChainPriorPublishers,
     same_chain_binding: TargetFilter,
 ) -> TargetFilter {
-    if chain_has_prior_exile_producer {
-        same_chain_binding
-    } else {
-        TargetFilter::ExiledBySource
+    match chain {
+        ChainPriorPublishers::IncludesExile => same_chain_binding,
+        ChainPriorPublishers::Absent | ChainPriorPublishers::NonExileOnly => {
+            TargetFilter::ExiledBySource
+        }
+    }
+}
+
+/// CR 607.2a: "the exiled card" / "the exiled cards" as a whole target phrase.
+/// The grammatical number selects how a return binds the linked set: plural
+/// names the whole set (a set-wide move), singular one card. Input is the
+/// trimmed, lowercased target text.
+pub(crate) fn parse_exiled_card_anaphor(input: &str) -> OracleResult<'_, AnaphorNumber> {
+    all_consuming(terminated(
+        alt((
+            value(AnaphorNumber::Plural, tag("the exiled cards")),
+            value(AnaphorNumber::Singular, tag("the exiled card")),
+        )),
+        (space0, eof),
+    ))
+    .parse(input)
+}
+
+/// CR 607.2a: the members the linked exile instruction put into exile — the
+/// chain's tracked set narrowed to the `Exiled`-caused subset.
+pub(crate) fn exiled_caused_tracked_set() -> TargetFilter {
+    TargetFilter::TrackedSetFiltered {
+        id: TrackedSetId(0),
+        filter: Box::new(TargetFilter::Any),
+        caused_by: Some(ThisWayCause::Exiled),
+    }
+}
+
+/// CR 607.2a: the mark a return written "the exiled card(s)" carries when the
+/// phrase is bound to the bare chain sentinel. Any other binding (a same-clause
+/// exile antecedent, `ExiledBySource`, a narrowed sentinel) is not the linked-set
+/// return and carries no mark. Grammatical number selects the move: plural names
+/// the whole set (a set-wide move), singular one card.
+pub(crate) fn linked_exile_return_mark(
+    number: AnaphorNumber,
+    binding: &TargetFilter,
+) -> Option<LinkedExileReturn> {
+    matches!(
+        binding,
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        }
+    )
+    .then_some(match number {
+        AnaphorNumber::Singular => LinkedExileReturn::OneCard,
+        AnaphorNumber::Plural => LinkedExileReturn::WholeSet,
+    })
+}
+
+/// Where the ability holding a marked "the exiled card(s)" return is written: the
+/// axis that decides which linked exile the phrase names.
+///
+/// CR 607.1 / CR 607.1a / CR 607.1d. A CR 607.5 pair (both abilities acquired
+/// from one effect) would bind the grantee's own linked exile; no printed card in
+/// the class reaches it, so it fails closed with the other created-by-effect
+/// returns, as `AbilityProvenance` treats CR 607.1a self-grants conservatively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinkedExileReturnHost {
+    /// CR 607.1 + CR 607.2a: printed on the source (a trigger, replacement or
+    /// spell ability the card prints). The linked exile instruction is another
+    /// ability printed on the same object, so the phrase names the cards that
+    /// object's linked exile put into exile.
+    PrintedOnSource,
+    /// Written inside an ability an effect creates (a granted trigger or ability,
+    /// a granted static's definition, a draw-replacement substitute), so not
+    /// printed on the source (CR 607.1). For Timothar's Bat, a token the
+    /// source's ability created, CR 607.1d links the grant to that ability.
+    /// The phrase names the cards exiled by the resolution that created it
+    /// (Timothar's ruling, 2021-11-19), which only a creation-time binding can
+    /// fix; until #11123 (Timothar's creation-time binding) lands, it narrows the
+    /// resolving chain's set to its `Exiled`-caused members.
+    CreatedByEffect,
+}
+
+/// CR 607.2a + CR 406.6 + CR 608.2c: the binding of a marked "the exiled card(s)"
+/// return, from the prior publishers of its OWN resolution chain and the host
+/// that holds it. Over only non-exile departures (Day of the Dragons' sacrifice,
+/// Timothar's granted sacrifice, The Spot's library put) the phrase names only
+/// the cards the linked exile instruction put into exile, never the chain's own
+/// members:
+/// - printed on the source (CR 607.1, CR 607.2a): the source's linked exile,
+///   `ExiledBySource`, the binding the O-ring class and Tidehollow Sculler use;
+/// - created by an effect (CR 607.1d; Timothar's ruling 2021-11-19, "Timothar's
+///   last ability is linked to the ability it grants the Bat token"): the
+///   creating resolution's `Exiled`-caused members, pending creation-time
+///   binding (#11123).
+///
+/// `None` keeps the sentinel: with no prior publisher (the O-ring LTB shape
+/// `detect_etb_exile_ltb_return` pairs) or over a same-chain exile producer.
+pub(crate) fn linked_exile_return_binding(
+    chain: ChainPriorPublishers,
+    host: LinkedExileReturnHost,
+) -> Option<TargetFilter> {
+    match (chain, host) {
+        (ChainPriorPublishers::NonExileOnly, LinkedExileReturnHost::PrintedOnSource) => {
+            Some(TargetFilter::ExiledBySource)
+        }
+        (ChainPriorPublishers::NonExileOnly, LinkedExileReturnHost::CreatedByEffect) => {
+            Some(exiled_caused_tracked_set())
+        }
+        (
+            ChainPriorPublishers::Absent | ChainPriorPublishers::IncludesExile,
+            LinkedExileReturnHost::PrintedOnSource | LinkedExileReturnHost::CreatedByEffect,
+        ) => None,
     }
 }
 
@@ -1676,11 +1786,7 @@ pub fn parse_target_with_syntax<'a>(
         tag::<_, _, OracleError<'_>>("the rest of the exiled cards").parse(lower.as_str())
     {
         return (
-            TargetFilter::TrackedSetFiltered {
-                id: TrackedSetId(0),
-                filter: Box::new(TargetFilter::Any),
-                caused_by: Some(ThisWayCause::Exiled),
-            },
+            exiled_caused_tracked_set(),
             &text[lower.len() - rest.len()..],
             syntax,
         );
@@ -2112,9 +2218,10 @@ pub fn parse_target_with_syntax<'a>(
         // the tracked set as `TrackedSetFiltered{Not(AttackedThisTurn)}` — the
         // frozen "those creatures" population INTERSECTED with the did-not-attack
         // predicate. Parse the whole typed phrase first; if it carries any
-        // predicate PROPERTY beyond the head type noun, wrap it. A bare noun
-        // ("creatures"/"permanents"/"cards") with no trailing predicate yields
-        // only a head `type_filter` and no properties → the plain `TrackedSet`.
+        // predicate PROPERTY or a controller scope beyond the head type noun
+        // ("each of those creatures you don't control", Lost in the Maze), wrap
+        // it. A bare noun ("creatures"/"permanents"/"cards") with no trailing
+        // qualifier yields only a head `type_filter` → the plain `TrackedSet`.
         let (filter, remainder) = parse_type_phrase_folding_with_ctx(phrase, ctx);
         if target_filter_carries_predicate_property(&filter) {
             return (
@@ -3642,6 +3749,10 @@ fn parse_type_phrase_folding_unbound<'a>(
     // parse_non_prefix uses whitespace as word boundary, but in stacked negation the
     // separator is ", " (comma-space). We must strip the trailing comma from the negated
     // word when the ", non" continuation pattern follows.
+    // CR 406.3: the exile visibility adjectives may lead a `non-` negation
+    // ("face-up exiled nonland card"); read them first so the negation that
+    // follows is still parsed.
+    consume_exile_visibility_adjectives(&lower, &mut pos, &mut properties);
     let mut neg_type_filters: Vec<TypeFilter> = Vec::new();
     loop {
         let remaining = &lower[pos..];
@@ -4670,6 +4781,12 @@ fn parse_type_phrase_folding_unbound<'a>(
         pos += consumed;
     }
 
+    // CR 608.2c: "that weren't put there this way" names the complement of the objects the preceding instruction in the same ability moved (Bringer of the Last Gift: "…returns all creature cards from their graveyard that weren't put there this way…"). Lowered to Not(InTrackedSet(0)); the sentinel binds at resolution to the chain set the sacrifice published.
+    if let Some((prop, consumed)) = parse_not_put_there_this_way_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
     // Check "of the chosen type" / "of that type" suffix (Cavern of Souls,
     // Metallic Mimic; Selfless Safewright). CR 205.3m + CR 608.2c: "of that
     // type" is the anaphor form of "of the chosen type" — same typed reference,
@@ -5607,15 +5724,14 @@ mod declared_damage_source_target_tests {
     }
 }
 
-/// CR 608.2c: True when a typed filter carries a `FilterProp` PREDICATE beyond
-/// the bare head type noun (e.g. `Not(AttackedThisTurn)`, `Untapped`, a
-/// controller-scoping property). Used by the "each of those <noun> that
-/// <predicate>" anaphor to decide whether the trailing predicate must fold into
-/// a `TrackedSetFiltered` (frozen set ∩ predicate) rather than collapsing to a
-/// bare `TrackedSet` that would drop the predicate.
+/// CR 608.2c: True when a typed filter carries a qualifier beyond its bare head
+/// type noun, such as a `FilterProp` predicate or controller scope. Used by the
+/// "each of those <noun> that <predicate>" anaphor to decide whether the
+/// trailing qualifier must fold into a `TrackedSetFiltered` (frozen set ∩
+/// qualifier) rather than collapsing to a bare `TrackedSet` that would drop it.
 fn target_filter_carries_predicate_property(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(tf) => !tf.properties.is_empty(),
+        TargetFilter::Typed(tf) => !tf.properties.is_empty() || tf.controller.is_some(),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(target_filter_carries_predicate_property)
         }
@@ -6090,6 +6206,32 @@ fn leading_leg_type_filters(filter: &TargetFilter) -> &[TypeFilter] {
 /// only in filtering. Folding a type-conditional test in here would silently
 /// change which leg is harvested for unrelated cards. See that function's doc
 /// comment for the full argument.
+/// CR 406.3: read a run of exile visibility adjectives ("face-up", "face-down",
+/// "exiled") at `pos`. Face-up exiled cards retain both their zone and
+/// visibility restrictions; these properties are leg-local (see
+/// [`is_adjective_prefix_prop`]).
+fn consume_exile_visibility_adjectives(
+    lower: &str,
+    pos: &mut usize,
+    properties: &mut Vec<FilterProp>,
+) {
+    while let Ok((rest, property)) = alt((
+        value(
+            FilterProp::Not {
+                prop: Box::new(FilterProp::FaceDown),
+            },
+            tag::<_, _, OracleError<'_>>("face-up "),
+        ),
+        value(FilterProp::FaceDown, tag("face-down ")),
+        value(FilterProp::InZone { zone: Zone::Exile }, tag("exiled ")),
+    ))
+    .parse(&lower[*pos..])
+    {
+        properties.push(property);
+        *pos = lower.len() - rest.len();
+    }
+}
+
 pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
     matches!(
         prop,
@@ -6147,7 +6289,17 @@ pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // reaches this distributor, or carry `Named` on every leg and are
             // deduped by `same_kind`), but excluding it future-proofs the guard.
             | FilterProp::Named { .. }
-    )
+            // CR 406.3: the exile visibility adjectives ("face-down",
+            // "exiled") qualify only the noun they precede.
+            | FilterProp::FaceDown
+            | FilterProp::InZone { zone: Zone::Exile }
+    ) || is_face_up_adjective_prop(prop)
+}
+
+/// CR 406.3: "face-up" is read as "not face down"; like its "face-down"
+/// sibling it qualifies only the noun it precedes.
+fn is_face_up_adjective_prop(prop: &FilterProp) -> bool {
+    matches!(prop, FilterProp::Not { prop } if **prop == FilterProp::FaceDown)
 }
 
 /// Returns true when `prop` reads a creature's power and/or toughness.
@@ -7285,6 +7437,44 @@ pub(crate) fn parse_block_pairing_clause(
         }
     };
     Ok((rest, (form, subject)))
+}
+
+/// CR 509.1g: the prenominal-relative current block pairing "<creatures> it's
+/// blocking" / "<creatures> it is blocking" (Wall of Vapor's "creatures it's
+/// blocking") — the active voice of the passive "blocked by it" clause, so it is
+/// the same `SubjectIsBlocker` relation. Splits the clause off the end of a
+/// lowercase damage-source subject and returns the head noun phrase with the
+/// `CombatRelation` prop to add to it. The bare pronoun binds only to the
+/// ability's own source (`resolve_relation_subject`), so a caller whose context
+/// is not armed for the source gets `None`. Deliberately NOT a form of
+/// `parse_block_pairing_clause`: that clause is a postnominal suffix read by the
+/// swallow audit over whole Oracle lines, and "it's blocking" also heads
+/// conditions ("if it's blocking") that audit must not claim.
+pub(crate) fn split_source_is_blocking_relative<'a>(
+    subject: &'a str,
+    ctx: &ParseContext,
+) -> Option<(&'a str, FilterProp)> {
+    let (_, (head, tail)) = nom_primitives::split_once_on(subject, " it's blocking")
+        .or_else(|_| nom_primitives::split_once_on(subject, " it is blocking"))
+        .ok()?;
+    all_consuming(terminated(
+        multispace0,
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(tail)
+    .ok()?;
+    let relation_subject = resolve_relation_subject(
+        CombatRelationSubjectWord::Pronoun,
+        CombatClauseKind::Pairing,
+        ctx,
+    )?;
+    Some((
+        head,
+        FilterProp::CombatRelation {
+            relation: BlockPairingForm::BlockedBy.relation(),
+            subject: relation_subject,
+        },
+    ))
 }
 
 /// One block-history clause: who blocked whom, against which partner, in which window.
@@ -9966,6 +10156,24 @@ pub(crate) fn parse_zone_changed_this_turn_suffix(
     parse_zone_change_provenance(input, to, false)
 }
 
+/// CR 608.2c: "that weren't put there this way" names the complement of the objects the preceding instruction in the same ability moved (Bringer of the Last Gift: "…returns all creature cards from their graveyard that weren't put there this way…"). Lowered to Not(InTrackedSet(0)); the sentinel binds at resolution to the chain set the sacrifice published.
+fn parse_not_put_there_this_way_suffix(input: &str) -> Option<(FilterProp, usize)> {
+    let trimmed = input.trim_start();
+    let offset = input.len() - trimmed.len();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("that weren't put there this way")
+        .parse(trimmed)
+        .ok()?;
+
+    Some((
+        FilterProp::Not {
+            prop: Box::new(FilterProp::InTrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            }),
+        },
+        offset + trimmed.len() - rest.len(),
+    ))
+}
+
 fn zone_for_scope(props: &[FilterProp]) -> Option<Zone> {
     props.iter().find_map(|prop| match prop {
         FilterProp::InZone { zone } => Some(*zone),
@@ -10297,6 +10505,34 @@ pub(crate) fn parse_that_clause_suffix<'a>(
         }
     }
 
+    // CR 701.26a: "that's|that is|that are|that isn't|that aren't <tapped state>"
+    // ("blocking creatures that are tapped", New Master of Arms) — the
+    // relative-clause form of the tapped/untapped adjectives; the shared
+    // `parse_property_filter` word grammar keeps this position and the prefix
+    // position from disagreeing about which adjectives exist. Only the tapped
+    // state is read here: the other status adjectives ("that's attacking") stay
+    // with the suffix arms and callers that already own them. The boundary after
+    // the adjective is deliberately strict (end of clause, a comma, or a period):
+    // a continuation ("that are tapped and attacking") belongs to the token-spec
+    // and battlefield-entry paths that absorb their own qualifier runs.
+    if let Some((after_intro, intro_len, negated)) = parse_relative_clause_intro(trimmed) {
+        if let Ok((rest, prop @ (FilterProp::Tapped | FilterProp::Untapped))) =
+            parse_property_filter(after_intro)
+        {
+            if rest.chars().next().is_none_or(|c| c == '.' || c == ',') {
+                let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+                let prop = if negated {
+                    FilterProp::Not {
+                        prop: Box::new(prop),
+                    }
+                } else {
+                    prop
+                };
+                return Some((vec![prop], consumed));
+            }
+        }
+    }
+
     if let Some(parsed) = parse_color_relative_clause_suffix(trimmed, leading_ws) {
         return Some(parsed);
     }
@@ -10380,10 +10616,17 @@ pub(crate) fn parse_that_clause_suffix<'a>(
     }
 
     // --- CR 115.9b: "that targets [filter]" (.any() semantics) ---
-    // Must come AFTER "targets only" check above (longest match first).
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("targets ").parse(after_that) {
-        let targets_verb_len = "targets ".len();
-        if let Some((props, consumed)) = parse_targets_constraint(rest, that_len + targets_verb_len)
+    // Must come AFTER "targets only" check above (longest match first). The
+    // verb agrees with its subject's number: "that targets" (singular) and
+    // "that target" (plural — "spells that target it", Bronze Horse) are one
+    // predicate in two agreement spellings, like the "was/were dealt damage"
+    // rows below, not two FilterProps.
+    if let Ok((rest, _)) =
+        alt((tag::<_, _, OracleError<'_>>("targets "), tag("target "))).parse(after_that)
+    {
+        let targets_verb_len = after_that.len() - rest.len();
+        if let Some((props, consumed)) =
+            parse_targets_constraint(rest, that_len + targets_verb_len, ctx)
         {
             return Some((props, consumed));
         }
@@ -11556,7 +11799,7 @@ fn parse_targets_only_constraint(
     None
 }
 
-/// CR 115.9b: Parse the constraint after "that targets ".
+/// CR 115.9b: Parse the constraint after "that targets " / "that target ".
 /// Returns `(properties_to_add, total_bytes_consumed)`.
 ///
 /// Handles:
@@ -11565,7 +11808,17 @@ fn parse_targets_only_constraint(
 /// - "you or a [type]" → `Targets { Or(Controller, Typed) }`
 /// - "one or more [type phrase]" → strip prefix, then parse type phrase
 /// - "a/an [type phrase]" → `Targets { filter }`
-fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<FilterProp>, usize)> {
+///
+/// A bare "it" is ANAPHORIC, unlike the deictic "~" / "this creature": CR 608.2c
+/// lets it name the ability's source only when the parse context binds it there
+/// (`bare_pronoun_names_ability_source`); any other antecedent leaves the
+/// constraint unconsumed so the caller fails closed instead of silently
+/// binding the host.
+fn parse_targets_constraint(
+    text: &str,
+    prefix_len: usize,
+    ctx: &ParseContext,
+) -> Option<(Vec<FilterProp>, usize)> {
     // Strip "one or more " — redundant with .any() semantics
     let (text, extra_len) =
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("one or more ").parse(text) {
@@ -11582,8 +11835,9 @@ fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<Filter
         }];
         return Some((props, prefix_len + 1));
     }
-    // "it" with word boundary
-    if parse_word_bounded(text, "it").is_ok() {
+    // "it" with word boundary — CR 608.2c: bound to the source only when the
+    // parse context says so; otherwise the clause stays unconsumed (fail closed).
+    if parse_word_bounded(text, "it").is_ok() && bare_pronoun_names_ability_source(ctx) {
         let props = vec![FilterProp::Targets {
             filter: Box::new(TargetFilter::SelfRef),
         }];
@@ -12476,6 +12730,116 @@ mod tests {
     use crate::types::ability::{PtStat, PtValueScope};
     use crate::types::counter::CounterType;
     use crate::types::keywords::Keyword;
+
+    const CHAIN_STATES: [ChainPriorPublishers; 3] = [
+        ChainPriorPublishers::Absent,
+        ChainPriorPublishers::NonExileOnly,
+        ChainPriorPublishers::IncludesExile,
+    ];
+
+    /// U1 — CR 607.2a: the anaphor combinator reads the grammatical number of
+    /// a whole "the exiled card(s)" phrase and rejects adjacent grammar.
+    #[test]
+    fn exiled_card_anaphor_reads_number_of_the_whole_phrase() {
+        let number = |text| parse_exiled_card_anaphor(text).ok().map(|(_, n)| n);
+        assert_eq!(number("the exiled card"), Some(AnaphorNumber::Singular));
+        assert_eq!(number("the exiled cards"), Some(AnaphorNumber::Plural));
+        assert_eq!(number("the exiled cards "), Some(AnaphorNumber::Plural));
+        for adjacent in [
+            "the exiled card's owner",
+            "the exiled creature",
+            "the rest of the exiled cards",
+            "those exiled cards",
+        ] {
+            assert_eq!(number(adjacent), None, "{adjacent:?} is not the anaphor");
+        }
+    }
+
+    /// U2 — CR 607.2a + CR 406.6: only the bare chain sentinel carries the
+    /// linked-exile mark, numbered by the anaphor; and only a chain of non-exile
+    /// publishers rebinds a marked return to the `Exiled`-caused subset.
+    #[test]
+    fn linked_exile_mark_and_binding_cover_only_the_bare_sentinel_over_non_exile_chains() {
+        let bindings = [
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(7),
+            },
+            TargetFilter::ExiledBySource,
+            TargetFilter::Any,
+        ];
+        for (number, mark) in [
+            (AnaphorNumber::Singular, LinkedExileReturn::OneCard),
+            (AnaphorNumber::Plural, LinkedExileReturn::WholeSet),
+        ] {
+            for (index, binding) in bindings.iter().enumerate() {
+                assert_eq!(
+                    linked_exile_return_mark(number, binding),
+                    (index == 0).then_some(mark),
+                    "{number:?} × {binding:?}"
+                );
+            }
+        }
+        for chain in CHAIN_STATES {
+            for (host, bound) in [
+                (
+                    LinkedExileReturnHost::PrintedOnSource,
+                    TargetFilter::ExiledBySource,
+                ),
+                (
+                    LinkedExileReturnHost::CreatedByEffect,
+                    exiled_caused_tracked_set(),
+                ),
+            ] {
+                assert_eq!(
+                    linked_exile_return_binding(chain, host),
+                    (chain == ChainPriorPublishers::NonExileOnly).then_some(bound),
+                    "{chain:?} × {host:?}"
+                );
+            }
+        }
+    }
+
+    /// U3 — the chain-state join is a lattice (`Absent` identity,
+    /// `IncludesExile` absorbing), and the singular authority keeps the
+    /// same-chain binding only over an exile producer.
+    #[test]
+    fn chain_prior_publishers_join_and_singular_authority() {
+        for a in CHAIN_STATES {
+            assert_eq!(a.join(a), a, "idempotent: {a:?}");
+            assert_eq!(a.join(ChainPriorPublishers::Absent), a, "identity: {a:?}");
+            assert_eq!(
+                a.join(ChainPriorPublishers::IncludesExile),
+                ChainPriorPublishers::IncludesExile,
+                "absorbing: {a:?}"
+            );
+            for b in CHAIN_STATES {
+                assert_eq!(a.join(b), b.join(a), "commutative: {a:?} {b:?}");
+            }
+        }
+        assert_eq!(
+            ChainPriorPublishers::Absent.join(ChainPriorPublishers::NonExileOnly),
+            ChainPriorPublishers::NonExileOnly
+        );
+        for chain in CHAIN_STATES {
+            assert_eq!(
+                chain.includes_exile(),
+                chain == ChainPriorPublishers::IncludesExile
+            );
+            let expected = if chain == ChainPriorPublishers::IncludesExile {
+                TargetFilter::ParentTarget
+            } else {
+                TargetFilter::ExiledBySource
+            };
+            assert_eq!(
+                resolve_singular_exiled_card_target(chain, TargetFilter::ParentTarget),
+                expected,
+                "{chain:?}"
+            );
+        }
+    }
 
     #[test]
     fn parent_controller_population_requires_a_typed_object_permission() {
@@ -14116,6 +14480,51 @@ mod tests {
             assert!(
                 parse_block_pairing_clause(declined).is_err(),
                 "{declined:?} must not parse as a block-pairing clause"
+            );
+        }
+    }
+
+    /// CR 509.1g: "creatures it's blocking" splits into its head noun phrase and
+    /// the `SubjectIsBlocker` pairing relation only under a context that names the
+    /// ability's source; a blank context, another tail and a window decline.
+    #[test]
+    fn source_is_blocking_relative_binds_only_for_the_source() {
+        let armed = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
+        let expected = FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope: None,
+            },
+            subject: CombatRelationSubject::Source,
+        };
+        for text in [
+            "creatures it's blocking",
+            "creatures it is blocking",
+            "creatures it's blocking.",
+        ] {
+            assert_eq!(
+                split_source_is_blocking_relative(text, &armed),
+                Some(("creatures", expected.clone())),
+                "{text:?}"
+            );
+            assert_eq!(
+                split_source_is_blocking_relative(text, &ParseContext::default()),
+                None,
+                "a blank context must not bind the bare pronoun: {text:?}"
+            );
+        }
+        for text in [
+            "creatures it's blocking this turn",
+            "creatures it's blocking and attacking",
+            "creatures blocking it",
+        ] {
+            assert_eq!(
+                split_source_is_blocking_relative(text, &armed),
+                None,
+                "{text:?}"
             );
         }
     }
@@ -17009,6 +17418,37 @@ mod tests {
             }
         ));
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn each_of_those_creatures_filters_the_tracked_set_by_controller() {
+        for (text, controller) in [
+            ("each of those creatures you control", ControllerRef::You),
+            (
+                "each of those creatures you don't control",
+                ControllerRef::Opponent,
+            ),
+        ] {
+            let (filter, rest) = parse_target(text);
+            assert_eq!(rest, "", "{text}");
+            match filter {
+                TargetFilter::TrackedSetFiltered {
+                    id,
+                    filter,
+                    caused_by: None,
+                } => {
+                    assert_eq!(id, TrackedSetId(0), "{text}");
+                    assert_eq!(
+                        *filter,
+                        TargetFilter::Typed(TypedFilter::creature().controller(controller)),
+                        "{text}"
+                    );
+                }
+                other => {
+                    panic!("expected a controller-filtered tracked set for {text}, got {other:?}")
+                }
+            }
+        }
     }
 
     /// CR 601.2c: "each of <count> target <type>" must route through "target"
@@ -22697,6 +23137,36 @@ mod tests {
     }
 
     #[test]
+    fn type_phrase_cards_not_put_there_this_way_excludes_tracked_set() {
+        let (filter, rest) = parse_type_phrase_folding(
+            "creature cards from their graveyard that weren't put there this way",
+        );
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+        assert!(
+            tf.properties.iter().any(|prop| matches!(
+                prop,
+                FilterProp::Not { prop }
+                    if matches!(
+                        &**prop,
+                        FilterProp::InTrackedSet { id }
+                            if *id == crate::types::identifiers::TrackedSetId(0)
+                    )
+            )),
+            "the negative this-way qualifier must exclude the current tracked set: {tf:?}"
+        );
+        assert!(
+            rest.trim().is_empty(),
+            "expected empty remainder, got: {rest:?}"
+        );
+    }
+
+    #[test]
     fn that_attacked_this_turn() {
         let (filter, rest) = parse_target("target creature that attacked this turn");
         if let TargetFilter::Typed(ref tf) = filter {
@@ -23613,6 +24083,95 @@ mod tests {
         }
     }
 
+    /// CR 115.9b: the verb of a "that targets [filter]" clause agrees with its
+    /// subject's number — "that target" (plural, Bronze Horse's "spells that
+    /// target it") is the same predicate as "that targets". A bare "it" is
+    /// ANAPHORIC (CR 608.2c): it binds to the source only under a context armed
+    /// with the self-reference, and stays unbound otherwise, so the clause is
+    /// left unconsumed rather than silently naming the host.
+    #[test]
+    fn that_target_plural_agreement_and_ctx_gated_it() {
+        // Plural verb + deictic self-reference: parses under a blank context.
+        let result = parse_that_clause_suffix(" that target this creature,", None);
+        let (props, consumed) = result.expect("should parse");
+        assert_eq!(props.len(), 1);
+        assert!(matches!(
+            &props[0],
+            FilterProp::Targets { filter } if **filter == TargetFilter::SelfRef
+        ));
+        assert_eq!(consumed, " that target this creature".len());
+
+        // Plural verb + bare "it": binds only under an armed context.
+        let self_ref_ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
+        let (props, consumed) = parse_that_clause_suffix(" that target it.", Some(&self_ref_ctx))
+            .expect("an armed context binds the bare pronoun");
+        assert_eq!(props.len(), 1);
+        assert!(matches!(
+            &props[0],
+            FilterProp::Targets { filter } if **filter == TargetFilter::SelfRef
+        ));
+        assert_eq!(consumed, " that target it".len());
+
+        // Blank context: the bare "it" leaves the clause unconsumed (fail
+        // closed), for both agreement spellings.
+        for phrase in [" that target it.", " that targets it."] {
+            assert!(
+                parse_that_clause_suffix(phrase, None).is_none(),
+                "{phrase:?} must not bind a bare pronoun under a blank context"
+            );
+        }
+    }
+
+    /// CR 110.5 + CR 509.1a: "that are|that's|that is <status adjective>" — the
+    /// relative-clause form of the status adjectives the prefix position
+    /// accepts (New Master of Arms: "blocking creatures that are tapped"). The
+    /// boundary after the adjective is strict, so a conjunct continuation stays
+    /// unconsumed for the token-spec and attacking-defender arms to own.
+    #[test]
+    fn that_are_status_adjective_relative_clause() {
+        for (phrase, expected) in [
+            (" that are tapped", FilterProp::Tapped),
+            (" that's tapped.", FilterProp::Tapped),
+            (" that is tapped,", FilterProp::Tapped),
+            (" that are untapped.", FilterProp::Untapped),
+        ] {
+            let (props, consumed) = parse_that_clause_suffix(phrase, None)
+                .unwrap_or_else(|| panic!("{phrase:?} must parse"));
+            assert_eq!(props.len(), 1, "{phrase:?}");
+            assert_eq!(props[0], expected, "{phrase:?}");
+            assert_eq!(
+                consumed,
+                phrase.trim_end_matches(['.', ',']).len(),
+                "{phrase:?}"
+            );
+        }
+        // CR 110.5: the negated intro lowers to Not { <adjective> }.
+        let (props, _) = parse_that_clause_suffix(" that aren't tapped", None)
+            .expect("the negated status clause must parse");
+        assert_eq!(
+            props[0],
+            FilterProp::Not {
+                prop: Box::new(FilterProp::Tapped),
+            }
+        );
+        // Continuations belong to the token-spec and attacking-defender arms,
+        // not this one.
+        for declined in [
+            " that are tapped and attacking",
+            " that are attacking you",
+            " that are attacking",
+            " that are blocking",
+            " that are tapped this turn",
+        ] {
+            assert!(
+                parse_that_clause_suffix(declined, None).is_none(),
+                "{declined:?} must stay unconsumed"
+            );
+        }
+    }
     // ── VERB-01: Compound target type patterns ──
 
     #[test]

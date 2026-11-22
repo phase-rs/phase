@@ -2654,28 +2654,55 @@ fn parse_source_attached_to_creature(input: &str) -> OracleResult<'_, StaticCond
     Ok((rest, StaticCondition::SourceAttachedToCreature))
 }
 
-/// CR 120.3 + CR 702.11b: Parse "<subject> hasn't dealt damage yet" into
-/// `Not(SourceHasDealtDamage)` — the negated form of the sticky "has dealt
-/// damage since entering" gate (Palladia-Mors, the Ruiner; Karakyk Guardian:
-/// "has hexproof if it hasn't dealt damage yet"). Accepts the self-referential
-/// subjects the conditional-keyword templates use ("it", "~", "this creature",
-/// "this permanent"). Only the negated "hasn't" idiom appears in Oracle text, so
-/// no affirmative form is produced here.
-fn parse_source_hasnt_dealt_damage(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((
-        tag("it "),
-        tag("~ "),
-        tag("this creature "),
-        tag("this permanent "),
-    ))
-    .parse(input)?;
-    value(
-        StaticCondition::Not {
-            condition: Box::new(StaticCondition::SourceHasDealtDamage),
-        },
-        (parse_hasnt, tag(" dealt damage yet")),
+/// CR 120.2a + CR 120.2b: Parse the sticky-history tail "dealt [combat |noncombat
+/// ]damage yet" into the damage class it names (`Any` for the bare form). Shared
+/// by `parse_source_hasnt_dealt_damage` and the SelfRef "they haven't ..." pronoun
+/// rewrite so both read one definition of the phrase.
+pub(crate) fn parse_dealt_damage_yet(input: &str) -> OracleResult<'_, DamageKindFilter> {
+    preceded(
+        tag("dealt "),
+        terminated(parse_damage_kind_qualifier, tag("damage yet")),
     )
-    .parse(rest)
+    .parse(input)
+}
+
+/// CR 120.3 + CR 702.11b: Parse "<subject> hasn't dealt [combat |noncombat
+/// ]damage yet" into `Not(SourceHasDealtDamage { kind })` — the negated form of
+/// the sticky "has dealt damage since entering" gate (Palladia-Mors, the Ruiner;
+/// Karakyk Guardian: "has hexproof if it hasn't dealt damage yet"; Ruric Thar,
+/// Magecrusher: "... they haven't dealt combat damage yet", after the SelfRef
+/// pronoun rewrite to "~ hasn't ..."). CR 120.2a / CR 120.2b: the optional
+/// qualifier selects the damage class. The source-named subjects ("~", "this
+/// creature", "this permanent") accept every damage class. CR 611.3a: the
+/// anaphoric "it" is accepted context-free only in the bare `Any` form (the
+/// Palladia-Mors / Karakyk Guardian / Oyaminartok templates); a qualified
+/// "it hasn't dealt combat damage yet" stays unrecognized here because on an
+/// attached-subject static "it" names the enchanted/equipped creature, not the
+/// source — mirroring the bare "it entered this turn" refusal. Only the negated
+/// "hasn't" idiom appears in Oracle text, so no affirmative form is produced.
+fn parse_source_hasnt_dealt_damage(input: &str) -> OracleResult<'_, StaticCondition> {
+    let hasnt_dealt_damage_yet = || preceded((parse_hasnt, tag(" ")), parse_dealt_damage_yet);
+    map(
+        alt((
+            preceded(
+                (
+                    alt((tag("~"), tag("this creature"), tag("this permanent"))),
+                    tag(" "),
+                ),
+                hasnt_dealt_damage_yet(),
+            ),
+            preceded(
+                tag("it "),
+                verify(hasnt_dealt_damage_yet(), |kind| {
+                    *kind == DamageKindFilter::Any
+                }),
+            ),
+        )),
+        |kind| StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage { kind }),
+        },
+    )
+    .parse(input)
 }
 
 /// CR 301.5a / CR 303.4 / CR 508.1k / CR 509.1g / CR 509.1h: gendered/plural
@@ -5399,7 +5426,7 @@ pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCo
 ///
 /// CR 603.4: Intervening-if conditions are evaluated as written — both
 /// idioms are grammatically equivalent `>= N` thresholds.
-fn parse_ge_threshold(input: &str) -> OracleResult<'_, u32> {
+pub(crate) fn parse_ge_threshold(input: &str) -> OracleResult<'_, u32> {
     alt((
         // "N or more "
         |i| {
@@ -6986,7 +7013,7 @@ pub(crate) fn inject_controller_you(filter: TargetFilter) -> TargetFilter {
 
 /// CR 102.2 + CR 102.3: Recognize opponent possessive prefixes. Shared
 /// combinator used by zone-count parsing and life-total condition parsing.
-fn parse_opponent_possessive(input: &str) -> OracleResult<'_, ()> {
+pub(crate) fn parse_opponent_possessive(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((
@@ -7397,6 +7424,11 @@ fn parse_source_in_zone_condition(input: &str) -> OracleResult<'_, StaticConditi
         value(false, tag(" is")),
     ))
     .parse(rest)?;
+    // CR 113.6b + CR 603.4: "still" is a temporal qualifier on the same
+    // source-zone predicate, not a new subject or event anaphor. Keep it in
+    // this shared production so every supported zone and polarity accepts the
+    // same grammar without widening the source token set.
+    let (rest, _) = opt(tag(" still")).parse(rest)?;
     // CR 701.13a + CR 113.6b: passive "is exiled" is equivalent to "is in
     // exile" for source-referential intervening-if gates (Cosima, God of the
     // Voyage's granted landfall trigger: "if ~ is exiled"). Match the leading
@@ -14473,6 +14505,71 @@ mod tests {
         );
     }
 
+    /// CR 113.6b + CR 603.4: the optional "still" qualifier belongs to the
+    /// shared source-zone production. The matrix keeps the zone vocabulary and
+    /// qualifier rules composable rather than adding a battlefield-only arm.
+    #[test]
+    fn source_zone_still_matrix_preserves_all_supported_zones() {
+        let cases = [
+            ("~ is still on the battlefield", Zone::Battlefield),
+            ("~ is still in your graveyard", Zone::Graveyard),
+            ("~ is still in exile", Zone::Exile),
+            ("~ is still in your hand", Zone::Hand),
+            ("~ is still in your library", Zone::Library),
+            ("~ is still in the command zone", Zone::Command),
+        ];
+        for (text, zone) in cases {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "remainder for {text:?}");
+            assert_eq!(
+                condition,
+                StaticCondition::SourceInZone { zone },
+                "condition for {text:?}"
+            );
+        }
+    }
+
+    /// CR 113.6c: negated source-zone forms retain their polarity while using
+    /// the same optional qualifier and zone matrix as affirmative forms.
+    #[test]
+    fn negated_source_zone_still_matrix_wraps_in_not() {
+        let cases = [
+            ("~ isn't still on the battlefield", Zone::Battlefield),
+            ("~ isn't still in your graveyard", Zone::Graveyard),
+            ("~ isn't still in exile", Zone::Exile),
+            ("~ isn't still in your hand", Zone::Hand),
+            ("~ isn't still in your library", Zone::Library),
+            ("~ isn't still in the command zone", Zone::Command),
+        ];
+        for (text, zone) in cases {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "remainder for {text:?}");
+            assert_eq!(
+                condition,
+                StaticCondition::Not {
+                    condition: Box::new(StaticCondition::SourceInZone { zone }),
+                },
+                "condition for {text:?}"
+            );
+        }
+    }
+
+    /// CR 608.2c: source-zone grammar is source-referential only; target and
+    /// event anaphors must not be accepted by the shared production.
+    #[test]
+    fn source_zone_still_rejects_target_and_event_anaphors() {
+        for text in [
+            "target creature is still on the battlefield",
+            "that creature is still on the battlefield",
+            "this spell is still in your graveyard",
+        ] {
+            assert!(
+                parse_source_in_zone_condition(text).is_err(),
+                "non-source anaphor must be rejected: {text:?}"
+            );
+        }
+    }
+
     // --- parse_reflexive_conditional_connector (CR 603.12 / 608.2c) ---
 
     #[test]
@@ -17715,9 +17812,72 @@ mod tests {
         assert_eq!(
             c,
             StaticCondition::Not {
-                condition: Box::new(StaticCondition::SourceHasDealtDamage),
+                condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                    kind: DamageKindFilter::Any,
+                }),
             }
         );
+    }
+
+    // CR 120.2a + CR 120.2b: the damage-class qualifier on the sticky
+    // "hasn't dealt ... damage yet" gate (Ruric Thar, Magecrusher after the
+    // SelfRef pronoun rewrite), incl. the typographic apostrophe.
+    #[test]
+    fn test_source_hasnt_dealt_kind_damage_yet() {
+        let not_dealt = |kind| StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage { kind }),
+        };
+        for (text, kind) in [
+            (
+                "~ hasn't dealt combat damage yet",
+                DamageKindFilter::CombatOnly,
+            ),
+            (
+                "~ hasn't dealt noncombat damage yet",
+                DamageKindFilter::NoncombatOnly,
+            ),
+            (
+                "~ hasn\u{2019}t dealt combat damage yet",
+                DamageKindFilter::CombatOnly,
+            ),
+            (
+                "this creature hasn\u{2019}t dealt damage yet",
+                DamageKindFilter::Any,
+            ),
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "{text}: must be fully consumed");
+            assert_eq!(c, not_dealt(kind), "{text}");
+        }
+    }
+
+    // Hostile adjacent grammar: the per-turn "this turn" form is a different
+    // concept and must not be typed as the sticky since-entering gate; the bare
+    // plural "they" is context-gated (only the SelfRef rewrite binds it). CR
+    // 611.3a: the anaphoric "it" with a damage-class qualifier is refused
+    // context-free (on an attached-subject static "it" is the enchanted /
+    // equipped creature, not the source); only the bare form stays accepted.
+    #[test]
+    fn test_source_hasnt_dealt_damage_yet_rejects_neighbours() {
+        let is_sticky_gate = |text: &str| {
+            matches!(
+                parse_inner_condition(text),
+                Ok((
+                    "",
+                    StaticCondition::Not { ref condition }
+                )) if matches!(**condition, StaticCondition::SourceHasDealtDamage { .. })
+            )
+        };
+        assert!(!is_sticky_gate("it hasn't dealt combat damage this turn"));
+        assert!(!is_sticky_gate("they haven't dealt damage yet"));
+        assert!(!is_sticky_gate("they haven't dealt combat damage yet"));
+        assert!(!is_sticky_gate("it hasn't dealt combat damage yet"));
+        assert!(!is_sticky_gate("it hasn't dealt noncombat damage yet"));
+        assert!(!is_sticky_gate("it hasn\u{2019}t dealt combat damage yet"));
+        // Positive reach-guards: the same predicate accepts the source-named
+        // qualified form and the bare anaphoric form.
+        assert!(is_sticky_gate("~ hasn't dealt combat damage yet"));
+        assert!(is_sticky_gate("it hasn't dealt damage yet"));
     }
 
     // CR 400.7: Shardmage's Rescue — `~ entered this turn` (no "the battlefield").

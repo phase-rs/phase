@@ -175,7 +175,9 @@ pub(crate) fn is_alternative_keyword_cost_pattern(lower: &str) -> bool {
     (lower_starts_with(lower, "you may ")
         || (lower_starts_with(lower, "as long as ") && scan_contains(lower, "you may ")))
         && scan_contains(lower, "rather than pay")
-        && (scan_contains(lower, "cycling cost") || scan_contains(lower, "crew cost"))
+        && (scan_contains(lower, "cycling cost")
+            || scan_contains(lower, "crew cost")
+            || scan_contains(lower, "equip cost"))
 }
 
 /// CR 118.9: Alternative-cost grant — "You may cast [filter] by paying {cost}
@@ -660,6 +662,12 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
     }
 
     if super::oracle_static::is_win_first_coin_flip_set_each_turn_static(lower) {
+        return true;
+    }
+
+    // CR 120.6 + CR 704.5g: "Lethal damage dealt to [subject] is determined by their power
+    // rather than their toughness." (Zilortha, Strength Incarnate).
+    if super::oracle_static::is_lethal_damage_determined_by_power_static(lower) {
         return true;
     }
 
