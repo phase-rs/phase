@@ -7550,6 +7550,112 @@ fn an_early_lifelink_substitutes_win_stops_phase_c() {
     assert_nothing_after_the_game_ended(&runner, &combat.events);
 }
 
+/// Declining Abundance draws P1's last card. Laboratory Maniac replaces the second draw
+/// with a win (CR 614.6), ending the game with combat gains and a rider still owed (CR 104.1).
+#[test]
+fn a_winning_lifelink_answer_retires_the_parked_combat_batch() {
+    let mut scenario = main_phase();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let second_bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let sable = scenario.add_creature(P1, "Bronze Sable", 2, 1).id();
+    let nighthawk = creature_with_keywords(
+        &mut scenario,
+        P1,
+        "Vampire Nighthawk",
+        (2, 3),
+        &["Flying", "Deathtouch", "Lifelink"],
+        VAMPIRE_NIGHTHAWK,
+    );
+    let second_nighthawk = creature_with_keywords(
+        &mut scenario,
+        P1,
+        "Vampire Nighthawk",
+        (2, 3),
+        &["Flying", "Deathtouch", "Lifelink"],
+        VAMPIRE_NIGHTHAWK,
+    );
+    scenario.add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH);
+    scenario.add_enchantment_from_oracle(P1, "Abundance", ABUNDANCE);
+    let maniac = scenario
+        .add_creature_from_oracle(P1, "Laboratory Maniac", 2, 2, LABORATORY_MANIAC)
+        .id();
+    scenario.add_card_to_library_top(P1, "Last card");
+    let awe_strike = scenario
+        .add_spell_to_hand_from_oracle(P1, "Awe Strike", true, AWE_STRIKE)
+        .id();
+    let mut runner = scenario.build();
+    let mut events = cast_by_p1(&mut runner, awe_strike);
+    drive(
+        &mut runner,
+        &mut vec![TargetRef::Object(giant)],
+        &mut events,
+    );
+    assert_settled(&runner);
+
+    let mut events = to_the_first_combat_prompt(
+        &mut runner,
+        &[
+            (bears, AttackTarget::Player(P1)),
+            (second_bears, AttackTarget::Player(P1)),
+            (giant, AttackTarget::Player(P1)),
+        ],
+        P1,
+        &[
+            (nighthawk, bears),
+            (second_nighthawk, second_bears),
+            (sable, giant),
+        ],
+    );
+    let parked = runner.state().pending_combat_lifelink.as_ref().unwrap();
+    assert_eq!(parked.remaining.len(), 1);
+    assert!(!parked.prevention_tally.is_empty());
+    assert_eq!(runner.state().players[1].library.len(), 1);
+
+    let decline = answering_abundance(false)(runner.state());
+    let mut answer = runner.act(decline).expect("P1 declines Abundance");
+    if let WaitingFor::ReplacementChoice { candidates, .. } = &answer.waiting_for {
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == maniac)
+            .expect("Laboratory Maniac applies to the draw from an empty library");
+        events.extend(answer.events);
+        answer = runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("P1 chooses Laboratory Maniac");
+    }
+    assert!(matches!(
+        answer.waiting_for,
+        WaitingFor::GameOver { winner: Some(P1) }
+    ));
+    assert!(answer
+        .events
+        .iter()
+        .any(|event| matches!(event, GameEvent::GameOver { winner: Some(P1) })));
+    events.extend(answer.events);
+    assert_eq!(cards_drawn(&events, P1), 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::GameOver { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(life(&runner, P1), 20);
+    assert_nothing_after_the_game_ended(&runner, &events);
+    assert!(
+        runner.state().pending_combat_lifelink.is_none(),
+        "the winning answer left the combat batch parked"
+    );
+
+    save_and_load(&mut runner);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P1) }
+    ));
+    assert!(runner.state().pending_combat_lifelink.is_none());
+}
+
 /// The Nighthawk's lifelink gain (CR 702.15b) asks P1 to order the Lich and Faithmender
 /// (CR 616.1). Choosing the Lich fully replaces the gain (CR 614.6). Abundance can
 /// pause each substitute draw (CR 616.2 + CR 121.2), but the batch no longer awaits a

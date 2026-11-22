@@ -2203,10 +2203,10 @@ fn stage_combat_lifelink_gain(
 ///   the damage and its lifelink gain are simultaneous results of the batch
 ///   (CR 510.2, CR 120.3f), so their choices are made in APNAP order;
 /// - EVERY gain (choice-capable or not) owned by an equal-rank player (the
-///   damaged player, or one shared-turn team, CR 805.6). CR 101.4c leaves the
-///   order of one player's own simultaneous choices to that player; staging
-///   the gain before the leg writes the board makes both read the pre-batch
-///   board, so the fixed order cannot change either result.
+///   damaged player, or one shared-turn team, CR 805.6). Staging the gain
+///   before the leg writes the board makes both read the pre-batch board. A
+///   gain's substitute runs during staging (CR 614.6), so it can end the game
+///   before the leg is applied (CR 104.1).
 ///
 /// Final gains settle with the batch's other gains (`drain_combat_lifelink`).
 /// Totals per source are the gains folded so far plus the planned amounts of

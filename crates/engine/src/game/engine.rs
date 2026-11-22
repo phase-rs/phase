@@ -2038,20 +2038,32 @@ fn resume_parked_combat_damage_at_action_boundary(
     if !state.combat_damage_batch_parked() {
         return Ok(None);
     }
-    if !matches!(waiting_for, WaitingFor::Priority { .. }) {
-        super::combat_damage::hold_parked_combat_damage_answer_events(state, answer, events);
-        return Ok(None);
+    let returned_priority = matches!(waiting_for, WaitingFor::Priority { .. });
+    if returned_priority && state.game_end.is_none() {
+        sync_waiting_for(state, waiting_for);
+        resume_pending_continuation_if_priority(state, events)?;
     }
-    sync_waiting_for(state, waiting_for);
-    resume_pending_continuation_if_priority(state, events)?;
+    // CR 104.1 + CR 510.2: a game that ends during an answer ends the entire
+    // combat damage batch immediately. Keep the answer's events in its buffer.
+    if state.game_end.is_some() {
+        state.pending_combat_lifelink = None;
+        state
+            .pending_damage_post_loss
+            .take_if(|stashed| stashed.is_combat);
+        state
+            .pending_damage_post_counter
+            .take_if(|stashed| stashed.is_combat);
+        super::elimination::ensure_game_over_if_terminal(state, events);
+        return Ok(Some(state.waiting_for.clone()));
+    }
     if !state.combat_damage_batch_parked() {
         // The continuation's own drain finished the batch.
         return Ok(Some(state.waiting_for.clone()));
     }
-    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        // The continuation stopped at its next choice with the batch still parked.
+    if !returned_priority || !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        // The answer or continuation stopped at its next choice.
         super::combat_damage::hold_parked_combat_damage_answer_events(state, answer, events);
-        return Ok(Some(state.waiting_for.clone()));
+        return Ok(returned_priority.then(|| state.waiting_for.clone()));
     }
     let resumed = super::combat_damage::resume_pending_combat_lifelink(
         state,
