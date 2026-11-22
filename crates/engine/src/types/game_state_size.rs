@@ -172,6 +172,17 @@
 //! library-placement entry above boxed `library_placement`. That is under the
 //! 16,384 ceiling, so the ceiling is unchanged.
 //!
+//! `GameState` measured on aarch64-apple-darwin (`nightly-2026-04-19`) at
+//! 15,952 B when #10637's staged destroy and ChangeZone populations merged
+//! main through `51b7fe41d9`: the branch's `staged_population_parent`
+//! (`Option<StagedPopulationParent>`, 24 B) unioned with main's new fields
+//! since the merge base, among them `pending_player_scope_choice`
+//! (`Option<PendingPlayerScopeChoice>`, 56 B), `unsettled_entry_batch_events`,
+//! `instruction_boundary_marks` and the two departed-activation ledgers (small
+//! `Vec`s and heap-shared `im::HashMap`s). No single large
+//! rarely-populated field went inline, so the ceiling moves by the rule to
+//! 15,952.next_multiple_of(256) + 256 = 16,384.
+//!
 //! `GameState` re-measured on x86_64-unknown-linux-gnu (`nightly-2026-04-18`) at
 //! 15,856 B when the two-phase damage batch merged main through `91639fdf`: the
 //! branch's boxed `damage_batch_ledger` (8 B) and `damage_event_losses` unioned
@@ -196,6 +207,11 @@
 //! 15,952 B when the two-phase damage batch merged main through `f99eb633`:
 //! main's boxed `pending_damage_post_counter` (#10016) unioned with the branch's
 //! fields. That is under the unchanged 16,384 ceiling.
+//!
+//! #10637 contributes a 24 B staged parent witness to `GameState`; the batch
+//! parking witness is synchronous and does not enlarge the saved state.
+//! The staged parent's inline size fits within the existing bucket's slack;
+//! keep the 16,384 ceiling.
 //!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.

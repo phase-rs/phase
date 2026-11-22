@@ -8262,11 +8262,11 @@ fn tap_land_for_mana_labels_an_any_color_among_permanents_land() {
     let labels = projected_land_mana_labels(runner.state_mut(), plaza, "plaza-of-heroes-label");
     let symbols = sorted_labelled_symbols(&labels, "Plaza of Heroes");
     assert!(
-        symbols.contains(&"R".to_string()),
+        symbols.iter().any(|i| i == "R"),
         "the among-legendary-permanents ability projects the legend's color: {labels:?}"
     );
     assert!(
-        symbols.contains(&"C".to_string()),
+        symbols.iter().any(|i| i == "C"),
         "the sibling colorless ability stays labelled: {labels:?}"
     );
 }

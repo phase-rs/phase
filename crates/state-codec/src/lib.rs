@@ -141,7 +141,7 @@ impl<'de> Deserialize<'de> for StateHash {
             _ => None,
         };
         let mut bytes = [0; 32];
-        for (slot, pair) in bytes.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+        for (slot, pair) in bytes.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
             let high = digit(pair[0]).ok_or_else(|| de::Error::custom("invalid hash digit"))?;
             let low = digit(pair[1]).ok_or_else(|| de::Error::custom("invalid hash digit"))?;
             *slot = (high << 4) | low;
@@ -1244,8 +1244,8 @@ fn diff<'a>(
     };
     Ok(Patch {
         layout: before.layout,
-        message: message.filter(&nonempty),
-        data: data.filter(&nonempty),
+        message: message.filter(nonempty),
+        data: data.filter(nonempty),
         state: Some(state).filter(nonempty),
         objects: objects.filter(|objects| {
             !objects.upsert.is_empty() || !objects.remove.is_empty() || objects.order.is_some()

@@ -187,7 +187,8 @@ fn sarkhan_second_dragon_keeps_own_lifelink_through_replacement_pause() {
             .unwrap()
             .card_types
             .subtypes
-            .contains(&"Dragon".to_string()),
+            .iter()
+            .any(|i| i == "Dragon"),
         "Shivan Dragon must be a Dragon"
     );
     assert!(
