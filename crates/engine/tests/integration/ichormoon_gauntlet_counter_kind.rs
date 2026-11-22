@@ -17,10 +17,10 @@
 use crate::support::shared_card_db;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{AbilityDefinition, Effect, TargetRef};
+use engine::types::ability::{AbilityDefinition, Effect};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -105,51 +105,15 @@ fn noncreature_cast_prompts_kind_and_only_chosen_kind_grows() {
     let (mut runner, gauntlet, carrier, bolt) = setup();
     let p1_life_before = runner.life(P1);
 
-    // CR 601.2: real production cast of Lightning Bolt aimed at P1.
-    let card_id = runner
-        .state()
-        .objects
-        .get(&bolt)
-        .expect("Lightning Bolt object exists")
-        .card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: bolt,
-            card_id,
-            targets: vec![TargetRef::Player(P1)],
-            payment_mode: CastPaymentMode::Auto,
-        })
-        .expect("cast Lightning Bolt at P1");
-
-    // CR 603.3d: the trigger is dispatched while the cast completes and parks
-    // on its target prompt; P0 (the Gauntlet's controller) must answer it.
-    let WaitingFor::TriggerTargetSelection {
-        player,
-        target_slots,
-        selection,
-        ..
-    } = runner.state().waiting_for.clone()
-    else {
-        panic!(
-            "the Gauntlet trigger must prompt for its target permanent, got {:?}",
-            runner.state().waiting_for
-        );
-    };
+    // CR 601.2 + CR 603.3d: real production cast of Lightning Bolt aimed at P1.
+    // The cast also declares the Gauntlet's trigger target: the helper matches
+    // the carrier to the trigger's target slot and the player to Bolt's.
+    runner.cast(bolt).target_player(P1).target_objects(&[carrier]).commit();
     assert_eq!(
-        player, P0,
-        "P0 controls the Gauntlet and chooses its trigger target"
+        runner.state().stack.len(),
+        2,
+        "the Bolt and the Gauntlet's trigger are on the stack"
     );
-    let slot = &target_slots[selection.current_slot];
-    assert!(
-        slot.legal_targets.contains(&TargetRef::Object(carrier)),
-        "the counter carrier must be a legal target permanent: {:?}",
-        slot.legal_targets
-    );
-    runner
-        .act(GameAction::ChooseTarget {
-            target: Some(TargetRef::Object(carrier)),
-        })
-        .expect("target the counter carrier");
 
     // The trigger is on top of the Bolt; passing priority resolves it and its
     // counter-kind prompt must open. If the stack drains instead, the
