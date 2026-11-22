@@ -7229,16 +7229,101 @@ fn channel_harms_may_is_asked_in_each_combat_damage_step() {
     );
 }
 
+/// CR 101.4 + CR 614.6 + CR 616.2: P0's substituted lifelink draws ask Abundance
+/// before P1 orders the poison result's replacements (CR 120.4c + CR 616.1).
+#[test]
+fn active_players_lifelink_substitute_prompts_before_defenders_poison_order() {
+    const GLISTENER_ELF: &str = "Infect (This creature deals damage to creatures in the form of -1/-1 counters and to players in the form of poison counters.)";
+    const VORINCLEX: &str = "Trample, haste\nIf you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
+
+    for (first, poison) in [(P0, 1), (P1, 0)] {
+        let mut scenario = rider_board();
+        let nighthawk = creature_with_keywords(
+            &mut scenario,
+            P0,
+            "Vampire Nighthawk",
+            (2, 3),
+            &["Flying", "Deathtouch", "Lifelink"],
+            VAMPIRE_NIGHTHAWK,
+        );
+        let elf = creature_with_keywords(
+            &mut scenario,
+            P0,
+            "Glistener Elf",
+            (1, 1),
+            &["Infect"],
+            GLISTENER_ELF,
+        );
+        let vorinclex = [P0, P1].map(|player| {
+            creature_with_keywords(
+                &mut scenario,
+                player,
+                "Vorinclex, Monstrous Raider",
+                (6, 6),
+                &["Trample", "Haste"],
+                VORINCLEX,
+            )
+        });
+        scenario.add_enchantment_from_oracle(P0, "Nefarious Lich", NEFARIOUS_LICH);
+        let abundance = scenario
+            .add_enchantment_from_oracle(P0, "Abundance", ABUNDANCE)
+            .id();
+        let mut runner = scenario.build();
+        let hand_before = hand_size(&runner, P0);
+        let mut decline = answering_abundance(false);
+        let mut draw_prompts = 0;
+        let combat = fight_driving(&mut runner, &[nighthawk, elf], &[], |runner| {
+            let state = runner.state();
+            assert!(state.pending_combat_lifelink.is_some());
+            assert_eq!(state.players[1].poison_counters, 0);
+            if let WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } = &state.waiting_for
+            {
+                if *player == P1 {
+                    assert_eq!(
+                        draw_prompts, 2,
+                        "P0's Abundance must precede P1's poison order"
+                    );
+                    assert_eq!(hand_size(runner, P0) - hand_before, 2);
+                    assert_eq!(candidates.len(), 2);
+                    assert!(vorinclex
+                        .iter()
+                        .all(|source| candidates.iter().any(|c| c.source_id == *source)));
+                    return GameAction::ChooseReplacement {
+                        index: candidates
+                            .iter()
+                            .position(|c| c.source_id == vorinclex[first.0 as usize])
+                            .unwrap(),
+                    };
+                }
+                assert_eq!(*player, P0);
+                assert!(candidates.iter().any(|c| c.source_id == abundance));
+                draw_prompts += 1;
+            }
+            decline(state)
+        });
+
+        assert_batch_settled(&runner);
+        assert_eq!(combat.choosers, [P0, P0, P1]);
+        assert_eq!(cards_drawn(&combat.events, P0), 2);
+        assert_eq!(hand_size(&runner, P0) - hand_before, 2);
+        assert_eq!(life(&runner, P0), 20);
+        assert_eq!(life(&runner, P1), 18);
+        assert_eq!(runner.state().players[1].poison_counters, poison);
+    }
+}
+
 /// P7: a lifelink gain's substitute asks its own choice (CR 614.6 + CR 616.2). P1's Vampire
 /// Nighthawk (deathtouch, lifelink) blocks P0's Grizzly Bears; P1 controls Nefarious Lich ("If you
 /// would gain life, draw that many cards instead.") and Abundance. The gain of 2 becomes 2 draws
 /// (CR 121.2), each meeting Abundance's "may", which P1 is asked: two prompts, and the batch
 /// completes on the last answer. Declining both draws 2; accepting both and choosing nonland draws
 /// none and still puts 2 cards in P1's hand. The Bears die in every case.
-/// The early cases use printed Lich because its damage ability is a trigger, so the
-/// unblocked hit stays owed while the draw prompt parks the Phase C tail (CR 510.2),
-/// including through a save and load. The sacrifice trigger goes on the stack after
-/// the batch with any other pending triggers (CR 510.3a + CR 603.3b).
+/// The early cases use two Nighthawks and printed Lich. Its damage ability is a trigger,
+/// so the unblocked hit stays owed when the second source's first draw parks the remnant
+/// again (CR 510.2), including through a save and load. The sacrifice trigger goes on
+/// the stack after the batch with any other pending triggers (CR 510.3a + CR 603.3b).
 #[test]
 fn a_lifelink_substitutes_draws_ask_abundance() {
     for (accept, early, reload) in [
@@ -7253,9 +7338,6 @@ fn a_lifelink_substitutes_draws_ask_abundance() {
         let mut scenario = rider_board();
         let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
         let mut attackers = vec![bears];
-        if early {
-            attackers.push(scenario.add_creature(P0, "Eager Cadet", 1, 1).id());
-        }
         let nighthawk = creature_with_keywords(
             &mut scenario,
             P1,
@@ -7264,19 +7346,35 @@ fn a_lifelink_substitutes_draws_ask_abundance() {
             &["Flying", "Deathtouch", "Lifelink"],
             VAMPIRE_NIGHTHAWK,
         );
-        let sacrifice = if early {
-            scenario.add_enchantment_from_oracle(P1, "Lich", LICH);
+        let mut blocks = vec![(nighthawk, bears)];
+        let (lich, sacrifice) = if early {
+            let second_bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+            let second_nighthawk = creature_with_keywords(
+                &mut scenario,
+                P1,
+                "Vampire Nighthawk",
+                (2, 3),
+                &["Flying", "Deathtouch", "Lifelink"],
+                VAMPIRE_NIGHTHAWK,
+            );
+            attackers.extend([
+                second_bears,
+                scenario.add_creature(P0, "Eager Cadet", 1, 1).id(),
+            ]);
+            blocks.push((second_nighthawk, second_bears));
+            let lich = scenario.add_enchantment_from_oracle(P1, "Lich", LICH).id();
             // Start after Lich's as-enters life loss (CR 614.1c). Lich overrides the life-total
             // state-based loss (CR 101.1 + CR 704.5a).
             scenario.with_life(P1, 0);
-            Some(
-                scenario
-                    .add_land_from_oracle(P1, "Forest", "{T}: Add {G}.")
-                    .id(),
-            )
+            let forest = scenario
+                .add_land_from_oracle(P1, "Forest", "{T}: Add {G}.")
+                .id();
+            (lich, Some(forest))
         } else {
-            scenario.add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH);
-            None
+            let lich = scenario
+                .add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH)
+                .id();
+            (lich, None)
         };
         scenario.add_enchantment_from_oracle(P1, "Abundance", ABUNDANCE);
         let mut runner = scenario.build();
@@ -7284,8 +7382,9 @@ fn a_lifelink_substitutes_draws_ask_abundance() {
         let hand_before = hand_size(&runner, P1);
         let mut answer = answering_abundance(accept);
         let mut reloaded = false;
+        let mut draw_prompts = 0;
 
-        let combat = fight_driving(&mut runner, &attackers, &[(nighthawk, bears)], |runner| {
+        let combat = fight_driving(&mut runner, &attackers, &blocks, |runner| {
             let state = runner.state();
             if let WaitingFor::EffectZoneChoice {
                 player,
@@ -7308,11 +7407,16 @@ fn a_lifelink_substitutes_draws_ask_abundance() {
                 };
             }
             if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                draw_prompts += 1;
                 let parked = runner.state().pending_combat_lifelink.as_ref().unwrap();
                 assert_eq!(parked.phase_c_remnant.is_some(), early, "{label}");
-                assert!(!parked.awaiting_staged_gain, "{label}");
+                assert!(
+                    !parked.awaiting_staged_gain,
+                    "{label}: draw prompt {draw_prompts} must park on the substitute"
+                );
                 assert_eq!(life(runner, P1), life_before, "{label}");
-                if reload && !reloaded {
+                if reload && draw_prompts == 3 {
+                    assert_eq!(hand_size(runner, P1) - hand_before, 2, "{label}");
                     let remnant = parked.phase_c_remnant.clone().unwrap();
                     assert!(
                         remnant.remaining.iter().any(|leg| {
@@ -7333,28 +7437,47 @@ fn a_lifelink_substitutes_draws_ask_abundance() {
 
         assert_batch_settled(&runner);
         assert_eq!(reloaded, reload, "{label}");
-        assert_eq!(combat.prompts.len(), 2, "{label}");
-        assert_eq!(combat.choosers, vec![P1, P1], "{label}");
+        let cards = if early { 4 } else { 2 };
+        assert_eq!(combat.prompts.len(), cards, "{label}");
+        assert_eq!(combat.choosers, vec![P1; cards], "{label}");
+        assert_eq!(
+            combat
+                .events
+                .iter()
+                .filter(|event| matches!(
+                    event, GameEvent::ReplacementApplied { source_id, .. } if *source_id == lich
+                ))
+                .count(),
+            blocks.len(),
+            "{label}: one Lich substitution per lifelink source"
+        );
         assert_eq!(
             cards_drawn(&combat.events, P1),
-            if accept { 0 } else { 2 },
+            if accept { 0 } else { cards },
             "{label}"
         );
-        assert_eq!(hand_size(&runner, P1) - hand_before, 2, "{label}");
+        assert_eq!(hand_size(&runner, P1) - hand_before, cards, "{label}");
         // CR 120.3a: the unblocked hit costs one life.
         assert_eq!(life(&runner, P1), if early { -1 } else { 20 }, "{label}");
         if let Some(forest) = sacrifice {
+            assert_eq!(
+                damage_dealt_to_player(&combat.events, P1),
+                vec![1],
+                "{label}"
+            );
             assert_eq!(
                 runner.state().objects[&forest].zone,
                 Zone::Graveyard,
                 "{label}"
             );
         }
-        assert_eq!(
-            runner.state().objects[&bears].zone,
-            Zone::Graveyard,
-            "{label}"
-        );
+        for (_, blocked) in blocks {
+            assert_eq!(
+                runner.state().objects[&blocked].zone,
+                Zone::Graveyard,
+                "{label}"
+            );
+        }
     }
 }
 

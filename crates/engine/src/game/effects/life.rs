@@ -249,18 +249,31 @@ fn proposed_life_gain(
     })
 }
 
-/// CR 616.1: can the replacement pipeline open a player choice on this life
-/// gain? Read-only. False when the gain never reaches the pipeline ("can't gain
-/// life", CR 119.7; amount 0) and for a lone mandatory modifier; true for an
-/// optional candidate or two or more competing candidates whose order is
-/// material (`ReplacementPromptCauses::may_open_player_choice`).
+/// CR 616.1: can this gain's replacement pipeline open a choice? CR 614.6 +
+/// CR 616.2: also check whether a substitute's action opens a choice on this
+/// board. Probe the ordinary staging path on a clone so the substitute uses
+/// the same controller, amount, and replacement pipeline as the live gain.
+/// A zero or prohibited gain (CR 119.7) never reaches the pipeline.
 pub(crate) fn life_gain_may_prompt(state: &GameState, player_id: PlayerId, amount: u32) -> bool {
-    proposed_life_gain(state, player_id, amount)
-        .is_some_and(|event| proposed_event_may_prompt(state, &event))
+    let Some(event) = proposed_life_gain(state, player_id, amount) else {
+        return false;
+    };
+    let causes = replacement::proposed_event_prompt_cause(
+        state,
+        &event,
+        replacement::replacement_registry(),
+    );
+    causes.may_open_player_choice()
+        || (causes.contains(replacement::ReplacementPromptCause::MandatoryLifeGainSubstitute) && {
+            let _probe = crate::game::engine::SimulationProbeGuard::enter();
+            replacement::without_proposed_event_recording(|| {
+                stage_life_gain(&mut state.clone(), player_id, amount, &mut Vec::new()).is_err()
+            })
+        })
 }
 
-/// CR 616.1: the life-loss twin of [`life_gain_may_prompt`] (CR 119.8: a
-/// player who can't lose life never reaches the pipeline).
+/// CR 616.1: can the life-loss event itself open a replacement choice?
+/// CR 119.8: a player who can't lose life never reaches the pipeline.
 pub(crate) fn life_loss_may_prompt(state: &GameState, player_id: PlayerId, amount: u32) -> bool {
     proposed_life_loss(state, player_id, amount)
         .is_some_and(|event| proposed_event_may_prompt(state, &event))

@@ -25351,7 +25351,7 @@ pub struct PendingCombatLifelink {
     /// recorded by `engine_replacement`'s LifeGain arm (`take_staged_answer`). Re-queueing
     /// it here would gain the life twice.
     ///
-    /// CR 614.6 + CR 616.1g: the batch can also park on a lifelink gain's
+    /// CR 614.6 + CR 616.2: the batch can also park on a lifelink gain's
     /// substitute, whose own action asks a choice (Nefarious Lich's "draw that
     /// many cards instead" meeting Abundance); the gains after it stay here.
     pub remaining: VecDeque<PendingLifelinkGain>,

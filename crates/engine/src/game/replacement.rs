@@ -11416,6 +11416,8 @@ pub(crate) enum ReplacementPromptCause {
     /// as a `PostReplacementContinuation` and drained through an arbitrary
     /// `ResolvedAbility`, which can set a non-priority `waiting_for`.
     MandatoryBodyContinuation,
+    /// CR 614.6: a life gain can be replaced by an action of another kind.
+    MandatoryLifeGainSubstitute,
     /// CR 616.1: two or more candidates whose ordering is material — the
     /// affected player orders them.
     OrderingMaterial,
@@ -11427,6 +11429,7 @@ impl ReplacementPromptCause {
             ReplacementPromptCause::OptionalCandidate => 1 << 0,
             ReplacementPromptCause::MandatoryBodyContinuation => 1 << 1,
             ReplacementPromptCause::OrderingMaterial => 1 << 2,
+            ReplacementPromptCause::MandatoryLifeGainSubstitute => 1 << 3,
         }
     }
 }
@@ -11508,6 +11511,14 @@ pub(crate) fn proposed_event_prompt_cause(
             causes = causes.union(ReplacementPromptCauses::of(
                 ReplacementPromptCause::MandatoryBodyContinuation,
             ));
+            if matches!(event, ProposedEvent::LifeGain { .. })
+                && def.quantity_modification.is_none()
+                && gain_life_execute_substitutes_event_type(state, *rid)
+            {
+                causes = causes.union(ReplacementPromptCauses::of(
+                    ReplacementPromptCause::MandatoryLifeGainSubstitute,
+                ));
+            }
         }
     }
     // CR 616.1: ordering is only a choice when at least two candidates compete.
@@ -11667,6 +11678,13 @@ pub(crate) fn record_proposed_events<F: FnOnce()>(f: F) -> Vec<ProposedEvent> {
         .unwrap_or_default();
     drop(guard);
     recorded
+}
+
+/// Keep speculative events out of an enclosing recording of live proposals.
+pub(crate) fn without_proposed_event_recording<T>(f: impl FnOnce() -> T) -> T {
+    let _guard =
+        ProposedEventRecorderGuard(PROPOSED_EVENT_RECORDER.with(|cell| cell.borrow_mut().take()));
+    f()
 }
 
 /// The recorder hook. Called once per `pipeline_loop` entry, before any

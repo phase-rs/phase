@@ -1833,7 +1833,7 @@ pub(crate) enum CombatDamageBatch {
     /// * The lifelink tail: a lifelink life-gain event met two or more
     ///   co-applicable replacement effects. All damage is already dealt;
     ///   `state.pending_replacement` holds the paused source's own `LifeGain`.
-    /// * The lifelink tail's substitute (CR 614.6 + CR 616.1g): a gain's
+    /// * The lifelink tail's substitute (CR 614.6 + CR 616.2): a gain's
     ///   substitute asked a choice of its own (Nefarious Lich's draws meeting
     ///   Abundance). The gain itself is settled; `remaining` holds the later
     ///   gains.
@@ -2068,9 +2068,9 @@ fn reorder_ranked_slots<T: Clone>(items: &mut [T], rank: impl Fn(&T) -> Option<u
 
 /// CR 616.1 + CR 101.4 + CR 702.15b: the APNAP rank of a lifelink gain's
 /// choice owner (the gaining player, the source's controller) when the gain's
-/// own replacement pipeline can open a choice; `None` for a gain that cannot
-/// (it keeps its slot and is staged ahead of a leg only when its owner is the
-/// player that leg damages).
+/// replacement pipeline or its substitute's action can open a choice.
+/// A gain with no rank keeps its slot and is staged ahead of a leg only when
+/// its owner is the player that leg damages.
 fn lifelink_gain_rank(state: &GameState, controller: PlayerId, amount: u32) -> Option<usize> {
     crate::game::effects::life::life_gain_may_prompt(state, controller, amount)
         .then(|| crate::game::topology::apnap_team_rank(state, controller))
@@ -2182,7 +2182,7 @@ fn stage_combat_lifelink_gain(
         // `drain_substitution_continuation` ran, and on Prevented nothing was
         // owed — so this source's gain is not re-queued.
         //
-        // CR 614.6 + CR 616.1g: the substitute's own action stopped at a choice
+        // CR 614.6 + CR 616.2: the substitute's own action stopped at a choice
         // (Nefarious Lich's draws meeting Abundance's "may"). Park the rest of
         // the batch beneath that prompt and let the player's answer resume it.
         Err(ReplacementDeferred::SubstitutionContinuation { .. }) => {
@@ -2921,7 +2921,7 @@ fn apply_combat_damage_survivors(
 /// later source in the batch.
 ///
 /// Two more choices park the batch here, and the same resume finishes it:
-/// a gain's substitute that asks a choice of its own (CR 614.6 + CR 616.1g),
+/// a gain's substitute that asks a choice of its own (CR 614.6 + CR 616.2),
 /// and a Phase D rider that asks one (CR 615.5 + CR 608.2d). Neither is
 /// answered in the player's place.
 fn drain_combat_lifelink(
