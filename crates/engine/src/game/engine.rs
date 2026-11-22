@@ -23758,9 +23758,11 @@ mod stage2_injector_tests {
             .filter(|l| l.contains(&authority))
             .count();
         assert_eq!(
-            authority_code_hits, 3,
-            "one definition + two calls — the CR 603.5 gate's `let prompt_player = ..` and the \
-             repeated-payment offer, which asks the named player per iteration. A third call \
+            authority_code_hits, 4,
+            "one definition + three calls — the CR 603.5 gate's `let prompt_player = ..`, the \
+             repeated-payment offer, which asks the named player per iteration, and \
+             `optional_rider_chooser`, which only names who a combat prevention rider's \
+             \"may\" would ask so Phase D orders the choices in APNAP order. A fourth call \
              inside `effects/mod.rs` means another producer started consulting the authority \
              and this row's partition needs re-deriving"
         );
