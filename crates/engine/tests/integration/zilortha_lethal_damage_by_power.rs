@@ -1063,9 +1063,12 @@ fn zilortha_protected_after_blocks_stays_in_double_strike_forecast() {
     );
 }
 
-#[test]
-fn zilortha_combat_forecast_drops_hydra_after_prevention_removes_its_counters() {
+fn hydra_combat_board<T>(
+    counters: u32,
+    defender: impl FnOnce(&mut GameScenario) -> T,
+) -> (GameRunner, ObjectId, ObjectId, T) {
     let mut scenario = board();
+    scenario.with_life(P1, 30);
     scenario.at_phase(Phase::PostCombatMain);
     scenario.with_library_top(P0, &["Island"]);
     let hydra = scenario
@@ -1085,7 +1088,7 @@ fn zilortha_combat_forecast_drops_hydra_after_prevention_removes_its_counters() 
         .id();
     scenario.with_mana_pool(
         P1,
-        vec![ManaUnit::new(ManaType::Green, hydra, false, vec![]); 13],
+        vec![ManaUnit::new(ManaType::Green, hydra, false, vec![]); counters as usize + 1],
     );
     let ghalta = scenario
         .add_creature(P0, "Ghalta, Primal Hunger", 12, 12)
@@ -1100,6 +1103,7 @@ fn zilortha_combat_forecast_drops_hydra_after_prevention_removes_its_counters() 
         .with_mana_cost(ManaCost::zero())
         .from_oracle_text_with_keywords(&["Enchant"], BATTLE_MASTERY)
         .id();
+    let defender = defender(&mut scenario);
     let mut runner = scenario.build();
 
     let state = runner.state_mut();
@@ -1107,7 +1111,7 @@ fn zilortha_combat_forecast_drops_hydra_after_prevention_removes_its_counters() 
     state.priority_player = P1;
     state.waiting_for = WaitingFor::Priority { player: P1 };
 
-    let outcome = runner.cast(hydra).x(12).resolve();
+    let outcome = runner.cast(hydra).x(counters).resolve();
     outcome.assert_zone(&[hydra], Zone::Battlefield);
     assert!(matches!(
         outcome.final_waiting_for(),
@@ -1119,6 +1123,12 @@ fn zilortha_combat_forecast_drops_hydra_after_prevention_removes_its_counters() 
     assert_eq!(runner.state().active_player, P0);
     cast_at(&mut runner, mastery, ghalta);
     assert!(runner.state().objects[&ghalta].has_keyword(&Keyword::DoubleStrike));
+    (runner, ghalta, hydra, defender)
+}
+
+#[test]
+fn zilortha_combat_forecast_drops_hydra_after_prevention_removes_its_counters() {
+    let (mut runner, ghalta, hydra, ()) = hydra_combat_board(12, |_| {});
     let p1_life = runner.life(P1);
     runner.advance_to_combat();
     runner
@@ -1151,6 +1161,47 @@ fn zilortha_combat_forecast_drops_hydra_after_prevention_removes_its_counters() 
     // CR 702.19d: Ghalta assigns all regular-step damage to the defending player.
     let actual = p1_life - runner.life(P1);
     assert_eq!(actual, 12);
+    assert_eq!(
+        forecast, actual,
+        "forecast must match the actual trample damage"
+    );
+}
+
+#[test]
+fn zilortha_combat_forecast_drops_regenerated_blocker() {
+    let (mut runner, ghalta, hydra, (bears, regenerate)) = hydra_combat_board(2, |scenario| {
+        let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let regenerate = scenario
+            .add_spell_to_hand_from_oracle(
+                P1,
+                "Regenerate",
+                true,
+                "Regenerate target creature. (The next time that creature would be destroyed this turn, instead tap it, remove it from combat, and heal all damage on it.)",
+            )
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        (bears, regenerate)
+    });
+    runner.act(GameAction::PassPriority).unwrap();
+    cast_at(&mut runner, regenerate, bears);
+
+    let life_before = runner.life(P1);
+    attack_and_block(&mut runner, &[ghalta], &[(hydra, ghalta), (bears, ghalta)]);
+    let forecast = combat_damage_to_defender(runner.state(), ghalta, &[hydra, bears]);
+
+    assign_split(&mut runner, vec![(hydra, 2), (bears, 2)], 8);
+    // CR 615.5 + CR 704.5f: Hydra loses its two counters and dies at 0/0.
+    assert_eq!(zone(&runner, hydra), Zone::Graveyard);
+    // CR 701.19a + CR 506.4: regeneration leaves Bears on the battlefield but removes it from combat.
+    assert_eq!(zone(&runner, bears), Zone::Battlefield);
+    assert!(runner.state().objects[&bears].tapped);
+    assert_eq!(marked(&runner, bears), 0);
+    assert_eq!(life_before - runner.life(P1), 8);
+
+    finish_combat(&mut runner);
+    // CR 702.19d: with both blockers gone, all 12 regular-step damage tramples over.
+    let actual = life_before - runner.life(P1);
+    assert_eq!(actual, 20);
     assert_eq!(
         forecast, actual,
         "forecast must match the actual trample damage"

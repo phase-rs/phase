@@ -1,4 +1,6 @@
-use crate::game::combat::{AttackTarget, CombatState, DamageAssignment, DamageTarget, TrampleKind};
+use crate::game::combat::{
+    AttackTarget, CombatParticipation, CombatState, DamageAssignment, DamageTarget, TrampleKind,
+};
 use crate::game::effects::deal_damage::{
     apply_damage_after_replacement, pre_replacement_damage_gate,
     settle_parked_player_damage_results, tally_map_from_record_entries,
@@ -1651,19 +1653,38 @@ pub fn combat_damage_to_defender(
         }
     }
 
-    let has_departed = |id| match &preview {
-        Some(preview) => state
-            .objects
-            .get(&id)
-            .is_some_and(|obj| !ObjectIncarnationRef::from_object(obj).is_current(preview)),
+    let preview_combat = preview.as_ref().map(|preview| {
+        (
+            preview,
+            CombatParticipation::capture(state, attacker_id),
+            CombatParticipation::capture(preview, attacker_id),
+        )
+    });
+    let has_departed = |id| match &preview_combat {
+        Some((preview, before, after)) => {
+            // CR 701.19a + CR 506.4: regeneration removes a creature from combat without a
+            // zone change. Only a role the live combat records can end, so a hypothetical
+            // attack or block passed in by the caller still counts.
+            let left_combat = if id == attacker_id {
+                before.attacking.is_some() && after.attacking.is_none()
+            } else {
+                before.blocked_by.contains(&id) && !after.blocked_by.contains(&id)
+            };
+            left_combat
+                || state
+                    .objects
+                    .get(&id)
+                    .is_some_and(|obj| !ObjectIncarnationRef::from_object(obj).is_current(preview))
+        }
         None => departed.contains(&id),
     };
     let regular_state = preview.as_ref().unwrap_or(state);
     // CR 702.4b: the attacker assigns in the regular step if it has double strike,
     // or if it never had first strike and so has not assigned at all yet.
     if !has_departed(attacker_id) && (has_double_strike || !attacker_strikes_first) {
-        // CR 506.4: a destroyed blocker has left combat. Each survivor is owed lethal damage
-        // counting what the first step marked on it (CR 702.19b), measured on the battlefield
+        // CR 506.4: a blocker removed from combat is no longer owed lethal damage. Each
+        // remaining blocker is owed it counting what the first step marked on it
+        // (CR 702.19b), measured on the battlefield
         // the first step left: a departed creature's static no longer sets the basis
         // (CR 611.3b). With no first-strike step this is the live remainder.
         let slots = owed_slots(
