@@ -10,9 +10,11 @@
 //! that would fail if the clause counted wrongly (a card the filter must not offer, a different
 //! count, an empty answer), and ends with an empty stack and priority.
 use engine::database::card_db::CardDatabase;
+use engine::game::engine::EngineError;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::move_to_zone;
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
     CastPaymentMode, CastingVariant, StackEntry, StackEntryKind, WaitingFor,
@@ -345,25 +347,317 @@ fn kozilek_discards_a_card_of_the_announced_mana_value_to_counter_a_spell_of_tha
     assert_settled(&r, P0, "Kozilek counter");
 }
 
-/// Control: with X = 4 no card in hand has the announced mana value, so the cost cannot be paid.
-#[test]
-fn kozilek_rejects_an_announced_x_that_no_card_in_hand_matches() {
-    let (mut r, kozilek, discard, _, target) = kozilek_on_battlefield_facing_a_spell();
+/// Kozilek on the battlefield under P0, `hand` printed cards in P0's hand, and
+/// each named printed card of P1's on the stack (written order, last name on
+/// top) — the same direct injection the witness above performs: the object
+/// moves to the stack zone and a Spell entry is pushed behind it.
+fn kozilek_facing_p1_spells(
+    hand: &[&str],
+    spells: &[&str],
+) -> (GameRunner, ObjectId, Vec<ObjectId>, Vec<ObjectId>) {
+    let mut s = table();
+    let kozilek = s.add_real_card(P0, "Kozilek, the Great Distortion", Zone::Battlefield, db());
+    let hand_ids: Vec<ObjectId> = hand
+        .iter()
+        .map(|name| s.add_real_card(P0, name, Zone::Hand, db()))
+        .collect();
+    let spell_ids: Vec<ObjectId> = spells
+        .iter()
+        .map(|name| s.add_real_card(P1, name, Zone::Hand, db()))
+        .collect();
+    let mut r = s.build();
+    for spell in spell_ids.iter().copied() {
+        let state = r.state_mut();
+        let card_id = state.objects[&spell].card_id;
+        let mut events = Vec::new();
+        move_to_zone(state, spell, Zone::Stack, &mut events);
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: P1,
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+    }
+    (r, kozilek, hand_ids, spell_ids)
+}
+
+/// The X announcement for Kozilek's counter ability is open for P0; report the
+/// engine's (min, max) range.
+fn assert_at_kozilek_x_prompt(r: &GameRunner, what: &str) -> (u32, u32) {
+    let WaitingFor::ChooseXValue {
+        player,
+        min,
+        max,
+        pending_cast: _,
+        convoke_mode: _,
+        x_cost_previews: _,
+    } = &r.state().waiting_for
+    else {
+        panic!(
+            "{what}: expected the X announcement prompt, found {:?}",
+            r.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0, "{what}: P0 announces X");
+    (*min, *max)
+}
+
+/// The counter ability's target prompt is still open — a refused ChooseTarget
+/// must not advance or pay anything.
+fn assert_still_target_selection(r: &GameRunner, what: &str) {
+    let WaitingFor::TargetSelection {
+        player: _,
+        pending_cast: _,
+        target_slots: _,
+        mode_labels: _,
+        selection: _,
+    } = &r.state().waiting_for
+    else {
+        panic!(
+            "{what}: expected the target prompt to still be open, found {:?}",
+            r.state().waiting_for
+        );
+    };
+}
+
+/// The discard restriction — not the X prompt's range and not target legality
+/// (CR 601.2b + CR 601.2h: the announced cost must be payable) — refuses an
+/// in-range X that no card in P0's hand matches. `spell` (a legal target for
+/// that X) is P1's only stack object; `highest` is the highest mana value among
+/// `hand`, where the X prompt's maximum caps.
+fn kozilek_refuses_in_range_x_without_a_matching_discard(
+    hand: &[&str],
+    spell: &str,
+    x: u32,
+    highest: u32,
+) {
+    let (mut r, kozilek, hand_ids, spell_ids) = kozilek_facing_p1_spells(hand, &[spell]);
+    let opposed = spell_ids[0];
     r.act(GameAction::ActivateAbility {
         source_id: kozilek,
         ability_index: 0,
         payment_mode: CastPaymentMode::Auto,
     })
-    .expect("activation reaches the X announcement");
-    assert!(
-        r.act(GameAction::ChooseX { value: 4 }).is_err(),
-        "X = 4 has no matching discard"
-    );
-    assert_eq!(zone_of(&r, discard), Zone::Hand);
+    .expect("activating Kozilek's counter ability is accepted");
+    let (min, max) = assert_at_kozilek_x_prompt(&r, "announcing an in-range X");
+    // Kozilek's printed text carries no "X can't be 0" annotation, so the
+    // floor the engine reports is the default zero.
+    assert_eq!(min, 0, "the X prompt's minimum is the printed floor");
     assert_eq!(
-        zone_of(&r, target),
+        max, highest,
+        "the X prompt's maximum is the highest mana value the hand can discard"
+    );
+    let Err(error) = r.act(GameAction::ChooseX { value: x }) else {
+        panic!("X={x} with no card of that mana value in hand must be refused");
+    };
+    let EngineError::InvalidAction(message) = error else {
+        panic!("the unpayable discard refuses X={x}, found {error:?}");
+    };
+    assert_eq!(
+        message,
+        format!("X={x} cannot pay the activation cost"),
+        "the discard restriction \"mana value X\" refuses the announcement — not the \
+         X range (max {max}) and not a target restriction (the opponent's spell is legal)"
+    );
+    assert_at_kozilek_x_prompt(&r, "after the refusal, nothing advanced");
+    for card in hand_ids {
+        assert_eq!(zone_of(&r, card), Zone::Hand, "no card was discarded");
+    }
+    assert_eq!(
+        zone_of(&r, opposed),
         Zone::Stack,
-        "the spell was not countered"
+        "the opponent's spell was not countered"
+    );
+    for player in [P0, P1] {
+        assert!(
+            r.state().graveyard_of(player).is_empty(),
+            "nothing reached P{}'s graveyard: nothing was paid and nothing resolved",
+            player.0
+        );
+    }
+}
+
+/// F2a: an X inside the prompt's range whose target is legal but whose discard
+/// is not — only the cost restriction "mana value X" can refuse it.
+#[test]
+fn kozilek_rejects_an_in_range_x_with_a_matching_target_but_no_matching_discard() {
+    // The reviewer's shape: X = 1 is in range (the hand tops out at three) and
+    // the stack's Shock has mana value one, but no card in hand does.
+    kozilek_refuses_in_range_x_without_a_matching_discard(
+        &["Divination", "Grizzly Bears"],
+        "Shock",
+        1,
+        3,
+    );
+    // One card cheaper than X and one dearer: a check relaxed to <= or >= in
+    // either direction would let one of these through.
+    kozilek_refuses_in_range_x_without_a_matching_discard(
+        &["Forest", "Divination"],
+        "Grizzly Bears",
+        2,
+        3,
+    );
+}
+
+/// F2b: with a matching discard in hand, the target restriction "mana value X"
+/// is the only thing that can refuse a mismatched target spell, and the
+/// prompt's legal set names exactly the spells of the announced mana value.
+/// P1's second MV-2 spell keeps the target choice genuinely ambiguous: a
+/// unique legal target is auto-committed by the engine (the prompt never opens)
+/// and could not be refused through `GameAction::ChooseTarget`.
+#[test]
+fn kozilek_rejects_a_target_whose_mana_value_is_not_x_even_with_a_matching_discard() {
+    let (mut r, kozilek, p0_hand, p1_spells) = kozilek_facing_p1_spells(
+        &["Grizzly Bears"],
+        &["Phyrexian Arena", "Shock", "Grizzly Bears", "Grizzly Bears"],
+    );
+    let p0_bears = p0_hand[0];
+    let [arena, shock, bears, bears_copy] =
+        [p1_spells[0], p1_spells[1], p1_spells[2], p1_spells[3]];
+    r.act(GameAction::ActivateAbility {
+        source_id: kozilek,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    })
+    .expect("activating Kozilek's counter ability is accepted");
+    let (min, max) = assert_at_kozilek_x_prompt(&r, "announcing X with a matching discard");
+    assert_eq!(min, 0, "the X prompt's minimum is the printed floor");
+    assert_eq!(
+        max, 2,
+        "the only card in hand has mana value two, so the prompt caps X there"
+    );
+    r.act(GameAction::ChooseX { value: 2 })
+        .expect("X = 2 matches the Grizzly Bears in hand");
+
+    let WaitingFor::TargetSelection {
+        player,
+        pending_cast: _,
+        target_slots,
+        mode_labels: _,
+        selection,
+    } = &r.state().waiting_for
+    else {
+        panic!(
+            "the counter ability asks for its target, found {:?}",
+            r.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0, "P0 declares the counter's target");
+    let slot = &target_slots[selection.current_slot];
+    let mut offered = slot.legal_targets.clone();
+    offered.sort();
+    let mut expected = vec![TargetRef::Object(bears), TargetRef::Object(bears_copy)];
+    expected.sort();
+    assert_eq!(
+        offered, expected,
+        "X = 2 offers exactly the two MV-2 spells; Arena (MV 3) and Shock (MV 1) \
+         are not legal targets"
+    );
+
+    for (mismatched, what) in [(arena, "Phyrexian Arena (MV 3)"), (shock, "Shock (MV 1)")] {
+        let Err(error) = r.act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(mismatched)),
+        }) else {
+            panic!("with X = 2 announced, targeting {what} must be refused");
+        };
+        let EngineError::InvalidAction(message) = error else {
+            panic!("the target restriction \"mana value X\" refuses {what}, found {error:?}");
+        };
+        assert_eq!(
+            message, "Illegal target selected",
+            "the target restriction \"mana value X\" refuses {what}: it is not in the \
+             slot's legal set even though the hand can pay the discard"
+        );
+        assert_still_target_selection(&r, what);
+    }
+    assert_eq!(
+        zone_of(&r, arena),
+        Zone::Stack,
+        "the refused Arena was not countered"
+    );
+    assert_eq!(
+        zone_of(&r, shock),
+        Zone::Stack,
+        "the refused Shock was not countered"
+    );
+    assert_eq!(
+        zone_of(&r, p0_bears),
+        Zone::Hand,
+        "nothing was discarded while the target was refused"
+    );
+
+    r.act(GameAction::ChooseTarget {
+        target: Some(TargetRef::Object(bears)),
+    })
+    .expect("targeting the MV-2 spell is accepted");
+    let WaitingFor::PayCost {
+        player,
+        kind: _,
+        choices,
+        count,
+        min_count: _,
+        resume: _,
+    } = &r.state().waiting_for
+    else {
+        panic!(
+            "the discard cost is asked before the ability resolves, found {:?}",
+            r.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0, "P0 pays the discard");
+    assert_eq!(*count, 1, "the cost discards one card");
+    assert_eq!(
+        *choices,
+        vec![p0_bears],
+        "the cost restriction \"mana value X\" offers only the MV-2 card in hand"
+    );
+    r.act(GameAction::SelectCards {
+        cards: vec![p0_bears],
+    })
+    .expect("the matching card pays the discard");
+
+    // Pass priority until the ability resolves and counters its target; the
+    // three spells below it must not resolve.
+    for _ in 0..40 {
+        if zone_of(&r, bears) != Zone::Stack {
+            break;
+        }
+        r.act(GameAction::PassPriority)
+            .expect("pass priority with the counter ability on the stack");
+    }
+    assert_eq!(
+        zone_of(&r, bears),
+        Zone::Graveyard,
+        "the MV-2 spell was countered"
+    );
+    assert_eq!(
+        zone_of(&r, p0_bears),
+        Zone::Graveyard,
+        "the announced card was discarded"
+    );
+    assert!(
+        r.state().graveyard_of(P1).iter().any(|&id| id == bears),
+        "the countered spell went to its owner's graveyard"
+    );
+    assert!(
+        r.state().graveyard_of(P0).iter().any(|&id| id == p0_bears),
+        "the discard went to P0's graveyard"
+    );
+    let stack_ids: Vec<ObjectId> = r.state().stack.iter().map(|entry| entry.id).collect();
+    assert_eq!(
+        sorted(stack_ids),
+        sorted(vec![arena, shock, bears_copy]),
+        "the counter resolved: the MV-3 Arena, the MV-1 Shock and the second, \
+         untargeted MV-2 spell are still on the stack"
+    );
+    assert!(
+        matches!(r.state().waiting_for, WaitingFor::Priority { player: p } if p == P0),
+        "P0 holds priority after the counter resolved"
     );
 }
 
