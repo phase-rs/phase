@@ -10,8 +10,6 @@
 //!   src/adapter/__tests__/stateCodec.integration.test.ts
 //! The complete corpus is limited to 64 MiB and the script to 64 accepted actions.
 
-use std::fs::File;
-use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -191,14 +189,8 @@ fn produce_native_portability_corpus() {
         destination.is_absolute(),
         "STATE_CODEC_CORPUS must be an absolute path"
     );
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../engine/tests/fixtures/integration_cards.json.gz");
-    let db = Arc::new(
-        CardDatabase::from_export_reader(flate2::read::GzDecoder::new(BufReader::new(
-            File::open(fixture).expect("committed card fixture opens"),
-        )))
-        .expect("committed card fixture loads"),
-    );
+    let db =
+        Arc::new(CardDatabase::from_integration_fixture().expect("committed card fixture loads"));
     let deck = |name: &str| {
         assert!(
             db.get_face_by_name(name).is_some(),

@@ -670,6 +670,7 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
         entry_onset: _, // ContinuousEffectOnset tag, no prompt
         sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
         instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        repeat_timing: _,    // CR 608.2 iteration-relation tag; it offers no choice
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
         activation_record: _,

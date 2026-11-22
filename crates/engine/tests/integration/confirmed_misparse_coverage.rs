@@ -1,7 +1,6 @@
 //! Coverage metadata changes support classification, never parsed rules.
 
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::sync::LazyLock;
 
 use engine::database::CardDatabase;
@@ -13,17 +12,13 @@ use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
 use engine::types::confirmed_misparse::{ConfirmedMisparses, MisparseClass};
 use engine::types::format::{GameFormat, SelectedFormat};
-use flate2::read::GzDecoder;
 use serde_json::{Map, Value};
 use strum::IntoEnumIterator;
 
 fn fixture() -> &'static Map<String, Value> {
     static RAW: LazyLock<Map<String, Value>> = LazyLock::new(|| {
         // Regeneration requires scripts/gen-test-fixture.py and gzip -9 -n.
-        let mut json = String::new();
-        GzDecoder::new(&include_bytes!("../fixtures/integration_cards.json.gz")[..])
-            .read_to_string(&mut json)
-            .unwrap();
+        let json = engine::database::integration_fixture::json().unwrap();
         serde_json::from_str(&json).unwrap()
     });
     &RAW
