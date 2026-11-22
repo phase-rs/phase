@@ -2,8 +2,6 @@
 //! Regenerate integration_cards.json.gz after oracle-gen with gen-test-fixture.py;
 //! the public-loader rows deliberately require fresh exported real cards.
 
-use std::io::Read;
-
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::game::coverage::{
@@ -581,10 +579,7 @@ fn kannushi_pledge_independent_protection_removes_matching_auras() {
 
 #[test]
 fn kannushi_pledge_export_and_game_state_roundtrip_keep_live_semantics() {
-    let mut json = String::new();
-    flate2::read::GzDecoder::new(&include_bytes!("../fixtures/integration_cards.json.gz")[..])
-        .read_to_string(&mut json)
-        .unwrap();
+    let json = engine::database::integration_fixture::json().unwrap();
     let string_db = CardDatabase::from_json_str(&json).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cards.json");
