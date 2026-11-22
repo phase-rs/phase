@@ -47,7 +47,7 @@ use engine::types::game_state::{
     WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaCostShard};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::resolution::ResolutionFrame;
@@ -3299,6 +3299,8 @@ const NEW_WAY_FORWARD: &str = "The next time a source of your choice would deal 
 const DEFLECTING_PALM: &str = "The next time a source of your choice would deal damage to you this turn, prevent that damage. If damage is prevented this way, Deflecting Palm deals that much damage to that source's controller.";
 const AWE_STRIKE: &str = "The next time target creature would deal damage this turn, prevent that damage. You gain life equal to the damage prevented this way.";
 const NEFARIOUS_LICH: &str = "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.\nIf you would gain life, draw that many cards instead.\nWhen this enchantment leaves the battlefield, you lose the game.";
+const LIFE_TO_DRAW: &str = "If you would gain life, draw that many cards instead.";
+const DUSKMANTLE_GUILDMAGE: &str = "{1}{U}{B}: Whenever a card is put into an opponent's graveyard from anywhere this turn, that player loses 1 life.\n{2}{U}{B}: Target player mills two cards.";
 const SHEOLDRED: &str = "Deathtouch\nWhenever you draw a card, you gain 2 life.\nWhenever an opponent draws a card, they lose 2 life.";
 const EXQUISITE_BLOOD: &str = "Whenever an opponent loses life, you gain that much life.";
 const FLAME_RIFT: &str = "Flame Rift deals 4 damage to each player.";
@@ -6185,6 +6187,107 @@ fn nefarious_lichs_exile_answer_finishes_the_batch() {
     }
 }
 
+/// Guildmage's resolved activation watches opposing graveyards for the turn (CR 603.7b).
+/// Dralnu replaces its damage with a sacrifice (CR 614.6 + CR 701.21a). When P1 chooses
+/// a land, the delayed trigger joins Jackal Pup's and Ripjaw Raptor's damage triggers
+/// in the same APNAP placement before priority (CR 510.3a + CR 603.3b).
+#[test]
+fn dralnus_sacrificed_land_joins_combat_trigger_placement_via_guildmage() {
+    let mut scenario = rider_board();
+    let guildmage = scenario
+        .add_creature_from_oracle(P0, "Duskmantle Guildmage", 2, 2, DUSKMANTLE_GUILDMAGE)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Blue, ManaType::Black, ManaType::Red]
+            .into_iter()
+            .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let dralnu = scenario
+        .add_creature_from_oracle(P1, "Dralnu, Lich Lord", 3, 3, DRALNU_LICH_LORD)
+        .id();
+    let land = scenario.add_basic_land(P1, ManaColor::Blue);
+    let cadet = scenario.add_creature(P0, "Eager Cadet", 1, 1).id();
+    let pup = scenario
+        .add_creature_from_oracle(P0, "Jackal Pup", 2, 1, JACKAL_PUP)
+        .id();
+    let raptor = scenario
+        .add_creature_from_oracle(
+            P1,
+            "Ripjaw Raptor",
+            4,
+            5,
+            "Enrage — Whenever this creature is dealt damage, draw a card.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    let ability = runner.state().objects[&guildmage]
+        .abilities
+        .iter()
+        .position(|ability| matches!(*ability.effect, Effect::CreateDelayedTrigger { .. }))
+        .expect("Guildmage's first ability creates a delayed trigger");
+    runner.activate(guildmage, ability).resolve();
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+
+    to_the_first_combat_prompt(
+        &mut runner,
+        &at_p1(&[cadet, pup]),
+        P1,
+        &[(dralnu, cadet), (raptor, pup)],
+    );
+    let WaitingFor::EffectZoneChoice {
+        player,
+        count,
+        cards,
+        effect_kind,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected Dralnu's sacrifice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        (*player, *count, *effect_kind),
+        (P1, 1, EffectKind::Sacrifice)
+    );
+    assert!(cards.contains(&land));
+    let result = runner
+        .act(GameAction::SelectCards { cards: vec![land] })
+        .expect("P1 sacrifices the Island");
+    assert_eq!(runner.state().objects[&land].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&dralnu].damage_marked, 0);
+    assert_eq!(
+        ordered_by(&result.waiting_for, P0),
+        [guildmage, pup].into_iter().collect()
+    );
+    let WaitingFor::OrderTriggers { triggers, .. } = result.waiting_for else {
+        unreachable!("ordered_by checked the prompt");
+    };
+    assert_eq!(triggers.len(), 2);
+    assert!(runner.state().stack.is_empty());
+    runner
+        .act(GameAction::OrderTriggers { order: vec![0, 1] })
+        .expect("P0 orders its two triggers");
+    let stack = stack_sources(&runner);
+    assert_eq!(stack.len(), 3);
+    assert_eq!(stack[2], (raptor, P1));
+    assert_eq!(
+        stack
+            .iter()
+            .filter(|&&(source, _)| source == guildmage)
+            .count(),
+        1
+    );
+    assert_eq!(life(&runner, P1), 20);
+
+    finish_the_combat(&mut runner);
+    assert_eq!(life(&runner, P1), 19);
+    assert_batch_settled(&runner);
+}
+
 /// C2. Dralnu, Lich Lord: "If damage would be dealt to Dralnu, sacrifice that many permanents
 /// instead." P0's Grizzly Bears A is blocked by Dralnu and P0's Hill Giant by P1's Jackal Pup
 /// ("Whenever this creature is dealt damage, it deals that much damage to you."). P1 also controls
@@ -7132,17 +7235,26 @@ fn channel_harms_may_is_asked_in_each_combat_damage_step() {
 /// (CR 121.2), each meeting Abundance's "may", which P1 is asked: two prompts, and the batch
 /// completes on the last answer. Declining both draws 2; accepting both and choosing nonland draws
 /// none and still puts 2 cards in P1's hand. P1's life doesn't change, and the Bears die.
-/// Isolating the gain replacement and adding an unblocked attacker stages P1's
-/// gain before P1's damage leg (CR 101.4c). The draw prompts park that Phase C remnant.
+/// An unblocked attacker stages P1's gain before P1's damage leg (CR 101.4c).
+/// A synthetic enchantment isolates the Lich's gain clause because the printed Lich
+/// would replace that attacker's damage. The draw prompt parks the Phase C tail
+/// with the damage leg still owed (CR 510.2), including through a save and load.
 #[test]
 fn a_lifelink_substitutes_draws_ask_abundance() {
-    for (accept, early) in [(false, false), (true, false), (false, true), (true, true)] {
-        let label = format!("accept: {accept}, early: {early}");
+    for (accept, early, reload) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (false, true, true),
+        (true, true, true),
+    ] {
+        let label = format!("accept: {accept}, early: {early}, reload: {reload}");
         let mut scenario = rider_board();
         let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
         let mut attackers = vec![bears];
         if early {
-            attackers.push(scenario.add_creature(P0, "Unblocked attacker", 1, 1).id());
+            attackers.push(scenario.add_creature(P0, "Eager Cadet", 1, 1).id());
         }
         let nighthawk = creature_with_keywords(
             &mut scenario,
@@ -7153,11 +7265,7 @@ fn a_lifelink_substitutes_draws_ask_abundance() {
             VAMPIRE_NIGHTHAWK,
         );
         if early {
-            scenario.add_enchantment_from_oracle(
-                P1,
-                "Life-to-draw replacement",
-                "If you would gain life, draw that many cards instead.",
-            );
+            scenario.add_enchantment_from_oracle(P1, "Life-to-draw replacement", LIFE_TO_DRAW);
         } else {
             scenario.add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH);
         }
@@ -7165,6 +7273,7 @@ fn a_lifelink_substitutes_draws_ask_abundance() {
         let mut runner = scenario.build();
         let hand_before = hand_size(&runner, P1);
         let mut answer = answering_abundance(accept);
+        let mut reloaded = false;
 
         let combat = fight_driving(&mut runner, &attackers, &[(nighthawk, bears)], |runner| {
             if matches!(
@@ -7175,11 +7284,27 @@ fn a_lifelink_substitutes_draws_ask_abundance() {
                 assert_eq!(parked.phase_c_remnant.is_some(), early, "{label}");
                 assert!(!parked.awaiting_staged_gain, "{label}");
                 assert_eq!(life(runner, P1), 20, "{label}");
+                if reload && !reloaded {
+                    let remnant = parked.phase_c_remnant.clone().unwrap();
+                    assert!(
+                        remnant.remaining.iter().any(|leg| {
+                            leg.target == TargetRef::Player(P1) && leg.survivor.is_some()
+                        }),
+                        "{label}: P1's damage leg is still owed"
+                    );
+                    save_and_load(runner);
+                    let parked = runner.state().pending_combat_lifelink.as_ref().unwrap();
+                    assert_eq!(parked.phase_c_remnant.as_ref(), Some(&remnant), "{label}");
+                    assert!(!parked.awaiting_staged_gain, "{label}");
+                    assert_eq!(life(runner, P1), 20, "{label}");
+                    reloaded = true;
+                }
             }
             answer(runner.state())
         });
 
         assert_batch_settled(&runner);
+        assert_eq!(reloaded, reload, "{label}");
         assert_eq!(combat.prompts.len(), 2, "{label}");
         assert_eq!(combat.choosers, vec![P1, P1], "{label}");
         assert_eq!(
@@ -7195,6 +7320,152 @@ fn a_lifelink_substitutes_draws_ask_abundance() {
             "{label}"
         );
     }
+}
+
+/// Two P1 lifelink sources have gains to stage before the unblocked attacker deals
+/// damage to P1 (CR 510.2 + CR 702.15b + CR 101.4c). The synthetic enchantment
+/// uses the Lich's gain clause so the unblocked damage stays owed. Laboratory Maniac
+/// replaces the first substitute draw with a win (CR 614.6), ending the game immediately
+/// (CR 104.1) before player damage or staging the other source's gain.
+#[test]
+fn an_early_lifelink_substitutes_win_stops_phase_c() {
+    let mut scenario = main_phase();
+    let lich = scenario
+        .add_enchantment_from_oracle(P1, "Life-to-draw replacement", LIFE_TO_DRAW)
+        .id();
+    let maniac = scenario
+        .add_creature_from_oracle(P1, "Laboratory Maniac", 2, 2, LABORATORY_MANIAC)
+        .id();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let cadet = scenario.add_creature(P0, "Eager Cadet", 1, 1).id();
+    let vampire = creature_with_keywords(
+        &mut scenario,
+        P1,
+        "Vampire of the Dire Moon",
+        (1, 1),
+        &["Deathtouch", "Lifelink"],
+        VAMPIRE_OF_THE_DIRE_MOON,
+    );
+    let nighthawk = creature_with_keywords(
+        &mut scenario,
+        P1,
+        "Vampire Nighthawk",
+        (2, 3),
+        &["Flying", "Deathtouch", "Lifelink"],
+        VAMPIRE_NIGHTHAWK,
+    );
+    let mut runner = scenario.build();
+    assert!(runner.state().players[1].library.is_empty());
+    let combat = fight_driving(
+        &mut runner,
+        &[bears, giant, cadet],
+        &[(vampire, bears), (nighthawk, giant)],
+        |runner| panic!("unexpected prompt: {:?}", runner.state().waiting_for),
+    );
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P1) }
+    ));
+    assert_eq!(life(&runner, P1), 20, "the owed leg never took life");
+    assert!(damage_dealt_to_player(&combat.events, P1).is_empty());
+    assert!(combat.events.iter().any(|event| matches!(
+        event, GameEvent::ReplacementApplied { source_id, event_type }
+            if *source_id == maniac && event_type == "Draw"
+    )));
+    assert_eq!(
+        combat
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event, GameEvent::ReplacementApplied { source_id, .. } if *source_id == lich
+            ))
+            .count(),
+        1,
+        "only the winning source's gain reaches the gain-to-draw replacement"
+    );
+    assert_nothing_after_the_game_ended(&runner, &combat.events);
+}
+
+/// The Nighthawk's lifelink gain (CR 702.15b) asks P1 to order the Lich and Faithmender
+/// (CR 616.1). Choosing the Lich fully replaces the gain (CR 614.6). Abundance can
+/// pause each substitute draw (CR 616.1g + CR 121.2), but the batch no longer awaits a
+/// staged gain. That distinction survives a save and load and the batch finishes.
+#[test]
+fn a_replaced_lifelink_gain_clears_the_staging_marker_before_its_draw_prompt() {
+    let mut scenario = rider_board();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let nighthawk = creature_with_keywords(
+        &mut scenario,
+        P1,
+        "Vampire Nighthawk",
+        (2, 3),
+        &["Flying", "Deathtouch", "Lifelink"],
+        VAMPIRE_NIGHTHAWK,
+    );
+    let lich = scenario
+        .add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH)
+        .id();
+    let rhox = scenario
+        .add_creature_from_oracle(P1, "Rhox Faithmender", 1, 5, RHOX_FAITHMENDER)
+        .id();
+    let abundance = scenario
+        .add_enchantment_from_oracle(P1, "Abundance", ABUNDANCE)
+        .id();
+    let mut runner = scenario.build();
+    let mut decline = answering_abundance(false);
+    let mut draw_prompts = 0;
+    let combat = fight_driving(&mut runner, &[bears], &[(nighthawk, bears)], |runner| {
+        let state = runner.state();
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &state.waiting_for
+        else {
+            panic!("unexpected prompt: {:?}", state.waiting_for);
+        };
+        assert_eq!(*player, P1);
+        let parked = state.pending_combat_lifelink.as_ref().unwrap();
+        if let Some(index) = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == lich)
+        {
+            assert!(
+                parked.awaiting_staged_gain,
+                "the gain awaits its order answer"
+            );
+            GameAction::ChooseReplacement { index }
+        } else {
+            assert!(
+                !parked.awaiting_staged_gain,
+                "the draw prompt still awaits a replaced gain"
+            );
+            if draw_prompts == 0 {
+                save_and_load(runner);
+                let parked = runner.state().pending_combat_lifelink.as_ref().unwrap();
+                assert!(
+                    !parked.awaiting_staged_gain,
+                    "the loaded draw prompt still awaits a replaced gain"
+                );
+            }
+            draw_prompts += 1;
+            decline(runner.state())
+        }
+    });
+
+    assert_eq!(draw_prompts, 2);
+    assert_eq!(combat.prompts.len(), 3);
+    assert_eq!(
+        offered(&combat.prompts[0]),
+        [lich, rhox].into_iter().collect()
+    );
+    for prompt in &combat.prompts[1..] {
+        assert!(prompt.contains(&abundance));
+    }
+    assert_eq!(cards_drawn(&combat.events, P1), 2);
+    assert_eq!(life(&runner, P1), 20);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
+    assert_batch_settled(&runner);
 }
 
 /// The active player leaves at its own prompt inside the batch (CR 800.4a), and the batch finishes
