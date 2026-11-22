@@ -7427,6 +7427,104 @@ fn defenders_poison_order_precedes_its_zurs_weirding_offers_on_lifelink_draws() 
     lifelink_substitute_and_poison_order(DrawReplacement::ZursWeirding);
 }
 
+/// CR 101.4 + CR 616.1: Notion Thief redirects the Lich's individual draws
+/// during combat, so P0 answers Abundance before P1 orders poison replacements.
+#[test]
+fn notion_thiefs_redirected_lifelink_draws_prompt_before_poison_order() {
+    const ELF: &str = "Infect (This creature deals damage to creatures in the form of -1/-1 counters and to players in the form of poison counters.)";
+    const NOTION_THIEF: &str = "Flash\nIf an opponent would draw a card except the first one they draw in each of their draw steps, instead that player skips that draw and you draw a card.";
+    const VORINCLEX: &str = "Trample, haste\nIf you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
+
+    let p2 = PlayerId(2);
+    let mut scenario = three_player_rider_board();
+    let elf = creature_with_keywords(&mut scenario, P0, "Glistener Elf", (1, 1), &["Infect"], ELF);
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let nighthawk = creature_with_keywords(
+        &mut scenario,
+        p2,
+        "Vampire Nighthawk",
+        (2, 3),
+        &["Flying", "Deathtouch", "Lifelink"],
+        VAMPIRE_NIGHTHAWK,
+    );
+    creature_with_keywords(
+        &mut scenario,
+        P0,
+        "Notion Thief",
+        (3, 1),
+        &["Flash"],
+        NOTION_THIEF,
+    );
+    let vorinclex = [P0, P1].map(|player| {
+        creature_with_keywords(
+            &mut scenario,
+            player,
+            "Vorinclex, Monstrous Raider",
+            (6, 6),
+            &["Trample", "Haste"],
+            VORINCLEX,
+        )
+    });
+    scenario.add_enchantment_from_oracle(p2, "Nefarious Lich", NEFARIOUS_LICH);
+    let abundance = scenario
+        .add_enchantment_from_oracle(P0, "Abundance", ABUNDANCE)
+        .id();
+    let mut runner = scenario.build();
+    let hand_before = hand_size(&runner, P0);
+
+    let mut events = to_the_first_combat_prompt(
+        &mut runner,
+        &[
+            (elf, AttackTarget::Player(P1)),
+            (bears, AttackTarget::Player(p2)),
+        ],
+        p2,
+        &[(nighthawk, bears)],
+    );
+    let mut decline = answering_abundance(false);
+    let mut choosers = Vec::new();
+    events.extend(finish_the_combat_answering(&mut runner, |state| {
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "expected a combat replacement choice, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(
+            Some(player),
+            [P0, P0, P1].get(choosers.len()),
+            "P0's Abundance must prompt twice before P1 orders poison"
+        );
+        choosers.push(*player);
+        if *player == P0 {
+            assert!(candidates.iter().all(|c| c.source_id == abundance));
+            return decline(state);
+        }
+        assert_eq!(candidates.len(), 2);
+        assert!(vorinclex
+            .iter()
+            .all(|source| candidates.iter().any(|c| c.source_id == *source)));
+        GameAction::ChooseReplacement {
+            index: candidates
+                .iter()
+                .position(|c| c.source_id == vorinclex[0])
+                .unwrap(),
+        }
+    }));
+
+    assert_eq!(choosers, [P0, P0, P1]);
+    assert_batch_settled(&runner);
+    assert_eq!(runner.state().players[1].poison_counters, 1);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
+    assert_eq!(life(&runner, p2), 20);
+    assert_eq!(cards_drawn(&events, p2), 0);
+    assert_eq!(cards_drawn(&events, P0), 2);
+    assert_eq!(hand_size(&runner, P0) - hand_before, 2);
+}
+
 #[derive(Clone, Copy)]
 enum DrawReplacement {
     Abundance(PlayerId),

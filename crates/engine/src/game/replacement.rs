@@ -11517,18 +11517,29 @@ pub(crate) fn visit_proposed_event_choosers(
                 visit_draw_event_choosers(state, *player_id, *amount, visit)
             }
             ProposedEvent::Draw {
-                player_id, stage, ..
+                player_id, applied, ..
             } => {
                 let Some(execute) = definition.execute.as_deref() else {
                     continue;
                 };
                 let controller = replacement_ability_controller(state, candidate, definition);
                 if let Effect::Draw { target, .. } = execute.effect.as_ref() {
-                    // CR 121.2a: a multi-card instruction can substitute draws
-                    // for another player, whose individual draw has its own chooser.
-                    *stage == DrawEventStage::Instruction
-                        && draw_head_draws_for_other_player(target, controller, *player_id)
-                        && visit_draw_event_choosers(state, controller, 1, visit)
+                    if !draw_head_draws_for_other_player(target, controller, *player_id) {
+                        continue;
+                    }
+                    // CR 121.2: either draw stage can substitute an individual draw
+                    // for another player. CR 614.5 + CR 616.1f: retain the applied
+                    // effects when checking the new recipient's replacements.
+                    // CR 101.4 + CR 616.1: that recipient's first prompt now
+                    // determines when this chain may ask for a choice.
+                    let mut redirected = ProposedEvent::Draw {
+                        player_id: controller,
+                        count: 1,
+                        stage: DrawEventStage::Individual,
+                        applied: applied.clone(),
+                    };
+                    redirected.mark_applied(candidate);
+                    visit_proposed_event_choosers(state, &redirected, visit)
                 } else {
                     let resolved = build_resolved_from_def(execute, candidate.source, controller);
                     visit_draw_fanout_choosers(state, &resolved, *player_id, visit)
