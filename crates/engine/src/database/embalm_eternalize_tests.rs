@@ -330,9 +330,9 @@ fn embalm_activation_creates_white_zombie_copy_with_no_mana_cost() {
     assert!(state.battlefield.contains(&token), "token on battlefield");
     // White, Zombie added to existing Cat, no mana cost, P/T copied (2/1).
     assert_eq!(tok.color, vec![ManaColor::White]);
-    assert!(tok.card_types.subtypes.contains(&"Zombie".to_string()));
+    assert!(tok.card_types.subtypes.iter().any(|i| i == "Zombie"));
     assert!(
-        tok.card_types.subtypes.contains(&"Cat".to_string()),
+        tok.card_types.subtypes.iter().any(|i| i == "Cat"),
         "Zombie is added in addition to the copied types"
     );
     assert_eq!(tok.mana_cost, ManaCost::NoCost, "token has no mana cost");
@@ -363,8 +363,8 @@ fn eternalize_activation_creates_4_4_black_zombie_copy_with_no_mana_cost() {
     assert_eq!(tok.color, vec![ManaColor::Black]);
     assert_eq!(tok.power, Some(4));
     assert_eq!(tok.toughness, Some(4));
-    assert!(tok.card_types.subtypes.contains(&"Zombie".to_string()));
-    assert!(tok.card_types.subtypes.contains(&"Cat".to_string()));
+    assert!(tok.card_types.subtypes.iter().any(|i| i == "Zombie"));
+    assert!(tok.card_types.subtypes.iter().any(|i| i == "Cat"));
     assert_eq!(tok.mana_cost, ManaCost::NoCost);
 }
 

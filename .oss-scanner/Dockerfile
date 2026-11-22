@@ -40,7 +40,7 @@ COPY . /src
 WORKDIR /src
 
 # The workspace pins its toolchain in rust-toolchain.toml
-# (nightly-2026-04-19, with the cranelift backend and the
+# (nightly-2026-11-19, with the cranelift backend and the
 # wasm32-unknown-unknown target). Install it explicitly so a bad pin
 # fails here, while the network is up, not mid-build.
 RUN rustup toolchain install \

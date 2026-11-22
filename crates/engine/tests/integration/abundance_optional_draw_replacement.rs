@@ -237,7 +237,7 @@ fn abundance_accept_choose_land_puts_first_land_into_hand() {
 
     // The kept card must be Forest (first land from the top).
     assert!(
-        hand_after_names.contains(&"Forest".to_string()),
+        hand_after_names.iter().any(|i| i == "Forest"),
         "Forest must be in hand; got {hand_after_names:?}"
     );
     assert!(runner.state().players[0].hand.contains(&forest));
@@ -323,7 +323,7 @@ fn abundance_decline_falls_through_to_normal_draw() {
         "decline must result in exactly +1 hand card (the natural draw); got {hand_after_names:?}"
     );
     assert!(
-        hand_after_names.contains(&"Grizzly Bears".to_string()),
+        hand_after_names.iter().any(|i| i == "Grizzly Bears"),
         "top library card (Grizzly Bears) must be drawn on decline; got {hand_after_names:?}"
     );
     assert_eq!(

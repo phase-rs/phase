@@ -4,6 +4,9 @@
 //! other than `support` through `crate::<module>`, and every module with an insta snapshot; it may
 //! also hold modules from this range. `no_top_level_test_binaries` enforces that each file here is
 //! registered in exactly one shard root.
+// The auto-trait (`Send`) proof for the im-backed `GameState` exceeds the default
+// recursion limit of 128 (a future-incompatibility error on newer toolchains).
+#![recursion_limit = "512"]
 
 pub mod support;
 
@@ -61,6 +64,7 @@ mod runadi_behemoth_caller_etb_counters;
 mod runaway_steam_kin_fewer_than_counters;
 mod runed_halo_chosen_card_name_protection;
 mod runo_stromkirk_reveal_transform_gate;
+mod ruric_thar_magecrusher_hexproof;
 mod s01_current_phase_condition;
 mod s01_excess_damage_followup;
 mod s01_object_property_conditions;
@@ -240,6 +244,7 @@ mod swarm_combat_witness;
 mod swashbuckler_extraordinaire_declined_sacrifice_3179;
 mod swashbuckler_repro_3179_accept;
 mod swords_life_equals_power_counters_2895;
+mod syphon_flesh_merged_sacrifice;
 mod syr_vondam_power_gate;
 mod szadek_combat_damage_to_counters;
 mod taigam_master_opportunist_exiles_cast_spell_749;
@@ -294,6 +299,7 @@ mod the_notary_hobbits;
 mod the_sentry_golden_guardian;
 mod the_ur_dragon_eminence;
 mod the_who_opponent_guess_resolution;
+mod theorists_sanctum;
 mod there_are_no_permanents_state_trigger;
 mod they_gain_keyword_anaphor;
 mod thickest_in_the_thicket_target_anaphor_8460;
@@ -332,6 +338,7 @@ mod top_of_library_object_form_permission;
 mod torch_the_tower_die_exile;
 mod tracked_set_anaphor_quantity_binds;
 mod tracked_set_anaphor_source;
+mod tracked_set_zone_scan_merged;
 mod trample_lethal_assigned_this_step;
 mod treasure_map_landmark_transform;
 mod treasured_find_regression;

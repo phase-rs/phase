@@ -2654,28 +2654,55 @@ fn parse_source_attached_to_creature(input: &str) -> OracleResult<'_, StaticCond
     Ok((rest, StaticCondition::SourceAttachedToCreature))
 }
 
-/// CR 120.3 + CR 702.11b: Parse "<subject> hasn't dealt damage yet" into
-/// `Not(SourceHasDealtDamage)` — the negated form of the sticky "has dealt
-/// damage since entering" gate (Palladia-Mors, the Ruiner; Karakyk Guardian:
-/// "has hexproof if it hasn't dealt damage yet"). Accepts the self-referential
-/// subjects the conditional-keyword templates use ("it", "~", "this creature",
-/// "this permanent"). Only the negated "hasn't" idiom appears in Oracle text, so
-/// no affirmative form is produced here.
-fn parse_source_hasnt_dealt_damage(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((
-        tag("it "),
-        tag("~ "),
-        tag("this creature "),
-        tag("this permanent "),
-    ))
-    .parse(input)?;
-    value(
-        StaticCondition::Not {
-            condition: Box::new(StaticCondition::SourceHasDealtDamage),
-        },
-        (parse_hasnt, tag(" dealt damage yet")),
+/// CR 120.2a + CR 120.2b: Parse the sticky-history tail "dealt [combat |noncombat
+/// ]damage yet" into the damage class it names (`Any` for the bare form). Shared
+/// by `parse_source_hasnt_dealt_damage` and the SelfRef "they haven't ..." pronoun
+/// rewrite so both read one definition of the phrase.
+pub(crate) fn parse_dealt_damage_yet(input: &str) -> OracleResult<'_, DamageKindFilter> {
+    preceded(
+        tag("dealt "),
+        terminated(parse_damage_kind_qualifier, tag("damage yet")),
     )
-    .parse(rest)
+    .parse(input)
+}
+
+/// CR 120.3 + CR 702.11b: Parse "<subject> hasn't dealt [combat |noncombat
+/// ]damage yet" into `Not(SourceHasDealtDamage { kind })` — the negated form of
+/// the sticky "has dealt damage since entering" gate (Palladia-Mors, the Ruiner;
+/// Karakyk Guardian: "has hexproof if it hasn't dealt damage yet"; Ruric Thar,
+/// Magecrusher: "... they haven't dealt combat damage yet", after the SelfRef
+/// pronoun rewrite to "~ hasn't ..."). CR 120.2a / CR 120.2b: the optional
+/// qualifier selects the damage class. The source-named subjects ("~", "this
+/// creature", "this permanent") accept every damage class. CR 611.3a: the
+/// anaphoric "it" is accepted context-free only in the bare `Any` form (the
+/// Palladia-Mors / Karakyk Guardian / Oyaminartok templates); a qualified
+/// "it hasn't dealt combat damage yet" stays unrecognized here because on an
+/// attached-subject static "it" names the enchanted/equipped creature, not the
+/// source — mirroring the bare "it entered this turn" refusal. Only the negated
+/// "hasn't" idiom appears in Oracle text, so no affirmative form is produced.
+fn parse_source_hasnt_dealt_damage(input: &str) -> OracleResult<'_, StaticCondition> {
+    let hasnt_dealt_damage_yet = || preceded((parse_hasnt, tag(" ")), parse_dealt_damage_yet);
+    map(
+        alt((
+            preceded(
+                (
+                    alt((tag("~"), tag("this creature"), tag("this permanent"))),
+                    tag(" "),
+                ),
+                hasnt_dealt_damage_yet(),
+            ),
+            preceded(
+                tag("it "),
+                verify(hasnt_dealt_damage_yet(), |kind| {
+                    *kind == DamageKindFilter::Any
+                }),
+            ),
+        )),
+        |kind| StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage { kind }),
+        },
+    )
+    .parse(input)
 }
 
 /// CR 301.5a / CR 303.4 / CR 508.1k / CR 509.1g / CR 509.1h: gendered/plural
@@ -6986,7 +7013,7 @@ pub(crate) fn inject_controller_you(filter: TargetFilter) -> TargetFilter {
 
 /// CR 102.2 + CR 102.3: Recognize opponent possessive prefixes. Shared
 /// combinator used by zone-count parsing and life-total condition parsing.
-fn parse_opponent_possessive(input: &str) -> OracleResult<'_, ()> {
+pub(crate) fn parse_opponent_possessive(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((
@@ -9599,22 +9626,22 @@ fn parse_you_drew_prefix(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-/// "<threshold> card(s) <window>" for controller draws: the plural
-/// `parse_ge_threshold` form ("two or more cards") plus the singular GE-1
-/// article idiom ("a card"; drawing is the unit event), each over the shared
-/// history window. Covers "you drew a card this turn" and "you drew two or
-/// more cards last turn" with no new tags; "since your last turn ended" has
-/// no draw counter and is declined.
+/// "<threshold> card(s) <window>" for controller draws. Strict comparisons,
+/// plural GE thresholds, and the singular article share the history window.
 fn parse_drawn_cards_in_window(input: &str) -> OracleResult<'_, StaticCondition> {
-    if let Ok((rest, n)) = parse_ge_threshold(input) {
-        let (rest, _) = tag("cards ").parse(rest)?;
-        let (rest, window) = parse_history_window(rest)?;
-        return draw_window_condition(input, rest, window, n);
-    }
-    let (rest, _) = parse_article(input)?;
-    let (rest, _) = tag("card ").parse(rest)?;
+    let (rest, (comparator, n)) = alt((
+        terminated(
+            (parse_strict_comparator_prefix, parse_number),
+            alt((tag(" cards "), tag(" card "))),
+        ),
+        map(terminated(parse_ge_threshold, tag("cards ")), |n| {
+            (Comparator::GE, n)
+        }),
+        value((Comparator::GE, 1), (parse_article, tag("card "))),
+    ))
+    .parse(input)?;
     let (rest, window) = parse_history_window(rest)?;
-    draw_window_condition(input, rest, window, 1)
+    draw_window_condition(input, rest, window, comparator, n)
 }
 
 /// CR 121.1 + CR 603.4: map a controller-draw threshold onto its window
@@ -9624,6 +9651,7 @@ fn draw_window_condition<'a>(
     input: &'a str,
     rest: &'a str,
     window: HistoryWindow,
+    comparator: Comparator,
     n: u32,
 ) -> OracleResult<'a, StaticCondition> {
     let qty = match window {
@@ -9640,7 +9668,7 @@ fn draw_window_condition<'a>(
             )))
         }
     };
-    Ok((rest, make_quantity_ge(qty, n)))
+    Ok((rest, make_quantity_comparison(qty, comparator, n)))
 }
 
 fn parse_you_drew_cards_in_window(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -17714,9 +17742,72 @@ mod tests {
         assert_eq!(
             c,
             StaticCondition::Not {
-                condition: Box::new(StaticCondition::SourceHasDealtDamage),
+                condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                    kind: DamageKindFilter::Any,
+                }),
             }
         );
+    }
+
+    // CR 120.2a + CR 120.2b: the damage-class qualifier on the sticky
+    // "hasn't dealt ... damage yet" gate (Ruric Thar, Magecrusher after the
+    // SelfRef pronoun rewrite), incl. the typographic apostrophe.
+    #[test]
+    fn test_source_hasnt_dealt_kind_damage_yet() {
+        let not_dealt = |kind| StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage { kind }),
+        };
+        for (text, kind) in [
+            (
+                "~ hasn't dealt combat damage yet",
+                DamageKindFilter::CombatOnly,
+            ),
+            (
+                "~ hasn't dealt noncombat damage yet",
+                DamageKindFilter::NoncombatOnly,
+            ),
+            (
+                "~ hasn\u{2019}t dealt combat damage yet",
+                DamageKindFilter::CombatOnly,
+            ),
+            (
+                "this creature hasn\u{2019}t dealt damage yet",
+                DamageKindFilter::Any,
+            ),
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "{text}: must be fully consumed");
+            assert_eq!(c, not_dealt(kind), "{text}");
+        }
+    }
+
+    // Hostile adjacent grammar: the per-turn "this turn" form is a different
+    // concept and must not be typed as the sticky since-entering gate; the bare
+    // plural "they" is context-gated (only the SelfRef rewrite binds it). CR
+    // 611.3a: the anaphoric "it" with a damage-class qualifier is refused
+    // context-free (on an attached-subject static "it" is the enchanted /
+    // equipped creature, not the source); only the bare form stays accepted.
+    #[test]
+    fn test_source_hasnt_dealt_damage_yet_rejects_neighbours() {
+        let is_sticky_gate = |text: &str| {
+            matches!(
+                parse_inner_condition(text),
+                Ok((
+                    "",
+                    StaticCondition::Not { ref condition }
+                )) if matches!(**condition, StaticCondition::SourceHasDealtDamage { .. })
+            )
+        };
+        assert!(!is_sticky_gate("it hasn't dealt combat damage this turn"));
+        assert!(!is_sticky_gate("they haven't dealt damage yet"));
+        assert!(!is_sticky_gate("they haven't dealt combat damage yet"));
+        assert!(!is_sticky_gate("it hasn't dealt combat damage yet"));
+        assert!(!is_sticky_gate("it hasn't dealt noncombat damage yet"));
+        assert!(!is_sticky_gate("it hasn\u{2019}t dealt combat damage yet"));
+        // Positive reach-guards: the same predicate accepts the source-named
+        // qualified form and the bare anaphoric form.
+        assert!(is_sticky_gate("~ hasn't dealt combat damage yet"));
+        assert!(is_sticky_gate("it hasn't dealt damage yet"));
     }
 
     // CR 400.7: Shardmage's Rescue — `~ entered this turn` (no "the battlefield").
@@ -22309,21 +22400,41 @@ mod tests {
     }
 
     #[test]
-    fn youve_drawn_two_or_more_cards_this_turn_counts_controller_draws() {
-        let (rest, c) = parse_inner_condition("you've drawn two or more cards this turn").unwrap();
-        assert_eq!(rest, "");
-        assert_eq!(
-            c,
-            StaticCondition::QuantityComparison {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::CardsDrawnThisTurn {
-                        player: PlayerScope::Controller,
+    fn youve_drawn_card_threshold_counts_controller_draws() {
+        // Proft's Eidetic Memory, Lake-town Toymaker, and Lyra, Tolarian Archangel.
+        for (text, comparator, value) in [
+            (
+                "you've drawn more than one card this turn",
+                Comparator::GT,
+                1,
+            ),
+            (
+                "you've drawn two or more cards this turn",
+                Comparator::GE,
+                2,
+            ),
+            (
+                "you've drawn three or more cards this turn",
+                Comparator::GE,
+                3,
+            ),
+        ] {
+            let (rest, condition) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(
+                condition,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::CardsDrawnThisTurn {
+                            player: PlayerScope::Controller,
+                        },
                     },
+                    comparator,
+                    rhs: QuantityExpr::Fixed { value },
                 },
-                comparator: Comparator::GE,
-                rhs: QuantityExpr::Fixed { value: 2 },
-            }
-        );
+                "{text}"
+            );
+        }
     }
 
     #[test]

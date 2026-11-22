@@ -2093,7 +2093,7 @@ fn parse_its_a_card_type_gate_body<'a>(
         }
     }
     let type_word = type_str.rsplit(' ').next().unwrap_or(type_str);
-    let capitalized = format!("{}{}", &type_word[..1].to_uppercase(), &type_word[1..]);
+    let capitalized = format!("{}{}", type_word[..1].to_uppercase(), &type_word[1..]);
     // CR 608.2c: "permanent" is not a CoreType (it spans CR 110.1's permanent card
     // types). Build the condition via the existing parse_type_phrase_folding building block —
     // "permanent card" → TargetFilter::Typed(TypeFilter::Permanent) — and gate on it
@@ -3714,7 +3714,7 @@ pub(super) fn try_parse_type_setting(text: &str) -> Option<AbilityDefinition> {
         .ok()?;
 
     let type_name = type_name.trim();
-    let capitalized = format!("{}{}", &type_name[..1].to_uppercase(), &type_name[1..]);
+    let capitalized = format!("{}{}", type_name[..1].to_uppercase(), &type_name[1..]);
     CoreType::from_str(&capitalized).ok()?;
 
     let mut remove_types = Vec::new();
@@ -7840,7 +7840,7 @@ pub(crate) fn static_condition_to_ability_condition(
         // Layer-6 gate (the conditional hexproof grant) with no effect-resolution
         // (`AbilityCondition`) equivalent. `Not(SourceHasDealtDamage)` is handled by
         // the inner Not sub-match's `_ => None` arm above.
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         // CR 110.5b + CR 611.2b: `IsTapped { scope }` is a duration-only
         // target-relative tap condition (Zygon Infiltrator's copy duration), not

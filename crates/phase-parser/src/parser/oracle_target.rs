@@ -1,7 +1,9 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1, take_while1};
-use nom::character::complete::{multispace0, one_of, satisfy, space1};
-use nom::combinator::{cut, eof, map, map_opt, not, opt, peek, success, value, verify};
+use nom::character::complete::{multispace0, one_of, satisfy, space0, space1};
+use nom::combinator::{
+    all_consuming, cut, eof, map, map_opt, not, opt, peek, success, value, verify,
+};
 use nom::multi::{many0, many_till};
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
@@ -10,10 +12,10 @@ use crate::types::ability::{
     AggregateFunction, AttachmentKind, AttachmentReferent, BlockPairDirection, CardTypeSetSource,
     ChoiceType, CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator,
     ControllerRef, CostCategory, CountScope, CrewRelation, DamageKindFilter, FilterProp,
-    NameStickerSet, ObjectProperty, ObjectScope, Parity, ParitySource, PlayerFilter,
-    PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-    SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
-    ThisWayCause, TypeFilter, TypedFilter,
+    LinkedExileReturn, NameStickerSet, ObjectProperty, ObjectScope, Parity, ParitySource,
+    PlayerFilter, PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr,
+    QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
+    TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -26,8 +28,10 @@ use super::oracle_effect::{
     is_bare_object_pronoun, parse_multi_target_count_expr, parse_search_name_reference_suffix,
     resolve_it_pronoun,
 };
+use super::oracle_ir::ast::AnaphorNumber;
 use super::oracle_ir::context::{
-    bind_controller_phrase, ChosenColorQualifierScope, ParseContext, SpellAnaphorBinding,
+    bind_controller_phrase, ChainPriorPublishers, ChosenColorQualifierScope, ParseContext,
+    SpellAnaphorBinding,
 };
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
@@ -320,7 +324,7 @@ fn parse_card_or_cards_word(input: &str) -> super::oracle_nom::error::OracleResu
 /// CR 608.2c + CR 406.6 + CR 607.2a + CR 707.10 + CR 702.75a: Resolve a
 /// singular "the exiled card" / "copy the exiled card" anaphor to the
 /// correct binding. When an earlier clause in the SAME resolution chain
-/// already exiled a card (`chain_has_prior_exile_producer`), the anaphor
+/// already exiled a card (`ChainPriorPublishers::IncludesExile`), the anaphor
 /// refers to that same-chain exile and keeps its pre-existing binding
 /// (`same_chain_binding`, e.g. `TrackedSet{0}` or `ParentTarget`). Otherwise
 /// the referenced exile happened in an EARLIER, separately-resolved ability
@@ -330,13 +334,118 @@ fn parse_card_or_cards_word(input: &str) -> super::oracle_nom::error::OracleResu
 /// `exile_links` (CR 607.1/607.2a: linked abilities reference the same
 /// object across resolutions).
 pub(crate) fn resolve_singular_exiled_card_target(
-    chain_has_prior_exile_producer: bool,
+    chain: ChainPriorPublishers,
     same_chain_binding: TargetFilter,
 ) -> TargetFilter {
-    if chain_has_prior_exile_producer {
-        same_chain_binding
-    } else {
-        TargetFilter::ExiledBySource
+    match chain {
+        ChainPriorPublishers::IncludesExile => same_chain_binding,
+        ChainPriorPublishers::Absent | ChainPriorPublishers::NonExileOnly => {
+            TargetFilter::ExiledBySource
+        }
+    }
+}
+
+/// CR 607.2a: "the exiled card" / "the exiled cards" as a whole target phrase.
+/// The grammatical number selects how a return binds the linked set: plural
+/// names the whole set (a set-wide move), singular one card. Input is the
+/// trimmed, lowercased target text.
+pub(crate) fn parse_exiled_card_anaphor(input: &str) -> OracleResult<'_, AnaphorNumber> {
+    all_consuming(terminated(
+        alt((
+            value(AnaphorNumber::Plural, tag("the exiled cards")),
+            value(AnaphorNumber::Singular, tag("the exiled card")),
+        )),
+        (space0, eof),
+    ))
+    .parse(input)
+}
+
+/// CR 607.2a: the members the linked exile instruction put into exile — the
+/// chain's tracked set narrowed to the `Exiled`-caused subset.
+pub(crate) fn exiled_caused_tracked_set() -> TargetFilter {
+    TargetFilter::TrackedSetFiltered {
+        id: TrackedSetId(0),
+        filter: Box::new(TargetFilter::Any),
+        caused_by: Some(ThisWayCause::Exiled),
+    }
+}
+
+/// CR 607.2a: the mark a return written "the exiled card(s)" carries when the
+/// phrase is bound to the bare chain sentinel. Any other binding (a same-clause
+/// exile antecedent, `ExiledBySource`, a narrowed sentinel) is not the linked-set
+/// return and carries no mark. Grammatical number selects the move: plural names
+/// the whole set (a set-wide move), singular one card.
+pub(crate) fn linked_exile_return_mark(
+    number: AnaphorNumber,
+    binding: &TargetFilter,
+) -> Option<LinkedExileReturn> {
+    matches!(
+        binding,
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        }
+    )
+    .then_some(match number {
+        AnaphorNumber::Singular => LinkedExileReturn::OneCard,
+        AnaphorNumber::Plural => LinkedExileReturn::WholeSet,
+    })
+}
+
+/// Where the ability holding a marked "the exiled card(s)" return is written: the
+/// axis that decides which linked exile the phrase names.
+///
+/// CR 607.1 / CR 607.1a / CR 607.1d. A CR 607.5 pair (both abilities acquired
+/// from one effect) would bind the grantee's own linked exile; no printed card in
+/// the class reaches it, so it fails closed with the other created-by-effect
+/// returns, as `AbilityProvenance` treats CR 607.1a self-grants conservatively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinkedExileReturnHost {
+    /// CR 607.1 + CR 607.2a: printed on the source (a trigger, replacement or
+    /// spell ability the card prints). The linked exile instruction is another
+    /// ability printed on the same object, so the phrase names the cards that
+    /// object's linked exile put into exile.
+    PrintedOnSource,
+    /// Written inside an ability an effect creates (a granted trigger or ability,
+    /// a granted static's definition, a draw-replacement substitute), so not
+    /// printed on the source (CR 607.1). For Timothar's Bat, a token the
+    /// source's ability created, CR 607.1d links the grant to that ability.
+    /// The phrase names the cards exiled by the resolution that created it
+    /// (Timothar's ruling, 2021-11-19), which only a creation-time binding can
+    /// fix; until #11123 (Timothar's creation-time binding) lands, it narrows the
+    /// resolving chain's set to its `Exiled`-caused members.
+    CreatedByEffect,
+}
+
+/// CR 607.2a + CR 406.6 + CR 608.2c: the binding of a marked "the exiled card(s)"
+/// return, from the prior publishers of its OWN resolution chain and the host
+/// that holds it. Over only non-exile departures (Day of the Dragons' sacrifice,
+/// Timothar's granted sacrifice, The Spot's library put) the phrase names only
+/// the cards the linked exile instruction put into exile, never the chain's own
+/// members:
+/// - printed on the source (CR 607.1, CR 607.2a): the source's linked exile,
+///   `ExiledBySource`, the binding the O-ring class and Tidehollow Sculler use;
+/// - created by an effect (CR 607.1d; Timothar's ruling 2021-11-19, "Timothar's
+///   last ability is linked to the ability it grants the Bat token"): the
+///   creating resolution's `Exiled`-caused members, pending creation-time
+///   binding (#11123).
+///
+/// `None` keeps the sentinel: with no prior publisher (the O-ring LTB shape
+/// `detect_etb_exile_ltb_return` pairs) or over a same-chain exile producer.
+pub(crate) fn linked_exile_return_binding(
+    chain: ChainPriorPublishers,
+    host: LinkedExileReturnHost,
+) -> Option<TargetFilter> {
+    match (chain, host) {
+        (ChainPriorPublishers::NonExileOnly, LinkedExileReturnHost::PrintedOnSource) => {
+            Some(TargetFilter::ExiledBySource)
+        }
+        (ChainPriorPublishers::NonExileOnly, LinkedExileReturnHost::CreatedByEffect) => {
+            Some(exiled_caused_tracked_set())
+        }
+        (
+            ChainPriorPublishers::Absent | ChainPriorPublishers::IncludesExile,
+            LinkedExileReturnHost::PrintedOnSource | LinkedExileReturnHost::CreatedByEffect,
+        ) => None,
     }
 }
 
@@ -1676,11 +1785,7 @@ pub fn parse_target_with_syntax<'a>(
         tag::<_, _, OracleError<'_>>("the rest of the exiled cards").parse(lower.as_str())
     {
         return (
-            TargetFilter::TrackedSetFiltered {
-                id: TrackedSetId(0),
-                filter: Box::new(TargetFilter::Any),
-                caused_by: Some(ThisWayCause::Exiled),
-            },
+            exiled_caused_tracked_set(),
             &text[lower.len() - rest.len()..],
             syntax,
         );
@@ -2112,9 +2217,10 @@ pub fn parse_target_with_syntax<'a>(
         // the tracked set as `TrackedSetFiltered{Not(AttackedThisTurn)}` — the
         // frozen "those creatures" population INTERSECTED with the did-not-attack
         // predicate. Parse the whole typed phrase first; if it carries any
-        // predicate PROPERTY beyond the head type noun, wrap it. A bare noun
-        // ("creatures"/"permanents"/"cards") with no trailing predicate yields
-        // only a head `type_filter` and no properties → the plain `TrackedSet`.
+        // predicate PROPERTY or a controller scope beyond the head type noun
+        // ("each of those creatures you don't control", Lost in the Maze), wrap
+        // it. A bare noun ("creatures"/"permanents"/"cards") with no trailing
+        // qualifier yields only a head `type_filter` → the plain `TrackedSet`.
         let (filter, remainder) = parse_type_phrase_folding_with_ctx(phrase, ctx);
         if target_filter_carries_predicate_property(&filter) {
             return (
@@ -4670,6 +4776,12 @@ fn parse_type_phrase_folding_unbound<'a>(
         pos += consumed;
     }
 
+    // CR 608.2c: "that weren't put there this way" names the complement of the objects the preceding instruction in the same ability moved (Bringer of the Last Gift: "…returns all creature cards from their graveyard that weren't put there this way…"). Lowered to Not(InTrackedSet(0)); the sentinel binds at resolution to the chain set the sacrifice published.
+    if let Some((prop, consumed)) = parse_not_put_there_this_way_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
     // Check "of the chosen type" / "of that type" suffix (Cavern of Souls,
     // Metallic Mimic; Selfless Safewright). CR 205.3m + CR 608.2c: "of that
     // type" is the anaphor form of "of the chosen type" — same typed reference,
@@ -5607,15 +5719,14 @@ mod declared_damage_source_target_tests {
     }
 }
 
-/// CR 608.2c: True when a typed filter carries a `FilterProp` PREDICATE beyond
-/// the bare head type noun (e.g. `Not(AttackedThisTurn)`, `Untapped`, a
-/// controller-scoping property). Used by the "each of those <noun> that
-/// <predicate>" anaphor to decide whether the trailing predicate must fold into
-/// a `TrackedSetFiltered` (frozen set ∩ predicate) rather than collapsing to a
-/// bare `TrackedSet` that would drop the predicate.
+/// CR 608.2c: True when a typed filter carries a qualifier beyond its bare head
+/// type noun, such as a `FilterProp` predicate or controller scope. Used by the
+/// "each of those <noun> that <predicate>" anaphor to decide whether the
+/// trailing qualifier must fold into a `TrackedSetFiltered` (frozen set ∩
+/// qualifier) rather than collapsing to a bare `TrackedSet` that would drop it.
 fn target_filter_carries_predicate_property(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(tf) => !tf.properties.is_empty(),
+        TargetFilter::Typed(tf) => !tf.properties.is_empty() || tf.controller.is_some(),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(target_filter_carries_predicate_property)
         }
@@ -9966,6 +10077,24 @@ pub(crate) fn parse_zone_changed_this_turn_suffix(
     parse_zone_change_provenance(input, to, false)
 }
 
+/// CR 608.2c: "that weren't put there this way" names the complement of the objects the preceding instruction in the same ability moved (Bringer of the Last Gift: "…returns all creature cards from their graveyard that weren't put there this way…"). Lowered to Not(InTrackedSet(0)); the sentinel binds at resolution to the chain set the sacrifice published.
+fn parse_not_put_there_this_way_suffix(input: &str) -> Option<(FilterProp, usize)> {
+    let trimmed = input.trim_start();
+    let offset = input.len() - trimmed.len();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("that weren't put there this way")
+        .parse(trimmed)
+        .ok()?;
+
+    Some((
+        FilterProp::Not {
+            prop: Box::new(FilterProp::InTrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            }),
+        },
+        offset + trimmed.len() - rest.len(),
+    ))
+}
+
 fn zone_for_scope(props: &[FilterProp]) -> Option<Zone> {
     props.iter().find_map(|prop| match prop {
         FilterProp::InZone { zone } => Some(*zone),
@@ -12476,6 +12605,116 @@ mod tests {
     use crate::types::ability::{PtStat, PtValueScope};
     use crate::types::counter::CounterType;
     use crate::types::keywords::Keyword;
+
+    const CHAIN_STATES: [ChainPriorPublishers; 3] = [
+        ChainPriorPublishers::Absent,
+        ChainPriorPublishers::NonExileOnly,
+        ChainPriorPublishers::IncludesExile,
+    ];
+
+    /// U1 — CR 607.2a: the anaphor combinator reads the grammatical number of
+    /// a whole "the exiled card(s)" phrase and rejects adjacent grammar.
+    #[test]
+    fn exiled_card_anaphor_reads_number_of_the_whole_phrase() {
+        let number = |text| parse_exiled_card_anaphor(text).ok().map(|(_, n)| n);
+        assert_eq!(number("the exiled card"), Some(AnaphorNumber::Singular));
+        assert_eq!(number("the exiled cards"), Some(AnaphorNumber::Plural));
+        assert_eq!(number("the exiled cards "), Some(AnaphorNumber::Plural));
+        for adjacent in [
+            "the exiled card's owner",
+            "the exiled creature",
+            "the rest of the exiled cards",
+            "those exiled cards",
+        ] {
+            assert_eq!(number(adjacent), None, "{adjacent:?} is not the anaphor");
+        }
+    }
+
+    /// U2 — CR 607.2a + CR 406.6: only the bare chain sentinel carries the
+    /// linked-exile mark, numbered by the anaphor; and only a chain of non-exile
+    /// publishers rebinds a marked return to the `Exiled`-caused subset.
+    #[test]
+    fn linked_exile_mark_and_binding_cover_only_the_bare_sentinel_over_non_exile_chains() {
+        let bindings = [
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(7),
+            },
+            TargetFilter::ExiledBySource,
+            TargetFilter::Any,
+        ];
+        for (number, mark) in [
+            (AnaphorNumber::Singular, LinkedExileReturn::OneCard),
+            (AnaphorNumber::Plural, LinkedExileReturn::WholeSet),
+        ] {
+            for (index, binding) in bindings.iter().enumerate() {
+                assert_eq!(
+                    linked_exile_return_mark(number, binding),
+                    (index == 0).then_some(mark),
+                    "{number:?} × {binding:?}"
+                );
+            }
+        }
+        for chain in CHAIN_STATES {
+            for (host, bound) in [
+                (
+                    LinkedExileReturnHost::PrintedOnSource,
+                    TargetFilter::ExiledBySource,
+                ),
+                (
+                    LinkedExileReturnHost::CreatedByEffect,
+                    exiled_caused_tracked_set(),
+                ),
+            ] {
+                assert_eq!(
+                    linked_exile_return_binding(chain, host),
+                    (chain == ChainPriorPublishers::NonExileOnly).then_some(bound),
+                    "{chain:?} × {host:?}"
+                );
+            }
+        }
+    }
+
+    /// U3 — the chain-state join is a lattice (`Absent` identity,
+    /// `IncludesExile` absorbing), and the singular authority keeps the
+    /// same-chain binding only over an exile producer.
+    #[test]
+    fn chain_prior_publishers_join_and_singular_authority() {
+        for a in CHAIN_STATES {
+            assert_eq!(a.join(a), a, "idempotent: {a:?}");
+            assert_eq!(a.join(ChainPriorPublishers::Absent), a, "identity: {a:?}");
+            assert_eq!(
+                a.join(ChainPriorPublishers::IncludesExile),
+                ChainPriorPublishers::IncludesExile,
+                "absorbing: {a:?}"
+            );
+            for b in CHAIN_STATES {
+                assert_eq!(a.join(b), b.join(a), "commutative: {a:?} {b:?}");
+            }
+        }
+        assert_eq!(
+            ChainPriorPublishers::Absent.join(ChainPriorPublishers::NonExileOnly),
+            ChainPriorPublishers::NonExileOnly
+        );
+        for chain in CHAIN_STATES {
+            assert_eq!(
+                chain.includes_exile(),
+                chain == ChainPriorPublishers::IncludesExile
+            );
+            let expected = if chain == ChainPriorPublishers::IncludesExile {
+                TargetFilter::ParentTarget
+            } else {
+                TargetFilter::ExiledBySource
+            };
+            assert_eq!(
+                resolve_singular_exiled_card_target(chain, TargetFilter::ParentTarget),
+                expected,
+                "{chain:?}"
+            );
+        }
+    }
 
     #[test]
     fn parent_controller_population_requires_a_typed_object_permission() {
@@ -17009,6 +17248,37 @@ mod tests {
             }
         ));
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn each_of_those_creatures_filters_the_tracked_set_by_controller() {
+        for (text, controller) in [
+            ("each of those creatures you control", ControllerRef::You),
+            (
+                "each of those creatures you don't control",
+                ControllerRef::Opponent,
+            ),
+        ] {
+            let (filter, rest) = parse_target(text);
+            assert_eq!(rest, "", "{text}");
+            match filter {
+                TargetFilter::TrackedSetFiltered {
+                    id,
+                    filter,
+                    caused_by: None,
+                } => {
+                    assert_eq!(id, TrackedSetId(0), "{text}");
+                    assert_eq!(
+                        *filter,
+                        TargetFilter::Typed(TypedFilter::creature().controller(controller)),
+                        "{text}"
+                    );
+                }
+                other => {
+                    panic!("expected a controller-filtered tracked set for {text}, got {other:?}")
+                }
+            }
+        }
     }
 
     /// CR 601.2c: "each of <count> target <type>" must route through "target"
@@ -22690,6 +22960,36 @@ mod tests {
                 }
             )));
         }
+        assert!(
+            rest.trim().is_empty(),
+            "expected empty remainder, got: {rest:?}"
+        );
+    }
+
+    #[test]
+    fn type_phrase_cards_not_put_there_this_way_excludes_tracked_set() {
+        let (filter, rest) = parse_type_phrase_folding(
+            "creature cards from their graveyard that weren't put there this way",
+        );
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+        assert!(
+            tf.properties.iter().any(|prop| matches!(
+                prop,
+                FilterProp::Not { prop }
+                    if matches!(
+                        &**prop,
+                        FilterProp::InTrackedSet { id }
+                            if *id == crate::types::identifiers::TrackedSetId(0)
+                    )
+            )),
+            "the negative this-way qualifier must exclude the current tracked set: {tf:?}"
+        );
         assert!(
             rest.trim().is_empty(),
             "expected empty remainder, got: {rest:?}"
