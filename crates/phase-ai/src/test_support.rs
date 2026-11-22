@@ -30,11 +30,7 @@ pub(crate) fn shared_integration_card_db() -> &'static engine::database::card_db
     static DB: std::sync::OnceLock<engine::database::card_db::CardDatabase> =
         std::sync::OnceLock::new();
     DB.get_or_init(|| {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../engine/tests/fixtures/integration_cards.json.gz");
-        let file = std::fs::File::open(path).expect("integration fixture should open");
-        let decoder = flate2::read::GzDecoder::new(std::io::BufReader::new(file));
-        engine::database::card_db::CardDatabase::from_export_reader(decoder)
+        engine::database::card_db::CardDatabase::from_integration_fixture()
             .expect("integration fixture should load")
     })
 }

@@ -5202,9 +5202,9 @@ mod tests {
     fn hydrating_a_lazily_loaded_fixture_types_only_the_games_cards_and_meld_cards() {
         use crate::game::scenario::{GameScenario, P0};
         use crate::game::scenario_db::GameScenarioDbExt;
-        use crate::test_support::{fixture_path, load_fixture};
+        use crate::test_support::load_fixture;
 
-        let db = load_fixture(&fixture_path());
+        let db = load_fixture();
         let mut scenario = GameScenario::new();
         scenario.add_real_card(P0, "Well of Lost Dreams", Zone::Battlefield, &db);
         scenario.add_real_card(P0, "Plains", Zone::Library, &db);
