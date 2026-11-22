@@ -8768,6 +8768,7 @@ fn scan_resolved_continuous_static(
         protection_does_not_remove: _,
         room_door: _,
         granting_object: _,
+        origin: _,
     } = sd;
     let attack_restriction = matches!(
         static_mode,

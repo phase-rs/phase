@@ -8221,6 +8221,7 @@ mod tests {
             let obj = state.objects.get_mut(&omniscience).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
             obj.static_definitions = vec![StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::CastFromHandFree {
                     frequency: CastFrequency::Unlimited,
                     origin: CastFreeOrigin::Hand,

@@ -25,6 +25,7 @@ const PANIC: &str = r#"Cast this spell only during combat before blockers are de
 Target creature can't block this turn.
 Draw a card at the beginning of the next turn's upkeep."#;
 const INCITE: &str = r#"Radiance — Until end of turn, target creature and each other creature that shares a color with it gain "This creature can't block.""#;
+const ARTFUL_DODGE: &str = "Target creature can't be blocked this turn.\nFlashback {U} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
 const DRESS_DOWN: &str = r#"Flash
 When this enchantment enters, draw a card.
 Creatures lose all abilities.
@@ -1905,4 +1906,933 @@ fn call_for_aid_keeps_its_actor_bound_sacrifice_prohibition() {
     );
     assert!(eligible.contains(&control));
     assert!(!eligible.contains(&stolen));
+}
+
+const CRATEROUS_STOMP: &str = r#"Craterous Stomp deals 3 damage to target creature an opponent controls. Each other creature that player controls becomes a Coward in addition to its other types and gains "This creature can't block Giants or Warriors.""#;
+
+fn craterous_stomp_from_oracle(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_spell_to_hand_from_oracle(P0, "Craterous Stomp", false, CRATEROUS_STOMP)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id()
+}
+
+fn add_lands(scenario: &mut GameScenario, player: PlayerId, colors: &[ManaColor]) {
+    for &color in colors {
+        scenario.add_basic_land(player, color);
+    }
+}
+
+fn resolve_dress_down(runner: &mut GameRunner, spell: ObjectId) {
+    let active = runner.state().active_player;
+    runner.cast(spell).resolve();
+    assert_priority(runner, active);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Battlefield);
+}
+
+fn live_statics(
+    runner: &GameRunner,
+    recipient: ObjectId,
+    mode: StaticMode,
+) -> impl Iterator<Item = &StaticDefinition> {
+    runner.state().objects[&recipient]
+        .static_definitions
+        .iter_all()
+        .filter(move |definition| definition.mode == mode)
+}
+
+#[test]
+fn panic_still_prevents_blocking_after_dress_down() {
+    use ManaColor::{Blue, Red};
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island"]);
+    add_lands(&mut scenario, P0, &[Red, Blue, Blue]);
+    let panic = scenario.add_real_card(P0, "Panic", Zone::Hand, db);
+    let dress = scenario.add_real_card(P0, "Dress Down", Zone::Hand, db);
+    let attacker = scenario.add_vanilla(P0, 2, 2);
+    let blocked = scenario.add_vanilla(P1, 2, 2);
+    let other = scenario.add_vanilla(P1, 2, 2);
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .unwrap();
+    assert_priority(&runner, P0);
+
+    let mut control = GameRunner::from_state(runner.state().clone());
+    reach_blocks(&mut control, P1);
+    control.declare_blockers(&[(blocked, attacker)]).unwrap();
+
+    runner
+        .cast(panic)
+        .target_object(blocked)
+        .resolve()
+        .assert_zone(&[panic], Zone::Graveyard);
+    assert_priority(&runner, P0);
+    resolve_dress_down(&mut runner, dress);
+    reach_blocks(&mut runner, P1);
+    // CR 509.1b + CR 611.2c: Panic's restriction still applies to the first blocker.
+    assert!(runner.declare_blockers(&[(blocked, attacker)]).is_err());
+    runner.declare_blockers(&[(other, attacker)]).unwrap();
+}
+
+#[test]
+fn venser_still_prevents_blocks_on_both_attackers_after_dress_down() {
+    use engine::types::CounterType;
+    use ManaColor::Blue;
+
+    const VENSER_ORACLE: &str = r#"[+2]: Exile target permanent you own. Return it to the battlefield under your control at the beginning of the next end step.
+[−1]: Creatures can't be blocked this turn.
+[−8]: You get an emblem with "Whenever you cast a spell, exile target permanent.""#;
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island"]);
+    add_lands(&mut scenario, P0, &[Blue, Blue]);
+    let venser = scenario
+        .add_planeswalker_from_oracle(P0, "Venser, the Sojourner", "Venser", 3, VENSER_ORACLE)
+        .id();
+    let dress = scenario.add_real_card(P0, "Dress Down", Zone::Hand, db);
+    let first = scenario.add_vanilla(P0, 2, 2);
+    let second = scenario.add_vanilla(P0, 2, 2);
+    let blocker = scenario.add_vanilla(P1, 2, 2);
+    let attacks = [
+        (first, AttackTarget::Player(P1)),
+        (second, AttackTarget::Player(P1)),
+    ];
+    let mut runner = scenario.build();
+
+    let mut control = GameRunner::from_state(runner.state().clone());
+    resolve_dress_down(&mut control, dress);
+    control.advance_to_combat();
+    control.declare_attackers(&attacks).unwrap();
+    reach_blocks(&mut control, P1);
+    control.declare_blockers(&[(blocker, first)]).unwrap();
+
+    runner.activate(venser, 1).resolve();
+    assert_priority(&runner, P0);
+    assert_eq!(
+        runner.state().objects[&venser].counters[&CounterType::Loyalty],
+        2
+    );
+    resolve_dress_down(&mut runner, dress);
+
+    // CR 611.2 + CR 611.2c + CR 613.1f: Venser's resolved rule effect survives
+    // Dress Down's layer 6 ability removal on each creature.
+    for attacker in [first, second] {
+        let mut restrictions = live_statics(&runner, attacker, StaticMode::CantBeBlocked);
+        assert!(restrictions
+            .next()
+            .is_some_and(StaticDefinition::is_resolution_installed));
+        assert!(restrictions.next().is_none());
+    }
+    runner.advance_to_combat();
+    runner.declare_attackers(&attacks).unwrap();
+    reach_blocks(&mut runner, P1);
+    assert!(runner.declare_blockers(&[(blocker, first)]).is_err());
+    assert!(runner.declare_blockers(&[(blocker, second)]).is_err());
+    runner.declare_blockers(&[]).unwrap();
+}
+
+#[test]
+fn artful_dodge_still_prevents_blocks_after_turn_to_frog() {
+    use engine::types::keywords::Keyword;
+    use ManaColor::Blue;
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_lands(&mut scenario, P0, &[Blue, Blue, Blue]);
+    let dodge = scenario
+        .add_spell_to_hand_from_oracle(P0, "Artful Dodge", false, ARTFUL_DODGE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::Blue],
+        })
+        .id();
+    let frog = scenario.add_real_card(P0, "Turn to Frog", Zone::Hand, db);
+    let attacker = scenario
+        .add_creature(P0, "Attacker", 3, 3)
+        .with_keyword(Keyword::Haste)
+        .id();
+    let blocker = scenario.add_vanilla(P1, 2, 2);
+    let mut runner = scenario.build();
+    let mut control = GameRunner::from_state(runner.state().clone());
+    control.cast(frog).target_object(attacker).resolve();
+    assert_priority(&control, P0);
+    declare_attack_and_reach_blocks(&mut control, attacker);
+    control.declare_blockers(&[(blocker, attacker)]).unwrap();
+
+    runner.cast(dodge).target_object(attacker).resolve();
+    assert_priority(&runner, P0);
+    assert_eq!(
+        live_statics(&runner, attacker, StaticMode::CantBeBlocked).count(),
+        1
+    );
+    runner
+        .cast(frog)
+        .target_object(attacker)
+        .resolve()
+        .assert_zone(&[frog], Zone::Graveyard);
+    assert_priority(&runner, P0);
+    let creature = &runner.state().objects[&attacker];
+    // CR 613.4b: Turn to Frog sets the creature's base P/T to 1/1.
+    assert_eq!((creature.power, creature.toughness), (Some(1), Some(1)));
+    assert_eq!(creature.color, [Blue]);
+    assert_eq!(creature.card_types.subtypes, ["Frog"]);
+    // CR 613.1f + CR 611.2c: The creature loses its abilities and keeps the rule effect.
+    assert!(creature.keywords.is_empty());
+    assert!(creature.abilities.is_empty());
+    assert!(creature.trigger_definitions.is_empty());
+    assert!(creature.replacement_definitions.is_empty());
+    assert_eq!(
+        live_statics(&runner, attacker, StaticMode::CantBeBlocked).count(),
+        1
+    );
+    assert!(creature
+        .static_definitions
+        .iter_all()
+        .all(StaticDefinition::is_resolution_installed));
+    declare_attack_and_reach_blocks(&mut runner, attacker);
+    assert!(runner.declare_blockers(&[(blocker, attacker)]).is_err());
+    runner.declare_blockers(&[]).unwrap();
+}
+
+#[test]
+fn goblin_tunneler_restriction_survives_humility() {
+    use ManaColor::White;
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_lands(&mut scenario, P0, &[White; 4]);
+    let humility = scenario.add_real_card(P0, "Humility", Zone::Hand, db);
+    let tunneler = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Goblin Tunneler",
+            1,
+            1,
+            "{T}: Target creature with power 2 or less can't be blocked this turn.",
+        )
+        .id();
+    let attacker = scenario.add_vanilla(P0, 2, 2);
+    let blocker = scenario.add_vanilla(P1, 2, 2);
+    let mut runner = scenario.build();
+    let mut control = GameRunner::from_state(runner.state().clone());
+    control
+        .cast(humility)
+        .resolve()
+        .assert_zone(&[humility], Zone::Battlefield);
+    assert_priority(&control, P0);
+    declare_attack_and_reach_blocks(&mut control, attacker);
+    control.declare_blockers(&[(blocker, attacker)]).unwrap();
+
+    runner
+        .activate(tunneler, activation(&runner, tunneler))
+        .target_object(attacker)
+        .resolve();
+    assert_priority(&runner, P0);
+    assert!(runner.state().objects[&tunneler].tapped);
+    assert_eq!(
+        live_statics(&runner, attacker, StaticMode::CantBeBlocked).count(),
+        1
+    );
+    runner
+        .cast(humility)
+        .resolve()
+        .assert_zone(&[humility], Zone::Battlefield);
+    assert_priority(&runner, P0);
+    declare_attack_and_reach_blocks(&mut runner, attacker);
+    // CR 611.2 + CR 611.2c: An activated ability's resolution can also install a rule effect.
+    assert!(runner.declare_blockers(&[(blocker, attacker)]).is_err());
+    runner.declare_blockers(&[]).unwrap();
+}
+
+#[test]
+fn parsed_craterous_stomp_quote_is_removed_by_dress_down() {
+    use ManaColor::{Blue, Red};
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island"]);
+    add_lands(&mut scenario, P0, &[Red, Red, Blue, Blue]);
+    let stomp = craterous_stomp_from_oracle(&mut scenario);
+    let dress = scenario.add_real_card(P0, "Dress Down", Zone::Hand, db);
+    let giant = scenario
+        .add_creature(P0, "Giant attacker", 3, 3)
+        .with_subtypes(vec!["Giant"])
+        .id();
+    let other = scenario.add_vanilla(P0, 2, 2);
+    let victim = scenario.add_vanilla(P1, 2, 2);
+    let coward = scenario.add_vanilla(P1, 2, 2);
+    let mut runner = scenario.build();
+    runner
+        .cast(stomp)
+        .target_object(victim)
+        .resolve()
+        .assert_zone(&[victim], Zone::Graveyard);
+    assert_priority(&runner, P0);
+
+    let mut before = GameRunner::from_state(runner.state().clone());
+    before.advance_to_combat();
+    before
+        .declare_attackers(&[
+            (giant, AttackTarget::Player(P1)),
+            (other, AttackTarget::Player(P1)),
+        ])
+        .unwrap();
+    reach_blocks(&mut before, P1);
+    assert!(before.declare_blockers(&[(coward, giant)]).is_err());
+    before.declare_blockers(&[(coward, other)]).unwrap();
+
+    resolve_dress_down(&mut runner, dress);
+    assert!(runner.state().objects[&coward]
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Coward"));
+    declare_attack_and_reach_blocks(&mut runner, giant);
+    // CR 113.10 + CR 613.1f: The earlier quote is an ability and is removed.
+    runner.declare_blockers(&[(coward, giant)]).unwrap();
+}
+
+#[test]
+fn incite_hysteria_grants_its_quote_after_dress_down_until_cleanup() {
+    use ManaColor::{Blue, Red};
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island", "Island"]);
+    scenario.with_library_top(P1, &["Island"]);
+    add_lands(&mut scenario, P0, &[Red, Red, Red, Blue, Blue]);
+    let dress = scenario.add_real_card(P0, "Dress Down", Zone::Hand, db);
+    let incite = scenario
+        .add_spell_to_hand_from_oracle(P0, "Incite Hysteria", false, INCITE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    let attacker = scenario.add_vanilla(P0, 1, 1);
+    let blocker = scenario
+        .add_creature(P1, "Red blocker", 2, 2)
+        .with_color(vec![Red])
+        .id();
+    let mut runner = scenario.build();
+    resolve_dress_down(&mut runner, dress);
+
+    let mut control = GameRunner::from_state(runner.state().clone());
+    declare_attack_and_reach_blocks(&mut control, attacker);
+    control.declare_blockers(&[(blocker, attacker)]).unwrap();
+
+    runner
+        .cast(incite)
+        .target_object(blocker)
+        .resolve()
+        .assert_zone(&[incite], Zone::Graveyard);
+    assert_priority(&runner, P0);
+    declare_attack_and_reach_blocks(&mut runner, attacker);
+    // CR 613.7: The more recent effect grants the ability after removal applies.
+    assert!(runner.declare_blockers(&[(blocker, attacker)]).is_err());
+    runner.declare_blockers(&[]).unwrap();
+    for _ in 0..2 {
+        reach_end_step(&mut runner);
+        runner.advance_to_phase(Phase::PreCombatMain);
+    }
+    assert_priority(&runner, P0);
+    assert_eq!(runner.state().objects[&dress].zone, Zone::Graveyard);
+    declare_attack_and_reach_blocks(&mut runner, attacker);
+    runner.declare_blockers(&[(blocker, attacker)]).unwrap();
+}
+
+#[test]
+fn petroglyphs_counts_panic_target_but_excludes_a_quoted_ability() {
+    use engine::game::layers::evaluate_layers;
+    use ManaColor::Red;
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_lands(&mut scenario, P0, &[Red]);
+    scenario.add_real_card(P0, "Muraganda Petroglyphs", Zone::Battlefield, db);
+    let panic = scenario.add_real_card(P0, "Panic", Zone::Hand, db);
+    let giant = scenario
+        .add_creature(P0, "Giant attacker", 3, 3)
+        .with_subtypes(vec!["Giant"])
+        .id();
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let control = scenario.add_vanilla(P1, 2, 2);
+    let mut runner = scenario.build();
+    evaluate_layers(runner.state_mut());
+    let size = |runner: &GameRunner, id: ObjectId| {
+        let creature = &runner.state().objects[&id];
+        (creature.power, creature.toughness)
+    };
+    assert_eq!(size(&runner, control), (Some(4), Some(4)));
+    assert_eq!(size(&runner, bears), (Some(4), Some(4)));
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(giant, AttackTarget::Player(P1))])
+        .unwrap();
+    assert_priority(&runner, P0);
+
+    let mut baseline = GameRunner::from_state(runner.state().clone());
+    reach_blocks(&mut baseline, P1);
+    baseline.declare_blockers(&[(bears, giant)]).unwrap();
+
+    runner
+        .cast(panic)
+        .target_object(bears)
+        .resolve()
+        .assert_zone(&[panic], Zone::Graveyard);
+    assert_priority(&runner, P0);
+    // CR 109.3 + CR 611.2c: A rule effect does not disqualify the Bears.
+    assert_eq!(size(&runner, bears), (Some(4), Some(4)));
+    reach_blocks(&mut runner, P1);
+    assert!(runner.declare_blockers(&[(bears, giant)]).is_err());
+    runner.declare_blockers(&[(control, giant)]).unwrap();
+
+    // Set up a separate main-phase branch for the sorcery-speed quoted grant.
+    let mut quote = GameScenario::new();
+    quote.at_phase(Phase::PreCombatMain);
+    add_lands(&mut quote, P0, &[Red; 2]);
+    quote.add_real_card(P0, "Muraganda Petroglyphs", Zone::Battlefield, db);
+    let stomp = craterous_stomp_from_oracle(&mut quote);
+    let giant = quote
+        .add_creature(P0, "Giant attacker", 3, 3)
+        .with_subtypes(vec!["Giant"])
+        .id();
+    let victim = quote.add_vanilla(P1, 1, 1);
+    let survivor = quote.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let mut quote = quote.build();
+    evaluate_layers(quote.state_mut());
+    assert_eq!(size(&quote, survivor), (Some(4), Some(4)));
+    quote
+        .cast(stomp)
+        .target_object(victim)
+        .resolve()
+        .assert_zone(&[victim], Zone::Graveyard);
+    assert_priority(&quote, P0);
+    // CR 113.10: The quoted ability disqualifies the surviving creature.
+    assert_eq!(size(&quote, survivor), (Some(2), Some(2)));
+    declare_attack_and_reach_blocks(&mut quote, giant);
+    assert!(quote.declare_blockers(&[(survivor, giant)]).is_err());
+    quote.declare_blockers(&[]).unwrap();
+}
+
+#[test]
+fn artful_dodge_graft_does_not_deduplicate_against_psychic_paper() {
+    use engine::types::ability::{ChoiceType, DefinitionOrigin};
+    use ManaColor::Blue;
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island"]);
+    add_lands(&mut scenario, P0, &[Blue; 5]);
+    let paper = scenario.add_real_card(P0, "Psychic Paper", Zone::Battlefield, db);
+    let dodge = scenario
+        .add_spell_to_hand_from_oracle(P0, "Artful Dodge", false, ARTFUL_DODGE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::Blue],
+        })
+        .id();
+    let dress = scenario.add_real_card(P0, "Dress Down", Zone::Hand, db);
+    let attacker = scenario.add_vanilla(P0, 2, 2);
+    let blocker = scenario.add_vanilla(P1, 2, 2);
+    let mut runner = scenario.build();
+    let mut control = GameRunner::from_state(runner.state().clone());
+    declare_attack_and_reach_blocks(&mut control, attacker);
+    control.declare_blockers(&[(blocker, attacker)]).unwrap();
+
+    runner.state_mut().all_card_names = vec!["Grizzly Bears".to_string()].into();
+    runner
+        .activate(paper, activation(&runner, paper))
+        .target_object(attacker)
+        .resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::NamedChoice {
+            player: P0,
+            choice_type: ChoiceType::CardName { .. },
+            ..
+        }
+    ));
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Grizzly Bears".to_string(),
+        })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::NamedChoice {
+            player: P0,
+            choice_type: ChoiceType::CreatureType { .. },
+            ..
+        }
+    ));
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Human".to_string(),
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_priority(&runner, P0);
+    assert_eq!(
+        runner.state().objects[&paper].attached_to,
+        Some(AttachTarget::Object(attacker))
+    );
+    let equip_graft: Vec<_> = live_statics(&runner, attacker, StaticMode::CantBeBlocked).collect();
+    assert_eq!(equip_graft.len(), 1);
+    assert_eq!(equip_graft[0].origin, DefinitionOrigin::Characteristic);
+
+    runner.cast(dodge).target_object(attacker).resolve();
+    assert_priority(&runner, P0);
+    let grafts: Vec<_> = live_statics(&runner, attacker, StaticMode::CantBeBlocked).collect();
+    // CR 611.2c: Identical rules text can represent effects with different origins.
+    assert_eq!(grafts.len(), 2);
+    let printed = grafts
+        .iter()
+        .copied()
+        .find(|d| d.origin == DefinitionOrigin::Characteristic)
+        .unwrap();
+    let resolved = grafts
+        .iter()
+        .copied()
+        .find(|d| d.origin == DefinitionOrigin::Resolution)
+        .unwrap();
+    let mut normalized = (*resolved).clone();
+    normalized.origin = DefinitionOrigin::Characteristic;
+    assert_eq!(printed, &normalized);
+
+    resolve_dress_down(&mut runner, dress);
+    declare_attack_and_reach_blocks(&mut runner, attacker);
+    assert!(runner.declare_blockers(&[(blocker, attacker)]).is_err());
+    runner.declare_blockers(&[]).unwrap();
+}
+
+#[test]
+fn wind_drake_gains_petroglyphs_pump_and_keeps_panic_restriction_after_dress_down() {
+    use engine::game::layers::evaluate_layers;
+    use engine::types::keywords::Keyword;
+    use ManaColor::{Blue, Red};
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island"]);
+    add_lands(&mut scenario, P0, &[Red, Blue, Blue]);
+    scenario.add_real_card(P0, "Muraganda Petroglyphs", Zone::Battlefield, db);
+    let panic = scenario.add_real_card(P0, "Panic", Zone::Hand, db);
+    let dress = scenario.add_real_card(P0, "Dress Down", Zone::Hand, db);
+    let drake = scenario.add_real_card(P1, "Wind Drake", Zone::Battlefield, db);
+    let attacker = scenario.add_vanilla(P0, 2, 2);
+    let other = scenario.add_vanilla(P1, 2, 2);
+    let mut runner = scenario.build();
+    evaluate_layers(runner.state_mut());
+    let creature = &runner.state().objects[&drake];
+    assert!(creature.keywords.contains(&Keyword::Flying));
+    assert_eq!((creature.power, creature.toughness), (Some(2), Some(2)));
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .unwrap();
+    assert_priority(&runner, P0);
+
+    let mut control = GameRunner::from_state(runner.state().clone());
+    resolve_dress_down(&mut control, dress);
+    reach_blocks(&mut control, P1);
+    control.declare_blockers(&[(drake, attacker)]).unwrap();
+
+    runner
+        .cast(panic)
+        .target_object(drake)
+        .resolve()
+        .assert_zone(&[panic], Zone::Graveyard);
+    assert_priority(&runner, P0);
+    resolve_dress_down(&mut runner, dress);
+    let creature = &runner.state().objects[&drake];
+    // CR 109.3 + CR 611.2c + CR 613.1f: With flying removed, the Drake has no abilities.
+    assert!(!creature.keywords.contains(&Keyword::Flying));
+    assert_eq!((creature.power, creature.toughness), (Some(4), Some(4)));
+    reach_blocks(&mut runner, P1);
+    assert!(runner.declare_blockers(&[(drake, attacker)]).is_err());
+    runner.declare_blockers(&[(other, attacker)]).unwrap();
+}
+
+#[test]
+fn break_through_the_line_loses_haste_but_keeps_unblockability() {
+    use engine::types::keywords::Keyword;
+    use ManaColor::{Blue, Red};
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island"]);
+    add_lands(&mut scenario, P0, &[Red, Blue, Blue]);
+    let line = scenario.add_enchantment_from_oracle(
+        P0, "Break Through the Line",
+        "{R}: Target creature with power 2 or less gains haste until end of turn and can't be blocked this turn.",
+    ).id();
+    let dress = scenario.add_real_card(P0, "Dress Down", Zone::Hand, db);
+    let attacker = scenario.add_vanilla(P0, 2, 2);
+    let blocker = scenario.add_vanilla(P1, 2, 2);
+    let mut runner = scenario.build();
+    let mut control = GameRunner::from_state(runner.state().clone());
+    declare_attack_and_reach_blocks(&mut control, attacker);
+    control.declare_blockers(&[(blocker, attacker)]).unwrap();
+
+    runner
+        .activate(line, activation(&runner, line))
+        .target_object(attacker)
+        .resolve();
+    assert_priority(&runner, P0);
+    assert!(runner.state().objects[&attacker]
+        .keywords
+        .contains(&Keyword::Haste));
+    let mut before_removal = GameRunner::from_state(runner.state().clone());
+    declare_attack_and_reach_blocks(&mut before_removal, attacker);
+    assert!(before_removal
+        .declare_blockers(&[(blocker, attacker)])
+        .is_err());
+    before_removal.declare_blockers(&[]).unwrap();
+
+    resolve_dress_down(&mut runner, dress);
+    // CR 702.10a + CR 613.1f: Haste is an ability that Dress Down removes.
+    assert!(!runner.state().objects[&attacker]
+        .keywords
+        .contains(&Keyword::Haste));
+    declare_attack_and_reach_blocks(&mut runner, attacker);
+    assert!(runner.declare_blockers(&[(blocker, attacker)]).is_err());
+    runner.declare_blockers(&[]).unwrap();
+}
+
+#[test]
+fn provoke_spell_still_requires_a_block_after_dress_down() {
+    use ManaColor::{Blue, Green};
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest", "Island"]);
+    add_lands(&mut scenario, P0, &[Green, Green, Blue, Blue]);
+    let provoke = scenario.add_real_card(P0, "Provoke", Zone::Hand, db);
+    let dress = scenario.add_real_card(P0, "Dress Down", Zone::Hand, db);
+    let attacker = scenario.add_vanilla(P0, 2, 2);
+    let blocker = scenario.add_vanilla(P1, 2, 2);
+    let mut runner = scenario.build();
+    let mut control = GameRunner::from_state(runner.state().clone());
+    resolve_dress_down(&mut control, dress);
+    declare_attack_and_reach_blocks(&mut control, attacker);
+    control.declare_blockers(&[]).unwrap();
+
+    runner
+        .cast(provoke)
+        .target_object(blocker)
+        .resolve()
+        .assert_zone(&[provoke], Zone::Graveyard);
+    assert_priority(&runner, P0);
+    resolve_dress_down(&mut runner, dress);
+    declare_attack_and_reach_blocks(&mut runner, attacker);
+    // CR 509.1c: The blocker must fulfill the resolved requirement if able.
+    assert!(runner.declare_blockers(&[]).is_err());
+    runner.declare_blockers(&[(blocker, attacker)]).unwrap();
+}
+
+#[test]
+fn deftblade_elite_provoke_still_requires_blocking_the_elite_after_dress_down() {
+    use ManaColor::Blue;
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island"]);
+    add_lands(&mut scenario, P0, &[Blue, Blue]);
+    let dress = scenario.add_real_card(P0, "Dress Down", Zone::Hand, db);
+    let elite = scenario.add_creature(P0, "Deftblade Elite", 1, 1)
+        .with_color(vec![ManaColor::White])
+        .with_subtypes(vec!["Human", "Soldier"])
+        .from_oracle_text_with_keywords(
+            &["Provoke"],
+            "Provoke (Whenever this creature attacks, you may have target creature defending player controls untap and block it if able.)\n{1}{W}: Prevent all combat damage that would be dealt to and dealt by this creature this turn.",
+        ).id();
+    let other = scenario.add_vanilla(P0, 2, 2);
+    let blocker = scenario.add_vanilla(P1, 2, 2);
+    let alternative = scenario.add_vanilla(P1, 2, 2);
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[
+            (elite, AttackTarget::Player(P1)),
+            (other, AttackTarget::Player(P1)),
+        ])
+        .unwrap();
+    let WaitingFor::TriggerTargetSelection {
+        player: P0,
+        source_id,
+        target_slots,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected the Elite's provoke target selection, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*source_id, Some(elite));
+    assert_eq!(target_slots.len(), 1);
+    let target = TargetRef::Object(blocker);
+    assert!(target_slots[0].legal_targets.contains(&target));
+    assert!(target_slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(alternative)));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(target),
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P0, .. }
+    ));
+
+    let mut control = GameRunner::from_state(runner.state().clone());
+    control
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .unwrap();
+    control.advance_until_stack_empty();
+    assert_priority(&control, P0);
+    resolve_dress_down(&mut control, dress);
+    reach_blocks(&mut control, P1);
+    control.declare_blockers(&[(blocker, other)]).unwrap();
+
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_priority(&runner, P0);
+    resolve_dress_down(&mut runner, dress);
+    reach_blocks(&mut runner, P1);
+    // CR 702.39a + CR 509.1c: Only blocking the provoking attacker satisfies the requirement.
+    assert!(runner.declare_blockers(&[(blocker, other)]).is_err());
+    runner.declare_blockers(&[(blocker, elite)]).unwrap();
+}
+
+fn advance_to_player_main(runner: &mut GameRunner, player: PlayerId) {
+    for _ in 0..64 {
+        if runner.state().active_player == player && runner.state().phase == Phase::PreCombatMain {
+            assert_priority(runner, player);
+            return;
+        }
+        match runner.state().waiting_for {
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority).unwrap(),
+            WaitingFor::DeclareAttackers { .. } => runner.declare_attackers(&[]).unwrap(),
+            ref other => panic!("unexpected prompt while advancing to main phase: {other:?}"),
+        };
+    }
+    panic!("did not reach main phase for {player:?}");
+}
+
+fn assert_declare_attackers(runner: &GameRunner, attacker: PlayerId) {
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareAttackers { player, .. } if player == attacker
+    ));
+}
+
+#[test]
+fn boiling_blood_still_requires_attacking_after_dress_down() {
+    use ManaColor::{Blue, Red};
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Island", "Mountain", "Island"]);
+    add_lands(&mut scenario, P1, &[Red, Red, Red, Blue, Blue]);
+    let blood = scenario.add_real_card(P1, "Boiling Blood", Zone::Hand, db);
+    let dress = scenario.add_real_card(P1, "Dress Down", Zone::Hand, db);
+    let attacker = scenario.add_vanilla(P1, 2, 2);
+    let mut runner = scenario.build();
+    advance_to_player_main(&mut runner, P1);
+
+    let mut control = GameRunner::from_state(runner.state().clone());
+    resolve_dress_down(&mut control, dress);
+    control.advance_to_combat();
+    assert_declare_attackers(&control, P1);
+    control.declare_attackers(&[]).unwrap();
+
+    runner
+        .cast(blood)
+        .target_object(attacker)
+        .resolve()
+        .assert_zone(&[blood], Zone::Graveyard);
+    assert_priority(&runner, P1);
+    resolve_dress_down(&mut runner, dress);
+    runner.advance_to_combat();
+    assert_declare_attackers(&runner, P1);
+    // CR 508.1d: The declaration must satisfy the attack requirement.
+    assert!(runner.declare_attackers(&[]).is_err());
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P0))])
+        .unwrap();
+}
+
+#[test]
+fn alluring_siren_still_requires_attacking_its_controller_after_dress_down() {
+    let p2 = PlayerId(2);
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Island", "Island"]);
+    add_lands(&mut scenario, P1, &[ManaColor::Blue; 2]);
+    let dress = scenario.add_real_card(P1, "Dress Down", Zone::Hand, db);
+    let siren = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Alluring Siren",
+            1,
+            1,
+            "{T}: Target creature an opponent controls attacks you this turn if able.",
+        )
+        .id();
+    let attacker = scenario.add_vanilla(P1, 2, 2);
+    let mut runner = scenario.build();
+    advance_to_player_main(&mut runner, P1);
+
+    let mut control = GameRunner::from_state(runner.state().clone());
+    resolve_dress_down(&mut control, dress);
+    control.advance_to_combat();
+    assert_declare_attackers(&control, P1);
+    control
+        .declare_attackers(&[(attacker, AttackTarget::Player(p2))])
+        .unwrap();
+
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+    assert_priority(&runner, P0);
+    runner
+        .activate(siren, activation(&runner, siren))
+        .target_object(attacker)
+        .resolve();
+    assert_priority(&runner, P1);
+    assert!(runner.state().objects[&siren].tapped);
+    resolve_dress_down(&mut runner, dress);
+    runner.advance_to_combat();
+    assert_declare_attackers(&runner, P1);
+    // CR 508.1d: Attacking another player leaves a satisfiable requirement unmet.
+    assert!(runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(p2))])
+        .is_err());
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P0))])
+        .unwrap();
+}
+
+#[test]
+fn exerted_champion_keeps_its_untap_restriction_after_dress_down() {
+    use engine::types::ability::DefinitionOrigin;
+    use ManaColor::Blue;
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island", "Island"]);
+    scenario.with_library_top(P1, &["Island"]);
+    add_lands(&mut scenario, P0, &[Blue]);
+    let dress = scenario.add_real_card(P0, "Dress Down", Zone::Hand, db);
+    let champion = scenario.add_real_card(P0, "Ahn-Crop Champion", Zone::Battlefield, db);
+    let control = scenario
+        .add_creature_from_oracle(P0, "Llanowar Elves", 1, 1, "{T}: Add {G}.")
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().objects.get_mut(&control).unwrap().tapped = true;
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(champion, AttackTarget::Player(P1))])
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ExertChoice { player: P0, attacker, .. } if attacker == champion
+    ));
+    runner.act(GameAction::ChooseExert { exert: true }).unwrap();
+    runner.advance_until_stack_empty();
+    assert_priority(&runner, P0);
+    assert!(!runner.state().objects[&control].tapped);
+    // CR 701.43a: The choice to exert installs an untap prohibition.
+    let origins = |runner: &GameRunner| {
+        live_statics(runner, champion, StaticMode::CantUntap)
+            .map(|d| d.origin)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(origins(&runner), [DefinitionOrigin::Resolution]);
+
+    // The Elves supply the generic mana and start the next turn tapped.
+    resolve_dress_down(&mut runner, dress);
+    assert_eq!(origins(&runner), [DefinitionOrigin::Resolution]);
+    reach_blocks(&mut runner, P1);
+    runner.declare_blockers(&[]).unwrap();
+    advance_to_player_main(&mut runner, P1);
+    assert!(runner.state().objects[&champion].tapped);
+    assert!(runner.state().objects[&control].tapped);
+    advance_to_player_main(&mut runner, P0);
+    assert!(runner.state().objects[&champion].tapped);
+    assert!(!runner.state().objects[&control].tapped);
+}
+
+#[test]
+fn disrupt_decorum_goad_survives_dress_down_in_three_player_combat() {
+    use ManaColor::{Blue, Red};
+
+    let p2 = PlayerId(2);
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Island", "Island"]);
+    add_lands(&mut scenario, P0, &[Red; 4]);
+    add_lands(&mut scenario, P1, &[Blue; 2]);
+    let decorum = scenario.add_real_card(P0, "Disrupt Decorum", Zone::Hand, db);
+    let dress = scenario.add_real_card(P1, "Dress Down", Zone::Hand, db);
+    let attacker = scenario.add_vanilla(P1, 2, 2);
+    let mut runner = scenario.build();
+    let mut control = GameRunner::from_state(runner.state().clone());
+    advance_to_player_main(&mut control, P1);
+    resolve_dress_down(&mut control, dress);
+    control.advance_to_combat();
+    assert_declare_attackers(&control, P1);
+    let mut no_attack = GameRunner::from_state(control.state().clone());
+    no_attack.declare_attackers(&[]).unwrap();
+    control
+        .declare_attackers(&[(attacker, AttackTarget::Player(P0))])
+        .unwrap();
+
+    runner
+        .cast(decorum)
+        .resolve()
+        .assert_zone(&[decorum], Zone::Graveyard);
+    assert_priority(&runner, P0);
+    advance_to_player_main(&mut runner, P1);
+    resolve_dress_down(&mut runner, dress);
+    runner.advance_to_combat();
+    assert_declare_attackers(&runner, P1);
+    // CR 701.15a + CR 701.15b: Goad is a designation and still directs the attack.
+    assert!(runner.declare_attackers(&[]).is_err());
+    assert!(runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P0))])
+        .is_err());
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(p2))])
+        .unwrap();
 }

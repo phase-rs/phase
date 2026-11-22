@@ -36,9 +36,9 @@ use crate::types::ability::{
     quantity_expr_uses_recipient, AbilityCost, AbilityDefinition, AbilityKind,
     ActivationRestriction, AttachmentReferent, AttackedYouScope, BasicLandType, CardTypeSetSource,
     CastingPermission, ChosenSubtypeKind, CommanderOwnership, ContinuousModification,
-    CopiableValues, Designation, Duration, Effect, FilterProp, ManaContribution, ManaProduction,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerGrantProducerKey, TriggerProducerOrigin, TypedFilter,
+    CopiableValues, DefinitionOrigin, Designation, Duration, Effect, FilterProp, ManaContribution,
+    ManaProduction, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
+    StaticDefinition, TargetFilter, TriggerGrantProducerKey, TriggerProducerOrigin, TypedFilter,
 };
 use crate::types::ability_visit::{
     each_granter_symbol, granter_symbols_mut, names_unbound_granter, own_fields_name_granter,
@@ -13324,13 +13324,17 @@ fn apply_continuous_effect_filtered(
                 obj.granted_abilities_from = Some(0);
                 obj.trigger_definitions.clear();
                 // CR 613.1f + CR 611.2c: Layer 6 removes the object's ABILITIES.
-                // A replacement created by the resolution of a spell or ability is
+                // A rule effect that a resolved spell or ability stored here as a
+                // replacement or static definition (`is_resolution_installed`) is
                 // not one of the object's abilities — and per CR 611.2c not one of
                 // its characteristics at all — so Humility does not end a
-                // prevention/regeneration shield already resolved onto this object.
+                // prevention/regeneration shield or a "can't block this turn"
+                // restriction already resolved onto this object. A granted quoted
+                // ability (CR 113.10) is an ability and is removed.
                 obj.replacement_definitions
                     .retain(|d| d.is_resolution_installed());
-                obj.static_definitions.clear();
+                obj.static_definitions
+                    .retain(|d| d.is_resolution_installed());
                 obj.clear_keywords();
                 abilities_suppressed.insert(id);
             }
@@ -13516,7 +13520,11 @@ fn apply_continuous_effect_filtered(
             // passes don't multiply the grant (mirrors the `GrantAbility` /
             // `GrantTrigger` / `AddStaticMode` idempotency invariant in this match).
             ContinuousModification::GrantStaticAbility { definition } => {
-                let granted = *definition.clone();
+                let mut granted = *definition.clone();
+                // CR 613.1f: A static ability's grant is subject to ability removal.
+                if effect.transient_id.is_none() {
+                    granted.origin = DefinitionOrigin::Characteristic;
+                }
                 if !obj.static_definitions.iter_all().any(|sd| sd == &granted) {
                     obj.static_definitions.push(granted);
                 }
@@ -13594,6 +13602,11 @@ fn apply_continuous_effect_filtered(
                 // silently drop the second caster's requirement. Full-def equality
                 // still collapses the same effect re-applied across layer passes
                 // (identical anchor), so no grant is multiplied.
+                // CR 611.2 + CR 611.2c: A transient rule effect grafted
+                // onto this object does not become one of its abilities.
+                if effect.transient_id.is_some() {
+                    def.origin = DefinitionOrigin::Resolution;
+                }
                 if !obj.static_definitions.iter_all().any(|sd| sd == &def) {
                     obj.static_definitions.push(def);
                 }
@@ -16625,6 +16638,144 @@ mod tests {
         );
         assert!(live[0].is_resolution_installed());
         assert!(live[0].is_consumed, "runtime state survives Humility too");
+    }
+
+    fn install_test_static_modification(
+        state: &mut GameState,
+        recipient: ObjectId,
+        modification: ContinuousModification,
+        transient: bool,
+    ) {
+        let source = make_creature(state, "Static source", 2, 2, P0);
+        let affected = TargetFilter::SpecificObject { id: recipient };
+        if transient {
+            state.add_transient_continuous_effect(
+                source,
+                P0,
+                Duration::UntilEndOfTurn,
+                affected,
+                vec![modification],
+                None,
+            );
+        } else {
+            install_static_definition(
+                state,
+                source,
+                StaticDefinition::continuous()
+                    .affected(affected)
+                    .modifications(vec![modification]),
+            );
+        }
+        state.layers_dirty.mark_full();
+        evaluate_layers(state);
+    }
+
+    #[test]
+    fn transient_static_mode_is_resolution_installed() {
+        let mut state = setup();
+        let recipient = make_creature(&mut state, "Recipient", 2, 2, P0);
+        install_test_static_modification(
+            &mut state,
+            recipient,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBlock,
+            },
+            true,
+        );
+        // CR 611.2 + CR 611.2c: The graft represents a resolved rule effect.
+        let live = state.objects[&recipient].static_definitions.as_slice();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].mode, StaticMode::CantBlock);
+        assert_eq!(live[0].origin, DefinitionOrigin::Resolution);
+    }
+
+    #[test]
+    fn printed_static_mode_is_characteristic() {
+        let mut state = setup();
+        let recipient = make_creature(&mut state, "Recipient", 2, 2, P0);
+        install_test_static_modification(
+            &mut state,
+            recipient,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBlock,
+            },
+            false,
+        );
+        let live = state.objects[&recipient].static_definitions.as_slice();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].mode, StaticMode::CantBlock);
+        assert_eq!(live[0].origin, DefinitionOrigin::Characteristic);
+    }
+
+    // Synthetic provenance fixture. Promise of Loyalty is the nearest printed
+    // card, and its resolution-origin grant is deferred to phase 3.
+    fn check_static_grant_removal(
+        inner_origin: DefinitionOrigin,
+        transient: bool,
+        expected_origin: DefinitionOrigin,
+        expected_after_removal: usize,
+    ) {
+        let mut state = setup();
+        let recipient = make_creature(&mut state, "Recipient", 2, 2, P0);
+        let mut definition =
+            StaticDefinition::new(StaticMode::CantBlock).affected(TargetFilter::SelfRef);
+        definition.origin = inner_origin;
+        install_test_static_modification(
+            &mut state,
+            recipient,
+            ContinuousModification::GrantStaticAbility {
+                definition: Box::new(definition),
+            },
+            transient,
+        );
+        let live = state.objects[&recipient].static_definitions.as_slice();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].mode, StaticMode::CantBlock);
+        assert_eq!(live[0].origin, expected_origin);
+
+        install_test_static_modification(
+            &mut state,
+            recipient,
+            ContinuousModification::RemoveAllAbilities,
+            true,
+        );
+        // CR 613.1f + CR 611.2c: A later ability removal leaves installed rule effects.
+        let live = state.objects[&recipient].static_definitions.as_slice();
+        assert_eq!(live.len(), expected_after_removal);
+        for definition in live {
+            assert_eq!(definition.mode, StaticMode::CantBlock);
+            assert_eq!(definition.origin, DefinitionOrigin::Resolution);
+        }
+    }
+
+    #[test]
+    fn printed_static_grant_cannot_install_resolution_origin() {
+        check_static_grant_removal(
+            DefinitionOrigin::Resolution,
+            false,
+            DefinitionOrigin::Characteristic,
+            0,
+        );
+    }
+
+    #[test]
+    fn transient_resolution_static_grant_survives_removal() {
+        check_static_grant_removal(
+            DefinitionOrigin::Resolution,
+            true,
+            DefinitionOrigin::Resolution,
+            1,
+        );
+    }
+
+    #[test]
+    fn transient_characteristic_static_grant_is_removed() {
+        check_static_grant_removal(
+            DefinitionOrigin::Characteristic,
+            true,
+            DefinitionOrigin::Characteristic,
+            0,
+        );
     }
 
     /// An activated ability whose effect draws `count` cards — distinct
