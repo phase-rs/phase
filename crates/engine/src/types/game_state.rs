@@ -28357,7 +28357,7 @@ declare_game_state! {
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub spells_cast_this_game_by_player: HashMap<PlayerId, im::Vector<SpellCastRecord>>,
     /// Completed cycling activations in placement order, keyed by activator.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub cycles_completed_this_game_by_player: HashMap<PlayerId, im::Vector<CyclingRecord>>,
     /// Per-player spell cast history this turn.

@@ -56341,7 +56341,12 @@ fn try_parse_put_zone_change_parts(
                 Some(pool) => pool,
                 None => {
                     let mut target_ctx = ctx.clone_player_antecedents();
-                    target_ctx.object_pronoun_ref = ctx.object_pronoun_ref.clone();
+                    // CR 608.2k: preserve an explicit self binding, such as the
+                    // card named by a self-cycling trigger. Other pronouns keep
+                    // the parent-target fallback used by reveal continuations.
+                    if matches!(ctx.object_pronoun_ref, Some(TargetFilter::SelfRef)) {
+                        target_ctx.object_pronoun_ref = Some(TargetFilter::SelfRef);
+                    }
                     let parsed = parse_target_with_ctx(target_text, &mut target_ctx).0;
                     // CR 608.2c: a definite plural subject ("the nonland cards
                     // revealed this way") restricts the anaphor's set to its named
