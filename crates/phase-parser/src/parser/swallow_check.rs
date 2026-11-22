@@ -9053,37 +9053,45 @@ For              each kind of counter on Blue, Loyal Raptor, each other Dinosaur
     /// into attached-subject filters must not trip Condition_AsLongAs warnings
     /// (issue #2234).
     #[test]
-    fn condition_as_long_as_bronze_horse_reports_known_gap_champions_helm_accepted() {
+    fn condition_as_long_as_bronze_horse_scope_parses_champions_helm_accepted() {
         use crate::types::ability::{FilterProp, ShieldKind, TypedFilter};
         use crate::types::keywords::Keyword;
         use crate::types::replacements::ReplacementEvent;
         use crate::types::ContinuousModification;
 
-        // CR 615.1a: Bronze Horse's gate parses, but its shield is scoped to
-        // "spells that target it", a source subject no filter expresses. The line
-        // fails closed as a line-owned `Effect::unimplemented` — the known gap —
-        // rather than shipping a shield that prevents damage from every source.
+        // CR 615.1a + CR 115.9b + CR 109.2: Bronze Horse's gate parses AND its
+        // "spells that target it" source scope reads as a stack-spell filter
+        // targeting the host, so the gated shield is represented (no
+        // `Effect::unimplemented` gap and no Condition_AsLongAs swallow) and
+        // scoped to exactly those sources.
         let bronze = parse_named(
             "Trample\nAs long as you control another creature, prevent all damage that would be dealt to this creature by spells that target it.",
             "Bronze Horse",
             &["Artifact", "Creature"],
         );
         assert!(
-            bronze.abilities.iter().any(|a| matches!(
+            !bronze.abilities.iter().any(|a| matches!(
                 &*a.effect,
                 Effect::Unimplemented { name, .. } if name == "prevention_source_scope"
             )),
-            "Bronze Horse's shield line must report its source-scope gap: {:#?}",
+            "Bronze Horse's shield line must carry its source scope, not report a gap: {:#?}",
             bronze.abilities
         );
         assert!(
-            bronze
-                .replacements
-                .iter()
-                .all(|r| r.event != ReplacementEvent::DamageDone),
-            "no unscoped Bronze Horse shield may be built: {:#?}",
+            bronze.replacements.iter().any(|r| {
+                r.event == ReplacementEvent::DamageDone
+                    && r.condition.is_some()
+                    && matches!(r.shield_kind, ShieldKind::Prevention { .. })
+                    && matches!(
+                        &r.damage_source_filter,
+                        Some(crate::types::ability::TargetFilter::And { filters })
+                            if filters.contains(&crate::types::ability::TargetFilter::StackSpell)
+                    )
+            }),
+            "Bronze Horse's shield must be gated and source-scoped: {:#?}",
             bronze.replacements
         );
+        assert!(!has_swallowed_detector(&bronze, "Condition_AsLongAs"));
 
         // CR 611.3: a gated "as long as" prevention is a CONTINUOUS shield — the
         // exact `Prevention { .. }` assertion (no `PreventionOneShot`) pins the
