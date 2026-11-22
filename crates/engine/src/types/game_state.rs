@@ -20081,6 +20081,17 @@ impl PersistedGameState {
             .validate_payment_transaction()
             .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
         state.restore_legacy_battlefield_entry_token_status()?;
+        // The recovery checkpoint becomes the game when its payment settles,
+        // so it must pass the same repair or refusal.
+        if let Some(checkpoint) = state
+            .payment_transaction
+            .as_deref_mut()
+            .and_then(|transaction| transaction.recovered.as_deref_mut())
+        {
+            checkpoint
+                .state
+                .restore_legacy_battlefield_entry_token_status()?;
+        }
         state.rehydrate_recovered_checkpoint_rng();
         crate::game::engine_casting::restore_legacy_cast_timing_routes(&mut state)?;
         crate::game::engine_casting::restore_legacy_pitch_cost_resume(&mut state);

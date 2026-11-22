@@ -16,6 +16,7 @@
 //! creatures you control and count each one that entered this turn" — a LIVE set
 //! (CR 608.2h). That form must NOT migrate.
 
+use engine::game::engine::apply;
 use engine::game::merge::{merge_object_onto, MergeSide};
 use engine::game::quantity::resolve_quantity;
 use engine::game::restrictions::{check_activation_restrictions, record_battlefield_entry};
@@ -36,6 +37,7 @@ use engine::types::game_state::{
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 const HOBGOBLIN: &str = "Other Goblins you control get +1/+1.\n{R}, {T}: This creature deals \
@@ -1451,6 +1453,151 @@ fn legacy_save_without_entry_token_status(state: &GameState) -> PersistedGameSta
         .remove("token_status")
         .is_some());
     serde_json::from_value(save).unwrap()
+}
+
+fn legacy_payment_checkpoint_save() -> (serde_json::Value, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let gyome = scenario
+        .add_creature(P0, "Gyome, Master Chef", 5, 3)
+        .from_oracle_text_with_keywords(&["Trample"], GYOME)
+        .id();
+    let pet = scenario
+        .add_creature_from_oracle(P0, "Blood Pet", 1, 1, "Sacrifice this creature: Add {B}.")
+        .id();
+    scenario.add_basic_land(P0, ManaColor::White);
+    scenario.add_enchantment_from_oracle(
+        P1,
+        "Rest in Peace",
+        "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.",
+    );
+    scenario.add_enchantment_from_oracle(
+        P1,
+        "Leyline of the Void",
+        "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.",
+    );
+    let zoraline = scenario
+        .add_creature_to_hand(P0, "Zoraline, Cosmos Caller", 3, 3)
+        .as_legendary()
+        .with_subtypes(vec!["Bat", "Cleric"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::Black],
+            generic: 1,
+        })
+        .from_oracle_text_with_keywords(
+            &["Flying", "Vigilance"],
+            "Flying, vigilance\nWhenever a Bat you control attacks, you gain 1 life.\nWhenever Zoraline enters or attacks, you may pay {W}{B} and 2 life. When you do, return target nonland permanent card with mana value 3 or less from your graveyard to the battlefield with a finality counter on it.",
+        )
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            mana(ManaType::White),
+            mana(ManaType::Black),
+            mana(ManaType::Colorless),
+        ],
+    );
+    let mut runner = scenario.build();
+    runner
+        .cast(zoraline)
+        .commit()
+        .stop_at_optional()
+        .resolve()
+        .assert_zone(&[zoraline], Zone::Battlefield);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P0, .. }
+    ));
+    // CR 605.3a + CR 616.1: paying with Blood Pet pauses at the exile replacements.
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice {
+            player: P0,
+            candidate_count: 2,
+            ..
+        }
+    ));
+    // CR 104.3a: an uninvolved player may concede during this prompt.
+    let departing = PlayerId(2);
+    apply(
+        runner.state_mut(),
+        departing,
+        GameAction::Concede {
+            player_id: departing,
+        },
+    )
+    .unwrap();
+    let mut save =
+        serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+    let state = &mut save["state"];
+    remove_saved_entry_token_status(&mut state["battlefield_entries_this_turn"][0], zoraline);
+    remove_saved_entry_token_status(
+        &mut state["payment_transaction"]["recovered"]["state"]["battlefield_entries_this_turn"][0],
+        zoraline,
+    );
+    (save, gyome, zoraline, pet)
+}
+
+fn remove_saved_entry_token_status(entry: &mut serde_json::Value, entrant: ObjectId) {
+    assert_eq!(entry["object_id"], serde_json::to_value(entrant).unwrap());
+    assert!(entry
+        .as_object_mut()
+        .unwrap()
+        .remove("token_status")
+        .is_some());
+}
+
+#[test]
+fn legacy_payment_checkpoint_repairs_entry_token_status_before_settlement() {
+    let (save, gyome, zoraline, pet) = legacy_payment_checkpoint_save();
+    let restored = serde_json::from_value::<PersistedGameState>(save)
+        .unwrap()
+        .into_game_state()
+        .unwrap();
+    let checkpoint = restored
+        .payment_transaction
+        .as_deref()
+        .and_then(|transaction| transaction.recovered.as_deref())
+        .expect("restore preserves the recovery checkpoint");
+    let entry = &checkpoint.state.battlefield_entries_this_turn[0];
+    assert_eq!(entry.object_id, zoraline);
+    assert_eq!(entry.token_status, Some(EntryTokenStatus::Nontoken));
+
+    let mut runner = GameRunner::from_state(restored);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player: P0, .. }
+    ));
+    let life_before = runner.life(P0);
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .unwrap();
+    assert!(runner.state().payment_transaction.is_none());
+    assert_eq!(runner.state().objects[&pet].zone, Zone::Exile);
+    assert_eq!(runner.life(P0), life_before - 2);
+    // CR 608.2i: Gyome looks back at Zoraline's entry in the settled game.
+    assert_gyome_food_delta(&mut runner, gyome, 1);
+}
+
+#[test]
+fn legacy_payment_checkpoint_refuses_unrecoverable_entry_token_status() {
+    let (mut save, _, _, _) = legacy_payment_checkpoint_save();
+    let missing = ObjectId(9_999);
+    // Only the checkpoint ledger refers to this absent entrant. Its object and
+    // entry zone-change record are both unavailable as repair evidence.
+    save["state"]["payment_transaction"]["recovered"]["state"]["battlefield_entries_this_turn"]
+        [0]["object_id"] = serde_json::to_value(missing).unwrap();
+    let result = serde_json::from_value::<PersistedGameState>(save)
+        .unwrap()
+        .prepare_for_restore(PersistedRestoreFinalization::Immediate);
+    assert!(matches!(
+        result,
+        Err(PersistedRestoreError::UnrecoverableBattlefieldEntryTokenStatus { object_id })
+            if object_id == missing
+    ));
 }
 
 fn legacy_bears_entry() -> (GameRunner, ObjectId, ObjectId) {
