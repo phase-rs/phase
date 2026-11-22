@@ -102,6 +102,22 @@ fn assert_settled(runner: &GameRunner) {
     );
 }
 
+/// Completion boundary for a combat witness: combat damage was dealt (the phase
+/// left the combat-damage step for `EndCombat` or `PostCombatMain`) and the game
+/// settled into a clean priority window with an empty stack. `combat_damage()`
+/// stops silently when a priority pass is rejected, so the phase is the proof.
+fn assert_combat_settled(runner: &GameRunner) {
+    assert_settled(runner);
+    assert!(
+        matches!(
+            runner.state().phase,
+            Phase::EndCombat | Phase::PostCombatMain
+        ),
+        "combat damage must have been dealt, phase is {:?}",
+        runner.state().phase
+    );
+}
+
 /// P0 casts Lightning Bolt (printed text: "Lightning Bolt deals 3 damage to any
 /// target.") at `target`.
 fn cast_bolt_at(runner: &mut GameRunner, bolt: ObjectId, target: ObjectId) {
@@ -179,7 +195,7 @@ fn wall_of_vapor_prevents_damage_from_the_creature_it_blocks() {
         .expect("P0 blocks with Wall of Vapor");
     to_priority(&mut runner);
     runner.combat_damage();
-    assert_settled(&runner);
+    assert_combat_settled(&runner);
 
     assert_eq!(
         runner.state().objects[&wall].zone,
