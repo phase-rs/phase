@@ -765,8 +765,8 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         }
     }
 
-    // CR 700.2b (override) + CR 701.9b (analogous): "choose one at random" — the
-    // game, not the chooser, selects the mode(s). The "at random" qualifier is a
+    // CR 700.2b + CR 701.9b (analogous): "choose one at random" — the game draws
+    // the mode(s); "at random" fixes how, not who chooses. The qualifier is a
     // word-boundary phrase flag on the header sentence, not parsing dispatch.
     let selection = if nom_primitives::scan_contains(&header_lower, "at random") {
         TargetSelectionMode::Random
@@ -2203,7 +2203,7 @@ fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice
         entwine_cost: None,
         // CR 700.2e: the player who chooses the mode(s).
         chooser: header.chooser.clone(),
-        // CR 700.2b (override): random mode selection ("choose one at random").
+        // CR 700.2b: random mode selection ("choose one at random").
         selection: header.selection,
         // CR 700.2 + CR 107.3m: dynamic "choose up to X —" cap, resolved live
         // at runtime; the static `max_choices` above already holds the
@@ -3701,8 +3701,8 @@ mod tests {
 
     #[test]
     fn parse_modal_header_choose_one_at_random_sets_random_selection() {
-        // CR 700.2b (override): "choose one at random" (Cult of Skaro) — the
-        // game selects the mode, so the header records TargetSelectionMode::Random
+        // CR 700.2b: "choose one at random" (Cult of Skaro) — the game draws
+        // the mode, so the header records TargetSelectionMode::Random
         // while still parsing the count as one.
         let header =
             parse_modal_header_ast("choose one at random —").expect("modal header recognized");

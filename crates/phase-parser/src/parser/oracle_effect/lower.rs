@@ -7200,7 +7200,11 @@ pub(super) fn rebind_decline_body_recipient(effect: &mut Effect) {
         Effect::Draw { target, .. }
         | Effect::Discard { target, .. }
         | Effect::Mill { target, .. }
-        | Effect::DealDamage { target, .. } => rebind(target),
+        | Effect::DealDamage { target, .. }
+        // CR 701.22a + CR 701.25a: scry and surveil act on "your library" — the
+        // recipient is the keyword action's performer.
+        | Effect::Scry { target, .. }
+        | Effect::Surveil { target, .. } => rebind(target),
         Effect::Token { owner, .. } => rebind(owner),
         // CR 608.2c: "that player exiles …" in the body is the scoped opponent's
         // own move, so its performer follows the same rebind.
@@ -7213,9 +7217,33 @@ pub(super) fn rebind_decline_body_recipient(effect: &mut Effect) {
     }
 }
 
-/// CR 109.5: Walk a decline-body chain (`effect` + every `sub_ability`
-/// descendant) and apply `rebind` to each node's `effect`. Single shared
-/// walker; the per-quadrant mapping is supplied as the leaf rebinder.
+/// CR 608.2c + CR 608.2e: the continuation steps of one gated instruction —
+/// `head` and each following `ContinuationStep` descendant. Stops at the next
+/// printed instruction (`SequentialSibling`) and at a descendant with its own
+/// `player_scope` (a separate multi-player action whose subjects bind in its own
+/// iteration — the Valiant Batrider rule in `rewrite_player_scope_refs`).
+pub(super) fn for_each_continuation_step_mut(
+    head: Option<&mut AbilityDefinition>,
+    mut visit: impl FnMut(&mut AbilityDefinition),
+) {
+    let mut cursor = head;
+    while let Some(node) = cursor {
+        match node.sub_link {
+            SubAbilityLink::ContinuationStep => {}
+            SubAbilityLink::SequentialSibling => break,
+        }
+        if node.player_scope.is_some() {
+            break;
+        }
+        visit(node);
+        cursor = node.sub_ability.as_deref_mut();
+    }
+}
+
+/// CR 109.5: Walk a decline-body chain (`effect` + its continuation steps, per
+/// [`for_each_continuation_step_mut`]) and apply `rebind` to each node's
+/// `effect`. Single shared walker; the per-quadrant mapping is supplied as the
+/// leaf rebinder.
 ///
 /// Used by both the prepositional decline path
 /// (`rebind_decline_body_recipient`: `Controller → OriginalController`) and
@@ -7228,11 +7256,9 @@ pub(super) fn rebind_clause_recipients_with(
     rebind: impl Fn(&mut Effect),
 ) {
     rebind(&mut clause.effect);
-    let mut cursor = clause.sub_ability.as_deref_mut();
-    while let Some(node) = cursor {
-        rebind(&mut node.effect);
-        cursor = node.sub_ability.as_deref_mut();
-    }
+    for_each_continuation_step_mut(clause.sub_ability.as_deref_mut(), |node| {
+        rebind(&mut node.effect)
+    });
 }
 
 /// CR 109.5 + CR 101.3: Inside a subject-only "each <scope> who can't, <body>"

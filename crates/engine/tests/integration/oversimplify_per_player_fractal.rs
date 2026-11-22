@@ -1184,10 +1184,21 @@ mod constructed {
         )
     }
 
+    /// The trailing instruction's link after an ungated rider: either link
+    /// leaves it the once-after-all-seats tail.
     const LINKS: [SubAbilityLink; 2] = [
         SubAbilityLink::ContinuationStep,
         SubAbilityLink::SequentialSibling,
     ];
+
+    /// The trailing instruction's link after a gated rider ("if they do" /
+    /// "each player who doesn't"). A separate sentence is ordinarily a
+    /// `SequentialSibling` (the parser stamps sentence boundaries so), though
+    /// `relink_gated_token_referent_consumers` may retag a separate sentence
+    /// as a `ContinuationStep`; a retagged consumer correctly runs per seat.
+    /// A `ContinuationStep` is a step of the gated instruction itself, which
+    /// runs per seat behind its gate (Shakedown Heavy's decline witness).
+    const GATED_TAIL_LINKS: [SubAbilityLink; 1] = [SubAbilityLink::SequentialSibling];
 
     // --- N5: the partition needs the matching co-scoped producer ------------
 
@@ -1353,7 +1364,7 @@ mod constructed {
     /// seat reads its own "not performed", not P0's accept latch.
     #[test]
     fn matched_empty_seat_failed_condition_reads_its_own_outcome_after_a_pause() {
-        for link in LINKS {
+        for link in GATED_TAIL_LINKS {
             for (players, expected) in [(2, vec![3, 1]), (3, vec![3, 1, 1])] {
                 let row = Row::new(players, Board::HalvingP0)
                     .gate(Gate::YourTurn)
@@ -1399,7 +1410,7 @@ mod constructed {
     /// nothing, P0 (accepted) gains 1, and the trailing instruction runs.
     #[test]
     fn matched_empty_seat_failed_condition_false_if_you_do_keeps_the_trailing_instruction() {
-        for link in LINKS {
+        for link in GATED_TAIL_LINKS {
             for (players, expected) in [(2, vec![4, 0]), (3, vec![4, 0, 0])] {
                 let row = Row::new(players, Board::HalvingP0)
                     .gate(Gate::YourTurn)
@@ -1418,7 +1429,7 @@ mod constructed {
     /// false, and the trailing instruction runs.
     #[test]
     fn matched_empty_seat_false_if_you_do_keeps_the_trailing_instruction() {
-        for link in LINKS {
+        for link in GATED_TAIL_LINKS {
             for (players, board, prompted, expected) in [
                 (2, Board::HalvingP0, P0, vec![4, 0]),
                 (3, Board::HalvingP0, P0, vec![4, 0, 0]),
@@ -1438,7 +1449,7 @@ mod constructed {
     /// fails, or it declines its "may"). The trailing instruction runs once.
     #[test]
     fn bound_last_seat_that_does_not_place_keeps_the_trailing_instruction() {
-        for link in LINKS {
+        for link in GATED_TAIL_LINKS {
             // (i) P0 Parallel Lives (P0 2 Fractals, P1 1); P1 controls no
             // enchantment, so its condition fails. P1's own life is not asserted.
             let row = Row::new(2, Board::ParallelP0)
@@ -1519,7 +1530,7 @@ mod constructed {
     /// placing seat: P2's leg is reached with its own ability.
     #[test]
     fn matched_empty_seat_before_a_placing_seat_after_a_pause() {
-        for link in LINKS {
+        for link in GATED_TAIL_LINKS {
             let row = Row::new(3, Board::HalvingP2ParallelP0)
                 .gate(Gate::ControlsEnchantment)
                 .rider(Rider::IfYouDo)

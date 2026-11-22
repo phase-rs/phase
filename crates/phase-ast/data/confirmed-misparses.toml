@@ -1721,6 +1721,7 @@ face = [
   { key = "painbringer", class = "cost_wrong", clauses = ["{T}, Exile any number of cards from your graveyard:"] },
   { key = "paired tactician", class = "dropped_qualifier", clauses = ["Whenever this creature and at least one other Warrior attack, put a +1/+1 counter on this creature."] },
   { key = "paladin danse, steel maverick", class = "wrong_object", clauses = ["Exile Paladin Danse: Each creature you control that's an artifact or Human gains indestructible until end of turn."] },
+  { key = "palantír of orthanc", class = "wrong_object", clauses = ["that player loses life equal to the total mana value of those cards."] },
   { key = "paliano vanguard", class = "dropped_qualifier", clauses = ["Draft this card face up.", "As you draft a creature card, you may reveal it, note its creature types, then turn this card face down.", "Other creatures you control of a type you noted for cards named Paliano Vanguard get +1/+1."] },
   { key = "panacea", class = "wrong_count", clauses = ["{X}{X}, {T}: Prevent the next X damage that would be dealt to any target this turn."] },
   { key = "panoptic projektor", class = "dropped_qualifier", clauses = ["{T}: The next face-down creature spell you cast this turn costs {3} less to cast.", "If turning a face-down permanent face up causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time."] },

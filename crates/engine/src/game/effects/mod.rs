@@ -14365,10 +14365,24 @@ fn filter_is_parent_object_anaphor(filter: &TargetFilter) -> bool {
     )
 }
 
+/// CR 608.2c + CR 118.12: whether the node `detach_after_player_scope_local_chain`
+/// is judging belongs to an instruction a per-seat performed gate governs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeatGateMembership {
+    /// The fan-out head, or a node outside any per-seat gated instruction. The
+    /// head's own gate is the gate the whole fan-out inherited (extort's "If you
+    /// do", CR 702.101a), not one seat's decision.
+    Ungoverned,
+    /// A descendant whose own performed gate, or whose instruction's gate, reads
+    /// this seat's optional decision.
+    PerSeatGated,
+}
+
 fn detach_after_player_scope_local_chain(
     node: &mut ResolvedAbility,
     scope: &PlayerFilter,
     referent_introduced: bool,
+    membership: SeatGateMembership,
 ) -> Option<Box<ResolvedAbility>> {
     let mut next = node.sub_ability.take()?;
     // CR 115.10 + CR 608.2c: a decline-branch sub-ability whose own condition is
@@ -14488,11 +14502,24 @@ fn detach_after_player_scope_local_chain(
         && !child_scope_is_distinct
         && is_player_scope_local_continuation(&node.effect, &next.effect, scope)
         && !next_is_scoped_search_shuffle_tail;
+    // CR 608.2c + CR 118.12: a resolution step of a per-seat gated instruction
+    // ("If they don't, they lose 2 life and you draw a card" — Braids's
+    // Frightful Return chapter III; "If they do, untap this creature and
+    // remove it from combat" — Shakedown Heavy) is part of that instruction: it
+    // resolves inside the seat's template and is skipped with its gate when the
+    // gate is false (`starts_independent_instruction`). The fan-out head is
+    // never a per-seat gate (extort, CR 702.101a). A child with its OWN
+    // `player_scope` is the next multi-player action (CR 608.2e) and is judged
+    // as before.
+    let next_is_gated_instruction_step = membership == SeatGateMembership::PerSeatGated
+        && !starts_independent_instruction(&next)
+        && next.player_scope.is_none();
     if next_is_performed_gated
         || next_is_scoped_player_zone_change_gated
         || next_is_co_scoped_anaphoric_consumer
         || next_is_optional_clause_continuation
         || next_is_local_continuation
+        || next_is_gated_instruction_step
     {
         // CR 608.2c: co-scoped continuations kept inside the scoped template
         // inherit the outer iteration — redundant `player_scope` on the child
@@ -14501,7 +14528,17 @@ fn detach_after_player_scope_local_chain(
         if next_is_local_continuation {
             next.player_scope = None;
         }
-        let tail = detach_after_player_scope_local_chain(&mut next, scope, referent_in_scope);
+        let next_membership = if next_is_performed_gated || next_is_gated_instruction_step {
+            SeatGateMembership::PerSeatGated
+        } else {
+            SeatGateMembership::Ungoverned
+        };
+        let tail = detach_after_player_scope_local_chain(
+            &mut next,
+            scope,
+            referent_in_scope,
+            next_membership,
+        );
         node.sub_ability = Some(next);
         tail
     } else {
@@ -14515,7 +14552,12 @@ pub fn split_player_scope_chain(
 ) -> (ResolvedAbility, Option<Box<ResolvedAbility>>) {
     let mut scoped = ability.clone();
     scoped.player_scope = None;
-    let tail = detach_after_player_scope_local_chain(&mut scoped, scope, false);
+    let tail = detach_after_player_scope_local_chain(
+        &mut scoped,
+        scope,
+        false,
+        SeatGateMembership::Ungoverned,
+    );
     scoped.detached_remainder = detached_remainder_verdict(tail.as_deref());
     (scoped, tail)
 }
@@ -31535,10 +31577,11 @@ fn record_player_actions_performed(state: &mut GameState, new_events: &[GameEven
         {
             state.player_actions_this_way.insert((*player_id, *action));
             // Draw completions record their turn-ledger entry at the single event
-            // emission site in `draw.rs`; overlapping nested chain windows may
-            // still see that event for the resolution-local set, but must not
-            // append it to the Vec more than once.
-            if *action != PlayerActionKind::Draw {
+            // emission site in `draw.rs`, and a faced dilemma at stack placement
+            // (`ability_utils::record_face_dilemma_after_stack_placement`);
+            // overlapping nested chain windows may still see those events for the
+            // resolution-local set, but must not append them to the Vec again.
+            if action.turn_history_recorded_by_chain_scan() {
                 record_player_action_this_turn(state, *player_id, *action);
             }
         }
@@ -67142,6 +67185,192 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.total(), 0, "nothing was spent");
     }
 
+    const BRAIDS_FRIGHTFUL_RETURN: &str = "Read ahead (Choose a chapter and start with that many lore counters. Add one after your draw step. Skipped chapters don't trigger. Sacrifice after III.)\nI — You may sacrifice a creature. If you do, each opponent discards a card.\nII — Return target creature card from your graveyard to your hand.\nIII — Target opponent may sacrifice a nonland, nontoken permanent of their choice. If they don't, they lose 2 life and you draw a card.";
+
+    /// The resolved chain of the first trigger whose `execute` carries a
+    /// `player_scope`, parsed from verbatim Oracle text.
+    fn scoped_trigger_resolved(text: &str, name: &str, types: &[&str]) -> ResolvedAbility {
+        scoped_trigger_resolved_with(text, name, &[], types, &[])
+    }
+
+    /// `scoped_trigger_resolved` for a face with printed keywords and subtypes
+    /// (a Saga's "Read ahead").
+    fn scoped_trigger_resolved_with(
+        text: &str,
+        name: &str,
+        keywords: &[&str],
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> ResolvedAbility {
+        let owned =
+            |items: &[&str]| -> Vec<String> { items.iter().map(|t| t.to_string()).collect() };
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            name,
+            &owned(keywords),
+            &owned(types),
+            &owned(subtypes),
+        );
+        let execute = parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .find(|execute| execute.player_scope.is_some())
+            .expect("REACH: a scoped trigger body parses");
+        build_resolved_from_def(execute, ObjectId(100), PlayerId(0))
+    }
+
+    /// Split `ability` at its first `player_scope` node, the way the
+    /// `player_scope` driver in `resolve_chain_body` does.
+    fn split_at_first_scope(
+        ability: &ResolvedAbility,
+    ) -> (ResolvedAbility, Option<Box<ResolvedAbility>>) {
+        let mut cursor = Some(ability);
+        while let Some(node) = cursor {
+            if let Some(scope) = node.player_scope.clone() {
+                return split_player_scope_chain(node, &scope);
+            }
+            cursor = node.sub_ability.as_deref();
+        }
+        panic!("no player_scope node in {ability:?}");
+    }
+
+    /// The template's nodes after the head, in order.
+    fn template_steps(template: &ResolvedAbility) -> Vec<&ResolvedAbility> {
+        let mut steps = Vec::new();
+        let mut cursor = template.sub_ability.as_deref();
+        while let Some(node) = cursor {
+            steps.push(node);
+            cursor = node.sub_ability.as_deref();
+        }
+        steps
+    }
+
+    /// Braids's Frightful Return chapter III's resolved chain.
+    fn braids_iii_resolved() -> ResolvedAbility {
+        scoped_trigger_resolved_with(
+            BRAIDS_FRIGHTFUL_RETURN,
+            "Braids's Frightful Return",
+            &["Read ahead"],
+            &["Enchantment"],
+            &["Saga"],
+        )
+    }
+
+    /// U1 — CR 608.2c + CR 118.12: a per-seat gated instruction keeps its
+    /// continuation steps in the seat template. Braids's Frightful Return
+    /// chapter III: "If they don't, they lose 2 life and you draw a card" — the
+    /// draw stays with the gated life loss instead of detaching as the
+    /// once-after-all-seats tail.
+    #[test]
+    fn player_scope_gated_instruction_keeps_its_continuation_steps() {
+        let resolved = braids_iii_resolved();
+        let (template, tail) = split_at_first_scope(&resolved);
+        assert!(matches!(template.effect, Effect::Sacrifice { .. }));
+        let steps = template_steps(&template);
+        assert_eq!(steps.len(), 2, "template: {template:?}");
+        assert!(matches!(steps[0].effect, Effect::LoseLife { .. }));
+        assert!(
+            steps[0]
+                .condition
+                .as_ref()
+                .is_some_and(condition_depends_on_effect_performed),
+            "REACH: the life loss carries the per-seat decline gate"
+        );
+        assert!(
+            matches!(steps[1].effect, Effect::Draw { .. }),
+            "the draw is retained in the seat template"
+        );
+        assert!(tail.is_none(), "nothing detaches: {tail:?}");
+    }
+
+    /// U2 — CR 702.101a: the fan-out head's own gate is the gate the whole
+    /// fan-out inherited (extort's "If you do"), not one seat's decision, so
+    /// "you gain life equal to the total life lost this way" stays the one
+    /// aggregate tail after every seat.
+    #[test]
+    fn player_scope_head_gate_does_not_retain_aggregate_tail() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Extort);
+        synthesize_extort(&mut face);
+        let execute = face
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::SpellCast))
+            .and_then(|t| t.execute.as_deref())
+            .expect("synthesized extort trigger");
+        let resolved = build_resolved_from_def(execute, ObjectId(100), PlayerId(0));
+        let (template, tail) = split_at_first_scope(&resolved);
+        assert!(matches!(template.effect, Effect::LoseLife { .. }));
+        assert!(
+            template
+                .condition
+                .as_ref()
+                .is_some_and(condition_depends_on_effect_performed),
+            "REACH: the head carries the controller's performed gate"
+        );
+        assert!(template.sub_ability.is_none(), "template: {template:?}");
+        assert!(
+            tail.as_deref()
+                .is_some_and(|tail| matches!(tail.effect, Effect::GainLife { .. })),
+            "the aggregate gain is the detached tail: {tail:?}"
+        );
+    }
+
+    /// U3 — CR 608.2c: a `SequentialSibling` is the next printed instruction,
+    /// which ends the gated instruction. Wernog, Rider's Chaplain: "You
+    /// investigate X times …" resolves once after every seat.
+    #[test]
+    fn player_scope_gated_instruction_stops_at_sequential_sibling() {
+        let resolved = scoped_trigger_resolved(
+            "When Wernog, Rider's Chaplain enters or leaves the battlefield, each opponent may investigate. Each opponent who doesn't loses 1 life. You investigate X times, where X is one plus the number of opponents who investigated this way.\nPartner—Friends forever (You can have two commanders if both have this ability.)",
+            "Wernog, Rider's Chaplain",
+            &["Creature"],
+        );
+        let (template, tail) = split_at_first_scope(&resolved);
+        assert!(matches!(template.effect, Effect::Investigate));
+        let steps = template_steps(&template);
+        assert_eq!(steps.len(), 1, "template: {template:?}");
+        assert!(matches!(steps[0].effect, Effect::LoseLife { .. }));
+        assert!(
+            steps[0].condition.is_some(),
+            "REACH: the life loss is gated"
+        );
+        let tail = tail.expect("the trailing investigate detaches");
+        assert!(matches!(tail.effect, Effect::Investigate));
+        assert_eq!(tail.sub_link, SubAbilityLink::SequentialSibling);
+    }
+
+    /// U6 — CR 608.2c + CR 118.12: the positive-gate member of the class.
+    /// Shakedown Heavy: "If they do, untap this creature and remove it from
+    /// combat" — the removal is a continuation step of the gated untap and
+    /// stays in the defending player's template.
+    #[test]
+    fn player_scope_positive_gated_instruction_keeps_its_continuation_step() {
+        let resolved = scoped_trigger_resolved(
+            "Menace\nWhenever this creature attacks, defending player may have you draw a card. If they do, untap this creature and remove it from combat.",
+            "Shakedown Heavy",
+            &["Creature"],
+        );
+        let (template, tail) = split_at_first_scope(&resolved);
+        assert!(matches!(template.effect, Effect::Draw { .. }));
+        let steps = template_steps(&template);
+        assert_eq!(steps.len(), 2, "template: {template:?}");
+        assert!(matches!(steps[0].effect, Effect::SetTapState { .. }));
+        assert!(
+            steps[0]
+                .condition
+                .as_ref()
+                .is_some_and(condition_depends_on_effect_performed),
+            "REACH: the untap carries the per-seat accept gate"
+        );
+        assert!(
+            matches!(steps[1].effect, Effect::RemoveFromCombat { .. }),
+            "the removal is retained in the seat template"
+        );
+        assert!(tail.is_none(), "nothing detaches: {tail:?}");
+    }
+
     #[test]
     fn optional_resolution_pay_ability_cost_if_you_do_draws_after_composite_payment() {
         let mut state = GameState::new_two_player(42);
@@ -71634,7 +71863,12 @@ mod tests {
         child.player_scope = Some(PlayerFilter::Opponent);
         node.sub_ability = Some(Box::new(child));
 
-        let tail = detach_after_player_scope_local_chain(&mut node, &owner_shuffle_scope, false);
+        let tail = detach_after_player_scope_local_chain(
+            &mut node,
+            &owner_shuffle_scope,
+            false,
+            SeatGateMembership::Ungoverned,
+        );
         let tail = tail.expect("a distinct child scope is detached, not absorbed");
         assert_eq!(
             tail.player_scope,
@@ -71668,7 +71902,13 @@ mod tests {
         child.sub_link = SubAbilityLink::ContinuationStep;
         node.sub_ability = Some(Box::new(child));
         assert!(
-            detach_after_player_scope_local_chain(&mut node, &owner_shuffle_scope, false).is_none(),
+            detach_after_player_scope_local_chain(
+                &mut node,
+                &owner_shuffle_scope,
+                false,
+                SeatGateMembership::Ungoverned
+            )
+            .is_none(),
             "an unscoped owner-seat continuation stays in the iteration"
         );
         let attached = node

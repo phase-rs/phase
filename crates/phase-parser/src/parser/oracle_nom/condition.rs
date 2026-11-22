@@ -8825,6 +8825,9 @@ fn parse_player_action_past_tense(input: &str) -> OracleResult<'_, PlayerActionK
             PlayerActionKind::SearchedLibrary,
             alt((tag("searched their library"), tag("searched a library"))),
         ),
+        // CR 700.17 (edition effective 2026-11-06): "faced a dilemma" — chose one
+        // or more modes for a spell or ability.
+        value(PlayerActionKind::FaceDilemma, tag("faced a dilemma")),
     ))
     .parse(input)
 }
