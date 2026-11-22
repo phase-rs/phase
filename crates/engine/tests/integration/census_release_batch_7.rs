@@ -277,9 +277,13 @@ struct Prowler {
     land: ObjectId,
     shock: ObjectId,
     island: ObjectId,
+    /// A land card that starts in the graveyard, before the mill: eligible by type, but not milled
+    /// "this way", so it must never be offered.
+    old_land: ObjectId,
 }
 
-/// Library: Grizzly Bears, <Forest or Hill Giant>, Shock, then Island (not milled).
+/// Library: Grizzly Bears, <Forest or Hill Giant>, Shock, then Island (not milled). The graveyard
+/// starts with a Mountain.
 fn prowler_table(with_land: bool) -> (GameRunner, Prowler) {
     let (mut r, t) = table(|s| Prowler {
         spell: s.add_real_card(P0, "Blanchwood Prowler", Zone::Hand, db()),
@@ -292,6 +296,7 @@ fn prowler_table(with_land: bool) -> (GameRunner, Prowler) {
         ),
         shock: s.add_real_card(P0, "Shock", Zone::Library, db()),
         island: s.add_real_card(P0, "Island", Zone::Library, db()),
+        old_land: s.add_real_card(P0, "Mountain", Zone::Graveyard, db()),
     });
     set_library(&mut r, P0, &[t.bears, t.land, t.shock, t.island]);
     (r, t)
@@ -314,7 +319,12 @@ fn prowler_may_put_the_milled_land_into_hand() {
             min: 0,
             max: 1,
         }],
-        "the land among the milled cards is the only choice: not the nonland ones, not the Island below"
+        "the land among the milled cards is the only choice: not the nonland ones, not the Island below, not the Mountain already in the graveyard"
+    );
+    assert_eq!(
+        zone_of(&r, t.old_land),
+        Zone::Graveyard,
+        "the pre-existing land was not milled this way, so it stays"
     );
     assert_eq!(zone_of(&r, t.land), Zone::Hand);
     assert_eq!(zone_of(&r, t.bears), Zone::Graveyard);
@@ -345,8 +355,9 @@ fn prowler_declining_the_land_puts_a_counter_on_it() {
             min: 0,
             max: 1,
         }],
-        "the choice was offered, over the milled land only"
+        "the choice was offered, over the milled land only, not the Mountain already in the graveyard"
     );
+    assert_eq!(zone_of(&r, t.old_land), Zone::Graveyard);
     assert_eq!(
         zone_of(&r, t.land),
         Zone::Graveyard,
@@ -369,7 +380,12 @@ fn prowler_without_a_milled_land_gets_the_counter() {
     cast_plan(&mut r, "prowler no land", t.spell, &mut plan);
     assert!(
         plan.prompts.is_empty(),
-        "no land milled: nothing to choose, so no choice is offered"
+        "no land milled: nothing to choose, so no choice is offered, although a Mountain sits in the graveyard"
+    );
+    assert_eq!(
+        zone_of(&r, t.old_land),
+        Zone::Graveyard,
+        "the pre-existing land is not a milled card"
     );
     assert_eq!(
         zone_of(&r, t.land),
@@ -396,6 +412,9 @@ struct Grab {
     bears: ObjectId,
     squirrel: ObjectId,
     forest: ObjectId,
+    /// A permanent card that starts in the graveyard, before the mill: eligible by type, but not
+    /// milled "this way", so it must never be offered.
+    old_permanent: ObjectId,
 }
 
 fn grab_table(squirrel_on_board: bool) -> (GameRunner, Grab) {
@@ -410,6 +429,7 @@ fn grab_table(squirrel_on_board: bool) -> (GameRunner, Grab) {
             bears: s.add_real_card(P0, "Grizzly Bears", Zone::Library, db()),
             squirrel: s.add_real_card(P0, "Bushy Bodyguard", Zone::Library, db()),
             forest: s.add_real_card(P0, "Forest", Zone::Library, db()),
+            old_permanent: s.add_real_card(P0, "Llanowar Elves", Zone::Graveyard, db()),
         }
     });
     set_library(
@@ -446,7 +466,12 @@ fn grab_run(r: &mut GameRunner, g: &Grab, pick: Option<ObjectId>) -> Shown {
             min: 0,
             max: 1,
         }],
-        "exactly one choice, over the milled permanent cards only: the Shock is not offered"
+        "exactly one choice, over the milled permanent cards only: not the Shock, not the Llanowar Elves already in the graveyard"
+    );
+    assert_eq!(
+        zone_of(r, g.old_permanent),
+        Zone::Graveyard,
+        "the pre-existing permanent card was not milled this way, so it stays"
     );
     plan.prompts.remove(0)
 }
@@ -463,7 +488,7 @@ fn cache_grab_takes_one_milled_permanent_and_no_food_without_a_squirrel() {
             min: 0,
             max: 1,
         },
-        "permanent cards only: the Shock is not offered"
+        "permanent cards only: the Shock is not offered, nor the pre-existing Llanowar Elves"
     );
     assert_eq!(zone_of(&r, g.bears), Zone::Hand);
     assert_eq!(zone_of(&r, g.shock), Zone::Graveyard);
