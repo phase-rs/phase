@@ -293,6 +293,7 @@ mod golbez_artifact_count_scope_8751;
 mod gollum_scheming_guide_card_predicate_guess;
 mod gonti_lord_of_luxury_exiles_dug_card;
 mod good_king_mog_xii_chapter_iv_588;
+mod goreclaw_power_gated_cost_reduction;
 mod gourmands_talent_turn_scoped_food_grant;
 mod grab_the_prize_discarded_nonland;
 mod gran_gran_integration;
