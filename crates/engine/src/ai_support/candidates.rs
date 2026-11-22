@@ -494,6 +494,20 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // CR 101.4c: choose which of this player's simultaneous replacement
+        // decisions to make first; each object is one decision.
+        WaitingFor::ReplacementDecisionOrder { player, objects } => objects
+            .iter()
+            .map(|&object| {
+                candidate(
+                    GameAction::SelectCards {
+                        cards: vec![object],
+                    },
+                    TacticalClass::Replacement,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::MoveCountersDistribution {
             player,
             available,
@@ -987,6 +1001,7 @@ fn exact_owns_candidate_domain(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::MeldAttackTargetChoice { .. }
             | WaitingFor::EntryAttackTargetChoice { .. }
             | WaitingFor::EntryControllerChoice { .. }
+            | WaitingFor::ReplacementDecisionOrder { .. }
             | WaitingFor::ChooseAnnouncingOpponent { .. }
             | WaitingFor::ChooseGiftRecipient { .. }
             | WaitingFor::MoveCountersDistribution { .. }
@@ -1015,6 +1030,7 @@ pub fn candidate_actions_broad_with_probe(
         | WaitingFor::MeldAttackTargetChoice { .. }
         | WaitingFor::EntryAttackTargetChoice { .. }
         | WaitingFor::EntryControllerChoice { .. }
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::MoveCountersDistribution { .. }
@@ -11078,6 +11094,7 @@ mod tests {
                         incarnation: 0,
                     },
                     origin: Zone::Library,
+                    departing_permanent: None,
                 },
                 MassLibraryOrderMember {
                     identity: ObjectIncarnationRef {
@@ -11085,6 +11102,7 @@ mod tests {
                         incarnation: 0,
                     },
                     origin: Zone::Library,
+                    departing_permanent: None,
                 },
             ],
         };

@@ -15,6 +15,9 @@
 //! production aggregator (`search::emit_trace_for_candidate`) directly, so
 //! we are exercising the exact formatter and registry call that runs inside
 //! `choose_action` — no reimplementation in the test.
+// The auto-trait (`Send`) proof for the im-backed `GameState` exceeds the default
+// recursion limit of 128 (a future-incompatibility error on newer toolchains).
+#![recursion_limit = "512"]
 
 use std::sync::{Arc, Mutex};
 

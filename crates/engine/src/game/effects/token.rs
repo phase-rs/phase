@@ -4371,16 +4371,13 @@ fn try_resolve_copy_batch(
     let Some(owner) = resolve_token_owner(state, ability, &TargetFilter::Controller) else {
         return false;
     };
-    if token_creation_needs_choice(
+    !token_creation_needs_choice(
         state,
         &probe_spec,
         owner,
         crate::types::proposed_event::EtbTapState::from_seeded_tapped(false),
         1,
-    ) {
-        return false;
-    }
-    true
+    )
 }
 
 /// CR 306.5b + CR 614.1c + CR 707.2: `CopyTokenOf` seeds intrinsic counters
@@ -6495,7 +6492,7 @@ mod tests {
         assert_eq!(a.display_name, "Angel");
         assert!(a.keywords.contains(&Keyword::Flying));
         assert!(a.keywords.contains(&Keyword::Vigilance));
-        assert!(!a.subtypes.contains(&"Flying".to_string()));
+        assert!(!a.subtypes.iter().any(|i| i == "Flying"));
     }
 
     #[test]
@@ -7165,7 +7162,7 @@ mod tests {
         let obj = &state.objects[&state.battlefield[0]];
         assert_eq!(obj.name, "Treasure");
         assert!(obj.card_types.core_types.contains(&CoreType::Artifact));
-        assert!(obj.card_types.subtypes.contains(&"Treasure".to_string()));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Treasure"));
         assert_eq!(obj.power, None);
         assert_eq!(obj.toughness, None);
     }

@@ -177,7 +177,8 @@ pub use keyword_grant::{classify_quoted_inner, parse_quoted_ability_modification
 pub(crate) use keyword_grant::{
     find_refused_loyalty_grant_sentence, parse_chosen_qualifier_subject,
     parse_continuous_modifications, parse_graveyard_granted_keyword_kind, split_keyword_list,
-    try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
+    strip_enclosing_sentence_comma, try_parse_graveyard_keyword_grant_clause,
+    try_parse_graveyard_keyword_grant_static,
 };
 pub(crate) use mana_transform::{
     is_unspent_mana_loss_causes_life_loss_static, try_parse_retain_unspent_mana_static,

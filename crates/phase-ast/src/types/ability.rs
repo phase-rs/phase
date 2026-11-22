@@ -8255,6 +8255,22 @@ impl TypedFilter {
             || !self.properties.is_empty()
     }
 
+    /// Whether best-effort target parsing retained no standalone selection constraint.
+    ///
+    /// CR 115.1a + CR 115.1c: a target phrase describes the affected object or
+    /// player. An empty filter or `Another` alone does not preserve that
+    /// description; the latter only excludes a relative referent. CR 115.4:
+    /// damage-target wording has its own domain, which this filter alone
+    /// cannot establish. Every other property remains a real constraint.
+    pub fn lacks_standalone_selection_constraint(&self) -> bool {
+        self.type_filters.is_empty()
+            && self.controller.is_none()
+            && self
+                .properties
+                .iter()
+                .all(|property| *property == FilterProp::Another)
+    }
+
     pub fn normalized(mut self) -> Self {
         self.type_filters = normalized_type_filters(self.type_filters);
         self.properties = normalized_filter_props(self.properties);
@@ -17593,11 +17609,13 @@ impl Comparator {
     }
 }
 
-/// CR 508.1 / CR 508.1b: Subject axis for counting members of a triggering
-/// `AttackersDeclared` event.
+/// CR 508.1a + CR 508.1b: Subject axis for counting declared attackers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AttackersDeclaredCountSubject {
+    /// CR 508.1a + CR 508.4: Count creatures declared as attackers in this combat,
+    /// optionally excluding the source's observed incarnation (CR 400.7).
+    CurrentCombat { exclude_source: SourceExclusion },
     /// Count attackers whose controller matches `scope` relative to the trigger
     /// controller. `filter` is the optional condition-level type axis (CR
     /// 508.1): when `Some(f)`, only attackers whose object matches `f` are
@@ -20399,7 +20417,7 @@ pub fn is_direct_resolution_optional_payment_branch(cost: &AbilityCost) -> bool 
 /// absent: the optional-branch selector intercepts it before this executor and
 /// rewrites the completed frame to an empty prepaid composite.
 pub fn supported_at_resolution(cost: &AbilityCost) -> bool {
-    use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
+    use crate::types::ability::{BeholdCostAction, CardSelectionMode, DiscardSelfScope};
     match cost {
         AbilityCost::Mana { .. }
         | AbilityCost::ManaDynamic { .. }
@@ -20428,6 +20446,14 @@ pub fn supported_at_resolution(cost: &AbilityCost) -> bool {
         // CR 118.3: The shared effect-cost predicate admits only deterministic
         // payment effects that the authority resolves directly.
         AbilityCost::EffectCost { .. } if cost.supports_effect_cost_payment() => true,
+        // CR 614.12a + CR 118.3 + CR 701.4a: a single-object "behold a [quality]"
+        // replacement cost has an interactive resolution path.
+        AbilityCost::Behold {
+            count: 1,
+            action: BeholdCostAction::ChooseOrReveal,
+            type_choice: None,
+            ..
+        } => true,
         AbilityCost::Discard { .. }
         | AbilityCost::Sacrifice(_)
         | AbilityCost::Tap
@@ -21915,6 +21941,20 @@ impl LibraryPosition {
     /// Serde skip-helper: `Top` is the default and is omitted from JSON.
     pub fn is_top(&self) -> bool {
         matches!(self, Self::Top)
+    }
+
+    /// CR 401.4 + CR 401.7: whether several arrivals at this position are
+    /// grouped into one owner arrangement prompt. The one position contract for
+    /// both the staged producer and checked persistence: fixed positions (`Top`,
+    /// `Bottom`, a numbered slot, and a statically known "beneath the top X") are
+    /// arrangeable; a depth known only at resolution time and the random Alchemy
+    /// slot are not.
+    pub fn is_owner_arrangeable(&self) -> bool {
+        match self {
+            Self::Top | Self::Bottom | Self::NthFromTop { .. } => true,
+            Self::BeneathTop { depth } => matches!(depth, QuantityExpr::Fixed { .. }),
+            Self::RandomWithinTop { .. } => false,
+        }
     }
 }
 
@@ -35199,10 +35239,11 @@ macro_rules! define_effect_quantity_walk {
     };
 }
 
-impl Effect {
-    define_effect_quantity_walk!([]; for_each_quantity_expr);
-    define_effect_quantity_walk!([mut]; for_each_quantity_expr_mut);
-
+/// One body, two receivers: the shared [`Effect::for_each_nested_definition`] and
+/// the exclusive [`Effect::for_each_nested_definition_mut`] (the
+/// `define_effect_quantity_walk!` precedent), so the edge set cannot drift between them.
+macro_rules! define_nested_definition_walk {
+    ([$($mut_:tt)?]; $name:ident; $as_deref:ident) => {
     /// Every [`AbilityDefinition`] this effect carries as a DIRECT executable
     /// payload, together with the [`NestedDefinitionEdge`] it hangs from.
     ///
@@ -35228,9 +35269,9 @@ impl Effect {
     /// the entire point of this visitor: a wildcard is invisible, and the defect
     /// it produces is a card reporting support it does not have, which is worse
     /// than a card honestly reporting a gap.
-    pub fn for_each_nested_definition<'a>(
-        &'a self,
-        f: &mut dyn FnMut(NestedDefinitionEdge, &'a AbilityDefinition),
+    pub fn $name<'a>(
+        &'a $($mut_)? self,
+        f: &mut dyn FnMut(NestedDefinitionEdge, &'a $($mut_)? AbilityDefinition),
     ) {
         match self {
             // CR 701.38: a vote picks one choice from a list. Each listed
@@ -35298,14 +35339,14 @@ impl Effect {
             // unimplemented detection see through the boon wrapper exactly as
             // they see through `CreateDelayedTrigger`.
             Effect::CreateBoon { trigger, .. } => {
-                if let Some(execute) = trigger.execute.as_deref() {
+                if let Some(execute) = trigger.execute.$as_deref() {
                     f(NestedDefinitionEdge::CreateBoonTrigger, execute)
                 }
             }
             // CR 706.3a: one payload per results-table striation.
             Effect::RollDie { results, .. } => {
                 for result in results {
-                    f(NestedDefinitionEdge::RollDieResult, &result.effect);
+                    f(NestedDefinitionEdge::RollDieResult, &$($mut_)? result.effect);
                 }
             }
             // CR 705.1: coin-flip branches, in every run mode. Each side is its own edge.
@@ -35563,327 +35604,14 @@ impl Effect {
             | Effect::Unimplemented { .. } => {}
         }
     }
+    };
+}
 
-    /// Mutable twin of [`Effect::for_each_nested_definition`].
-    ///
-    /// The two visitors deliberately keep the same exhaustive carrier list:
-    /// callers that need to rewrite a nested executable definition must not
-    /// silently miss a new effect payload just because the rewrite happens on
-    /// the mutable side of the AST.
-    pub fn for_each_nested_definition_mut(
-        &mut self,
-        f: &mut dyn FnMut(NestedDefinitionEdge, &mut AbilityDefinition),
-    ) {
-        match self {
-            Effect::Vote {
-                per_choice_effect,
-                subject,
-                ..
-            } => {
-                for effect in per_choice_effect {
-                    f(NestedDefinitionEdge::VotePerChoice, effect);
-                }
-                if let VoteSubject::Objects {
-                    outcome_template, ..
-                } = subject
-                {
-                    f(NestedDefinitionEdge::VoteObjectOutcome, outcome_template);
-                }
-            }
-            Effect::SeparateIntoPiles {
-                chosen_pile_effect,
-                unchosen_pile_effect,
-                ..
-            } => {
-                f(
-                    NestedDefinitionEdge::SeparateIntoPilesChosen,
-                    chosen_pile_effect,
-                );
-                if let Some(unchosen_pile_effect) = unchosen_pile_effect {
-                    f(
-                        NestedDefinitionEdge::SeparateIntoPilesUnchosen,
-                        unchosen_pile_effect,
-                    );
-                }
-            }
-            Effect::ExileTopCardContest { winner_effect } => {
-                f(
-                    NestedDefinitionEdge::ExileTopCardContestWinner,
-                    winner_effect,
-                );
-            }
-            Effect::RevealFromHand { on_decline, .. } => {
-                if let Some(on_decline) = on_decline {
-                    f(NestedDefinitionEdge::RevealFromHandOnDecline, on_decline);
-                }
-            }
-            Effect::CreateDelayedTrigger { effect, .. } => {
-                f(NestedDefinitionEdge::CreateDelayedTriggerEffect, effect)
-            }
-            Effect::CreateDrawReplacement { replacement_effect } => f(
-                NestedDefinitionEdge::CreateDrawReplacementEffect,
-                replacement_effect,
-            ),
-            Effect::CreateBoon { trigger, .. } => {
-                if let Some(execute) = trigger.execute.as_deref_mut() {
-                    f(NestedDefinitionEdge::CreateBoonTrigger, execute);
-                }
-            }
-            Effect::RollDie { results, .. } => {
-                for result in results {
-                    f(NestedDefinitionEdge::RollDieResult, &mut result.effect);
-                }
-            }
-            Effect::FlipCoins {
-                win_effect,
-                lose_effect,
-                ..
-            } => {
-                if let Some(win_effect) = win_effect {
-                    f(NestedDefinitionEdge::FlipCoinsWin, win_effect);
-                }
-                if let Some(lose_effect) = lose_effect {
-                    f(NestedDefinitionEdge::FlipCoinsLose, lose_effect);
-                }
-            }
-            Effect::ChooseOneOf { branches, .. } => {
-                for branch in branches {
-                    f(NestedDefinitionEdge::ChooseOneOfBranch, branch);
-                }
-            }
-            Effect::StartYourEngines { .. }
-            | Effect::ChangeSpeed { .. }
-            | Effect::DealDamage { .. }
-            | Effect::ApplyPostReplacementDamage { .. }
-            | Effect::ResumeDamageBatch { .. }
-            | Effect::EachDealsDamageEqualToPower { .. }
-            | Effect::EachSourceDealsDamage { .. }
-            | Effect::Draw { .. }
-            | Effect::Pump { .. }
-            | Effect::PairWith { .. }
-            | Effect::Destroy { .. }
-            | Effect::Regenerate { .. }
-            | Effect::RemoveAllDamage { .. }
-            | Effect::Counter { .. }
-            | Effect::CounterAll { .. }
-            | Effect::Token { .. }
-            | Effect::GainLife { .. }
-            | Effect::LoseLife { .. }
-            | Effect::SetTapState { .. }
-            | Effect::RemoveCounter { .. }
-            | Effect::Sacrifice { .. }
-            | Effect::DiscardCard { .. }
-            | Effect::Mill { .. }
-            | Effect::Scry { .. }
-            | Effect::PumpAll { .. }
-            | Effect::DamageAll { .. }
-            | Effect::DamageEachPlayer { .. }
-            | Effect::DestroyAll { .. }
-            | Effect::ChangeZone { .. }
-            | Effect::ChangeZoneAll { .. }
-            | Effect::Dig { .. }
-            | Effect::GainControl { .. }
-            | Effect::GainControlAll { .. }
-            | Effect::ControlNextTurn { .. }
-            | Effect::Attach { .. }
-            | Effect::UnattachAll { .. }
-            | Effect::Surveil { .. }
-            | Effect::Fight { .. }
-            | Effect::Bounce { .. }
-            | Effect::BounceAll { .. }
-            | Effect::Explore
-            | Effect::ExploreAll { .. }
-            | Effect::Investigate
-            | Effect::Tribute { .. }
-            | Effect::TimeTravel
-            | Effect::BecomeMonarch { .. }
-            | Effect::NoOp
-            | Effect::Proliferate
-            | Effect::ProliferateTarget { .. }
-            | Effect::Populate
-            | Effect::Clash
-            | Effect::Behold { .. }
-            | Effect::EndTheTurn
-            | Effect::EndCombatPhase
-            | Effect::SwitchPT { .. }
-            | Effect::CopySpell { .. }
-            | Effect::EpicCopy { .. }
-            | Effect::CastCopyOfCard { .. }
-            | Effect::CopyTokenOf { .. }
-            | Effect::CreateTokenCopyFromPool { .. }
-            | Effect::Myriad
-            | Effect::Encore
-            | Effect::CombineHost { .. }
-            | Effect::ChooseAugmentAndCombineWithHost { .. }
-            | Effect::Meld { .. }
-            | Effect::ExileHaunting { .. }
-            | Effect::HideawayConceal { .. }
-            | Effect::CopyTokenBlockingAttacker { .. }
-            | Effect::BecomeCopy { .. }
-            | Effect::ChoosePermanent { .. }
-            | Effect::GainActivatedAbilitiesOfTarget { .. }
-            | Effect::ChooseCard { .. }
-            | Effect::PutCounter { .. }
-            | Effect::ChooseCounterKind { .. }
-            | Effect::PutChosenCounter { .. }
-            | Effect::PutCounterAll { .. }
-            | Effect::MultiplyCounter { .. }
-            | Effect::ChooseCounterAdjustment { .. }
-            | Effect::DoublePT { .. }
-            | Effect::DoublePTAll { .. }
-            | Effect::MoveCounters { .. }
-            | Effect::ReproduceEventCounters { .. }
-            | Effect::Animate { .. }
-            | Effect::ReturnAsAura { .. }
-            | Effect::RegisterBending { .. }
-            | Effect::GenericEffect { .. }
-            | Effect::Cleanup { .. }
-            | Effect::Mana { .. }
-            | Effect::Discard { .. }
-            | Effect::Shuffle { .. }
-            | Effect::Transform { .. }
-            | Effect::FlipPermanent { .. }
-            | Effect::SearchLibrary { .. }
-            | Effect::SearchOutsideGame { .. }
-            | Effect::OpenBoosterPack { .. }
-            | Effect::RevealHand { .. }
-            | Effect::Reveal { .. }
-            | Effect::RevealChosenNumbers { .. }
-            | Effect::RevealTop { .. }
-            | Effect::ExileTop { .. }
-            | Effect::ExileFaceDownPile { .. }
-            | Effect::TargetOnly { .. }
-            | Effect::Choose { .. }
-            | Effect::OpponentGuess { .. }
-            | Effect::SwapChosenLabels { .. }
-            | Effect::ChooseDamageSource { .. }
-            | Effect::Suspect { .. }
-            | Effect::Unsuspect { .. }
-            | Effect::Connive { .. }
-            | Effect::PhaseOut { .. }
-            | Effect::PhaseIn { .. }
-            | Effect::ForceBlock { .. }
-            | Effect::ForceAttack { .. }
-            | Effect::SolveCase
-            | Effect::BecomePrepared { .. }
-            | Effect::BecomeUnprepared { .. }
-            | Effect::BecomeSaddled { .. }
-            | Effect::SetClassLevel { .. }
-            | Effect::AddTargetReplacement { .. }
-            | Effect::AddRestriction { .. }
-            | Effect::ReduceNextSpellCost { .. }
-            | Effect::GrantNextSpellAbility { .. }
-            | Effect::AddPendingETBCounters { .. }
-            | Effect::AddPendingEntersModifications { .. }
-            | Effect::CreateEmblem { .. }
-            | Effect::PayCost { .. }
-            | Effect::CastFromZone { .. }
-            | Effect::FreeCastFromZones { .. }
-            | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
-            | Effect::PreventDamage { .. }
-            | Effect::CreateDamageReplacement { .. }
-            | Effect::CreatePlaneswalkReplacement { .. }
-            | Effect::LoseTheGame { .. }
-            | Effect::WinTheGame { .. }
-            | Effect::RingTemptsYou
-            | Effect::VentureIntoDungeon
-            | Effect::VentureInto { .. }
-            | Effect::TakeTheInitiative
-            | Effect::ArrangePlanarDeckTop { .. }
-            | Effect::Planeswalk
-            | Effect::AbandonScheme
-            | Effect::ChaosEnsues
-            | Effect::ReverseTurnOrder
-            | Effect::RedistributeLifeTotals
-            | Effect::OpenAttractions { .. }
-            | Effect::RollToVisitAttractions
-            | Effect::AssembleContraptions { .. }
-            | Effect::AssembleContraptionsFromRollDifference
-            | Effect::CrankContraptions { .. }
-            | Effect::ReassembleContraption { .. }
-            | Effect::AssembleContraptionOnSprocket { .. }
-            | Effect::ReassembleContraptionOnSprocket { .. }
-            | Effect::PutSticker { .. }
-            | Effect::ApplySticker { .. }
-            | Effect::ProcessRadCounters
-            | Effect::GrantCastingPermission { .. }
-            | Effect::ChooseFromZone { .. }
-            | Effect::RememberCard { .. }
-            | Effect::NoteManaSpent
-            | Effect::NoteNumber { .. }
-            | Effect::ForEachCategory { .. }
-            | Effect::ChooseObjectsIntoTrackedSet { .. }
-            | Effect::ChooseAndSacrificeRest { .. }
-            | Effect::EachPlayerCopyChosen { .. }
-            | Effect::Exploit { .. }
-            | Effect::GainEnergy { .. }
-            | Effect::GivePlayerCounter { .. }
-            | Effect::LoseAllPlayerCounters { .. }
-            | Effect::ExileFromTopUntil { .. }
-            | Effect::RevealUntil { .. }
-            | Effect::Discover { .. }
-            | Effect::PhysicalContest { .. }
-            | Effect::Heist { .. }
-            | Effect::HeistExile
-            | Effect::Cascade
-            | Effect::Ripple { .. }
-            | Effect::MiracleCast { .. }
-            | Effect::MadnessCast { .. }
-            | Effect::PutAtLibraryPosition { .. }
-            | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
-            | Effect::PutOnTopOrBottom { .. }
-            | Effect::GiftDelivery { .. }
-            | Effect::Goad { .. }
-            | Effect::GoadAll { .. }
-            | Effect::Detain { .. }
-            | Effect::SetRoomDoorLock { .. }
-            | Effect::ExchangeControl { .. }
-            | Effect::ChangeTargets { .. }
-            | Effect::Manifest { .. }
-            | Effect::ManifestDread
-            | Effect::Cloak { .. }
-            | Effect::TurnFaceUp { .. }
-            | Effect::TurnFaceDown { .. }
-            | Effect::ExtraTurn { .. }
-            | Effect::GrantExtraLoyaltyActivations { .. }
-            | Effect::SkipNextTurn { .. }
-            | Effect::SkipNextStep { .. }
-            | Effect::AdditionalPhase { .. }
-            | Effect::Double { .. }
-            | Effect::ModifyAnnouncedX { .. }
-            | Effect::RuntimeHandled { .. }
-            | Effect::Incubate { .. }
-            | Effect::Amass { .. }
-            | Effect::EmpowerJace { .. }
-            | Effect::Monstrosity { .. }
-            | Effect::Specialize
-            | Effect::Renown { .. }
-            | Effect::Bolster { .. }
-            | Effect::Adapt { .. }
-            | Effect::Learn
-            | Effect::Forage
-            | Effect::CompletePlayerAction { .. }
-            | Effect::Harness
-            | Effect::CollectEvidence { .. }
-            | Effect::Endure { .. }
-            | Effect::BlightEffect { .. }
-            | Effect::Seek { .. }
-            | Effect::SetLifeTotal { .. }
-            | Effect::ExchangeLifeWithStat { .. }
-            | Effect::ExchangeLifeTotals { .. }
-            | Effect::SetDayNight { .. }
-            | Effect::GiveControl { .. }
-            | Effect::RemoveFromCombat { .. }
-            | Effect::BecomeBlocked { .. }
-            | Effect::Conjure { .. }
-            | Effect::CreateCardCopyByName { .. }
-            | Effect::ApplyPerpetual { .. }
-            | Effect::Intensify { .. }
-            | Effect::DraftFromSpellbook { .. }
-            | Effect::HordePlayCard { .. }
-            | Effect::Unimplemented { .. } => {}
-        }
-    }
+impl Effect {
+    define_effect_quantity_walk!([]; for_each_quantity_expr);
+    define_effect_quantity_walk!([mut]; for_each_quantity_expr_mut);
+    define_nested_definition_walk!([]; for_each_nested_definition; as_deref);
+    define_nested_definition_walk!([mut]; for_each_nested_definition_mut; as_deref_mut);
 
     /// CR 107.3 + CR 608.2c: Returns the `QuantityExpr` carrying this effect's
     /// primary count/amount, for the full class of count- and amount-bearing
@@ -37940,6 +37668,8 @@ pub struct AbilityDefinition {
     pub instruction_join: InstructionJoin,
     /// CR 608.2c + CR 614.1a: see [`UnloweredGuard`]. Always `None` on a finished parse.
     pub unlowered_guard: Option<UnloweredGuard>,
+    /// CR 607.2a: see [`LinkedExileReturn`]. Always `None` on a finished parse.
+    pub linked_exile_return: Option<LinkedExileReturn>,
     /// Typed intent for SearchLibrary clauses that exile the found card face down.
     /// This is deliberately separate from `FaceDownProfile`, which describes
     /// battlefield characteristics only.
@@ -38335,6 +38065,8 @@ struct AbilityDefinitionRepr<'a> {
     instruction_join: InstructionJoin,
     #[serde(skip_serializing_if = "Option::is_none")]
     unlowered_guard: &'a Option<UnloweredGuard>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    linked_exile_return: &'a Option<LinkedExileReturn>,
     #[serde(skip_serializing_if = "ExileConcealment::is_public")]
     face_down_in_exile: ExileConcealment,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38397,6 +38129,7 @@ impl Serialize for AbilityDefinition {
             sibling_condition,
             instruction_join,
             unlowered_guard,
+            linked_exile_return,
             face_down_in_exile,
             granting_object,
             grant_chain,
@@ -38451,6 +38184,7 @@ impl Serialize for AbilityDefinition {
             sibling_condition: *sibling_condition,
             instruction_join: *instruction_join,
             unlowered_guard,
+            linked_exile_return,
             face_down_in_exile: *face_down_in_exile,
             granting_object,
             grant_chain,
@@ -38587,6 +38321,8 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     unlowered_guard: Option<UnloweredGuard>,
     #[serde(default)]
+    linked_exile_return: Option<LinkedExileReturn>,
+    #[serde(default)]
     face_down_in_exile: ExileConcealment,
     #[serde(default)]
     granting_object: Option<ObjectIncarnationRef>,
@@ -38653,6 +38389,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             sibling_condition: de.sibling_condition,
             instruction_join: de.instruction_join,
             unlowered_guard: de.unlowered_guard,
+            linked_exile_return: de.linked_exile_return,
             face_down_in_exile: de.face_down_in_exile,
             granting_object: de.granting_object,
             grant_chain: de.grant_chain,
@@ -38962,6 +38699,31 @@ pub struct UnloweredGuard {
     pub clause_text: String,
 }
 
+/// CR 607.2a: a return whose object is written "the exiled card" / "the exiled cards",
+/// parsed with the bare chain sentinel (`TrackedSet(0)`) as its target.
+///
+/// Whether that phrase names only the cards the linked exile instruction exiled
+/// (`TrackedSetFiltered { caused_by: Exiled }`) depends on what the return's OWN
+/// resolution chain did before it (CR 608.2c), and a delayed trigger's payload is
+/// a separate chain whose binding is fixed when the trigger is created (CR 603.7c).
+/// Neither is known where the clause is parsed: assembly and the Phase 2 passes can
+/// still move the clause across a `CreateDelayedTrigger` edge. The parser therefore
+/// marks the clause here and decides the binding once, on the finished tree, in
+/// `parser::oracle::bind_linked_exile_returns`.
+///
+/// `None` on every tree `parse_oracle_pipeline` hands out (both the production
+/// `ParsedAbilities` and the `RawLoweredIr` stage clone); serialized when set so a
+/// mark that escaped the pass is visible in `card-data.json`. Like
+/// [`UnloweredGuard`], a tree built by `parse_effect_chain` outside the pipeline keeps
+/// its mark and the sentinel target, which is the unrebound binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinkedExileReturn {
+    /// "the exiled card": one card of the linked set.
+    OneCard,
+    /// "the exiled cards": the whole linked set, moved set-wide.
+    WholeSet,
+}
+
 impl fmt::Debug for AbilityDefinition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // JSON serialization instead of field-by-field Debug — avoids stack overflow
@@ -39035,6 +38797,7 @@ impl AbilityDefinition {
             sibling_condition: SiblingCondition::Dependent,
             instruction_join: InstructionJoin::Own,
             unlowered_guard: None,
+            linked_exile_return: None,
             face_down_in_exile: ExileConcealment::Public,
             granting_object: None,
             grant_chain: Vec::new(),
@@ -41350,13 +41113,15 @@ pub enum TriggerCondition {
     ChosenLabelIs { label: String },
 
     /// CR 506.2 + CR 508.1 + CR 508.1b + CR 603.4: Intervening-if comparison
-    /// over the current attack declaration. Handles "attacks with N or more
+    /// over the current attack declaration or the current combat’s declaration
+    /// history. Handles "attacks with N or more
     /// creatures", "none of those creatures attacked you", and attack-target
     /// count gates such as "two or more of those creatures are attacking you
     /// and/or planeswalkers you control."
     ///
     /// The `subject` axis selects what is counted (attackers by controller, or
-    /// attacks by their announced target); the `Controller` subject also carries
+    /// attacks by their announced target, or declarations in this combat); the
+    /// `Controller` subject also carries
     /// the optional condition-level type filter (CR 508.1) so "you attack with
     /// two or more Dinosaurs" counts only Dinosaur attackers. `comparator` and
     /// `count` express the threshold (`GE 2` for "two or more", `EQ 0` for
@@ -41898,13 +41663,14 @@ pub enum ReplacementCondition {
     Unrecognized { text: String },
 }
 
-/// The historical wire shape of `NthSpellThisTurn` represented an exact ordinal.
+/// The historical wire shape of `NthSpellThisTurn` (and `NthDrawThisTurn`) represented an
+/// exact ordinal.
 /// Keep that meaning when a persisted export has no comparator field.
-fn default_nth_spell_comparator() -> Comparator {
+fn default_exact_ordinal_comparator() -> Comparator {
     Comparator::EQ
 }
 
-fn is_default_nth_spell_comparator(comparator: &Comparator) -> bool {
+fn is_default_exact_ordinal_comparator(comparator: &Comparator) -> bool {
     *comparator == Comparator::EQ
 }
 
@@ -41951,16 +41717,24 @@ pub enum TriggerConstraint {
     NthSpellThisTurn {
         n: u32,
         #[serde(
-            default = "default_nth_spell_comparator",
-            skip_serializing_if = "is_default_nth_spell_comparator"
+            default = "default_exact_ordinal_comparator",
+            skip_serializing_if = "is_default_exact_ordinal_comparator"
         )]
         comparator: Comparator,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
     },
-    /// "Whenever you draw your Nth card each turn" — fires exactly when the
-    /// triggering draw event's per-turn ordinal equals `n`.
-    NthDrawThisTurn { n: u32 },
+    /// "Whenever you draw your Nth card each turn" — the triggering draw event's
+    /// per-turn ordinal satisfies `comparator` against `n`. `EQ` preserves exact
+    /// ordinals; `LE` covers a contiguous prefix such as "your first or second card."
+    NthDrawThisTurn {
+        n: u32,
+        #[serde(
+            default = "default_exact_ordinal_comparator",
+            skip_serializing_if = "is_default_exact_ordinal_comparator"
+        )]
+        comparator: Comparator,
+    },
     /// "At the beginning of each opponent's [phase]"
     OnlyDuringOpponentsTurn,
     /// CR 505.1: Trigger fires only during the controller's main phase

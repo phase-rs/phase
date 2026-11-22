@@ -25,20 +25,21 @@ use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
     ActivationRestriction, AdditionalCost, AggregateFunction, AttachmentReferent, AttackSubject,
-    AttackedYouScope, AttackerBlockStatus, CardTypeSetSource, ChoiceAssignmentSide, ChoiceType,
-    CoinFlipResult, CoinFlipRun, CombatDamageScope, CombatHistoryScope, CommanderOwnership,
-    Comparator, ContinuousEffectOnset, ContinuousModification, ControllerRef, CountScope,
-    CounterKindChooser, CounterKindDomain, CounterSourceRider, DelayedTriggerCondition,
-    DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
-    EffectScope, FilterProp, ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition,
-    LibraryShuffleMode, ManaProduction, NameStickerSet, NumberQuality, ObjectProperty, ObjectScope,
+    AttackedYouScope, AttackerBlockStatus, AttackersDeclaredCountSubject, CardTypeSetSource,
+    ChoiceAssignmentSide, ChoiceType, CoinFlipResult, CoinFlipRun, CombatDamageScope,
+    CombatHistoryScope, CommanderOwnership, Comparator, ContinuousEffectOnset,
+    ContinuousModification, ControllerRef, CountScope, CounterKindChooser, CounterKindDomain,
+    CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
+    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition, LibraryShuffleMode,
+    ManaProduction, NameStickerSet, NumberQuality, ObjectProperty, ObjectScope,
     ObjectSelectionCardinality, ObjectSelectionEligibility, Parity, ParsedCondition,
     PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope, ProhibitedActivity, PtStat,
     PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
-    SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StackAbilityKind,
-    StaticCondition, StaticDefinition, SubAbilityLink, TapStateChange, TargetFilter,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SourceExclusion,
+    SpeedDelta, SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement,
+    StackAbilityKind, StaticCondition, StaticDefinition, SubAbilityLink, TapStateChange,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::ability_visit::{ability_tree_any, visit_direct_effect_ability_payloads};
 use crate::types::card::CardFace;
@@ -85,6 +86,15 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // permanents. Not registry-keyed (mirrors the marker cluster).
             | StaticMode::CantBecomeSuspected
             | StaticMode::ReduceAbilityCost { .. }
+            // CR 118.9 + CR 602.2b: runtime enforcement is
+            // `casting::activation_cost_with_alternative_keyword_costs`, which
+            // folds active grants into the Equip/Cycling activation cost. Crew
+            // has no such hook and stays a coverage gap.
+            | StaticMode::AlternativeKeywordCost {
+                keyword: crate::types::keywords::KeywordKind::Cycling
+                    | crate::types::keywords::KeywordKind::Equip,
+                ..
+            }
             // CR 116.2 + CR 118.7a: ReduceActionCost carries `action`
             // (SpecialAction), `mode`, and `amount`. Runtime enforcement is the
             // special-action cost-reduction resolver
@@ -5365,8 +5375,22 @@ fn fmt_trigger_condition(
         TC::DamagedPlayerIsEventSourceOwner => "damaged player is the source's owner".into(),
         TC::ChosenLabelIs { label } => format!("chosen label is {label}"),
         TC::AttackersDeclaredCount {
-            comparator, count, ..
-        } => format!("attackers declared {} {count}", fmt_comparator(comparator)),
+            subject,
+            comparator,
+            count,
+        } => {
+            let description = match subject {
+                AttackersDeclaredCountSubject::CurrentCombat { exclude_source } => {
+                    match exclude_source {
+                        SourceExclusion::Include => "creatures that attacked this combat",
+                        SourceExclusion::Exclude => "other creatures that attacked this combat",
+                    }
+                }
+                AttackersDeclaredCountSubject::Controller { .. }
+                | AttackersDeclaredCountSubject::AttackTarget { .. } => "attackers declared",
+            };
+            format!("{description} {} {count}", fmt_comparator(comparator))
+        }
         TC::ExceptFirstDrawInDrawStep => "except first draw in draw step".into(),
         TC::PlacedByAbilitySource => "placed by this ability".into(),
         TC::AddedManaWithThisAbilityThisTurn => "added mana with this ability this turn".into(),
@@ -5440,7 +5464,14 @@ fn fmt_trigger_constraint(c: &crate::types::ability::TriggerConstraint) -> Strin
                 None => format!("{timing} spell this turn"),
             }
         }
-        TC::NthDrawThisTurn { n } => format!("on your {} draw this turn", fmt_ordinal(*n)),
+        TC::NthDrawThisTurn { n, comparator } => match comparator {
+            Comparator::EQ => format!("on your {} draw this turn", fmt_ordinal(*n)),
+            Comparator::LE => format!("on or before your {} draw this turn", fmt_ordinal(*n)),
+            Comparator::GT | Comparator::LT | Comparator::GE | Comparator::NE => format!(
+                "when your draw ordinal {} {n} this turn",
+                fmt_comparator(comparator)
+            ),
+        },
         TC::OnlyDuringOpponentsTurn => "only during opponent's turn".into(),
         TC::OnlyDuringYourMainPhase => "only during your main phase".into(),
         TC::AtClassLevel { level } => format!("at class level {level}"),
@@ -5885,6 +5916,15 @@ fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
     };
     if let Some(dynamic_count) = dynamic_count {
         d.push(("dynamic_count".into(), fmt_quantity_ref(dynamic_count)));
+    }
+    if let StaticMode::ModifyCost {
+        spell_filter: Some(filter),
+        ..
+    } = &stat.mode
+    {
+        if super::filter::filter_reads_pt(filter) {
+            d.push(("spell_filter".into(), fmt_target(filter)));
+        }
     }
     // Composable modifications (GrantTrigger / GrantAbility) are emitted as
     // children, so list only the simple ones here as a joined pill.
@@ -8257,7 +8297,13 @@ pub fn compute_card_face_coverage(
     }
     check_subtype_lexicon(face, valid_subtypes, &mut missing);
     check_resolver_features(face, &mut missing);
-    check_silent_drops(&face.oracle_text, &face.name, &parse_details, &mut missing);
+    check_silent_drops(
+        &face.oracle_text,
+        &face.name,
+        &parse_details,
+        &face.static_abilities,
+        &mut missing,
+    );
 
     let tree_gaps = extract_gap_details(&parse_details);
     let gaps_before_parse_warnings = merge_coverage_gaps(&missing, tree_gaps.clone(), &[]);
@@ -9355,6 +9401,7 @@ fn check_silent_drops(
     oracle_text: &Option<String>,
     card_name: &str,
     parse_details: &[ParsedItem],
+    statics: &[StaticDefinition],
     missing: &mut Vec<String>,
 ) {
     let Some(oracle_text) = oracle_text.as_ref().filter(|t| !t.is_empty()) else {
@@ -9362,7 +9409,23 @@ fn check_silent_drops(
     };
 
     let lines = effective_oracle_lines_for_card(oracle_text, card_name);
-    let (dropped, _) = dropped_oracle_lines(&lines, card_name, parse_details);
+    let (dropped, uncovered) = dropped_oracle_lines(&lines, card_name, parse_details);
+    // A matched line can still lose its P/T qualifier, even with one parse
+    // root per Oracle line. Count these independently of the cardinality cap.
+    let card_name_lower = card_name.to_lowercase();
+    let mut qualifier_drops = 0;
+    let mut possibly_already_counted = 0;
+    for line in &lines {
+        let lower = line.to_lowercase();
+        let effective = strip_structural_prefix(&lower).unwrap_or(lower);
+        if !pt_cost_qualifier_covered(&effective, &card_name_lower, statics) {
+            qualifier_drops += 1;
+            if uncovered.contains(&line.as_str()) {
+                possibly_already_counted += 1;
+            }
+        }
+    }
+    let dropped = qualifier_drops + dropped.saturating_sub(possibly_already_counted);
 
     if dropped > 0 {
         let label = format!("SilentDrop:{}_of_{}", lines.len() - dropped, lines.len());
@@ -10464,7 +10527,9 @@ fn is_static_definition_supported(
     static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
     token_static_traversal: TokenStaticTraversal,
 ) -> bool {
-    (static_registry.contains_key(&stat.mode) || is_data_carrying_static(&stat.mode))
+    let mode_supported =
+        static_registry.contains_key(&stat.mode) || is_data_carrying_static(&stat.mode);
+    mode_supported
         && !stat
             .condition
             .as_ref()
@@ -13633,6 +13698,124 @@ fn is_counter_reference(lower: &str, pt_end: usize) -> bool {
 // and checks that specific element for expected properties.
 // ---------------------------------------------------------------------------
 
+fn pt_cost_qualifier_covered(
+    line: &str,
+    card_name_lower: &str,
+    statics: &[StaticDefinition],
+) -> bool {
+    use crate::parser::oracle_nom::{filter::split_spell_pt_qualifier, primitives::split_once_on};
+
+    fn prop_requires(prop: &FilterProp, expected: &FilterProp) -> bool {
+        prop == expected
+            || matches!(prop, FilterProp::AnyOf { props }
+                if !props.is_empty() && props.iter().all(|prop| prop_requires(prop, expected)))
+    }
+
+    fn requires(filter: &TargetFilter, expected: &FilterProp) -> bool {
+        match filter {
+            TargetFilter::Typed(typed) => typed
+                .properties
+                .iter()
+                .any(|prop| prop_requires(prop, expected)),
+            TargetFilter::And { filters } => {
+                filters.iter().any(|filter| requires(filter, expected))
+            }
+            TargetFilter::Or { filters } => {
+                !filters.is_empty() && filters.iter().all(|filter| requires(filter, expected))
+            }
+            TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Opponent
+            | TargetFilter::SelfRef
+            | TargetFilter::GrantingObject { .. }
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::Not { .. }
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastCreated
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
+            | TargetFilter::ChosenCard
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ChoiceAssignment { .. }
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::AttackedPlayerOrPlaneswalker
+            | TargetFilter::EventTarget
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::AffectedObjectOwner
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::OriginalSource
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::HasChosenName
+            | TargetFilter::ChosenDamageSource { .. }
+            | TargetFilter::Named { .. }
+            | TargetFilter::Owner
+            | TargetFilter::AllPlayers => false,
+        }
+    }
+
+    let Ok((_, (subject, cost))) = split_once_on(line, " cost") else {
+        return true;
+    };
+    if !subject.contains("spell")
+        || !(cost.contains(" less to cast") || cost.contains(" more to cast"))
+    {
+        return true;
+    }
+    match split_spell_pt_qualifier(subject) {
+        Err(_) => false,
+        Ok((_, None)) => true,
+        Ok((_, Some(expected))) => {
+            let line = normalize_for_matching(line, card_name_lower);
+            statics.iter().any(|definition| {
+                let StaticMode::ModifyCost {
+                    spell_filter: Some(filter),
+                    ..
+                } = &definition.mode
+                else {
+                    return false;
+                };
+                definition.description.as_ref().is_some_and(|description| {
+                    let description = strip_parenthesized_reminder(description).to_lowercase();
+                    let description = normalize_for_matching(description.trim(), card_name_lower);
+                    description.trim_end_matches('.') == line.trim_end_matches('.')
+                }) && requires(filter, &expected)
+            })
+        }
+    }
+}
+
 /// A parsed element that can be matched to an Oracle line via its description.
 enum ParsedElement<'a> {
     Ability(&'a AbilityDefinition),
@@ -13995,6 +14178,13 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         // Strip structural prefixes (bullet, saga chapter, spree mode,
         // attraction/dungeon) to get the semantic effect text for matching.
         let effective_lower = strip_structural_prefix(&lower).unwrap_or_else(|| lower.clone());
+
+        if !pt_cost_qualifier_covered(&effective_lower, &card_name_lower, &face.static_abilities) {
+            findings.push(SemanticFinding::SilentDrop {
+                oracle_line: line.to_string(),
+            });
+            continue;
+        }
 
         // Normalize self-references for matching
         let norm = normalize_for_matching(&effective_lower, &card_name_lower);
@@ -18272,6 +18462,87 @@ mod tests {
         );
     }
 
+    #[test]
+    fn spell_cost_pt_qualifier_coverage_requires_the_exact_gate() {
+        use crate::parser::oracle_static::parse_static_line;
+
+        let line = "Creature spells you cast with power 4 or greater cost {2} less to cast.";
+        let correct = parse_static_line(line).expect("parsed power gate");
+        let mut wrong =
+            parse_static_line(&line.replace("power 4", "power 3")).expect("parsed wrong threshold");
+        wrong.description = correct.description.clone();
+        let mut ungated = correct.clone();
+        let StaticMode::ModifyCost { spell_filter, .. } = &mut ungated.mode else {
+            panic!("cost reducer");
+        };
+        *spell_filter = Some(TargetFilter::Typed(TypedFilter::creature()));
+
+        let mut face = make_face();
+        face.oracle_text = Some(line.into());
+        face.static_abilities = vec![correct.clone()];
+        assert!(card_face_coverage(&face).is_supported());
+        assert!(audit_card_lines(line, &face).is_empty());
+        for dropped in [wrong.clone(), ungated.clone()] {
+            face.static_abilities = vec![dropped];
+            assert_eq!(
+                card_face_coverage(&face).gap_handlers(),
+                ["SilentDrop:0_of_1"]
+            );
+            assert!(audit_card_lines(line, &face)
+                .iter()
+                .any(|finding| matches!(finding, SemanticFinding::SilentDrop { .. })));
+        }
+        let mut disjunctive = correct.clone();
+        let StaticMode::ModifyCost { spell_filter, .. } = &mut disjunctive.mode else {
+            panic!("cost reducer");
+        };
+        *spell_filter = Some(TargetFilter::Or {
+            filters: vec![
+                spell_filter.take().expect("parsed power gate"),
+                TargetFilter::Typed(TypedFilter::creature()),
+            ],
+        });
+        face.static_abilities = vec![disjunctive];
+        assert_eq!(
+            card_face_coverage(&face).gap_handlers(),
+            ["SilentDrop:0_of_1"]
+        );
+        assert!(audit_card_lines(line, &face)
+            .iter()
+            .any(|finding| matches!(finding, SemanticFinding::SilentDrop { .. })));
+        let doran = "Each creature spell you cast with toughness greater than its power costs {1} less to cast.";
+        face.oracle_text = Some(doran.into());
+        face.static_abilities = vec![parse_static_line(doran).expect("parsed toughness gate")];
+        assert!(card_face_coverage(&face).is_supported());
+        assert!(audit_card_lines(doran, &face).is_empty());
+
+        let other = line.replace("{2}", "{1}");
+        let other_definition = parse_static_line(&other).expect("parsed second reducer");
+        face.oracle_text = Some(format!("{line}\n{other}"));
+        face.static_abilities = vec![wrong.clone(), other_definition];
+        assert_eq!(
+            card_face_coverage(&face).gap_handlers(),
+            ["SilentDrop:1_of_2"]
+        );
+        assert!(!coverage_result_for_face(face.clone()).supported);
+
+        let non_pt = "Creature spells you cast cost {2} less to cast.";
+        let non_pt_definition = parse_static_line(non_pt).expect("parsed unconditional reducer");
+        face.oracle_text = Some(non_pt.into());
+        face.static_abilities = vec![non_pt_definition.clone()];
+        let coverage = card_face_coverage(&face);
+        assert!(coverage.is_supported());
+        assert!(coverage_result_for_face(face).supported);
+        assert_ne!(static_details(&correct), static_details(&wrong));
+        assert_eq!(
+            coverage.parse_details[0].details,
+            vec![(
+                "affects".into(),
+                fmt_target(non_pt_definition.affected.as_ref().unwrap())
+            )]
+        );
+    }
+
     /// CR 601.2f: a cost modifier's `dynamic_count` is parse-significant but
     /// invisible to the `StaticMode` Display label ("ReduceCost"). The coverage
     /// receipt must surface it, or a fix that changes Cemetery Prowler's bare
@@ -19432,8 +19703,18 @@ mod tests {
             "on your 13th spell this turn"
         );
         assert_eq!(
-            fmt_trigger_constraint(&TriggerConstraint::NthDrawThisTurn { n: 3 }),
+            fmt_trigger_constraint(&TriggerConstraint::NthDrawThisTurn {
+                n: 3,
+                comparator: Comparator::EQ,
+            }),
             "on your 3rd draw this turn"
+        );
+        assert_eq!(
+            fmt_trigger_constraint(&TriggerConstraint::NthDrawThisTurn {
+                n: 2,
+                comparator: Comparator::LE,
+            }),
+            "on or before your 2nd draw this turn"
         );
     }
 
@@ -21582,6 +21863,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             ),
             "Test Card",
             &parse_details,
+            &[],
             &mut missing,
         );
         assert_eq!(missing, vec!["SilentDrop:1_of_2"]);
@@ -21626,6 +21908,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             &Some(ORACLE.to_string()),
             "Test Card",
             &parse_details,
+            &[],
             &mut missing,
         );
         assert!(
@@ -21671,7 +21954,13 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
         let parse_details = build_parse_details_for_face(&face);
         let mut missing = Vec::new();
-        check_silent_drops(&Some(oracle), "Test Card", &parse_details, &mut missing);
+        check_silent_drops(
+            &Some(oracle),
+            "Test Card",
+            &parse_details,
+            &[],
+            &mut missing,
+        );
         assert!(
             missing.is_empty(),
             "outcome rows are covered by the ability their header produced: {missing:?}"
@@ -21769,7 +22058,13 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
         let parse_details = build_parse_details_for_face(&roll_header_face(HEADER));
         let mut missing = Vec::new();
-        check_silent_drops(&Some(oracle), "Test Card", &parse_details, &mut missing);
+        check_silent_drops(
+            &Some(oracle),
+            "Test Card",
+            &parse_details,
+            &[],
+            &mut missing,
+        );
         assert!(
             missing.is_empty(),
             "em-dash rows are covered by the ability their header produced: {missing:?}"
@@ -21940,7 +22235,13 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
 
         let mut missing = Vec::new();
-        check_silent_drops(&Some(oracle), "Test Card", &parse_details, &mut missing);
+        check_silent_drops(
+            &Some(oracle),
+            "Test Card",
+            &parse_details,
+            &[],
+            &mut missing,
+        );
         assert_eq!(missing, vec!["SilentDrop:2_of_3"]);
     }
 
@@ -21969,6 +22270,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             &Some(ORACLE.to_string()),
             "Grim Wanderer",
             &parse_details,
+            &[],
             &mut missing,
         );
         assert!(
@@ -22056,6 +22358,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 &Some(oracle.to_string()),
                 name,
                 &parse_details,
+            &[],
                 &mut missing,
             );
             assert!(
@@ -22113,6 +22416,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             &Some(ORACLE.to_string()),
             "Pie-Eating Contest",
             &parse_details,
+            &[],
             &mut missing,
         );
         assert_eq!(missing, vec!["SilentDrop:1_of_2"]);
@@ -22234,6 +22538,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             &Some(UNRECOGNIZED_ORACLE.to_string()),
             "Basic Spell",
             &parse_details,
+            &[],
             &mut missing,
         );
         assert_eq!(missing, vec!["SilentDrop:1_of_2"]);
@@ -22425,7 +22730,9 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         }
         let mut face = make_face();
         face.static_abilities.push(definition);
-        assert!(card_face_gaps(&face).contains(&GRAVEYARD_ALTERNATIVE_COST_GAP.to_string()));
+        assert!(card_face_gaps(&face)
+            .iter()
+            .any(|i| i == GRAVEYARD_ALTERNATIVE_COST_GAP));
     }
 
     /// A graveyard permission whose extra cost is a choice can't be paid by the
@@ -22454,7 +22761,9 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         }
         let mut face = make_face();
         face.static_abilities.push(definition);
-        assert!(card_face_gaps(&face).contains(&GRAVEYARD_CHOICE_COST_GAP.to_string()));
+        assert!(card_face_gaps(&face)
+            .iter()
+            .any(|i| i == GRAVEYARD_CHOICE_COST_GAP));
     }
 
     /// A face whose continuous static GRANTS a graveyard permission with an
@@ -24249,8 +24558,8 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let pattern = &top_gap.oracle_patterns[0];
         assert_eq!(pattern.pattern, normalize_oracle_pattern(GUARD));
         assert_eq!(pattern.count, 2);
-        assert!(pattern.example_cards.contains(&"Alpha".to_string()));
-        assert!(pattern.example_cards.contains(&"Beta".to_string()));
+        assert!(pattern.example_cards.iter().any(|i: &String| i == "Alpha"));
+        assert!(pattern.example_cards.iter().any(|i: &String| i == "Beta"));
     }
 
     /// A row whose verdicts carry two distinct phrases contributes to both patterns; a row
@@ -24305,7 +24614,10 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 .unwrap_or_else(|| panic!("no pattern for {phrase:?}"))
         };
         for phrase in ["you control an artifact", "you have no cards in hand"] {
-            assert!(pattern(phrase).example_cards.contains(&"A".to_string()));
+            assert!(pattern(phrase)
+                .example_cards
+                .iter()
+                .any(|i: &String| i == "A"));
         }
         let repeated_key = normalize_oracle_pattern("you have 20 or more life");
         assert_eq!(
@@ -24770,7 +25082,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let mut missing = Vec::new();
         collect_test_ability_missing_parts(&grant_def(None), &mut missing);
         assert!(
-            missing.contains(&"Effect:BodylessBoon".to_string()),
+            missing.iter().any(|i: &String| i == "Effect:BodylessBoon"),
             "bodyless grant must record the structural gap, got {missing:?}"
         );
         let mut control_missing = Vec::new();
@@ -27066,25 +27378,24 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     }
 
     #[test]
-    fn alternative_keyword_cost_static_remains_runtime_coverage_gap() {
+    fn alternative_keyword_cost_coverage_tracks_runtime_ability_classes() {
         let mut face = make_face();
-        face.oracle_text = Some("You may pay {0} rather than pay cycling costs.".to_string());
+        face.oracle_text = Some("You may pay {0} rather than pay the equip cost of the first equip ability you activate each turn.".to_string());
         face.static_abilities.push(
             StaticDefinition::new(StaticMode::AlternativeKeywordCost {
-                keyword: KeywordKind::Cycling,
+                keyword: KeywordKind::Equip,
                 cost: AbilityCost::Mana {
                     cost: ManaCost::generic(0),
                 },
-                frequency: None,
+                frequency: Some(crate::types::statics::CastFrequency::OncePerTurn),
             })
-            .description("You may pay {0} rather than pay cycling costs.".to_string()),
+            .description("You may pay {0} rather than pay the equip cost of the first equip ability you activate each turn.".to_string()),
         );
 
         let gaps = card_face_gaps(&face);
         assert!(
-            gaps.iter()
-                .any(|gap| gap == "Static:AlternativeKeywordCost(Cycling)"),
-            "runtime-deferred AlternativeKeywordCost must remain a coverage gap: {gaps:?}"
+            gaps.is_empty(),
+            "Equip alternative cost should be supported: {gaps:?}"
         );
 
         let parse_details = build_parse_details_for_face(&face);
@@ -27093,8 +27404,33 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             .find(|item| item.category == ParseCategory::Static)
             .expect("static parse item");
         assert!(
-            !static_item.supported,
-            "runtime-deferred AlternativeKeywordCost must not be marked supported"
+            static_item.supported,
+            "runtime-supported Equip AlternativeKeywordCost should be supported"
+        );
+
+        let mut crew_face = make_face();
+        // Heart of Kiran's printed line.
+        crew_face.oracle_text = Some("You may remove a loyalty counter from a planeswalker you control rather than pay Heart of Kiran's crew cost.".to_string());
+        crew_face.static_abilities.push(StaticDefinition::new(
+            StaticMode::AlternativeKeywordCost {
+                keyword: KeywordKind::Crew,
+                cost: AbilityCost::RemoveCounter {
+                    count: 1,
+                    counter_type: CounterMatch::OfType(CounterType::Loyalty),
+                    target: Some(TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::You),
+                    )),
+                    selection: Default::default(),
+                },
+                frequency: None,
+            },
+        ));
+        let crew_gaps = card_face_gaps(&crew_face);
+        assert!(
+            crew_gaps
+                .iter()
+                .any(|gap| gap == "Static:AlternativeKeywordCost(Crew)"),
+            "Crew still routes through a separate special-action cost seam: {crew_gaps:?}"
         );
     }
 
@@ -27134,6 +27470,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             ),
             "Test Card",
             &parse_details,
+            &[],
             &mut missing,
         );
         assert!(
@@ -27219,6 +27556,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             &Some("Teferi, Temporal Archmage can be your commander.".to_string()),
             "Teferi, Temporal Archmage",
             &parse_details,
+            &[],
             &mut missing,
         );
 
@@ -27256,7 +27594,13 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             );
 
             let mut missing = Vec::new();
-            check_silent_drops(&Some(oracle.to_string()), "Test Card", &[], &mut missing);
+            check_silent_drops(
+                &Some(oracle.to_string()),
+                "Test Card",
+                &[],
+                &[],
+                &mut missing,
+            );
             assert!(
                 missing.is_empty(),
                 "deck-construction line falsely counted as SilentDrop: {oracle} -> {missing:?}"
@@ -27316,7 +27660,13 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
 
         let details = build_parse_details_for_face(&face);
         let mut missing = Vec::new();
-        check_silent_drops(&face.oracle_text, &face.name, &details, &mut missing);
+        check_silent_drops(
+            &face.oracle_text,
+            &face.name,
+            &details,
+            &face.static_abilities,
+            &mut missing,
+        );
         assert!(
             missing.is_empty(),
             "Whtz must leave no silent drop: {missing:?}"
