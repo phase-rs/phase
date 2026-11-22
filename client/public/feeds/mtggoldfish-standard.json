@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-11-20T00:00:00Z",
+  "updated": "2026-11-22T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -123,6 +123,149 @@
         {
           "count": 1,
           "name": "Mole Man, Moloid Master"
+        }
+      ]
+    },
+    {
+      "name": "Dimir Midrange",
+      "author": "MTGGoldfish",
+      "colors": [
+        "B",
+        "U"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 3,
+          "name": "Swamp"
+        },
+        {
+          "count": 4,
+          "name": "Floodpits Drowner"
+        },
+        {
+          "count": 4,
+          "name": "Dream Beavers"
+        },
+        {
+          "count": 4,
+          "name": "Kaito, Bane of Nightmares"
+        },
+        {
+          "count": 1,
+          "name": "Wan Shi Tong, Librarian"
+        },
+        {
+          "count": 2,
+          "name": "Restless Reef"
+        },
+        {
+          "count": 2,
+          "name": "We Say Thee Nay!"
+        },
+        {
+          "count": 4,
+          "name": "Island"
+        },
+        {
+          "count": 2,
+          "name": "Shipwreck Marsh"
+        },
+        {
+          "count": 1,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 2,
+          "name": "The Wondrous Wasp"
+        },
+        {
+          "count": 2,
+          "name": "Bitter Triumph"
+        },
+        {
+          "count": 4,
+          "name": "Enduring Curiosity"
+        },
+        {
+          "count": 2,
+          "name": "Shoot the Sheriff"
+        },
+        {
+          "count": 3,
+          "name": "Requiting Hex"
+        },
+        {
+          "count": 4,
+          "name": "Spyglass Siren"
+        },
+        {
+          "count": 2,
+          "name": "Tishana's Tidebinder"
+        },
+        {
+          "count": 4,
+          "name": "Watery Grave"
+        },
+        {
+          "count": 2,
+          "name": "Soulstone Sanctuary"
+        },
+        {
+          "count": 2,
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 4,
+          "name": "Gloomlake Verge"
+        },
+        {
+          "count": 2,
+          "name": "Hidden Lair"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Disdainful Stroke"
+        },
+        {
+          "count": 1,
+          "name": "Vren, the Relentless"
+        },
+        {
+          "count": 2,
+          "name": "Strategic Betrayal"
+        },
+        {
+          "count": 1,
+          "name": "Wan Shi Tong, Librarian"
+        },
+        {
+          "count": 1,
+          "name": "Annul"
+        },
+        {
+          "count": 1,
+          "name": "Requiting Hex"
+        },
+        {
+          "count": 1,
+          "name": "Tishana's Tidebinder"
+        },
+        {
+          "count": 3,
+          "name": "Duress"
+        },
+        {
+          "count": 2,
+          "name": "Day of Black Sun"
+        },
+        {
+          "count": 2,
+          "name": "Flashfreeze"
         }
       ]
     },
@@ -267,149 +410,6 @@
         {
           "count": 2,
           "name": "Fire Magic"
-        }
-      ]
-    },
-    {
-      "name": "Dimir Midrange",
-      "author": "MTGGoldfish",
-      "colors": [
-        "B",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 3,
-          "name": "Swamp"
-        },
-        {
-          "count": 4,
-          "name": "Floodpits Drowner"
-        },
-        {
-          "count": 4,
-          "name": "Dream Beavers"
-        },
-        {
-          "count": 4,
-          "name": "Kaito, Bane of Nightmares"
-        },
-        {
-          "count": 1,
-          "name": "Wan Shi Tong, Librarian"
-        },
-        {
-          "count": 2,
-          "name": "Restless Reef"
-        },
-        {
-          "count": 2,
-          "name": "We Say Thee Nay!"
-        },
-        {
-          "count": 4,
-          "name": "Island"
-        },
-        {
-          "count": 2,
-          "name": "Shipwreck Marsh"
-        },
-        {
-          "count": 1,
-          "name": "Spell Snare"
-        },
-        {
-          "count": 2,
-          "name": "The Wondrous Wasp"
-        },
-        {
-          "count": 2,
-          "name": "Bitter Triumph"
-        },
-        {
-          "count": 4,
-          "name": "Enduring Curiosity"
-        },
-        {
-          "count": 2,
-          "name": "Shoot the Sheriff"
-        },
-        {
-          "count": 3,
-          "name": "Requiting Hex"
-        },
-        {
-          "count": 4,
-          "name": "Spyglass Siren"
-        },
-        {
-          "count": 2,
-          "name": "Tishana's Tidebinder"
-        },
-        {
-          "count": 4,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 2,
-          "name": "Soulstone Sanctuary"
-        },
-        {
-          "count": 2,
-          "name": "Strategic Betrayal"
-        },
-        {
-          "count": 4,
-          "name": "Gloomlake Verge"
-        },
-        {
-          "count": 2,
-          "name": "Hidden Lair"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 1,
-          "name": "Vren, the Relentless"
-        },
-        {
-          "count": 2,
-          "name": "Strategic Betrayal"
-        },
-        {
-          "count": 1,
-          "name": "Wan Shi Tong, Librarian"
-        },
-        {
-          "count": 1,
-          "name": "Annul"
-        },
-        {
-          "count": 1,
-          "name": "Requiting Hex"
-        },
-        {
-          "count": 1,
-          "name": "Tishana's Tidebinder"
-        },
-        {
-          "count": 3,
-          "name": "Duress"
-        },
-        {
-          "count": 2,
-          "name": "Day of Black Sun"
-        },
-        {
-          "count": 2,
-          "name": "Flashfreeze"
         }
       ]
     },
