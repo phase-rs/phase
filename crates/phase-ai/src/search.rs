@@ -5,8 +5,6 @@ use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 #[cfg(test)]
 use std::fs::File;
-#[cfg(test)]
-use std::io::BufReader;
 
 use engine::ai_support::{
     build_decision_context, build_decision_context_for_semantic_owner, certify_fetch_then_cast,
@@ -5974,11 +5972,7 @@ mod tests {
         "Counter target spell.\nAt the beginning of your next upkeep, pay {3}{U}{U}. If you don't, you lose the game.";
 
     fn integration_card_db() -> CardDatabase {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../engine/tests/fixtures/integration_cards.json.gz");
-        let file = File::open(path).expect("integration fixture should open");
-        let decoder = flate2::read::GzDecoder::new(BufReader::new(file));
-        CardDatabase::from_export_reader(decoder).expect("integration fixture should load")
+        CardDatabase::from_integration_fixture().expect("integration fixture should load")
     }
 
     /// `integration_card_db`, loaded once per test binary for read-only callers.

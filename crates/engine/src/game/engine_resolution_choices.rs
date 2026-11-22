@@ -469,6 +469,91 @@ pub(crate) fn settle_player_scope_choice_after_departure(
     }
 }
 
+/// CR 800.4a + CR 800.4f + CR 101.4: after a player leaves, bring an open
+/// choose-all-then-act unless poll in line with the players still in the game.
+/// A departed seat pays nothing; a departed controller's resolving ability
+/// ceases to exist. When the departure completes collection, the poll is
+/// delivered here and the resolution's remaining tail is left to the
+/// departure's caller (`DepartureResume::ResolutionTail`), which resumes it and
+/// runs the action's one post-action pipeline.
+pub(crate) fn settle_simultaneous_unless_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<super::elimination::DepartureResume, EngineError> {
+    use super::elimination::DepartureResume;
+    use effects::simultaneous_unless::{DeliveryOutcome, SimultaneousUnlessReconciliation};
+
+    match effects::simultaneous_unless::reconcile_after_departure(state, events) {
+        SimultaneousUnlessReconciliation::Unchanged | SimultaneousUnlessReconciliation::Retired => {
+            Ok(DepartureResume::Settled)
+        }
+        // CR 800.4f: the paused step's prompt names a living chooser; its answer
+        // resumes the delivery through the continuation drain.
+        SimultaneousUnlessReconciliation::DeliveryParked => Ok(DepartureResume::Settled),
+        // CR 800.4a + CR 603.2 + CR 603.2c: the delivery's held events happened;
+        // they are collected once, since they were never in a buffer while held.
+        // A paused step whose chooser is still in the game keeps its prompt
+        // (CR 616.1 + CR 614.1: the event is already under way).
+        SimultaneousUnlessReconciliation::DeliveryRetired { released_from } => {
+            super::triggers::collect_departure_triggers_into_deferred(
+                state,
+                events,
+                released_from,
+                None,
+            );
+            Ok(DepartureResume::Settled)
+        }
+        SimultaneousUnlessReconciliation::Prompted(chooser) => {
+            // CR 117.2e: the republished prompt is the wait; it names a living
+            // chooser.
+            state.priority_player = chooser;
+            Ok(DepartureResume::Settled)
+        }
+        SimultaneousUnlessReconciliation::Settle => {
+            // Taking the carrier releases the poll's hold on its resolution, so
+            // no priority wait ever coexists with a live carrier (CR 117.2e).
+            let carrier = state
+                .pending_simultaneous_unless
+                .take()
+                .expect("a settled poll keeps its carrier");
+            // CR 117.2e + CR 117.3b + CR 800.4j: provisional. No player has
+            // priority while the ability is still resolving, but the caller's
+            // resume runs only under a priority wait; this names the seat the
+            // completed resolution's own grant gives priority to.
+            set_priority(state, super::engine::living_priority_seat(state));
+            // The delivery appends into the action's buffer from its current end:
+            // a pause moves only the delivery's own events (from that end) into its
+            // held set or the sacrifice batch's deferred span (CR 603.10), so the
+            // concession's earlier events stay in this buffer.
+            let outcome = effects::simultaneous_unless::deliver(state, *carrier, events, 0)
+                .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+            match outcome {
+                DeliveryOutcome::Delivered { span } => {
+                    // CR 603.2 + CR 603.2c: the delivery's triggered abilities are
+                    // collected once and every occurrence scanned is claimed, so
+                    // the caller's pipeline places them without collecting them
+                    // again (CR 603.3b).
+                    super::triggers::collect_departure_triggers_into_deferred(
+                        state, events, span.start, None,
+                    );
+                    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                        // CR 117.2e + CR 608.2c: the resolution is still under
+                        // way and owes its tail.
+                        Ok(DepartureResume::ResolutionTail)
+                    } else {
+                        // A delivery primitive's prompt is the wait; its answer
+                        // settles the resolution.
+                        Ok(DepartureResume::Settled)
+                    }
+                }
+                // CR 616.1: the replacement choice is the wait; its resume runs
+                // the parked remainder and its own pipeline.
+                DeliveryOutcome::Paused => Ok(DepartureResume::Settled),
+            }
+        }
+    }
+}
+
 /// CR 800.4a + CR 608.2d + CR 608.2m: after a player leaves, bring an open
 /// resolution-time object choice ("choose a creature you control") back in line
 /// with the game. The candidates stored on the prompt were scanned when it was
@@ -1402,21 +1487,37 @@ fn batch_or_drain_observer_triggers(
 /// `events` is the current action buffer. Under a live announcement only the
 /// span it does not own is collected here (CR 601.2h + CR 603.3), and an event
 /// another collector already claimed this action is not collected again
-/// (CR 603.2c).
+/// (CR 603.2c). Every occurrence collected here is claimed for ordinary
+/// collectors, so a later scan of the same buffer (the action's post-action
+/// pipeline, a departure's collection) does not collect it a second time;
+/// delayed collectors keep their CR 603.7 view of it, as nothing here collects
+/// delayed triggers.
 pub(crate) fn defer_observer_triggers_for_paused_choice(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     event_start: usize,
 ) {
     let owned = super::announcement_triggers::take_inline_trigger_span(state, events, event_start);
-    let trigger_events: Vec<GameEvent> =
-        unclaimed_observer_events(state, events, owned.start, owned.end)
-            .into_iter()
-            .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
-            .collect();
-    if !trigger_events.is_empty() {
-        super::triggers::collect_action_end_triggers_into_deferred(state, &trigger_events);
+    if owned.end <= owned.start {
+        return;
     }
+    let mut unclaimed = super::triggers::unclaimed_trigger_events_from(
+        &events[..owned.end],
+        owned.start,
+        super::triggers::TriggerCollectionRequester::Ordinary,
+        &state.consumed_before_priority_trigger_events,
+    );
+    unclaimed.retain(|event| !matches!(event, GameEvent::PhaseChanged { .. }));
+    if unclaimed.events.is_empty() {
+        return;
+    }
+    super::triggers::collect_action_end_triggers_into_deferred(state, &unclaimed.events);
+    super::triggers::claim_trigger_event_occurrences(
+        state,
+        events,
+        unclaimed.positions().iter().copied(),
+        super::triggers::ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+    );
 }
 
 /// CR 603.2 + CR 603.3b + CR 701.23: after a search tutor's put/shuffle
@@ -7093,6 +7194,8 @@ pub(super) fn handle_resolution_choice(
                                 state.objects[&card_id].incarnation,
                             ),
                             discard_frame,
+                            // CR 701.9a: a resolving effect's discard choice.
+                            cause: crate::types::game_state::DiscardCause::Effect,
                             fan_out: None,
                             preceding_events: events[events_before_effect..].to_vec(),
                         },

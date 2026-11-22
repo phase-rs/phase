@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "GameState gains pending_simultaneous_unless (CR 101.4 choose-all-then-act carrier for Rottenmouth Viper-class unless polls) and its phase (collecting answers, or delivering with held events and pinned picks); AbilityDefinition/ResolvedAbility.repeat_timing (the CR 608.2c instance-timing tag of a leading \"for each\" count); PendingDiscardBatch.cause and SpellContext.discard_cause (cost vs effect discard). Old peers cannot decode a mid-collection or cost-discard-paused state and resolve Viper round by round."
+}

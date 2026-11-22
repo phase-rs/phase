@@ -1319,11 +1319,8 @@ fn restore_copy_with_real_db(state: &GameState, trusted: bool) -> GameRunner {
 fn restore_copy_json_with_real_db(json: serde_json::Value) -> GameRunner {
     static DB: LazyLock<Arc<CardDatabase>> = LazyLock::new(|| {
         Arc::new(
-            CardDatabase::from_compressed_export_cached(
-                &include_bytes!("../fixtures/integration_cards.json.gz")[..],
-                |gz| std::io::read_to_string(flate2::read::GzDecoder::new(gz)),
-            )
-            .expect("load the actual integration CardDatabase"),
+            CardDatabase::from_integration_fixture_cached()
+                .expect("load the actual integration CardDatabase"),
         )
     });
     shared_card_db().expect("real integration fixture is required");

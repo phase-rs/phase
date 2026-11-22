@@ -10,6 +10,8 @@ pub mod encore;
 pub mod forge;
 pub mod haunt;
 pub mod hideaway;
+#[cfg(feature = "test-support")]
+pub mod integration_fixture;
 pub mod legality;
 pub mod meld;
 pub mod mtgjson;
