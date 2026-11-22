@@ -66750,7 +66750,7 @@ fn find_effect_node(
     is_wanted: impl Fn(&Effect) -> bool,
 ) -> Option<&AbilityDefinition> {
     while let Some(link) = node {
-        if is_wanted(&*link.effect) {
+        if is_wanted(&link.effect) {
             return Some(link);
         }
         node = link.sub_ability.as_deref();
