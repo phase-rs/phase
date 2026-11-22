@@ -79,6 +79,7 @@ use super::oracle_effect::conditions::{
 use super::oracle_effect::strip_trailing_duration;
 use super::oracle_ir::ast::is_play_from_exile_lifetime_duration;
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::effect_chain::RepeatCount;
 use super::oracle_nom::bridge::nom_on_lower;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, Duration, Effect, OpponentMayScope, PlayerFilter,
@@ -171,7 +172,8 @@ pub(crate) struct ClauseContext {
     pub(crate) may_implicit_player_scope: Option<PlayerFilter>,
     /// CR 608.2c: `for each [qty], ` prefix or trailing `twice` / `N times` — the
     /// controller follows the instruction as written, once per counted iteration.
-    pub(crate) repeat_for: Option<QuantityExpr>,
+    /// The timing comes from the peel (`RepeatCount::for_each_prefix`).
+    pub(crate) repeat_for: Option<RepeatCount>,
     /// CR 109.5: `each opponent` / `each player` subject-prefix iteration scope.
     pub(crate) player_scope: Option<PlayerFilter>,
     /// CR 608.2c + CR 109.4: gates the "each of your other opponents" subject
@@ -306,9 +308,9 @@ fn peel_inner(text: String, mut ctx: ClauseContext) -> (String, ClauseContext) {
     }
 
     // Repeat-for: "for each [qty], " leading prefix (CR 608.2c: the instruction is
-    // followed as written, once per counted iteration). CR 102.2: "for each
-    // opponent, choose … that player controls" is a per-opponent choice, not a
-    // repeat count, and keeps its prefix.
+    // followed as written, once per counted iteration). "for each opponent,
+    // choose … that player controls" is a per-opponent choice, not a repeat
+    // count, and keeps its prefix.
     if ctx.repeat_for.is_none()
         && !super::oracle_effect::is_for_each_opponent_choose_controlled(&text.to_lowercase())
         && !super::oracle_effect::is_object_exiler_play_grant(&text.to_lowercase())
@@ -358,8 +360,9 @@ enum YouMayBlocklist {
 
 /// CR 608.2c: Peel a leading `for each [qty], ` repeat prefix — the controller
 /// follows the instruction as written, once per counted iteration.
-/// Delegates to the existing `strip_for_each_prefix` building block.
-pub(crate) fn peel_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
+/// Delegates to the existing `strip_for_each_prefix` building block. The timing
+/// comes from the peel (`RepeatCount::for_each_prefix`).
+pub(crate) fn peel_for_each_prefix(text: &str) -> (Option<RepeatCount>, String) {
     super::oracle_effect::lower::strip_for_each_prefix(text)
 }
 
@@ -797,6 +800,7 @@ fn is_specialized_put_body(rest_lower: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::RepeatForTiming;
 
     #[test]
     fn peel_optional_prefix_strips_you_may() {
@@ -1247,6 +1251,11 @@ mod tests {
     fn peel_for_each_prefix_strips_repeat_quantity() {
         let (qty, rest) = peel_for_each_prefix("for each creature you control, draw a card");
         assert!(qty.is_some());
+        // CR 608.2c + CR 101.4: the peel carries the for-each timing.
+        assert_eq!(
+            qty.as_ref().map(RepeatCount::timing),
+            Some(RepeatForTiming::SimultaneousInstances)
+        );
         assert_eq!(rest, "draw a card");
     }
 
@@ -1254,6 +1263,10 @@ mod tests {
     fn peel_clause_combines_for_each_and_player_scope() {
         let (peeled, ctx) = peel_clause("for each opponent, each opponent loses 1 life");
         assert!(ctx.repeat_for.is_some());
+        assert_eq!(
+            ctx.repeat_for.as_ref().map(RepeatCount::timing),
+            Some(RepeatForTiming::SimultaneousInstances)
+        );
         assert_eq!(ctx.player_scope, Some(PlayerFilter::Opponent));
         assert_eq!(peeled, "lose 1 life");
     }

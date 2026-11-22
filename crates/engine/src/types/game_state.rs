@@ -7159,6 +7159,215 @@ pub struct PendingPlayerScopeChoice {
     pub selections: Vec<(PlayerId, ObjectIncarnationRef)>,
 }
 
+/// CR 101.4: the choices of a choose-all-then-act scoped unless poll
+/// (Rottenmouth Viper: "Then for each blight counter on it, each opponent loses
+/// 4 life unless that player sacrifices a nonland permanent of their choice or
+/// discards a card."). Each affected player, in APNAP order, answers every
+/// instance before the next player starts; nothing chosen moves and no life is
+/// lost until every answer is in, and then every action happens together
+/// (CR 608.2f). Owned by `effects::simultaneous_unless`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct PendingSimultaneousUnless {
+    /// Per-instance template: built by `split_player_scope_chain`, so
+    /// `player_scope = None`; `repeat_for = None`; `unless_pay = None`. Every
+    /// node built from it (prompt, delivery, unpaid instance) is therefore a
+    /// single seat's instruction that never re-enters a fan-out or an unless
+    /// prompt.
+    pub ability: Box<ResolvedAbility>,
+    /// The instruction's unless modifier, kept apart from the template; read
+    /// only to build a seat's prompt cost.
+    pub unless_pay: crate::types::ability::UnlessPayModifier,
+    /// CR 608.2h: the number of instances, fixed once when the poll began.
+    pub instances: u32,
+    /// Whether the poll is still collecting answers or is performing them.
+    pub phase: SimultaneousUnlessPhase,
+    /// The resolving trigger's event, installed again for every prompt and for
+    /// the delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_event: Option<GameEvent>,
+    /// CR 608.2c: binds the carrier to the resolution that wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolving_entry: Option<ObjectId>,
+}
+
+/// Where a choose-all-then-act unless poll is: the single authority for the
+/// collection fields and the delivery cursor (the same shape as
+/// [`PendingScopedLibrarySearch::phase`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SimultaneousUnlessPhase {
+    /// CR 101.4: players are still choosing in APNAP order.
+    Collecting(SimultaneousUnlessCollection),
+    /// CR 101.4 + CR 614.1: every choice is made; the actions are being performed.
+    Delivering(SimultaneousUnlessDelivery),
+}
+
+/// CR 101.4: the answers recorded so far by a collecting poll.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SimultaneousUnlessCollection {
+    /// The seat answering now.
+    pub current_player: PlayerId,
+    /// The instance `current_player` answers next (0-based).
+    pub next_instance: u32,
+    /// Seats still to answer after `current_player`, in APNAP order.
+    pub remaining_players: Vec<PlayerId>,
+    /// CR 101.4b: every recorded answer, in answer order. Public.
+    pub answers: Vec<SimultaneousUnlessSeatAnswer>,
+    /// CR 101.4a: the cards chosen to be discarded, with their choosers, pinned
+    /// to the incarnation they had when chosen (CR 400.7). They stay in hand,
+    /// unrevealed, until the poll is delivered; a viewer sees only its own.
+    pub hidden_discards: Vec<(PlayerId, ObjectIncarnationRef)>,
+}
+
+/// CR 101.4 + CR 614.1: the cursor of a poll whose answers are being performed.
+/// Discards come first, then unpaid life losses, then the sacrifice batch last,
+/// so every earlier action sees the battlefield as it was when the players chose.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SimultaneousUnlessDelivery {
+    /// CR 101.4a + CR 400.7: discard picks not yet delivered, APNAP order, pinned
+    /// to the incarnation chosen. Projected only to the chooser.
+    pub discards: Vec<(PlayerId, ObjectIncarnationRef)>,
+    /// CR 118.12a: one entry per unpaid instance not yet delivered, APNAP order.
+    pub unpaid: Vec<PlayerId>,
+    /// CR 701.21a + CR 400.7: the chosen permanents, APNAP order, pinned. Public.
+    pub sacrifices: Vec<(PlayerId, ObjectIncarnationRef)>,
+    /// CR 603.10 + CR 101.4: events of completed steps, held across a pause until
+    /// the whole delivery completes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_events: Vec<GameEvent>,
+}
+
+#[derive(serde::Deserialize)]
+struct PendingSimultaneousUnlessWire {
+    ability: Box<ResolvedAbility>,
+    unless_pay: crate::types::ability::UnlessPayModifier,
+    instances: u32,
+    phase: SimultaneousUnlessPhase,
+    #[serde(default)]
+    trigger_event: Option<GameEvent>,
+    #[serde(default)]
+    resolving_entry: Option<ObjectId>,
+}
+
+impl<'de> serde::Deserialize<'de> for PendingSimultaneousUnless {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = PendingSimultaneousUnlessWire::deserialize(deserializer)?;
+        let valid = match &wire.phase {
+            SimultaneousUnlessPhase::Collecting(collection) => {
+                let mut seen_remaining = HashSet::new();
+                let remaining_valid = collection.remaining_players.iter().all(|player| {
+                    *player != collection.current_player && seen_remaining.insert(*player)
+                });
+                let mut answers_by_player: HashMap<PlayerId, u32> = HashMap::new();
+                let mut discards_by_player: HashMap<PlayerId, u32> = HashMap::new();
+                for answer in &collection.answers {
+                    *answers_by_player.entry(answer.player).or_default() += 1;
+                    if matches!(answer.answer, SimultaneousUnlessAnswer::Discard) {
+                        *discards_by_player.entry(answer.player).or_default() += 1;
+                    }
+                }
+                // A viewer projection keeps only the viewer's own hidden picks, so
+                // a chooser may hold fewer picks than `Discard` answers, never more.
+                let mut hidden_by_player: HashMap<PlayerId, u32> = HashMap::new();
+                for (player, _) in &collection.hidden_discards {
+                    *hidden_by_player.entry(*player).or_default() += 1;
+                }
+                remaining_valid
+                    && collection.next_instance <= wire.instances
+                    && answers_by_player
+                        .values()
+                        .all(|count| *count <= wire.instances)
+                    && hidden_by_player.iter().all(|(player, count)| {
+                        discards_by_player
+                            .get(player)
+                            .is_some_and(|answered| count <= answered)
+                    })
+            }
+            SimultaneousUnlessPhase::Delivering(delivery) => {
+                let mut discard_ids = HashSet::new();
+                let mut sacrifice_ids = HashSet::new();
+                delivery
+                    .discards
+                    .iter()
+                    .all(|(_, pin)| discard_ids.insert(pin.object_id))
+                    && delivery
+                        .sacrifices
+                        .iter()
+                        .all(|(_, pin)| sacrifice_ids.insert(pin.object_id))
+                    && discard_ids.is_disjoint(&sacrifice_ids)
+            }
+        };
+        if !valid {
+            return Err(serde::de::Error::custom(
+                "invalid simultaneous unless phase invariants",
+            ));
+        }
+        Ok(Self {
+            ability: wire.ability,
+            unless_pay: wire.unless_pay,
+            instances: wire.instances,
+            phase: wire.phase,
+            trigger_event: wire.trigger_event,
+            resolving_entry: wire.resolving_entry,
+        })
+    }
+}
+
+impl PendingSimultaneousUnless {
+    /// The collection fields, while the poll is still collecting.
+    pub fn collection(&self) -> Option<&SimultaneousUnlessCollection> {
+        match &self.phase {
+            SimultaneousUnlessPhase::Collecting(collection) => Some(collection),
+            SimultaneousUnlessPhase::Delivering(_) => None,
+        }
+    }
+
+    pub fn collection_mut(&mut self) -> Option<&mut SimultaneousUnlessCollection> {
+        match &mut self.phase {
+            SimultaneousUnlessPhase::Collecting(collection) => Some(collection),
+            SimultaneousUnlessPhase::Delivering(_) => None,
+        }
+    }
+
+    /// The delivery cursor, once every answer is in.
+    pub fn delivery(&self) -> Option<&SimultaneousUnlessDelivery> {
+        match &self.phase {
+            SimultaneousUnlessPhase::Delivering(delivery) => Some(delivery),
+            SimultaneousUnlessPhase::Collecting(_) => None,
+        }
+    }
+
+    pub fn delivery_mut(&mut self) -> Option<&mut SimultaneousUnlessDelivery> {
+        match &mut self.phase {
+            SimultaneousUnlessPhase::Delivering(delivery) => Some(delivery),
+            SimultaneousUnlessPhase::Collecting(_) => None,
+        }
+    }
+}
+
+/// One recorded answer of a [`PendingSimultaneousUnless`] poll.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SimultaneousUnlessSeatAnswer {
+    pub player: PlayerId,
+    pub answer: SimultaneousUnlessAnswer,
+}
+
+/// CR 118.12a: what a seat chose for one instance of an unless poll.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
+pub enum SimultaneousUnlessAnswer {
+    /// CR 118.12a: the player doesn't pay, so this instance's effect happens.
+    Declined,
+    /// CR 701.21a: the player chose this permanent to sacrifice (public).
+    Sacrifice { permanent: ObjectIncarnationRef },
+    /// CR 701.9a: the player chose to discard a card. Public that a discard was
+    /// chosen; the card itself is in `hidden_discards` (CR 101.4a).
+    Discard,
+}
+
 /// CR 101.4 + CR 118.12a + CR 111.2: An APNAP poll for a player-scoped
 /// token instruction whose declining players receive one aggregate token
 /// creation after every payer has answered. Kept independently of the current
@@ -7383,6 +7592,44 @@ pub struct PendingSingleDiscard {
     pub source_id: Option<ObjectId>,
 }
 
+/// CR 701.9a vs CR 118.12 / CR 601.2h: WHY a card is being discarded.
+///
+/// This is the `caused_by_effect` axis of `route_discard`, surfaced as a type
+/// rather than a bool because it is load-bearing and silently mis-set: it gates
+/// `ReplacementCondition::EffectCausedDiscard`. Library of Leng replaces a
+/// discard caused by a spell or ability, and must NOT touch a discard made to
+/// pay a cost — the boundary `library_of_leng_does_not_apply_to_discard_cost`
+/// pins.
+///
+/// Discard helpers take the cause as an argument with no default: a shared
+/// helper that hard-codes one silently launders a cost payment into an effect
+/// (or vice versa), which is exactly the bug this enum exists to make
+/// unrepresentable. `Default` (`Effect`) exists only for the two records that
+/// carry a cause across a chain or a pause — `SpellContext::discard_cause` and
+/// `PendingDiscardBatch::cause` — so an old wire state, and every
+/// ability-carried discard that predates the cost route, reads as the effect
+/// discard it always was. `SpellContext::discard_cause` is node-local:
+/// `apply_parent_chain_context` never hands it to a child. The only writer of
+/// `Cost` on a resolved ability is the CR 118.12 unless-cost delivery node
+/// (`scoped_discard::scoped_discard_delivery_node`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DiscardCause {
+    /// A resolving spell or ability discards the card (CR 701.9a).
+    /// Library-of-Leng-class replacements gate on this.
+    #[default]
+    Effect,
+    /// The discard IS the payment of a cost (CR 118.12 unless-cost,
+    /// CR 601.2h additional cost). Effect-caused replacements must not apply.
+    Cost,
+}
+
+impl DiscardCause {
+    /// `skip_serializing_if` predicate — the default needs no JSON byte.
+    pub fn is_effect(cause: &Self) -> bool {
+        matches!(cause, Self::Effect)
+    }
+}
+
 /// One discard instruction, parked mid-batch while an optional replacement
 /// application awaits its apply-or-decline choice.
 ///
@@ -7442,6 +7689,11 @@ pub struct PendingDiscardBatch {
     pub paused_card: ObjectIncarnationRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
+    /// CR 701.9a vs CR 118.12: why the batch's cards are discarded. The drain
+    /// discards every remaining card with this cause, so a CR 118.12 unless-cost
+    /// discard paused mid-batch resumes as a cost, never as an effect.
+    #[serde(default, skip_serializing_if = "DiscardCause::is_effect")]
+    pub cause: DiscardCause,
     /// CR 608.2f: the clause and the seats it has not reached, installed by the
     /// `player_scope` driver when this pause interrupted its fan-out. `None`
     /// for a single-subject discard, which owns no fan-out.
@@ -18132,6 +18384,10 @@ fn visit_persisted_live_zone_changed_records(
         "consumed_before_priority_trigger_events",
         "pending_attack_trigger_events",
         "pending_player_scope_sacrifice_choice",
+        // `PendingSimultaneousUnless::trigger_event` is the resolving trigger's
+        // event (Rottenmouth Viper's enters `ZoneChanged`), rebound like the
+        // prompts' own `trigger_event`.
+        "pending_simultaneous_unless",
         // `PendingDiscardBatch::preceding_events` holds this turn's `ZoneChanged`
         // records, whose `turn_zone_change_index` must be rebound on load —
         // exactly the reason its sacrifice sibling is listed above.
@@ -30847,6 +31103,11 @@ declare_game_state! {
     /// across one-seat sacrifice choices and replacement pauses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_player_scope_unless_payment: Option<Box<PendingPlayerScopeUnlessPayment>>,
+    /// CR 101.4: a choose-all-then-act scoped unless poll collecting its
+    /// answers on the existing unless and pick prompts; nothing has moved and no
+    /// life has been lost yet. See [`PendingSimultaneousUnless`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_simultaneous_unless: Option<Box<PendingSimultaneousUnless>>,
     /// CR 101.4 + CR 118.12a: APNAP poll for a player-scoped unless
     /// instruction whose seats all answer before anything moves or resolves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -34015,6 +34276,14 @@ fn visit_suspended_chains<'a>(
     }
     if let Some(payment) = state.pending_player_scope_unless_payment.as_deref() {
         suspended(&payment.pending_effect, SuspendedChainEvent::Ambient)?;
+    }
+    // CR 101.4 + CR 608.2c: a choose-all-then-act unless poll resumes its
+    // instruction under the trigger event it captured.
+    if let Some(poll) = state.pending_simultaneous_unless.as_deref() {
+        suspended(
+            &poll.ability,
+            SuspendedChainEvent::Bound(poll.trigger_event.as_ref()),
+        )?;
     }
     if let Some(poll) = state.pending_player_scope_unless_punishment.as_deref() {
         suspended(
@@ -40823,6 +41092,7 @@ impl GameState {
             pending_player_scope_sacrifice_choice: None,
             pending_player_scope_choice: None,
             pending_player_scope_unless_payment: None,
+            pending_simultaneous_unless: None,
             pending_player_scope_unless_punishment: None,
             pending_discard_batch: None,
             pending_hero_event: None,
@@ -44539,6 +44809,10 @@ impl GameState {
             pending_damage_post_loss: _,
             pending_damage_post_counter: _,
             pending_single_discard: _,
+            // CR 101.4: a choose-all-then-act unless poll's pins are live only while its own
+            // non-Priority prompt is the wait (installed with its first prompt, taken before
+            // every delivery), so it is never live at a loop sample.
+            pending_simultaneous_unless: _,
             // NOT THIS CLASS — no incarnation id, a stable `ObjectId`/`PlayerId` only, or an
             // unbounded ledger that grows every cycle, so ranking it cannot equalize a loop:
             turn_number: _,
@@ -45025,14 +45299,16 @@ impl GameState {
     /// instruction, a staged payment or a pending cast — each holds abilities
     /// whose pins no loop visitor walks (CR 400.7), so comparing them raw could
     /// equate a live pin with a stale one — or a player-scope sacrifice
-    /// completion, a discard or combat-lifelink batch, deferred entry events, or
-    /// undispatched attack/blocker declaration events.
+    /// completion, a choose-all-then-act unless poll, a discard or
+    /// combat-lifelink batch, deferred entry events, or undispatched
+    /// attack/blocker declaration events.
     pub(crate) fn is_loop_comparable(&self) -> bool {
         self.resolution_stack.is_empty()
             && self.pending_die_roll_instruction.is_none()
             && self.payment_transaction.is_none()
             && self.pending_cast.is_none()
             && self.pending_player_scope_sacrifice_choice.is_none()
+            && self.pending_simultaneous_unless.is_none()
             && self.pending_discard_batch.is_none()
             && self.pending_hero_event.is_none()
             && self.pending_combat_lifelink.is_none()
@@ -46595,6 +46871,12 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_player_scope_sacrifice_choice: _,
         pending_player_scope_choice: _,
         pending_player_scope_unless_payment: _,
+        //   - `pending_simultaneous_unless`: COMPARED (hand-written `impl PartialEq` conjunct) —
+        //     a paused choose-all-then-act unless poll, classified like
+        //     `pending_player_scope_sacrifice_choice`. It is `None` at every Priority sample
+        //     (installed with its first prompt, taken before every delivery), so COMPARING it
+        //     can never suppress a legitimate loop's detection.
+        pending_simultaneous_unless: _,
         pending_player_scope_unless_punishment: _,
         pending_discard_batch: _,
         pending_hero_event: _,
@@ -47126,6 +47408,7 @@ impl PartialEq for GameState {
             && self.pending_player_scope_choice == other.pending_player_scope_choice
             && self.pending_player_scope_unless_payment
                 == other.pending_player_scope_unless_payment
+            && self.pending_simultaneous_unless == other.pending_simultaneous_unless
             && self.pending_player_scope_unless_punishment
                 == other.pending_player_scope_unless_punishment
             && self.pending_discard_batch == other.pending_discard_batch
@@ -52604,9 +52887,35 @@ mod tests {
             effect_kind: crate::types::ability::EffectKind::Discard,
             paused_card: ObjectIncarnationRef::of(ObjectId(9_303), 0),
             discard_frame: None,
+            cause: DiscardCause::Effect,
             fan_out: None,
             preceding_events: vec![persisted_zone_change_event(record)],
         })
+    }
+
+    /// CR 118.12 vs CR 701.9a: a discard batch paused mid-payment keeps its
+    /// cost cause across serde, and the default effect cause costs no byte on
+    /// the wire, so an old peer's batch reads as the effect discard it was.
+    #[test]
+    fn pending_discard_batch_cause_round_trips_and_defaults_to_effect() {
+        let record = persisted_zone_change_record(ObjectId(9_304), 1, 0);
+        let effect = parked_discard_batch(record);
+        let effect_json = serde_json::to_value(&effect).unwrap();
+        assert!(
+            effect_json.get("cause").is_none(),
+            "the default cause is omitted: {effect_json}"
+        );
+
+        let mut cost = effect.clone();
+        cost.cause = DiscardCause::Cost;
+        let cost_json = serde_json::to_string(&cost).unwrap();
+        assert!(cost_json.contains("\"cause\":\"Cost\""), "{cost_json}");
+        let decoded: Box<PendingDiscardBatch> = serde_json::from_str(&cost_json).unwrap();
+        assert_eq!(decoded, cost);
+        assert_eq!(decoded.cause, DiscardCause::Cost);
+
+        let decoded: Box<PendingDiscardBatch> = serde_json::from_value(effect_json).unwrap();
+        assert_eq!(decoded.cause, DiscardCause::Effect);
     }
 
     #[test]
@@ -73424,7 +73733,9 @@ mod restored_exact_attack_authority_tests {
     /// back a prompt (`FinalizeCast`, `FinalizeDelvedCast`, `FinalizeSpell`, and a
     /// counter-removal cost's `FinalizeCast`); rows 24-25 the departed stack
     /// records in the two shapes `record_departed_stack_entry` writes (a spell in
-    /// `departed_stack_spells`, an activation in `departed_activated_abilities`).
+    /// `departed_stack_spells`, an activation in `departed_activated_abilities`);
+    /// row 26 a choose-all-then-act unless poll (`pending_simultaneous_unless`),
+    /// visited with its own captured trigger event.
     /// Each is checked through both Raw and Trusted restore, wherever the root sits.
     #[test]
     fn payment_and_batch_roots_validate_their_attacked_referent() {
@@ -73498,7 +73809,7 @@ mod restored_exact_attack_authority_tests {
             cast_this_way_enters_mods: Default::default(),
         };
         let mut admitted = Vec::new();
-        for carrier in 0..26 {
+        for carrier in 0..27 {
             let mut state = state.clone();
             state.waiting_for = match carrier {
                 // The rider in the mana ability's own resume root.
@@ -73946,6 +74257,28 @@ mod restored_exact_attack_authority_tests {
                             },
                         },
                     );
+                    state.waiting_for.clone()
+                }
+                // CR 101.4: a choose-all-then-act unless poll, which resumes under
+                // its own captured trigger event.
+                26 => {
+                    state.pending_simultaneous_unless = Some(Box::new(PendingSimultaneousUnless {
+                        ability: node.clone(),
+                        unless_pay: crate::types::ability::UnlessPayModifier {
+                            cost: AbilityCost::Tap,
+                            payer: crate::types::ability::TargetFilter::ScopedPlayer,
+                        },
+                        instances: 1,
+                        phase: SimultaneousUnlessPhase::Collecting(SimultaneousUnlessCollection {
+                            current_player: P0,
+                            next_instance: 0,
+                            remaining_players: vec![],
+                            answers: vec![],
+                            hidden_discards: vec![],
+                        }),
+                        trigger_event: trigger_event.clone(),
+                        resolving_entry: None,
+                    }));
                     state.waiting_for.clone()
                 }
                 _ => unreachable!(),

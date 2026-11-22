@@ -10161,7 +10161,12 @@ pub(crate) fn process_triggers_observing(
     // CR 603.3 + CR 603.3b + CR 608.2n: while an instant or sorcery owes its final
     // part, what triggers waits in the queue for the resolution's batch instead
     // of being put on the stack now.
-    if super::stack::resolving_spell_owes_final_part(state) {
+    // CR 603.3 + CR 117.2e: likewise while a choose-all-then-act unless poll holds
+    // its resolution open (Rottenmouth Viper): no player receives priority until it
+    // is delivered.
+    if super::stack::resolving_spell_owes_final_part(state)
+        || super::effects::simultaneous_unless::holds_resolution(state)
+    {
         collect_triggers_into_deferred_observing(state, events, action_departures);
         return;
     }
@@ -12161,11 +12166,30 @@ pub(crate) fn collect_departure_triggers_into_deferred(
     looked_back: Option<(ImmediatelyBeforeObservers, usize, usize)>,
 ) {
     collect_unclaimed_triggers_into_deferred(state, events, event_start, looked_back);
-    let claims = (event_start..events.len()).map(|index| ConsumedTriggerEventOccurrence {
-        event: events[index].clone(),
-        occurrence: trigger_event_occurrence(events, index),
-        scope: ConsumedTriggerEventScope::AllCollectors,
-    });
+    claim_trigger_event_occurrences(
+        state,
+        events,
+        event_start..events.len(),
+        ConsumedTriggerEventScope::AllCollectors,
+    );
+}
+
+/// CR 603.2c: record that a collector has taken the occurrences at `positions`
+/// of the full action buffer `events`, so a later scan of the same buffer does
+/// not collect them again for the collectors `scope` names.
+pub(crate) fn claim_trigger_event_occurrences(
+    state: &mut GameState,
+    events: &[GameEvent],
+    positions: impl IntoIterator<Item = usize>,
+    scope: ConsumedTriggerEventScope,
+) {
+    let claims = positions
+        .into_iter()
+        .map(|index| ConsumedTriggerEventOccurrence {
+            event: events[index].clone(),
+            occurrence: trigger_event_occurrence(events, index),
+            scope,
+        });
     state.consumed_before_priority_trigger_events.extend(claims);
 }
 
@@ -15651,9 +15675,13 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
     // `CastOffer`) do not require a typed resolution-stack frame. They still
     // suspend the parent object, so its carrier and deferred observers must
     // remain live until the shared choice dispatcher has completed them.
+    // CR 101.4 + CR 117.2e: an open choose-all-then-act unless poll
+    // (Rottenmouth Viper) suspends its resolution across several players'
+    // prompts; it stays the resolving object until the poll is delivered.
     if state.resolving_stack_entry.is_some()
         && (super::engine_resolution_choices::handles(&state.waiting_for)
-            || matches!(state.waiting_for, WaitingFor::CopyRetarget { .. }))
+            || matches!(state.waiting_for, WaitingFor::CopyRetarget { .. })
+            || super::effects::simultaneous_unless::holds_resolution(state))
     {
         return false;
     }
@@ -20849,12 +20877,12 @@ fn check_trigger_constraint_with_ref(
         }
         // CR 121.2: Use the ordinal stamped onto the individual draw event
         // rather than the final per-turn count after a multi-card draw batch.
-        TriggerConstraint::NthDrawThisTurn { n } => {
+        TriggerConstraint::NthDrawThisTurn { n, comparator } => {
             let nth_in_turn = match event {
                 Some(GameEvent::CardDrawn { nth_in_turn, .. }) => *nth_in_turn,
                 _ => return false,
             };
-            nth_in_turn == *n
+            comparator.evaluate(nth_in_turn as i32, *n as i32)
         }
         // CR 716.2a: "When this Class becomes level N" — fire only at the specified level.
         // CR 716.2d: an absent stored level reads as 1 (`GameObject::level`).
@@ -21431,33 +21459,13 @@ fn evaluate_trigger_condition_with_source(
                 co_attacker_count >= *minimum as usize
             })
         }
-        // CR 506.2 + CR 508.1 + CR 508.1b + CR 603.4: Compare a count over the
-        // current attack declaration, either by attacker controller (optionally
-        // narrowed to a typed class, e.g. "two or more Dinosaurs") or by the
-        // announced attack target.
+        // CR 508.1a + CR 508.1b + CR 603.4: Compare the scoped declaration count.
         TriggerCondition::AttackersDeclaredCount {
             subject,
             comparator,
             count,
-        } => {
-            let Some(GameEvent::AttackersDeclared {
-                attacker_ids,
-                attacks,
-                ..
-            }) = trigger_event
-            else {
-                return false;
-            };
-            let actual = attackers_declared_count(
-                state,
-                attacker_ids,
-                attacks,
-                controller,
-                source_context,
-                subject,
-            );
-            comparator.evaluate(actual as i32, *count as i32)
-        }
+        } => attackers_declared_count(state, trigger_event, controller, source_context, subject)
+            .is_some_and(|actual| comparator.evaluate(actual as i32, *count as i32)),
         // CR 719.2: True when the source Case is unsolved and its solve condition is met.
         TriggerCondition::SolveConditionMet => source_context.is_some_and(|source| {
             source
@@ -22712,14 +22720,39 @@ pub(crate) fn exploit_record_matches_dying_object(
 
 fn attackers_declared_count(
     state: &GameState,
-    attacker_ids: &[ObjectId],
-    attacks: &[(ObjectId, crate::game::combat::AttackTarget)],
+    trigger_event: Option<&GameEvent>,
     trigger_controller: PlayerId,
     source_context: Option<&TriggerSourceContext>,
     subject: &crate::types::ability::AttackersDeclaredCountSubject,
-) -> usize {
-    match subject {
-        crate::types::ability::AttackersDeclaredCountSubject::Controller { scope, filter } => {
+) -> Option<usize> {
+    use crate::types::ability::{AttackersDeclaredCountSubject, SourceExclusion};
+
+    let declaration = match trigger_event {
+        Some(GameEvent::AttackersDeclared {
+            attacker_ids,
+            attacks,
+            ..
+        }) => Some((attacker_ids, attacks)),
+        _ => None,
+    };
+    let count = match subject {
+        AttackersDeclaredCountSubject::CurrentCombat { exclude_source } => {
+            // CR 508.4 + CR 506.4: This ledger records declarations and survives
+            // removal from combat. Exclusion uses the observed incarnation (CR 400.7).
+            let excluded = match exclude_source {
+                SourceExclusion::Include => None,
+                SourceExclusion::Exclude => Some(source_context?.identity.reference),
+            };
+            state.combat.as_ref().map_or(0, |combat| {
+                combat
+                    .attacking_incarnations_this_combat
+                    .iter()
+                    .filter(|&&attacker| Some(attacker) != excluded)
+                    .count()
+            })
+        }
+        AttackersDeclaredCountSubject::Controller { scope, filter } => {
+            let (attacker_ids, _) = declaration?;
             // `TriggeringPlayer` reads the controller of the first attacker in
             // the (possibly per-attacker narrowed) event. Under shared team
             // turns one combined declaration can hold several attacking
@@ -22777,11 +22810,12 @@ fn attackers_declared_count(
                 })
                 .count()
         }
-        crate::types::ability::AttackersDeclaredCountSubject::AttackTarget {
+        AttackersDeclaredCountSubject::AttackTarget {
             controller,
             attacked,
             filter,
-        } => attacks
+        } => declaration?
+            .1
             .iter()
             .filter(|(attacker_id, target)| {
                 attack_target_matches_controller_scope(
@@ -22804,7 +22838,8 @@ fn attackers_declared_count(
                 })
             })
             .count(),
-    }
+    };
+    Some(count)
 }
 
 /// CR 603.4 + CR 608.2h + CR 400.7 + CR 508.1: evaluate the resolution
@@ -22953,6 +22988,8 @@ fn condition_is_attack_event_only(
                 && matches!(trigger.mode, TriggerMode::Attacks)
         }
         TriggerCondition::AttackersDeclaredCount { subject, .. } => match subject {
+            // CR 603.4: The combat ledger is available for the resolution recheck.
+            crate::types::ability::AttackersDeclaredCountSubject::CurrentCombat { .. } => false,
             crate::types::ability::AttackersDeclaredCountSubject::Controller { .. } => {
                 trigger_mode_uses_attack_declaration_count(&trigger.mode)
             }
@@ -27436,6 +27473,87 @@ pub mod tests {
             comparator: Comparator::GE,
             count: 1,
         }
+    }
+
+    #[test]
+    fn current_combat_attacker_count_uses_incarnations_and_resets_between_combats() {
+        use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+        use crate::types::ability::SourceExclusion;
+
+        let mut state = setup();
+        let player = PlayerId(0);
+        let source = make_creature(&mut state, player, "Source", 2, 2);
+        let other = make_creature(&mut state, player, "Other attacker", 2, 2);
+        let source_ref = ObjectIncarnationRef::from_object(&state.objects[&source]);
+        let other_ref = ObjectIncarnationRef::from_object(&state.objects[&other]);
+        // CR 506.4 + CR 508.4: An attacker removed from combat still attacked.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                source,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            )],
+            attacking_incarnations_this_combat: [source_ref, other_ref].into_iter().collect(),
+            ..CombatState::default()
+        });
+        state.creatures_attacked_this_turn.extend([source, other]);
+
+        let condition = |exclude_source, count| TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::CurrentCombat { exclude_source },
+            comparator: Comparator::EQ,
+            count,
+        };
+        let excluded = condition(SourceExclusion::Exclude, 1);
+        let included = condition(SourceExclusion::Include, 2);
+        assert!(check_trigger_condition(
+            &state,
+            &excluded,
+            player,
+            Some(source),
+            None
+        ));
+        assert!(check_trigger_condition(
+            &state, &included, player, None, None
+        ));
+        assert!(!check_trigger_condition(
+            &state, &excluded, player, None, None
+        ));
+
+        state.combat = Some(CombatState::default());
+        assert!(!check_trigger_condition(
+            &state, &included, player, None, None
+        ));
+        assert!(check_trigger_condition(
+            &state,
+            &condition(SourceExclusion::Include, 0),
+            player,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn current_combat_attacker_count_survives_as_resolution_condition() {
+        use crate::types::ability::SourceExclusion;
+
+        let trigger = make_trigger(TriggerMode::Phase);
+        let condition = TriggerCondition::And {
+            conditions: vec![
+                TriggerCondition::SourceAttackedThisCombat,
+                TriggerCondition::AttackersDeclaredCount {
+                    subject: AttackersDeclaredCountSubject::CurrentCombat {
+                        exclude_source: SourceExclusion::Exclude,
+                    },
+                    comparator: Comparator::GE,
+                    count: 2,
+                },
+            ],
+        };
+        // CR 603.4: Preserve both conjuncts for the resolution-time check.
+        assert_eq!(
+            stack_condition_for_trigger(&trigger, &condition),
+            Some(condition)
+        );
     }
 
     #[test]
@@ -38552,7 +38670,10 @@ pub mod tests {
             trigger.valid_target = Some(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::You),
             ));
-            trigger.constraint = Some(TriggerConstraint::NthDrawThisTurn { n: 3 });
+            trigger.constraint = Some(TriggerConstraint::NthDrawThisTurn {
+                n: 3,
+                comparator: Comparator::EQ,
+            });
             trigger.execute = Some(Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
@@ -39814,7 +39935,10 @@ pub mod tests {
         state.players[1].cards_drawn_this_turn = 4;
 
         let mut trig_def = make_trigger(TriggerMode::Drawn);
-        trig_def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n: 2 });
+        trig_def.constraint = Some(TriggerConstraint::NthDrawThisTurn {
+            n: 2,
+            comparator: Comparator::EQ,
+        });
 
         let controller = PlayerId(0);
         let event = GameEvent::CardDrawn {
@@ -50978,6 +51102,229 @@ pub mod tests {
             drain_deferred_trigger_queue(&mut state, &mut events),
             Some(WaitingFor::OrderTriggers { .. })
         ));
+    }
+
+    /// Parse one printed trigger line into its first trigger definition.
+    fn parsed_printed_trigger(name: &str, oracle: &str) -> TriggerDefinition {
+        crate::parser::oracle::parse_oracle_text(
+            oracle,
+            name,
+            &[],
+            &[String::from("Creature")],
+            &[],
+        )
+        .triggers
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{name}: the trigger line parses to a trigger"))
+    }
+
+    /// Rottenmouth Viper's trigger line, verbatim from its Oracle text.
+    const VIPER_TRIGGER: &str = "Whenever this creature enters or attacks, put a blight counter on it. Then for each blight counter on it, each opponent loses 4 life unless that player sacrifices a nonland permanent of their choice or discards a card.";
+
+    /// Psychosis Crawler's trigger line, verbatim from its Oracle text.
+    const CRAWLER_TRIGGER: &str = "Whenever you draw a card, each opponent loses 1 life.";
+
+    /// The per-opponent unless instruction of Rottenmouth Viper's trigger, as the
+    /// parser builds it and a resolution reaches it (the `LoseLife` link carrying
+    /// the counted repeat and the "unless that player sacrifices a nonland
+    /// permanent of their choice or discards a card" modifier).
+    fn viper_unless_link(source: ObjectId) -> ResolvedAbility {
+        let trigger = parsed_printed_trigger("Rottenmouth Viper", VIPER_TRIGGER);
+        let execute = trigger.execute.expect("Viper's trigger has an effect");
+        let mut node =
+            crate::game::ability_utils::build_resolved_from_def(&execute, source, PlayerId(0));
+        loop {
+            if node.unless_pay.is_some() {
+                node.sub_ability = None;
+                return node;
+            }
+            node = *node
+                .sub_ability
+                .expect("Viper's trigger chain reaches its unless instruction");
+        }
+    }
+
+    /// Rottenmouth Viper's "each opponent loses 4 life unless that player
+    /// sacrifices a nonland permanent of their choice or discards a card" is
+    /// mid-resolution with its unless prompt raised and no resolution-stack frame,
+    /// plus a battlefield Psychosis Crawler ("Whenever you draw a card, each
+    /// opponent loses 1 life.") whose trigger is not part of it.
+    fn unless_prompt_mid_resolution() -> (GameState, GameEvent) {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(9_601),
+            PlayerId(0),
+            "Rottenmouth Viper".to_string(),
+            Zone::Battlefield,
+        );
+        let entry = create_object(
+            &mut state,
+            CardId(9_602),
+            PlayerId(0),
+            "Rottenmouth Viper".to_string(),
+            Zone::Stack,
+        );
+        let unless_link = viper_unless_link(source);
+        let unless_cost = unless_link
+            .unless_pay
+            .as_ref()
+            .expect("the unless link carries its modifier")
+            .cost
+            .clone();
+        assert!(
+            matches!(&unless_cost, AbilityCost::OneOf { costs } if costs.len() == 2),
+            "Viper's unless cost is the two-branch sacrifice-or-discard choice"
+        );
+        let mut pending_effect = unless_link.clone();
+        pending_effect.unless_pay = None;
+        state.resolving_stack_entry = Some(crate::types::game_state::StackEntry {
+            id: entry,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(unless_link),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            repeat: None,
+            cost: unless_cost,
+            pending_effect: Box::new(pending_effect),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+            affected_object: None,
+        };
+
+        let watcher = create_object(
+            &mut state,
+            CardId(9_603),
+            PlayerId(0),
+            "Psychosis Crawler".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parsed_printed_trigger("Psychosis Crawler", CRAWLER_TRIGGER);
+        assert_eq!(trigger.mode, TriggerMode::Drawn);
+        state
+            .objects
+            .get_mut(&watcher)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+        let drawn = create_object(
+            &mut state,
+            CardId(9_604),
+            PlayerId(0),
+            "Drawn Card".to_string(),
+            Zone::Hand,
+        );
+        let draw = GameEvent::CardDrawn {
+            player_id: PlayerId(0),
+            object_id: drawn,
+            nth_in_turn: 1,
+            nth_in_step: 1,
+        };
+        (state, draw)
+    }
+
+    /// An open choose-all-then-act poll's carrier, as Rottenmouth Viper's
+    /// resolution installs it: its own unless modifier (the OneOf sacrifice or
+    /// discard cost, paid by the scoped player) over its two blight counters.
+    fn simultaneous_unless_carrier(
+        state: &GameState,
+    ) -> crate::types::game_state::PendingSimultaneousUnless {
+        let entry = state.resolving_stack_entry.as_ref().unwrap();
+        let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
+            unreachable!("the fixture resolves a triggered ability");
+        };
+        // The coordinator's per-instance template: the instruction with its
+        // count and unless modifier removed (`per_instance_template`).
+        let mut template = ability.clone();
+        let unless_pay = template
+            .unless_pay
+            .take()
+            .expect("Viper's unless link carries its modifier");
+        template.repeat_for = None;
+        crate::types::game_state::PendingSimultaneousUnless {
+            ability: template,
+            unless_pay,
+            instances: 2,
+            phase: crate::types::game_state::SimultaneousUnlessPhase::Collecting(
+                crate::types::game_state::SimultaneousUnlessCollection {
+                    current_player: PlayerId(1),
+                    next_instance: 0,
+                    remaining_players: Vec::new(),
+                    answers: Vec::new(),
+                    hidden_discards: Vec::new(),
+                },
+            ),
+            trigger_event: None,
+            resolving_entry: Some(entry.id),
+        }
+    }
+
+    /// CR 608.2c + CR 117.2e + CR 101.4: a generic unless prompt does not keep
+    /// its resolving ability open (its prompt carries the rest), but an open
+    /// choose-all-then-act poll does, until its carrier is taken. Keyed on the
+    /// carrier, not on the prompt's shape.
+    #[test]
+    fn an_open_simultaneous_unless_poll_holds_its_resolution_until_taken() {
+        let (mut state, _) = unless_prompt_mid_resolution();
+        assert!(
+            resolution_completion_can_settle(&state),
+            "a generic unless prompt settles its resolving ability, as before"
+        );
+
+        state.pending_simultaneous_unless = Some(Box::new(simultaneous_unless_carrier(&state)));
+        assert!(
+            !resolution_completion_can_settle(&state),
+            "the poll holds its resolution while it collects"
+        );
+
+        state.pending_simultaneous_unless.take();
+        assert!(
+            resolution_completion_can_settle(&state),
+            "taking the carrier releases the resolution"
+        );
+    }
+
+    /// CR 603.3 + CR 117.2e: what triggers while a choose-all-then-act poll
+    /// holds its resolution waits in the queue instead of going on the stack
+    /// over the poll's prompt. Control: without the poll the same trigger is put
+    /// on the stack.
+    #[test]
+    fn triggers_park_while_a_simultaneous_unless_poll_holds_its_resolution() {
+        let (mut state, draw) = unless_prompt_mid_resolution();
+        let mut control = state.clone();
+        process_triggers(&mut control, std::slice::from_ref(&draw));
+        assert_eq!(
+            control.stack.len(),
+            1,
+            "positive control: with no poll the draw trigger goes on the stack"
+        );
+        assert!(control.deferred_triggers.is_empty());
+
+        state.pending_simultaneous_unless = Some(Box::new(simultaneous_unless_carrier(&state)));
+        process_triggers(&mut state, std::slice::from_ref(&draw));
+        assert!(
+            state.stack.is_empty(),
+            "nothing is put on the stack while the poll holds its resolution"
+        );
+        assert_eq!(
+            state.deferred_triggers.len(),
+            1,
+            "the draw trigger waits in the deferred queue"
+        );
     }
 
     /// Build a `TriggeredManaResume` naming `node`, with an otherwise inert

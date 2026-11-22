@@ -1982,6 +1982,15 @@ pub struct SpellContext {
     /// ordinary ability-chain handoffs without widening every ability literal.
     #[serde(default, skip_serializing_if = "ExileConcealment::is_public")]
     pub face_down_in_exile: ExileConcealment,
+    /// CR 701.9a vs CR 118.12: why this node's discard happens. Node-local:
+    /// `apply_parent_chain_context` keeps a child's own cause, so a cost-paying
+    /// delivery node never makes a chained instruction's discard a cost. See
+    /// [`crate::types::game_state::DiscardCause`].
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::game_state::DiscardCause::is_effect"
+    )]
+    pub discard_cause: crate::types::game_state::DiscardCause,
     /// CR 201.5a: the granter stamped on the definition this ability was built from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granting_object: Option<ObjectIncarnationRef>,
@@ -3648,6 +3657,10 @@ pub struct ResolvedAbility {
     /// CR 608.2c: Repeat this ability N times (from "for each [X], [effect]").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_for: Option<QuantityExpr>,
+    /// CR 608.2: the iteration relation of `repeat_for`, copied through from the
+    /// originating `AbilityDefinition`. See [`RepeatForTiming`].
+    #[serde(default, skip_serializing_if = "RepeatForTiming::is_sequential")]
+    pub repeat_timing: RepeatForTiming,
     /// Minimum legal announced value for X. Defaults to zero; set to one by
     /// "X can't be 0" annotations.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -4037,6 +4050,7 @@ impl PartialEq for ResolvedAbility {
             modal_instruction_ordinal: a_modal_instruction_ordinal,
             detached_remainder: a_detached_remainder,
             repeat_for: a_repeat_for,
+            repeat_timing: a_repeat_timing,
             min_x_value: a_min_x_value,
             announced_x: a_announced_x,
             cant_be_copied: a_cant_be_copied,
@@ -4120,6 +4134,7 @@ impl PartialEq for ResolvedAbility {
             modal_instruction_ordinal: b_modal_instruction_ordinal,
             detached_remainder: b_detached_remainder,
             repeat_for: b_repeat_for,
+            repeat_timing: b_repeat_timing,
             min_x_value: b_min_x_value,
             announced_x: b_announced_x,
             cant_be_copied: b_cant_be_copied,
@@ -4202,6 +4217,7 @@ impl PartialEq for ResolvedAbility {
             && a_modal_instruction_ordinal == b_modal_instruction_ordinal
             && a_detached_remainder == b_detached_remainder
             && a_repeat_for == b_repeat_for
+            && a_repeat_timing == b_repeat_timing
             && a_min_x_value == b_min_x_value
             && a_announced_x == b_announced_x
             && a_cant_be_copied == b_cant_be_copied
@@ -4777,6 +4793,7 @@ impl ResolvedAbility {
             modal_instruction_ordinal: None,
             detached_remainder: DetachedRemainder::NoProducer,
             repeat_for: None,
+            repeat_timing: RepeatForTiming::Sequential,
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,

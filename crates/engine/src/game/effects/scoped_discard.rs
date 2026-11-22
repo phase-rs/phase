@@ -19,7 +19,7 @@ use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingPlayerScopeChoice, WaitingFor};
+use crate::types::game_state::{DiscardCause, GameState, PendingPlayerScopeChoice, WaitingFor};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -207,6 +207,21 @@ fn deliver_scoped_discards(
         });
         return Ok(super::ResolutionProgress::Complete);
     }
+    let delivery = scoped_discard_delivery_node(template, cards, DiscardCause::Effect);
+    super::resolve_ability_chain_step(state, &delivery, events, depth)
+}
+
+/// CR 101.4 + CR 701.9a: the one specific-card discard node that delivers a
+/// simultaneous instruction's collected hand picks (`cards`, already checked
+/// to still be in hand). `cause` is the node's own (CR 118.12): `Effect` for
+/// "each opponent discards a card", `Cost` for the discards chosen to pay a
+/// CR 118.12a unless-cost (`simultaneous_unless`), which Library-of-Leng-class
+/// replacements must not touch.
+pub(super) fn scoped_discard_delivery_node(
+    template: &ResolvedAbility,
+    cards: Vec<TargetRef>,
+    cause: DiscardCause,
+) -> ResolvedAbility {
     let mut delivery = template.clone();
     delivery.effect = Effect::DiscardCard {
         count: cards.len() as u32,
@@ -214,7 +229,9 @@ fn deliver_scoped_discards(
     };
     delivery.multi_target = None;
     delivery.targets = cards;
-    super::resolve_ability_chain_step(state, &delivery, events, depth)
+    delivery.context.discard_cause = cause;
+    delivery.sub_ability = None;
+    delivery
 }
 
 /// CR 101.4: walk `remaining` in APNAP order, collecting each seat's choice
