@@ -1441,9 +1441,9 @@ fn riptide_owner_departure_at_their_prompt_delivers_the_collected_arrangement() 
 /// settled move then takes the Demon and `borrowed` together; the Demon
 /// looks back (CR 603.10a; its 2017-03-14 ruling: it triggers when it and
 /// another creature leave at the same time) and triggers exactly once, for
-/// `borrowed`. A Concede returns before the
-/// post-action pipeline, so that trigger reaches the stack only through the
-/// settle's own completion and the elimination drain.
+/// `borrowed`. The settlement collects that exact segment; the concession's
+/// canonical tail then checks SBAs and places the combined trigger batch
+/// before priority, without scanning the settlement's events again.
 ///
 /// REVERT-FAILING: if the triggers of the departure-settled move are not put
 /// on the stack, the Demon's stack count is 0, not 1.

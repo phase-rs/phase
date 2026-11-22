@@ -1960,6 +1960,7 @@ fn spell_alternative_cost_is_payable(
             legs,
             super::cost_payability::ObjectLegPayment::Unguided,
             super::cost_payability::CostSourceRole::SpellBeingCast,
+            super::cost_payability::ExileCostPopulation::PayerZones,
         )
         || !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, committed_life)
     {

@@ -725,7 +725,7 @@ fn a_milled_grist_repeats_the_plus_one_and_counts_at_minus_five() {
 }
 
 // Production CardDB consumers. The direct-body rows above are supplementary
-// building-block tests. Regenerate integration_cards.json.gz from the fresh
+// building-block tests. Regenerate integration_cards/ from the fresh
 // production export with scripts/gen-test-fixture.py (including canonical gzip).
 fn colossus_scenario(
     hand_lands: usize,

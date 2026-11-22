@@ -46,7 +46,7 @@
 //!
 //! Every card here is built from VERBATIM Oracle text (`/card-test`), never a
 //! paraphrase and never `add_real_card` — none of these cards is in
-//! `integration_cards.json.gz` except Memory Vessel and Mondo Gecko, and expanding
+//! `integration_cards/` except Memory Vessel and Mondo Gecko, and expanding
 //! that fixture is not this PR's business.
 
 use engine::game::combat::{creature_cant_attack, AttackTarget};

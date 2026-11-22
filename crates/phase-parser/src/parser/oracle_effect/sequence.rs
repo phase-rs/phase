@@ -2872,6 +2872,12 @@ fn continues_inline_delayed_body(remainder_lower: &str) -> bool {
 fn starts_prefix_clause(current_lower: &str) -> bool {
     // CR 603.7a: Temporal prefix clauses must not be split on their internal comma.
     // CR 611.2b: "For as long as [condition], [effect]" — duration prefix clause.
+    // CR 608.2c: a sequence-connected prefix ("Then if ...", "Then, for each ...")
+    // owns its comma-delimited body exactly as the bare prefix does, so classify
+    // the clause after the shared connector is stripped. Regression: A Good Thing
+    // ("Then, if you have 1,000 or more life, you lose the game") — the splitter
+    // must not bisect the conditional at the comma and orphan the body.
+    let current_lower = strip_sequence_connector_lower(current_lower);
     alt((
         tag::<_, _, OracleError<'_>>("until "),
         tag("after "),
@@ -2879,12 +2885,6 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
         tag("when "),
         tag("whenever "),
         tag("for each "),
-        tag("then if "),
-        // "then, if ..." (with comma after "then") — same scoping as "then if".
-        // Regression: A Good Thing ("Then, if you have 1,000 or more life, you
-        // lose the game") — without this, the splitter bisects the conditional
-        // at the comma between life and "you lose", orphaning the body.
-        tag("then, if "),
         tag("otherwise"),
         tag("if not"),
         tag("the next time "),
@@ -11783,6 +11783,17 @@ mod tests {
         assert_eq!(split_clause_sequence(waltz).len(), 2, "{waltz}");
         let plain = "Draw a card. It gains flying until end of turn.";
         assert_eq!(split_clause_sequence(plain).len(), 2, "{plain}");
+    }
+
+    #[test]
+    fn then_for_each_prefix_keeps_its_effect_body_together() {
+        let text = "put a blight counter on it. Then for each blight counter on it, each opponent loses 4 life unless that player sacrifices a nonland permanent of their choice or discards a card.";
+        let chunks = split_clause_sequence(text);
+        assert_eq!(chunks.len(), 2, "{chunks:#?}");
+        assert_eq!(
+            chunks[1].text,
+            "Then for each blight counter on it, each opponent loses 4 life unless that player sacrifices a nonland permanent of their choice or discards a card"
+        );
     }
 
     #[test]
