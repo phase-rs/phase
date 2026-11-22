@@ -17,6 +17,7 @@ mod dark_matter_manipulator;
 mod darkness_crystal_exiled_with_activation_8164;
 mod darksteel_angel_cant_have_counters;
 mod dathon_his_heart_open_counter_kind;
+mod ichormoon_gauntlet_counter_kind;
 mod dawnbreak_reclaimer;
 mod dazzling_beauty_become_blocked;
 mod death_priest_myrkul_oxford_anthem;
