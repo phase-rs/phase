@@ -442,8 +442,8 @@ fn futurist_subtype_animation_retains_artifact_and_uses_own_tapped_condition() {
         tapped.card_types.core_types,
         vec![CoreType::Creature, CoreType::Artifact]
     );
-    assert!(tapped.card_types.subtypes.contains(&"Human".to_string()));
-    assert!(tapped.card_types.subtypes.contains(&"Citizen".to_string()));
+    assert!(tapped.card_types.subtypes.iter().any(|i| i == "Human"));
+    assert!(tapped.card_types.subtypes.iter().any(|i| i == "Citizen"));
     // CR 611.3a: the other source's tapped state cannot activate this source.
     let untapped = &state.objects[&untapped_id];
     assert_eq!((untapped.power, untapped.toughness), (Some(3), Some(4)));
@@ -505,7 +505,11 @@ fn kaito_animation_during_your_turn_with_loyalty() {
         "Kaito should be a creature during your turn"
     );
     assert!(
-        kaito.card_types.subtypes.contains(&"Ninja".to_string()),
+        kaito
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Ninja"),
         "Kaito should be a Ninja during your turn"
     );
     assert!(

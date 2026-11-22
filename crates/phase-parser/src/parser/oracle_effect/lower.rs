@@ -10728,6 +10728,7 @@ pub(super) fn try_parse_distribute_damage(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::DealDamage {
             amount,
             target,
@@ -10818,6 +10819,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::PutCounter {
             counter_type,
             count: count_expr,
@@ -10882,6 +10884,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::PreventDamage {
             amount,
             amount_dynamic,
@@ -11011,6 +11014,7 @@ pub(super) fn try_parse_bidirectional_prevent(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: to_effect,
         duration: None,
         sub_ability: Some(Box::new(by_ability)),
@@ -14076,19 +14080,16 @@ fn where_x_is_demonstrative_target_creature_stat(where_x: WhereXBinding<'_>) -> 
         return false;
     };
     let expression = expression.trim().trim_end_matches('.').to_ascii_lowercase();
-    // The `if` condition scopes the parser temporary so it drops at the end of
-    // condition evaluation (before the owned `expression` string), avoiding the
+    // The `let` scopes the parser temporary so it drops at the end of the
+    // statement (before the owned `expression` string), avoiding the
     // tail-position borrow that an `is_ok()` return expression would create.
-    if all_consuming(preceded(
+    let matched = all_consuming(preceded(
         tag::<_, _, OracleError<'_>>("that creature's "),
         alt((tag("power"), tag("toughness"))),
     ))
     .parse(expression.as_str())
-    .is_ok()
-    {
-        return true;
-    }
-    false
+    .is_ok();
+    matched
 }
 
 /// CR 608.2c: Rebind a power/toughness reference scoped `from` inside a

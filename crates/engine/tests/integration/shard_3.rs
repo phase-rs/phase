@@ -5,6 +5,9 @@
 //! through `crate::<module>`, and every module with an insta snapshot; it may also hold modules
 //! from this range. `no_top_level_test_binaries` enforces that each file here is registered in
 //! exactly one shard root.
+// The auto-trait (`Send`) proof for the im-backed `GameState` exceeds the default
+// recursion limit of 128 (a future-incompatibility error on newer toolchains).
+#![recursion_limit = "512"]
 
 pub mod support;
 
@@ -48,6 +51,7 @@ mod departed_recipient_control_exchange;
 mod departure_pin_narrowed;
 mod descendants_path_shared_creature_type_gate;
 mod desperate_futurescribe_instead;
+mod destroy_and_change_zone_batch;
 mod destroy_redirect_to_battlefield_delivery_tail;
 mod detectives_phoenix_bestow_graveyard;
 mod deterministic_blocker_prompt_order;
@@ -184,6 +188,7 @@ mod face_a_dilemma;
 mod face_down_cast_offer;
 mod face_down_cause_marker;
 mod face_down_spell_cost_filter;
+mod face_up_exile_and_two_other_target_witnesses;
 mod fact_or_fiction_pile_separation;
 mod fall_from_favor_monarch_untap;
 mod fallaji_archaeologist_up_to_may_put;
@@ -221,6 +226,7 @@ mod first_creature_spell_flash;
 mod first_family_union_color_count;
 mod fixture_deck_size_conformance;
 mod flame_spill_excess_damage;
+mod flamewar_intel_counter_return;
 mod flamewar_mtmte_export;
 mod flare_of_faith_parent_target;
 mod flashback_nonmana_payability;
@@ -235,6 +241,7 @@ mod for_the_ancestors_chosen_creature_type_4834;
 mod forced_retarget_multi_role_mana_6056;
 mod foreign_subject_split_guard;
 mod foretell_pipeline;
+mod forge_of_heroes_commander_target;
 mod forgotten_cellar_9467;
 mod fra_bloodline_recollector;
 mod fractalize;

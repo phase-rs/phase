@@ -617,13 +617,29 @@ fn mill_replacement_order_inside_the_substitute_parks_the_batch() {
     let mut runner = scenario.build();
     attack_and_run_to_prompt(&mut runner, &[szadek, bear]);
 
+    // CR 101.4c: the staged mill batch consults every milled card before any
+    // prompt, so the owner of the milled cards first orders their held
+    // decisions (here in announcement order) and then answers each card's
+    // CR 616.1 choice. Only the per-card choices are counted.
     let mut prompts = 0usize;
+    let mut round_tripped = false;
     while matches!(
         runner.state().waiting_for,
-        WaitingFor::ReplacementChoice { .. }
+        WaitingFor::ReplacementChoice { .. } | WaitingFor::ReplacementDecisionOrder { .. }
     ) {
-        if prompts == 0 {
+        if !round_tripped {
             round_trip_at_pause(&mut runner);
+            round_tripped = true;
+        }
+        if let WaitingFor::ReplacementDecisionOrder { objects, .. } =
+            runner.state().waiting_for.clone()
+        {
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![objects[0]],
+                })
+                .expect("make the first announced card's decision first");
+            continue;
         }
         prompts += 1;
         assert!(prompts <= 16, "the mill prompts terminate");

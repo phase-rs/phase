@@ -177,8 +177,8 @@ fn combine_host_merges_augmented_values_onto_host() {
         Some(crate::game::game_object::MergeKind::Augment)
     );
     assert!(!merged.card_types.supertypes.contains(&Supertype::Host));
-    assert!(merged.card_types.subtypes.contains(&"Cat".to_string()));
-    assert!(merged.card_types.subtypes.contains(&"Monkey".to_string()));
+    assert!(merged.card_types.subtypes.iter().any(|i| i == "Cat"));
+    assert!(merged.card_types.subtypes.iter().any(|i| i == "Monkey"));
     assert!(
         events.iter().any(|event| matches!(
             event,
@@ -260,8 +260,8 @@ fn combine_host_uses_current_copiable_values_after_copy_effect() {
     assert_eq!(merged.power, Some(5));
     assert_eq!(merged.toughness, Some(6));
     assert_eq!(merged.color, vec![ManaColor::Green]);
-    assert!(merged.card_types.subtypes.contains(&"Dog".to_string()));
-    assert!(merged.card_types.subtypes.contains(&"Monkey".to_string()));
+    assert!(merged.card_types.subtypes.iter().any(|i| i == "Dog"));
+    assert!(merged.card_types.subtypes.iter().any(|i| i == "Monkey"));
     assert_eq!(
         merged
             .trigger_definitions

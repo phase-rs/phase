@@ -3564,9 +3564,9 @@ mod tests {
         // All four players draw 6 cards each (= total X across the loop).
         // CR 107.3i: every Variable("X") in the chain resolves to the same
         // accumulated total.
-        for pid in 0..4 {
+        for (pid, player) in state.players.iter().enumerate().take(4) {
             assert_eq!(
-                state.players[pid].hand.len(),
+                player.hand.len(),
                 6,
                 "Player {} should have drawn 6 cards (total mana paid = 6)",
                 pid
@@ -3631,9 +3631,9 @@ mod tests {
 
         // CR 121.1: Drawing 0 cards is a legal no-op. All players should
         // have empty hands.
-        for pid in 0..3 {
+        for (pid, player) in state.players.iter().enumerate().take(3) {
             assert_eq!(
-                state.players[pid].hand.len(),
+                player.hand.len(),
                 0,
                 "Player {} should have drawn 0 cards (no mana paid)",
                 pid
@@ -3684,9 +3684,9 @@ mod tests {
             .unwrap();
         }
 
-        for pid in 0..4 {
+        for (pid, player) in state.players.iter().enumerate().take(4) {
             assert_eq!(
-                state.players[pid].hand.len(),
+                player.hand.len(),
                 0,
                 "Player {} should have drawn 0 cards on refusal path",
                 pid
@@ -3741,9 +3741,9 @@ mod tests {
             .unwrap();
         }
 
-        for pid in 0..4 {
+        for (pid, player) in state.players.iter().enumerate().take(4) {
             assert_eq!(
-                state.players[pid].hand.len(),
+                player.hand.len(),
                 5,
                 "Player {} should have drawn 5 cards (total mana paid = 5)",
                 pid

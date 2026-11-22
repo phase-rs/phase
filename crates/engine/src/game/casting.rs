@@ -1355,14 +1355,16 @@ fn is_blocked_by_cant_cast_spells_for(
 /// CR 305.1 + CR 116.2a: Check if any `PlayLands` restriction prevents `player`
 /// from playing `land_obj` as a land. Filter-scoped sibling of
 /// `is_blocked_by_cant_cast_spells_for` — a land play is not a cast, so this
-/// reads the land's own `GameObject` directly through the generic per-object
-/// filter evaluator (`filter::matches_target_filter`) rather than a spell-record
-/// projection.
+/// reads the land's own `GameObject` through the generic per-object filter
+/// evaluator (`filter::matches_target_filter`) rather than a spell-record
+/// projection. CR 712.12: a spell//land modal card is read as the land back face
+/// it would be played as (`engine::land_face_played`), evaluated once per call.
 pub(crate) fn is_blocked_by_cant_play_lands(
     state: &GameState,
     player: PlayerId,
     land_obj: &GameObject,
 ) -> bool {
+    let played_face = std::cell::OnceCell::new();
     state.restrictions.iter().any(|restriction| {
         let GameRestriction::ProhibitActivity {
             source,
@@ -1385,11 +1387,8 @@ pub(crate) fn is_blocked_by_cant_play_lands(
 
         player_affected
             && match land_filter {
-                Some(filter) => super::filter::matches_target_filter(
-                    state,
-                    land_obj.id,
-                    filter,
-                    &super::filter::FilterContext {
+                Some(filter) => {
+                    let ctx = super::filter::FilterContext {
                         source_id: *source,
                         source_controller,
                         ability: None,
@@ -1404,8 +1403,20 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                         declared_slot_view: None,
                         granting_object: None,
                         pre_entry_battlefield: None,
-                    },
-                ),
+                    };
+                    // CR 712.12 + CR 101.2: a spell//land modal card is played
+                    // as its land back face, so the prohibition is read on that
+                    // face. One face-evaluation path for discovery and for the
+                    // submitted play; the real object is not mutated.
+                    match played_face.get_or_init(|| super::engine::land_face_played(land_obj)) {
+                        Some(face) => super::filter::matches_target_filter_on_object(
+                            state, face, filter, &ctx,
+                        ),
+                        None => {
+                            super::filter::matches_target_filter(state, land_obj.id, filter, &ctx)
+                        }
+                    }
+                }
                 None => true,
             }
     })
@@ -5409,12 +5420,14 @@ pub(crate) fn single_use_play_from_exile_group(
 /// iterate `state.exile` alone, which silently did nothing for a grant whose pool
 /// is any other zone: Locke, Treasure Hunter's batch is MILLED, so its siblings
 /// sit in graveyards and kept a permission this call had just declared spent.
-/// Membership in the set is what the permission is scoped by — `single_use_group`
-/// is a `TrackedSetId`, not a zone — so the tracked set is the authority here.
-/// The exile zone is still swept as well, because a grant whose set is absent
-/// from `tracked_object_sets` (a deserialized state, a legacy grant) would
-/// otherwise lose the sweep it has today; the union can only strip permissions
-/// carrying this exact group, so the extra leg cannot over-reach.
+/// The sweep reads the grant's own population: every object carrying this
+/// group's single-use `PlayFromExile`, wherever it is. That population includes
+/// the CR 730.3c components the grant found outside the set and outside exile,
+/// and it subsumes the former set and exile legs, a deserialized or legacy grant
+/// included. It can strip only permissions carrying this exact group. It does
+/// not re-derive the population through the gated tracked-set authority,
+/// because a cast-time read of a carried group id is never the chain rung
+/// (CR 601.2a + CR 611.2a).
 ///
 /// `exile_play_single_use_consumed` is the belt to this sweep's braces — the
 /// eligibility gate in `play_from_exile_permission_source_at_index` consults it
@@ -5423,26 +5436,25 @@ pub(crate) fn single_use_play_from_exile_group(
 /// including the AI's legal-action surface.
 pub(crate) fn consume_single_use_play_from_exile(state: &mut GameState, group: TrackedSetId) {
     state.exile_play_single_use_consumed.insert(group);
-    let scoped: Vec<ObjectId> = state
-        .tracked_object_sets
-        .get(&group)
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .chain(state.exile.iter().cloned())
+    let spent = |permission: &crate::types::ability::CastingPermission| {
+        matches!(
+            permission,
+            crate::types::ability::CastingPermission::PlayFromExile {
+                single_use_group,
+                single_use: true,
+                ..
+            } if *single_use_group == Some(group)
+        )
+    };
+    let carriers: Vec<ObjectId> = state
+        .objects
+        .iter()
+        .filter(|(_, obj)| obj.casting_permissions.iter().any(spent))
+        .map(|(id, _)| *id)
         .collect();
-    for obj_id in scoped {
+    for obj_id in carriers {
         if let Some(obj) = state.objects.get_mut(&obj_id) {
-            obj.casting_permissions.retain(|p| {
-                !matches!(
-                    p,
-                    crate::types::ability::CastingPermission::PlayFromExile {
-                        single_use_group,
-                        single_use: true,
-                        ..
-                    } if *single_use_group == Some(group)
-                )
-            });
+            obj.casting_permissions.retain(|p| !spent(p));
         }
     }
 }
@@ -6757,7 +6769,7 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -7897,11 +7909,25 @@ pub(super) fn exile_land_play_authorization(
     land_id: ObjectId,
 ) -> Option<ExileLandPlayAuthorization> {
     let obj = state.objects.get(&land_id)?;
-    if !obj
+    // CR 712.8a: outside the battlefield and stack the card has only its front
+    // face's characteristics, so a spell//land modal card in exile is not a land
+    // card by itself. CR 712.12 nonetheless lets a player who plays it do so as
+    // a land by choosing its land face, which the shared play-land election
+    // (`handle_play_land`'s `modal_land_face_election_available` branch) then
+    // elects. The permission is read unchanged below (play mode, grantee,
+    // `card_filter` on the stored front face, frequency), so a Cast-mode grant
+    // still refuses the land face and only a Play-mode grant that authorizes the
+    // card (Light Up the Stage's "play those cards") reaches it. Exile only:
+    // `graveyard_lands_playable_by_permission` discovers graveyard lands by
+    // their front face and the gate must not admit what discovery never offers.
+    let front_is_land = obj
         .card_types
         .core_types
-        .contains(&crate::types::card_type::CoreType::Land)
-    {
+        .contains(&crate::types::card_type::CoreType::Land);
+    let modal_land_face_open = obj.zone == Zone::Exile
+        && !obj.cast_face_committed
+        && super::engine::modal_land_face_election_available(obj);
+    if !front_is_land && !modal_land_face_open {
         return None;
     }
     if let Some((casting_permission_index, source, frequency)) =
@@ -23250,7 +23276,7 @@ fn target_dependent_reduction_makes_payable(
             {
                 continue;
             }
-            if payable(&priced) || with_defiler.as_ref().is_some_and(&defiler_payable) {
+            if payable(&priced) || with_defiler.as_ref().is_some_and(defiler_payable) {
                 return true;
             }
             checked.push((priced, with_defiler));

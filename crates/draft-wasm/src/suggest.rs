@@ -915,12 +915,12 @@ mod tests {
             &DeckAddableCards::standard_basics(),
         );
         assert!(
-            deck.main_deck.contains(&"On Color Dual".to_string()),
+            deck.main_deck.iter().any(|i| i == "On Color Dual"),
             "on-color (W/U) fixing land should be in the drafted main deck, got {:?}",
             deck.main_deck
         );
         assert!(
-            !deck.main_deck.contains(&"Off Color Dual".to_string()),
+            !deck.main_deck.iter().any(|i| i == "Off Color Dual"),
             "off-color (B/R) fixing land must not be admitted, got {:?}",
             deck.main_deck
         );
@@ -1143,8 +1143,8 @@ mod tests {
             &DeckAddableCards::standard_basics(),
         );
         assert_eq!(deck.commander, vec!["Legal Legend"]);
-        assert!(deck.main_deck.contains(&"Legal Legend".to_string()));
-        assert!(!deck.main_deck.contains(&"Ante Legend".to_string()));
+        assert!(deck.main_deck.iter().any(|i| i == "Legal Legend"));
+        assert!(!deck.main_deck.iter().any(|i| i == "Ante Legend"));
         assert_eq!(
             deck.main_deck.len() + deck.lands.values().map(|&n| n as usize).sum::<usize>(),
             60
@@ -1624,6 +1624,6 @@ mod tests {
             0,
             &DeckAddableCards::standard_basics(),
         );
-        assert!(!deck.main_deck.contains(&"On Color Dual".to_string()));
+        assert!(!deck.main_deck.iter().any(|i| i == "On Color Dual"));
     }
 }

@@ -2915,6 +2915,7 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                     ReplaceMeaningKind::KeywordOverride => {
                         // Build the def for this clause and attach to previous as sub_ability
                         let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+                        carry_linked_exile_return(&mut def, clause_ir);
                         let effective_cond = clause_ir
                             .condition
                             .as_ref()
@@ -2938,6 +2939,7 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                 // produced by the previous SearchLibrary's intrinsic continuation
                 // (SearchDestination).
                 let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+                carry_linked_exile_return(&mut def, clause_ir);
                 let effective_cond = clause_ir
                     .condition
                     .as_ref()
@@ -3201,6 +3203,7 @@ pub(crate) fn assemble_effect_chain_with_provenance(
         // def, so `parser::oracle::resolve_unlowered_guards` can settle it on the
         // assembled tree — the only place the body's final parent is visible.
         def.unlowered_guard = clause_ir.parsed.unlowered_guard.clone();
+        carry_linked_exile_return(&mut def, clause_ir);
         // CR 611.2e: carry the onset the clause parser stamped from the verb form, so the
         // resolution's entry-observation boundary knows whether this instruction applies
         // with an entry of the same resolution.
@@ -5347,6 +5350,13 @@ fn instead_replaces_optional_payment_continuation(root: &AbilityDefinition) -> b
                 .as_ref()
                 .is_some_and(AbilityCondition::is_optional_effect_performed)
         })
+}
+
+/// CR 607.2a: every site that builds a clause's own definition carries its "the exiled
+/// card(s)" mark, so `parser::oracle::bind_linked_exile_returns` decides the return's
+/// binding wherever the definition finally lands.
+fn carry_linked_exile_return(def: &mut AbilityDefinition, clause_ir: &ClauseIr) {
+    def.linked_exile_return = clause_ir.parsed.linked_exile_return;
 }
 
 #[cfg(test)]

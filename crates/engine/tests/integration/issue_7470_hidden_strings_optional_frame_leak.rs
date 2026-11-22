@@ -290,7 +290,7 @@ fn discard_shaped_prompt_sequence(with_cipher: bool) -> Vec<String> {
 fn a_discard_pause_also_keeps_the_encode_offer_last() {
     let without = discard_shaped_prompt_sequence(false);
     assert!(
-        without.contains(&"DiscardChoice".to_string()),
+        without.iter().any(|i| i == "DiscardChoice"),
         "control: without Cipher the discard is asked — {without:?}"
     );
     let with = discard_shaped_prompt_sequence(true);
@@ -459,12 +459,12 @@ fn the_encode_offer_survives_a_paused_post_replacement_draw_pair() {
     }
 
     assert!(
-        seen.contains(&"OpponentMayChoice".to_string()),
+        seen.iter().any(|i: &String| i == "OpponentMayChoice"),
         "the draw replacement must actually pause this resolution — otherwise this \
          test does not stand on the stack shape it claims; prompts={seen:?}"
     );
     assert!(
-        seen.contains(&"CipherEncodeChoice".to_string()),
+        seen.iter().any(|i: &String| i == "CipherEncodeChoice"),
         "the encode offer must survive the paused draw pair and still be asked; \
          prompts={seen:?}"
     );

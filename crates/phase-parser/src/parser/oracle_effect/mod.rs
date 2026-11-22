@@ -106,14 +106,14 @@ use super::oracle_quantity::{
     parse_for_each_object_filter_clause_with_context,
 };
 use super::oracle_target::{
-    history_clause_subject, parse_anaphoric_target_ref, parse_block_history_clause,
-    parse_definite_anaphor, parse_definite_parent_reference, parse_event_context_ref,
-    parse_fight_target, parse_parent_target_controller_population, parse_target,
-    parse_target_with_ctx, parse_target_with_disjunctive_restriction, parse_target_with_syntax,
-    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
-    population_drops_block_history_clause, resolve_singular_exiled_card_target,
-    strip_block_history_clauses, unique_slot_for_anaphor, AnaphorNoun, AnaphorZoneClass,
-    DefiniteAnaphor, TargetSyntax,
+    exiled_caused_tracked_set, history_clause_subject, parse_anaphoric_target_ref,
+    parse_block_history_clause, parse_definite_anaphor, parse_definite_parent_reference,
+    parse_event_context_ref, parse_exiled_card_anaphor, parse_fight_target,
+    parse_parent_target_controller_population, parse_target, parse_target_with_ctx,
+    parse_target_with_disjunctive_restriction, parse_target_with_syntax, parse_type_phrase_folding,
+    parse_type_phrase_folding_with_ctx, population_drops_block_history_clause,
+    resolve_singular_exiled_card_target, strip_block_history_clauses, unique_slot_for_anaphor,
+    AnaphorNoun, AnaphorZoneClass, DefiniteAnaphor, TargetSyntax,
 };
 use super::oracle_util::{
     contains_possessive, first_sentence, has_unconsumed_conditional, parse_count_expr,
@@ -206,8 +206,8 @@ use self::subject::{
 };
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::{
-    bind_controller_phrase, BodyScope, ClauseChooser, PendingTrackedSet, ResolvedChainRoot,
-    TrackedSetProducer,
+    bind_controller_phrase, BodyScope, ChainPriorPublishers, ClauseChooser, PendingTrackedSet,
+    ResolvedChainRoot, TrackedSetProducer,
 };
 pub(crate) use crate::parser::oracle_ir::context::{
     BareCardAggregateBinding, ChosenColorQualifierScope, DeclaredSlotEntry, DeclaredSlotRegistry,
@@ -1598,6 +1598,8 @@ fn classify_population_walk_step(
         optional,
         unless_pay,
         unlowered_guard,
+        // CR 607.2a: decided on the finished tree; names no population here.
+        linked_exile_return: _,
         optional_targeting: _,
         entry_onset: _,
         history,
@@ -3250,6 +3252,7 @@ fn try_parse_whenever_this_turn_from(
         head_text: Some(String::new()),
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::WheneverEvent {
                 trigger: Box::new(trigger_def),
@@ -3390,6 +3393,7 @@ fn build_reflexive_coin_flip_trigger(is_win: bool, inner: AbilityDefinition) -> 
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
@@ -3439,6 +3443,7 @@ fn build_when_next_delayed_trigger(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
@@ -3749,6 +3754,7 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
         head_text: Some(tp.original[..tp.original.len() - effect_text.len()].to_string()),
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
@@ -3874,6 +3880,7 @@ fn try_parse_when_next_generic_event(tp: TextPair) -> Option<ParsedEffectClause>
         head_text: Some(String::new()),
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
@@ -3993,6 +4000,7 @@ fn try_parse_reflexive_this_way_trigger(tp: TextPair) -> Option<ParsedEffectClau
         head_text: Some(String::new()),
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::CreateDelayedTrigger {
             condition: DelayedTriggerCondition::WhenNextEvent {
                 trigger: Box::new(trigger_def),
@@ -4173,6 +4181,7 @@ fn try_parse_at_next_phase_delayed_trigger(
         head_text: Some(String::new()),
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::CreateDelayedTrigger {
             condition,
             effect: Box::new(inner),
@@ -5084,6 +5093,7 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::PreventDamage {
             amount: PreventionAmount::All,
             amount_dynamic: None,
@@ -6106,6 +6116,7 @@ fn try_parse_inline_delayed_trigger(
         head_text: Some(String::new()),
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::CreateDelayedTrigger {
             condition,
             effect: Box::new(inner),
@@ -6448,6 +6459,7 @@ fn try_parse_damage_prevention_disabled(tp: TextPair) -> Option<ParsedEffectClau
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::AddRestriction { restriction },
         duration: None,
         sub_ability: None,
@@ -6521,6 +6533,7 @@ fn try_parse_cant_enter_battlefield_from_restriction(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::CantEnterBattlefieldFrom {
                 source: ObjectId(0), // Filled in at resolution time.
@@ -6589,6 +6602,7 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
@@ -6656,6 +6670,7 @@ fn try_parse_temporary_spell_cost_modification(tp: TextPair<'_>) -> Option<Parse
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
@@ -6708,6 +6723,7 @@ fn try_parse_temporary_attack_only_neighbor(tp: TextPair<'_>) -> Option<ParsedEf
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
@@ -6779,6 +6795,7 @@ fn try_parse_temporary_cant_become_tapped(tp: TextPair<'_>) -> Option<ParsedEffe
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(TargetFilter::ParentTarget)
@@ -7006,6 +7023,7 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
         head_text: Some(tp.original[..tp.original.len() - tail.len()].to_string()),
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
@@ -7109,6 +7127,7 @@ fn try_parse_passive_cant_be_played_land_effect(tp: TextPair<'_>) -> Option<Pars
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
@@ -7199,6 +7218,7 @@ fn try_parse_passive_cant_be_cast_effect(tp: TextPair<'_>) -> Option<ParsedEffec
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
@@ -7324,6 +7344,7 @@ fn try_parse_cant_play_from_zone(tp: TextPair<'_>) -> Option<ParsedEffectClause>
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
@@ -7404,6 +7425,7 @@ fn try_parse_cant_activate_non_mana_abilities_effect(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
@@ -7451,6 +7473,7 @@ fn try_parse_during_that_turn_powerup_prohibition(tp: TextPair<'_>) -> Option<Pa
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
@@ -7525,6 +7548,7 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::AddRestriction {
                 restriction: GameRestriction::ProhibitActivity {
                     source: ObjectId(0),
@@ -7614,6 +7638,7 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::AddRestriction {
             restriction: GameRestriction::ProhibitActivity {
                 source: ObjectId(0),
@@ -7698,6 +7723,8 @@ fn try_parse_you_cant_attack_targeted_player_prohibition(
         optional_targeting: false,
         // A prohibition clause, not an ownership-candidate guard.
         unlowered_guard: None,
+        // A prohibition clause, not a linked "return the exiled card(s)".
+        linked_exile_return: None,
         // A prohibition clause, not a continuous "is/has" effect.
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -7943,6 +7970,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect,
         duration: None,
         sub_ability: Some(Box::new(
@@ -8070,6 +8098,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::Animate {
             power: Some(PtValue::Fixed(0)),
             toughness: Some(PtValue::Fixed(0)),
@@ -9789,6 +9818,9 @@ fn carry_nested_clause_history(
 ///     modifier to be dropped without a word.
 ///   * `history` — CARRIED beside the definition. The caller prepends its typed
 ///     nesting step and transfers every record to the enclosing clause.
+///   * `linked_exile_return` (CR 607.2a) — CARRIED onto the identically-named field, so
+///     `oracle::bind_linked_exile_returns` decides the return's binding wherever the branch
+///     definition lands.
 ///   * `head_text` — DROPPED: parser bookkeeping for the block-history guard, which
 ///     has already run on the clause; it lowers to nothing.
 ///   * `unlowered_guard` — DELIBERATELY DROPPED. This is the SECOND fail-open path for a
@@ -9819,6 +9851,8 @@ fn ability_definition_from_clause(
         // CR 608.2c + CR 614.1a: dropped on purpose — see the doc comment above. Bound as `_`
         // rather than omitted via `..` so a new field cannot hide behind the rest pattern.
         unlowered_guard: _,
+        // CR 607.2a: carried — the finished-tree pass decides this return's binding.
+        linked_exile_return,
         // Parser bookkeeping the block-history guard has already read; nothing to lower.
         head_text: _,
         history,
@@ -9836,6 +9870,7 @@ fn ability_definition_from_clause(
     def.distribute = distribute;
     def.unless_pay = unless_pay;
     def.entry_onset = entry_onset;
+    def.linked_exile_return = linked_exile_return;
     (def, history)
 }
 
@@ -10247,6 +10282,7 @@ fn try_parse_for_each_counter_kind_choice(tp: TextPair<'_>) -> Option<ParsedEffe
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches: vec![fixed_branch, dynamic_branch],
@@ -10294,6 +10330,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::ChooseFromZone {
             count: categories.len() as u32,
             zone: Zone::Library,
@@ -10406,6 +10443,7 @@ fn try_parse_for_each_category_exile(tp: TextPair<'_>) -> Option<ParsedEffectCla
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::ForEachCategory {
             category,
             chooser: crate::types::ability::Chooser::Controller,
@@ -10495,6 +10533,7 @@ fn try_parse_for_each_category_put_counter(tp: TextPair<'_>) -> Option<ParsedEff
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::ForEachCategory {
             category,
             chooser: crate::types::ability::Chooser::Controller,
@@ -12603,6 +12642,7 @@ fn try_parse_player_draws_and_gains_control(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::Draw {
             count,
             target: recipient.clone(),
@@ -16668,6 +16708,7 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlockedByAll {
                 blockers: blockers.clone(),
@@ -16773,6 +16814,7 @@ impl ParsedRetainedTypeClause {
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::continuous()
                     .affected(TargetFilter::SelfRef)
@@ -21729,6 +21771,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect,
             duration,
             sub_ability: None,
@@ -21781,6 +21824,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
+                linked_exile_return: None,
                 effect,
                 duration,
                 sub_ability: None,
@@ -22058,6 +22102,7 @@ fn parsed_for_each_quantity_effect(
                 head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
+                linked_exile_return: None,
                 effect: Effect::TargetOnly { target },
                 duration: None,
                 sub_ability: Some(Box::new(sub_ability)),
@@ -22076,6 +22121,7 @@ fn parsed_for_each_quantity_effect(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect,
         duration,
         sub_ability: None,
@@ -22235,6 +22281,7 @@ fn try_parse_random_card_perpetual_gain_quoted_ability(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(nonland_card_in_hand_filter(controller))
@@ -23542,6 +23589,7 @@ fn try_parse_for_each_counter_kind_adjust_target(text: &str) -> Option<ParsedEff
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         // CR 115.1: `TargetOnly` surfaces the "target permanent" slot; the chosen
         // permanent is inherited by the sub-ability's `ParentTarget` references.
         effect: Effect::TargetOnly { target },
@@ -24669,6 +24717,7 @@ fn try_parse_verb_and_target<'a>(
                             enters_under,
                             enter_tapped: d.enter_tapped,
                             enter_with_counters: d.enter_with_counters,
+                            linked_exile_return: None,
                         },
                         rem,
                     ))
@@ -24708,6 +24757,7 @@ fn try_parse_verb_and_target<'a>(
                             enter_with_counters: d.enter_with_counters,
                             face_down: d.face_down,
                             attach_host,
+                            linked_exile_return: None,
                         },
                         rem,
                     ))
@@ -24725,6 +24775,7 @@ fn try_parse_verb_and_target<'a>(
                             enters_under: EntersUnderSpec::Default,
                             enter_tapped: false,
                             enter_with_counters: vec![],
+                            linked_exile_return: None,
                         },
                         rem,
                     ))
@@ -24736,6 +24787,7 @@ fn try_parse_verb_and_target<'a>(
                             destination: Zone::Hand,
                             up_to: false,
                             multi_target: return_multi_target,
+                            linked_exile_return: None,
                         },
                         rem,
                     ))
@@ -24745,6 +24797,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             selection,
                             multi_target: return_multi_target,
+                            linked_exile_return: None,
                         },
                         rem,
                     ))
@@ -24762,6 +24815,7 @@ fn try_parse_verb_and_target<'a>(
                             enters_under: EntersUnderSpec::Default,
                             enter_tapped: false,
                             enter_with_counters: vec![],
+                            linked_exile_return: None,
                         },
                         rem,
                     ))
@@ -24773,6 +24827,7 @@ fn try_parse_verb_and_target<'a>(
                             destination: d.zone,
                             up_to: false,
                             multi_target: return_multi_target,
+                            linked_exile_return: None,
                         },
                         rem,
                     ))
@@ -24783,6 +24838,7 @@ fn try_parse_verb_and_target<'a>(
                     target,
                     selection,
                     multi_target: return_multi_target,
+                    linked_exile_return: None,
                 },
                 rem,
             )),
@@ -25221,6 +25277,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
                     head_text: None,
                     optional_targeting: false,
                     unlowered_guard: None,
+                    linked_exile_return: None,
                     effect: Effect::PutCounter {
                         counter_type: counter_type.clone(),
                         count: count.clone(),
@@ -25542,6 +25599,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         head_text: Some(text[..text.len() - remainder.len()].to_lowercase()),
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: primary_effect,
         duration: None,
         sub_ability: Some(Box::new(sub_ability)),
@@ -25584,6 +25642,7 @@ fn try_parse_tap_goad_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: primary,
         duration: None,
         sub_ability: Some(Box::new(sub_ability)),
@@ -25955,6 +26014,7 @@ fn try_parse_compound_player_object_damage(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::DamageAll {
             amount: qty,
             target: object_filter,
@@ -26090,6 +26150,7 @@ fn try_parse_compound_object_player_damage(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::DamageAll {
             amount: qty,
             target: object_filter,
@@ -26231,6 +26292,7 @@ fn try_parse_radiance_color_fanout_damage_inner(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: primary_effect.clone(),
         duration: None,
         sub_ability: Some(Box::new(AbilityDefinition::new(
@@ -26621,6 +26683,7 @@ fn try_parse_multi_target_damage_chain_inner(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: primary_effect,
         duration: None,
         sub_ability: chain_tail,
@@ -26754,6 +26817,7 @@ fn try_parse_multi_target_counter_chain(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: primary_effect,
         duration: None,
         sub_ability: chain_tail,
@@ -27221,6 +27285,7 @@ fn try_split_copy_cast_compound(text: &str, ctx: &mut ParseContext) -> Option<Pa
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: copy_effect,
         duration: None,
         sub_ability: Some(Box::new(sub_ability)),
@@ -27400,6 +27465,7 @@ fn try_split_damage_compound_with_damage_context(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: primary_effect,
         duration: None,
         sub_ability: Some(Box::new(sub_ability)),
@@ -27664,6 +27730,7 @@ fn try_parse_compound_shuffle(text: &str, ctx: &mut ParseContext) -> Option<Pars
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: primary_effect,
         duration: None,
         sub_ability: Some(Box::new(sub_def)),
@@ -28303,6 +28370,7 @@ fn try_parse_compound_subject_each(
         head_text: Some(owner_text),
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: *half_a.effect,
         duration: half_a.duration,
         sub_ability: half_a.sub_ability,
@@ -33843,6 +33911,7 @@ fn lower_subject_predicate_ast_body(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect,
             duration,
             sub_ability,
@@ -33864,6 +33933,7 @@ fn lower_subject_predicate_ast_body(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect,
             duration,
             sub_ability,
@@ -33884,6 +33954,7 @@ fn lower_subject_predicate_ast_body(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect,
             duration,
             sub_ability,
@@ -34284,6 +34355,7 @@ fn lower_subject_predicate_ast_body(
                         head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
+                        linked_exile_return: None,
                         effect: Effect::TargetOnly {
                             target: object_target,
                         },
@@ -34524,6 +34596,7 @@ fn lower_subject_predicate_ast_body(
                         head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
+                        linked_exile_return: None,
                         effect: Effect::TargetOnly {
                             target: player_target.clone(),
                         },
@@ -34553,6 +34626,7 @@ fn lower_subject_predicate_ast_body(
                         head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
+                        linked_exile_return: None,
                         effect: Effect::TargetOnly {
                             target: subject_filter,
                         },
@@ -34576,6 +34650,7 @@ fn lower_subject_predicate_ast_body(
                         head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
+                        linked_exile_return: None,
                         effect: Effect::ExploreAll {
                             filter: subject_filter,
                         },
@@ -36355,6 +36430,7 @@ fn wrap_target_subject_damage(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::TargetOnly {
             target: subject_target.clone(),
         },
@@ -39733,7 +39809,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // the same treatment as the singular anaphor. The sibling "cards exiled
         // this way" form (Chandra, Heart of Fire; Dream Harvest) refers to the
         // batch this very resolution produced and must keep `ParentTarget`.
-        // Both still defer to `chain_has_prior_exile_producer`, so a
+        // Both still defer to `chain_prior_publishers`, so a
         // source-anchored tail in a chain that ALSO exiles keeps its
         // same-chain binding.
         //
@@ -39747,7 +39823,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         };
         let target = if anchors_to_source_exile_ledger {
             resolve_singular_exiled_card_target(
-                ctx.chain_has_prior_exile_producer,
+                ctx.chain_prior_publishers,
                 TargetFilter::ParentTarget,
             )
         } else {
@@ -39883,7 +39959,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     if scan_contains_phrase(rest, "from among them")
         || scan_contains_phrase(rest, "from among those cards")
     {
-        if !ctx.chain_has_prior_exile_producer {
+        if !ctx.chain_prior_publishers.includes_exile() {
             if let Some(controller) = ctx
                 .chain_prior_hand_reveal_target
                 .as_ref()
@@ -39973,7 +40049,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         let driver = if mode == CardPlayMode::Cast
             && without_paying
             && ctx.chain_prior_self_library_peek
-            && !ctx.chain_has_prior_exile_producer
+            && !ctx.chain_prior_publishers.includes_exile()
         {
             // CR 608.2c: `DuringResolution` casts a SINGLE card, so this arm may
             // be selected only for an exact single-card cap — never for
@@ -43140,7 +43216,7 @@ fn is_exile_effect(effect: &Effect) -> bool {
 
 /// CR 406.6 + CR 607.2a: Exhaustive predicate over every exile-producer
 /// effect shape recognized by the parser — used to gate
-/// `ParseContext::chain_has_prior_exile_producer` so a singular "the exiled
+/// `ParseContext::chain_prior_publishers` so a singular "the exiled
 /// card" anaphor in a LATER clause of the SAME chain keeps binding to that
 /// same-chain exile (`TrackedSet{0}` / `ParentTarget`), while an anaphor with
 /// NO prior same-chain exile producer binds durably to
@@ -43219,7 +43295,7 @@ fn continuation_is_exile_producer(continuation: Option<&ContinuationAst>) -> boo
 /// `Continue`, because a `ContinuationAst::ExileLookedAtCardsFaceDown` marker on this
 /// SAME clause later rewrites the PRECEDING `Dig` into the exile-producing form
 /// and discards this raw `ChangeZone` during the LATER lowering pass.
-/// `chain_has_prior_exile_producer` is seeded during the earlier per-chunk PARSE
+/// `chain_prior_publishers` is seeded during the earlier per-chunk PARSE
 /// pass, so skipping `Continue` clauses here would discard this clause's
 /// still-genuine exile evidence and wrongly flip Discover the Impossible to
 /// `ExiledBySource`. That is the load-bearing property of this predicate, and it
@@ -43239,6 +43315,20 @@ fn clause_ir_is_exile_producer(clause: &ClauseIr) -> bool {
     chain_clause_is_exile_producer(&clause.parsed.effect)
         || continuation_is_exile_producer(clause.disposition.followup())
         || continuation_is_exile_producer(clause.disposition.intrinsic())
+}
+
+/// CR 608.2c + CR 607.2a: classifies one earlier clause of the chain for
+/// [`ChainPriorPublishers`]. Every prior clause is a potential tracked-set
+/// publisher (runtime publication is generic over the affected objects of any
+/// effect), and it is an exile publisher iff [`clause_ir_is_exile_producer`]
+/// holds. Like that scan, `ClauseDisposition::Continue` clauses are NOT skipped
+/// (the Hideaway reason documented on `clause_ir_is_exile_producer`).
+fn classify_prior_clause(clause: &ClauseIr) -> ChainPriorPublishers {
+    if clause_ir_is_exile_producer(clause) {
+        ChainPriorPublishers::IncludesExile
+    } else {
+        ChainPriorPublishers::NonExileOnly
+    }
 }
 
 /// CR 701.20e + CR 608.2c: A bare private peek Dig ("look at the top N cards"
@@ -44534,13 +44624,7 @@ fn fold_cast_copy_of_card_defs(defs: &mut Vec<AbilityDefinition>) {
 /// every leaf, mirroring its bare sibling.
 fn rewrite_filter_parent_to_exiled_tracked_set(filter: &mut TargetFilter) {
     match filter {
-        TargetFilter::ParentTarget => {
-            *filter = TargetFilter::TrackedSetFiltered {
-                id: TrackedSetId(0),
-                filter: Box::new(TargetFilter::Any),
-                caused_by: Some(ThisWayCause::Exiled),
-            }
-        }
+        TargetFilter::ParentTarget => *filter = exiled_caused_tracked_set(),
         TargetFilter::Not { filter } => rewrite_filter_parent_to_exiled_tracked_set(filter),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             for filter in filters {
@@ -49964,11 +50048,11 @@ fn parse_effect_chain_ir_with_damage_context(
     already_chosen: u8,
     damage_context: Option<DamageTargetContext>,
 ) -> EffectChainIr {
-    let enclosing_chain_has_prior_exile_producer = ctx.chain_has_prior_exile_producer;
+    let enclosing_chain_prior_publishers = ctx.chain_prior_publishers;
     let mut ir = parse_effect_chain_ir_body(text, kind, ctx, already_chosen, damage_context);
     // Nested delayed, reflexive, and continuation bodies may inherit an outer
     // chain's tracked exile binding. Keep that context scoped to this call.
-    ctx.chain_has_prior_exile_producer = enclosing_chain_has_prior_exile_producer;
+    ctx.chain_prior_publishers = enclosing_chain_prior_publishers;
     per_opponent_choice::enforce_per_opponent_choice_tail(&mut ir);
     ir
 }
@@ -50001,7 +50085,7 @@ fn parse_effect_chain_ir_body(
     already_chosen_players: u8,
     enclosing_damage_context: Option<DamageTargetContext>,
 ) -> EffectChainIr {
-    let enclosing_chain_has_prior_exile_producer = ctx.chain_has_prior_exile_producer;
+    let enclosing_chain_prior_publishers = ctx.chain_prior_publishers;
     // CR 608.2c: the enclosing chain's player declaration, taken on entry so only
     // the one nested call that set it can read it.
     let enclosing_declared_player = ctx.enclosing_declared_player.take();
@@ -53126,13 +53210,18 @@ fn parse_effect_chain_ir_body(
             TargetFilter::DeclaredPlayer { group } => Some(ControllerRef::DeclaredPlayer { group }),
             _ => None,
         });
-        let chain_has_prior_exile_producer = enclosing_chain_has_prior_exile_producer
-            || builder.clauses().iter().any(clause_ir_is_exile_producer);
+        // CR 608.2c + CR 607.2a: every earlier clause of this chain (joined with
+        // the enclosing chain's state) classified as a publisher, exile or not.
+        let chain_prior_publishers = builder
+            .clauses()
+            .iter()
+            .map(classify_prior_clause)
+            .fold(enclosing_chain_prior_publishers, ChainPriorPublishers::join);
         // Recursive chain parses below receive `ctx` rather than this freshly
         // built per-chunk context. Publish the current chain-local binding for
         // those nested delayed/reflexive/continuation parses; the public wrapper
         // restores the caller's value on every return path.
-        ctx.chain_has_prior_exile_producer = chain_has_prior_exile_producer;
+        ctx.chain_prior_publishers = chain_prior_publishers;
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             // CR 608.2k: precedence for a bare object anaphor, nearest antecedent
@@ -53277,14 +53366,18 @@ fn parse_effect_chain_ir_body(
             // card discarded for the cost (Hisoka, Minamo Sensei).
             current_ability_cost_components: ctx.current_ability_cost_components.clone(),
             parent_target_available,
-            // CR 406.6 + CR 607.2a: whether an EARLIER clause in this same
-            // chain already produces an exile, so a later singular "the
+            // CR 406.6 + CR 607.2a: what the EARLIER clauses of this same
+            // chain publish. Over an exile producer a later singular "the
             // exiled card" anaphor keeps its same-chain binding instead of
             // falling back to the durable `ExiledBySource` cross-resolution
-            // binding. Unlike `any_prior_publishes`, this scan deliberately does
-            // NOT skip absorbed (`ClauseDisposition::Continue`) clauses — see
+            // binding; over non-exile publishers only, a return binds the
+            // cards the linked exile put into exile (`linked_exile_return_binding`:
+            // `ExiledBySource` printed on the source, the `Exiled`-caused chain
+            // members when an effect creates it). Unlike
+            // `any_prior_publishes`, this scan deliberately does NOT skip
+            // absorbed (`ClauseDisposition::Continue`) clauses — see
             // `clause_ir_is_exile_producer` for why (Hideaway).
-            chain_has_prior_exile_producer,
+            chain_prior_publishers,
             chain_prior_self_library_peek: builder
                 .clauses()
                 .iter()
@@ -53986,6 +54079,7 @@ fn parse_effect_chain_ir_body(
                         head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
+                        linked_exile_return: None,
                         effect: (*animate_def.effect).clone(),
                         duration: animate_def.duration.clone(),
                         sub_ability: animate_def.sub_ability.clone(),
@@ -57037,9 +57131,11 @@ fn try_parse_put_zone_change_parts(
             // excluded exactly as the cast-path caller does.
             let mut target = if !is_tracked_anaphor
                 && ctx.current_ability_exile_cost_zone.is_none()
-                && target_text.trim().eq_ignore_ascii_case("the exiled card")
-            {
-                resolve_singular_exiled_card_target(ctx.chain_has_prior_exile_producer, target)
+                && matches!(
+                    parse_exiled_card_anaphor(&target_text.trim().to_ascii_lowercase()),
+                    Ok((_, AnaphorNumber::Singular))
+                ) {
+                resolve_singular_exiled_card_target(ctx.chain_prior_publishers, target)
             } else {
                 target
             };

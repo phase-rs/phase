@@ -52,14 +52,15 @@ use std::sync::Arc;
 
 use crate::game::game_object::{DisplayIdentity, GameObject, ObjectIncarnationRefExt};
 use crate::game::printed_cards::intrinsic_copiable_values;
+use crate::game::targeting;
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
     ContinuousModification, CopiableValues, Duration, Effect, LibraryPosition, LibraryShuffleMode,
-    ResolvedAbility, TargetFilter,
+    ResolvedAbility, TargetFilter, ThisWayCause,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::proposed_event::AppliedReplacementKey;
 use crate::types::zones::Zone;
 
@@ -492,11 +493,6 @@ pub fn split_merged_permanent_on_leave(
     // (it lands in `default_dest == dest` via `move_to_zone`).
     let card_route = state.merged_card_component_route;
 
-    // CR 730.3 + CR 400.7: before the surviving object changes zone, drop the
-    // merge's layer-1 copy effect and flush layers so it leaves as its own card.
-    remove_merge_layer_effect(state, merged_id);
-    crate::game::layers::flush_layers(state);
-
     for component_id in components {
         // The surviving object itself rides the normal `move_to_zone` flow; only
         // the absorbed (non-survivor) components need explicit routing here.
@@ -520,14 +516,13 @@ pub fn split_merged_permanent_on_leave(
             Some(route) => route.default_dest,
             None => dest,
         };
-        put_component_into_zone(state, component_id, component_dest, events);
-        // CR 730.3c: record which surviving object this component split from, so an
-        // effect that later finds "the object the merged permanent became" (a
-        // flicker/blink return) brings this component back too, not just the
-        // survivor. See `expand_returned_merge_components`.
-        if let Some(obj) = state.objects.get_mut(&component_id) {
-            obj.split_from_merge_survivor = Some(survivor_successor);
-        }
+        put_component_into_zone(
+            state,
+            component_id,
+            component_dest,
+            Some(survivor_successor),
+            events,
+        );
     }
 
     // The surviving object's merge identity is cleared by its own
@@ -555,9 +550,11 @@ pub fn split_merged_permanent_on_leave(
 /// noncommander components remain routed to their appropriate zones.
 ///
 /// CR 701.24a + CR 730.3: every component inherits the approved library
-/// position. For a terminal-shuffle operation the position is transient and
-/// the chained `Shuffle` randomizes the library once. The owner's CR 730.3a
-/// arrangement of the components is not modeled here.
+/// position together with the move's shuffle mode. Under a terminal shuffle
+/// the position is transient and the chained `Shuffle` randomizes the library
+/// once. Under an ordinary placement the components arrive at that position
+/// as one group, which their owner arranges (CR 730.3a + CR 401.4) through
+/// the staged batch.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn move_merged_permanent_on_leave(
@@ -595,39 +592,45 @@ pub(crate) fn move_merged_permanent_for_parent(
     parent: Option<crate::types::game_state::PendingComponentDeliveryParent>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
+    let requests = plan_merged_component_moves(
+        state,
+        merged_id,
+        dest,
+        library_placement,
+        library_shuffle,
+        applied,
+        performed_by,
+    );
+    if requests.is_empty() {
+        return BatchMoveResult::Done;
+    }
+    zone_pipeline::move_component_batch_then(
+        state,
+        requests,
+        ObjectIncarnationRef::from_object(&state.objects[&merged_id]),
+        parent,
+        events,
+    )
+}
+
+/// CR 730.3d: plan the physical moves without changing the live permanent.
+pub(crate) fn plan_merged_component_moves(
+    state: &GameState,
+    merged_id: ObjectId,
+    dest: Zone,
+    library_placement: Option<&LibraryPosition>,
+    library_shuffle: LibraryShuffleMode,
+    applied: &HashSet<AppliedReplacementKey>,
+    performed_by: Option<crate::types::player::PlayerId>,
+) -> Vec<ZoneMoveRequest> {
     let Some(survivor) = state.objects.get(&merged_id) else {
-        return BatchMoveResult::Done;
+        return Vec::new();
     };
-    if survivor.merged_components.is_empty() {
-        return BatchMoveResult::Done;
-    }
-    let components = survivor.merged_components.clone();
-    let survivor_successor = leave_successor(survivor);
-
-    // CR 730.3 + CR 400.7: restore each physical card's own characteristics
-    // before proposing its destination. Clearing this list also prevents the
-    // survivor's ordinary delivery at the tail of this batch from recursively
-    // entering the raw split seam in `zones::move_to_zone`.
-    remove_merge_layer_effect(state, merged_id);
-    crate::game::layers::flush_layers(state);
-    if let Some(survivor) = state.objects.get_mut(&merged_id) {
-        survivor.merged_components.clear();
-        survivor.merge_kind = None;
-    }
-
-    let requests = components
-        .into_iter()
+    survivor
+        .merged_components
+        .iter()
+        .copied()
         .map(|component_id| {
-            if component_id != merged_id {
-                // This live marker distinguishes the absorbed component's
-                // pipeline delivery from an ordinary Battlefield departure.
-                // `put_component_into_zone` restores it after CR 400.7 cleanup.
-                state
-                    .objects
-                    .get_mut(&component_id)
-                    .expect("merged component exists")
-                    .split_from_merge_survivor = Some(survivor_successor);
-            }
             // CR 730.3: every component inherits the final approved destination
             // and position; its own replacement consult may redirect it again.
             let placement = match (dest, library_placement) {
@@ -646,9 +649,28 @@ pub(crate) fn move_merged_permanent_for_parent(
                     ownership_actor: None,
                 })
         })
-        .collect();
+        .collect()
+}
 
-    zone_pipeline::move_component_batch_then(state, requests, None, parent, events)
+/// Non-arranged component delivery keeps the existing serial split path.
+pub(super) fn detach_merge_for_serial_delivery(state: &mut GameState, merged_id: ObjectId) {
+    let survivor = &state.objects[&merged_id];
+    let successor = leave_successor(survivor);
+    remove_merge_layer_effect(state, merged_id);
+    crate::game::layers::flush_layers(state);
+    let survivor = state
+        .objects
+        .get_mut(&merged_id)
+        .expect("merged survivor exists");
+    let components = std::mem::take(&mut survivor.merged_components);
+    survivor.merge_kind = None;
+    for component in components.into_iter().filter(|id| *id != merged_id) {
+        state
+            .objects
+            .get_mut(&component)
+            .expect("merged component exists")
+            .split_from_merge_survivor = Some(successor);
+    }
 }
 
 /// CR 730.2d + CR 400.7 + CR 111.7: restore the survivor's intrinsic token-ness
@@ -672,7 +694,8 @@ pub(crate) fn restore_pre_merge_tokenness_for_leave(state: &mut GameState, merge
 /// split into (CR 730.3) must receive the same action too — otherwise a flicker
 /// returns only the survivor and strands the other components in exile.
 ///
-/// Given the objects a *continuity* reference resolved to, append each survivor's
+/// Given the objects a *continuity* reference (`ParentTarget`,
+/// `TriggeringSource`, `ExiledBySource`) resolved to, append each survivor's
 /// co-departed sibling components that are still co-located in the same zone, in
 /// deterministic id order. The caller (the `ChangeZone` return loop, or
 /// `ChangeZoneAll`'s linked-exile return) then applies its move to the whole
@@ -685,6 +708,9 @@ pub(crate) fn restore_pre_merge_tokenness_for_leave(state: &mut GameState, merge
 /// resolved object is a former survivor with co-located components. A freshly
 /// chosen target (Riftsweeper choosing one exiled card; reanimating one specific
 /// card) carries no departure evidence for that object and must not over-return.
+/// A tracked-set filter expands per resolved referent from the set's recorded
+/// departures ([`expand_tracked_set_referents`]); co-location is not evidence
+/// for a tracked set (CR 730.3c).
 pub(crate) fn expand_returned_merge_components(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -719,12 +745,80 @@ pub(crate) fn expand_returned_merge_components(
         }
         return expanded;
     }
+    // CR 730.3c + CR 400.7: a tracked-set referent's components come from the
+    // set's recorded battlefield departures (D2), per resolved referent; never
+    // from co-location.
+    if matches!(
+        target_filter,
+        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+    ) {
+        return expand_tracked_set_referents(state, ability, resolved, target_filter);
+    }
     let mut expanded = resolved.clone();
     for &survivor_id in &resolved {
         if !referent_records_departure(state, ability, target_filter, survivor_id) {
             continue;
         }
         let components = co_split_components(state, survivor_id, &expanded);
+        expanded.extend(components);
+    }
+    expanded
+}
+
+/// CR 730.3c + CR 400.7 + CR 608.2c: the bound move path over a tracked set.
+/// Each resolved referent that is a member of the bound set, and whose
+/// battlefield departure the set recorded, expands to the objects split at that
+/// departure: a split object that is itself a member is found as a member; any
+/// other only through the reader's D7 gate and its member's producer action
+/// ([`tracked_set_finds_component`]). Expansion is per referent, never
+/// set-wide: a referent the set did not move (a chosen card) and a set that
+/// recorded no battlefield departure (a membership-only set) expand to nothing.
+/// The referent object need not still exist (CR 704.5d): the recorded
+/// departure, not the survivor, is the evidence.
+fn expand_tracked_set_referents(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    resolved: Vec<ObjectId>,
+    target_filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    let (set_id, caused_by) =
+        match targeting::resolve_tracked_set_sentinel(state, target_filter.clone()) {
+            TargetFilter::TrackedSet { id } => (id, None),
+            TargetFilter::TrackedSetFiltered { id, caused_by, .. } => (id, caused_by),
+            // The combat-damage source rung yields a source filter, not a set:
+            // no recorded departure to read (E3), no expansion.
+            _ => return resolved,
+        };
+    let Some(members) = state.tracked_object_sets.get(&set_id) else {
+        return resolved;
+    };
+    let mut expanded = resolved.clone();
+    for referent in resolved {
+        if !members.contains(&referent) {
+            continue;
+        }
+        let Some(successor) = member_departure_successor(state, set_id, referent) else {
+            continue;
+        };
+        let mut components: Vec<ObjectId> = state
+            .objects
+            .iter()
+            .filter(|(id, obj)| {
+                obj.split_from_merge_survivor == Some(successor) && !expanded.contains(id)
+            })
+            .map(|(id, _)| *id)
+            .filter(|id| {
+                members.contains(id)
+                    || tracked_set_finds_component(
+                        state,
+                        set_id,
+                        *id,
+                        Some(ability),
+                        caused_by.as_ref(),
+                    )
+            })
+            .collect();
+        components.sort_by_key(|id| id.0);
         expanded.extend(components);
     }
     expanded
@@ -809,8 +903,12 @@ fn is_terminal_shuffle_move(effect: &Effect) -> bool {
 ///   other object is not evidence for this one.
 /// * `TriggeringSource`: the trigger event is this referent's own departure
 ///   from the battlefield.
-/// * `TrackedSet`/`TrackedSetFiltered` and `ExiledBySource` are formed by an
-///   earlier move in the chain; those already record a departure.
+/// * `ExiledBySource` is formed by an earlier move in the chain and records a
+///   departure.
+///
+/// Tracked-set filters never reach this function:
+/// [`expand_tracked_set_referents`] answers them from the set's recorded
+/// departures.
 ///
 /// `SelfRef` is answered separately by [`recorded_departure_components`],
 /// which requires the trigger's own departure event.
@@ -846,9 +944,7 @@ fn referent_records_departure(
                         && pin.incarnation.checked_add(1) == Some(current.incarnation)
                 })
         }
-        TargetFilter::TrackedSet { .. }
-        | TargetFilter::TrackedSetFiltered { .. }
-        | TargetFilter::ExiledBySource => true,
+        TargetFilter::ExiledBySource => true,
         TargetFilter::TriggeringSource => matches!(
             state.current_trigger_event.as_ref(),
             Some(GameEvent::ZoneChanged {
@@ -907,7 +1003,18 @@ pub(crate) fn co_split_components(
 /// CR 400.7: the incarnation the survivor holds once its leave move lands; that
 /// move bumps it exactly once, so a later zone change no longer matches.
 fn leave_successor(survivor: &GameObject) -> ObjectIncarnationRef {
-    ObjectIncarnationRef::of(survivor.id, survivor.incarnation + 1)
+    departure_successor(survivor.id, survivor.incarnation)
+}
+
+/// CR 400.7 + CR 730.3: the incarnation a leave move lands on, which is also the
+/// split pin every component of the departed merged permanent carries. The move
+/// bumps the departing object's incarnation exactly once, so the successor of
+/// departure incarnation `k` is `k + 1`.
+pub(crate) fn departure_successor(
+    object_id: ObjectId,
+    departure_incarnation: u64,
+) -> ObjectIncarnationRef {
+    ObjectIncarnationRef::of(object_id, departure_incarnation + 1)
 }
 
 /// CR 400.7e + CR 730.3c: the component cards of the merged permanent whose
@@ -988,7 +1095,7 @@ fn departed_identity_components(
     if !recorded {
         return Vec::new();
     }
-    let successor = ObjectIncarnationRef::of(expected.object_id, expected.incarnation + 1);
+    let successor = departure_successor(expected.object_id, expected.incarnation);
     let mut components: Vec<ObjectId> = state
         .objects
         .iter()
@@ -997,6 +1104,474 @@ fn departed_identity_components(
         .collect();
     components.sort_by_key(|id| id.0);
     components
+}
+
+/// CR 730.3c + CR 400.7: the successor incarnation a tracked-set member's
+/// battlefield departure landed on, read from the producer's recorded origin.
+/// `Some` only for a member that departed the battlefield: a component can be
+/// found only through a merged permanent's battlefield departure.
+fn member_departure_successor(
+    state: &GameState,
+    set_id: TrackedSetId,
+    member: ObjectId,
+) -> Option<ObjectIncarnationRef> {
+    let origin = state
+        .tracked_set_member_origins
+        .get(&set_id)?
+        .get(&member)
+        .filter(|origin| origin.departed_from == Zone::Battlefield)?;
+    Some(departure_successor(member, origin.departure_incarnation))
+}
+
+/// CR 730.3c: every non-member object split from a member of `set_id` at that
+/// member's recorded battlefield departure, as `(component, member)` pairs
+/// sorted by component id. Provenance is NOT applied here (see
+/// [`finding_admitted`]); this is the structural relation alone.
+///
+/// Equality is on the full [`ObjectIncarnationRef`], so a component split at an
+/// earlier departure of the same member id is not found (CR 400.7: the later
+/// object is a new object). Zone-agnostic by design: a component that changed
+/// zones has a cleared pin, so it is a new object (CR 400.7). A membership-only
+/// set (no battlefield-departure origin) returns empty without scanning objects.
+pub(crate) fn tracked_set_split_components(
+    state: &GameState,
+    set_id: TrackedSetId,
+) -> Vec<(ObjectId, ObjectId)> {
+    let Some(members) = state.tracked_object_sets.get(&set_id) else {
+        return Vec::new();
+    };
+    let successors: Vec<(ObjectIncarnationRef, ObjectId)> = members
+        .iter()
+        .filter_map(|member| {
+            member_departure_successor(state, set_id, *member).map(|pin| (pin, *member))
+        })
+        .collect();
+    if successors.is_empty() {
+        return Vec::new();
+    }
+    let mut components: Vec<(ObjectId, ObjectId)> = state
+        .objects
+        .iter()
+        .filter(|(id, _)| !members.contains(id))
+        .filter_map(|(id, obj)| {
+            let pin = obj.split_from_merge_survivor?;
+            successors
+                .iter()
+                .find(|(successor, _)| *successor == pin)
+                .map(|(_, member)| (*id, *member))
+        })
+        .collect();
+    components.sort_by_key(|(component, _)| component.0);
+    components
+}
+
+/// Whether `effect` is a tracked-set publisher in the census sense, the effects the
+/// finding gate counts on a root's chain line (D7). The list is every `Effect` whose
+/// resolution can stamp a zone-transition cause on a member (CR 608.2c; the per-member
+/// stamp authority is `this_way_cause_for_resolved`, which defers to
+/// `this_way_cause_for_effect` / `this_way_cause_for_action` except for `Counter`'s exile
+/// rider, `SetTapState` and `GiveControl`), plus the dedicated-seam producers the census
+/// of tracked-set readers names. The census is the source of truth for the list; its
+/// `CopyToken` token names no `Effect` variant (`Effect::CopyTokenOf` is the nearest, and
+/// the corpus has no effect under the census name), so the 24 `Effect` variants remain.
+/// Not keyed on `EffectKind`, which is lossy (`RevealTop` collapses into `Reveal`,
+/// `SetTapState` into `Tap`/`Untap`).
+///
+/// An unlisted effect may still publish a set through the generic event seam
+/// (`publish_tracked_set_for_resolution`). It stamps no zone-transition cause, and
+/// `stamp_member_causes` writes nothing for a member without a cause. So a member that only
+/// an unlisted effect contributed carries no stamp, and `finding_admitted`'s veto rejects
+/// the set (`u7_an_unstamped_member_vetoes_the_finding`). A member it re-publishes keeps the
+/// stamp the listed publisher wrote, which still names the action that produced that
+/// member, so the finding the veto admits is unchanged. The match is exhaustive, so a new
+/// `Effect` variant must be classified here.
+fn is_census_publisher(effect: &Effect) -> bool {
+    match effect {
+        Effect::Destroy { .. }
+        | Effect::Counter { .. }
+        | Effect::Token { .. }
+        | Effect::SetTapState { .. }
+        | Effect::Sacrifice { .. }
+        | Effect::DiscardCard { .. }
+        | Effect::Mill { .. }
+        | Effect::DestroyAll { .. }
+        | Effect::ChangeZone { .. }
+        | Effect::ChangeZoneAll { .. }
+        | Effect::Dig { .. }
+        | Effect::Bounce { .. }
+        | Effect::BounceAll { .. }
+        | Effect::Discard { .. }
+        | Effect::SearchLibrary { .. }
+        | Effect::RevealTop { .. }
+        | Effect::ExileTop { .. }
+        | Effect::ChooseFromZone { .. }
+        | Effect::ChooseObjectsIntoTrackedSet { .. }
+        | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::ExileFromTopUntil { .. }
+        | Effect::RevealUntil { .. }
+        | Effect::PutAtLibraryPosition { .. }
+        | Effect::GiveControl { .. } => true,
+        Effect::StartYourEngines { .. }
+        | Effect::ChangeSpeed { .. }
+        | Effect::DealDamage { .. }
+        | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
+        | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachSourceDealsDamage { .. }
+        | Effect::Draw { .. }
+        | Effect::Pump { .. }
+        | Effect::PairWith { .. }
+        | Effect::Regenerate { .. }
+        | Effect::RemoveAllDamage { .. }
+        | Effect::CounterAll { .. }
+        | Effect::GainLife { .. }
+        | Effect::LoseLife { .. }
+        | Effect::RemoveCounter { .. }
+        | Effect::Scry { .. }
+        | Effect::PumpAll { .. }
+        | Effect::DamageAll { .. }
+        | Effect::DamageEachPlayer { .. }
+        | Effect::GainControl { .. }
+        | Effect::GainControlAll { .. }
+        | Effect::ControlNextTurn { .. }
+        | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
+        | Effect::Surveil { .. }
+        | Effect::Fight { .. }
+        | Effect::Explore
+        | Effect::ExploreAll { .. }
+        | Effect::Investigate
+        | Effect::Tribute { .. }
+        | Effect::TimeTravel
+        | Effect::BecomeMonarch { .. }
+        | Effect::NoOp
+        | Effect::Proliferate
+        | Effect::ProliferateTarget { .. }
+        | Effect::Populate
+        | Effect::Clash
+        | Effect::ExileTopCardContest { .. }
+        | Effect::Behold { .. }
+        | Effect::EndTheTurn
+        | Effect::EndCombatPhase
+        | Effect::Vote { .. }
+        | Effect::SeparateIntoPiles { .. }
+        | Effect::SwitchPT { .. }
+        | Effect::CopySpell { .. }
+        | Effect::EpicCopy { .. }
+        | Effect::CastCopyOfCard { .. }
+        | Effect::CopyTokenOf { .. }
+        | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::Myriad
+        | Effect::Encore
+        | Effect::CombineHost { .. }
+        | Effect::ChooseAugmentAndCombineWithHost { .. }
+        | Effect::Meld { .. }
+        | Effect::ExileHaunting { .. }
+        | Effect::HideawayConceal { .. }
+        | Effect::CopyTokenBlockingAttacker { .. }
+        | Effect::BecomeCopy { .. }
+        | Effect::ChoosePermanent { .. }
+        | Effect::GainActivatedAbilitiesOfTarget { .. }
+        | Effect::ChooseCard { .. }
+        | Effect::PutCounter { .. }
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
+        | Effect::PutCounterAll { .. }
+        | Effect::MultiplyCounter { .. }
+        | Effect::ChooseCounterAdjustment { .. }
+        | Effect::DoublePT { .. }
+        | Effect::DoublePTAll { .. }
+        | Effect::MoveCounters { .. }
+        | Effect::ReproduceEventCounters { .. }
+        | Effect::Animate { .. }
+        | Effect::ReturnAsAura { .. }
+        | Effect::RegisterBending { .. }
+        | Effect::GenericEffect { .. }
+        | Effect::Cleanup { .. }
+        | Effect::Mana { .. }
+        | Effect::Shuffle { .. }
+        | Effect::Transform { .. }
+        | Effect::FlipPermanent { .. }
+        | Effect::SearchOutsideGame { .. }
+        | Effect::OpenBoosterPack { .. }
+        | Effect::RevealHand { .. }
+        | Effect::RevealFromHand { .. }
+        | Effect::Reveal { .. }
+        | Effect::RevealChosenNumbers { .. }
+        | Effect::ExileFaceDownPile { .. }
+        | Effect::TargetOnly { .. }
+        | Effect::Choose { .. }
+        | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
+        | Effect::ChooseDamageSource { .. }
+        | Effect::Suspect { .. }
+        | Effect::Unsuspect { .. }
+        | Effect::Connive { .. }
+        | Effect::PhaseOut { .. }
+        | Effect::PhaseIn { .. }
+        | Effect::ForceBlock { .. }
+        | Effect::ForceAttack { .. }
+        | Effect::SolveCase
+        | Effect::BecomePrepared { .. }
+        | Effect::BecomeUnprepared { .. }
+        | Effect::BecomeSaddled { .. }
+        | Effect::SetClassLevel { .. }
+        | Effect::CreateDelayedTrigger { .. }
+        | Effect::AddTargetReplacement { .. }
+        | Effect::AddRestriction { .. }
+        | Effect::ReduceNextSpellCost { .. }
+        | Effect::GrantNextSpellAbility { .. }
+        | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
+        | Effect::CreateEmblem { .. }
+        | Effect::CreateBoon { .. }
+        | Effect::NoteNumber { .. }
+        | Effect::PayCost { .. }
+        | Effect::CastFromZone { .. }
+        | Effect::FreeCastFromZones { .. }
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+        | Effect::PreventDamage { .. }
+        | Effect::CreateDamageReplacement { .. }
+        | Effect::CreateDrawReplacement { .. }
+        | Effect::CreatePlaneswalkReplacement { .. }
+        | Effect::LoseTheGame { .. }
+        | Effect::WinTheGame { .. }
+        | Effect::RollDie { .. }
+        | Effect::FlipCoins { .. }
+        | Effect::RingTemptsYou
+        | Effect::VentureIntoDungeon
+        | Effect::VentureInto { .. }
+        | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
+        | Effect::Planeswalk
+        | Effect::AbandonScheme
+        | Effect::ChaosEnsues
+        | Effect::ReverseTurnOrder
+        | Effect::RedistributeLifeTotals
+        | Effect::OpenAttractions { .. }
+        | Effect::RollToVisitAttractions
+        | Effect::AssembleContraptions { .. }
+        | Effect::AssembleContraptionsFromRollDifference
+        | Effect::CrankContraptions { .. }
+        | Effect::ReassembleContraption { .. }
+        | Effect::AssembleContraptionOnSprocket { .. }
+        | Effect::ReassembleContraptionOnSprocket { .. }
+        | Effect::PutSticker { .. }
+        | Effect::ApplySticker { .. }
+        | Effect::ProcessRadCounters
+        | Effect::GrantCastingPermission { .. }
+        | Effect::RememberCard { .. }
+        | Effect::NoteManaSpent
+        | Effect::ForEachCategory { .. }
+        | Effect::EachPlayerCopyChosen { .. }
+        | Effect::Exploit { .. }
+        | Effect::GainEnergy { .. }
+        | Effect::GivePlayerCounter { .. }
+        | Effect::LoseAllPlayerCounters { .. }
+        | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
+        | Effect::Heist { .. }
+        | Effect::HeistExile
+        | Effect::Cascade
+        | Effect::Ripple { .. }
+        | Effect::MiracleCast { .. }
+        | Effect::MadnessCast { .. }
+        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+        | Effect::PutOnTopOrBottom { .. }
+        | Effect::GiftDelivery { .. }
+        | Effect::Goad { .. }
+        | Effect::GoadAll { .. }
+        | Effect::Detain { .. }
+        | Effect::SetRoomDoorLock { .. }
+        | Effect::ExchangeControl { .. }
+        | Effect::ChangeTargets { .. }
+        | Effect::Manifest { .. }
+        | Effect::ManifestDread
+        | Effect::Cloak { .. }
+        | Effect::TurnFaceUp { .. }
+        | Effect::TurnFaceDown { .. }
+        | Effect::ExtraTurn { .. }
+        | Effect::GrantExtraLoyaltyActivations { .. }
+        | Effect::SkipNextTurn { .. }
+        | Effect::SkipNextStep { .. }
+        | Effect::AdditionalPhase { .. }
+        | Effect::ModifyAnnouncedX { .. }
+        | Effect::Double { .. }
+        | Effect::RuntimeHandled { .. }
+        | Effect::Incubate { .. }
+        | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
+        | Effect::Monstrosity { .. }
+        | Effect::HordePlayCard { .. }
+        | Effect::Specialize
+        | Effect::Renown { .. }
+        | Effect::Bolster { .. }
+        | Effect::Adapt { .. }
+        | Effect::Learn
+        | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
+        | Effect::Harness
+        | Effect::CollectEvidence { .. }
+        | Effect::Endure { .. }
+        | Effect::BlightEffect { .. }
+        | Effect::Seek { .. }
+        | Effect::SetLifeTotal { .. }
+        | Effect::ExchangeLifeWithStat { .. }
+        | Effect::ExchangeLifeTotals { .. }
+        | Effect::SetDayNight { .. }
+        | Effect::RemoveFromCombat { .. }
+        | Effect::BecomeBlocked { .. }
+        | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
+        | Effect::ApplyPerpetual { .. }
+        | Effect::Intensify { .. }
+        | Effect::DraftFromSpellbook { .. }
+        | Effect::ChooseOneOf { .. }
+        | Effect::Unimplemented { .. } => false,
+    }
+}
+
+/// CR 608.2c + CR 730.3c: whether a reader may find the components of `set_id`
+/// (the D7 gate). A merged permanent's components are found only by a reader
+/// that reads the set as the product of the action that moved the survivor.
+///
+/// - Provenance: the reader must be reading `set_id` through its own
+///   resolution's chain rung ([`targeting::chain_rung_root`]). A concrete id
+///   carried into the resolution (a delayed bound id, a cost-exile id) is
+///   allocated before any chain id of this resolution, so it never equals the
+///   chain id and is never admitted. A call with no reader (the validator,
+///   legal-action enumeration) is never admitted.
+/// - Cause-bound (`caused_by` set): admitted; CR 608.2c + CR 614.6 the producer
+///   action is then checked per member by the caller (D4).
+/// - Cause-free: the reader must follow exactly one census publisher on the
+///   root's chain line, that publisher's declared action must be a zone
+///   transition, and every member of the set must carry that action's stamp
+///   (the veto: a set holding an unstamped or differently-caused member was not
+///   produced solely by that action). For a modal root the line is walked from
+///   the root, so earlier chosen modes are on it too: a later-mode reader is
+///   admitted only when no earlier mode publishes and its effect occurs once on
+///   the line (the conservative direction).
+///
+/// No cost-exile branch: no marker persists that the resolution could recognize,
+/// so every carried concrete id is rejected (the safe direction).
+fn finding_admitted(
+    state: &GameState,
+    set_id: TrackedSetId,
+    reader: Option<&ResolvedAbility>,
+    caused_by: Option<&ThisWayCause>,
+) -> bool {
+    let Some(reader) = reader else {
+        return false;
+    };
+    let Some(root) = targeting::chain_rung_root(state, set_id, reader) else {
+        return false;
+    };
+    if caused_by.is_some() {
+        return true;
+    }
+    let line = || std::iter::successors(Some(root), |node| node.sub_ability.as_deref());
+    if line().filter(|node| node.effect == reader.effect).count() != 1 {
+        return false;
+    }
+    let mut publishers = line()
+        .take_while(|node| node.effect != reader.effect)
+        .filter(|node| is_census_publisher(&node.effect));
+    let (Some(publisher), None) = (publishers.next(), publishers.next()) else {
+        return false;
+    };
+    let Some(cause) = crate::game::effects::this_way_cause_for_effect(&publisher.effect)
+        .filter(|cause| cause.is_zone_transition())
+    else {
+        return false;
+    };
+    let (Some(members), Some(stamps)) = (
+        state.tracked_object_sets.get(&set_id),
+        state.tracked_set_member_causes.get(&set_id),
+    ) else {
+        return false;
+    };
+    members
+        .iter()
+        .all(|member| stamps.get(member) == Some(&cause))
+}
+
+/// CR 730.3c + CR 608.2c + CR 614.6: D4 — a component inherits its member's
+/// producer-action stamp. With no bound cause every component qualifies.
+fn member_cause_matches(
+    state: &GameState,
+    set_id: TrackedSetId,
+    member: ObjectId,
+    caused_by: Option<&ThisWayCause>,
+) -> bool {
+    caused_by.is_none_or(|bound| {
+        state
+            .tracked_set_member_causes
+            .get(&set_id)
+            .and_then(|stamps| stamps.get(&member))
+            == Some(bound)
+    })
+}
+
+/// CR 730.3c: membership form of "an effect that can find the new object a
+/// merged permanent becomes finds all of its components". Whether the
+/// non-member `object_id` is a component split from a member of `set_id` at that
+/// member's recorded battlefield departure, that the reader may find (the D7
+/// gate) and whose member's producer action matches `caused_by` (D4).
+///
+/// Cheap rejects first: an object with no split pin (every ordinary object) is
+/// rejected before any set work. Callers test direct membership first, so a
+/// member never reaches this.
+pub(crate) fn tracked_set_finds_component(
+    state: &GameState,
+    set_id: TrackedSetId,
+    object_id: ObjectId,
+    reader: Option<&ResolvedAbility>,
+    caused_by: Option<&ThisWayCause>,
+) -> bool {
+    let Some(pin) = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.split_from_merge_survivor)
+    else {
+        return false;
+    };
+    let member = pin.object_id;
+    state
+        .tracked_object_sets
+        .get(&set_id)
+        .is_some_and(|members| members.contains(&member))
+        && member_departure_successor(state, set_id, member) == Some(pin)
+        && member_cause_matches(state, set_id, member, caused_by)
+        && finding_admitted(state, set_id, reader, caused_by)
+}
+
+/// CR 730.3c: enumeration form of [`tracked_set_finds_component`]. The raw
+/// members of `set_id` in set order (`caused_by` is not applied to them: that
+/// is the zone projection's existing semantics), followed by the found
+/// components sorted by id. The gate is evaluated once, and only when the
+/// structural relation is non-empty. Components are disjoint from the members.
+pub(crate) fn tracked_set_found_objects(
+    state: &GameState,
+    set_id: TrackedSetId,
+    reader: Option<&ResolvedAbility>,
+    caused_by: Option<&ThisWayCause>,
+) -> Vec<ObjectId> {
+    let mut found = state
+        .tracked_object_sets
+        .get(&set_id)
+        .cloned()
+        .unwrap_or_default();
+    let components = tracked_set_split_components(state, set_id);
+    if components.is_empty() || !finding_admitted(state, set_id, reader, caused_by) {
+        return found;
+    }
+    found.extend(
+        components
+            .into_iter()
+            .filter(|(_, member)| member_cause_matches(state, set_id, *member, caused_by))
+            .map(|(component, _)| component),
+    );
+    found
 }
 
 /// CR 730.3 + CR 712.21: Put a non-surviving merge component into `dest` as a
@@ -1024,6 +1599,7 @@ pub(crate) fn put_component_into_zone(
     state: &mut GameState,
     component_id: ObjectId,
     dest: Zone,
+    survivor_successor: Option<ObjectIncarnationRef>,
     events: &mut Vec<GameEvent>,
 ) {
     // CR 603.10a: snapshot the component's characteristics BEFORE the CR 400.7
@@ -1038,21 +1614,12 @@ pub(crate) fn put_component_into_zone(
     else {
         return;
     };
-    let split_from_merge_survivor = state
-        .objects
-        .get(&component_id)
-        .and_then(|obj| obj.split_from_merge_survivor);
-
     crate::game::zones::route_component(state, component_id, dest);
 
-    // CR 730.3c: `route_component` performs CR 400.7 cleanup and therefore
-    // clears the live marker used to select this special delivery. Restore the
-    // continuity link only after the component has actually reached its new
-    // zone, so a paused replacement cannot expose it as already split.
-    if let Some(survivor_id) = split_from_merge_survivor {
-        if let Some(obj) = state.objects.get_mut(&component_id) {
-            obj.split_from_merge_survivor = Some(survivor_id);
-        }
+    // CR 730.3c: the cleanup clears previous incarnation links. Stamp the
+    // new link only on arrival so a parked choice cannot expose a split card.
+    if let Some(obj) = state.objects.get_mut(&component_id) {
+        obj.split_from_merge_survivor = survivor_successor;
     }
 
     crate::game::restrictions::record_zone_change(state, &mut record);
