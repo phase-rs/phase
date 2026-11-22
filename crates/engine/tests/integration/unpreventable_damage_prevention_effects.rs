@@ -3282,7 +3282,7 @@ fn a_wither_leg_pauses_on_its_counters_inside_a_resumed_combat_batch() {
 }
 
 // ---------------------------------------------------------------------------
-// Rider pauses inside a combat batch, asked at the leg (CR 510.2, CR 616.1, CR 616.1g)
+// Rider pauses inside a combat batch, asked at the leg or at the aggregate drain (CR 510.2, CR 615.5, CR 616.1, CR 616.1g)
 // ---------------------------------------------------------------------------
 
 const HARDENED_SCALES: &str = "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.";

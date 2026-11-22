@@ -15,8 +15,9 @@
 //!   instruction follows all of it (CR 608.2c, CR 608.2d): Lightning Helix's "and you gain 3
 //!   life" under Nefarious Lich.
 //! - A combat damage batch asks each CR 616.1 order and each prompt a replacement's action or
-//!   rider raises, at the leg (CR 510.2 rules out a priority window, not these choices); a
-//!   substitution's action precedes an earlier rider there as elsewhere (CR 614.6 + CR 615.5).
+//!   rider raises, at the leg or at the aggregate prevention-rider drain (CR 510.2 rules out a
+//!   priority window, not these choices); a substitution's action precedes an earlier rider
+//!   there as elsewhere (CR 614.6 + CR 615.5).
 //! - A spell's later instruction runs once, behind its remaining recipients, whichever
 //!   replacement answer reaches it.
 

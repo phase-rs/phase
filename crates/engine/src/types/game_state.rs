@@ -30020,12 +30020,6 @@ declare_game_state! {
     /// clippy's `type_complexity` lint demands one — `replace_combat_damage_batch`'s
     /// return type.
     pub combat_prevention_tally: Option<HashMap<(AppliedReplacementKey, TargetRef), i32>>,
-    /// CR 510.2 + CR 615.13: which simultaneous batch opened `combat_prevention_tally`: a combat
-    /// damage step's (CR 510.2) or a noncombat instruction's, whose riders wait for its damage.
-    /// Opened and restored with the tally, so execution-local and excluded from serialization and
-    /// equality like it.
-    #[serde(skip)]
-    pub(crate) prevention_tally_batch: Option<DamageBatchKind>,
     /// CR 510.2 + CR 700.1 + CR 615.8 + CR 611.3a: what one simultaneous damage batch has
     /// settled. Only this ledger is suspended during independent follow-ups, then restored
     /// before the next portion; the prevention tally remains active. Restored to its prior
@@ -30052,13 +30046,6 @@ declare_game_state! {
 pub(crate) enum EventLosses {
     Recording(crate::types::ability::EventOutcomes),
     Immediate,
-}
-
-/// CR 510.2 + CR 615.13: the kind of simultaneous damage batch whose prevention tally is open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DamageBatchKind {
-    Combat,
-    Noncombat,
 }
 
 /// The map-backed history entries `copy` does not share with `original`, a nested causes map
@@ -38748,7 +38735,6 @@ impl GameState {
             combat_prevention_tally: None,
             damage_batch_ledger: None,
             damage_event_losses: None,
-            prevention_tally_batch: None,
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),
             commander_declined_zone_return: HashSet::new(),
@@ -42658,7 +42644,6 @@ impl GameState {
             combat_prevention_tally: _,
             damage_batch_ledger: _,
             damage_event_losses: _,
-            prevention_tally_batch: _,
             liminal_entries: _,
             pending_liminal_entry_resume: _,
             entering_aura_authority: _,
@@ -44325,7 +44310,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         combat_prevention_tally: _,
         damage_batch_ledger: _,
         damage_event_losses: _,
-        prevention_tally_batch: _,
         // Post-rebase upstream additions (v0.21.x: #5515 discover + liminal mechanic).
         // Strict-compared by eq_except_growable's GameState PartialEq reuse (fail-safe:
         // a differing value is correctly not a fixed-point repeat); object-growth loops

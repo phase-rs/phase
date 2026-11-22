@@ -29,13 +29,13 @@ use crate::types::ability::{DamageGuardReading, SettledDamageGuard};
 use crate::types::events::GameEvent;
 use crate::types::game_state::DamageBatchLedger;
 use crate::types::game_state::{
-    CombatPreventionTally, DamageBatchKind, DrainStatus, GameState, HeldBatchRider, LiminalEntry,
-    LiminalEntryKind, NamedChoiceSource, NamedChoiceSourceBinding, PayableResource,
-    PendingCombatLegChoice, PendingCombatLegProgress, PendingCostMoveResume, PendingReplacement,
-    PostReplacementDrain, ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity,
-    ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail,
-    ReplacementCandidateSummary, ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy,
-    ResolutionPaymentOrigin, RiderTiming, WaitingFor,
+    CombatPreventionTally, DrainStatus, GameState, HeldBatchRider, LiminalEntry, LiminalEntryKind,
+    NamedChoiceSource, NamedChoiceSourceBinding, PayableResource, PendingCombatLegChoice,
+    PendingCombatLegProgress, PendingCostMoveResume, PendingReplacement, PostReplacementDrain,
+    ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
+    ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail, ReplacementCandidateSummary,
+    ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy, ResolutionPaymentOrigin,
+    RiderTiming, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, ProtectionReplacementSourceExt};
 use crate::types::keywords::{
@@ -1103,7 +1103,7 @@ fn stash_post_replacement_continuation(
 /// (`replaced_event_amount`). A rider queued behind another recipient's paused rider keeps its
 /// place in that queue (Command Zone #172). In combat the same order holds: a substitute that
 /// leaves its prompt standing parks the leg on it (`settle_combat_damage_replacement`), and the
-/// earlier rider runs behind that answer (CR 616.1g).
+/// earlier rider runs after that answer (CR 615.5).
 fn stash_damage_substitute(
     state: &mut GameState,
     substitute: PostReplacementDrain,
@@ -16239,9 +16239,6 @@ pub(crate) fn replace_combat_damage_batch(
     // A parked pass carries its tally out (`pass.tally`) and the state field is
     // restored, so nothing outside the batch aggregates while it waits.
     let restore_tally = state.combat_prevention_tally.take();
-    let restore_tally_batch = state
-        .prevention_tally_batch
-        .replace(DamageBatchKind::Combat);
     state.combat_prevention_tally = Some(std::mem::take(&mut pass.tally));
     // CR 510.2 + CR 700.1 + CR 615.8 + CR 608.2f: the batch's ledger is installed on every entry:
     // the one-shot applications and the printed guards' reading travel with the pass exactly like
@@ -16465,7 +16462,6 @@ pub(crate) fn replace_combat_damage_batch(
 
     pass.tally = state.combat_prevention_tally.take().unwrap_or_default();
     state.combat_prevention_tally = restore_tally;
-    state.prevention_tally_batch = restore_tally_batch;
     if let Some(ledger) = state.damage_batch_ledger.take() {
         pass.one_shot_applications = ledger.applications;
         pass.settled_guards = ledger.settled_guards;
