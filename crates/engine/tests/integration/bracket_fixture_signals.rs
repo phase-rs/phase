@@ -22,7 +22,7 @@ fn shared_db() -> Option<&'static CardDatabase> {
 fn fixture_signals(db: &CardDatabase, name: &str) -> Option<BracketSignals> {
     if db.get_face_by_name(name).is_none() {
         eprintln!(
-            "skipping: {name} is not in integration_cards.json.gz — regenerate the committed fixture"
+            "skipping: {name} is not in integration_cards/ — regenerate the committed fixture"
         );
         return None;
     }
