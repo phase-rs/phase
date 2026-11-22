@@ -615,8 +615,9 @@ fn begin_delivery(collection: &SimultaneousUnlessCollection) -> SimultaneousUnle
     }
 }
 
-/// The single entry that runs a delivery's remaining steps: the start, an
-/// answer's settle and the resume hook. It owns
+/// The single entry that runs a delivery's remaining steps: the start
+/// (`deliver`, from an answer's or a departure's settle) and the resume hook
+/// (`resume_parked_delivery`). It owns
 /// the installation and restoration of the poll's trigger event. `span_start` is
 /// the first index of `events` that belongs to this delivery.
 fn drive_delivery(
@@ -933,11 +934,12 @@ fn reconcile_delivery_after_departure(
         .take()
         .expect("a parked delivery");
     let controller = carrier.ability.controller;
-    // CR 800.4a + CR 701.9a: a paused step whose chooser left never happens (its
-    // card left the game with its owner and was not discarded). The departure's
+    // CR 800.4a: a paused step whose chooser left never happens: a discard
+    // step's card left the game with its owner and was not discarded
+    // (CR 701.9a), and a departed seat loses no life. The departure's
     // replacement settlement (`engine_replacement::settle_replacement_after_departure`)
     // runs before this reconciliation: it abandons that step's replacement
-    // choice, drains the step's discard batch and resumes this delivery itself,
+    // choice, drains a discard step's batch and resumes this delivery itself,
     // so a delivery that reaches here is parked on a living chooser's prompt.
     if !crate::game::players::is_alive(state, controller) {
         // CR 800.4a: the resolving ability ceased to exist, so the remaining

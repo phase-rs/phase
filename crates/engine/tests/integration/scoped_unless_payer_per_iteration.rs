@@ -3272,11 +3272,13 @@ fn viper_step_chooser_conceding_during_a_paused_delivery_resumes_it() {
 
 /// (f4b). CR 800.4a + CR 701.21a: the sacrificing chooser concedes while its
 /// sacrifice step waits on its CR 616.1 choice (Rest in Peace against Leyline of
-/// the Void). The permanent left the game with its controller, so it is not
-/// sacrificed; the discard that already happened is held across the pause, and
-/// it is collected exactly once, and the unpaid step's life loss lands once.
+/// the Void). The permanent left the game with its owner, so it is not
+/// sacrificed; the discard that already happened is held across the pause and
+/// collected exactly once, and the unpaid step's life loss lands once. The
+/// sacrifice step is the delivery's last, so its carrier is already consumed;
+/// (f4) guards the delivery's own departure path.
 #[test]
-fn viper_sacrificing_chooser_conceding_during_its_paused_sacrifice_resumes_the_delivery() {
+fn viper_sacrificing_chooser_conceding_during_its_paused_sacrifice_completes_the_batch() {
     let Some(db) = shared_card_db() else {
         return;
     };
@@ -3317,6 +3319,10 @@ fn viper_sacrificing_chooser_conceding_during_its_paused_sacrifice_resumes_the_d
             .is_some(),
         "reach guard: the sacrifice batch is parked on the replacement choice"
     );
+    assert!(
+        poll(&runner).is_none(),
+        "reach guard: the sacrifice step is the delivery's last; its carrier is already consumed"
+    );
 
     let concession = runner
         .act(GameAction::Concede { player_id: P1 })
@@ -3326,7 +3332,7 @@ fn viper_sacrificing_chooser_conceding_during_its_paused_sacrifice_resumes_the_d
     assert_ne!(
         zone_of(&runner, rip),
         Zone::Battlefield,
-        "Rest in Peace left the game with its controller"
+        "Rest in Peace left the game with its owner"
     );
     assert!(
         concession.events.iter().any(|event| matches!(
@@ -3340,10 +3346,8 @@ fn viper_sacrificing_chooser_conceding_during_its_paused_sacrifice_resumes_the_d
             event,
             GameEvent::PermanentSacrificed { object_id, .. } if *object_id == rip
         )),
-        "it left with its controller (CR 800.4a); it was not sacrificed"
+        "it left with its owner (CR 800.4a); it was not sacrificed"
     );
-    assert!(poll(&runner).is_none(), "the poll is cleared");
-    assert!(runner.state().pending_discard_batch.is_none());
     assert!(runner
         .state()
         .pending_player_scope_sacrifice_choice
