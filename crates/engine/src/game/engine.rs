@@ -23547,7 +23547,7 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test.len(),
-            56,
+            55,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
@@ -23555,11 +23555,11 @@ mod stage2_injector_tests {
         );
         assert_eq!(
             (producers.len(), readers.len(), in_test.len()),
-            (4, 9, 43),
+            (4, 9, 42),
             "the partition, not just the total: four PRODUCTION producers, nine PRODUCTION \
-             readers (including the two optional-subject projection reads), and 43 \
+             readers (including the two optional-subject projection reads), and 42 \
              `#[cfg(test)]` sites, including the ChooseOneOf, retained optional/outer, \
-             retained repeat/choice restore, per-seat gated-step (U5) fixtures, and the `phase_out` suspension fixture \
+             retained repeat/choice restore fixtures, and the `phase_out` suspension fixture \
              that parks a typed prompt on a clone (test-only: it mints no producer).\n\
              producers={producers:#?}\nreaders={readers:#?}"
         );

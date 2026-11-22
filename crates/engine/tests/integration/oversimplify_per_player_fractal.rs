@@ -1197,7 +1197,7 @@ mod constructed {
     /// `relink_gated_token_referent_consumers` may retag a separate sentence
     /// as a `ContinuationStep`; a retagged consumer correctly runs per seat.
     /// A `ContinuationStep` is a step of the gated instruction itself, which
-    /// runs per seat behind its gate (`gated_rider_step_runs_per_accepting_seat`).
+    /// runs per seat behind its gate (Shakedown Heavy's decline witness).
     const GATED_TAIL_LINKS: [SubAbilityLink; 1] = [SubAbilityLink::SequentialSibling];
 
     // --- N5: the partition needs the matching co-scoped producer ------------
@@ -1488,43 +1488,6 @@ mod constructed {
                 "(iii) P2, {link:?}"
             );
         }
-    }
-
-    /// N5-17 — CR 608.2c: "If they do, they gain 1 life and gain 3 life" — the
-    /// trailing gain is a `ContinuationStep` of the gated instruction, not a
-    /// later sentence, so it resolves inside each seat behind that seat's gate:
-    /// +3 for every accepting seat, +0 for a declining or empty seat.
-    ///
-    /// The text is synthetic: no printed card has this exact shape. The nearest
-    /// printed cards with a gated node followed by a continuation step are Tell
-    /// Me What You See ("target opponent may have you draw a card. If they
-    /// don't, they lose 4 life and you surveil 1") and Exit Through the Grift
-    /// Shop (a bid-gated copy followed by "If you didn't win the bid, you gain
-    /// life ... and create that many Treasure tokens"); neither is a per-seat
-    /// fan-out, so this test pins the per-seat form of the shape.
-    #[test]
-    fn gated_rider_step_runs_per_accepting_seat() {
-        let row = Row::new(3, Board::Empty)
-            .optional()
-            .rider(Rider::IfYouDo)
-            .tail(SubAbilityLink::ContinuationStep);
-        // Every seat Bound; the last seat (P2) declines.
-        let declined = run(row.decline(P2));
-        assert_eq!(
-            declined.prompts,
-            vec![(P0, "optional"), (P1, "optional"), (P2, "optional")]
-        );
-        assert_eq!(declined.life, vec![4, 4, 0], "P2 declines");
-
-        // P1 Halving Season: P0 creates no Fractal (empty seat), P1 accepts.
-        let row = Row::new(2, Board::HalvingP1)
-            .rider(Rider::IfYouDo)
-            .tail(SubAbilityLink::ContinuationStep);
-        let paused = run(row.optional());
-        assert_eq!(paused.prompts, vec![(P1, "optional")]);
-        assert_eq!(paused.fractals, vec![(P1, 1)]);
-        assert_eq!(paused.life, vec![0, 4], "paused");
-        assert_eq!(run(row).life, vec![0, 4], "sync");
     }
 
     /// L1 — CR 608.2c + CR 118.12a: "If it's your turn, put a counter on it
