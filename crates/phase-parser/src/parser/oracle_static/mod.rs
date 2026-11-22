@@ -51,10 +51,10 @@ mod prelude {
         AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction,
         AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, ColorChangeMode,
         CombatRelation, CombatRelationSubject, Comparator, ContinuousModification, ControllerRef,
-        CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition, PlayerFilter, PtStat,
-        PtValueScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality,
-        SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
-        TypedFilter,
+        CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition, PlayerFilter,
+        PlayerRelation, PtStat, PtValueScope, QuantityExpr, QuantityRef, RoundingMode,
+        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
+        TypeFilter, TypedFilter,
     };
     pub(super) use crate::types::card_type::{
         noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
@@ -67,11 +67,12 @@ mod prelude {
     pub(super) use crate::types::statics::{
         ActivationExemption, AdditionalCostTaxAction, AttackDefenderScope, BlockExceptionKind,
         CastCostMode, CastExtraCost, CastFreeOrigin, CastFrequency, CastingProhibitionCondition,
-        CombatAloneAction, CombatAloneRequirement, CostModifyMode, CostPaymentProhibition,
-        CostReductionReach, CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost,
-        ExileCastGrantee, ExileCastTiming, GraveyardPermissionPool, HandSizeModification,
-        PermissionCastLimit, ProhibitionScope, RequiredDefender, StaticMode,
-        SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
+        CausingObject, CombatAloneAction, CombatAloneRequirement, ControlledCreatureEvent,
+        CostModifyMode, CostPaymentProhibition, CostReductionReach, CrewAction,
+        CrewContributionKind, ExileCardPool, ExileCastCost, ExileCastGrantee, ExileCastTiming,
+        GraveyardPermissionPool, HandSizeModification, PermissionCastLimit, PlayerCauseAction,
+        ProhibitionScope, RequiredDefender, StaticMode, SuppressedTriggerEvent, TriggerCause,
+        ZoneChangeQualifier,
     };
     pub(super) use crate::types::zones::Zone;
 }
@@ -97,6 +98,7 @@ mod shared;
 mod static_helpers;
 mod type_change;
 
+pub(crate) use anthem::PrintedSubject;
 pub(crate) use shared::add_property;
 pub(crate) use shared::parse_affected_scoped_static_condition;
 pub(crate) use shared::parse_commander_subject_filter_prefix;

@@ -23,7 +23,6 @@
 
 use super::oracle::{is_draft_matters_sentence, ParsedAbilities};
 use super::oracle_effect::gap_diagnosis::{swallowed_clause_gap, GuardWord, SwallowedAxis};
-use super::oracle_effect::lower::strip_redundant_flip_win_quantifier;
 use super::oracle_effect::player_lookback_relative_clause_owns_suffix;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use super::oracle_ir::doc::OracleItemIr;
@@ -3220,75 +3219,6 @@ fn per_opponent_choices_cover_all_for_each_markers(
     raised > 0 && root_aware_count(scoped, def_tree_per_opponent_choice_count) >= raised
 }
 
-/// CR 705.2: the number of `Effect::FlipCoins` in `def`'s tree whose
-/// `win_effect` slot is filled.
-fn def_tree_flip_win_effect_count(def: &AbilityDefinition) -> usize {
-    let mut count = 0usize;
-    let _ = visit_ability_def(def, &mut |effect| {
-        if let Effect::FlipCoins {
-            flips: _,
-            win_effect: Some(_),
-            lose_effect: _,
-            flipper: _,
-        } = effect
-        {
-            count += 1;
-        }
-        ControlFlow::Continue(())
-    });
-    count
-}
-
-/// CR 705.2: a sentence that starts a run the parser gives a `win_effect`: "flip
-/// a coin until you lose a flip" or "flip three coins". A single "flip a coin"
-/// never absorbs the clause after it, so it is not one. The test is textual: it
-/// accepts any sentence that contains "coins" (so "flip three coins" and also, for
-/// example, a sentence about "two coins"); that is safe only because the caller
-/// also requires the next sentence to be a per-flip-win quantifier and the parse
-/// to hold a `FlipCoins` with a `win_effect` for each one.
-fn is_coin_flip_head(sentence: &str) -> bool {
-    scan_contains(sentence, "flip a coin until") || scan_contains(sentence, "coins")
-}
-
-/// CR 705.2: true when every `"for each "` occurrence the line raises is the
-/// per-win quantifier of a coin-flip win clause ("For each flip you won,
-/// create a token that's a copy of that creature" — Mirror March; "put a +1/+1
-/// counter on this creature for each flip you won" — Crazed Firecat), and the
-/// parse holds a `FlipCoins` with a `win_effect` for each.
-///
-/// The quantifier is carried, not dropped: the parser strips it
-/// ([`strip_redundant_flip_win_quantifier`]) because `FlipCoins` runs its
-/// `win_effect` once per won flip. The parser fills `win_effect` with the
-/// clause right after the flip head ("flip a coin ...", "flip three coins"), so
-/// a quantifier sentence only counts when the sentence before it is such a head;
-/// a quantifier behind any other sentence is not the clause `win_effect` holds
-/// and still warns.
-///
-/// Occurrence-counted like [`per_opponent_choices_cover_all_for_each_markers`]:
-/// every raised occurrence must be a recognized quantifier sentence, so a
-/// sentence that raises a second `"for each "`, or a "for each flip you lose" /
-/// "for each opponent" / "for each coin that comes up heads" clause, still warns.
-fn flip_win_quantifiers_cover_all_for_each_markers(
-    cleaned: &str,
-    markers: &[&'static str],
-    scoped: &ParsedAbilities,
-) -> bool {
-    if markers.len() != 1 || markers[0] != "for each " {
-        return false;
-    }
-    // allow-noncombinator: swallow detector marker scan on classified text
-    let raised = cleaned.match_indices("for each ").count();
-    let quantifiers = split_sentence_units(cleaned)
-        .windows(2)
-        .filter(|pair| {
-            is_coin_flip_head(pair[0]) && strip_redundant_flip_win_quantifier(pair[1]).is_some()
-        })
-        .count();
-    quantifiers > 0
-        && quantifiers == raised
-        && quantifiers <= root_aware_count(scoped, def_tree_flip_win_effect_count)
-}
-
 /// CR 205.2 + CR 608.2c/d: true when every `"for each "` occurrence the line
 /// raises is a card-type iteration represented by a `DistinctCardTypes`
 /// `ChooseFromZone` constraint.
@@ -3693,11 +3623,15 @@ fn detect_dynamic_qty(
     if per_opponent_choices_cover_all_for_each_markers(cleaned, &markers, scoped) {
         return;
     }
-    // CR 705.2: "For each flip you won, …" is carried by `FlipCoins.win_effect`,
-    // which runs once per won flip; the parser drops the quantifier on purpose.
-    if flip_win_quantifiers_cover_all_for_each_markers(cleaned, &markers, scoped) {
-        return;
-    }
+    // CR 705.2: "For each flip you won, …" (Crazed Firecat, Mirror March, Goblin
+    // Traprunner) is deliberately NOT exempted. `FlipCoins` runs its count-one
+    // `win_effect` once per won flip, so the reward is not one batched addition
+    // (CR 614.1a, Hardened Scales), the copies do not enter together (CR 603.6a),
+    // the attacking token is not offered its defender choice (CR 508.4), and a
+    // replacement prompt drops the rest of the run (CR 608.2c). The quantifier
+    // stays a reported gap until the reward uses the aggregate win count; the
+    // fence test is `per_win_coin_flip_quantifiers_stay_reported`.
+
     // CR 406.3a + CR 611.2a: "For each card exiled this way, the player who
     // exiled it may play it" (Vulcan Mind-Meld) distributes one grant per
     // exiled card; its carrier is the per-object `PermissionGrantee::ObjectExiler`
@@ -19496,13 +19430,14 @@ mod excess_rider_tests {
     }
 }
 
-/// The three swallow-detector exemptions for printed cards that already resolve
-/// as printed: a dynamic word inside the card's own name, the per-win coin-flip
-/// quantifier, and the threshold sentences of a scope-free top-tally vote.
-/// Each positive parses the verbatim MTGJSON Oracle text with the printed type
-/// line through `parse_oracle_text` and reads the audit's own `parse_warnings`;
-/// each hostile is a printed card that must keep warning, with a reach guard
-/// that shows the parse got as far as the exemption's condition.
+/// The two swallow-detector exemptions for printed cards that already resolve
+/// as printed (a dynamic word inside the card's own name, and the threshold
+/// sentences of a scope-free top-tally vote) and the fence that keeps the
+/// per-win coin-flip quantifier reported. Each positive parses the verbatim
+/// MTGJSON Oracle text with the printed type line through `parse_oracle_text`
+/// and reads the audit's own `parse_warnings`; each hostile is a printed card
+/// that must keep warning, with a reach guard that shows the parse got as far
+/// as the exemption's condition.
 #[cfg(test)]
 mod name_flip_vote_exemption_tests {
     use super::*;
@@ -19877,30 +19812,59 @@ mod name_flip_vote_exemption_tests {
         assert!(lone_scope_free_top_votes(&scoped).is_none());
     }
 
+    /// The number of `Effect::FlipCoins` in `parsed` whose `win_effect` slot is
+    /// filled (the reach guard of the fence below).
+    fn flip_win_effect_count(parsed: &ParsedAbilities) -> usize {
+        fn per_def(def: &AbilityDefinition) -> usize {
+            let mut count = 0usize;
+            let _ = visit_ability_def(def, &mut |effect| {
+                if let Effect::FlipCoins {
+                    flips: _,
+                    win_effect: Some(_),
+                    lose_effect: _,
+                    flipper: _,
+                } = effect
+                {
+                    count += 1;
+                }
+                ControlFlow::Continue(())
+            });
+            count
+        }
+        root_aware_count(parsed, per_def)
+    }
+
+    /// The fence: `FlipCoins` runs its count-one reward once per won flip, so
+    /// these printed cards still resolve wrongly (Crazed Firecat with Hardened
+    /// Scales gets six counters, not four; Mirror March's copies enter one at a
+    /// time; Goblin Traprunner's token is not offered its defender choice and a
+    /// replacement prompt drops the rest of its run). The detector must keep
+    /// reporting their per-win quantifier until the reward uses the aggregate
+    /// win count; adding an exemption back fails this test. Reach guard: the
+    /// audit ran and the parse holds the `FlipCoins` carrier that an exemption
+    /// would have trusted.
     #[test]
-    fn coin_flip_win_quantifiers_are_carried_by_the_win_effect() {
+    fn per_win_coin_flip_quantifiers_stay_reported() {
         for card in [GOBLIN_TRAPRUNNER, MIRROR_MARCH, CRAZED_FIRECAT] {
             let parsed = parse(&card);
             assert!(audit_ran(&parsed), "{}", card.name);
             assert_eq!(
-                root_aware_count(&parsed, def_tree_flip_win_effect_count),
+                flip_win_effect_count(&parsed),
                 1,
-                "{}: FlipCoins must carry the win_effect",
+                "{}: the parse carries the per-win FlipCoins",
                 card.name
             );
             assert!(
-                !warns(&parsed, "DynamicQty"),
-                "{}: {:?}",
-                card.name,
-                parsed.parse_warnings
+                warns(&parsed, "DynamicQty"),
+                "{}: the per-win quantifier must stay reported",
+                card.name
             );
         }
     }
 
-    /// Mutalith Vortex Beast raises three "for each" occurrences and its parse
-    /// holds no `win_effect` carrier; Ral Zarek's "for each coin that comes up
-    /// heads" is not a win quantifier at all. The occurrence equality is pinned
-    /// by the synthetic test below.
+    /// Mutalith Vortex Beast ("for each flip you lose") and Ral Zarek ("for each
+    /// coin that comes up heads") are not per-win quantifiers: they report today
+    /// and must keep doing so if the per-win shape is ever exempted again.
     #[test]
     fn other_for_each_flip_clauses_keep_warning() {
         for card in [MUTALITH_VORTEX_BEAST, RAL_ZAREK] {
@@ -19908,59 +19872,6 @@ mod name_flip_vote_exemption_tests {
             assert!(audit_ran(&parsed), "{}", card.name);
             assert!(warns(&parsed, "DynamicQty"), "{}", card.name);
         }
-    }
-
-    /// SYNTHETIC: unit texts around Crazed Firecat's real `FlipCoins` parse. No
-    /// printed card has a quantifier behind an unrelated sentence, a second
-    /// raised occurrence in the quantifier sentence, or a quantifier with no
-    /// flip carrier; Mutalith Vortex Beast (above) is the nearest printed case
-    /// for the "for each flip you lose" text.
-    #[test]
-    fn flip_quantifier_is_covered_only_when_it_is_the_clause_win_effect_holds() {
-        let firecat = parse(&CRAZED_FIRECAT);
-        let markers = ["for each "];
-        let covered = |unit: &str, parsed: &ParsedAbilities| {
-            flip_win_quantifiers_cover_all_for_each_markers(unit, &markers, parsed)
-        };
-        let head = "when this creature enters, flip a coin until you lose a flip.";
-        let quantifier = "put a +1/+1 counter on this creature for each flip you won.";
-        assert!(covered(&format!("{head} {quantifier}"), &firecat));
-        // A quantifier behind an unrelated sentence is not the clause the flip
-        // head's `win_effect` holds.
-        assert!(!covered(
-            &format!("{head} draw a card. {quantifier}"),
-            &firecat
-        ));
-        // A sentence that mentions a flip but is not the head `win_effect`
-        // follows: the head's `win_effect` would be the draw clause.
-        assert!(!covered(
-            "flip two coins. if you win both flips, draw a card. for each flip you win, you gain 1 life.",
-            &firecat
-        ));
-        assert!(covered(
-            "flip three coins. for each flip you win, you gain 1 life.",
-            &firecat
-        ));
-        // A single flip never absorbs the clause after it.
-        assert!(!covered(
-            "flip a coin. for each flip you win, you gain 1 life.",
-            &firecat
-        ));
-        // A second raised occurrence in the quantifier sentence.
-        assert!(!covered(
-            &format!("{head} put a +1/+1 counter on this creature for each creature you control for each flip you won."),
-            &firecat
-        ));
-        // A quantifier with no FlipCoins carrier in the parse.
-        assert!(!covered(
-            &format!("{head} {quantifier}"),
-            &parse(&PLEA_FOR_POWER)
-        ));
-        // "for each flip you lose" is not the win quantifier.
-        assert!(!covered(
-            "flip a coin. draw a card for each flip you lose.",
-            &firecat
-        ));
     }
 
     #[test]

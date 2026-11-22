@@ -19,7 +19,7 @@ use engine::game::game_object::PhaseStatus;
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::TargetRef;
+use engine::types::ability::{DamageKindFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::Supertype;
 use engine::types::format::{ChallengeDeck, FormatConfig, HordeLegendaryDeath};
@@ -575,6 +575,18 @@ fn paused_damage_to_mill_preserves_lifelink_and_recording() {
         records[0].amount, 1,
         "the record must carry the 1 damage dealt"
     );
+    // CR 120.2b: the resumed noncombat leg latches `noncombat` (and Any) on Tim
+    // through the shared damage-history authority, exactly as a never-paused
+    // ping would; it must not latch `combat`.
+    let kinds = runner.state().objects[&tim].dealt_damage_kinds;
+    assert!(
+        kinds.has(DamageKindFilter::NoncombatOnly) && !kinds.has(DamageKindFilter::CombatOnly),
+        "the resumed ping must latch noncombat only, got {kinds:?}"
+    );
+    assert!(
+        runner.state().objects_that_dealt_damage.contains(&tim),
+        "the resumed ping must record Tim in the Any set"
+    );
 }
 
 /// R6-#3 — the SECOND pause must not re-propose the lifelink gain: the R4-#3
@@ -847,6 +859,18 @@ fn combat_damage_to_mill_preserves_lifelink_and_recording() {
     assert_eq!(
         records[0].amount, 1,
         "the record must carry the 1 damage dealt"
+    );
+    // CR 120.2a: the resumed combat leg (Phase C remnant) latches `combat` (and
+    // Any) on Rhox through the shared damage-history authority; it must not
+    // latch `noncombat`.
+    let kinds = runner.state().objects[&rhox].dealt_damage_kinds;
+    assert!(
+        kinds.has(DamageKindFilter::CombatOnly) && !kinds.has(DamageKindFilter::NoncombatOnly),
+        "the resumed combat leg must latch combat only, got {kinds:?}"
+    );
+    assert!(
+        runner.state().objects_that_dealt_damage.contains(&rhox),
+        "the resumed combat leg must record Rhox in the Any set"
     );
 }
 
