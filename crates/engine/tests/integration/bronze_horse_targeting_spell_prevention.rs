@@ -193,16 +193,33 @@ fn bronze_horse_without_another_creature_takes_spell_damage() {
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("P1 casts Lightning Bolt");
-    if matches!(
-        runner.state().waiting_for,
-        WaitingFor::TargetSelection { .. }
-    ) {
-        runner
-            .act(GameAction::ChooseTarget {
-                target: Some(TargetRef::Object(horse)),
-            })
-            .expect("targeting Bronze Horse is legal");
-    }
+    // Lightning Bolt has several legal targets, so the engine always asks: assert the
+    // chooser and that the intended target is offered before answering.
+    let WaitingFor::TargetSelection {
+        player, selection, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "Lightning Bolt must ask for its target, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        player,
+        runner.state().objects[&bolt].owner,
+        "the caster chooses the target"
+    );
+    assert!(
+        selection
+            .current_legal_targets
+            .contains(&TargetRef::Object(horse)),
+        "the intended target is offered"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(horse)),
+        })
+        .expect("targeting Bronze Horse is legal");
     runner.advance_until_stack_empty();
 
     assert_eq!(

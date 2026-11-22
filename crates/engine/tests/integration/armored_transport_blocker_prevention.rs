@@ -8,8 +8,6 @@
 //!   a blocking creature assigns to the creature it is blocking.
 //! CR 615.1a + CR 615.2: "prevent" creates a prevention effect that applies to
 //!   damage from a source (see CR 609.7).
-//! CR 506.4b: tapping/untapping a declared blocker does not remove it from
-//!   combat — the relation the shield keys on is the block relation.
 //! CR 120.3a: damage dealt to a player causes that player to lose that much life.
 //!
 //! Verbatim printed Oracle text (MTGJSON AtomicCards):
@@ -120,16 +118,33 @@ fn cast_bolt_at(runner: &mut GameRunner, bolt: ObjectId, target: ObjectId) {
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("Lightning Bolt is castable");
-    if matches!(
-        runner.state().waiting_for,
-        WaitingFor::TargetSelection { .. }
-    ) {
-        runner
-            .act(GameAction::ChooseTarget {
-                target: Some(engine::types::TargetRef::Object(target)),
-            })
-            .expect("the target is legal");
-    }
+    // Lightning Bolt has several legal targets, so the engine always asks: assert the
+    // chooser and that the intended target is offered before answering.
+    let WaitingFor::TargetSelection {
+        player, selection, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "Lightning Bolt must ask for its target, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        player,
+        runner.state().objects[&bolt].owner,
+        "the caster chooses the target"
+    );
+    assert!(
+        selection
+            .current_legal_targets
+            .contains(&engine::types::TargetRef::Object(target)),
+        "the intended target is offered"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(engine::types::TargetRef::Object(target)),
+        })
+        .expect("the target is legal");
     runner.advance_until_stack_empty();
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. })

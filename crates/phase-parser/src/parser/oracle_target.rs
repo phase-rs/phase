@@ -14419,11 +14419,11 @@ mod tests {
     }
 
     /// CR 509.1g + CR 509.1h: the block-pairing clause combinator over its full
-    /// input range — every form × every subject word the form admits × the
+    /// input range — both forms × every subject word the form admits × the
     /// boundary tails — returns the form and subject word and leaves the
     /// boundary character in the remainder. "target creature" heads only the
     /// two-way form; a non-boundary continuation, a trailing window on the
-    /// single-orientation forms, a verb form, and an unknown subject all decline.
+    /// passive form, a verb form, and an unknown subject all decline.
     #[test]
     fn block_pairing_clause_accepts_forms_and_subjects() {
         use BlockPairingForm::{BlockedBy, BlockingOrBlockedBy};

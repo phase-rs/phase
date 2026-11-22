@@ -85,16 +85,31 @@ fn cast_bolt_at(runner: &mut GameRunner, bolt: ObjectId, target: TargetRef) {
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("Lightning Bolt is castable");
-    if matches!(
-        runner.state().waiting_for,
-        WaitingFor::TargetSelection { .. }
-    ) {
-        runner
-            .act(GameAction::ChooseTarget {
-                target: Some(target),
-            })
-            .expect("the target is legal");
-    }
+    // Lightning Bolt has several legal targets, so the engine always asks: assert the
+    // chooser and that the intended target is offered before answering.
+    let WaitingFor::TargetSelection {
+        player, selection, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "Lightning Bolt must ask for its target, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        player,
+        runner.state().objects[&bolt].owner,
+        "the caster chooses the target"
+    );
+    assert!(
+        selection.current_legal_targets.contains(&target),
+        "the intended target is offered"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(target),
+        })
+        .expect("the target is legal");
     runner.advance_until_stack_empty();
     assert_settled(runner, P0);
 }

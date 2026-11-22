@@ -20,8 +20,8 @@
 //!     no basic lands."
 //!
 //! Runtime tests drive the production pipeline (cast, combat, castability); the
-//! two lines that fail closed are pinned at `parse_oracle_text`, where the gap is
-//! recorded.
+//! line that fails closed (Woolly Razorback) is pinned at `parse_oracle_text`,
+//! where the gap is recorded.
 
 use engine::game::casting::can_cast_object_now;
 use engine::game::combat::AttackTarget;

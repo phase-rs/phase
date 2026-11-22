@@ -16380,8 +16380,7 @@ fn parse_damage_prevention_replacement_with_provenance(
     // anchor ("dealt to ", "would deal to ", "would deal damage to ",
     // "would deal combat damage to ", "deal damage to ") but neither
     // `damage_target_filter`, `valid_card_filter`, nor `parse_damage_recipient_scope`
-    // parsed it, the recipient qualification is unrecognized or incomplete (e.g.
-    // Light of Sanction's "to creatures you control by sources you control").
+    // parsed it, the recipient qualification is unrecognized or incomplete.
     // Fail closed (return None) rather than falling through to an un-scoped shield
     // that would wrongly prevent damage to all targets in the game.
     let has_recipient_clause = [
