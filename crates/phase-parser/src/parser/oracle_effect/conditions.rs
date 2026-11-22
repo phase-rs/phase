@@ -31,7 +31,9 @@ use super::sequence::parse_dig_from_among;
 use super::subject;
 use super::{parse_effect_clause_inner, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::ast::{parsed_clause, ContinuationAst};
-use crate::parser::oracle_ir::context::{SpellAnaphorBinding, TriggerZoneChangeProvenance};
+use crate::parser::oracle_ir::context::{
+    SpellAnaphorBinding, TriggerConditionScope, TriggerZoneChangeProvenance,
+};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
@@ -5319,16 +5321,29 @@ pub(super) fn strip_routed_suffix_conditional(
         return (general(cond), effect_text);
     }
 
-    if let Some((condition, route)) =
-        parse_triggering_spell_targets_filter_ability_condition(condition_core)
-            .map(|condition| (condition, LeadingConditionRoute::General))
-            .or_else(|| try_routed_nom_condition_as_ability_condition(condition_core, ctx))
-            .or_else(|| {
-                parse_condition_text_in(condition_core, ctx)
-                    .or_else(|| parse_control_count_as_ability_condition(condition_core))
-                    .map(|condition| (condition, LeadingConditionRoute::General))
-            })
+    // CR 603.7c + CR 603.7e + CR 400.7: a trailing condition on a delayed
+    // payload is checked against the delayed object's source and zone at the
+    // delayed trigger's fire/resolution boundary. The temporal suffix is the
+    // existing parser seam that proves this clause is such a payload; use the
+    // typed scope only while lowering its condition so ordinary trigger-body
+    // source-zone guards remain explicit gaps.
+    let previous_trigger_condition_scope = ctx.trigger_condition_scope;
+    if super::lower::strip_temporal_suffix(effect_prefix)
+        .1
+        .is_some()
     {
+        ctx.trigger_condition_scope = TriggerConditionScope::Delayed;
+    }
+    let condition_result = parse_triggering_spell_targets_filter_ability_condition(condition_core)
+        .map(|condition| (condition, LeadingConditionRoute::General))
+        .or_else(|| try_routed_nom_condition_as_ability_condition(condition_core, ctx))
+        .or_else(|| {
+            parse_condition_text_in(condition_core, ctx)
+                .or_else(|| parse_control_count_as_ability_condition(condition_core))
+                .map(|condition| (condition, LeadingConditionRoute::General))
+        });
+    ctx.trigger_condition_scope = previous_trigger_condition_scope;
+    if let Some((condition, route)) = condition_result {
         // CR 608.2c + CR 109.2: in an " or if " chain on a targeting effect, a
         // bare "it's a <type>" disjunct describes the effect's target, not a
         // revealed card (`RevealedHasCardType` would never see the target).
@@ -7636,16 +7651,6 @@ pub(crate) fn static_condition_to_ability_condition(
                     filter: filter.clone(),
                 }),
             }),
-            // CR 113.6c + CR 608.2c: preserve the negated source-zone gate
-            // through the same exact filter shape as the affirmative bridge.
-            StaticCondition::SourceInZone { zone } => Some(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::SourceMatchesFilter {
-                    filter: TargetFilter::Typed(TypedFilter {
-                        properties: vec![FilterProp::InZone { zone: *zone }],
-                        ..Default::default()
-                    }),
-                }),
-            }),
             // CR 702.171b + CR 601.2b: "~ isn't saddled" → the source does NOT
             // match the saddled-designation filter. Mirrors the affirmative
             // `SourceIsSaddled` bridge (the source's saddled status is a runtime
@@ -7685,16 +7690,6 @@ pub(crate) fn static_condition_to_ability_condition(
                 filter: filter.clone(),
             })
         }
-        // CR 113.6b + CR 608.2c: a source-zone predicate is an effect-time
-        // source filter with exactly one `InZone` property. Keep this bridge
-        // narrow: other `SourceMatchesFilter` shapes have their own semantics
-        // and must not be generalized through the zone axis.
-        StaticCondition::SourceInZone { zone } => Some(AbilityCondition::SourceMatchesFilter {
-            filter: TargetFilter::Typed(TypedFilter {
-                properties: vec![FilterProp::InZone { zone: *zone }],
-                ..Default::default()
-            }),
-        }),
         StaticCondition::SourceIsTapped => Some(AbilityCondition::SourceIsTapped),
         // CR 702.171b + CR 601.2b: Bridge the source's saddled designation to the
         // effect-resolution seam. The static-layer predicate (`SourceIsSaddled`)
@@ -7830,6 +7825,7 @@ pub(crate) fn static_condition_to_ability_condition(
         // CR 509.1b: recipient-scoped block-evasion gate; no effect-resolution
         // (`AbilityCondition`) equivalent — lowering returns `None`.
         | StaticCondition::RecipientAttackingOwnerTarget { .. }
+        | StaticCondition::SourceInZone { .. }
         | StaticCondition::DefendingPlayerControls { .. }
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceIsEquipped
@@ -7888,6 +7884,53 @@ pub(crate) fn static_condition_to_ability_condition(
         // is structurally unavailable here, not merely unused.
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::None => None,
+    }
+}
+
+/// CR 603.4 + CR 603.7c + CR 603.7e + CR 400.7: a delayed ability's
+/// source-zone intervening-if is checked when the delayed object is put on the
+/// stack and again as it resolves, against the source incarnation that created
+/// it. Keep this bridge scoped to delayed-trigger bodies; ordinary effect
+/// conditions must remain strict gaps when no effect-time equivalent exists.
+fn static_condition_to_delayed_ability_condition(
+    sc: &StaticCondition,
+    ctx: &mut ParseContext,
+) -> Option<AbilityCondition> {
+    if !matches!(ctx.trigger_condition_scope, TriggerConditionScope::Delayed) {
+        return None;
+    }
+
+    match sc {
+        StaticCondition::SourceInZone { zone } => Some(AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::InZone { zone: *zone }],
+                ..Default::default()
+            }),
+        }),
+        StaticCondition::Not { condition } => {
+            static_condition_to_delayed_ability_condition(condition, ctx).map(|condition| {
+                AbilityCondition::Not {
+                    condition: Box::new(condition),
+                }
+            })
+        }
+        StaticCondition::And { conditions } => Some(AbilityCondition::And {
+            conditions: conditions
+                .iter()
+                .map(|condition| static_condition_to_delayed_ability_condition(condition, ctx))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        StaticCondition::Or { conditions } => Some(AbilityCondition::Or {
+            conditions: conditions
+                .iter()
+                .map(|condition| static_condition_to_delayed_ability_condition(condition, ctx))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        // Only source-zone leaves and Boolean composition are admitted here.
+        // Other leaves fall through to the ordinary exhaustive bridge below;
+        // any mixed Boolean tree containing SourceInZone is therefore rejected
+        // there instead of being partially lowered.
+        _ => None,
     }
 }
 
@@ -7985,10 +8028,11 @@ pub fn ability_condition_to_static_condition(ac: &AbilityCondition) -> Option<St
                 .collect::<Option<Vec<_>>>()?,
         }),
 
-        // CR 113.6b + CR 603.4: invert only the exact source-zone filter
-        // emitted above. A typed filter with any additional type, controller,
-        // or property axis remains an ordinary `SourceMatchesFilter` and is
-        // intentionally not generalized into `SourceInZone`.
+        // CR 603.7c + CR 603.7e + CR 400.7: invert only the exact source-zone
+        // filter emitted for a delayed payload. A typed filter with any
+        // additional type, controller, or property axis remains an ordinary
+        // `SourceMatchesFilter` and is intentionally not generalized into
+        // `SourceInZone`.
         AbilityCondition::SourceMatchesFilter {
             filter:
                 TargetFilter::Typed(TypedFilter {
@@ -9308,7 +9352,8 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
     if !rest.trim().is_empty() {
         return None;
     }
-    static_condition_to_ability_condition(&condition, ctx)
+    static_condition_to_delayed_ability_condition(&condition, ctx)
+        .or_else(|| static_condition_to_ability_condition(&condition, ctx))
 }
 
 /// CR 109.4 + CR 109.5 + CR 608.2c: Consume the anaphoric control predicate
@@ -11183,9 +11228,10 @@ mod tests {
         assert_eq!(remainder, original);
     }
 
-    /// CR 113.6b + CR 603.4: the source-zone bridge is deliberately exact,
-    /// and the delayed intervening-if path can recover the trigger-layer zone
-    /// condition from it. Recursive negation remains intact.
+    /// CR 603.4 + CR 603.7c + CR 603.7e + CR 400.7: the source-zone bridge is
+    /// deliberately exact and scoped to delayed bodies. The delayed intervening-if
+    /// path recovers the trigger-layer zone condition while ordinary effect
+    /// lowering remains an explicit gap. Recursive negation remains intact.
     #[test]
     fn source_in_zone_bridge_inverse_and_delayed_trigger_shape() {
         for zone in [
@@ -11209,8 +11255,17 @@ mod tests {
                     &static_condition,
                     &mut ParseContext::default()
                 ),
+                None,
+                "ordinary source-zone guards remain explicit gaps for {zone:?}"
+            );
+            let mut delayed_ctx = ParseContext {
+                trigger_condition_scope: TriggerConditionScope::Delayed,
+                ..Default::default()
+            };
+            assert_eq!(
+                static_condition_to_delayed_ability_condition(&static_condition, &mut delayed_ctx),
                 Some(ability_condition.clone()),
-                "affirmative source-zone bridge for {zone:?}"
+                "delayed source-zone bridge for {zone:?}"
             );
             assert_eq!(
                 ability_condition_to_static_condition(&ability_condition),
@@ -11236,8 +11291,17 @@ mod tests {
                     &negated_static,
                     &mut ParseContext::default()
                 ),
+                None,
+                "ordinary negated source-zone guards remain explicit gaps for {zone:?}"
+            );
+            let mut delayed_ctx = ParseContext {
+                trigger_condition_scope: TriggerConditionScope::Delayed,
+                ..Default::default()
+            };
+            assert_eq!(
+                static_condition_to_delayed_ability_condition(&negated_static, &mut delayed_ctx),
                 Some(negated_ability.clone()),
-                "negated source-zone bridge for {zone:?}"
+                "delayed negated source-zone bridge for {zone:?}"
             );
             assert_eq!(
                 ability_condition_to_static_condition(&negated_ability),
@@ -11273,6 +11337,70 @@ mod tests {
             None,
             "an extra property must not generalize through SourceInZone"
         );
+    }
+
+    /// CR 603.7c + CR 603.7e + CR 400.7: delayed source-zone lowering is
+    /// fail-closed when a recursive boolean also contains a static-only
+    /// predicate with no effect-resolution equivalent.
+    #[test]
+    fn delayed_source_zone_mixed_condition_fails_closed() {
+        let source_in_zone = StaticCondition::SourceInZone {
+            zone: Zone::Battlefield,
+        };
+        let static_only = StaticCondition::SourceEnteredThisTurn;
+        let mut delayed_ctx = ParseContext {
+            trigger_condition_scope: TriggerConditionScope::Delayed,
+            ..Default::default()
+        };
+
+        let source_filter = AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }],
+                ..Default::default()
+            }),
+        };
+        let nested_source_zone = StaticCondition::Or {
+            conditions: vec![
+                source_in_zone.clone(),
+                StaticCondition::Not {
+                    condition: Box::new(source_in_zone.clone()),
+                },
+            ],
+        };
+        assert_eq!(
+            static_condition_to_delayed_ability_condition(&nested_source_zone, &mut delayed_ctx),
+            Some(AbilityCondition::Or {
+                conditions: vec![
+                    source_filter.clone(),
+                    AbilityCondition::Not {
+                        condition: Box::new(source_filter.clone()),
+                    },
+                ],
+            }),
+            "delayed source-zone boolean trees should recurse through Not/Or"
+        );
+
+        for condition in [
+            StaticCondition::And {
+                conditions: vec![source_in_zone.clone(), static_only.clone()],
+            },
+            StaticCondition::Or {
+                conditions: vec![source_in_zone.clone(), static_only.clone()],
+            },
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::And {
+                    conditions: vec![source_in_zone.clone(), static_only.clone()],
+                }),
+            },
+        ] {
+            assert_eq!(
+                static_condition_to_delayed_ability_condition(&condition, &mut delayed_ctx),
+                None,
+                "mixed delayed source-zone conditions must not partially lower: {condition:?}"
+            );
+        }
     }
 
     #[test]

@@ -1378,6 +1378,7 @@ impl ParseContext {
             relative_player_scope: self.relative_player_scope.clone(),
             declared_player_scope: self.declared_player_scope.clone(),
             prior_player_declaration: self.prior_player_declaration,
+            trigger_condition_scope: self.trigger_condition_scope,
             ..Self::default()
         }
     }

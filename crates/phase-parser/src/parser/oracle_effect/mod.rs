@@ -4150,6 +4150,10 @@ fn try_parse_at_next_phase_delayed_trigger(
         return None;
     }
     let mut ctx = antecedents.clone_player_antecedents();
+    // CR 603.7 + CR 603.7c + CR 603.7e + CR 400.7: this is the body of a
+    // delayed ability, so its source-zone condition belongs to the delayed
+    // payload rather than the ordinary effect-condition bridge.
+    ctx.trigger_condition_scope = TriggerConditionScope::Delayed;
     // CR 603.7 + CR 608.2k: delayed body, no announced parent target.
     ctx.spell_anaphor_binding = SpellAnaphorBinding::EventSource;
     let inner_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
@@ -53318,6 +53322,9 @@ fn parse_effect_chain_ir_body(
             // raw field is copied (not the effective one): `in_trigger` travels
             // separately on the line above and dominates at the consumer.
             spell_anaphor_binding: ctx.spell_anaphor_binding,
+            // This parser-only scope also survives the field-by-field chunk
+            // handoff so delayed source-zone gates use their scoped bridge.
+            trigger_condition_scope: ctx.trigger_condition_scope,
             bare_card_aggregate_source,
             nearest_dig_rest_zone,
             // CR 608.2c + CR 122.1: a bare counter anaphor in this chunk's body
