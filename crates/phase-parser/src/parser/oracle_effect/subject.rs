@@ -1788,7 +1788,7 @@ fn try_parse_combat_tax_effect_clause(text: &str) -> Option<ParsedEffectClause> 
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous().modifications(vec![
                 ContinuousModification::GrantStaticAbility {
-                    definition: Box::new(static_def),
+                    definition: Box::new(static_def.resolution_installed()),
                 },
             ])],
             duration: None,
@@ -8098,7 +8098,8 @@ fn build_restriction_clause(
             // phrase keeps being re-evaluated per counter edit.
             let granted = StaticDefinition::new(StaticMode::CantAttack)
                 .affected(TargetFilter::SelfRef)
-                .attack_defended(Some(defended));
+                .attack_defended(Some(defended))
+                .resolution_installed();
             let installer = StaticDefinition::continuous()
                 .affected(affected)
                 .modifications(vec![ContinuousModification::GrantStaticAbility {

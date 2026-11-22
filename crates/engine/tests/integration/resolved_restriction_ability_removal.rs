@@ -31,6 +31,13 @@ When this enchantment enters, draw a card.
 Creatures lose all abilities.
 At the beginning of the end step, sacrifice this enchantment."#;
 
+const FORBIDDING_SPIRIT_ORACLE: &str = "When this creature enters, until your next turn, creatures can't attack you or planeswalkers you control unless their controller pays {2} for each of those creatures.";
+const WILL_ORACLE: &str = "Vigilance\n{T}: Spells you cast this turn that are white and/or blue cost {X} less to cast, where X is the amount of life you gained this turn. Activate only as a sorcery.";
+const WAR_CADENCE_ORACLE: &str = "{X}{R}: This turn, creatures can't block unless their controller pays {X} for each blocking creature they control.";
+const LEGEND_OF_ARENA_ORACLE: &str = "The Legend of Arena can be your commander.\nI, II — Create a 2/1 red Human Wizard creature token. Spells you cast this turn cost {1} less to cast for each Wizard you control.\nIII — Search your library for a planeswalker card, put it onto the battlefield, then shuffle your library. It enters with an additional loyalty counter on it for each Wizard you control.";
+const TEYO_ORACLE: &str = "When Teyo enters, create a 0/4 white Wall creature token with defender and flying.\n[+1]: You and target opponent each draw a card.\n[−2]: Choose left or right. Until your next turn, each player may attack only the nearest opponent in the last chosen direction and planeswalkers controlled by that opponent.";
+const MOON_ORACLE: &str = "Enchant creature, land, or planeswalker\nEnchanted permanent is a colorless land with \"{T}: Add {C}\" and loses all other card types and abilities.";
+
 fn declare_attack_and_reach_blocks(runner: &mut GameRunner, attacker: ObjectId) {
     runner.advance_to_phase(Phase::BeginCombat);
     runner
@@ -2835,4 +2842,628 @@ fn disrupt_decorum_goad_survives_dress_down_in_three_player_combat() {
     runner
         .declare_attackers(&[(attacker, AttackTarget::Player(p2))])
         .unwrap();
+}
+
+fn float_mana(runner: &mut GameRunner, player: PlayerId, mana: &[engine::types::mana::ManaType]) {
+    use engine::types::mana::ManaUnit;
+
+    let pool = &mut runner.state_mut().players[player.0 as usize].mana_pool;
+    for &mana_type in mana {
+        pool.add(ManaUnit::new(mana_type, ObjectId(0), false, Vec::new()));
+    }
+}
+
+fn assert_tax(
+    runner: &GameRunner,
+    payer: PlayerId,
+    expected_context: engine::types::game_state::CombatTaxContext,
+    creatures: &[ObjectId],
+) {
+    use engine::types::mana::parse_mtgjson_mana_cost;
+
+    let WaitingFor::CombatTaxPayment {
+        player,
+        context,
+        total_cost,
+        per_creature,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected combat tax payment, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, payer);
+    assert_eq!(*context, expected_context);
+    assert_eq!(
+        *total_cost,
+        parse_mtgjson_mana_cost(&format!("{{{}}}", creatures.len() * 2))
+    );
+    assert_eq!(per_creature.len(), creatures.len());
+    for creature in creatures {
+        assert!(per_creature.contains(&(*creature, parse_mtgjson_mana_cost("{2}"))));
+    }
+}
+
+#[test]
+fn forbidding_spirit_attack_tax_survives_humility() {
+    use engine::types::game_state::CombatTaxContext;
+    use engine::types::mana::{parse_mtgjson_mana_cost, ManaType};
+
+    let p2 = PlayerId(2);
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Island"; 2]);
+    add_lands(&mut scenario, P0, &[ManaColor::White; 7]);
+    let spirit = scenario
+        .add_creature_to_hand_from_oracle(P0, "Forbidding Spirit", 3, 3, FORBIDDING_SPIRIT_ORACLE)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{W}{W}"))
+        .id();
+    let humility = scenario.add_real_card(P0, "Humility", Zone::Hand, db);
+    let first = scenario.add_vanilla(P1, 2, 2);
+    let second = scenario.add_vanilla(P1, 2, 2);
+    let mut runner = scenario.build();
+    // CR 611.2: Entering and resolving the trigger installs the attack tax.
+    runner
+        .cast(spirit)
+        .resolve()
+        .assert_zone(&[spirit], Zone::Battlefield);
+    assert_priority(&runner, P0);
+    runner
+        .cast(humility)
+        .resolve()
+        .assert_zone(&[humility], Zone::Battlefield);
+    assert_priority(&runner, P0);
+    assert_eq!(runner.state().objects[&spirit].power, Some(1));
+
+    advance_to_player_main(&mut runner, P1);
+    runner.advance_to_combat();
+    assert_declare_attackers(&runner, P1);
+    let mut untaxed = GameRunner::from_state(runner.state().clone());
+    untaxed
+        .declare_attackers(&[
+            (first, AttackTarget::Player(p2)),
+            (second, AttackTarget::Player(p2)),
+        ])
+        .unwrap();
+    assert_priority(&untaxed, P1);
+    assert_eq!(untaxed.state().combat.as_ref().unwrap().attackers.len(), 2);
+
+    float_mana(&mut runner, P1, &[ManaType::Colorless; 4]);
+    runner
+        .declare_attackers(&[
+            (first, AttackTarget::Player(P0)),
+            (second, AttackTarget::Player(P0)),
+        ])
+        .unwrap();
+    // CR 508.1h–j: The protected defender costs two mana per proposed attacker.
+    assert_tax(&runner, P1, CombatTaxContext::Attacking, &[first, second]);
+    let mut declined = GameRunner::from_state(runner.state().clone());
+    declined
+        .act(GameAction::PayCombatTax { accept: false })
+        .unwrap();
+    assert_declare_attackers(&declined, P1);
+    declined.declare_attackers(&[]).unwrap();
+    assert!(declined
+        .state()
+        .combat
+        .as_ref()
+        .is_none_or(|combat| combat.attackers.is_empty()));
+    assert!(!matches!(
+        declined.state().waiting_for,
+        WaitingFor::DeclareAttackers { .. } | WaitingFor::CombatTaxPayment { .. }
+    ));
+
+    runner
+        .act(GameAction::PayCombatTax { accept: true })
+        .unwrap();
+    assert_priority(&runner, P1);
+    assert_eq!(runner.state().combat.as_ref().unwrap().attackers.len(), 2);
+    assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+}
+
+#[test]
+fn ood_sphere_tap_restriction_survives_dress_down() {
+    use engine::database::synthesis::synthesize_planechase;
+    use engine::game::planechase::{active_plane, PlanarDieFace};
+    use engine::game::printed_cards::apply_card_face_to_object;
+    use engine::types::card_type::CoreType;
+    use engine::types::events::GameEvent;
+    use engine::types::format::FormatConfig;
+    use engine::types::game_state::GameRng;
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new_with_format(FormatConfig::planechase(), 2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Island"; 3]);
+    add_lands(&mut scenario, P1, &[ManaColor::Blue; 2]);
+    let plane = scenario.add_real_card(P0, "Ood Sphere", Zone::Command, db);
+    let mut face = db
+        .get_face_by_name("Ood Sphere")
+        .expect("plane face")
+        .clone();
+    let types: Vec<_> = face
+        .card_type
+        .core_types
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    face.triggers = parse_oracle_text(
+        face.oracle_text.as_deref().expect("Ood Sphere Oracle text"),
+        &face.name,
+        &[],
+        &types,
+        &face.card_type.subtypes,
+    )
+    .triggers;
+    // The card export runs this after parsing so plane triggers function from command.
+    synthesize_planechase(&mut face);
+    let dress = scenario.add_real_card(P1, "Dress Down", Zone::Hand, db);
+    let copter = scenario.add_real_card(P1, "Smuggler's Copter", Zone::Battlefield, db);
+    let goaded = scenario.add_real_card(P1, "Wind Drake", Zone::Battlefield, db);
+    let pilot = scenario.add_vanilla(P1, 2, 2);
+    let mut runner = scenario.build();
+    apply_card_face_to_object(runner.state_mut().objects.get_mut(&plane).unwrap(), &face);
+    runner.state_mut().planar_controller = Some(P0);
+    assert_eq!(active_plane(runner.state()), Some(plane));
+
+    let chaos = |event: &GameEvent| {
+        matches!(
+            event,
+            GameEvent::PlanarDieRolled {
+                player_id: P0,
+                face: PlanarDieFace::Chaos
+            }
+        )
+    };
+    let seed = (0..512)
+        .find(|&seed| {
+            let mut trial = GameRunner::from_state(runner.state().clone());
+            trial.state_mut().rng = GameRng::seed_from_u64(seed);
+            trial
+                .act(GameAction::RollPlanarDie)
+                .is_ok_and(|result| result.events.iter().any(chaos))
+        })
+        .expect("a deterministic seed rolls Chaos");
+    // CR 901.9b: Roll publicly so the active plane produces its chaos trigger.
+    runner.state_mut().rng = GameRng::seed_from_u64(seed);
+    let rolled = runner.act(GameAction::RollPlanarDie).unwrap();
+    assert!(rolled.events.iter().any(chaos));
+    assert!(matches!(
+        &runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection {
+            player: P0,
+            source_id: Some(source),
+            selection,
+            ..
+        } if *source == plane && selection.current_legal_targets.contains(&TargetRef::Object(goaded))
+    ));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(goaded)),
+        })
+        .unwrap();
+    assert_eq!(runner.state().stack.back().unwrap().source_id, plane);
+    runner.resolve_top();
+    assert_priority(&runner, P0);
+    assert!(runner.state().objects[&goaded].goaded_by.contains(&P0));
+
+    advance_to_player_main(&mut runner, P1);
+    resolve_dress_down(&mut runner, dress);
+    assert!(!engine::game::keywords::has_keyword(
+        &runner.state().objects[&goaded],
+        &engine::types::keywords::Keyword::Flying
+    ));
+    assert!(!runner.state().objects[&goaded].tapped);
+    assert!(!runner.state().objects[&copter]
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+    let mut attack = GameRunner::from_state(runner.state().clone());
+
+    // CR 702.122a: The Crewing prompt excludes the prohibited creature and
+    // accepts the other untapped creature.
+    runner
+        .act(GameAction::CrewVehicle {
+            vehicle_id: copter,
+            creature_ids: vec![],
+        })
+        .unwrap();
+    assert!(
+        matches!(&runner.state().waiting_for, WaitingFor::CrewVehicle {
+        player: P1, vehicle_id, eligible_creatures, ..
+    } if *vehicle_id == copter && !eligible_creatures.contains(&goaded) && eligible_creatures.contains(&pilot))
+    );
+    let mut prohibited = GameRunner::from_state(runner.state().clone());
+    assert!(prohibited
+        .act(GameAction::CrewVehicle {
+            vehicle_id: copter,
+            creature_ids: vec![goaded],
+        })
+        .is_err());
+    runner
+        .act(GameAction::CrewVehicle {
+            vehicle_id: copter,
+            creature_ids: vec![pilot],
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_priority(&runner, P1);
+    assert!(runner.state().objects[&pilot].tapped);
+    assert!(!runner.state().objects[&goaded].tapped);
+    assert!(runner.state().objects[&copter]
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+
+    attack.advance_to_combat();
+    assert_declare_attackers(&attack, P1);
+    // CR 508.1f: Red-Eye allows this tap as part of declaring attackers.
+    attack
+        .declare_attackers(&[(goaded, AttackTarget::Player(P0))])
+        .unwrap();
+    assert_priority(&attack, P1);
+    assert!(attack.state().objects[&goaded].tapped);
+}
+
+#[test]
+fn will_cost_reduction_survives_humility() {
+    use engine::game::keywords::has_keyword;
+    use engine::types::keywords::Keyword;
+    use engine::types::mana::ManaType::{Colorless, Green, White};
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let will = scenario
+        .add_creature(P0, "Will, Scion of Peace", 2, 4)
+        .with_color(vec![ManaColor::White, ManaColor::Blue])
+        .with_subtypes(vec!["Human", "Wizard"])
+        .as_legendary()
+        .from_oracle_text(WILL_ORACLE)
+        .id();
+    let salve = scenario.add_real_card(P0, "Healing Salve", Zone::Hand, db);
+    let second_salve = scenario.add_real_card(P0, "Healing Salve", Zone::Hand, db);
+    let humility = scenario.add_real_card(P0, "Humility", Zone::Hand, db);
+    let legionnaire = scenario.add_real_card(P0, "Akron Legionnaire", Zone::Hand, db);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
+    let mut runner = scenario.build();
+    float_mana(&mut runner, P0, &[White]);
+    runner
+        .cast(salve)
+        .modes(&[0])
+        .target_player(P0)
+        .resolve()
+        .assert_life_delta(P0, 3);
+    assert_priority(&runner, P0);
+    let ability = activation(&runner, will);
+    runner.activate(will, ability).resolve();
+    assert_priority(&runner, P0);
+    assert!(runner.state().objects[&will].tapped);
+    assert!(has_keyword(
+        &runner.state().objects[&will],
+        &Keyword::Vigilance
+    ));
+    float_mana(&mut runner, P0, &[White]);
+    runner
+        .cast(second_salve)
+        .modes(&[0])
+        .target_player(P0)
+        .resolve()
+        .assert_life_delta(P0, 3);
+    assert_priority(&runner, P0);
+    assert_eq!(runner.state().players[0].life_gained_this_turn, 6);
+    float_mana(&mut runner, P0, &[White, White, Colorless, Colorless]);
+    runner
+        .cast(humility)
+        .resolve()
+        .assert_zone(&[humility], Zone::Battlefield);
+    assert_priority(&runner, P0);
+    // CR 613.1f: Will loses its printed abilities.
+    assert!(!has_keyword(
+        &runner.state().objects[&will],
+        &Keyword::Vigilance
+    ));
+    assert!(activated_ability_definitions(runner.state(), will).is_empty());
+
+    runner.state_mut().players[0].mana_pool.clear();
+    float_mana(
+        &mut runner,
+        P0,
+        &[White, White, Colorless, Colorless, Colorless, Green],
+    );
+    let mut nonmatching = GameRunner::from_state(runner.state().clone());
+    // CR 611.2d + CR 601.2f: The reduction was locked at {3} when Will's ability
+    // resolved, so {6}{W}{W} costs {3}{W}{W}; a live reading of the six life
+    // gained this turn would make it cost {W}{W}.
+    let outcome = runner.cast(legionnaire).resolve();
+    outcome.assert_zone(&[legionnaire], Zone::Battlefield);
+    assert_eq!(outcome.mana_pool_total(P0), 1);
+    assert_eq!(outcome.mana_pool_color(P0, White), 0);
+    assert_priority(&runner, P0);
+
+    let outcome = nonmatching.cast(bears).resolve();
+    outcome.assert_zone(&[bears], Zone::Battlefield);
+    assert_eq!(outcome.mana_pool_total(P0), 4);
+    assert_eq!(outcome.mana_pool_color(P0, Green), 0);
+    assert_priority(&nonmatching, P0);
+}
+
+fn war_cadence_under_humility() -> (GameRunner, ObjectId) {
+    use engine::types::card_type::CoreType;
+    use engine::types::mana::{parse_mtgjson_mana_cost, ManaType};
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Island"; 2]);
+    let cadence = scenario
+        .add_enchantment_from_oracle(P1, "War Cadence", WAR_CADENCE_ORACLE)
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{R}"))
+        .id();
+    let opalescence = scenario.add_real_card(P1, "Opalescence", Zone::Hand, db);
+    let humility = scenario.add_real_card(P1, "Humility", Zone::Hand, db);
+    let mut runner = scenario.build();
+    advance_to_player_main(&mut runner, P1);
+    float_mana(
+        &mut runner,
+        P1,
+        &[ManaType::Red, ManaType::Colorless, ManaType::Colorless],
+    );
+    let ability = activation(&runner, cadence);
+    runner.activate(cadence, ability).x(2).resolve();
+    assert_priority(&runner, P1);
+    assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+    assert!(
+        live_statics(&runner, cadence, StaticMode::CantBlock).any(|definition| {
+            matches!(
+                definition.condition,
+                Some(engine::types::ability::StaticCondition::UnlessPay { .. })
+            )
+        })
+    );
+    float_mana(&mut runner, P1, &[ManaType::White; 8]);
+    runner
+        .cast(opalescence)
+        .resolve()
+        .assert_zone(&[opalescence], Zone::Battlefield);
+    assert_priority(&runner, P1);
+    assert!(runner.state().objects[&cadence]
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+    assert!(!activated_ability_definitions(runner.state(), cadence).is_empty());
+    runner
+        .cast(humility)
+        .resolve()
+        .assert_zone(&[humility], Zone::Battlefield);
+    assert_priority(&runner, P1);
+    // CR 613.1f: The animated source lost the ability that created this tax.
+    assert!(activated_ability_definitions(runner.state(), cadence).is_empty());
+
+    (runner, cadence)
+}
+
+/// The block-tax payment itself never prompts at base (a pre-existing gap tracked
+/// separately), so this row checks the retained grant at layer level only.
+#[test]
+fn war_cadence_block_tax_grant_survives_humility() {
+    use engine::types::ability::{DefinitionOrigin, StaticCondition};
+
+    let (runner, cadence) = war_cadence_under_humility();
+    // CR 611.2 + CR 613.1f: Humility leaves the resolution-created block tax.
+    assert!(
+        live_statics(&runner, cadence, StaticMode::CantBlock).any(|definition| {
+            definition.origin == DefinitionOrigin::Resolution
+                && matches!(
+                    definition.condition,
+                    Some(StaticCondition::UnlessPay { .. })
+                )
+        })
+    );
+}
+
+#[test]
+fn legend_of_arena_wizard_keeps_cost_reduction_under_humility_until_cleanup() {
+    use engine::types::mana::{
+        parse_mtgjson_mana_cost,
+        ManaType::{Blue, Red, White},
+    };
+
+    let db = shared_card_db().expect("fixture database");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1] {
+        scenario.with_library_top(player, &["Island"; 4]);
+    }
+    let saga = scenario
+        .add_enchantment_to_hand_from_oracle(P0, "The Legend of Arena", LEGEND_OF_ARENA_ORACLE)
+        .with_subtypes(vec!["Saga"])
+        .as_legendary()
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{U}{R}{W}"))
+        .from_oracle_text(LEGEND_OF_ARENA_ORACLE)
+        .id();
+    let humility = scenario.add_real_card(P0, "Humility", Zone::Hand, db);
+    let probe = scenario.add_real_card(P0, "Think Twice", Zone::Hand, db);
+    let mut runner = scenario.build();
+    float_mana(&mut runner, P0, &[Blue, Red, White, White]);
+    runner
+        .cast(saga)
+        .resolve()
+        .assert_zone(&[saga], Zone::Battlefield);
+    assert_priority(&runner, P0);
+    // CR 714.3a: The first lore counter triggered chapter I and created its Wizard.
+    let wizard = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| {
+            runner.state().objects[id]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Wizard")
+        })
+        .expect("chapter I creates a Wizard");
+    assert_eq!(runner.state().objects[&wizard].power, Some(2));
+
+    float_mana(&mut runner, P0, &[White; 4]);
+    runner
+        .cast(humility)
+        .resolve()
+        .assert_zone(&[humility], Zone::Battlefield);
+    assert_priority(&runner, P0);
+    assert_eq!(runner.state().objects[&wizard].power, Some(1));
+    assert!(runner.state().objects[&wizard]
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Wizard"));
+    runner.state_mut().players[0].mana_pool.clear();
+    let mut expired = GameRunner::from_state(runner.state().clone());
+    float_mana(&mut runner, P0, &[Blue, Blue]);
+    // CR 601.2f: The Wizard still reduces Think Twice from {1}{U} to {U}.
+    let outcome = runner.cast(probe).resolve();
+    outcome.assert_zone(&[probe], Zone::Graveyard);
+    outcome.assert_hand_drawn(P0, 1);
+    assert_eq!(outcome.mana_pool_total(P0), 1);
+    assert_priority(&runner, P0);
+
+    // CR 514.2: The reduction expires at cleanup with the same Wizard in play.
+    advance_to_player_main(&mut expired, P1);
+    expired.act(GameAction::PassPriority).unwrap();
+    assert_priority(&expired, P0);
+    assert_eq!(expired.state().objects[&wizard].zone, Zone::Battlefield);
+    float_mana(&mut expired, P0, &[Blue, Blue]);
+    let outcome = expired.cast(probe).resolve();
+    outcome.assert_zone(&[probe], Zone::Graveyard);
+    outcome.assert_hand_drawn(P0, 1);
+    assert_eq!(outcome.mana_pool_total(P0), 0);
+    assert_priority(&expired, P1);
+}
+
+#[test]
+fn teyo_attack_direction_survives_imprisoned_in_the_moon() {
+    use engine::types::ability::{AbilityCost, SeatDirection, TypeFilter, TypedFilter};
+    use engine::types::card_type::CoreType;
+    use engine::types::events::GameEvent;
+    use engine::types::game_state::StackEntryKind;
+    use engine::types::keywords::Keyword;
+    use engine::types::mana::parse_mtgjson_mana_cost;
+
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Island"; 2]);
+    add_lands(&mut scenario, P0, &[ManaColor::Blue; 3]);
+    let teyo = scenario
+        .add_planeswalker_from_oracle(P0, "Teyo, Geometric Tactician", "Teyo", 3, TEYO_ORACLE)
+        .id();
+    let moon = scenario
+        .add_enchantment_to_hand_from_oracle(P0, "Imprisoned in the Moon", MOON_ORACLE)
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{U}"))
+        .from_oracle_text_with_keywords(&["enchant"], MOON_ORACLE)
+        .id();
+    let attacker = scenario.add_vanilla(P1, 2, 2);
+    let mut runner = scenario.build();
+    // SHAPE: Match the exported Aura's complete enchant restriction.
+    assert_eq!(
+        runner.state().objects[&moon].keywords,
+        [Keyword::Enchant(TargetFilter::Or {
+            filters: [
+                TypeFilter::Creature,
+                TypeFilter::Land,
+                TypeFilter::Planeswalker
+            ]
+            .into_iter()
+            .map(|kind| TargetFilter::Typed(TypedFilter::new(kind)))
+            .collect(),
+        })]
+    );
+    let (minus_two, _) = activated_ability_definitions(runner.state(), teyo)
+        .into_iter()
+        .find(|(_, ability)| {
+            matches!(
+                ability.cost.as_ref(),
+                Some(AbilityCost::Loyalty { amount: -2 })
+            )
+        })
+        .expect("Teyo's −2 loyalty ability");
+    runner.activate(teyo, minus_two).resolve();
+    // CR 608.2d: The ability pauses for its left/right choice.
+    assert!(
+        matches!(&runner.state().waiting_for, WaitingFor::NamedChoice {
+        player: P0, options, ..
+    } if options == &["Left", "Right"])
+    );
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Left".to_string(),
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_priority(&runner, P0);
+    assert_eq!(runner.state().objects[&teyo].loyalty, Some(1));
+    assert_eq!(
+        runner.state().objects[&teyo].chosen_direction(),
+        Some(SeatDirection::Left)
+    );
+
+    let cast = runner.cast(moon).target_object(teyo).commit();
+    assert!(
+        cast.state().stack.iter().any(|entry| {
+            entry.id == moon
+                && matches!(&entry.kind, StackEntryKind::Spell { ability: Some(ability), .. }
+                if ability.targets == [TargetRef::Object(teyo)])
+        }),
+        "Imprisoned in the Moon must have Teyo as its target on the stack"
+    );
+    let outcome = cast.resolve();
+    assert_eq!(
+        outcome.state().objects[&moon].attached_to,
+        Some(AttachTarget::Object(teyo)),
+        "Imprisoned in the Moon must stay attached to Teyo. Aura events: {:?}",
+        outcome
+            .events()
+            .iter()
+            .filter(|event| matches!(event,
+                GameEvent::ZoneChanged { object_id, .. } if *object_id == moon
+            ) || matches!(event,
+                GameEvent::Attached { attachment_id, .. }
+                    | GameEvent::Unattached { attachment_id, .. } if *attachment_id == moon
+            ))
+            .collect::<Vec<_>>()
+    );
+    outcome.assert_zone(&[moon], Zone::Battlefield);
+    assert_priority(&runner, P0);
+    // CR 613.1f: Teyo becomes a land and loses the original loyalty abilities.
+    assert_eq!(
+        runner.state().objects[&teyo].card_types.core_types,
+        [CoreType::Land]
+    );
+    assert!(activated_ability_definitions(runner.state(), teyo)
+        .iter()
+        .all(|(_, ability)| {
+            !matches!(ability.cost.as_ref(), Some(AbilityCost::Loyalty { .. }))
+        }));
+
+    advance_to_player_main(&mut runner, P1);
+    runner.advance_to_combat();
+    assert_declare_attackers(&runner, P1);
+    // CR 508.1c: P2 is on P1's left in seat order. P0 is on the right.
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P0))])
+        .expect_err("Teyo rules out the other direction");
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(p2))])
+        .unwrap();
+    assert_priority(&runner, P1);
+    assert_eq!(
+        runner.state().combat.as_ref().unwrap().attackers[0].defending_player,
+        p2
+    );
 }

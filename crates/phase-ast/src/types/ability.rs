@@ -43303,13 +43303,12 @@ pub struct StaticDefinition {
     /// the object's abilities, or a rule effect stored on it. See
     /// [`DefinitionOrigin`].
     ///
-    /// Set ONLY by the layer-6 graft arms (`layers.rs`): a transient
-    /// `AddStaticMode` stamps `Resolution`, and `GrantStaticAbility` keeps the
-    /// inner definition's origin for a transient grant and forces
-    /// `Characteristic` for any other grant. Printed and parsed definitions keep
-    /// the `Characteristic` default. `origin` participates in the
-    /// derived `PartialEq`, so a graft dedup never lets a characteristic graft
-    /// absorb an equal resolution-installed one that ability removal must keep.
+    /// A transient `AddStaticMode` stamps `Resolution` in layer 6.
+    /// `GrantStaticAbility` keeps the inner definition's origin for transient
+    /// grants and forces `Characteristic` otherwise. Printed and quoted
+    /// definitions keep the default. Parsed rule effects declare their origin
+    /// with [`Self::resolution_installed`]. Origin participates in equality
+    /// so graft deduplication preserves resolution-installed definitions.
     #[serde(default, skip_serializing_if = "DefinitionOrigin::is_characteristic")]
     pub origin: DefinitionOrigin,
 }
@@ -43527,6 +43526,14 @@ impl StaticDefinition {
     /// (see the `room_door` field doc). Mirrors `TriggerDefinition::room_door`.
     pub fn room_door(mut self, door: crate::types::object_data::RoomDoor) -> Self {
         self.room_door = Some(door);
+        self
+    }
+
+    /// CR 611.2 + CR 611.2c: Mark a rule effect hosted by a resolving effect
+    /// through `GrantStaticAbility`. Quoted abilities use the characteristic
+    /// origin (CR 113.10).
+    pub fn resolution_installed(mut self) -> Self {
+        self.origin = DefinitionOrigin::Resolution;
         self
     }
 
