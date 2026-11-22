@@ -760,6 +760,7 @@ fn drive_carried(
             | WaitingFor::RemoveCountersChoice { .. }
             | WaitingFor::RetargetChoice { .. }
             | WaitingFor::CombatTaxPayment { .. }
+            | WaitingFor::ReplacementDecisionOrder { .. }
             | WaitingFor::PhyrexianPayment { .. } => {
                 panic!("unexpected prompt {}", runner.waiting_for_kind())
             }

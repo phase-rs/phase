@@ -25,8 +25,8 @@ use std::collections::HashSet;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
-    ContinuousModification, Duration, Effect, EffectKind, QuantityExpr, ResolvedAbility,
-    TargetFilter, TargetRef,
+    AbilityDefinition, AbilityKind, ContinuousModification, Duration, Effect, EffectKind,
+    QuantityExpr, ReplacementDefinition, ReplacementMode, ResolvedAbility, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -36,9 +36,10 @@ use engine::types::game_state::{
     PendingPlayerScopeSacrificeCompletion, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
@@ -767,6 +768,112 @@ fn a_batch_paused_on_a_departed_choosers_replacement_ordering_resumes() {
 
     events.extend(run_until_settled(&mut runner, answer_replacements));
     assert_eq!(zone(&runner, blood), Zone::Exile);
+    assert_eq!(stack_resolved_count(&events, blood), 1);
+    assert_settled(runner.state());
+}
+
+/// T6b. CR 101.4 + CR 616.1 + CR 800.4a: P0 and P1 each sacrifice their Dauthi
+/// Voidwalker ("If a card would be put into an opponent's graveyard from
+/// anywhere, instead exile it with a void counter on it."). The batch is
+/// paused on P0's ordering of P1's Voidwalker and P2's Rest in Peace when P2
+/// leaves, taking Rest in Peace with them. The departure settles P0's choice,
+/// but the move waits with the batch: P1's sacrifice is still consulted while
+/// P0's Voidwalker is on the battlefield, so both are exiled with void counters.
+#[test]
+fn a_departure_that_settles_a_living_choosers_ordering_keeps_the_batch_simultaneous() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let blood = scenario.add_real_card(P0, "Innocent Blood", Zone::Hand, db());
+    scenario.with_mana_pool(P0, mana(ManaType::Black, 1));
+    let w0 = scenario.add_real_card(P0, "Dauthi Voidwalker", Zone::Battlefield, db());
+    let w1 = scenario.add_real_card(P1, "Dauthi Voidwalker", Zone::Battlefield, db());
+    scenario.add_real_card(P2, "Rest in Peace", Zone::Battlefield, db());
+    let mut runner = scenario.build();
+
+    runner.cast(blood).commit();
+    pass_until_a_prompt(&mut runner);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == P0),
+        "reach: P0 orders P1's Voidwalker and Rest in Peace, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(zone(&runner, w0), Zone::Battlefield);
+    assert_eq!(zone(&runner, w1), Zone::Battlefield);
+
+    let mut events = concede(&mut runner, P2);
+    events.extend(run_until_settled(&mut runner, answer_replacements));
+
+    let void = CounterType::Generic("void".to_string());
+    for (walker, owner) in [(w0, "P0"), (w1, "P1")] {
+        assert_eq!(sacrificed_count(&events, walker), 1);
+        let object = &runner.state().objects[&walker];
+        assert_eq!(
+            object.zone,
+            Zone::Exile,
+            "{owner}'s Voidwalker is exiled by its opponent's co-sacrificed Voidwalker"
+        );
+        assert_eq!(object.counters.get(&void).copied(), Some(1));
+    }
+    assert_eq!(zone(&runner, blood), Zone::Graveyard);
+    assert_eq!(stack_resolved_count(&events, blood), 1);
+    assert_settled(runner.state());
+}
+
+/// T6c. CR 800.4a + CR 701.21a: as T6b, but P2 also sacrifices P1's Darksteel
+/// Colossus, which P2 controls through a control effect. When P2 leaves, the
+/// effect ends and the Colossus returns to P1, so P2's selection is discarded
+/// before the departure resumes the batch: the Colossus is not sacrificed, and
+/// P1 is never asked to order its replacements.
+#[test]
+fn a_departure_that_resumes_a_paused_batch_discards_the_departed_players_selection() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let blood = scenario.add_real_card(P0, "Innocent Blood", Zone::Hand, db());
+    scenario.with_mana_pool(P0, mana(ManaType::Black, 1));
+    let w0 = scenario.add_real_card(P0, "Dauthi Voidwalker", Zone::Battlefield, db());
+    let w1 = scenario.add_real_card(P1, "Dauthi Voidwalker", Zone::Battlefield, db());
+    let colossus = scenario.add_real_card(P1, "Darksteel Colossus", Zone::Battlefield, db());
+    scenario.add_real_card(P2, "Rest in Peace", Zone::Battlefield, db());
+    let mut runner = scenario.build();
+    steal(&mut runner, colossus, P2);
+
+    runner.cast(blood).commit();
+    pass_until_a_prompt(&mut runner);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == P0),
+        "reach: P0 orders P1's Voidwalker and Rest in Peace, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        carrier_selections(runner.state()).contains(&(P2, vec![colossus])),
+        "reach: P2's selection of the Colossus is collected"
+    );
+
+    // No prompt is expected after the concession: `run_until_settled` panics on
+    // any, including a replacement ordering for the Colossus.
+    let mut events = concede(&mut runner, P2);
+    events.extend(run_until_settled(&mut runner, |_| None));
+
+    let colossus_object = &runner.state().objects[&colossus];
+    assert_eq!(colossus_object.zone, Zone::Battlefield);
+    assert_eq!(colossus_object.controller, P1);
+    assert_eq!(sacrificed_count(&events, colossus), 0);
+    assert!(
+        !runner
+            .state()
+            .sacrificed_permanents_this_turn
+            .iter()
+            .any(|record| record.object_id == colossus),
+        "the departed player's selection is not recorded as a sacrifice"
+    );
+    let void = CounterType::Generic("void".to_string());
+    for walker in [w0, w1] {
+        assert_eq!(sacrificed_count(&events, walker), 1);
+        let object = &runner.state().objects[&walker];
+        assert_eq!(object.zone, Zone::Exile);
+        assert_eq!(object.counters.get(&void).copied(), Some(1));
+    }
+    assert_eq!(zone(&runner, blood), Zone::Graveyard);
     assert_eq!(stack_resolved_count(&events, blood), 1);
     assert_settled(runner.state());
 }
@@ -1679,4 +1786,86 @@ fn a_departure_settled_batch_asks_for_its_observers_target() {
     assert_eq!(life(state, P0), l0 + 1);
     assert_eq!(plus_one_counters(&run.runner, run.feeder), 1);
     assert_settled(state);
+}
+
+// ---------------------------------------------------------------------------
+// EXT-DEPARTURE-SETTLEMENT: a departure that settles a staged population
+// ---------------------------------------------------------------------------
+
+/// CR 800.4a + CR 608.2m + CR 608.2n: when the departure itself settles a
+/// staged destruction population, the departing controller's resolving spell
+/// keeps its owed final part, and the action boundary's final-part convergence
+/// reports it resolved exactly once with no stranded carrier.
+///
+/// Discriminator: the staged reconciliation's typed `DepartureSettlement` is
+/// the only signal that distinguishes "this instruction actually settled during
+/// the departure" from "its last unanswered question was abandoned". Without
+/// that signal the retirement guard sees two `NotSettled` legacy settlements,
+/// a departed controller, a card that has left the Stack and finished
+/// instructions — and retires the carrier as `Eliminated`, which never reports
+/// `StackResolved`.
+#[test]
+fn a_departure_that_settles_a_staged_population_still_reports_the_spell_resolved() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let wrath = scenario
+        .add_spell_to_hand_from_oracle(P0, "Day of Judgment", false, "Destroy all creatures.")
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    // The whole staged population is P0's, so the concession abandons every
+    // member and the reconciliation has nothing left to deliver.
+    let pausing = {
+        let mut builder = scenario.add_creature(P0, "Pausing Bear", 2, 2);
+        let id = builder.id();
+        // Infrastructure exception: Drudge Skeletons' regeneration shield is
+        // the nearest printed destroy replacement. This optional NoOp isolates
+        // the concession boundary without claiming a full-card witness.
+        builder.with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::Destroy)
+                .mode(ReplacementMode::Optional { decline: None })
+                .valid_card(TargetFilter::SelfRef)
+                .description("pause the destroy".to_string())
+                .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+        );
+        id
+    };
+    let plain = scenario.add_creature(P0, "Plain Bear", 2, 2).id();
+    let mut runner = scenario.build();
+
+    // The engine's own loop drives the cast to its first replacement pause;
+    // nothing is constructed by hand.
+    runner.cast(wrath).commit();
+    pass_until_a_prompt(&mut runner);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "premise: the staged population is parked on a replacement choice, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // P0, the spell's controller and the staged population's owner, concedes at
+    // that prompt.
+    let mut events = concede(&mut runner, P0);
+    events.extend(run_until_settled(&mut runner, answer_replacements));
+
+    let state = runner.state();
+    assert_eq!(
+        stack_resolved_count(&events, wrath),
+        1,
+        "the settled resolution is reported resolved exactly once"
+    );
+    assert_settled(state);
+    assert_eq!(state.objects[&pausing].zone, Zone::Exile);
+    assert_eq!(state.objects[&plain].zone, Zone::Exile);
+    // CR 800.4a: the card itself left the game with its owner (the departure
+    // sweep exiles the resolving spell's card), so the final part reports the
+    // resolution without putting it into a graveyard. That is exactly why the
+    // retirement decision cannot key on the card's zone.
+    assert_eq!(
+        state.objects[&wrath].zone,
+        Zone::Exile,
+        "the spell's card left with its departed owner"
+    );
 }
