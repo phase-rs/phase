@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-11-20T00:00:00Z",
+  "updated": "2026-11-22T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -254,133 +254,6 @@
       ]
     },
     {
-      "name": "Selesnya Company",
-      "author": "MTGGoldfish",
-      "colors": [
-        "W",
-        "G"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Razorverge Thicket"
-        },
-        {
-          "count": 4,
-          "name": "Elvish Mystic"
-        },
-        {
-          "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 4,
-          "name": "Collected Company"
-        },
-        {
-          "count": 4,
-          "name": "Enduring Innocence"
-        },
-        {
-          "count": 2,
-          "name": "Abandoned Air Temple"
-        },
-        {
-          "count": 2,
-          "name": "Plains"
-        },
-        {
-          "count": 4,
-          "name": "Skyclave Apparition"
-        },
-        {
-          "count": 4,
-          "name": "Badgermole Cub"
-        },
-        {
-          "count": 3,
-          "name": "Forest"
-        },
-        {
-          "count": 4,
-          "name": "Archon of Emeria"
-        },
-        {
-          "count": 4,
-          "name": "Aven Interrupter"
-        },
-        {
-          "count": 2,
-          "name": "Hushwood Verge"
-        },
-        {
-          "count": 1,
-          "name": "Surrak, Elusive Hunter"
-        },
-        {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 2,
-          "name": "Dromoka's Command"
-        },
-        {
-          "count": 2,
-          "name": "Duskwatch Recruiter"
-        },
-        {
-          "count": 1,
-          "name": "Scavenging Ooze"
-        },
-        {
-          "count": 4,
-          "name": "Llanowar Elves"
-        },
-        {
-          "count": 4,
-          "name": "Brushland"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Surrak, Elusive Hunter"
-        },
-        {
-          "count": 3,
-          "name": "Seam Rip"
-        },
-        {
-          "count": 2,
-          "name": "Erode"
-        },
-        {
-          "count": 2,
-          "name": "Knight of Autumn"
-        },
-        {
-          "count": 1,
-          "name": "Scavenging Ooze"
-        },
-        {
-          "count": 1,
-          "name": "Unlicensed Hearse"
-        },
-        {
-          "count": 1,
-          "name": "Extraction Specialist"
-        },
-        {
-          "count": 4,
-          "name": "Solarium Sentry"
-        }
-      ]
-    },
-    {
       "name": "Azorius Control",
       "author": "MTGGoldfish",
       "colors": [
@@ -560,6 +433,133 @@
         {
           "count": 3,
           "name": "Mystical Dispute"
+        }
+      ]
+    },
+    {
+      "name": "Selesnya Company",
+      "author": "MTGGoldfish",
+      "colors": [
+        "W",
+        "G"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Razorverge Thicket"
+        },
+        {
+          "count": 4,
+          "name": "Elvish Mystic"
+        },
+        {
+          "count": 4,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 4,
+          "name": "Collected Company"
+        },
+        {
+          "count": 4,
+          "name": "Enduring Innocence"
+        },
+        {
+          "count": 2,
+          "name": "Abandoned Air Temple"
+        },
+        {
+          "count": 2,
+          "name": "Plains"
+        },
+        {
+          "count": 4,
+          "name": "Skyclave Apparition"
+        },
+        {
+          "count": 4,
+          "name": "Badgermole Cub"
+        },
+        {
+          "count": 3,
+          "name": "Forest"
+        },
+        {
+          "count": 4,
+          "name": "Archon of Emeria"
+        },
+        {
+          "count": 4,
+          "name": "Aven Interrupter"
+        },
+        {
+          "count": 2,
+          "name": "Hushwood Verge"
+        },
+        {
+          "count": 1,
+          "name": "Surrak, Elusive Hunter"
+        },
+        {
+          "count": 1,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 2,
+          "name": "Dromoka's Command"
+        },
+        {
+          "count": 2,
+          "name": "Duskwatch Recruiter"
+        },
+        {
+          "count": 1,
+          "name": "Scavenging Ooze"
+        },
+        {
+          "count": 4,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 4,
+          "name": "Brushland"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Surrak, Elusive Hunter"
+        },
+        {
+          "count": 3,
+          "name": "Seam Rip"
+        },
+        {
+          "count": 2,
+          "name": "Erode"
+        },
+        {
+          "count": 2,
+          "name": "Knight of Autumn"
+        },
+        {
+          "count": 1,
+          "name": "Scavenging Ooze"
+        },
+        {
+          "count": 1,
+          "name": "Unlicensed Hearse"
+        },
+        {
+          "count": 1,
+          "name": "Extraction Specialist"
+        },
+        {
+          "count": 4,
+          "name": "Solarium Sentry"
         }
       ]
     },
@@ -834,6 +834,149 @@
         {
           "count": 2,
           "name": "Spell Pierce"
+        }
+      ]
+    },
+    {
+      "name": "Temur Lessons",
+      "author": "MTGGoldfish",
+      "colors": [
+        "U",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 3,
+          "name": "Accumulate Wisdom"
+        },
+        {
+          "count": 4,
+          "name": "Gran-Gran"
+        },
+        {
+          "count": 4,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 4,
+          "name": "Firebending Lesson"
+        },
+        {
+          "count": 3,
+          "name": "Island"
+        },
+        {
+          "count": 4,
+          "name": "Divide by Zero"
+        },
+        {
+          "count": 4,
+          "name": "Tablet of Discovery"
+        },
+        {
+          "count": 4,
+          "name": "Riverpyre Verge"
+        },
+        {
+          "count": 1,
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 3,
+          "name": "Steam Vents"
+        },
+        {
+          "count": 4,
+          "name": "Combustion Technique"
+        },
+        {
+          "count": 3,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 3,
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 2,
+          "name": "Pop Quiz"
+        },
+        {
+          "count": 4,
+          "name": "Abandon Attachments"
+        },
+        {
+          "count": 3,
+          "name": "Thor, God of Thunder"
+        },
+        {
+          "count": 4,
+          "name": "Willowrush Verge"
+        },
+        {
+          "count": 2,
+          "name": "Questing Druid"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 1,
+          "name": "Environmental Sciences"
+        },
+        {
+          "count": 1,
+          "name": "Sokka's Haiku"
+        },
+        {
+          "count": 1,
+          "name": "Pop Quiz"
+        },
+        {
+          "count": 1,
+          "name": "Iroh's Demonstration"
+        },
+        {
+          "count": 1,
+          "name": "Accumulate Wisdom"
+        },
+        {
+          "count": 1,
+          "name": "Improvisation Capstone"
+        },
+        {
+          "count": 1,
+          "name": "Price of Freedom"
+        },
+        {
+          "count": 1,
+          "name": "Origin of Metalbending"
+        },
+        {
+          "count": 1,
+          "name": "True Ancestry"
+        },
+        {
+          "count": 2,
+          "name": "Fresh Start"
+        },
+        {
+          "count": 2,
+          "name": "Aether Gust"
+        },
+        {
+          "count": 1,
+          "name": "Questing Druid"
         }
       ]
     },
@@ -1129,10 +1272,11 @@
       ]
     },
     {
-      "name": "Temur Lessons",
+      "name": "Jund Sacrifice",
       "author": "MTGGoldfish",
       "colors": [
-        "U",
+        "B",
+        "G",
         "R"
       ],
       "tags": [
@@ -1140,277 +1284,154 @@
       ],
       "main": [
         {
-          "count": 3,
-          "name": "Accumulate Wisdom"
-        },
-        {
           "count": 4,
-          "name": "Gran-Gran"
-        },
-        {
-          "count": 4,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 4,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 3,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Divide by Zero"
-        },
-        {
-          "count": 4,
-          "name": "Tablet of Discovery"
-        },
-        {
-          "count": 4,
-          "name": "Riverpyre Verge"
+          "name": "Scavenger's Talent"
         },
         {
           "count": 1,
-          "name": "Riverglide Pathway"
+          "name": "Obsessive Pursuit"
         },
         {
-          "count": 3,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 4,
-          "name": "Combustion Technique"
-        },
-        {
-          "count": 3,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 3,
-          "name": "Riverglide Pathway"
+          "count": 1,
+          "name": "Lively Dirge"
         },
         {
           "count": 2,
-          "name": "Pop Quiz"
+          "name": "Blazemire Verge"
         },
         {
           "count": 4,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 3,
-          "name": "Thor, God of Thunder"
+          "name": "Witch's Oven"
         },
         {
           "count": 4,
-          "name": "Willowrush Verge"
+          "name": "Cauldron Familiar"
+        },
+        {
+          "count": 1,
+          "name": "Professor Dellian Fel"
         },
         {
           "count": 2,
-          "name": "Questing Druid"
+          "name": "Overgrown Tomb"
+        },
+        {
+          "count": 4,
+          "name": "Blooming Marsh"
+        },
+        {
+          "count": 2,
+          "name": "Thoughtseize"
+        },
+        {
+          "count": 1,
+          "name": "Sokenzan, Crucible of Defiance"
+        },
+        {
+          "count": 3,
+          "name": "Blackcleave Cliffs"
+        },
+        {
+          "count": 1,
+          "name": "Blackcleave Cliffs"
+        },
+        {
+          "count": 1,
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 1,
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 4,
+          "name": "Mana Confluence"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
         },
         {
           "count": 1,
           "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Deadly Dispute"
+        },
+        {
+          "count": 2,
+          "name": "Fatal Push"
+        },
+        {
+          "count": 2,
+          "name": "Mayhem Devil"
+        },
+        {
+          "count": 4,
+          "name": "Biotech Specialist"
+        },
+        {
+          "count": 2,
+          "name": "Eyetwitch"
+        },
+        {
+          "count": 1,
+          "name": "Copperline Gorge"
+        },
+        {
+          "count": 3,
+          "name": "The Sackville-Bagginses"
+        },
+        {
+          "count": 3,
+          "name": "Gilded Goose"
+        },
+        {
+          "count": 1,
+          "name": "Ygra, Eater of All"
         }
       ],
       "sideboard": [
         {
-          "count": 1,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 1,
-          "name": "Environmental Sciences"
-        },
-        {
-          "count": 1,
-          "name": "Sokka's Haiku"
-        },
-        {
-          "count": 1,
-          "name": "Pop Quiz"
-        },
-        {
-          "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 1,
-          "name": "Accumulate Wisdom"
-        },
-        {
-          "count": 1,
-          "name": "Improvisation Capstone"
-        },
-        {
-          "count": 1,
-          "name": "Price of Freedom"
+          "count": 2,
+          "name": "Fatal Push"
         },
         {
           "count": 1,
           "name": "Origin of Metalbending"
         },
         {
-          "count": 1,
-          "name": "True Ancestry"
+          "count": 2,
+          "name": "Unlicensed Hearse"
         },
         {
           "count": 2,
-          "name": "Fresh Start"
+          "name": "Thoughtseize"
         },
         {
           "count": 2,
-          "name": "Aether Gust"
+          "name": "Pick Your Poison"
         },
         {
           "count": 1,
-          "name": "Questing Druid"
-        }
-      ]
-    },
-    {
-      "name": "Izzet Prowess",
-      "author": "MTGGoldfish",
-      "colors": [
-        "R",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Academic Dispute"
-        },
-        {
-          "count": 2,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
+          "name": "Decorum Dissertation"
         },
         {
           "count": 1,
-          "name": "Den of the Bugbear"
-        },
-        {
-          "count": 4,
-          "name": "Emberheart Challenger"
-        },
-        {
-          "count": 1,
-          "name": "Hearth Elemental"
-        },
-        {
-          "count": 4,
-          "name": "Heroes' Hangout"
-        },
-        {
-          "count": 3,
-          "name": "Shivan Reef"
-        },
-        {
-          "count": 3,
-          "name": "Monstrous Rage"
-        },
-        {
-          "count": 4,
-          "name": "Pompous Battlemage"
-        },
-        {
-          "count": 3,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Reckless Rage"
-        },
-        {
-          "count": 4,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Slickshot Show-Off"
-        },
-        {
-          "count": 4,
-          "name": "Monastery Swiftspear"
-        },
-        {
-          "count": 4,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 4,
-          "name": "Stormchaser's Talent"
-        },
-        {
-          "count": 4,
-          "name": "Wrenn's Resolve"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 1,
-          "name": "Aether Gust"
-        },
-        {
-          "count": 1,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 1,
-          "name": "Fiery Impulse"
-        },
-        {
-          "count": 1,
-          "name": "Firebending Lesson"
+          "name": "The Meathook Massacre"
         },
         {
           "count": 1,
           "name": "Iroh's Demonstration"
         },
         {
-          "count": 2,
-          "name": "Octopus Form"
-        },
-        {
-          "count": 2,
-          "name": "Precise Redaction"
-        },
-        {
           "count": 1,
-          "name": "Redcap Melee"
-        },
-        {
-          "count": 1,
-          "name": "Rending Volley"
+          "name": "Abrade"
         },
         {
           "count": 2,
-          "name": "Spider-Sense"
-        },
-        {
-          "count": 1,
-          "name": "Stormwing Entity"
+          "name": "Leyline of the Void"
         }
       ]
     }
