@@ -117,6 +117,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::CantLoseLife, handle_rule_mod);
     registry.insert(StaticMode::UnspentManaLossCausesLifeLoss, handle_rule_mod);
     registry.insert(StaticMode::WinFirstCoinFlipSetEachTurn, handle_rule_mod);
+    // CR 120.6 + CR 704.5g + CR 613.11: rule modification read at query time by
+    // game/lethal_damage.rs::lethal_damage_basis.
+    registry.insert(StaticMode::LethalDamageDeterminedByPower, handle_rule_mod);
     registry.insert(StaticMode::MustAttack, handle_rule_mod);
     registry.insert(StaticMode::MustBlock, handle_rule_mod);
     // Note: CantDraw is a data-carrying variant — runtime enforcement is in

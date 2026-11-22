@@ -362,8 +362,37 @@ pub(crate) fn parse_superlative_property_head(
 /// CR 208.1: Possessive phrase introducing a creature's *own* stat in a
 /// self-referential P/T comparison — "its", "their", or "that creature's".
 /// All refer to the candidate object itself, not the ability source.
-fn parse_pt_possessive(input: &str) -> OracleResult<'_, &str> {
+pub(crate) fn parse_pt_possessive(input: &str) -> OracleResult<'_, &str> {
     alt((tag("its "), tag("their "), tag("that creature's "))).parse(input)
+}
+
+/// Peel a trailing spell P/T qualifier from a cost-modifier subject.
+/// A recognized stat with an invalid comparison is an error.
+pub fn split_spell_pt_qualifier(
+    subject: &str,
+) -> Result<(&str, Option<FilterProp>), nom::Err<super::error::OracleError<'_>>> {
+    use super::primitives::split_once_on;
+    use nom::combinator::{all_consuming, eof, peek};
+
+    let Ok((_, (prefix, tail))) = split_once_on(subject, " with ") else {
+        return Ok((subject, None));
+    };
+    if peek((
+        opt(tag::<_, _, super::error::OracleError<'_>>("base ")),
+        alt((
+            tag("power"),
+            tag("toughness"),
+            tag("total power and toughness"),
+        )),
+        alt((space1, eof)),
+    ))
+    .parse(tail)
+    .is_err()
+    {
+        return Ok((subject, None));
+    }
+    let (_, prop) = all_consuming(parse_pt_comparison).parse(tail)?;
+    Ok((prefix, Some(prop)))
 }
 
 /// CR 208.1: "toughness greater than <poss> power" → [`FilterProp::ToughnessGTPower`]
