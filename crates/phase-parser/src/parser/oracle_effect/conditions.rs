@@ -169,6 +169,15 @@ fn type_filter_references_subtype(filter: &TypeFilter) -> bool {
 pub(crate) fn split_leading_conditional(text: &str) -> Option<(String, String)> {
     let lower = text.to_lowercase();
     let prefix_rest = parse_leading_conditional_prefix(&lower)?;
+    if nom_condition::parse_named_cycling_head(prefix_rest).is_ok() {
+        let (comma, _) = nom_condition::parse_named_game_cycling_condition(prefix_rest).ok()?;
+        let comma = TextPair::new(text, &lower).original_remainder(comma)?;
+        let guard = text.strip_suffix(comma)?; // allow-noncombinator: split at the TextPair-mapped comma
+        let (body, _) = tag::<_, _, OracleError<'_>>(",").parse(comma).ok()?;
+        let body = body.trim();
+        return (!body.is_empty()).then(|| (guard.trim().to_owned(), body.to_owned()));
+    }
+
     let condition_start_idx = lower.len() - prefix_rest.len();
 
     let mut paren_depth = 0u32;
@@ -6918,7 +6927,7 @@ fn build_instead_def(
         &effect_text,
         kind,
         parent_target_available,
-        ctx.effective_spell_anaphor_binding(),
+        ctx,
     );
     let mut result = super::instead_override_definition(
         instead_def,
@@ -19222,5 +19231,51 @@ mod referent_owner_tests {
             writers[0].contains("fn referent_condition"), // allow-noncombinator: source-reading test instrument, not Oracle parsing
             "the single writer must be referent_condition, found {writers:?}"
         );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn named_cycling_split_commits_at_the_first_structural_suffix() {
+    use crate::types::ability::CyclingHistoryWindow;
+
+    // No printed card has these adversarial shapes. Yidaro, Wandering Monster
+    // is the nearest printed case.
+    let body = "counter nine or more times this game, then draw a card.";
+    for name in ["Yidaro, Wandering Monster", "Yidaro,   Wandering Monster"] {
+        let guard = format!("If you've cycled a card named {name} four or more times this game");
+        let text = format!("{guard},  {body}  ");
+        let (actual_guard, actual_body) =
+            split_leading_conditional(&text).expect("named game guard");
+        assert_eq!(actual_guard, guard);
+        assert_eq!(actual_body, body);
+        let lower = actual_guard.to_lowercase();
+        let (rest, condition) =
+            nom_condition::parse_inner_condition(parse_leading_conditional_prefix(&lower).unwrap())
+                .unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(
+            condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CardsCycled {
+                        scope: crate::types::ability::CountScope::Controller,
+                        window: CyclingHistoryWindow::ThisGame,
+                        name: Some("yidaro, wandering monster".into()),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            }
+        );
+    }
+    for suffix in [
+        "four or more times this turn",
+        "four or fewer times this game",
+        "four or more times this game during your turn",
+    ] {
+        let text =
+            format!("If you've cycled a card named Yidaro, Wandering Monster {suffix}, {body}");
+        assert_eq!(split_leading_conditional(&text), None, "{text}");
     }
 }

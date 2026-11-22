@@ -2254,6 +2254,20 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player } => {
             format!("loyalty abilities activated this turn ({player:?})")
         }
+        QuantityRef::CardsCycled {
+            scope,
+            window,
+            name,
+        } => {
+            let window = match window {
+                crate::types::ability::CyclingHistoryWindow::ThisTurn => "this turn",
+                crate::types::ability::CyclingHistoryWindow::ThisGame => "this game",
+            };
+            match name {
+                None => format!("cards cycled {window} ({scope:?})"),
+                Some(name) => format!("cards named {name} cycled {window} ({scope:?})"),
+            }
+        }
         QuantityRef::SpellsCastThisGame { scope, filter } => match (scope, filter) {
             (CountScope::Controller, None) => "spells you've cast this game".into(),
             (scope, None) => format!("spells cast this game ({scope:?})"),
@@ -12174,6 +12188,7 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
 fn window_attr_support(attr: &QuantityRef) -> FeatureSupport {
     use FeatureSupport::*;
     match attr {
+        QuantityRef::CardsCycled { .. } => Unhandled,
         QuantityRef::SpellsCast {
             scope: _,
             filter: _,
@@ -12856,6 +12871,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } => {
             ("LoyaltyAbilitiesActivatedThisTurn", Handled)
         }
+        QuantityRef::CardsCycled { .. } => ("CardsCycled", Handled),
         QuantityRef::SpellsCastThisGame { .. } => ("SpellsCastThisGame", Handled),
         QuantityRef::CounterAddedThisTurn { .. } => ("CounterAddedThisTurn", Handled),
         QuantityRef::CardsDiscardedThisTurn { .. } => ("CardsDiscardedThisTurn", Handled),
@@ -29861,6 +29877,50 @@ mod unpublished_event_source_tests {
             "{:?}",
             card_face_gaps(&kain)
         );
+    }
+}
+
+#[cfg(test)]
+mod cycling_quantity_coverage_tests {
+    use super::*;
+    use crate::types::ability::CyclingHistoryWindow;
+
+    #[test]
+    fn phase3_v3_v4_cycling_quantity_support_is_context_sensitive() {
+        use crate::types::ability::PlayerRelation;
+
+        let named = "Yidaro, Wandering Monster".to_owned();
+        let feature = |qty, key| {
+            let mut features = HashMap::new();
+            extract_quantity_features(&QuantityExpr::Ref { qty }, &mut features);
+            features[&ResolverFeatureFamily::QuantityRef.key(key)]
+        };
+        for window in [
+            CyclingHistoryWindow::ThisTurn,
+            CyclingHistoryWindow::ThisGame,
+        ] {
+            let cycle = |name| QuantityRef::CardsCycled {
+                scope: CountScope::ScopedPlayer,
+                window,
+                name,
+            };
+            for name in [None, Some(named.clone())] {
+                let attr = cycle(name);
+                assert_eq!(
+                    feature(attr.clone(), "CardsCycled"),
+                    FeatureSupport::Handled
+                );
+                let outer = QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::All,
+                        attr: Box::new(attr),
+                        comparator: Comparator::GE,
+                        value: Box::new(QuantityExpr::Fixed { value: 0 }),
+                    },
+                };
+                assert_eq!(feature(outer, "PlayerCount"), FeatureSupport::Unhandled);
+            }
+        }
     }
 }
 
