@@ -480,6 +480,92 @@ fn a_cancelled_cast_records_no_dilemma() {
     assert_eq!(dilemmas(&runner, P0), 1);
 }
 
+/// R10b — CR 602.2b + CR 733.1: an activated ability cancelled after its mode
+/// choice faces no dilemma that is recorded, and its "whenever you face a
+/// dilemma" trigger never reaches the stack.
+#[test]
+fn a_cancelled_activation_records_no_dilemma() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = board();
+    add_seven(&mut scenario, P0, db);
+    let cankerbloom = scenario.add_real_card(P0, "Cankerbloom", Zone::Battlefield, db);
+    // Two legal artifact targets (P0's Seven of Nine and P1's Sol Ring), so
+    // the destroy-artifact mode raises its target prompt instead of
+    // auto-targeting a single artifact.
+    scenario.add_real_card(P1, "Sol Ring", Zone::Battlefield, db);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let mut runner = scenario.build();
+    let hand = hand_len(&runner, P0);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: cankerbloom,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Cankerbloom");
+    runner
+        .act(GameAction::SelectModes { indices: vec![0] })
+        .expect("choose the destroy-artifact mode");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "REACH: the destroy-artifact mode asks for its target: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::CancelCast)
+        .expect("cancel the activation");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ),
+        "the cancelled activation returns to the priority window: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the ability never reached the stack"
+    );
+    // The sacrifice is a commit-time cost, paid after the targets are chosen,
+    // so nothing was sacrificed at the cancelled prompt.
+    assert_eq!(
+        runner.state().objects[&cankerbloom].zone,
+        Zone::Battlefield,
+        "the sacrifice cost was never paid"
+    );
+    assert_eq!(hand_len(&runner, P0), hand, "Seven never drew");
+    assert_eq!(dilemmas(&runner, P0), 0);
+    drive(&mut runner, Plan::default());
+
+    // Positive: reactivate with the targetless proliferate mode (index 2);
+    // that announcement reaches the stack, so the dilemma is recorded and
+    // Seven drew once.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: cankerbloom,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("reactivate Cankerbloom");
+    drive(
+        &mut runner,
+        Plan {
+            modes: vec![vec![2]],
+            ..Plan::default()
+        },
+    );
+    assert_eq!(
+        runner.state().objects[&cankerbloom].zone,
+        Zone::Graveyard,
+        "REACH: the sacrifice cost was paid this time"
+    );
+    assert_eq!(hand_len(&runner, P0), hand + 1, "Seven drew once");
+    assert_eq!(dilemmas(&runner, P0), 1);
+}
+
 /// R12 — CR 113.6m: Gabriel Lorca's ability works from the graveyard; paying
 /// {B} returns it to its owner's hand.
 #[test]
