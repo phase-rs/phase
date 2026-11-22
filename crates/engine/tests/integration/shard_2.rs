@@ -222,6 +222,7 @@ mod census_release_batch_3;
 mod census_release_batch_4;
 mod census_release_batch_5;
 mod census_release_batch_7;
+mod census_release_batch_8;
 mod census_release_next_cast;
 mod chain_of_smog_copy;
 mod chain_root_target_suspension;
