@@ -51,6 +51,7 @@ use crate::types::ability::{
 };
 use crate::types::counter::CounterType;
 use crate::types::event_kinds::PlayerActionKind;
+#[cfg(test)]
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
@@ -3227,26 +3228,7 @@ fn parse_optional_offer_accepted_clause(
 /// suspended cards (no ownership restriction). Never a one-off `Suspended` tag or a
 /// verbatim string match.
 pub(crate) fn suspended_card_filter(owner: Option<ControllerRef>) -> TargetFilter {
-    use crate::types::counter::{CounterMatch, CounterType};
-    let mut properties = vec![
-        // CR 400.1: in the exile zone.
-        FilterProp::InZone { zone: Zone::Exile },
-        // CR 702.62b: has suspend.
-        FilterProp::HasKeywordKind {
-            value: KeywordKind::Suspend,
-        },
-        // CR 702.62b: bears at least one time counter.
-        FilterProp::Counters {
-            counters: CounterMatch::OfType(CounterType::Time),
-            comparator: Comparator::GE,
-            count: QuantityExpr::Fixed { value: 1 },
-        },
-    ];
-    if let Some(o) = owner {
-        // CR 108.3: owned by the given player reference.
-        properties.push(FilterProp::Owned { controller: o });
-    }
-    TargetFilter::Typed(TypedFilter::card().properties(properties))
+    TargetFilter::suspended_card(owner)
 }
 
 /// Parse the clause after "for each" into a QuantityRef.

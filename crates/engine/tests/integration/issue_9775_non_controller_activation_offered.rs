@@ -219,3 +219,33 @@ fn any_player_may_activate_is_offered_to_both_controller_and_opponent() {
         "the controller is still offered its own any-player ability at instant speed"
     );
 }
+
+/// CR 602.2: the blocked-ability read-out scopes the battlefield the same way the
+/// offer does, so an opponent who may activate Mercenaries but cannot pay {3}
+/// sees it as blocked; with {3} available, it is offered and not blocked.
+#[test]
+fn any_player_may_activate_reports_the_opponents_unpayable_cost() {
+    let build = |mana: usize| {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        let mercs = s
+            .add_creature_from_oracle(P1, "Mercenaries", 3, 3, MERCENARIES)
+            .id();
+        s.with_mana_pool(P0, colorless(mana));
+        (s.build(), mercs)
+    };
+
+    let (poor, mercs) = build(0);
+    assert_eq!(priority_holder(&poor), P0, "reach guard: P0 holds priority");
+    assert!(
+        engine::ai_support::activation_block_reasons(poor.state()).contains_key(&mercs),
+        "the opponent sees the any-player ability it cannot pay for"
+    );
+
+    let (rich, mercs) = build(3);
+    assert!(legal_actions(rich.state()).contains(&activate(mercs)));
+    assert!(
+        !engine::ai_support::activation_block_reasons(rich.state()).contains_key(&mercs),
+        "a payable any-player ability is offered, not blocked"
+    );
+}

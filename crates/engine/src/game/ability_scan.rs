@@ -4846,7 +4846,8 @@ fn scan_parsed_condition(x: &ParsedCondition, mode: ScanMode) -> Axes<'_> {
         }
         ParsedCondition::IsOpponentsTurn => Axes::NONE,
         // CR 601.2c: the targets the spell being cast has chosen.
-        ParsedCondition::SpellTargetsFilter { filter } => {
+        ParsedCondition::SourceMatchesFilter { filter }
+        | ParsedCondition::SpellTargetsFilter { filter } => {
             scan_target_filter(filter, FilterReadContext::SnapshotOrEvent, mode)
         }
         ParsedCondition::And { conditions } | ParsedCondition::Or { conditions } => conditions

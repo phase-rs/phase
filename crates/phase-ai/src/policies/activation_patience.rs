@@ -670,6 +670,18 @@ fn cost_rider_reads_a_hand(rider: &CostReduction) -> bool {
         || rider.condition.as_ref().is_some_and(condition_reads_a_hand)
 }
 
+/// Follow the source's counter threshold, including its Boolean filter wrappers.
+fn source_filter_reads_a_hand(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(filter) => filter.properties.iter().any(|property| {
+            matches!(property, engine::types::ability::FilterProp::Counters { count, .. } if count.any_ref(&mut reads_a_hand))
+        }),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters.iter().any(source_filter_reads_a_hand),
+        TargetFilter::Not { filter } => source_filter_reads_a_hand(filter),
+        _ => false,
+    }
+}
+
 /// Does `condition` test a hand that can be the AI's, in either direction? Unlike
 /// [`condition_caps_hand`], a floor counts too: Arm-Mounted Anchor's equip costs {2} less with
 /// one or fewer cards in hand.
@@ -690,6 +702,7 @@ fn condition_reads_a_hand(condition: &ParsedCondition) -> bool {
             conditions.iter().any(condition_reads_a_hand)
         }
         ParsedCondition::Not { condition } => condition_reads_a_hand(condition),
+        ParsedCondition::SourceMatchesFilter { filter } => source_filter_reads_a_hand(filter),
         ParsedCondition::SourceInZone { .. }
         | ParsedCondition::SourceIsAttacking
         | ParsedCondition::SourceIsAttackingOrBlocking
