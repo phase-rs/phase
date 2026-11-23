@@ -254,6 +254,7 @@ fn board() -> Board {
         .id();
     let grizzly_bears = scenario
         .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
         .with_mana_cost(cost(1, vec![ManaCostShard::Green]))
         .id();
     let opposing_ritual = scenario
@@ -697,6 +698,7 @@ fn grim_captains_locker_grants_escape_to_the_creature_cards() {
         .id();
     let grizzly_bears = scenario
         .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
         .with_mana_cost(cost(1, vec![ManaCostShard::Green]))
         .id();
     let pyretic_ritual = scenario
@@ -707,6 +709,7 @@ fn grim_captains_locker_grants_escape_to_the_creature_cards() {
     scenario.with_graveyard(P0, &["Other 0", "Other 1", "Other 2", "Other 3"]);
     let opposing_bears = scenario
         .add_creature_to_graveyard(P1, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
         .with_mana_cost(cost(1, vec![ManaCostShard::Green]))
         .id();
     library(&mut scenario, P0, 3);
@@ -774,14 +777,20 @@ fn ghost_ark_crew_trigger_grants_unearth_to_the_artifact_creature_cards() {
         .with_subtypes(vec!["Vehicle"])
         .with_mana_cost(cost(4, vec![]))
         .id();
-    let pilot = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let pilot = scenario
+        .add_creature(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .id();
     let ornithopter = scenario
         .add_creature_to_graveyard(P0, "Ornithopter", 0, 2)
         .as_artifact_creature()
+        .with_subtypes(vec!["Thopter"])
+        .flying()
         .with_mana_cost(ManaCost::zero())
         .id();
     let grizzly_bears = scenario
         .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
         .with_mana_cost(cost(1, vec![ManaCostShard::Green]))
         .id();
     let pyretic_ritual = scenario
@@ -792,6 +801,8 @@ fn ghost_ark_crew_trigger_grants_unearth_to_the_artifact_creature_cards() {
     let late_artifact_creature = scenario
         .add_creature_to_hand(P0, "Ornithopter", 0, 2)
         .as_artifact_creature()
+        .with_subtypes(vec!["Thopter"])
+        .flying()
         .with_mana_cost(ManaCost::zero())
         .id();
     library(&mut scenario, P0, 3);
@@ -985,7 +996,10 @@ fn a_split_card_pays_only_the_half_it_casts() {
             .add_spell_to_hand_from_oracle(P0, "Past in Flames", false, PAST_IN_FLAMES)
             .with_mana_cost(cost(3, vec![ManaCostShard::Red]))
             .id();
-        let target = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let target = scenario
+            .add_creature(P1, "Grizzly Bears", 2, 2)
+            .with_subtypes(vec!["Bear"])
+            .id();
         library(&mut scenario, P0, 3);
         pool(&mut scenario, "CCCR");
         let mut runner = scenario.build();
