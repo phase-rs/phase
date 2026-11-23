@@ -3985,7 +3985,19 @@ fn assert_trigger_relative_pt_source(
             matches!(
                 trigger.mode,
                 TriggerMode::ChangesZone | TriggerMode::Attacks
-            )
+            ) && trigger_effects(trigger)
+                .into_iter()
+                .any(|effect| match effect {
+                    Effect::ChangeZone { target, .. }
+                    | Effect::GainControl { target, .. }
+                    | Effect::GiveControl { target, .. }
+                    | Effect::SetTapState { target, .. } => {
+                        filter_contains_filter_prop(&target, &|prop| {
+                            matches!(prop, FilterProp::PtComparison { .. })
+                        })
+                    }
+                    _ => false,
+                })
         })
         .unwrap_or_else(|| panic!("{name}: expected relative-P/T trigger"));
     assert_no_unimplemented(trigger.execute.as_deref().expect("trigger effect"));

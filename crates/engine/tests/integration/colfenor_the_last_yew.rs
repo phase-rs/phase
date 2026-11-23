@@ -8,7 +8,7 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -119,15 +119,17 @@ fn colfenor_returns_strictly_lesser_card_and_excludes_dying_trigger_object() {
         .id();
 
     let mut runner = scenario.build();
-    let card_id = runner.state().objects[&murder].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: murder,
-            card_id,
-            targets: vec![dying],
-            payment_mode: CastPaymentMode::Auto,
-        })
-        .expect("cast real Murder through the public action path");
+    runner.cast(murder).target_objects(&[dying]).commit();
+
+    for _ in 0..8 {
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority to resolve real Murder");
+        } else {
+            break;
+        }
+    }
 
     assert_eq!(runner.state().objects[&colfenor].zone, Zone::Battlefield);
     resolve_colfenor_trigger(&mut runner, strict_lesser, dying, equal_toughness);
