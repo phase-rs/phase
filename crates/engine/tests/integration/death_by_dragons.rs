@@ -21,6 +21,7 @@ use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::proposed_event::ProposedEvent;
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
@@ -488,6 +489,28 @@ fn assert_bears(state: &GameState, id: ObjectId, controller: PlayerId) {
         "{controller:?}'s token must be a Bear"
     );
     assert_eq!((token.power, token.toughness), (Some(2), Some(2)));
+}
+
+/// Jinnie Fay's Cat branch: a 2/2 green Cat creature token with haste. The
+/// name check pins the engine's subtype-named token convention, as in
+/// `assert_dragon`.
+fn assert_cat(state: &GameState, id: ObjectId, controller: PlayerId) {
+    let token = &state.objects[&id];
+    assert_eq!(token.controller, controller);
+    assert_eq!(token.name, "Cat", "{controller:?}'s token must be a Cat");
+    assert_eq!((token.power, token.toughness), (Some(2), Some(2)));
+    assert_eq!(token.color, vec![ManaColor::Green]);
+    assert!(token.card_types.core_types.contains(&CoreType::Creature));
+    assert!(
+        token
+            .card_types
+            .subtypes
+            .iter()
+            .any(|subtype| subtype == "Cat"),
+        "token must retain its Cat subtype: {:?}",
+        token.card_types.subtypes
+    );
+    assert!(token.keywords.contains(&Keyword::Haste));
 }
 
 fn assert_angel(state: &GameState, id: ObjectId, controller: PlayerId) {
@@ -1509,9 +1532,11 @@ fn death_by_dragons_two_accepted_substitutes_decide_in_apnap_order() {
     );
 }
 
-/// The parked substitute is a parked replacement: when its decider leaves, the
-/// prompt and the record are torn down like any other parked replacement. The
-/// survivors' part is phase 3's work and is not asserted here.
+/// CR 800.4b + CR 800.4d + CR 608.2f + CR 616.1 + CR 101.4: the parked
+/// substitute is a parked replacement — when its decider leaves, the prompt
+/// and the record are torn down — and the survivors' part of the one
+/// simultaneous event still happens: P0's batch, already past creation,
+/// enters as Bears through the shared entry Reflection.
 #[test]
 fn death_by_dragons_substitute_decider_concedes_is_torn_down() {
     let mut scenario = game();
@@ -1570,6 +1595,33 @@ fn death_by_dragons_substitute_decider_concedes_is_torn_down() {
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "the game is at Priority after the Concede boundary, got {:?}",
         runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().objects[&dragons].zone,
+        Zone::Graveyard,
+        "Death by Dragons must reach the graveyard once the clause completes"
+    );
+    let state = runner.state();
+    let p0_tokens = controlled_tokens(state, P0);
+    assert_eq!(p0_tokens.len(), 1, "P0 must create exactly one token");
+    assert_bears(state, p0_tokens[0], P0);
+    assert!(
+        controlled_tokens(state, P1).is_empty(),
+        "the departed decider creates no tokens"
+    );
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_no_dragons(state);
+    assert!(
+        reflection_consumed(state),
+        "Reflection must be used by the shared entry"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(vec![p0_tokens[0]]),
+        "the created referent must be P0's Bear"
     );
 }
 
@@ -2347,4 +2399,854 @@ fn death_by_dragons_two_substitutions_without_entry_copy_stay_sequential() {
     );
     assert_no_dragons(state);
     outcome.assert_zone(&[dragons], Zone::Graveyard);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 (P1): departure keeps the survivors' part. A player can leave while
+// a token-creation replacement is parked; the leaver's batches create nothing
+// (CR 800.4b, CR 800.4d) while the rest of the one simultaneous event still
+// happens for the survivors (CR 608.2f), who keep choosing for their own parts
+// in APNAP order (CR 616.1, CR 101.4).
+// ---------------------------------------------------------------------------
+
+/// Assert the live prompt is P1's Jinnie Fay accept/decline (the creation-layer
+/// park every departure row below concedes or SBA-discovers from).
+fn assert_jinnie_optional_parked(runner: &GameRunner, jinnie: ObjectId) {
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidates,
+        kind,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected P1's Jinnie accept/decline prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        kind,
+        ReplacementChoiceKind::OptionalBranch,
+        "expected an accept/decline choice, got {kind:?}"
+    );
+    assert_eq!(
+        player, P1,
+        "the accept/decline choice belongs to P1, got {player:?}"
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.source_id == jinnie),
+        "the optional prompt must offer Jinnie's replacement: {candidates:?}"
+    );
+}
+
+/// CR 800.4b + CR 800.4d + CR 608.2f + CR 616.1 + CR 101.4 (P1-M1, maintainer
+/// witness verbatim): three players, P1 controls Jinnie Fay; P0 casts Death
+/// by Dragons targeting P2; at P1's Jinnie accept/decline prompt P1 takes the
+/// public Concede action; the game finishes with P0's 5/5 red flying Dragon,
+/// no P2 token, no pending clause, an empty stack and priority.
+#[test]
+fn death_by_dragons_chooser_concedes_survivor_keeps_dragon() {
+    let mut scenario = game();
+    let jinnie = scenario
+        .add_creature_from_oracle(P1, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    assert_jinnie_optional_parked(&runner, jinnie);
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes at its Jinnie prompt");
+    assert!(
+        runner.state().players[1].is_eliminated,
+        "reach guard: P1 left the game"
+    );
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    let p0_tokens = controlled_tokens(state, P0);
+    assert_eq!(p0_tokens.len(), 1, "P0 must create exactly one Dragon");
+    assert_dragon(state, p0_tokens[0], P0);
+    assert!(
+        controlled_tokens(state, P1).is_empty(),
+        "the departed chooser creates no tokens"
+    );
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    for id in state.battlefield.iter() {
+        let name = state.objects[id].name.as_str();
+        assert!(
+            name != "Cat" && name != "Dog",
+            "no Cat or Dog may be created for the departed decider"
+        );
+    }
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(vec![p0_tokens[0]]),
+        "the created referent must be P0's Dragon"
+    );
+}
+
+/// CR 800.4b + CR 800.4d + CR 608.2f + CR 616.1 (P3-D1b): a non-chooser batch
+/// owner leaves while a survivor's optional is parked — P0 (the caster)
+/// concedes at P1's Jinnie prompt. The park stands for the living chooser
+/// with P0's batch pruned, P1 still chooses, and the completion exiles Death
+/// by Dragons (its caster left, CR 800.4a).
+#[test]
+fn death_by_dragons_non_chooser_owner_leaves_survivor_still_chooses() {
+    let mut scenario = game();
+    let jinnie = scenario
+        .add_creature_from_oracle(P1, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    assert_jinnie_optional_parked(&runner, jinnie);
+    runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("P0 concedes at P1's Jinnie prompt");
+    assert!(
+        runner.state().players[0].is_eliminated,
+        "reach guard: P0 left the game"
+    );
+    // STRUCTURAL (red at base): the repair is inert — the park stands for
+    // living chooser P1 — and P0's batch is pruned from it.
+    let pending = runner
+        .state()
+        .pending_replacement
+        .clone()
+        .expect("the park stands for the living chooser");
+    assert!(
+        pending
+            .proposed
+            .clone()
+            .into_token_batch_views()
+            .iter()
+            .all(|view| !matches!(view, ProposedEvent::CreateToken { owner, .. } if *owner == P0)),
+        "P0's batch must be pruned from the parked event"
+    );
+    // P1 still chooses: accept, then the Cat branch.
+    answer_optional(&mut runner, P1, jinnie, ACCEPT);
+    assert!(
+        runner.state().waiting_for.acting_player() != Some(P0),
+        "no later prompt waits on departed P0, got {:?}",
+        runner.state().waiting_for
+    );
+    let WaitingFor::ChooseOneOfBranch { player, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "P1's accept must park on P1's branch choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P1, "the branch choice belongs to P1");
+    runner
+        .act(GameAction::ChooseBranch { index: 0 })
+        .expect("P1 chooses the Cat branch");
+    assert!(
+        runner.state().waiting_for.acting_player() != Some(P0),
+        "no later prompt waits on departed P0, got {:?}",
+        runner.state().waiting_for
+    );
+    // DEP-CASTER completion: P1's Cat, Dragons exiled, Priority, empty stack.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the token clause must complete to Priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the token clause must leave an empty stack"
+    );
+    assert!(
+        runner.state().pending_simultaneous_token_clause.is_none(),
+        "the paused token clause must be finished and its record taken"
+    );
+    assert_eq!(
+        runner.state().objects[&dragons].zone,
+        Zone::Exile,
+        "Death by Dragons must be exiled: its caster left (CR 800.4a)"
+    );
+    let state = runner.state();
+    let p1_tokens = controlled_tokens(state, P1);
+    assert_eq!(p1_tokens.len(), 1, "P1 must create exactly one token");
+    assert_cat(state, p1_tokens[0], P1);
+    assert!(
+        controlled_tokens(state, P0).is_empty(),
+        "the departed caster creates no tokens"
+    );
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(vec![p1_tokens[0]]),
+        "the created referent must be P1's Cat"
+    );
+}
+
+/// CR 800.4b + CR 608.2f + CR 616.1 + CR 616.1g (P3-D1c): P0 controls
+/// Doubling Season, P1 controls Jinnie Fay, and a Mystic Reflection on Bears
+/// floats (cast pre-Dragons; the entry copy keys the compound gate so the
+/// creation tier parks P1's Jinnie optional with nothing applied pre-Concede).
+/// P1 concedes at its own optional prompt; the repair re-proposes and the
+/// survivor's lone mandatory auto-applies with NO survivor prompt, then the
+/// entry Reflection converts: P0 creates exactly two Bears.
+#[test]
+fn death_by_dragons_survivor_mandatory_auto_applies_after_repair() {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let jinnie = scenario
+        .add_creature_from_oracle(P1, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON);
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    resolve_reflection(&mut runner, mystic, bears);
+    assert_eq!(
+        runner.state().pending_damage_replacements.len(),
+        1,
+        "reach guard: Mystic Reflection is floating"
+    );
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    // Reach guard: the creation tier parks P1's Jinnie optional (P0's
+    // {Doubling} demands nothing); nothing applied pre-Concede, so the repair
+    // is load-bearing.
+    assert_jinnie_optional_parked(&runner, jinnie);
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes at its Jinnie prompt");
+    assert!(
+        runner.state().players[1].is_eliminated,
+        "reach guard: P1 left the game"
+    );
+    // No survivor prompt: P0's lone mandatory auto-applied via the repair's
+    // re-proposal.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "post-Concede wait is never a P0 choice, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    let p0_tokens = controlled_tokens(state, P0);
+    assert_eq!(p0_tokens.len(), 2, "P0 must create exactly two Bears");
+    for id in &p0_tokens {
+        assert_bears(state, *id, P0);
+    }
+    assert!(
+        controlled_tokens(state, P1).is_empty(),
+        "the departed chooser creates no tokens"
+    );
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_no_dragons(state);
+    assert!(
+        reflection_consumed(state),
+        "Reflection must be used by the shared entry"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(p0_tokens.clone()),
+        "the created referent must be P0's Bears"
+    );
+}
+
+/// CR 800.4b + CR 608.2f + CR 616.1 + CR 101.4 (P3-D1d): two Reflections float
+/// and P1 controls Jinnie Fay; P1 concedes at its creation-layer optional
+/// prompt. The repair re-proposes and P0's part surfaces its own ordering
+/// prompt over both Reflections; P0's token enters as a Bear. Per-owner
+/// applied sets survive the prune: nothing is re-offered.
+#[test]
+fn death_by_dragons_repair_reprompts_survivor_ordering() {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let jinnie = scenario
+        .add_creature_from_oracle(P1, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    let mystic_a = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let mystic_b = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    resolve_reflection(&mut runner, mystic_a, bears);
+    resolve_reflection(&mut runner, mystic_b, bears);
+    assert_eq!(
+        runner.state().pending_damage_replacements.len(),
+        2,
+        "reach guard: both Reflections are floating"
+    );
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    // Reach guard: at Concede time the park is creation-layer (P1's optional).
+    assert_jinnie_optional_parked(&runner, jinnie);
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes at its Jinnie prompt");
+    assert!(
+        runner.state().players[1].is_eliminated,
+        "reach guard: P1 left the game"
+    );
+    // The repair re-prompts the survivor: P0's ordering over both Reflections.
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidates,
+        kind,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the repair must re-propose P0's ordering prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0, "the ordering choice belongs to P0");
+    assert_eq!(
+        kind,
+        ReplacementChoiceKind::Order,
+        "expected an ordering choice, got {kind:?}"
+    );
+    assert_eq!(
+        candidates.len(),
+        2,
+        "P0 must be offered both Reflections, got {candidates:?}"
+    );
+    answer_floating_ordering_putting_first(&mut runner, P0, 0);
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    let p0_tokens = controlled_tokens(state, P0);
+    assert_eq!(p0_tokens.len(), 1, "P0 must create exactly one token");
+    assert_bears(state, p0_tokens[0], P0);
+    assert!(
+        controlled_tokens(state, P1).is_empty(),
+        "the departed chooser creates no tokens"
+    );
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_no_dragons(state);
+    assert_eq!(
+        one_shots_consumed(state),
+        vec![true, true],
+        "both Reflections must be used by the shared entry"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(vec![p0_tokens[0]]),
+        "the created referent must be P0's Bear"
+    );
+}
+
+/// CR 800.4b + CR 608.2f + CR 616.1 + CR 614.5 (P3-D1e): P0 and P1 each
+/// control Jinnie Fay with Reflection-on-Bears floating; P0 accepts and
+/// branches, then P1 concedes at its own optional. P0's decided part stands —
+/// its substituted batch enters as Bears via the entry Reflection, which
+/// auto-applies — and P0 is never re-prompted.
+#[test]
+fn death_by_dragons_decided_survivor_is_not_reprompted() {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let jinnie_p0 = scenario
+        .add_creature_from_oracle(P0, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    let jinnie_p1 = scenario
+        .add_creature_from_oracle(P1, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    resolve_reflection(&mut runner, mystic, bears);
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    answer_optional(&mut runner, P0, jinnie_p0, ACCEPT);
+    // Reach guard: P0's branch answered pre-Concede.
+    let WaitingFor::ChooseOneOfBranch { player, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "P0's accept must park on P0's branch choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0, "the branch choice belongs to P0");
+    runner
+        .act(GameAction::ChooseBranch { index: 0 })
+        .expect("P0 chooses the Cat branch");
+    assert_jinnie_optional_parked(&runner, jinnie_p1);
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes at its Jinnie prompt");
+    assert!(
+        runner.state().players[1].is_eliminated,
+        "reach guard: P1 left the game"
+    );
+    // No second P0 prompt: the decided survivor is not re-prompted.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "post-Concede wait is never a P0 choice, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    let p0_tokens = controlled_tokens(state, P0);
+    assert_eq!(p0_tokens.len(), 1, "P0 must create exactly one token");
+    assert_bears(state, p0_tokens[0], P0);
+    assert!(
+        controlled_tokens(state, P1).is_empty(),
+        "the departed chooser creates no tokens"
+    );
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_no_dragons(state);
+    assert!(
+        reflection_consumed(state),
+        "Reflection must be used by the shared entry"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(vec![p0_tokens[0]]),
+        "the created referent must be P0's Bear"
+    );
+}
+
+/// CR 616.1f + CR 113.6 + CR 800.4a + CR 614.5 (P1-WE): a parked pick
+/// whose source stopped functioning applies vacuously on a single-batch
+/// CreateToken event. P1 owns Halving Season, P0 owns Doubling Season; P0
+/// casts Dragons targeting P2 with NO Reflection and NO Jinnie, so the legs
+/// run sequentially and P0's leg parks a single-batch ordering {P1-Halving,
+/// P0-Doubling} for chooser P0. P1 concedes (not the chooser; owns no batch
+/// of this leg), so Halving leaves; answering halving-first skips the dead
+/// pick (mark kept) and Doubling applies 1->2: P0 creates exactly two
+/// Dragons. The doubling-first control answers the same 2-Dragon outcome
+/// through the live-first path.
+fn single_batch_dead_pick_applies_vacuously(halving_first: bool) {
+    let mut scenario = game();
+    let halving = scenario
+        .add_enchantment_from_oracle(P1, "Halving Season", HALVING_SEASON)
+        .id();
+    let doubling = scenario
+        .add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    // Reach guard: sequential-leg single-batch park — P0's ordering over both
+    // candidates proves the material Halve+Double pair reached P0's batch.
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidates,
+        kind,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "P0's leg must park P0's ordering prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0, "the ordering choice belongs to P0");
+    assert_eq!(
+        kind,
+        ReplacementChoiceKind::Order,
+        "expected an ordering choice, got {kind:?}"
+    );
+    assert_eq!(
+        candidates.len(),
+        2,
+        "P0 must be offered Halving + Doubling, got {candidates:?}"
+    );
+    let candidates_before = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("an ordering prompt parks its replacement record")
+        .candidates
+        .clone();
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes (non-chooser)");
+    assert!(
+        runner.state().players[1].is_eliminated,
+        "reach guard: P1 left the game"
+    );
+    // Post-Concede park stands with candidates unchanged (teardown keys on the
+    // acting player, and P1 is not the chooser).
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player, kind: ReplacementChoiceKind::Order, .. } if player == P0
+        ),
+        "the prompt must stand for the living chooser, got {:?}",
+        runner.state().waiting_for
+    );
+    let candidates_after = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("the park stands for the living chooser")
+        .candidates
+        .clone();
+    assert_eq!(
+        candidates_after, candidates_before,
+        "the prompt is not re-proposed with a live chooser"
+    );
+    let first = if halving_first { halving } else { doubling };
+    answer_ordering_putting_first(&mut runner, P0, &[halving, doubling], first);
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    let p0_tokens = controlled_tokens(state, P0);
+    assert_eq!(p0_tokens.len(), 2, "P0 must create exactly two Dragons");
+    for id in &p0_tokens {
+        assert_dragon(state, *id, P0);
+    }
+    assert!(
+        controlled_tokens(state, P1).is_empty(),
+        "P1 creates no tokens either leg order"
+    );
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    // CR 608.2c + CR 800.4b: each sequential leg publishes its own referent
+    // and the last leg wins. P0's leg runs first (its prompt parks before the
+    // Concede); P1's eliminated leg runs last and publishes its empty
+    // referent (token.rs departed-delivery publish), so the clause ends with
+    // no created referent even though P0's two Dragons exist.
+    assert!(
+        last_created_sorted(state).is_empty(),
+        "the eliminated last leg must publish an empty referent, got {:?}",
+        last_created_sorted(state)
+    );
+}
+
+#[test]
+fn death_by_dragons_single_batch_dead_pick_applies_vacuously() {
+    single_batch_dead_pick_applies_vacuously(true);
+}
+
+#[test]
+fn death_by_dragons_single_batch_dead_pick_doubling_first_control() {
+    single_batch_dead_pick_applies_vacuously(false);
+}
+
+/// CR 616.1 + CR 113.6 + CR 800.4a (P1-NC, full-preservation guard): a
+/// candidate's source leaves with a player who is not the chooser — P0 owns
+/// Halving Season, P1 owns Doubling Season, P0 casts Dragons targeting P2,
+/// P0 concedes at P1's ordering prompt. The prompt stands AND the completion
+/// stands: nothing is re-proposed with a live chooser. Dead Halving applies
+/// vacuously (its exiled source no longer functions); either order leaves
+/// P1's two Bears.
+fn candidate_source_leaves_with_non_chooser_prompt_stands(halving_first: bool) {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let halving = scenario
+        .add_enchantment_from_oracle(P0, "Halving Season", HALVING_SEASON)
+        .id();
+    let doubling_p1 = scenario
+        .add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON)
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    resolve_reflection(&mut runner, mystic, bears);
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player, kind: ReplacementChoiceKind::Order, .. } if player == P1
+        ),
+        "reach guard: P1's ordering prompt is parked, got {:?}",
+        runner.state().waiting_for
+    );
+    let candidates_before = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("an ordering prompt parks its replacement record")
+        .candidates
+        .clone();
+    runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("P0 concedes at P1's ordering prompt");
+    assert!(
+        runner.state().players[0].is_eliminated,
+        "reach guard: P0 left the game"
+    );
+    // Prompt stands: still P1's ordering, candidates unchanged incl. dead Halving.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player, kind: ReplacementChoiceKind::Order, .. } if player == P1
+        ),
+        "the prompt must stand for the living chooser, got {:?}",
+        runner.state().waiting_for
+    );
+    let candidates_after = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("the park stands for the living chooser")
+        .candidates
+        .clone();
+    assert_eq!(
+        candidates_after, candidates_before,
+        "the prompt is not re-proposed with a live chooser"
+    );
+    let first = if halving_first { halving } else { doubling_p1 };
+    answer_ordering_putting_first(&mut runner, P1, &[halving, doubling_p1], first);
+    // DEP-CASTER completion: P1's 2 Bears, Dragons exiled, Priority.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the token clause must complete to Priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the token clause must leave an empty stack"
+    );
+    assert!(
+        runner.state().pending_simultaneous_token_clause.is_none(),
+        "the paused token clause must be finished and its record taken"
+    );
+    assert_eq!(
+        runner.state().objects[&dragons].zone,
+        Zone::Exile,
+        "Death by Dragons must be exiled: its caster left (CR 800.4a)"
+    );
+    let state = runner.state();
+    let p1_tokens = controlled_tokens(state, P1);
+    assert_eq!(p1_tokens.len(), 2, "P1 must create two tokens");
+    for id in &p1_tokens {
+        assert_bears(state, *id, P1);
+    }
+    assert!(
+        controlled_tokens(state, P0).is_empty(),
+        "the departed caster creates no tokens"
+    );
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_no_dragons(state);
+    assert!(
+        reflection_consumed(state),
+        "Reflection must be used by the shared entry"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(p1_tokens.clone()),
+        "the created referent must be P1's Bears"
+    );
+}
+
+#[test]
+fn death_by_dragons_candidate_source_leaves_with_non_chooser_halving_first() {
+    candidate_source_leaves_with_non_chooser_prompt_stands(true);
+}
+
+#[test]
+fn death_by_dragons_candidate_source_leaves_with_non_chooser_doubling_first() {
+    candidate_source_leaves_with_non_chooser_prompt_stands(false);
+}
+
+/// CR 800.4b + CR 608.2f + CR 616.1 + CR 704.5a (P1-SBA): the chooser leaves
+/// via SBA while a token park exists — P0 casts Dragons targeting P2, P1
+/// controls Jinnie Fay. Documented sim: P1 is SBA-dead-but-undiscovered at 0
+/// life (state edit before the accept); P1 accepts while still in the game;
+/// the #962 net discovers the loss at the accept boundary with the substitute
+/// park live. The survivors continue: P0's Dragon, no P1 token, completion.
+#[test]
+fn death_by_dragons_chooser_leaves_via_sba_survivor_keeps_dragon() {
+    let mut scenario = game();
+    let jinnie = scenario
+        .add_creature_from_oracle(P1, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    assert_jinnie_optional_parked(&runner, jinnie);
+    // Documented sim: P1 is SBA-dead-but-undiscovered at 0 life.
+    runner
+        .state_mut()
+        .players
+        .iter_mut()
+        .find(|player| player.id == P1)
+        .expect("P1")
+        .life = 0;
+    answer_optional(&mut runner, P1, jinnie, ACCEPT);
+    // P1 accepted while still in the game; the accept boundary discovered the
+    // loss through the SBA net — P1 never conceded.
+    assert!(
+        runner.state().players[1].is_eliminated,
+        "reach guard: P1 left the game via the SBA net"
+    );
+    // No branch answer was ever submitted; the survivors continue.
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    let p0_tokens = controlled_tokens(state, P0);
+    assert_eq!(p0_tokens.len(), 1, "P0 must create exactly one Dragon");
+    assert_dragon(state, p0_tokens[0], P0);
+    assert!(
+        controlled_tokens(state, P1).is_empty(),
+        "the departed chooser creates no tokens"
+    );
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(vec![p0_tokens[0]]),
+        "the created referent must be P0's Dragon"
+    );
+}
+
+/// CR 800.4b + CR 608.2f (P1-NS): no batch survives — two Concedes on the
+/// D1d-prefix board (two Reflections, P1 Jinnie). P1 concedes at its Jinnie
+/// prompt (Survives: P0's 2-Reflection ordering is re-proposed); P0 concedes
+/// at its own ordering prompt (NoSurvivor). The whole prompt is abandoned
+/// with its companions, the clause is TAKEN (never stranded), the empty
+/// referent is published, Dragons is exiled (its caster left), and the
+/// end-state is Priority-or-terminal — never a choice naming a departed
+/// player.
+#[test]
+fn death_by_dragons_no_survivor_abandons_and_takes_clause() {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let jinnie = scenario
+        .add_creature_from_oracle(P1, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    let mystic_a = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let mystic_b = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    resolve_reflection(&mut runner, mystic_a, bears);
+    resolve_reflection(&mut runner, mystic_b, bears);
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    assert_jinnie_optional_parked(&runner, jinnie);
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes at its Jinnie prompt");
+    assert!(
+        runner.state().players[1].is_eliminated,
+        "reach guard: P1 left the game"
+    );
+    // Middle: the first Concede re-proposed P0's 2-Reflection ordering.
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidates,
+        kind,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the first Concede must re-propose P0's ordering prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0, "the ordering choice belongs to P0");
+    assert_eq!(
+        kind,
+        ReplacementChoiceKind::Order,
+        "expected an ordering choice, got {kind:?}"
+    );
+    assert_eq!(
+        candidates.len(),
+        2,
+        "P0 must be offered both Reflections, got {candidates:?}"
+    );
+    runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("P0 concedes at its own ordering prompt");
+    assert!(
+        runner.state().players[0].is_eliminated,
+        "reach guard: P0 left the game"
+    );
+    // NoSurvivor: park and companions gone, clause TAKEN, empty referent.
+    assert!(
+        runner.state().pending_replacement.is_none(),
+        "the survivorless park is abandoned"
+    );
+    assert!(
+        runner.state().pending_single_discard.is_none(),
+        "the abandoned choice leaves no paused discard"
+    );
+    assert!(
+        !runner.state().replacement_may_cost_paused,
+        "the abandoned choice leaves no paused MayCost"
+    );
+    assert!(
+        runner.state().pending_simultaneous_token_clause.is_none(),
+        "the clause is taken with the survivorless park, never stranded"
+    );
+    assert!(
+        runner.state().last_created_token_ids.is_empty(),
+        "the empty created referent is published"
+    );
+    assert_eq!(
+        runner.state().objects[&dragons].zone,
+        Zone::Exile,
+        "Death by Dragons must be exiled: its caster left (CR 800.4a)"
+    );
+    match &runner.state().waiting_for {
+        WaitingFor::Priority { .. } | WaitingFor::GameOver { .. } => {}
+        other => panic!("end-state must be Priority-or-terminal, got {other:?}"),
+    }
+    assert!(
+        runner.state().waiting_for.acting_player() != Some(P0)
+            && runner.state().waiting_for.acting_player() != Some(P1),
+        "never a choice naming a departed player, got {:?}",
+        runner.state().waiting_for
+    );
 }

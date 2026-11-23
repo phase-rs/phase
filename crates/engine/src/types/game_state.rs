@@ -42548,8 +42548,10 @@ impl GameState {
     /// instruction, a staged payment or a pending cast — each holds abilities
     /// whose pins no loop visitor walks (CR 400.7), so comparing them raw could
     /// equate a live pin with a stale one — or a player-scope sacrifice
-    /// completion, a discard or combat-lifelink batch, deferred entry events, or
-    /// undispatched attack/blocker declaration events.
+    /// completion, a discard, combat-lifelink or simultaneous-token-clause
+    /// batch, deferred entry events, or undispatched attack/blocker declaration
+    /// events. A paused simultaneous token clause is mid-action work in
+    /// progress, never a settled Priority position (CR 104.4b + CR 732.2a).
     pub(crate) fn is_loop_comparable(&self) -> bool {
         self.resolution_stack.is_empty()
             && self.pending_die_roll_instruction.is_none()
@@ -42559,6 +42561,7 @@ impl GameState {
             && self.pending_discard_batch.is_none()
             && self.pending_hero_event.is_none()
             && self.pending_combat_lifelink.is_none()
+            && self.pending_simultaneous_token_clause.is_none()
             && self.deferred_entry_events.is_empty()
             && self.unsettled_entry_batch_events.is_empty()
             && self.pending_attack_trigger_events.is_empty()
@@ -60708,6 +60711,46 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         assert!(
             !loop_states_equal(&normalized, &normalized.clone()),
             "an unsettled carrier is never loop-equal, even to itself"
+        );
+    }
+
+    /// CR 104.4b + CR 732.2a: a state holding a paused simultaneous token
+    /// clause is mid-action work in progress, not a settled Priority position —
+    /// it never certifies a loop repeat, even against an identical copy of
+    /// itself. Clearing the clause restores comparability.
+    #[test]
+    fn a_paused_token_clause_makes_the_state_not_loop_comparable() {
+        let settled = GameState::new_two_player(7);
+        assert!(settled.is_loop_comparable());
+        assert!(
+            loop_states_equal(
+                &settled.normalize_for_loop(),
+                &settled.clone().normalize_for_loop()
+            ),
+            "reach guard: a settled state equals its copy"
+        );
+        let mut paused = settled.clone();
+        paused.pending_simultaneous_token_clause = Some(Box::new(PendingSimultaneousTokenClause {
+            source_id: ObjectId(50),
+            seats: vec![PlayerId(0)],
+            scoped_events_before: 0,
+            accumulated: Vec::new(),
+        }));
+        assert!(!paused.is_loop_comparable());
+        let normalized = paused.normalize_for_loop();
+        assert!(
+            !loop_states_equal(&normalized, &normalized.clone()),
+            "a paused clause is never loop-equal, even to itself"
+        );
+        let mut cleared = paused.clone();
+        cleared.pending_simultaneous_token_clause = None;
+        assert!(
+            cleared.is_loop_comparable(),
+            "reach guard: clearing the clause restores comparability"
+        );
+        assert!(
+            loop_states_equal(&cleared.normalize_for_loop(), &settled.normalize_for_loop()),
+            "reach guard: the cleared state equals the settled one"
         );
     }
 

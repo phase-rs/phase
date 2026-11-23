@@ -1529,11 +1529,14 @@ pub(crate) fn pending_candidates_are_current(
     matches!(
         pending.proposed,
         ProposedEvent::SearchFound { .. } | ProposedEvent::EmptyManaPool { .. }
-    ) || (pending
-        .candidates
-        .iter()
-        .all(|rid| stored_candidate_applies(state, &pending.proposed, *rid))
-        && !leaves_out_an_applicable_replacement(state, pending))
+    ) || (pending.candidates.iter().all(|rid| {
+        stored_candidate_applies(
+            state,
+            &pending.proposed,
+            *rid,
+            pending_replacement_chooser(state, pending),
+        )
+    }) && !leaves_out_an_applicable_replacement(state, pending))
 }
 
 /// CR 616.1 + CR 800.4a: whether the discovery that built the parked prompt
@@ -1554,7 +1557,17 @@ pub(crate) fn pending_candidates_are_current(
 /// prompt re-parked inside one candidate's application (an accepted MayCost,
 /// which carries `may_cost_paid` / `may_cost_remaining`, or an entry-controller
 /// or as-enters answer, which marks its candidate applied first) is past that
-/// choice.
+/// choice — as is a parked token substitute, which was accepted past its
+/// ordering choice and awaits only its decider's answer (CR 616.1f).
+///
+/// CR 616.1 + CR 101.4: on a compound token event the parked prompt offers the
+/// latched actor's subset, not the whole event's union, so left-out is read
+/// per batch-view over the actor's views: an actor view admits a candidate
+/// that is in the whole-event [`choosable_replacement_candidates`] set but
+/// outside the stored candidates (and, on an optional prompt, the ordering
+/// peers). Candidates withheld by precedence (a later tier) are never
+/// left-out, and neither is a candidate that reaches only another owner's
+/// part. Any other event reads the whole event, as before.
 fn leaves_out_an_applicable_replacement(state: &GameState, pending: &PendingReplacement) -> bool {
     if pending.may_cost_paid
         || pending.may_cost_remaining.is_some()
@@ -1565,6 +1578,28 @@ fn leaves_out_an_applicable_replacement(state: &GameState, pending: &PendingRepl
     {
         return false;
     }
+    // CR 616.1f: a substitute park is parked inside its candidate's
+    // application (accept dispatched, marking at answer), past the ordering
+    // choice like a MayCost or an entry-controller answer.
+    if pending.token_substitute.is_some() {
+        return false;
+    }
+    if let Some(views) = pending.proposed.token_batch_views() {
+        let actor = pending_replacement_chooser(state, pending);
+        let applicable =
+            find_applicable_replacements(state, &pending.proposed, replacement_registry());
+        let spent = one_shots_spent_by_compound(state, &views);
+        return choosable_replacement_candidates(state, &pending.proposed, applicable)
+            .iter()
+            .any(|rid| {
+                !pending.candidates.contains(rid)
+                    && !(pending.is_optional && pending.ordering_peers.contains(rid))
+                    && views.iter().any(|view| {
+                        matches!(view, ProposedEvent::CreateToken { owner, .. } if *owner == actor)
+                            && actor_view_admits_candidate(state, view, *rid, &spent)
+                    })
+            });
+    }
     let applicable = find_applicable_replacements(state, &pending.proposed, replacement_registry());
     choosable_replacement_candidates(state, &pending.proposed, applicable)
         .iter()
@@ -1574,18 +1609,36 @@ fn leaves_out_an_applicable_replacement(state: &GameState, pending: &PendingRepl
         })
 }
 
+/// CR 800.4a + CR 616.1: whether a parked token-creation replacement's chooser
+/// — or its accepted substitute's decider — has left the game. The chooser is
+/// read through the one chooser authority ([`pending_replacement_chooser`]:
+/// the recorded chooser, else the affected player); a substitute park always
+/// latches its decider there, so both choices share this one conjunct. True
+/// only for `CreateToken` parks: payment (Draw) and combat (Damage) prompts
+/// never read it.
+pub(crate) fn parked_token_chooser_has_left(
+    state: &GameState,
+    pending: &PendingReplacement,
+) -> bool {
+    matches!(pending.proposed, ProposedEvent::CreateToken { .. })
+        && !super::players::is_alive(state, pending_replacement_chooser(state, pending))
+}
+
 /// CR 616.1 + CR 614.17c + CR 800.4a: whether a parked replacement prompt no
-/// longer describes its event: the draw can no longer happen, or the
-/// replacements that apply to it changed
-/// ([`pending_candidates_are_current`]). A departure re-settles such a prompt
-/// of a payment at once, through the replacement authority, so the chooser is
-/// never shown a choice the game would not offer: a staged payment's in
+/// longer describes its event: the draw can no longer happen, the parked
+/// token replacement's chooser or substitute decider left the game
+/// ([`parked_token_chooser_has_left`]), or the replacements that apply to it
+/// changed ([`pending_candidates_are_current`]). A departure re-settles such a
+/// prompt of a payment at once, through the replacement authority, so the
+/// chooser is never shown a choice the game would not offer: a staged
+/// payment's in
 /// `payment_transaction::resettle_parked_replacement_after_departure`, a
 /// parked unless payment's at the concession's action boundary. An answer to
 /// one that was not re-settled (a sandbox action or a restored save changed
 /// it) re-proposes it in any case, so no stored index is applied to it.
 pub(crate) fn parked_prompt_is_stale(state: &GameState, pending: &PendingReplacement) -> bool {
     proposed_draw_cannot_happen(state, &pending.proposed)
+        || parked_token_chooser_has_left(state, pending)
         || !pending_candidates_are_current(state, pending)
 }
 
@@ -11910,18 +11963,77 @@ pub(crate) fn stored_candidate_executes(
 /// that already marked this candidate applied before re-entering its handler
 /// (an entry-controller, as-enters or entry-payment answer on a ZoneChange) has
 /// its own mark cleared first.
+///
+/// CR 616.1 + CR 101.4: on a compound token event the parked prompt offers the
+/// latched `actor`'s subset, so a stored candidate still applies iff it is
+/// admitted on at least one of the actor's batch views after stripping its
+/// own mark there. Any other event judges the whole event, as before.
 fn stored_candidate_applies(
     state: &GameState,
     proposed: &ProposedEvent,
     rid: ReplacementId,
+    actor: PlayerId,
 ) -> bool {
-    rule_derived_candidate_executes(state, proposed, rid).unwrap_or_else(|| {
-        let mut offered = proposed.clone();
-        offered
-            .applied_set_mut()
-            .remove(&AppliedReplacementKey::for_event(proposed, rid));
-        find_applicable_replacements(state, &offered, replacement_registry()).contains(&rid)
-    })
+    if let Some(executes) = rule_derived_candidate_executes(state, proposed, rid) {
+        return executes;
+    }
+    if let Some(views) = proposed.token_batch_views() {
+        let spent = one_shots_spent_by_compound(state, &views);
+        return views.iter().any(|view| {
+            matches!(view, ProposedEvent::CreateToken { owner, .. } if *owner == actor)
+                && actor_view_admits_candidate(state, view, rid, &spent)
+        });
+    }
+    let mut offered = proposed.clone();
+    offered
+        .applied_set_mut()
+        .remove(&AppliedReplacementKey::for_event(proposed, rid));
+    find_applicable_replacements(state, &offered, replacement_registry()).contains(&rid)
+}
+
+/// CR 616.1f + CR 113.6 + CR 800.4a: whether a picked WholeEvent token
+/// replacement still applies when its answer is applied. Mirrors
+/// [`stored_candidate_applies`]' non-compound branch exactly (its compound
+/// branch is unreachable here: `token_batch_views()` is `None` whenever the
+/// scope is WholeEvent), threading the caller's `registry` and judging the
+/// event as it stood when the pick was offered, with the pick's own mark
+/// stripped.
+fn whole_event_token_pick_still_applies(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    rid: ReplacementId,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+) -> bool {
+    // Virtual candidates keep the staleness verdict (stored_candidate_applies order).
+    if let Some(executes) = rule_derived_candidate_executes(state, proposed, rid) {
+        return executes;
+    }
+    // The event as it stood when offered: the pick's own mark stripped.
+    let mut offered = proposed.clone();
+    offered
+        .applied_set_mut()
+        .remove(&AppliedReplacementKey::for_event(proposed, rid));
+    find_applicable_replacements(state, &offered, registry).contains(&rid)
+}
+
+/// CR 616.1 + CR 614.5: whether one batch view of a compound token event
+/// admits candidate `rid` for a staleness verdict: the view's own mark for
+/// `rid` is stripped first (the event is judged as it stood when the
+/// candidate was offered), then per-view discovery runs with `spent`, the
+/// one-shots the compound already used on another batch
+/// ([`one_shots_spent_by_compound`]).
+fn actor_view_admits_candidate(
+    state: &GameState,
+    view: &ProposedEvent,
+    rid: ReplacementId,
+    spent: &[ReplacementId],
+) -> bool {
+    let mut offered = view.clone();
+    offered
+        .applied_set_mut()
+        .remove(&AppliedReplacementKey::for_event(view, rid));
+    find_applicable_replacements_for_batch(state, &offered, replacement_registry(), None, spent)
+        .contains(&rid)
 }
 
 /// The live input a rule-derived candidate's applier needs, in
@@ -13113,8 +13225,9 @@ pub(crate) struct CompoundChoicePlan {
 /// the affected player and the whole choosable set.
 ///
 /// `leaves_out_an_applicable_replacement` compares a park against the full
-/// choosable set; it is reachable only for payment, combat-damage and recovery
-/// prompts, never a compound `CreateToken` park, which is why an offered
+/// choosable set; for payment, combat-damage and recovery prompts it reads the
+/// whole event. A compound `CreateToken` park reaches it too, through the
+/// staleness verdicts — actor-scoped per batch-view, which is why an offered
 /// subset here cannot read as leaving a candidate out.
 pub(crate) fn compound_token_choice_plan(
     state: &GameState,
@@ -13545,13 +13658,25 @@ fn apply_chosen_replacement(
     let before = proposed.clone();
     let mut result = match scope {
         TokenBatchScope::WholeEvent => {
-            apply_single_replacement(state, proposed, rid, work.branch(), registry, events)
-                .and_then(|event| match &work {
-                    ChosenReplacementWork::Branch(_) => Ok(event),
-                    ChosenReplacementWork::TokenSubstitute(sub) => {
-                        substitute_token_batch(event, sub)
-                    }
-                })
+            // CR 616.1f + CR 113.6 + CR 800.4a: a parked pick can arrive after its
+            // source stopped functioning (exiled sources keep their stored
+            // definition, so the applier's vanished-definition fallback does not
+            // fire); the compound Owner arm re-checks per batch, the WholeEvent arm
+            // did not. Skip application but keep the mark (applied above): the pick
+            // had its CR 614.5 opportunity, it just no longer modifies.
+            if matches!(proposed, ProposedEvent::CreateToken { .. })
+                && !whole_event_token_pick_still_applies(state, &proposed, rid, registry)
+            {
+                Ok(proposed)
+            } else {
+                apply_single_replacement(state, proposed, rid, work.branch(), registry, events)
+                    .and_then(|event| match &work {
+                        ChosenReplacementWork::Branch(_) => Ok(event),
+                        ChosenReplacementWork::TokenSubstitute(sub) => {
+                            substitute_token_batch(event, sub)
+                        }
+                    })
+            }
         }
         // `apply_replacement_to_token_batches` marks `owner`'s batches itself,
         // before it applies.
@@ -16552,6 +16677,95 @@ fn reconcile_parked_combat_leg(
     None
 }
 
+/// CR 800.4b + CR 608.2f: what pruning a parked token-creation event's
+/// departed batches left behind. A named outcome, never a bool: the caller
+/// abandons the park only when no batch survives, and keeps the pruned record
+/// for the boundary repair otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TokenPruneOutcome {
+    /// At least one batch survives: the pruned record stands for the
+    /// departure-boundary repair, which re-proposes it to the survivors.
+    Survives,
+    /// No batch survives: the whole prompt is abandoned, with its
+    /// companions, the paused clause, and an empty created referent.
+    NoSurvivor,
+    /// The parked event is not a token-creation event: untouched.
+    NotATokenEvent,
+}
+
+/// CR 800.4b + CR 800.4d + CR 608.2f + CR 111.2: the one prune authority for a
+/// parked token-creation replacement. It removes every leaving owner's batch
+/// views from the parked event and rejoins the rest, so the leavers' batches
+/// create nothing while the rest of the one simultaneous event still happens
+/// for the survivors. The first survivor becomes the event's own batch; each
+/// survivor keeps its own per-owner applied set — nothing is re-offered. A
+/// pruned substitute whose decider left takes its record with it (the choice's
+/// subject cannot exist, and its source left with its owner). Unrelated
+/// pending drains are kept untouched: prune touches only the token park's own
+/// batches and record. A fixpoint: a second run removes nothing and reports
+/// `Survives` again.
+pub(crate) fn prune_departed_token_batches(
+    pending: &mut PendingReplacement,
+    leaving: &HashSet<PlayerId>,
+) -> TokenPruneOutcome {
+    if !matches!(pending.proposed, ProposedEvent::CreateToken { .. }) {
+        return TokenPruneOutcome::NotATokenEvent;
+    }
+    let survivors: Vec<ProposedEvent> = pending
+        .proposed
+        .clone()
+        .into_token_batch_views()
+        .into_iter()
+        .filter(|view| {
+            !matches!(view, ProposedEvent::CreateToken { owner, .. } if leaving.contains(owner))
+        })
+        .collect();
+    if survivors.is_empty() {
+        return TokenPruneOutcome::NoSurvivor;
+    }
+    pending.proposed = ProposedEvent::from_token_batch_views(survivors)
+        .expect("surviving CreateToken views reassemble");
+    if pending.token_substitute.is_some()
+        && pending
+            .choice_player
+            .is_some_and(|decider| leaving.contains(&decider))
+    {
+        pending.token_substitute = None;
+    }
+    TokenPruneOutcome::Survives
+}
+
+/// CR 800.4a + CR 608.2f: abandon a token-creation park no batch survives —
+/// the whole prompt with its companions, as any other parked replacement —
+/// and take the paused simultaneous token clause with it. Resting the clause
+/// for a later resumer is rejected: the readiness gate needs no owed
+/// resolving work, and a survivorless park has no future delivery by
+/// construction, so resting would strand exactly like the gap this phase
+/// closes. The take publishes the EMPTY created referent, so a stale referent
+/// never exposes a prior event's tokens to live `LastCreated` consumers —
+/// scoped on an empty clause span, so a partial-delivery interleaving never
+/// wipes a real referent. Shared by elimination's teardown and the boundary
+/// repair's defensive path.
+pub(crate) fn abandon_survivorless_token_park(state: &mut GameState, leaving: &HashSet<PlayerId>) {
+    state.pending_replacement = None;
+    // CR 800.4a: a paused frameless single-card discard belongs to the
+    // abandoned choice of the leaving player; left behind it would go stale.
+    state.pending_single_discard = None;
+    state.replacement_may_cost_paused = false;
+    // CR 121.6b: under a surviving parked draw payment only the leaver's part
+    // of the draw authority goes with the abandoned choice.
+    if super::engine_payment_choices::draw_payment_is_parked(state) {
+        abandon_departed_substitute_continuation(state, leaving);
+    } else {
+        abandon_post_replacement_continuation(state);
+    }
+    if let Some(record) = state.pending_simultaneous_token_clause.take() {
+        if record.accumulated.is_empty() {
+            crate::game::effects::publish_created_token_union(state, &[]);
+        }
+    }
+}
+
 /// CR 800.4a + CR 616.1f: the player a surfaced combat-damage leg is waiting on
 /// has left the game. Lift the leg's in-progress record out of the single
 /// `pending_replacement` slot back into the parked batch, so the pass's
@@ -17196,6 +17410,26 @@ fn continue_replacement_impl(
 
     let registry = replacement_registry();
     prepare_replacement_index_for_pipeline(state);
+
+    // CR 616.1 + CR 800.4a: no answer — an ordering index or a substitute
+    // answer — is ever applied for a departed player: a token park whose
+    // chooser or substitute decider left is re-proposed through the pipeline
+    // instead, so exactly the effects that would now be applicable are
+    // considered, and the player who now chooses among them is asked. Hoisted
+    // above the resume match so it covers both arms uniformly, and above the
+    // MayCost post-choice resume (a paid-MayCost re-park with a live chooser
+    // reads false here and behaves exactly as before). Non-token parks read
+    // false and keep their answer as before.
+    if parked_token_chooser_has_left(state, &pending) {
+        return pipeline_loop(
+            state,
+            pending.proposed,
+            pending.depth + 1,
+            registry,
+            events,
+            None,
+        );
+    }
 
     // CR 614.6 + CR 616.1: a token-substitute answer resumes through its own
     // authority, past the ordering-index checks below.
@@ -33902,3 +34136,449 @@ mod auto_choice_identity_tests {
 #[cfg(test)]
 #[path = "enters_with_unless_runtime_tests.rs"]
 mod enters_with_unless_runtime_tests;
+
+#[cfg(test)]
+mod departed_token_park_tests {
+    use super::*;
+    use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use crate::types::actions::GameAction;
+    use crate::types::phase::Phase;
+    use std::collections::HashSet;
+
+    const P2: PlayerId = PlayerId(2);
+
+    // Verbatim Oracle consts, copied from
+    // `crates/engine/tests/integration/death_by_dragons.rs`.
+    const DEATH_BY_DRAGONS: &str =
+        "Each player other than target player creates a 5/5 red Dragon creature token with flying.";
+    const MYSTIC_REFLECTION: &str = "Choose target nonlegendary creature. The next time one or more creatures or planeswalkers enter this turn, they enter as copies of the chosen creature.\nForetell {U} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)";
+    const JINNIE_FAY: &str = "If you would create one or more tokens, you may instead create that many 2/2 green Cat creature tokens with haste or that many 3/1 green Dog creature tokens with vigilance.";
+    const DOUBLING_SEASON: &str = "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.";
+    const HALVING_SEASON: &str = "If an opponent would create one or more tokens, they create half that many of each of those kinds of tokens instead, rounded down.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
+
+    fn scenario() -> GameScenario {
+        let mut scenario = GameScenario::new_n_player(3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario
+    }
+
+    fn controlled_tokens(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+        state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| {
+                let object = &state.objects[id];
+                object.is_token && object.controller == player
+            })
+            .collect()
+    }
+
+    fn assert_jinnie_optional_parked(runner: &GameRunner, jinnie: ObjectId) {
+        let WaitingFor::ReplacementChoice {
+            player,
+            candidates,
+            kind,
+            ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "expected P1's Jinnie accept/decline prompt, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(kind, ReplacementChoiceKind::OptionalBranch);
+        assert_eq!(player, P1);
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.source_id == jinnie),
+            "the optional prompt must offer Jinnie's replacement: {candidates:?}"
+        );
+    }
+
+    /// CR 616.1 + CR 800.4a (P1-S1): no ordering-index answer is applied for
+    /// a departed chooser. M1 board, P1's optional parked; sandbox sim of an
+    /// unrepaired departure (flag-flip P1) + production prune; index 0
+    /// through the production authority re-proposes instead of accepting:
+    /// P0's Dragon is delivered, the park is gone, Priority.
+    #[test]
+    fn s1_no_index_answer_applied_for_a_departed_chooser() {
+        let mut scenario = scenario();
+        scenario.add_creature_from_oracle(P1, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY);
+        let dragons = scenario
+            .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+            .id();
+        let mut runner = scenario.build();
+        let _ = runner.cast(dragons).target_player(P2).resolve();
+        // Reach guard: pre-answer park is P1's optional, record None.
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { player, kind: ReplacementChoiceKind::OptionalBranch, .. } if player == P1
+            ),
+            "P1's optional must be parked, got {:?}",
+            runner.state().waiting_for
+        );
+        assert!(
+            runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .is_some_and(|pending| pending.token_substitute.is_none()),
+            "pre-answer park carries no substitute record"
+        );
+        // Sandbox sim of an unrepaired departure: flag-flip P1, then
+        // production prune.
+        runner.state_mut().players[1].is_eliminated = true;
+        let leaving: HashSet<PlayerId> = [P1].into_iter().collect();
+        let outcome = prune_departed_token_batches(
+            runner
+                .state_mut()
+                .pending_replacement
+                .as_mut()
+                .expect("park"),
+            &leaving,
+        );
+        assert_eq!(outcome, TokenPruneOutcome::Survives);
+        // Answer index 0 through the production authority.
+        let mut events = Vec::new();
+        let wait = crate::game::engine_replacement::handle_replacement_choice(
+            runner.state_mut(),
+            0,
+            &mut events,
+        )
+        .expect("the authority re-proposes");
+        assert!(
+            runner.state().pending_replacement.is_none(),
+            "re-proposal delivers with no surviving candidates: park gone"
+        );
+        let p0_tokens = controlled_tokens(runner.state(), P0);
+        assert_eq!(p0_tokens.len(), 1, "P0's Dragon must be delivered");
+        assert_eq!(runner.state().objects[&p0_tokens[0]].name, "Dragon");
+        assert!(
+            matches!(wait, WaitingFor::Priority { .. }),
+            "re-proposal settles to Priority, got {wait:?}"
+        );
+    }
+
+    /// CR 616.1 + CR 800.4a (P1-S2): no substitute answer is applied for a
+    /// departed decider. V12 board, P1's branch parked; flag-flip P1 with the
+    /// record kept (unpruned sim — production prunes first, V12-green proves
+    /// it); the Branch answer through the production authority re-proposes:
+    /// fresh park (record None), spec still Dragon, Jinnie unmarked.
+    #[test]
+    fn s2_no_substitute_answer_applied_for_a_departed_decider() {
+        let mut scenario = scenario();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let jinnie = scenario
+            .add_creature_from_oracle(P1, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+            .id();
+        let mystic = scenario
+            .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+            .id();
+        let dragons = scenario
+            .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(mystic).target_object(bears).resolve();
+        assert!(
+            runner.state().stack.is_empty(),
+            "reach guard: Mystic Reflection resolved"
+        );
+        let _ = runner.cast(dragons).target_player(P2).resolve();
+        assert_jinnie_optional_parked(&runner, jinnie);
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("P1 accepts");
+        // Reach guard: pre-answer `token_substitute` is `Some(Branch)`.
+        assert!(
+            runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .is_some_and(|pending| {
+                    pending
+                        .token_substitute
+                        .is_some_and(|rec| rec.awaits == TokenSubstituteChoice::Branch)
+                }),
+            "the accept parks a Branch substitute"
+        );
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ChooseOneOfBranch { player, .. } if player == P1
+            ),
+            "the accept parks on P1's branch choice, got {:?}",
+            runner.state().waiting_for
+        );
+        // Flag-flip P1, record kept.
+        runner.state_mut().players[1].is_eliminated = true;
+        let mut events = Vec::new();
+        crate::game::engine_replacement::resume_token_substitute(
+            runner.state_mut(),
+            TokenSubstituteAnswer::Branch(0),
+            &mut events,
+        )
+        .expect("the authority re-proposes");
+        // Fresh park: record None, spec still Dragon, Jinnie unmarked.
+        let fresh = runner
+            .state()
+            .pending_replacement
+            .clone()
+            .expect("re-proposal parks fresh");
+        assert!(
+            fresh.token_substitute.is_none(),
+            "no substitute record on the fresh park"
+        );
+        let views = fresh.proposed.clone().into_token_batch_views();
+        for view in &views {
+            assert!(
+                view.applied_set().is_empty(),
+                "nothing is marked on the fresh park: {view:?}"
+            );
+        }
+        let p1_spec = views
+            .iter()
+            .find_map(|view| match view {
+                ProposedEvent::CreateToken { owner, spec, .. } if *owner == P1 => Some(spec),
+                _ => None,
+            })
+            .expect("P1's batch survives the unpruned sim");
+        assert!(
+            p1_spec
+                .characteristics
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Dragon"),
+            "P1's batch keeps its Dragon spec (no Cat rewrite): {:?}",
+            p1_spec.characteristics.subtypes
+        );
+        assert_eq!(
+            (
+                p1_spec.characteristics.power,
+                p1_spec.characteristics.toughness
+            ),
+            (Some(5), Some(5))
+        );
+    }
+
+    /// CR 616.1 + CR 101.4 (P1-VA): a live compound ordering park reads
+    /// current under per-batch actor reads — P1 is offered {Halving,
+    /// P1-Doubling} while P0-Doubling reaches P0 only. Paired stale-side: a
+    /// departed chooser reads stale via the token conjunct. The floating
+    /// Reflection is the compound gate's key (a whole-entry one-shot copy):
+    /// without it a multi-mandatory material ordering keeps the legacy
+    /// sequential legs and never parks a compound. It rides the entry tier,
+    /// withheld from this creation-layer park.
+    #[test]
+    fn va_live_compound_ordering_park_reads_current() {
+        let mut scenario = scenario();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        scenario.add_enchantment_from_oracle(P0, "Halving Season", HALVING_SEASON);
+        scenario.add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON);
+        scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON);
+        let mystic = scenario
+            .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+            .id();
+        let dragons = scenario
+            .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(mystic).target_object(bears).resolve();
+        assert!(
+            runner.state().stack.is_empty(),
+            "reach guard: Mystic Reflection resolved"
+        );
+        let _ = runner.cast(dragons).target_player(P2).resolve();
+        // Reach guard: P1's ordering over Halving + P1-Doubling, on a
+        // compound park (the chooser is latched).
+        assert!(
+            runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .is_some_and(|pending| pending.choice_player == Some(P1)),
+            "the park must be a latched compound park, got {:?}",
+            runner.state().pending_replacement
+        );
+        let WaitingFor::ReplacementChoice {
+            player,
+            candidates,
+            kind,
+            ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "expected P1's ordering prompt, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(player, P1);
+        assert_eq!(kind, ReplacementChoiceKind::Order);
+        assert_eq!(
+            candidates.len(),
+            2,
+            "P1 must be offered exactly its own two candidates"
+        );
+        let pending = runner.state().pending_replacement.clone().expect("park");
+        assert!(
+            pending_candidates_are_current(runner.state(), &pending),
+            "the live offered subset reads current"
+        );
+        // Paired stale-side: a departed chooser reads stale via the conjunct.
+        runner.state_mut().players[1].is_eliminated = true;
+        let pending = runner.state().pending_replacement.clone().expect("park");
+        assert!(
+            parked_token_chooser_has_left(runner.state(), &pending),
+            "the departed chooser trips the token conjunct"
+        );
+        assert!(
+            parked_prompt_is_stale(runner.state(), &pending),
+            "the departed-chooser park reads stale"
+        );
+    }
+
+    /// CR 616.1f (P1-VB): a live substitute park reads past-the-choice — V12
+    /// plus P0-Doubling (reaching P0 only) leaves nothing out and reads
+    /// current.
+    #[test]
+    fn vb_live_substitute_park_reads_past_the_choice() {
+        let mut scenario = scenario();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let jinnie = scenario
+            .add_creature_from_oracle(P1, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON);
+        let mystic = scenario
+            .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+            .id();
+        let dragons = scenario
+            .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(mystic).target_object(bears).resolve();
+        assert!(
+            runner.state().stack.is_empty(),
+            "reach guard: Mystic Reflection resolved"
+        );
+        let _ = runner.cast(dragons).target_player(P2).resolve();
+        // P0's single mandatory demands nothing; P1's lone optional is offered.
+        assert_jinnie_optional_parked(&runner, jinnie);
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("P1 accepts");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ChooseOneOfBranch { player, .. } if player == P1
+            ),
+            "the accept parks on P1's branch choice, got {:?}",
+            runner.state().waiting_for
+        );
+        let pending = runner.state().pending_replacement.clone().expect("park");
+        assert!(
+            !leaves_out_an_applicable_replacement(runner.state(), &pending),
+            "a substitute park is past the ordering choice"
+        );
+        assert!(
+            pending_candidates_are_current(runner.state(), &pending),
+            "the live substitute park reads current"
+        );
+    }
+
+    /// CR 616.1f (P1-VB control): the same V12 park plus an actor-reaching
+    /// P1-Doubling (outside candidates + peers) reads left-out WITHOUT the
+    /// substitute record and current WITH it — the record flips the verdict.
+    /// Sandbox: P1-Doubling is placed post-park (it cannot be pre-placed —
+    /// P1's offer would be an ordering, not the lone optional the substitute
+    /// park needs). Both are creation-layer (same tier).
+    #[test]
+    fn vb_control_actor_reaching_candidate_flips_on_the_record() {
+        let mut scenario = scenario();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let jinnie = scenario
+            .add_creature_from_oracle(P1, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+            .id();
+        let doubling = scenario
+            .add_spell_to_hand_from_oracle(P1, "Doubling Season", false, DOUBLING_SEASON)
+            .as_enchantment()
+            .id();
+        let mystic = scenario
+            .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+            .id();
+        let dragons = scenario
+            .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(mystic).target_object(bears).resolve();
+        assert!(
+            runner.state().stack.is_empty(),
+            "reach guard: Mystic Reflection resolved"
+        );
+        let _ = runner.cast(dragons).target_player(P2).resolve();
+        assert_jinnie_optional_parked(&runner, jinnie);
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("P1 accepts");
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ChooseOneOfBranch { player, .. } if player == P1
+            ),
+            "the accept parks on P1's branch choice, got {:?}",
+            runner.state().waiting_for
+        );
+        // Sandbox: place P1-Doubling onto the battlefield post-park.
+        {
+            let state = runner.state_mut();
+            state
+                .players
+                .iter_mut()
+                .find(|player| player.id == P1)
+                .expect("P1")
+                .hand
+                .retain(|card| *card != doubling);
+            let object = state.objects.get_mut(&doubling).expect("doubling");
+            object.zone = Zone::Battlefield;
+            state.battlefield.push_back(doubling);
+        }
+        // WITHOUT the record: the actor-reaching candidate is left out.
+        let record = runner
+            .state_mut()
+            .pending_replacement
+            .as_mut()
+            .expect("park")
+            .token_substitute
+            .take();
+        assert!(
+            record.is_some_and(|rec| rec.awaits == TokenSubstituteChoice::Branch),
+            "reach guard: the parked record is the Branch substitute"
+        );
+        let pending = runner.state().pending_replacement.clone().expect("park");
+        assert!(
+            leaves_out_an_applicable_replacement(runner.state(), &pending),
+            "control: actor-reaching P1-Doubling is left out without the record"
+        );
+        assert!(
+            !pending_candidates_are_current(runner.state(), &pending),
+            "control: the recordless park reads stale"
+        );
+        // WITH the record: past-the-choice, current.
+        runner
+            .state_mut()
+            .pending_replacement
+            .as_mut()
+            .expect("park")
+            .token_substitute = record;
+        let pending = runner.state().pending_replacement.clone().expect("park");
+        assert!(
+            !leaves_out_an_applicable_replacement(runner.state(), &pending),
+            "the record flips the verdict: nothing left out"
+        );
+        assert!(
+            pending_candidates_are_current(runner.state(), &pending),
+            "the substitute park reads current"
+        );
+    }
+}

@@ -33,7 +33,7 @@ use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIn
 use crate::types::match_config::MatchType;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::TokenAttackRequest;
+use crate::types::proposed_event::{ProposedEvent, TokenAttackRequest};
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
 use crate::types::resolution::ResolutionFrame;
@@ -1773,13 +1773,13 @@ fn apply_action_boundary_core(
     // (`Option::take_if`).
     // CR 104.3a: a concession's follow-up that fails stops here; finalization
     // publishes the committed departure (`reject_or_publish_departure`).
-    let follow_up_failure =
-        'follow_up: {
-            let scan_from = result.events.len();
-            // CR 601.2h + CR 602.2b + CR 605.3b: a parked counter-cost root's subtree is
-            // finished and the root resumed before the action returns; when that made
-            // progress, its events join the convergence pass below.
-            let resumed_parked_root = match resume_parked_counter_cost_root_at_action_boundary(
+    let follow_up_failure = 'follow_up: {
+        let scan_from = result.events.len();
+        // CR 601.2h + CR 602.2b + CR 605.3b: a parked counter-cost root's subtree is
+        // finished and the root resumed before the action returns; when that made
+        // progress, its events join the convergence pass below.
+        let resumed_parked_root =
+            match resume_parked_counter_cost_root_at_action_boundary(
                 state,
                 &result.waiting_for,
                 &mut result.events,
@@ -1801,81 +1801,96 @@ fn apply_action_boundary_core(
                     }));
                 }
             };
-            // CR 800.4a + CR 616.1 + CR 117.2e: a concession that left a parked unless
-            // payment without its prompt, or with a prompt that no longer describes its
-            // event, is reconciled before the action returns. A payment that ended joins
-            // the convergence pass below.
-            let reconciled_unless_payment = match reconcile_parked_unless_payment_after_departure(
-                state,
-                committed_departure.as_ref(),
-                &mut result,
-                scan_from,
-            ) {
-                Ok(moved) => moved,
-                Err(err) => break 'follow_up Some(err),
-            };
-            let realized_token_entry =
-                effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
-            // CR 603.6a + CR 603.3b: the same convergence for entries of a completed
-            // entering instruction still held by `triggers::settle_entry_batch_scan`:
-            // a handler that settled without reaching the pipeline has not had them
-            // checked, and they are checked before any player receives priority.
-            let settled_entry_batch = settled_entry_batch_is_due(state, &result);
-            // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
-            // completed on a route that never reached the pipeline (a spell cast during
-            // a resolution, CR 608.2g, finishes its announcement here): the resolving
-            // instant or sorcery still owes its final part — leaving the stack — and the
-            // pipeline's top runs it (`run_spell_final_part_if_due`) and collects its
-            // triggers. A token realization and an owed final part on the same action
-            // share one pass.
-            let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
-            // CR 603.3 + CR 603.6d: a direct-return handler (`handle_tribute_choice`) that
-            // settled an as-enters continuation runs no pipeline of its own, so the parked
-            // entry is released by this convergence pass, the action's first, ahead of its
-            // SBA check.
-            let settled_entry_continuation_is_parked =
-                matches!(result.waiting_for, WaitingFor::Priority { .. })
-                    && !state.deferred_entry_events.is_empty();
-            if ((resumed_parked_root || reconciled_unless_payment)
-                && matches!(result.waiting_for, WaitingFor::Priority { .. }))
-                || realized_token_entry
-                || settled_entry_batch
-                || owed_spell_final_part_is_due
-                || settled_entry_continuation_is_parked
-            {
-                if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
-                    if committed_departure.is_some() {
-                        break 'follow_up Some(err);
-                    }
-                    let failure = boundary_life_change_failure(state);
-                    lifecycle.discard();
-                    *state = cast_undo_boundary.restore(boundary_snapshot);
-                    return Err(failure.map_or(err, |player| {
-                        EngineError::LifeChangeUnrepresentable { player }
-                    }));
-                }
-            }
-            // CR 603.2 + CR 603.3: events this action emitted while the announcement
-            // stays paused are staged into its carrier; a spell's carrier returns to
-            // whichever owner now holds the announcement. A reducer arm can return a
-            // prompt carrying the announcement without having written it to the state
-            // yet, so the result's wait is the one the custody authority inspects; the
-            // state's own wait is left exactly as the reducer left it.
-            let reducer_wait =
-                std::mem::replace(&mut state.waiting_for, result.waiting_for.clone());
-            super::announcement_triggers::end_action(state, &result.events);
-            result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
-            if let Some(player) = boundary_life_change_failure(state) {
-                let error = EngineError::LifeChangeUnrepresentable { player };
+        // CR 800.4a + CR 616.1 + CR 117.2e: a concession that left a parked unless
+        // payment without its prompt, or with a prompt that no longer describes its
+        // event, is reconciled before the action returns. A payment that ended joins
+        // the convergence pass below.
+        let reconciled_unless_payment = match reconcile_parked_unless_payment_after_departure(
+            state,
+            committed_departure.as_ref(),
+            &mut result,
+            scan_from,
+        ) {
+            Ok(moved) => moved,
+            Err(err) => break 'follow_up Some(err),
+        };
+        // CR 800.4b + CR 608.2f + CR 616.1: a concession that left a parked
+        // token-creation replacement without its chooser or substitute
+        // decider is reconciled before the action returns. A park that
+        // re-proposed to a survivor prompt stands; one that settled joins
+        // the convergence pass below.
+        let reconciled_token_replacement = match reconcile_parked_token_replacement_after_departure(
+            state,
+            committed_departure.as_ref(),
+            &mut result,
+            scan_from,
+        ) {
+            Ok(moved) => moved,
+            Err(err) => break 'follow_up Some(err),
+        };
+        let realized_token_entry =
+            effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
+        // CR 603.6a + CR 603.3b: the same convergence for entries of a completed
+        // entering instruction still held by `triggers::settle_entry_batch_scan`:
+        // a handler that settled without reaching the pipeline has not had them
+        // checked, and they are checked before any player receives priority.
+        let settled_entry_batch = settled_entry_batch_is_due(state, &result);
+        // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
+        // completed on a route that never reached the pipeline (a spell cast during
+        // a resolution, CR 608.2g, finishes its announcement here): the resolving
+        // instant or sorcery still owes its final part — leaving the stack — and the
+        // pipeline's top runs it (`run_spell_final_part_if_due`) and collects its
+        // triggers. A token realization and an owed final part on the same action
+        // share one pass.
+        let owed_spell_final_part_is_due = owed_spell_final_part_is_due(state, &result);
+        // CR 603.3 + CR 603.6d: a direct-return handler (`handle_tribute_choice`) that
+        // settled an as-enters continuation runs no pipeline of its own, so the parked
+        // entry is released by this convergence pass, the action's first, ahead of its
+        // SBA check.
+        let settled_entry_continuation_is_parked =
+            matches!(result.waiting_for, WaitingFor::Priority { .. })
+                && !state.deferred_entry_events.is_empty();
+        if ((resumed_parked_root || reconciled_unless_payment || reconciled_token_replacement)
+            && matches!(result.waiting_for, WaitingFor::Priority { .. }))
+            || realized_token_entry
+            || settled_entry_batch
+            || owed_spell_final_part_is_due
+            || settled_entry_continuation_is_parked
+        {
+            if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
                 if committed_departure.is_some() {
-                    break 'follow_up Some(error);
+                    break 'follow_up Some(err);
                 }
+                let failure = boundary_life_change_failure(state);
                 lifecycle.discard();
                 *state = cast_undo_boundary.restore(boundary_snapshot);
-                return Err(error);
+                return Err(
+                    failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
+                        player,
+                    }),
+                );
             }
-            None
-        };
+        }
+        // CR 603.2 + CR 603.3: events this action emitted while the announcement
+        // stays paused are staged into its carrier; a spell's carrier returns to
+        // whichever owner now holds the announcement. A reducer arm can return a
+        // prompt carrying the announcement without having written it to the state
+        // yet, so the result's wait is the one the custody authority inspects; the
+        // state's own wait is left exactly as the reducer left it.
+        let reducer_wait = std::mem::replace(&mut state.waiting_for, result.waiting_for.clone());
+        super::announcement_triggers::end_action(state, &result.events);
+        result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
+        if let Some(player) = boundary_life_change_failure(state) {
+            let error = EngineError::LifeChangeUnrepresentable { player };
+            if committed_departure.is_some() {
+                break 'follow_up Some(error);
+            }
+            lifecycle.discard();
+            *state = cast_undo_boundary.restore(boundary_snapshot);
+            return Err(error);
+        }
+        None
+    };
     // A paused simultaneous token clause owns every later action's events until
     // it finishes, whatever the action answered; the follow-up above can still
     // realize its token entries, so this runs after it.
@@ -2096,6 +2111,107 @@ fn parked_unless_payment_repair(
         {
             Some(ParkedPaymentRepair::LostPrompt)
         }
+        _ => None,
+    }
+}
+
+/// CR 800.4b + CR 800.4d + CR 608.2f + CR 616.1 + CR 101.4: the
+/// departure-boundary reconciliation of a parked token-creation replacement
+/// whose chooser — or its accepted substitute's decider — left the game. The
+/// pruned event is re-proposed through the replacement authority before the
+/// action returns, so the survivors keep choosing for their own parts in APNAP
+/// order; the boundary feed then delivers the re-proposed creation's events to
+/// the paused clause, which finishes at its resumer. A park whose chooser is
+/// still in the game is untouched. Inert for an action that committed no
+/// departure; `true` when the park moved.
+fn reconcile_parked_token_replacement_after_departure(
+    state: &mut GameState,
+    departure: Option<&CommittedDeparture>,
+    result: &mut ActionResult,
+    _scan_from: usize,
+) -> Result<bool, EngineError> {
+    // The clause feed owns event collection (it feeds the whole action buffer
+    // after the follow-up block), so this repair takes no scan window of its
+    // own; the parameter mirrors the unless-payment sibling's signature.
+    if departure.is_none() {
+        return Ok(false);
+    }
+    reconcile_parked_token_replacement_inner(state, &mut result.waiting_for, &mut result.events)
+}
+
+/// The departure-agnostic core of the token-park repair, shared by the
+/// concession-boundary site above and the SBA-net site in
+/// `reconcile_terminal_sba` (an SBA departure carries no `CommittedDeparture`).
+/// The leaving set is always re-derived from liveness, never trusted from the
+/// triggering departure: prune is a fixpoint, the substitute record-take is
+/// single-fire, and once the chooser is alive the detection below renders
+/// re-entry inert — so SBA-then-Concede orderings and a restored save holding
+/// a stale park are each repaired correctly at the next boundary.
+fn reconcile_parked_token_replacement_inner(
+    state: &mut GameState,
+    waiting_for: &mut WaitingFor,
+    events: &mut Vec<GameEvent>,
+) -> Result<bool, EngineError> {
+    if parked_token_replacement_repair(state, waiting_for).is_none() {
+        return Ok(false);
+    }
+    sync_waiting_for(state, waiting_for);
+    // Defensive prune: the repair never depends on prune having run — the
+    // leaving set is re-derived from liveness right here.
+    let leaving: HashSet<PlayerId> = state
+        .players
+        .iter()
+        .map(|player| player.id)
+        .filter(|player| !super::players::is_alive(state, *player))
+        .collect();
+    let Some(pending) = state.pending_replacement.as_mut() else {
+        return Ok(false);
+    };
+    match replacement::prune_departed_token_batches(pending, &leaving) {
+        replacement::TokenPruneOutcome::Survives => {
+            // No answer is read: the replacement authority re-proposes a park
+            // whose chooser left before it applies an index
+            // (`handle_replacement_choice`, `continue_replacement`).
+            *waiting_for = engine_replacement::handle_replacement_choice(state, 0, events)?;
+            state.waiting_for = waiting_for.clone();
+        }
+        replacement::TokenPruneOutcome::NoSurvivor => {
+            replacement::abandon_survivorless_token_park(state, &leaving);
+            *waiting_for = state.waiting_for.clone();
+        }
+        replacement::TokenPruneOutcome::NotATokenEvent => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// What a departure left to repair on a parked token-creation replacement.
+enum ParkedTokenRepair {
+    /// CR 616.1 + CR 800.4a: the park's chooser — or its substitute's decider —
+    /// left the game. The pruned event is re-proposed to whoever now chooses
+    /// for the surviving batches.
+    DepartedChooser,
+}
+
+/// The one reading of whether a parked token-creation replacement needs the
+/// departure's reconciliation: a token park whose chooser or decider left,
+/// under its prompt or the priority window the departure handed on while
+/// keeping the record.
+fn parked_token_replacement_repair(
+    state: &GameState,
+    waiting_for: &WaitingFor,
+) -> Option<ParkedTokenRepair> {
+    let pending = state.pending_replacement.as_ref()?;
+    if !matches!(pending.proposed, ProposedEvent::CreateToken { .. }) {
+        return None;
+    }
+    if !replacement::parked_token_chooser_has_left(state, pending) {
+        return None;
+    }
+    match waiting_for {
+        WaitingFor::ReplacementChoice { .. }
+        | WaitingFor::ChooseOneOfBranch { .. }
+        | WaitingFor::CopyTargetChoice { .. }
+        | WaitingFor::Priority { .. } => Some(ParkedTokenRepair::DepartedChooser),
         _ => None,
     }
 }
@@ -3130,6 +3246,31 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
     }
 
     super::elimination::ensure_game_over_if_terminal(state, &mut result.events);
+    // CR 800.4b + CR 608.2f: the same token-park repair behind the SBA
+    // trigger (an SBA departure leaves the same stale park a concession
+    // does). Inert when the game ended; otherwise the adopted wait is
+    // re-synced and settlement proceeds as below. A departure is never
+    // undone, so a failure is reported rather than returned.
+    if state.game_end.is_none() {
+        match reconcile_parked_token_replacement_inner(
+            state,
+            &mut result.waiting_for,
+            &mut result.events,
+        ) {
+            Ok(moved) => {
+                if moved {
+                    sync_waiting_for(state, &result.waiting_for);
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "a parked token replacement repair after a departure did not settle");
+                debug_assert!(
+                    false,
+                    "a parked token replacement repair after a departure did not settle: {error}"
+                );
+            }
+        }
+    }
     settle_finished_game(state, result);
 }
 
