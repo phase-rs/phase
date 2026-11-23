@@ -834,14 +834,17 @@ fn ghalta_and_battle_mastery(scenario: &mut GameScenario) -> (ObjectId, ObjectId
         .from_oracle_text_with_keywords(&["Trample"], GHALTA)
         .with_color(vec![ManaColor::Green])
         .id();
-    let mastery = scenario
+    (ghalta, battle_mastery(scenario))
+}
+
+fn battle_mastery(scenario: &mut GameScenario) -> ObjectId {
+    scenario
         .add_spell_to_hand(P0, "Battle Mastery", false)
         .as_enchantment()
         .with_subtypes(vec!["Aura"])
         .with_mana_cost(ManaCost::zero())
         .from_oracle_text_with_keywords(&["Enchant"], BATTLE_MASTERY)
-        .id();
-    (ghalta, mastery)
+        .id()
 }
 
 /// P0's Ghalta, Primal Hunger (12/12, "Trample") wearing Battle Mastery, cast onto it from P0's
@@ -1237,6 +1240,111 @@ fn regenerate_spell(scenario: &mut GameScenario) -> ObjectId {
 }
 
 #[test]
+fn zilortha_forecast_skips_regular_step_after_double_strike_grant_dies() {
+    let mut scenario = board();
+    let ghalta = printed(
+        &mut scenario,
+        P0,
+        "Ghalta, Primal Hunger",
+        (12, 12),
+        &["Trample"],
+        GHALTA,
+    );
+    let grant = printed(
+        &mut scenario,
+        P1,
+        "Avatar of Slaughter",
+        (8, 8),
+        &[],
+        "All creatures have double strike and attack each combat if able.",
+    );
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let regenerate = regenerate_spell(&mut scenario);
+    let mut runner = scenario.build();
+    runner.act(GameAction::PassPriority).unwrap();
+    cast_at(&mut runner, regenerate, bears);
+
+    let life_before = runner.life(P1);
+    attack_and_block(&mut runner, &[ghalta], &[(grant, ghalta), (bears, ghalta)]);
+    assert!(runner.state().objects[&ghalta].has_keyword(&Keyword::DoubleStrike));
+    let forecast = combat_damage_to_defender(runner.state(), ghalta, &[grant, bears]);
+    assign_split(&mut runner, vec![(grant, 8), (bears, 2)], 2);
+    assert_eq!(zone(&runner, grant), Zone::Graveyard);
+    assert_eq!(zone(&runner, bears), Zone::Battlefield);
+    assert!(runner.state().objects[&bears].tapped);
+    assert_eq!(zone(&runner, ghalta), Zone::Battlefield);
+    assert!(!runner.state().objects[&ghalta].has_keyword(&Keyword::DoubleStrike));
+    assert_eq!(life_before - runner.life(P1), 2);
+
+    finish_combat(&mut runner);
+    let actual = life_before - runner.life(P1);
+    assert_eq!(actual, 2);
+    assert_eq!(forecast, actual);
+}
+
+fn assert_zilortha_forecast_includes_first_step_trample_lifelink(regenerate: bool) {
+    let mut scenario = board();
+    scenario.with_life(P0, 10).with_life(P1, 50);
+    let avatar = printed(
+        &mut scenario,
+        P0,
+        "Serra Avatar",
+        (0, 0),
+        &[],
+        "Serra Avatar's power and toughness are each equal to your life total.\nWhen Serra Avatar is put into a graveyard from anywhere, shuffle it into its owner's library.",
+    );
+    let courage = scenario
+        .add_spell_to_hand(P0, "Unflinching Courage", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::zero())
+        .from_oracle_text_with_keywords(
+            &["Enchant"],
+            "Enchant creature\nEnchanted creature gets +2/+2 and has trample and lifelink. (Damage dealt by the creature also causes its controller to gain that much life.)",
+        )
+        .id();
+    let mastery = battle_mastery(&mut scenario);
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let shield = regenerate.then(|| regenerate_spell(&mut scenario));
+    let mut runner = scenario.build();
+    cast_at(&mut runner, courage, avatar);
+    cast_at(&mut runner, mastery, avatar);
+    if let Some(shield) = shield {
+        runner.act(GameAction::PassPriority).unwrap();
+        cast_at(&mut runner, shield, bears);
+    }
+
+    let life_before = runner.life(P1);
+    attack_and_block(&mut runner, &[avatar], &[(bears, avatar)]);
+    assert_eq!(prompt_minimum(&runner, bears), 2);
+    let forecast = combat_damage_to_defender(runner.state(), avatar, &[bears]);
+    assign(&mut runner, bears, 2, 10).expect("Serra Avatar assigns 12 with Unflinching Courage");
+    assert_eq!(runner.life(P0), 22);
+    assert_eq!(life_before - runner.life(P1), 10);
+    if regenerate {
+        assert_eq!(zone(&runner, bears), Zone::Battlefield);
+        assert!(runner.state().objects[&bears].tapped);
+    } else {
+        assert_eq!(zone(&runner, bears), Zone::Graveyard);
+    }
+
+    finish_combat(&mut runner);
+    let actual = life_before - runner.life(P1);
+    assert_eq!(actual, 34);
+    assert_eq!(forecast, actual);
+}
+
+#[test]
+fn zilortha_forecast_includes_first_step_trample_lifelink_with_regeneration() {
+    assert_zilortha_forecast_includes_first_step_trample_lifelink(true);
+}
+
+#[test]
+fn zilortha_forecast_previews_trample_lifelink_without_regeneration() {
+    assert_zilortha_forecast_includes_first_step_trample_lifelink(false);
+}
+
+#[test]
 fn zilortha_regeneration_alone_opens_first_strike_forecast() {
     let mut regenerate = None;
     let (mut runner, ghalta, z, yargle) =
@@ -1361,4 +1469,135 @@ fn zilortha_forecast_falls_back_when_destruction_replacement_needs_choice() {
     assert!(candidates
         .iter()
         .any(|candidate| candidate.source_id == umbra));
+}
+
+#[test]
+fn zilortha_forecast_skips_regular_step_after_hyena_umbra_is_destroyed() {
+    let mut scenario = board();
+    let ghalta = printed(
+        &mut scenario,
+        P0,
+        "Ghalta, Primal Hunger",
+        (12, 12),
+        &["Trample"],
+        GHALTA,
+    );
+    printed(
+        &mut scenario,
+        P0,
+        "Kwende, Pride of Femeref",
+        (2, 2),
+        &["Double strike"],
+        "Double strike\nCreatures you control with first strike have double strike.",
+    );
+    let umbra = scenario
+        .add_spell_to_hand(P0, "Hyena Umbra", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::zero())
+        .from_oracle_text_with_keywords(
+            &["Enchant", "Umbra armor"],
+            "Enchant creature\nEnchanted creature gets +1/+1 and has first strike.\nUmbra armor (If enchanted creature would be destroyed, instead remove all damage from it and destroy this Aura.)",
+        )
+        .id();
+    let glissa = printed(
+        &mut scenario,
+        P1,
+        "Glissa, the Traitor",
+        (3, 3),
+        &["First strike", "Deathtouch"],
+        "First strike, deathtouch\nWhenever a creature an opponent controls dies, you may return target artifact card from your graveyard to your hand.",
+    );
+    let mut runner = scenario.build();
+    cast_at(&mut runner, umbra, ghalta);
+    let life_before = runner.life(P1);
+
+    attack_and_block(&mut runner, &[ghalta], &[(glissa, ghalta)]);
+    assert!(runner.state().objects[&ghalta].has_keyword(&Keyword::DoubleStrike));
+    assert_eq!(prompt_minimum(&runner, glissa), 3);
+    let forecast = combat_damage_to_defender(runner.state(), ghalta, &[glissa]);
+
+    assign(&mut runner, glissa, 3, 10).expect("Ghalta assigns 13 with Hyena Umbra");
+    assert_eq!(zone(&runner, glissa), Zone::Graveyard);
+    assert_eq!(zone(&runner, umbra), Zone::Graveyard);
+    assert_eq!(zone(&runner, ghalta), Zone::Battlefield);
+    assert!(!runner.state().objects[&ghalta].has_keyword(&Keyword::FirstStrike));
+    assert!(!runner.state().objects[&ghalta].has_keyword(&Keyword::DoubleStrike));
+    assert_eq!(life_before - runner.life(P1), 10);
+
+    // CR 702.4c + CR 510.4: Ghalta lost double strike after assigning in the first step.
+    finish_combat(&mut runner);
+    let actual = life_before - runner.life(P1);
+    assert_eq!(actual, 10);
+    assert_eq!(forecast, actual, "forecast must skip the regular step");
+}
+
+#[test]
+fn zilortha_forecast_counts_full_lifelink_against_regenerating_wall_of_ice() {
+    let mut scenario = board();
+    scenario.with_life(P0, 20).with_life(P1, 20);
+    let avatar = printed(
+        &mut scenario,
+        P0,
+        "Serra Avatar",
+        (0, 0),
+        &[],
+        "Serra Avatar's power and toughness are each equal to your life total.\nWhen Serra Avatar is put into a graveyard from anywhere, shuffle it into its owner's library.",
+    );
+    let courage = scenario
+        .add_spell_to_hand(P0, "Unflinching Courage", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::zero())
+        .from_oracle_text_with_keywords(
+            &["Enchant"],
+            "Enchant creature\nEnchanted creature gets +2/+2 and has trample and lifelink. (Damage dealt by the creature also causes its controller to gain that much life.)",
+        )
+        .id();
+    let mastery = battle_mastery(&mut scenario);
+    let wall = printed(
+        &mut scenario,
+        P1,
+        "Wall of Ice",
+        (0, 7),
+        &["Defender"],
+        "Defender (This creature can't attack.)",
+    );
+    let regenerate = regenerate_spell(&mut scenario);
+    let mut runner = scenario.build();
+    cast_at(&mut runner, courage, avatar);
+    cast_at(&mut runner, mastery, avatar);
+    runner.act(GameAction::PassPriority).unwrap();
+    cast_at(&mut runner, regenerate, wall);
+
+    let life_before = runner.life(P1);
+    attack_and_block(&mut runner, &[avatar], &[(wall, avatar)]);
+    assert_eq!(runner.life(P0), 20);
+    assert_eq!(prompt_minimum(&runner, wall), 7);
+    let forecast = combat_damage_to_defender(runner.state(), avatar, &[wall]);
+
+    assign(&mut runner, wall, 7, 15).expect("Serra Avatar assigns 22 with Unflinching Courage");
+    // CR 702.15b: lifelink counts all 22 damage dealt to the blocker and defender.
+    assert_eq!(runner.life(P0), 42);
+    assert_eq!(life_before - runner.life(P1), 15);
+    // CR 701.19a: the Wall survives, tapped and removed from combat with no marked damage.
+    assert_eq!(zone(&runner, wall), Zone::Battlefield);
+    assert!(runner.state().objects[&wall].tapped);
+    assert_eq!(marked(&runner, wall), 0);
+    assert!(!runner
+        .state()
+        .combat
+        .as_ref()
+        .expect("combat continues after first-strike damage")
+        .blocker_to_attacker
+        .contains_key(&wall));
+
+    runner.combat_damage();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
+    let actual = life_before - runner.life(P1);
+    assert_eq!(actual, 59);
+    assert_eq!(forecast, actual, "forecast must include full lifelink");
 }

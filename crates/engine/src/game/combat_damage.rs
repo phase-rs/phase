@@ -1614,6 +1614,17 @@ pub fn combat_damage_to_defender(
                     },
                 )
             }));
+            if step.to_player > 0 {
+                assignments.push((
+                    attacker_id,
+                    DamageAssignment {
+                        target: DamageTarget::Player(forecast_defending_player(
+                            state, attacker, blockers,
+                        )),
+                        amount: step.to_player,
+                    },
+                ));
+            }
         }
         // CR 702.7b: first-striking blockers assign now, and can kill the attacker
         // before it ever reaches the regular step.
@@ -1678,12 +1689,14 @@ pub fn combat_damage_to_defender(
         None => departed.contains(&id),
     };
     let regular_state = preview.as_ref().map_or(state, |(preview, _)| preview);
-    // CR 702.4b: the attacker assigns in the regular step if it has double strike,
-    // or if it never had first strike and so has not assigned at all yet.
-    if !has_departed(attacker_id) && (has_double_strike || !attacker_strikes_first) {
+    if !has_departed(attacker_id) {
         let Some(attacker) = regular_state.objects.get(&attacker_id) else {
             return to_player as i32;
         };
+        // CR 510.4: a first-step participant must still have double strike to assign again.
+        if attacker_strikes_first && !attacker.has_keyword(&Keyword::DoubleStrike) {
+            return to_player as i32;
+        }
         // CR 510.1a + CR 613.11: the regular step assigns from the attacker as the first
         // step left it (an umbra armor Aura it lost no longer pumps it); 0 assigns nothing.
         let power = combat_damage_amount(attacker);
@@ -1784,10 +1797,10 @@ struct PredictedHit {
 }
 
 /// CR 510.2 + CR 615.5 + CR 614.6: run first-strike damage and its state-based actions on a
-/// copy when prevention or replacement could change the damage or a damaged creature's
-/// destruction. Return the resulting state and the attacker's starting combat participation.
-/// Return `None` when neither event can change or when damage or state-based actions pause
-/// for a player's choice. The caller then estimates from the assigned amounts.
+/// copy when damage or destruction can change, or when a double striker's lifelink can change
+/// the board it reads for its next assignment (CR 702.15b).
+/// Return the resulting state and the attacker's starting combat participation.
+/// If no preview is needed or play pauses for a choice, estimate from the assigned amounts.
 fn preview_first_step(
     state: &GameState,
     attacker: &GameObject,
@@ -1795,18 +1808,21 @@ fn preview_first_step(
     assignments: &[(ObjectId, DamageAssignment)],
 ) -> Option<(GameState, CombatParticipation)> {
     let needs_preview = assignments.iter().any(|(source, assignment)| {
-        let DamageTarget::Object(target) = assignment.target else {
+        if assignment.amount == 0 {
             return false;
+        }
+        let target = match assignment.target {
+            DamageTarget::Object(id) => TargetRef::Object(id),
+            DamageTarget::Player(id) => TargetRef::Player(id),
         };
-        assignment.amount > 0
-            && (DamageContext::from_source(state, *source).is_some_and(|context| {
-                damage_is_not_fixed(
-                    state,
-                    &context,
-                    &TargetRef::Object(target),
-                    assignment.amount,
-                )
-            }) || lethal_destruction_is_not_fixed(state, target))
+        DamageContext::from_source(state, *source).is_some_and(|context| {
+            damage_is_not_fixed(state, &context, &target, assignment.amount)
+                // CR 702.15b: a double striker's own lifelink gain, from damage to a blocker
+                // or the player, can change what it assigns in the regular step.
+                || (*source == attacker.id
+                    && context.has_lifelink
+                    && attacker.has_keyword(&Keyword::DoubleStrike))
+        }) || matches!(target, TargetRef::Object(id) if lethal_destruction_is_not_fixed(state, id))
     });
     if !needs_preview {
         return None;
@@ -1839,15 +1855,28 @@ fn preview_first_step(
     Some((preview, before))
 }
 
+/// The player a forecast attacker damages: its declared defending player, else the blockers'
+/// controller, else the next player for an attack not yet declared.
+fn forecast_defending_player(
+    state: &GameState,
+    attacker: &GameObject,
+    blockers: &[ObjectId],
+) -> PlayerId {
+    crate::game::combat::defending_player_for_attacker(state, attacker.id)
+        .or_else(|| {
+            blockers
+                .iter()
+                .find_map(|id| state.objects.get(id).map(|blocker| blocker.controller))
+        })
+        .unwrap_or_else(|| crate::game::players::next_player(state, attacker.controller))
+}
+
 /// Records on the preview copy the attack and blocks the forecast was asked about, where the
 /// live combat doesn't already hold them, so first-step effects that end a combat role
 /// (regeneration, CR 701.19a) act on hypothetical blocks as they would on declared ones.
 /// Records roles only: no declaration triggers, costs or requirements run.
 fn seed_forecast_combat(state: &mut GameState, attacker: &GameObject, blockers: &[ObjectId]) {
-    let defending_player = blockers
-        .iter()
-        .find_map(|id| state.objects.get(id).map(|blocker| blocker.controller))
-        .unwrap_or_else(|| crate::game::players::next_player(state, attacker.controller));
+    let defending_player = forecast_defending_player(state, attacker, blockers);
     let combat = state.combat.get_or_insert_with(CombatState::default);
     // CR 508.1k: give a hypothetical attacker an attacking role. Keep any
     // declared attack's destination.
