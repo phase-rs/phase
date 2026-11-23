@@ -195,6 +195,10 @@ pub(crate) fn handle_priority_pass_with_limit(
             // After resolve_next: the stack shrank by `consumed` entries.
             // Update auto-pass baselines by the SAME amount so trigger-growth
             // detection stays accurate across apply() calls (§7.2 / R6).
+            // CR 805.5b: overlay entries are exactly the session
+            // representatives' own keys (self-membership). A teammate's own
+            // key keeps its trigger-growth baseline accurate across apply()
+            // calls even while the representative's session runs.
             let session_representative_auto_pass_keys = state
                 .stack_resolution_session
                 .as_ref()
@@ -203,11 +207,7 @@ pub(crate) fn handle_priority_pass_with_limit(
                         .auto_pass
                         .keys()
                         .copied()
-                        .filter(|player| {
-                            session.representatives.contains(
-                                &super::topology::priority_pass_representative(state, *player),
-                            )
-                        })
+                        .filter(|player| session.representatives.contains(player))
                         .collect::<std::collections::BTreeSet<_>>()
                 })
                 .unwrap_or_default();

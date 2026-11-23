@@ -3308,3 +3308,215 @@ fn a_session_ending_pass_finishes_a_completed_baseline_until_stack_empty() {
         state.auto_pass
     );
 }
+
+/// VM-F1 (F3/D2.4 + phase-2 addendum): a finished non-representative
+/// UntilStackEmpty key is scrubbed from the live map AND the session
+/// baseline, so teardown cannot resurrect it. Lives in the submodule
+/// because only a synthetic entry grows the stack past the key's initial
+/// length (Bolt/Counter-only boards cannot). CR 805.5b: overlay entries are
+/// exactly the session representatives' keys.
+#[test]
+fn finished_teammate_until_stack_empty_scrubbed_live_and_baseline() {
+    let mut state = GameState::new(
+        crate::types::format::FormatConfig::two_headed_giant(),
+        4,
+        42,
+    );
+    state.turn_number = 1;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    push_simple_stack_entry(&mut state, 41_001, PlayerId(2));
+    // Opposing meaningful actions: the runner pauses at P2 with the session
+    // live instead of draining the cohort.
+    add_non_mana_activated_artifact(&mut state, PlayerId(2));
+    add_non_mana_activated_artifact(&mut state, PlayerId(3));
+
+    // Reach setup: session {P0}; live {P0 overlay, P1 USE0}; baseline
+    // {P0 EOC, P1 USE0}; one synthetic entry. P1's key is finished — the
+    // stack grew past its initial length of 0.
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+    state.auto_pass.insert(
+        PlayerId(1),
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 0,
+            policy: StackResolutionPolicy::Committed,
+        },
+    );
+    let baseline: BTreeMap<PlayerId, AutoPassMode> = state
+        .auto_pass
+        .iter()
+        .map(|(&player, &mode)| (player, mode))
+        .collect();
+    install_stack_resolution_session(
+        &mut state,
+        BTreeSet::from([PlayerId(0)]),
+        StackResolutionBudget::Unlimited,
+        StackResolutionPolicy::Committed,
+        baseline,
+    );
+    assert_eq!(state.stack.len(), 1, "reach: one synthetic entry");
+    let session = state
+        .stack_resolution_session
+        .as_ref()
+        .expect("reach: session installed");
+    assert_eq!(session.representatives, BTreeSet::from([PlayerId(0)]));
+    assert!(
+        matches!(
+            state.auto_pass.get(&PlayerId(1)),
+            Some(AutoPassMode::UntilStackEmpty {
+                initial_stack_len: 0,
+                ..
+            })
+        ),
+        "reach: P1's finished key live"
+    );
+    assert!(
+        session
+            .auto_pass_overlay
+            .baseline
+            .contains_key(&PlayerId(1)),
+        "reach: P1's key in the baseline"
+    );
+
+    // Beat: P1's explicit pass. The boundary runner takes P0's cohort beat,
+    // runs the finish sweep, then pauses at P2's meaningful action with the
+    // session live.
+    apply(&mut state, PlayerId(1), GameAction::PassPriority)
+        .expect("teammate pass must be accepted");
+
+    // Mid: session live, P1 scrubbed from both representations.
+    assert!(
+        state.stack_resolution_session.is_some(),
+        "the session survives the teammate pass"
+    );
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(1)),
+        "mid: the finished P1 key is scrubbed from the live map"
+    );
+    assert!(
+        !state
+            .stack_resolution_session
+            .as_ref()
+            .expect("the session was just asserted live")
+            .auto_pass_overlay
+            .baseline
+            .contains_key(&PlayerId(1)),
+        "mid: the finished P1 key is scrubbed from the baseline"
+    );
+
+    // Teardown exact: restoring the session must not resurrect P1.
+    assert!(
+        take_and_restore_stack_resolution_session(&mut state),
+        "reach: teardown ran"
+    );
+    assert!(state.stack_resolution_session.is_none());
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(1)),
+        "teardown must not restore P1's finished preference"
+    );
+    assert_eq!(
+        state.auto_pass.get(&PlayerId(0)),
+        Some(&AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        }),
+        "reach: teardown restored P0's baseline preference"
+    );
+}
+
+/// VM-T1 (F3/D2.1+D2.7): a non-representative's MyNextTurnStart clears when
+/// the TEAM's next turn begins, surviving the opposing team's intervening
+/// turn. CR 805.4 + CR 805.4a: a shared team takes one turn.
+#[test]
+fn teammate_my_next_turn_start_clears_at_team_next_turn() {
+    let mut state = GameState::new(
+        crate::types::format::FormatConfig::two_headed_giant(),
+        4,
+        42,
+    );
+    state.turn_number = 1;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    // Libraries: every seat draws on its team's turns, and a deck-out loss
+    // would confound the sweep assertions.
+    for (seat, base) in [
+        (PlayerId(0), 60_000u64),
+        (PlayerId(1), 60_010),
+        (PlayerId(2), 60_020),
+        (PlayerId(3), 60_030),
+    ] {
+        for n in 0..2 {
+            create_object(
+                &mut state,
+                CardId(base + n),
+                seat,
+                format!("T1 Library Filler {n}"),
+                Zone::Library,
+            );
+        }
+        let library_len = state
+            .players
+            .iter()
+            .find(|player| player.id == seat)
+            .expect("seat exists")
+            .library
+            .len();
+        assert_eq!(library_len, 2, "reach: {seat:?} library staged");
+    }
+    state.auto_pass.insert(
+        PlayerId(1),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::MyNextTurnStart,
+        },
+    );
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+
+    // Reach: own-key pre.
+    assert!(state.auto_pass.contains_key(&PlayerId(1)));
+
+    let mut events = Vec::new();
+    crate::game::turns::start_next_turn(&mut state, &mut events);
+    assert_eq!(state.active_player, PlayerId(2));
+    assert!(
+        state.game_end.is_none() && state.players.iter().all(|p| !p.is_eliminated),
+        "reach: no elimination confound on the opposing team's turn"
+    );
+    // P2-mid retained: the opposing team's turn is not P1's team's turn.
+    assert!(
+        state.auto_pass.contains_key(&PlayerId(1)),
+        "MyNextTurnStart must survive the opposing team's turn start"
+    );
+    // EOC-gone sibling: the boundary axis gates the retain.
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(0)),
+        "EndOfCurrentTurn must clear at the next turn start"
+    );
+
+    crate::game::turns::start_next_turn(&mut state, &mut events);
+    assert_eq!(state.active_player, PlayerId(0));
+    assert!(
+        state.game_end.is_none() && state.players.iter().all(|p| !p.is_eliminated),
+        "reach: no elimination confound on the own team's turn"
+    );
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(1)),
+        "MyNextTurnStart must clear at the owner's team next turn"
+    );
+}

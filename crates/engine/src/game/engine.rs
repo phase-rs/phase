@@ -9840,6 +9840,17 @@ pub(crate) fn no_living_player_has_meaningful_priority_action(state: &GameState)
     })
 }
 
+/// CR 805.5b: scrub one seat's standing preference from both the live map
+/// and a live session's teardown baseline, so a later teardown cannot
+/// resurrect a preference the seat already finished, cancelled, or revoked.
+/// Shared by the finish sweep and the runner's per-candidate Finish drive.
+fn scrub_seat_auto_pass(state: &mut GameState, seat: PlayerId) {
+    state.auto_pass.remove(&seat);
+    if let Some(session) = state.stack_resolution_session.as_mut() {
+        session.auto_pass_overlay.baseline.remove(&seat);
+    }
+}
+
 fn finish_completed_or_interrupted_until_stack_empty_sessions(state: &mut GameState) -> bool {
     let session_representatives = state
         .stack_resolution_session
@@ -9852,9 +9863,9 @@ fn finish_completed_or_interrupted_until_stack_empty_sessions(state: &mut GameSt
             AutoPassMode::UntilStackEmpty {
                 initial_stack_len, ..
             } if !session_representatives.is_some_and(|representatives| {
-                representatives.contains(&super::topology::priority_pass_representative(
-                    state, *player,
-                ))
+                // Self-membership: only a seat of the frozen cohort keeps its
+                // overlay entry while the session runs.
+                representatives.contains(player)
             }) && (state.stack.is_empty() || state.stack.len() > *initial_stack_len) =>
             {
                 Some(*player)
@@ -9864,7 +9875,7 @@ fn finish_completed_or_interrupted_until_stack_empty_sessions(state: &mut GameSt
         .collect();
 
     for player in &finished {
-        state.auto_pass.remove(player);
+        scrub_seat_auto_pass(state, *player);
     }
 
     !finished.is_empty()
@@ -10297,6 +10308,146 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
+/// CR 805.5b: one runner iteration's drive instruction for a Priority window.
+/// The runner drives each living unpassed member of the holding team from that
+/// member's own preference only.
+enum AutoPassDrive {
+    /// Pass for `seat`. `limit` carries the live session's next authorized
+    /// entries, and only a holder-driven session beat sets it: a teammate
+    /// drive passes that one seat with no session consumption.
+    Drive { seat: PlayerId, limit: Option<u32> },
+    /// Leave the window for a fresh decision.
+    Stop,
+}
+
+/// CR 805.5b + CR 117.4: select which living unpassed seat of the holder's
+/// team the auto-pass runner passes for on this beat, consulting only each
+/// candidate's own preference. An individual window drives the holder alone,
+/// exactly as before; a shared-team window scans holder-first across the
+/// living unpassed members.
+///
+/// CR 732.2c: a seat whose divergence latch is set is skipped before its
+/// preference is read — a bare pass can never discharge that obligation.
+/// Skips count: a scan that skipped anyone and drove nobody stops without
+/// the all-Exit sweep, so a latched seat is never passed over.
+fn select_auto_pass_drive(state: &mut GameState, holder: PlayerId) -> AutoPassDrive {
+    // Individual seat: the holder is its own whole team. This block is the
+    // base runner arm moved verbatim, including the Exit fallthrough: the
+    // live-only holder removal on Finish is safe because NotActive implies no
+    // session is live.
+    if !super::topology::side_takes_shared_turn(state, holder) {
+        let stack_resolution_limit = match stack_resolution_session_priority_decision(
+            state,
+            holder,
+            StackResolutionSessionPassKind::Automatic,
+        ) {
+            StackResolutionSessionPriorityDecision::Resolve { limit } => Some(limit),
+            StackResolutionSessionPriorityDecision::Pause
+            | StackResolutionSessionPriorityDecision::PauseRetained => {
+                return AutoPassDrive::Stop;
+            }
+            StackResolutionSessionPriorityDecision::NotActive => {
+                match priority_auto_pass_decision(state, holder) {
+                    AutoPassDecision::Exit => {
+                        let Some(requester) = active_until_stack_empty_requester(state) else {
+                            return AutoPassDrive::Stop;
+                        };
+                        if requester == holder {
+                            return AutoPassDrive::Stop;
+                        }
+                        if finish_completed_or_interrupted_until_stack_empty_sessions(state) {
+                            return AutoPassDrive::Stop;
+                        }
+                        if priority_player_has_meaningful_action(state)
+                            || window_held_for_mana(state, holder)
+                        {
+                            return AutoPassDrive::Stop;
+                        }
+                    }
+                    AutoPassDecision::Finish => {
+                        state.auto_pass.remove(&holder);
+                        return AutoPassDrive::Stop;
+                    }
+                    AutoPassDecision::Break => return AutoPassDrive::Stop,
+                    AutoPassDecision::Pass => {}
+                }
+                None
+            }
+        };
+        return AutoPassDrive::Drive {
+            seat: holder,
+            limit: stack_resolution_limit,
+        };
+    }
+
+    // Shared team turn: the holder consults the live session seam only while
+    // it has not passed. A passed holder already took its cohort beat, so the
+    // runner scans the members' own preferences directly.
+    if !state.priority_passes.contains(&holder) {
+        match stack_resolution_session_priority_decision(
+            state,
+            holder,
+            StackResolutionSessionPassKind::Automatic,
+        ) {
+            StackResolutionSessionPriorityDecision::Resolve { limit } => {
+                return AutoPassDrive::Drive {
+                    seat: holder,
+                    limit: Some(limit),
+                };
+            }
+            StackResolutionSessionPriorityDecision::Pause
+            | StackResolutionSessionPriorityDecision::PauseRetained => {
+                return AutoPassDrive::Stop;
+            }
+            StackResolutionSessionPriorityDecision::NotActive => {}
+        }
+    }
+
+    // Per-candidate scan: living unpassed members, holder-first. Each
+    // candidate's latch gates before its preference is read.
+    let mut candidates = Vec::new();
+    if !state.priority_passes.contains(&holder) {
+        candidates.push(holder);
+    }
+    for member in super::topology::team_members(state, holder) {
+        if member != holder && !state.priority_passes.contains(&member) {
+            candidates.push(member);
+        }
+    }
+    let mut skipped = 0usize;
+    for candidate in candidates {
+        if super::precast_copy_shortcut::blocks_pass(state, candidate) {
+            skipped += 1;
+            continue;
+        }
+        match priority_auto_pass_decision(state, candidate) {
+            AutoPassDecision::Pass => {
+                // CR 117.4: one seat per boundary. The drive carries no
+                // session limit, so it records the seat's pass without
+                // consuming another seat's authorized entries.
+                return AutoPassDrive::Drive {
+                    seat: candidate,
+                    limit: None,
+                };
+            }
+            AutoPassDecision::Finish => {
+                scrub_seat_auto_pass(state, candidate);
+                return AutoPassDrive::Stop;
+            }
+            AutoPassDecision::Break => return AutoPassDrive::Stop,
+            AutoPassDecision::Exit => {}
+        }
+    }
+    if skipped > 0 {
+        return AutoPassDrive::Stop;
+    }
+    // All-Exit with no skips: sweep finished preferences and stop. Unlike
+    // the individual Exit arm, no seat without its own preference is ever
+    // passed on another seat's behalf.
+    finish_completed_or_interrupted_until_stack_empty_sessions(state);
+    AutoPassDrive::Stop
+}
+
 /// Auto-pass loop: when a player has an auto-pass flag and receives priority,
 /// automatically pass for them until the goal condition is met or interrupted.
 ///
@@ -10362,44 +10513,9 @@ fn run_auto_pass_loop(
                 if super::precast_copy_shortcut::blocks_pass(state, player) {
                     break;
                 }
-                let stack_resolution_limit = match stack_resolution_session_priority_decision(
-                    state,
-                    player,
-                    StackResolutionSessionPassKind::Automatic,
-                ) {
-                    StackResolutionSessionPriorityDecision::Resolve { limit } => Some(limit),
-                    StackResolutionSessionPriorityDecision::Pause => break,
-                    StackResolutionSessionPriorityDecision::PauseRetained => break,
-                    StackResolutionSessionPriorityDecision::NotActive => {
-                        let decision = priority_auto_pass_decision(state, player);
-                        match decision {
-                            AutoPassDecision::Exit => {
-                                let Some(requester) = active_until_stack_empty_requester(state)
-                                else {
-                                    break;
-                                };
-                                if requester == player {
-                                    break;
-                                }
-                                if finish_completed_or_interrupted_until_stack_empty_sessions(state)
-                                {
-                                    break;
-                                }
-                                if priority_player_has_meaningful_action(state)
-                                    || window_held_for_mana(state, player)
-                                {
-                                    break;
-                                }
-                            }
-                            AutoPassDecision::Finish => {
-                                state.auto_pass.remove(&player);
-                                break;
-                            }
-                            AutoPassDecision::Break => break,
-                            AutoPassDecision::Pass => {}
-                        }
-                        None
-                    }
+                let (seat, stack_resolution_limit) = match select_auto_pass_drive(state, player) {
+                    AutoPassDrive::Stop => break,
+                    AutoPassDrive::Drive { seat, limit } => (seat, limit),
                 };
 
                 let mut events = Vec::new();
@@ -10410,7 +10526,26 @@ fn run_auto_pass_loop(
                 };
                 let phase_before_pass = state.phase;
                 let stack_len_before_pass = state.stack.len();
-                match pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit) {
+                let stack_top_before_pass = state.stack.back().map(|entry| entry.id);
+                // A round-clearing pass empties the records it just completed,
+                // so growth is read per-seat, not per-count: a pass for an
+                // already-passed seat with no other progress is the only
+                // idempotent beat.
+                let seat_already_passed = state.priority_passes.contains(&seat);
+                // CR 805.5b: a teammate drive passes that one seat through
+                // the per-seat pipeline; the holder keeps the window's own
+                // pipeline. Either way the limit travels with the drive.
+                let pass_result = if seat == player {
+                    pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit)
+                } else {
+                    pass_priority_once_with_pipeline_for(
+                        state,
+                        seat,
+                        &mut events,
+                        stack_resolution_limit,
+                    )
+                };
+                match pass_result {
                     Ok(outcome) => {
                         // Check the life failure BEFORE aggregating this
                         // iteration's events or starting the next one: the
@@ -10419,20 +10554,20 @@ fn run_auto_pass_loop(
                         if let Some(player) = boundary_life_change_failure(state) {
                             return Err(EngineError::LifeChangeUnrepresentable { player });
                         }
-                        // CR 805.5b: a holder-only pass leaves the team holding
-                        // priority while a teammate has not passed. With no
-                        // stack, phase, or resolution progress that is not loop
-                        // progress — stop and let the teammate decide, instead
-                        // of re-passing for the same holder until the cap.
-                        if state.phase == phase_before_pass
+                        // CR 805.5b: the runner continues while its passes
+                        // record new seats. Only total stasis stops it: the
+                        // driven seat was already passed (an idempotent
+                        // re-pass) and the pass moved neither the phase nor
+                        // the stack. Length alone cannot prove that — a
+                        // resolution that regrows the stack nets to the same
+                        // length — so the top entry's identity is compared
+                        // too. Continuing is the safe direction: the loop cap
+                        // bounds a redundant drive, while stopping early
+                        // strands fence teardown and continuations.
+                        if seat_already_passed
+                            && state.phase == phase_before_pass
                             && state.stack.len() == stack_len_before_pass
-                            && matches!(
-                                &outcome.waiting_for,
-                                WaitingFor::Priority { player: next }
-                                    if super::topology::side_takes_shared_turn(state, player)
-                                        && super::topology::team_id(state, *next)
-                                            == super::topology::team_id(state, player)
-                            )
+                            && state.stack.back().map(|entry| entry.id) == stack_top_before_pass
                         {
                             let session_finished = outcome.session_restored;
                             result.events.extend(events);
@@ -11136,8 +11271,12 @@ fn install_auto_pass_and_pass_priority(
         unreachable!("auto-pass may only be installed from a Priority window");
     };
     let player = *player;
+    // CR 805.5b: the immediate pass is the owner's own pass. It fires only
+    // when the owner holds the window; a teammate's install stores under the
+    // teammate and the boundary runner drives that seat from its own
+    // preference instead.
     let pass_immediately = player == auto_pass_owner;
-    if pass_immediately && super::precast_copy_shortcut::blocks_pass(state, player) {
+    if pass_immediately && super::precast_copy_shortcut::blocks_pass(state, auto_pass_owner) {
         return Err(EngineError::ActionNotAllowed(
             "A shortened shortcut requires a different meaningful action before passing"
                 .to_string(),
@@ -11150,7 +11289,7 @@ fn install_auto_pass_and_pass_priority(
             state.waiting_for.clone(),
         ));
     }
-    pass_installed_auto_pass_priority(state, player, events)
+    pass_installed_auto_pass_priority(state, auto_pass_owner, events)
 }
 
 /// Consume the immediate pass implied by a successful direct auto-pass request.
@@ -11212,15 +11351,16 @@ fn store_legacy_auto_pass_request(
 /// so omitting this mirror would resurrect a preference the player withdrew
 /// while another representative was considering the authorization.
 fn cancel_pending_resolve_all_auto_pass(state: &mut GameState, actor: PlayerId) -> bool {
-    let representative = super::topology::priority_pass_representative(state, actor);
     let Some(run) = state.resolve_all_consent_run.as_mut() else {
         return false;
     };
     let Some(baseline) = run.auto_pass_baseline.as_mut() else {
         return false;
     };
-    state.auto_pass.remove(&representative);
-    baseline.remove(&representative);
+    // CR 805.5b: the pending-consent cancel mirrors the actor's own key in
+    // both representations, so rollback restores every seat but this one.
+    state.auto_pass.remove(&actor);
+    baseline.remove(&actor);
     true
 }
 
@@ -11229,23 +11369,27 @@ fn store_direct_auto_pass_request(
     auto_pass_owner: PlayerId,
     mode: AutoPassRequest,
 ) {
-    let representative = super::topology::priority_pass_representative(state, auto_pass_owner);
+    // CR 805.5b + CR 805.5a + CR 117.3d: a seat's own decision bookkeeping is
+    // keyed to that seat. Storage below always uses the acting owner, never
+    // its priority representative; parking/cursors/cohorts stay rep-keyed.
     if let Some(representatives) = state
         .stack_resolution_session
         .as_ref()
         .map(|session| session.representatives.clone())
     {
-        if representatives.contains(&representative) {
+        // Self-membership: only a seat of the frozen cohort replaces it.
+        if representatives.contains(&auto_pass_owner) {
             take_and_restore_stack_resolution_session(state);
         } else {
-            // A different priority seat may update only its own standing
-            // preference; it cannot replace another seat's frozen cohort. The
-            // same preference becomes part of the teardown baseline so a later
-            // session stop never erases a valid intervening player choice.
-            store_legacy_auto_pass_request(state, representative, mode);
+            // A seat outside the frozen cohort may update only its own
+            // standing preference; it cannot replace another seat's frozen
+            // cohort. The same preference becomes part of the teardown
+            // baseline so a later session stop never erases a valid
+            // intervening player choice.
+            store_legacy_auto_pass_request(state, auto_pass_owner, mode);
             let updated_mode = *state
                 .auto_pass
-                .get(&representative)
+                .get(&auto_pass_owner)
                 .expect("the legacy request was just stored");
             state
                 .stack_resolution_session
@@ -11253,20 +11397,30 @@ fn store_direct_auto_pass_request(
                 .expect("the nonrepresentative path preserves the live session")
                 .auto_pass_overlay
                 .baseline
-                .insert(representative, updated_mode);
+                .insert(auto_pass_owner, updated_mode);
             return;
         }
     }
 
     if !matches!(mode, AutoPassRequest::UntilStackEmpty) || state.stack.is_empty() {
-        store_legacy_auto_pass_request(state, representative, mode);
+        store_legacy_auto_pass_request(state, auto_pass_owner, mode);
+        return;
+    }
+
+    // A non-representative's UntilStackEmpty request on a nonempty stack is a
+    // standing preference under its own key. It never installs or replaces the
+    // representative's Committed session/overlay; the runner drives the seat
+    // from that preference instead.
+    let representative = super::topology::priority_pass_representative(state, auto_pass_owner);
+    if representative != auto_pass_owner {
+        store_legacy_auto_pass_request(state, auto_pass_owner, mode);
         return;
     }
 
     let representatives =
         super::topology::canonical_priority_representatives(state, [auto_pass_owner]);
     if representatives.is_empty() {
-        store_legacy_auto_pass_request(state, representative, mode);
+        store_legacy_auto_pass_request(state, auto_pass_owner, mode);
         return;
     }
 
@@ -11789,11 +11943,13 @@ fn apply_action(
     // `authorized_submitter(state)`, which silently cancelled the wrong player's
     // session when fired while an opponent held the prompt.
     if matches!(action, GameAction::CancelAutoPass) {
-        let representative = super::topology::priority_pass_representative(state, actor);
+        // CR 805.5b: cancel revokes the actor's own preference. Only a seat
+        // of the frozen cohort tears it down (self-membership); a teammate's
+        // cancel removes that teammate's key and never ends the live session.
         if state
             .stack_resolution_session
             .as_ref()
-            .is_some_and(|session| session.representatives.contains(&representative))
+            .is_some_and(|session| session.representatives.contains(&actor))
         {
             take_and_restore_stack_resolution_session(state);
         } else if cancel_pending_resolve_all_auto_pass(state, actor) {
@@ -12104,15 +12260,16 @@ fn apply_action(
     // the preference, which is what `semantic_actor` names; its
     // `unwrap_or(actor)` fallback keeps the authenticated actor wherever
     // `state.waiting_for` names no single seat.
-    // CR 117.6 + CR 805.5b: Canonicalize that seat before consulting a
-    // session, because a shared team's representative owns its priority pass.
+    // CR 805.5b: a deliberate action revokes the acting seat's own
+    // preference. The Priority-window seat resolves through the same teammate
+    // ownership the pass arm uses; parking stays rep-keyed.
     let session_preference_owner = match (&state.waiting_for, &action) {
         // CR 104.3a: Concede is the one self-authorized action that may be
         // submitted while another player holds priority, so it remains scoped
         // to its authenticated actor rather than that other priority seat.
         (_, GameAction::Concede { .. }) => actor,
         (WaitingFor::Priority { player }, _) => {
-            super::topology::priority_pass_representative(state, *player)
+            resolve_team_priority_owner(state, *player, actor, &action)
         }
         _ => semantic_actor,
     };
@@ -12421,7 +12578,29 @@ fn apply_non_priority_pass_action(
                 max_resolutions,
                 scope,
             },
-        ) => begin_resolve_all_consent(state, *player, max_resolutions, scope)?,
+        ) => {
+            // CR 805.5b: a non-representative teammate's Resolve All entry
+            // binds only that seat. Unlimited `Own` is exactly their own
+            // UntilStackEmpty install; anything stronger is refused before
+            // any mutation. Representatives keep the consent protocol below.
+            let acting = team_priority_acting;
+            if super::topology::priority_pass_representative(state, acting) != acting {
+                super::priority::pass_priority_legality(state, acting)?;
+                if scope == ResolveAllScope::Own && max_resolutions == 0 {
+                    return install_auto_pass_and_pass_priority(
+                        state,
+                        acting,
+                        AutoPassRequest::UntilStackEmpty,
+                        &mut events,
+                    );
+                }
+                return Err(EngineError::ActionNotAllowed(
+                    "Only the team's representative may begin a shared or limited Resolve All"
+                        .to_string(),
+                ));
+            }
+            begin_resolve_all_consent(state, *player, max_resolutions, scope)?
+        }
         (
             WaitingFor::ResolveAllConsent {
                 epoch,

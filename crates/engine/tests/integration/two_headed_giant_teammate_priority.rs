@@ -829,3 +829,1243 @@ fn teammate_room_unlock_offered_and_applies_on_team_priority() {
         "CR 709.5e: the unlock pays the half's {{2}}{{G}}"
     );
 }
+
+// ===========================================================================
+// Phase-2 (F3, PR #10984 r2): per-seat auto-pass + Resolve All ownership.
+// Appended region: imports, VM-P1 helpers, rows VM-S1..VM-A1. Everything
+// above this line is read-only for phase 2.
+// ===========================================================================
+
+use engine::types::ability::TargetRef;
+use engine::types::actions::{ResolveAllConsentDecision, ResolveAllScope};
+use engine::types::game_state::{
+    AutoPassMode, AutoPassRequest, CastPaymentMode, StackResolutionPolicy, TurnBoundary,
+};
+use engine::types::phase::{PhaseStop, PhaseStopScope};
+use std::collections::BTreeSet;
+
+/// Staged object ids for the VM-P1 board.
+struct BoltIds {
+    /// P2's cast Bolt (on the stack after setup).
+    bolt: ObjectId,
+    /// P0's spare Bolt (clear-casts in S2/C1).
+    p0_bolt: ObjectId,
+    /// P1's spare Bolt (clear-cast in F2).
+    p1_bolt: ObjectId,
+    /// P1's Counterspell (deliberate cast in D1).
+    p1_counterspell: ObjectId,
+}
+
+/// Stages the union of what the phase-2 rows need: P2 holds two printed
+/// Bolts + 2 red (one to cast, one spare so P2 keeps a meaningful action
+/// afterwards); P0 holds a Bolt + red; P1 holds a Bolt + red and
+/// Counterspell + blue blue. Unused holdings are inert: the runner consults
+/// preferences, never mere holdings. Returned pre-build for rows with
+/// custom drive orders (R2); most rows use [`bolt_setup`] instead.
+fn staged_bolt_scenario() -> (GameScenario, BoltIds) {
+    let db = crate::support::shared_card_db().expect("integration card fixture must load");
+    let mut sc = team_turn_board();
+    let bolt = sc.add_real_card(P2, "Lightning Bolt", Zone::Hand, db);
+    sc.add_real_card(P2, "Lightning Bolt", Zone::Hand, db);
+    sc.with_mana_pool(
+        P2,
+        vec![
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+        ],
+    );
+    let p0_bolt = sc.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    sc.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+    );
+    let p1_bolt = sc.add_real_card(P1, "Lightning Bolt", Zone::Hand, db);
+    let p1_counterspell = sc.add_real_card(P1, "Counterspell", Zone::Hand, db);
+    sc.with_mana_pool(
+        P1,
+        vec![
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+        ],
+    );
+    (
+        sc,
+        BoltIds {
+            bolt,
+            p0_bolt,
+            p1_bolt,
+            p1_counterspell,
+        },
+    )
+}
+
+/// Parks a fresh runner on P0's team window.
+fn park_p0(runner: &mut GameRunner) {
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+}
+
+/// VM-P1 shared board: P2 casts a printed Bolt at P0 through the pipeline,
+/// then the opposing team hands priority back. Returns with `Priority{P0}`,
+/// `passes == {P2, P3}`, `stack == [Bolt]`.
+fn bolt_setup() -> (GameRunner, BoltIds) {
+    let (sc, ids) = staged_bolt_scenario();
+    let mut runner = sc.build();
+    park_p0(&mut runner);
+    runner
+        .pass_holding_team()
+        .expect("active team passes to P2");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P2
+        ),
+        "P2 must hold priority to cast, got {:?}",
+        runner.state().waiting_for
+    );
+    let _committed = runner.cast(ids.bolt).target_player(P0).commit();
+    assert_eq!(runner.stack_names(), ["Lightning Bolt"]);
+    runner
+        .pass_holding_team()
+        .expect("opposing team passes back");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "priority must return to the active representative, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(passes_set(&runner), BTreeSet::from([P2, P3]));
+    (runner, ids)
+}
+
+/// Recorded passes as an exact set.
+fn passes_set(runner: &GameRunner) -> BTreeSet<PlayerId> {
+    runner.state().priority_passes.iter().copied().collect()
+}
+
+/// Begins a teammate's instant cast on a parked window through an explicit
+/// apply (the fluent builder submits as the waiting player, so it cannot
+/// cast a teammate's spell). The cast parks on the caster's targeting step;
+/// [`teammate_cast_finish`] answers it.
+fn teammate_cast_begin(runner: &mut GameRunner, caster: PlayerId, spell: ObjectId) {
+    let card_id = runner.state().objects[&spell].card_id;
+    game_engine::apply(
+        runner.state_mut(),
+        caster,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("teammate cast must be accepted on team priority");
+}
+
+/// Answers a begun teammate cast's targeting with `target` and finalizes a
+/// pool payment if one surfaces.
+fn teammate_cast_finish(runner: &mut GameRunner, caster: PlayerId, target: TargetRef) {
+    for _ in 0..4 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } => {
+                game_engine::apply(
+                    runner.state_mut(),
+                    caster,
+                    GameAction::ChooseTarget {
+                        target: Some(target.clone()),
+                    },
+                )
+                .expect("teammate target must be accepted");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                game_engine::apply(runner.state_mut(), caster, GameAction::PassPriority)
+                    .expect("pool payment finalizes");
+            }
+            _ => break,
+        }
+    }
+}
+
+/// Drives a teammate's instant cast on a parked window to commit.
+fn teammate_cast(runner: &mut GameRunner, caster: PlayerId, spell: ObjectId, target: TargetRef) {
+    teammate_cast_begin(runner, caster, spell);
+    teammate_cast_finish(runner, caster, target);
+}
+
+/// VM-S1 (F3/D2.2): a teammate's direct auto-pass stores under the teammate's
+/// own key, and the boundary runner consumes the teammate's own pass. CR
+/// 805.5b: per-seat decision bookkeeping on a shared team turn.
+#[test]
+fn teammate_direct_auto_pass_stores_own_key_and_passes_own_seat() {
+    let sc = team_turn_board();
+    let mut runner = sc.build();
+    park_p0(&mut runner);
+
+    game_engine::apply(
+        runner.state_mut(),
+        P1,
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        },
+    )
+    .expect("teammate auto-pass install must be accepted");
+    // Reach: accepted on the parked window with an empty stack.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "the window must stay parked on P0, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach: the board stays bare"
+    );
+    // The preference is P1's alone.
+    assert_eq!(
+        runner.state().auto_pass.get(&P1),
+        Some(&AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        }),
+        "P1's install must store under P1"
+    );
+    assert!(
+        !runner.state().auto_pass.contains_key(&P0),
+        "P1's install must not store under P0"
+    );
+    // ... and the runner consumed P1's own pass.
+    assert!(
+        runner.state().priority_passes.contains(&P1),
+        "P1's install must pass for P1"
+    );
+    assert!(
+        !runner.state().priority_passes.contains(&P0),
+        "P1's install must not pass for P0"
+    );
+    // Hostile: P0 still holds a live window with its own actions.
+    let (actions, _, _) = ai_support::legal_actions_for_viewer(runner.state(), P0);
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, GameAction::PassPriority)),
+        "P0 must still be offered its own pass, got {actions:?}"
+    );
+}
+
+/// VM-S2 (F3/D2.2): a teammate's UntilStackEmpty on a nonempty stack
+/// preserves the representative's live session and merges the teammate's own
+/// key into the teardown baseline. CR 805.5b.
+#[test]
+fn teammate_until_stack_empty_preserves_session_and_merges_baseline() {
+    let (mut runner, ids) = bolt_setup();
+    // P0 clear-casts Bolt 2 at P2: passes clear, the stack grows to two, the
+    // window stays with the caster.
+    let life_p2_before = runner.state().players[2].life;
+    let _committed = runner.cast(ids.p0_bolt).target_player(P2).commit();
+    assert!(
+        runner.state().priority_passes.is_empty(),
+        "reach: the cast clears passes"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "reach: two Bolts on the stack"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "reach: the caster keeps the window, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // P0 installs: canonical session {P0} + P0's immediate own pass.
+    game_engine::apply(
+        runner.state_mut(),
+        P0,
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .expect("P0 install must be accepted");
+    // Reach pre-P1-install: session live, window P0, passes == {P0}.
+    let session = runner
+        .state()
+        .stack_resolution_session
+        .as_ref()
+        .expect("reach: P0 install opens the session");
+    assert_eq!(session.representatives, BTreeSet::from([P0]));
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "reach: pre-P1-install window P0, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(passes_set(&runner), BTreeSet::from([P0]));
+
+    // P1 installs its own UntilStackEmpty.
+    game_engine::apply(
+        runner.state_mut(),
+        P1,
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .expect("P1 install must be accepted");
+    // Post: the runner drove P1 from its own preference and stopped at P2's
+    // meaningful action with the session intact.
+    assert_eq!(runner.state().stack.len(), 2, "nothing resolves on install");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P2
+        ),
+        "post: window P2, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(passes_set(&runner), BTreeSet::from([P0, P1]));
+    let session = runner
+        .state()
+        .stack_resolution_session
+        .as_ref()
+        .expect("the session survives P1's install");
+    assert_eq!(session.representatives, BTreeSet::from([P0]));
+    assert!(
+        matches!(
+            runner.state().auto_pass.get(&P1),
+            Some(AutoPassMode::UntilStackEmpty {
+                initial_stack_len: 2,
+                ..
+            })
+        ),
+        "the live map holds P1's own key, got {:?}",
+        runner.state().auto_pass.get(&P1)
+    );
+    assert!(
+        session.auto_pass_overlay.baseline.contains_key(&P1),
+        "the baseline merged P1's key"
+    );
+    assert_eq!(
+        runner.state().players[2].life,
+        life_p2_before,
+        "reach: no Bolt resolved yet"
+    );
+}
+
+/// VM-R1 (F3/D2.3): the runner drives an unpassed member from its own
+/// preference. P0 passes manually; P1's inserted UntilStackEmpty carries the
+/// round home and the Bolt resolves. CR 805.5b + CR 117.4.
+#[test]
+fn runner_drives_unpassed_teammate_by_own_preference() {
+    let (mut runner, _) = bolt_setup();
+    // Reach: the helper parked P0 with the opposing team passed and [Bolt].
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "reach: window P0, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(passes_set(&runner), BTreeSet::from([P2, P3]));
+    assert_eq!(runner.stack_names(), ["Lightning Bolt"]);
+    // Direct insert: installing through apply would record P1's pass during
+    // setup, but the beat needs P1 unpassed.
+    runner.state_mut().auto_pass.insert(
+        P1,
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+            policy: StackResolutionPolicy::Committed,
+        },
+    );
+    assert!(
+        matches!(
+            runner.state().auto_pass.get(&P1),
+            Some(AutoPassMode::UntilStackEmpty {
+                initial_stack_len: 1,
+                ..
+            })
+        ),
+        "reach: P1's own key live"
+    );
+    assert!(
+        !runner.state().priority_passes.contains(&P1),
+        "reach: P1 unpassed"
+    );
+    let life_p0_before = runner.state().players[0].life;
+
+    // Beat: P0's manual pass. The runner must drive P1 from P1's preference,
+    // not re-pass P0. (Both passes being accepted is the behavioral proof the
+    // divergence latch gates nothing here.)
+    game_engine::apply(runner.state_mut(), P0, GameAction::PassPriority).expect("P0 passes");
+    // The round completed: empty stack and Bolt damage on P0.
+    assert!(
+        runner.state().stack.is_empty(),
+        "the Bolt must resolve, stack: {:?}",
+        runner.stack_names()
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        life_p0_before - 3,
+        "Bolt deals 3 to P0"
+    );
+}
+
+/// VM-R2 (F3/D2.3): no cross-seat Exit shortcut. P3's standing preference
+/// never passes P0's window: the handoff back records only its own seats.
+/// Team 0 stays bare (no holdings, no preferences) so the base code's
+/// session seam would drive P0 — the revert-failing beat.
+#[test]
+fn opposing_teammate_preference_never_passes_this_window() {
+    let db = crate::support::shared_card_db().expect("integration card fixture must load");
+    let mut sc = team_turn_board();
+    let bolt = sc.add_real_card(P2, "Lightning Bolt", Zone::Hand, db);
+    sc.with_mana_pool(
+        P2,
+        vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+    );
+    let mut runner = sc.build();
+    park_p0(&mut runner);
+    runner
+        .pass_holding_team()
+        .expect("active team passes to P2");
+    let _committed = runner.cast(bolt).target_player(P0).commit();
+    // P3 installs its own UntilStackEmpty on the nonempty stack.
+    game_engine::apply(
+        runner.state_mut(),
+        P3,
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .expect("P3 install must be accepted");
+
+    // Beat: the handoff back to team 0.
+    runner.pass_holding_team().expect("handoff back");
+    // Discriminating assert first: the base session seam records P0 here.
+    assert_eq!(
+        passes_set(&runner),
+        BTreeSet::from([P2, P3]),
+        "only the handoff's own seats pass"
+    );
+    assert!(
+        !runner.state().priority_passes.contains(&P0),
+        "P0 must stay unpassed"
+    );
+    assert_eq!(runner.stack_names(), ["Lightning Bolt"]);
+    // Reach: P3's own key live, window P0, team 0 bare of preferences.
+    assert!(
+        matches!(
+            runner.state().auto_pass.get(&P3),
+            Some(AutoPassMode::UntilStackEmpty {
+                initial_stack_len: 1,
+                ..
+            })
+        ),
+        "reach: P3's own key live, got {:?}",
+        runner.state().auto_pass
+    );
+    assert_eq!(
+        runner.state().auto_pass.len(),
+        1,
+        "reach: bare-team premises"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "reach: window P0, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Tail: P1 installs its own UntilStackEmpty; the runner drives P1 from
+    // it while P0 stays unpassed.
+    game_engine::apply(
+        runner.state_mut(),
+        P1,
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .expect("P1 install must be accepted");
+    assert!(
+        runner.state().auto_pass.contains_key(&P1),
+        "tail: P1's own key live"
+    );
+    assert!(
+        runner.state().priority_passes.contains(&P1),
+        "tail: the runner drove P1 from its own preference"
+    );
+    assert!(
+        !runner.state().priority_passes.contains(&P0),
+        "tail: P0 still unpassed"
+    );
+}
+
+/// VM-R3 (F3/D2.3): the runner continues across a round boundary while its
+/// passes grow, and terminates at the next team's bare seats. P3's pass
+/// completes the round and advances the phase; P0/P1's boundary preferences
+/// re-pass their team on the fresh window; P2's window stops the drive.
+#[test]
+fn runner_continues_across_round_boundary_stops_at_next_team() {
+    let sc = team_turn_board();
+    let mut runner = sc.build();
+    park_p0(&mut runner);
+    // Direct inserts: installing through apply would self-record passes.
+    runner.state_mut().auto_pass.insert(
+        P0,
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+    runner.state_mut().auto_pass.insert(
+        P1,
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::MyNextTurnStart,
+        },
+    );
+    runner.pass_holding_team().expect("team 0 passes");
+    game_engine::apply(runner.state_mut(), P2, GameAction::PassPriority).expect("P2 passes");
+    // Reach pre: {P0,P1,P2} with the window parked on P2.
+    assert_eq!(passes_set(&runner), BTreeSet::from([P0, P1, P2]));
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P2
+        ),
+        "reach: window P2, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
+
+    // Beat: P3's pass completes the round and advances the phase.
+    game_engine::apply(runner.state_mut(), P3, GameAction::PassPriority).expect("P3 passes");
+    assert_eq!(
+        passes_set(&runner),
+        BTreeSet::from([P0, P1]),
+        "the runner re-passed team 0 on the fresh window"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P2
+        ),
+        "the drive terminates at P2's bare window, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().phase,
+        Phase::BeginCombat,
+        "the completed round advanced the phase"
+    );
+    // Reach post: preferences live, no phase stops.
+    assert!(
+        runner.state().auto_pass.contains_key(&P0) && runner.state().auto_pass.contains_key(&P1),
+        "reach: post prefs live"
+    );
+    assert!(
+        runner.state().phase_stops.is_empty(),
+        "reach: phase stops empty"
+    );
+}
+
+/// VM-F2 (F3/D2.4): the resolution decrement tests the key itself — a
+/// teammate's own baseline advances while the representative's overlay key
+/// is skipped. CR 805.5b: overlay entries are exactly the session
+/// representatives' keys.
+#[test]
+fn resolution_decrement_advances_teammate_key_skips_overlay() {
+    let (mut runner, ids) = bolt_setup();
+    // P1 clear-casts Bolt 2 at P3 through explicit teammate applies.
+    teammate_cast(&mut runner, P1, ids.p1_bolt, TargetRef::Player(P3));
+    // Reach: [B1, B2], Priority{P1}, passes cleared.
+    assert_eq!(runner.stack_names(), ["Lightning Bolt", "Lightning Bolt"]);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P1
+        ),
+        "reach: the caster holds the window, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().priority_passes.is_empty(),
+        "reach: the cast clears passes"
+    );
+    // P1 + P0 install their own UntilStackEmpty preferences. P1 installs
+    // first, while the window is still its team's: after P0's install the
+    // runner parks the window on P2, where P1 may no longer submit.
+    game_engine::apply(
+        runner.state_mut(),
+        P1,
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .expect("P1 install must be accepted");
+    game_engine::apply(
+        runner.state_mut(),
+        P0,
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .expect("P0 install must be accepted");
+    assert!(
+        runner.state().stack_resolution_session.is_some(),
+        "reach: live session"
+    );
+    let life_p3_before = runner.state().players[3].life;
+
+    // Complete the round manually: P2, P3 pass; B2 resolves; the cascade
+    // stops at P2's meaningful action.
+    game_engine::apply(runner.state_mut(), P2, GameAction::PassPriority).expect("P2 passes");
+    game_engine::apply(runner.state_mut(), P3, GameAction::PassPriority).expect("P3 passes");
+    assert_eq!(runner.stack_names(), ["Lightning Bolt"]);
+    assert_eq!(
+        runner.state().players[3].life,
+        life_p3_before - 3,
+        "B2 dealt its damage"
+    );
+    assert!(
+        runner.state().stack_resolution_session.is_some(),
+        "reach: live session"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P2
+        ),
+        "reach: the cascade stops at P2, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(passes_set(&runner), BTreeSet::from([P0, P1]));
+    // The teammate's key decremented 2 -> 1; the overlay key skipped.
+    assert!(
+        matches!(
+            runner.state().auto_pass.get(&P1),
+            Some(AutoPassMode::UntilStackEmpty {
+                initial_stack_len: 1,
+                ..
+            })
+        ),
+        "P1's baseline must decrement to 1, got {:?}",
+        runner.state().auto_pass.get(&P1)
+    );
+    assert!(
+        matches!(
+            runner.state().auto_pass.get(&P0),
+            Some(AutoPassMode::UntilStackEmpty {
+                initial_stack_len: 2,
+                ..
+            })
+        ),
+        "reach: P0's overlay key stays at 2, got {:?}",
+        runner.state().auto_pass.get(&P0)
+    );
+}
+
+/// VM-C1 (F3/D2.5): a teammate's cancel removes only its own preference
+/// (live map + baseline) while the representative's session runs on. CR
+/// 805.5b: cancel revokes the acting seat's preference; teardown is
+/// team-level, by self-membership.
+#[test]
+fn teammate_cancel_removes_only_own_key_session_survives() {
+    let (mut runner, ids) = bolt_setup();
+    // P0 clear-casts Bolt 2 at P2: passes {}, len 2, window P0.
+    let _committed = runner.cast(ids.p0_bolt).target_player(P2).commit();
+    assert!(
+        runner.state().priority_passes.is_empty(),
+        "reach: the cast clears passes"
+    );
+    assert_eq!(runner.state().stack.len(), 2);
+    // P0 installs: passes {P0}, session {P0}, window P0 retained.
+    game_engine::apply(
+        runner.state_mut(),
+        P0,
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .expect("P0 install must be accepted");
+    assert_eq!(passes_set(&runner), BTreeSet::from([P0]));
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "reach: pre-P1-install window P0, got {:?}",
+        runner.state().waiting_for
+    );
+    // P1 installs its turn boundary. A boundary preference breaks over
+    // another seat's spell, so P1 then passes manually through the session.
+    game_engine::apply(
+        runner.state_mut(),
+        P1,
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        },
+    )
+    .expect("P1 install must be accepted");
+    game_engine::apply(runner.state_mut(), P1, GameAction::PassPriority)
+        .expect("P1 passes manually through the session");
+    // Reach pre-cancel: session + P1 + window P2 + passes {P0,P1}.
+    assert!(
+        runner.state().stack_resolution_session.is_some(),
+        "reach: session live pre-cancel"
+    );
+    assert!(
+        runner.state().auto_pass.contains_key(&P1),
+        "reach: P1's key live pre-cancel"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P2
+        ),
+        "reach: window P2 pre-cancel, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(passes_set(&runner), BTreeSet::from([P0, P1]));
+
+    // Beat: P1 cancels its own preference.
+    game_engine::apply(runner.state_mut(), P1, GameAction::CancelAutoPass)
+        .expect("P1 cancel must be accepted");
+    let session = runner
+        .state()
+        .stack_resolution_session
+        .as_ref()
+        .expect("the session survives P1's cancel");
+    assert_eq!(session.representatives, BTreeSet::from([P0]));
+    assert!(
+        !runner.state().auto_pass.contains_key(&P1),
+        "P1's live key must be removed"
+    );
+    assert!(
+        !session.auto_pass_overlay.baseline.contains_key(&P1),
+        "P1's baseline key must be removed"
+    );
+    // Post: passes preserved, window P2.
+    assert_eq!(passes_set(&runner), BTreeSet::from([P0, P1]));
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P2
+        ),
+        "post: window P2, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// VM-C2 (F3/D2.5+D2.7): a pending-consent cancel mirrors the actor's own
+/// key, and the decline rollback restores every seat but that one.
+#[test]
+fn pending_consent_cancel_and_decline_restore_only_other_seats() {
+    let (mut runner, _) = bolt_setup();
+    // Direct inserts: installing through apply would self-record passes.
+    runner.state_mut().auto_pass.insert(
+        P0,
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+    runner.state_mut().auto_pass.insert(
+        P1,
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::MyNextTurnStart,
+        },
+    );
+    // P0 opens Shared Resolve All: the baseline snapshots {P0, P1} and P2
+    // is queued for consent.
+    game_engine::apply(
+        runner.state_mut(),
+        P0,
+        GameAction::BeginResolveAll {
+            max_resolutions: 0,
+            scope: ResolveAllScope::Shared,
+        },
+    )
+    .expect("P0 opens Shared consent");
+    // Reach pre: consent queued at P2 with the full baseline.
+    let epoch = match runner.state().waiting_for.clone() {
+        WaitingFor::ResolveAllConsent {
+            epoch,
+            representative,
+        } => {
+            assert_eq!(representative, P2, "reach: P2 queued for consent");
+            epoch
+        }
+        other => panic!("reach: ResolveAllConsent{{P2}}, got {other:?}"),
+    };
+    {
+        let run = runner
+            .state()
+            .resolve_all_consent_run
+            .as_ref()
+            .expect("reach: run live");
+        let baseline = run
+            .auto_pass_baseline
+            .as_ref()
+            .expect("reach: baseline snapshotted");
+        assert_eq!(baseline.len(), 2, "reach: baseline holds both seats");
+        assert!(baseline.contains_key(&P0) && baseline.contains_key(&P1));
+    }
+    // P1 cancels its own preference mid-consent.
+    game_engine::apply(runner.state_mut(), P1, GameAction::CancelAutoPass)
+        .expect("P1 cancels mid-consent");
+    // P2 declines: rollback restores the baseline minus P1.
+    game_engine::apply(
+        runner.state_mut(),
+        P2,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Decline,
+        },
+    )
+    .expect("P2 declines");
+    // Only P0's preference survives, exactly.
+    assert_eq!(
+        runner.state().auto_pass.len(),
+        1,
+        "only one preference survives the rollback, got {:?}",
+        runner.state().auto_pass
+    );
+    assert_eq!(
+        runner.state().auto_pass.get(&P0),
+        Some(&AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        })
+    );
+    // Reach post: the priority snapshot restored the helper window.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "post: window P0, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(passes_set(&runner), BTreeSet::from([P2, P3]));
+}
+
+/// VM-D1 (F3/D2.5): a teammate's deliberate cast revokes only its own
+/// preference; the representative's survives. No session live. CR 805.5b.
+#[test]
+fn teammate_deliberate_cast_revokes_only_own_preference() {
+    let (mut runner, ids) = bolt_setup();
+    // Direct inserts: P0-EOC + P1-MNTS.
+    runner.state_mut().auto_pass.insert(
+        P0,
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+    runner.state_mut().auto_pass.insert(
+        P1,
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::MyNextTurnStart,
+        },
+    );
+    // Reach pre: both keys live on the helper window.
+    assert!(runner.state().auto_pass.contains_key(&P0));
+    assert!(runner.state().auto_pass.contains_key(&P1));
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "reach: window P0, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Beat: P1 casts Counterspell at the Bolt.
+    teammate_cast(
+        &mut runner,
+        P1,
+        ids.p1_counterspell,
+        TargetRef::Object(ids.bolt),
+    );
+    // Post: [Bolt, Counterspell], Priority{P1}, passes cleared.
+    assert_eq!(runner.stack_names(), ["Lightning Bolt", "Counterspell"]);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P1
+        ),
+        "post: the caster holds the window, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().priority_passes.is_empty(),
+        "post: passes cleared"
+    );
+    // Only P0's preference survives the deliberate cast.
+    assert_eq!(
+        runner.state().auto_pass.get(&P0),
+        Some(&AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        }),
+        "P0's preference must survive P1's cast"
+    );
+    assert!(
+        !runner.state().auto_pass.contains_key(&P1),
+        "P1's own preference must be revoked by its cast"
+    );
+}
+
+/// VM-D1b (F3/D2.5 + mirror): a teammate's deliberate cast with a live
+/// session mirror-scrubs only the teammate's key instead of tearing the
+/// session down — so when the new top fence-teardowns the cohort, the
+/// restore resurrects nothing. (Deviation from the plan's tap beat:
+/// teammate mana taps are rejected by the engine's mana custody rule and
+/// PlayLand needs an empty stack, so the cast is the only viable deliberate
+/// beat; the mirror seam under test is unchanged.)
+#[test]
+fn teammate_deliberate_cast_with_live_session_mirror_scrubs() {
+    let (mut runner, ids) = bolt_setup();
+    runner.state_mut().auto_pass.insert(
+        P1,
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::MyNextTurnStart,
+        },
+    );
+    game_engine::apply(
+        runner.state_mut(),
+        P0,
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .expect("P0 install must be accepted");
+    // Reach pre: session {P0}, both keys live, P1 merged into the baseline.
+    let session = runner
+        .state()
+        .stack_resolution_session
+        .as_ref()
+        .expect("reach: P0 install opens the session");
+    assert_eq!(session.representatives, BTreeSet::from([P0]));
+    assert!(runner.state().auto_pass.contains_key(&P0));
+    assert!(runner.state().auto_pass.contains_key(&P1));
+    assert!(session.auto_pass_overlay.baseline.contains_key(&P1));
+
+    // Beat: P1 deliberately casts Bolt 2 at P3.
+    teammate_cast_begin(&mut runner, P1, ids.p1_bolt);
+    // Mid (discriminating): the cast parked on P1's targeting step with the
+    // session live and P1 mirror-scrubbed — the targeting apply below would
+    // remove P1's key in both versions, so the seam is observed here.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { player, .. } if player == P1
+        ),
+        "mid: the cast parks on P1 targeting, got {:?}",
+        runner.state().waiting_for
+    );
+    let session = runner
+        .state()
+        .stack_resolution_session
+        .as_ref()
+        .expect("mid: no deliberate teardown — the session lives");
+    assert_eq!(session.representatives, BTreeSet::from([P0]));
+    assert_eq!(
+        runner.state().auto_pass.len(),
+        1,
+        "mid: only P0's overlay survives the mirror scrub, got {:?}",
+        runner.state().auto_pass
+    );
+    assert!(
+        !runner.state().auto_pass.contains_key(&P1),
+        "mid: P1's live key is mirror-scrubbed"
+    );
+    assert!(
+        session.auto_pass_overlay.baseline.is_empty(),
+        "mid: P1's baseline key is mirror-scrubbed"
+    );
+    teammate_cast_finish(&mut runner, P1, TargetRef::Player(P3));
+    // Post: [B1, B2], Priority{P1}, passes cleared.
+    assert_eq!(runner.stack_names(), ["Lightning Bolt", "Lightning Bolt"]);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P1
+        ),
+        "post: the caster holds the window, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().priority_passes.is_empty(),
+        "post: passes cleared"
+    );
+    // The new top fence-tore the cohort down (reach: the restore ran, so the
+    // emptiness below is non-vacuous) and resurrected nothing: P1's key was
+    // mirror-scrubbed from both representations instead of restored.
+    assert!(
+        runner.state().stack_resolution_session.is_none(),
+        "reach: the fence teardown ran"
+    );
+    assert!(
+        runner.state().auto_pass.is_empty(),
+        "no preference may survive the mirror-scrubbed restore, got {:?}",
+        runner.state().auto_pass
+    );
+    assert!(
+        !runner.state().auto_pass.contains_key(&P1),
+        "P1's revoked key must not be resurrected"
+    );
+}
+
+/// VM-B1 (F3/D2.6): a teammate's unlimited Own Resolve All is exactly their
+/// own UntilStackEmpty install — no consent run, no session. CR 805.5b.
+#[test]
+fn teammate_unlimited_own_begin_is_own_until_stack_empty() {
+    let (mut runner, _) = bolt_setup();
+    game_engine::apply(
+        runner.state_mut(),
+        P1,
+        GameAction::BeginResolveAll {
+            max_resolutions: 0,
+            scope: ResolveAllScope::Own,
+        },
+    )
+    .expect("P1 begins Own");
+    assert!(
+        matches!(
+            runner.state().auto_pass.get(&P1),
+            Some(AutoPassMode::UntilStackEmpty {
+                initial_stack_len: 1,
+                ..
+            })
+        ),
+        "P1's Begin must install P1's own USE, got {:?}",
+        runner.state().auto_pass.get(&P1)
+    );
+    assert!(
+        runner.state().priority_passes.contains(&P1),
+        "P1's Begin must pass for P1"
+    );
+    assert!(
+        runner.state().resolve_all_consent_run.is_none(),
+        "no consent run for a teammate Own entry"
+    );
+    assert!(
+        runner.state().stack_resolution_session.is_none(),
+        "no session for a teammate Own entry"
+    );
+    assert!(
+        !runner.state().priority_passes.contains(&P0),
+        "P0 must stay unpassed"
+    );
+    // Reach: the Bolt still awaits, window retained on P0.
+    assert_eq!(runner.stack_names(), ["Lightning Bolt"]);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "reach: window P0, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// VM-B2/B3 (F3/D2.6): a teammate's Shared or limited Resolve All is refused
+/// before any mutation; the window is left healthy enough to finish the
+/// round. CR 805.5b: one seat never binds another's passes.
+#[test]
+fn teammate_shared_or_limited_begin_refused_without_mutation() {
+    for (scope, max_resolutions) in [
+        (ResolveAllScope::Shared, 0u32),
+        (ResolveAllScope::Own, 3u32),
+    ] {
+        let (mut runner, _) = bolt_setup();
+        game_engine::apply(runner.state_mut(), P0, GameAction::PassPriority).expect("P0 passes");
+        assert_eq!(
+            passes_set(&runner),
+            BTreeSet::from([P2, P3, P0]),
+            "reach: {scope:?}/{max_resolutions}"
+        );
+        let err = game_engine::apply(
+            runner.state_mut(),
+            P1,
+            GameAction::BeginResolveAll {
+                max_resolutions,
+                scope,
+            },
+        )
+        .expect_err("teammate Shared/limited Begin must be refused");
+        assert!(
+            format!("{err:?}").contains("ActionNotAllowed"),
+            "unexpected refusal (want ActionNotAllowed): {err:?}"
+        );
+        // Refused pre-mutation: pass state, preferences, run, window.
+        assert_eq!(passes_set(&runner), BTreeSet::from([P2, P3, P0]));
+        assert!(
+            runner.state().auto_pass.is_empty(),
+            "no preference may be stored by a refused Begin"
+        );
+        assert!(runner.state().resolve_all_consent_run.is_none());
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { player } if player == P0
+            ),
+            "window P0, got {:?}",
+            runner.state().waiting_for
+        );
+        // Tail: P1's manual pass completes the round; the Bolt resolves.
+        let life_p0_before = runner.state().players[0].life;
+        game_engine::apply(runner.state_mut(), P1, GameAction::PassPriority).expect("P1 passes");
+        assert!(
+            runner.state().stack.is_empty(),
+            "the Bolt must resolve, stack: {:?}",
+            runner.stack_names()
+        );
+        assert_eq!(
+            runner.state().players[0].life,
+            life_p0_before - 3,
+            "Bolt deals 3 to P0"
+        );
+    }
+}
+
+/// VM-A1 (F3/D2.7): a Declare prompt's auto-pass stores under the prompt
+/// seat — the non-representative blocker's key, never the representative's.
+/// The representative's attacker prompt stores under itself, unchanged.
+#[test]
+fn declare_prompts_store_under_prompt_seat() {
+    let mut sc = team_turn_board();
+    let raider = sc.add_creature(P2, "P2 Raider", 2, 2).id();
+    let guardian = sc.add_creature(P1, "P1 Guardian", 1, 3).id();
+    let mut runner = sc.build();
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    // Stops keep both imperative prompts parked: a turn boundary would
+    // otherwise auto-submit the attacker declaration, and an attacker-less
+    // board would auto-submit the blockers.
+    runner.state_mut().phase_stops.insert(
+        P1,
+        vec![PhaseStop {
+            phase: Phase::DeclareBlockers,
+            scope: PhaseStopScope::AllTurns,
+        }],
+    );
+    runner.state_mut().phase_stops.insert(
+        P0,
+        vec![PhaseStop {
+            phase: Phase::DeclareAttackers,
+            scope: PhaseStopScope::AllTurns,
+        }],
+    );
+
+    // Blockers half: imperative DeclareBlockers{P1}.
+    runner.state_mut().phase = Phase::DeclareBlockers;
+    runner.state_mut().waiting_for = WaitingFor::DeclareBlockers {
+        player: P1,
+        valid_blocker_ids: vec![guardian],
+        valid_block_targets: Default::default(),
+        block_requirements: Default::default(),
+        blocker_constraints: Default::default(),
+        must_be_blocked_targets: Default::default(),
+        block_capacities: Default::default(),
+    };
+    game_engine::apply(
+        runner.state_mut(),
+        P1,
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        },
+    )
+    .expect("blocker auto-pass must be accepted");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { player, .. } if player == P1
+        ),
+        "reach: the blocker prompt stands, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().auto_pass.get(&P1),
+        Some(&AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        }),
+        "the blocker prompt must store under P1"
+    );
+    assert!(
+        !runner.state().auto_pass.contains_key(&P0),
+        "the blocker prompt must not store under P0"
+    );
+    let err = game_engine::apply(
+        runner.state_mut(),
+        P1,
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .expect_err("UntilStackEmpty must be refused while declaring blockers");
+    assert!(
+        format!("{err:?}").contains("ActionNotAllowed"),
+        "unexpected refusal (want ActionNotAllowed): {err:?}"
+    );
+
+    // Attackers half: imperative DeclareAttackers{P0} (representative path).
+    runner.state_mut().phase = Phase::DeclareAttackers;
+    runner.state_mut().waiting_for = WaitingFor::DeclareAttackers {
+        player: P0,
+        valid_attacker_ids: vec![raider],
+        valid_attack_targets: vec![],
+        valid_attack_targets_by_attacker: None,
+        attacker_constraints: Default::default(),
+    };
+    game_engine::apply(
+        runner.state_mut(),
+        P0,
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        },
+    )
+    .expect("attacker auto-pass must be accepted");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { player, .. } if player == P0
+        ),
+        "reach: the attacker prompt stands, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().auto_pass.get(&P0),
+        Some(&AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        }),
+        "the attacker prompt must store under P0"
+    );
+    let err = game_engine::apply(
+        runner.state_mut(),
+        P0,
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    )
+    .expect_err("UntilStackEmpty must be refused while declaring attackers");
+    assert!(
+        format!("{err:?}").contains("ActionNotAllowed"),
+        "unexpected refusal (want ActionNotAllowed): {err:?}"
+    );
+}

@@ -2307,16 +2307,33 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 102.1 + CR 500.1: resolve each auto-pass boundary against the turn now
     // beginning. EndOfCurrentTurn clears at every turn start (its turn has
     // ended); MyNextTurnStart persists through opponents' turns and clears only
-    // when the session owner's own next turn begins (active == owner).
+    // when the session owner's own next turn begins. CR 805.4 + CR 805.4a: a
+    // shared team takes one turn, so that comparison is representative to
+    // representative — a teammate's boundary clears when the TEAM's next turn
+    // begins. (An individual seat is its own representative, preserving the
+    // single-player behavior exactly.)
     // UntilStackEmpty is turn-agnostic and untouched. If the owner's next turn
     // is skipped (the `turns_to_skip` fast-path returns before this point),
     // MyNextTurnStart clears at the next non-skipped turn start — matching how
     // EndOfCurrentTurn already interacts with skips.
+    let active_rep = super::topology::priority_pass_representative(state, active);
+    let representatives: std::collections::BTreeMap<PlayerId, PlayerId> = state
+        .auto_pass
+        .keys()
+        .map(|&pid| {
+            (
+                pid,
+                super::topology::priority_pass_representative(state, pid),
+            )
+        })
+        .collect();
     state.auto_pass.retain(|&pid, mode| match mode {
         AutoPassMode::UntilStackEmpty { .. } => true,
         AutoPassMode::UntilTurnBoundary { until } => match *until {
             TurnBoundary::EndOfCurrentTurn => false,
-            TurnBoundary::MyNextTurnStart => pid != active,
+            TurnBoundary::MyNextTurnStart => representatives
+                .get(&pid)
+                .is_none_or(|&rep| rep != active_rep),
         },
     });
 
