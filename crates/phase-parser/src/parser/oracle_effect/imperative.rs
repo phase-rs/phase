@@ -11838,9 +11838,9 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
     };
     let tracks_owner_population = matches!(&effect, Effect::ChangeZoneAll { .. });
     // A selected graveyard population explicitly owned by the caster or the
-    // declared player has one library subject (Dwell on the Past). ParentTarget/
-    // SelfRef moves do not establish that guarantee: their receiving owner may
-    // differ from the terminal actor.
+    // declared player has one library subject (Dwell on the Past).
+    // This check covers typed populations. The match below handles scalar self
+    // moves explicitly.
     let single_library_population = matches!(
         &effect,
         Effect::ChangeZone {
@@ -11890,6 +11890,15 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         Effect::ChangeZone {
             destination: Zone::Library,
             owner_library: true,
+            library_shuffle,
+            ..
+        } => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
+        // CR 701.24a + CR 701.24c: the separate controller shuffle also
+        // applies when this specific source cannot be moved.
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
             library_shuffle,
             ..
         } => *library_shuffle = LibraryShuffleMode::TerminalShuffle,

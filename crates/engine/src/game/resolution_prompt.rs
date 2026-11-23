@@ -620,6 +620,7 @@ pub(crate) fn node_modifiers_offer_choice(a: &ResolvedAbility) -> bool {
         reads_return_result: _, // consumes a settled value without a prompt
         source_id: _, // object id
         cast_occurrence: _, // finalized-cast provenance, no resolution-time choice
+        cycling_occurrence: _,
         source_incarnation: _, // self-transform epoch latch, no resolution-time choice
         announced_source_incarnation: _, // announcement-time source epoch, no resolution-time choice
         noted_mana_payment: _, // concrete activation-payment snapshot, no resolution-time choice
