@@ -1,9 +1,10 @@
 //! Final authority for composable per-event ledger facts.
 
 use crate::game::game_object::ObjectIncarnationRefExt;
-use crate::types::ability::TriggerDefinitionRef;
+use crate::types::ability::{AbilityTag, TriggerDefinitionRef};
 use crate::types::game_state::{
-    AbilityActivationRecord, AbilityUsageKey, CastOccurrence, GameState, SpellCastRecord,
+    AbilityActivationRecord, AbilityUsageKey, CastOccurrence, CyclingOccurrence, CyclingRecord,
+    GameState, SpellCastRecord, StackEntryKind,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -73,6 +74,33 @@ pub fn record_spell_cast(
         caster: player,
         turn_journal_index: expected_turn_history_len,
     })
+}
+
+/// CR 702.29c + CR 702.29f: Record the just-completed cycle for the announced activator.
+pub(crate) fn record_completed_cycle(
+    state: &mut GameState,
+    activator: PlayerId,
+    record: CyclingRecord,
+    stack_entry: ObjectId,
+) -> CyclingOccurrence {
+    let journal_index = state
+        .cycles_completed_this_game_by_player
+        .get(&activator)
+        .map_or(0, im::Vector::len);
+    resolve_and_apply_ledger_edit(
+        state,
+        ResolvedLedgerEdit::CompletedCycle {
+            player: activator,
+            record,
+            expected_history_len: journal_index,
+            stack_entry,
+        },
+    )
+    .expect("completed cycling has a known activator, a named card and a just-placed entry");
+    CyclingOccurrence {
+        activator,
+        journal_index,
+    }
 }
 
 /// CR 601.2i: True iff `occurrence` names `object_id`'s cast in this turn's
@@ -306,6 +334,50 @@ pub fn apply_resolved_ledger_edit(
     command: &ResolvedLedgerEditCommand,
 ) -> Result<(), ResolvedLedgerEditReplayInvariantError> {
     match &command.edit {
+        ResolvedLedgerEdit::CompletedCycle {
+            player,
+            record,
+            expected_history_len,
+            stack_entry,
+        } => {
+            if !state
+                .players
+                .iter()
+                .any(|candidate| candidate.id == *player)
+            {
+                return Err(ResolvedLedgerEditReplayInvariantError::UnknownPlayer(
+                    *player,
+                ));
+            }
+            let actual = state
+                .cycles_completed_this_game_by_player
+                .get(player)
+                .map_or(0, im::Vector::len);
+            // CR 602.2a + CR 702.29a: The entry is a cycling activation, and the
+            // player who activated it controls it on the stack.
+            let is_activators_cycle = state.stack.iter().any(|entry| {
+                entry.id == *stack_entry
+                    && entry.controller == *player
+                    && matches!(
+                        &entry.kind,
+                        StackEntryKind::ActivatedAbility { ability, .. }
+                            if ability.context.ability_tag == Some(AbilityTag::Cycling)
+                    )
+            });
+            if actual != *expected_history_len
+                || ledger_edit_is_invalid(&command.edit)
+                || !is_activators_cycle
+            {
+                return Err(
+                    ResolvedLedgerEditReplayInvariantError::CompletedCyclePreconditionMismatch,
+                );
+            }
+            state
+                .cycles_completed_this_game_by_player
+                .entry(*player)
+                .or_default()
+                .push_back(record.clone());
+        }
         ResolvedLedgerEdit::SpellCast {
             player,
             record,

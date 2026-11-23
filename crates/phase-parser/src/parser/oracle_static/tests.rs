@@ -18351,6 +18351,88 @@ fn persistent_exile_play_permission_evendo_sacrificed_permanent_gate() {
     );
 }
 
+/// CR 508.1a + CR 611.3a: Pick Up the Pace's persistent play permission keeps
+/// its source-linked exile pool and gates the permission on the controller
+/// having attacked this turn.
+#[test]
+fn persistent_exile_play_permission_pick_up_the_pace_attack_gate() {
+    let card_text = "Whenever a creature you control that entered this turn attacks, exile the top card of your library.\nYou may play cards exiled with this enchantment as long as you attacked this turn.";
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        card_text,
+        "Pick Up the Pace",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let permission = parsed
+        .statics
+        .iter()
+        .find(|def| {
+            matches!(
+                def.mode,
+                StaticMode::ExileCastPermission {
+                    pool: ExileCardPool::Persistent,
+                    play_mode: CardPlayMode::Play,
+                    ..
+                }
+            )
+        })
+        .expect("Pick Up the Pace must lower its play-from-exile line as a static");
+    assert!(matches!(
+        permission.condition,
+        Some(StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::AttackedThisTurn {
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        })
+    ));
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .all(|ability| !matches!(ability.effect.as_ref(), Effect::CastFromZone { .. })),
+        "the permission must not fall through to a one-shot CastFromZone effect"
+    );
+    fn walk<'a>(ability: &'a AbilityDefinition, effects: &mut Vec<&'a Effect>) {
+        effects.push(&ability.effect);
+        if let Some(sub) = &ability.sub_ability {
+            walk(sub, effects);
+        }
+    }
+    let mut effects = Vec::new();
+    for ability in &parsed.abilities {
+        walk(ability, &mut effects);
+    }
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::Unimplemented { .. })),
+        "Pick Up the Pace must not emit Effect::Unimplemented: {effects:?}"
+    );
+    let swallowed_condition: Vec<_> = parsed
+        .parse_warnings
+        .iter()
+        .filter(|warning| {
+            matches!(
+                warning,
+                crate::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
+                    detector,
+                    ..
+                } if detector == "Condition_AsLongAs"
+            )
+        })
+        .collect();
+    assert!(
+        swallowed_condition.is_empty(),
+        "the condition must not be reported as swallowed: {swallowed_condition:?}"
+    );
+}
+
 /// CR 607.2a + CR 609.4b: "the exiled card" names the pool the card's own
 /// trigger exiled into (Null Summoner), the same pool as "cards exiled with ~".
 /// The threshold gate and the any-type concession ride the permission.

@@ -2139,6 +2139,26 @@ fn occurrence_trigger_events(
                     .collect(),
             );
         }
+        TriggerMode::AttacksOrBlocks => match event {
+            GameEvent::AttackersDeclared { .. } => {
+                return Some(
+                    m::attack_firings(event, trig_def, source_context, state)
+                        .into_iter()
+                        .map(|firing| FiringOccurrence {
+                            context: firing.context,
+                            causes: vec![firing.admitted],
+                        })
+                        .collect(),
+                );
+            }
+            GameEvent::BlockersDeclared { .. } => Some(m::matching_block_events(
+                event,
+                trig_def,
+                source_context,
+                state,
+            )),
+            _ => Some(Vec::new()),
+        },
         TriggerMode::YouAttack if ability.has_event_source_force_block_recursive() => {
             let matching = m::matching_you_attack_pairs(event, trig_def, source_context, state);
             Some(match event {
@@ -15771,6 +15791,16 @@ pub(super) fn can_drain_deferred_triggers(
     if matches!(policy, DeferredTriggerDrainPolicy::Skip) {
         return false;
     }
+    // CR 510.2 + CR 510.3a + CR 603.3b: while a combat damage batch is parked no
+    // player would receive priority, so nothing queued is put on the stack; the
+    // batch's one placement takes each queued context whose `ZoneChanged` witness
+    // it folded (`collect_combat_damage_batch_triggers`); any other waits for the
+    // drain after it (D4c, pre-existing). Not part of
+    // `resolution_completion_can_settle` (that predicate also gates a resolution's
+    // final part).
+    if state.combat_damage_batch_parked() {
+        return false;
+    }
     if state.deferred_triggers.is_empty() || !resolution_completion_can_settle(state) {
         return false;
     }
@@ -18164,6 +18194,8 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         QuantityRef::DamageDealtThisTurn { source, target, .. } => {
             filter_binding_diverges(source) || filter_binding_diverges(target)
         }
+        // CR 603.4: a scoped cycling count can bind to a different seat at resolution.
+        QuantityRef::CardsCycled { scope, .. } => count_scope_binding_diverges(scope),
         // Same filter axis, optional: a `None` filter names no population to
         // re-scope, so only the `Some` arm can diverge.
         QuantityRef::ZoneCardCount { filter, .. }
@@ -33872,6 +33904,79 @@ pub mod tests {
             "CR 603.4: `oracle_trigger` rewrites `Another` to `OtherThanTriggerObject` on \
              the fire-time leg only, so the two legs would count DIFFERENT populations"
         );
+    }
+
+    #[test]
+    fn scoped_cycling_gate_uses_the_delayed_abilitys_player_binding() {
+        use crate::types::ability::{Comparator, CountScope, CyclingHistoryWindow};
+        use crate::types::game_state::CyclingRecord;
+
+        let mut state = setup();
+        let controller = PlayerId(0);
+        let scoped_player = PlayerId(1);
+        state.active_player = controller;
+        state.priority_player = controller;
+        let source = make_creature(&mut state, controller, "Delayed Source", 1, 1);
+        let victim = make_creature(&mut state, controller, "Doomed Squire", 1, 1);
+        let record = CyclingRecord {
+            name: "Street Wraith".into(),
+            turn: state.turn_number,
+        };
+        state
+            .cycles_completed_this_game_by_player
+            .insert(controller, im::vector![record.clone()]);
+        state
+            .cycles_completed_this_game_by_player
+            .insert(scoped_player, im::vector![record.clone(), record]);
+        let death = battlefield_departure_event_from_live(
+            &state,
+            victim,
+            Zone::Battlefield,
+            Zone::Graveyard,
+        );
+
+        for (scope, expected_stack_size) in
+            [(CountScope::Controller, 0), (CountScope::ScopedPlayer, 1)]
+        {
+            let mut state = state.clone();
+            let mut ability = ResolvedAbility::new(
+                Effect::BecomeMonarch {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                controller,
+            );
+            ability.scoped_player = Some(scoped_player);
+            ability.condition = Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CardsCycled {
+                        scope,
+                        window: CyclingHistoryWindow::ThisTurn,
+                        name: None,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            });
+            state.delayed_triggers.push(DelayedTrigger::new(
+                DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::Any,
+                },
+                Box::new(ability),
+                controller,
+                source,
+                true,
+            ));
+            check_delayed_triggers(&mut state, std::slice::from_ref(&death));
+            assert_eq!(state.stack.len(), expected_stack_size);
+            if expected_stack_size == 1 {
+                let mut events = Vec::new();
+                crate::game::stack::resolve_top(&mut state, &mut events);
+                assert!(state.stack.is_empty());
+                assert_eq!(state.monarch, Some(controller));
+            }
+        }
     }
 
     /// CR 400.1 + CR 603.4: the ZONE axis of the same two-legs-must-agree rule.

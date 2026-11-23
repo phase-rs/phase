@@ -800,6 +800,7 @@ pub(crate) fn candidate_scalar_reads_spell_attr(attr: &QuantityRef) -> bool {
 pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<i32> {
     use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
     match attr {
+        QuantityRef::CardsCycled { .. } => None,
         // CR 402.1: cards in the candidate's hand.
         QuantityRef::HandSize { .. } => Some(usize_to_i32_saturating(p.hand.len())),
         // CR 119.3: life lost is tracked per candidate player; the window picks
@@ -868,6 +869,7 @@ pub(crate) fn candidate_player_scalar_with_state(
         return Some(value);
     }
     match attr {
+        QuantityRef::CardsCycled { .. } => None,
         // CR 119.1 + CR 810.9a: the candidate's life total reads the team's
         // shared total in a team format (off-team it is the candidate's own
         // life). Stateful because `team_life_total` folds over teammates'
@@ -9999,6 +10001,7 @@ fn instruction_outlives_declined_gate(
         targets: _,
         source_id: _,
         cast_occurrence: _,
+        cycling_occurrence: _,
         source_incarnation: _,
         announced_source_incarnation: _,
         trigger_source: _,
@@ -14669,6 +14672,7 @@ fn fan_out_head_is_allowlisted(head: &ResolvedAbility) -> bool {
         reads_return_result: _, // consumes a settled value
         source_id: _,     // object id
         cast_occurrence: _, // cast provenance
+        cycling_occurrence: _, // cycling provenance
         source_incarnation: _, // self-transform epoch latch
         announced_source_incarnation: _, // announcement-time source epoch
         chosen_target_slots: _, // CR 115.1 announced-target record
@@ -22004,6 +22008,16 @@ fn resolve_context_player(
     // anchor ever reaches this function, that caller is missing its per-member
     // expansion: do not "fix" it by returning a concrete player here.
     ability.controller
+}
+
+/// CR 101.4 + CR 608.2d: the player an optional rider's "may" would ask, read
+/// without asking. Combat damage's Phase D uses it only to order simultaneous
+/// rider choices in APNAP order; it opens no window.
+pub(crate) fn optional_rider_chooser(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<PlayerId> {
+    optional_prompt_player(state, ability)
 }
 
 /// CR 608.2d: Determine which player ANNOUNCES the choice — receives the "may"
@@ -78736,5 +78750,124 @@ mod unavailable_host_delayed_payload_tests {
             MissingParentReferent::HostObjectAndMetadata,
         );
         assert!(no_information.sub_ability.is_none());
+    }
+}
+
+#[cfg(test)]
+mod cycling_candidate_scalar_tests {
+    use super::*;
+    use crate::game::quantity::resolve_quantity_with_targets;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+    use crate::types::ability::{Comparator, CountScope, CyclingHistoryWindow};
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::CastPaymentMode;
+
+    #[test]
+    fn phase3_v4_candidate_filters_fail_closed_for_a_live_cycling_history() {
+        let mut scenario = GameScenario::new();
+        let card = scenario.add_real_card(
+            P0,
+            "Street Wraith",
+            Zone::Hand,
+            crate::test_support::shared_card_db(),
+        );
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario.add_card_to_library_top(P0, "Island");
+        let mut runner = scenario.build();
+        let ability_index = runner.state().objects[&card]
+            .abilities
+            .iter()
+            .position(|def| def.ability_tag == Some(crate::types::ability::AbilityTag::Cycling))
+            .expect("printed cycling");
+        let events = runner
+            .act(GameAction::ActivateAbility {
+                source_id: card,
+                ability_index,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap()
+            .events;
+        assert!(events.iter().any(|event| matches!(event,
+            GameEvent::Cycled { player_id: P0, object_id } if *object_id == card
+        )));
+        let state = runner.state();
+        let candidate = &state.players[0];
+        assert_eq!(candidate.id, P0);
+        assert_eq!(state.objects[&card].zone, Zone::Graveyard);
+        let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], card, P0);
+        ability.scoped_player = Some(P0);
+        let predicate = |attr| PlayerFilter::PlayerAttribute {
+            relation: PlayerRelation::Controller,
+            attr: Box::new(attr),
+            comparator: Comparator::GE,
+            value: Box::new(QuantityExpr::Fixed { value: 0 }),
+        };
+        let count = |filter| {
+            resolve_quantity_with_targets(
+                state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount { filter },
+                },
+                &ability,
+            )
+        };
+
+        let hand = QuantityRef::HandSize {
+            player: PlayerScope::Controller,
+        };
+        assert!(candidate_player_scalar(candidate, &hand).is_some());
+        assert!(matches_player_scope(
+            state,
+            P0,
+            &predicate(hand.clone()),
+            P0,
+            card
+        ));
+        assert_eq!(count(predicate(hand)), 1);
+
+        let graveyard = QuantityRef::GraveyardSize {
+            player: PlayerScope::Controller,
+        };
+        assert_eq!(candidate_player_scalar(candidate, &graveyard), None);
+        assert_eq!(
+            candidate_player_scalar_with_state(state, candidate, P0, &graveyard),
+            Some(1)
+        );
+        assert!(matches_player_scope(
+            state,
+            P0,
+            &predicate(graveyard.clone()),
+            P0,
+            card
+        ));
+        assert_eq!(count(predicate(graveyard)), 1);
+
+        for window in [
+            CyclingHistoryWindow::ThisTurn,
+            CyclingHistoryWindow::ThisGame,
+        ] {
+            let attr = QuantityRef::CardsCycled {
+                scope: CountScope::ScopedPlayer,
+                window,
+                name: None,
+            };
+            assert_eq!(
+                resolve_quantity_with_targets(
+                    state,
+                    &QuantityExpr::Ref { qty: attr.clone() },
+                    &ability
+                ),
+                1
+            );
+            assert_eq!(candidate_player_scalar(candidate, &attr), None);
+            assert_eq!(
+                candidate_player_scalar_with_state(state, candidate, P0, &attr),
+                None
+            );
+            let filter = predicate(attr);
+            assert_eq!(count(filter.clone()), 0);
+            assert!(!matches_player_scope(state, P0, &filter, P0, card));
+        }
     }
 }
