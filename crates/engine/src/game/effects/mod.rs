@@ -13271,7 +13271,8 @@ fn parsed_condition_reads_filter_population(
         ParsedCondition::YouCastSpellThisTurn { filter } => filter.as_ref().is_some_and(has_filter),
         ParsedCondition::BattlefieldEntriesThisTurn { filter, .. } => has_filter(filter),
         ParsedCondition::PlayerCountAtLeast { filter, .. } => has_player(filter),
-        ParsedCondition::SpellTargetsFilter { filter } => has_filter(filter),
+        ParsedCondition::SourceMatchesFilter { filter }
+        | ParsedCondition::SpellTargetsFilter { filter } => has_filter(filter),
         ParsedCondition::And { conditions } => conditions.iter().any(recurse),
         ParsedCondition::Or { conditions } => conditions.iter().any(recurse),
         ParsedCondition::Not { condition } => recurse(condition),

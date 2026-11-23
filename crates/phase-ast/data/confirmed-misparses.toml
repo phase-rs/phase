@@ -973,7 +973,6 @@ face = [
   { key = "gravegouger", class = "wrong_zone", clauses = ["When this creature leaves the battlefield, return the exiled cards to their owner's graveyard."] },
   { key = "gravitic herald", class = "wrong_object", clauses = ["That card gains warp {0} until end of turn."] },
   { key = "great fang chroniclers", class = "missing_effect", clauses = ["Double team", "then this creature loses this ability."] },
-  { key = "greater gargadon", class = "cost_wrong", clauses = ["Sacrifice an artifact, creature, or land: Remove a time counter from this card."] },
   { key = "greater realm of preservation", class = "dropped_qualifier", clauses = ["{1}{W}: The next time a black or red source of your choice would deal damage to you this turn, prevent that damage."] },
   { key = "green mana battery", class = "wrong_count", clauses = ["{T}, Remove any number of charge counters from this artifact: Add {G}, then add an additional {G} for each charge counter removed this way."] },
   { key = "green slime", class = "dropped_qualifier", clauses = ["When this creature enters, counter target activated or triggered ability from an artifact or enchantment source."] },

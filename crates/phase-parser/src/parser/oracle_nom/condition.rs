@@ -41,7 +41,7 @@ use crate::types::ability::{
     TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
-use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::counter::CounterMatch;
 use crate::types::event_kinds::PlayerActionKind;
 use crate::types::game_state_kinds::DayNight;
 use crate::types::keywords::Keyword;
@@ -7555,19 +7555,13 @@ fn parse_zone_list_separator(input: &str) -> OracleResult<'_, ()> {
 /// any pair of those zones ("~ is in the command zone or on the battlefield").
 fn parse_zone_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
-        // CR 702.62b: A card is suspended while it is in exile with a time
-        // counter on it. The "has suspend" component is guaranteed by cards
-        // that print this source-referential condition. Tried first so the
-        // generic zone-phrase parser does not misclassify "~ is suspended"
-        // as an unanchored "is" + zone match.
+        // CR 702.62b: state the functional zone and test the full live predicate.
         value(
             StaticCondition::And {
                 conditions: vec![
                     StaticCondition::SourceInZone { zone: Zone::Exile },
-                    StaticCondition::HasCounters {
-                        counters: CounterMatch::OfType(CounterType::Time),
-                        minimum: 1,
-                        maximum: None,
+                    StaticCondition::SourceMatchesFilter {
+                        filter: TargetFilter::suspended_card(None),
                     },
                 ],
             },
