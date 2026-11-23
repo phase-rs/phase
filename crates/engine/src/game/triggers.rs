@@ -2139,6 +2139,26 @@ fn occurrence_trigger_events(
                     .collect(),
             );
         }
+        TriggerMode::AttacksOrBlocks => match event {
+            GameEvent::AttackersDeclared { .. } => {
+                return Some(
+                    m::attack_firings(event, trig_def, source_context, state)
+                        .into_iter()
+                        .map(|firing| FiringOccurrence {
+                            context: firing.context,
+                            causes: vec![firing.admitted],
+                        })
+                        .collect(),
+                );
+            }
+            GameEvent::BlockersDeclared { .. } => Some(m::matching_block_events(
+                event,
+                trig_def,
+                source_context,
+                state,
+            )),
+            _ => Some(Vec::new()),
+        },
         TriggerMode::YouAttack if ability.has_event_source_force_block_recursive() => {
             let matching = m::matching_you_attack_pairs(event, trig_def, source_context, state);
             Some(match event {
