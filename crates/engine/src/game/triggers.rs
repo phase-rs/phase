@@ -2139,6 +2139,26 @@ fn occurrence_trigger_events(
                     .collect(),
             );
         }
+        TriggerMode::AttacksOrBlocks => match event {
+            GameEvent::AttackersDeclared { .. } => {
+                return Some(
+                    m::attack_firings(event, trig_def, source_context, state)
+                        .into_iter()
+                        .map(|firing| FiringOccurrence {
+                            context: firing.context,
+                            causes: vec![firing.admitted],
+                        })
+                        .collect(),
+                );
+            }
+            GameEvent::BlockersDeclared { .. } => Some(m::matching_block_events(
+                event,
+                trig_def,
+                source_context,
+                state,
+            )),
+            _ => Some(Vec::new()),
+        },
         TriggerMode::YouAttack if ability.has_event_source_force_block_recursive() => {
             let matching = m::matching_you_attack_pairs(event, trig_def, source_context, state);
             Some(match event {
@@ -15769,6 +15789,16 @@ pub(super) fn can_drain_deferred_triggers(
     policy: DeferredTriggerDrainPolicy,
 ) -> bool {
     if matches!(policy, DeferredTriggerDrainPolicy::Skip) {
+        return false;
+    }
+    // CR 510.2 + CR 510.3a + CR 603.3b: while a combat damage batch is parked no
+    // player would receive priority, so nothing queued is put on the stack; the
+    // batch's one placement takes each queued context whose `ZoneChanged` witness
+    // it folded (`collect_combat_damage_batch_triggers`); any other waits for the
+    // drain after it (D4c, pre-existing). Not part of
+    // `resolution_completion_can_settle` (that predicate also gates a resolution's
+    // final part).
+    if state.combat_damage_batch_parked() {
         return false;
     }
     if state.deferred_triggers.is_empty() || !resolution_completion_can_settle(state) {

@@ -1473,6 +1473,18 @@ fn assert_cycle_apply_rejections(
     );
     assert_no_cycle_replay_mutation(&prefix, &state);
 
+    let mut non_cycling = prefix.clone();
+    let entry = activated_graph(&mut non_cycling.stack[finalize.entry_position].kind);
+    assert_eq!(entry.context.ability_tag, Some(AbilityTag::Cycling));
+    entry.context.ability_tag = None;
+    let before = non_cycling.clone();
+    assert_eq!(
+        apply_resolved_ledger_edit(&mut non_cycling, edit),
+        Err(LedgerError::CompletedCyclePreconditionMismatch),
+        "a completed cycle names an activation that is not cycling"
+    );
+    assert_no_cycle_replay_mutation(&before, &non_cycling);
+
     for (label, expected) in [
         (
             "wrong prefix",

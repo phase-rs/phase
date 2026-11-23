@@ -428,4 +428,5 @@ mod dandan_free_reveal;
 mod dandan_free_reveal_futility;
 mod dandan_look_top_of_library;
 mod dandan_read_sweep;
+mod danitha_spear_of_agony;
 mod daretti_emblem_simultaneous_death;
