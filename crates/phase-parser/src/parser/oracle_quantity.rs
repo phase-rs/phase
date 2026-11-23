@@ -30,7 +30,7 @@ use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::{
     inject_controller_you, parse_life_total_comparator, parse_spell_history_filter,
 };
-use super::oracle_nom::duration::parse_cast_snapshot_suffix;
+use super::oracle_nom::duration::{parse_cast_snapshot_suffix, parse_self_reference_subject};
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
@@ -2027,6 +2027,20 @@ pub(crate) fn parse_event_context_quantity_with_context(
         all_consuming(nom_quantity::parse_demonstrative_pt_difference).parse(lower)
     {
         return Some(expr);
+    }
+    // CR 106.4 + CR 608.2i: Read the amount this source produced from the
+    // mana ability resolution that triggered the effect.
+    if all_consuming((
+        tag::<_, _, OracleError<'_>>("the amount of mana "),
+        parse_self_reference_subject,
+        tag(" produced"),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
     }
     // CR 120.1 + CR 603.2c + CR 608.2c: "opponents dealt damage this way" in
     // trigger-context effects counts the damaged opponents, not the numeric
@@ -4272,6 +4286,30 @@ mod tests {
         RoundingMode, SubtypeExclusion, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
+
+    #[test]
+    fn event_context_mana_produced_by_self() {
+        for subject in ["~", "this creature"] {
+            let phrase = format!("the amount of mana {subject} produced");
+            assert_eq!(
+                parse_event_context_quantity(&phrase),
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                })
+            );
+        }
+        for phrase in [
+            "the amount of mana another creature produced",
+            "the amount of mana this creature produced last turn",
+        ] {
+            assert_ne!(
+                parse_event_context_quantity(phrase),
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                })
+            );
+        }
+    }
 
     // -----------------------------------------------------------------------
     // CR 608.2c — the spell-history swallow guard, and the narrow contract of

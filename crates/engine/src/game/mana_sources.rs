@@ -1321,19 +1321,17 @@ pub(crate) fn activate_mana_source_option_with_output(
         // produced by their own TapsForMana abilities after this single source
         // event. Producing the combination here would add those bonuses twice.
         let produced = vec![option.mana_type];
-        for mana_type in &produced {
-            mana_payment::produce_mana_with_attributes(
-                state,
-                option.object_id,
-                *mana_type,
-                player,
-                true,
-                &option.restrictions,
-                &[],
-                None,
-                events,
-            );
-        }
+        let deposited = mana_payment::produce_mana_with_attributes(
+            state,
+            option.object_id,
+            option.mana_type,
+            player,
+            true,
+            &option.restrictions,
+            &[],
+            None,
+            events,
+        );
         events.push(GameEvent::TappedForMana {
             player_id: player,
             source_id: option.object_id,
@@ -1344,6 +1342,10 @@ pub(crate) fn activate_mana_source_option_with_output(
             player_id: player,
             source_id: option.object_id,
             produced: vec![option.mana_type],
+            // CR 614.1a: Use the post-replacement deposit count.
+            resolution: crate::types::events::ManaResolutionShare::WholeResolution {
+                total: u32::try_from(deposited.len()).unwrap_or(u32::MAX),
+            },
             trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
         });
         mana_abilities::resume_waiting_for(player, resume)

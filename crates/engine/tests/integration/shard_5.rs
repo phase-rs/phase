@@ -372,6 +372,7 @@ mod type_phrase_union_rows;
 mod typed_trigger_compound_counter_anaphor;
 mod typhoon_per_opponent_island_count;
 mod tyvar_activate_as_though_haste;
+mod tyvar_the_bellicose_mana_counters;
 mod uba_mask_draw_to_exile_play;
 mod ugin_ineffable_token_tracked_set;
 mod ultimate_magic_meteor_per_opponent_destroy;

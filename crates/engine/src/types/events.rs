@@ -130,6 +130,24 @@ impl ManaAbilityTriggerState {
     }
 }
 
+/// CR 603.2c + CR 608.2p: One recipient event represents the whole mana
+/// ability resolution, regardless of how many players received its mana.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ManaResolutionShare {
+    /// An additional recipient's event or a payload recorded before totals.
+    #[default]
+    RecipientOnly,
+    /// CR 614.1a: Total mana added across all recipients after replacement.
+    WholeResolution { total: u32 },
+}
+
+impl ManaResolutionShare {
+    pub fn is_recipient_only(&self) -> bool {
+        matches!(self, Self::RecipientOnly)
+    }
+}
+
 /// CR 603.10 + CR 605.3b: Who owns an activation event's trigger observation.
 /// A mana ability's activation is observed at its own boundary, before the
 /// ability resolves (CR 603.10); the event then travels on through payment
@@ -1258,14 +1276,19 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "ManaTapState::is_not_from_tap")]
         tap_state: ManaTapState,
     },
-    /// CR 605.1b: A mana ability resolved and produced mana; a triggered mana
-    /// ability's production is emitted only while loop detection samples. Unlike
-    /// `ManaAdded`, this is one aggregate event per ability resolution; unlike
-    /// `TappedForMana`, it also covers mana abilities without a tap cost.
+    /// CR 605.1b + CR 608.2p: One aggregate event per recipient of a mana
+    /// ability resolution, including abilities without a tap cost. A completed
+    /// activated ability with no output reports one empty event for its activator.
+    /// Triggered mana production is reported only while loop detection samples.
     ManaAbilityProduced {
         player_id: PlayerId,
         source_id: ObjectId,
         produced: Vec<ManaType>,
+        #[serde(
+            default,
+            skip_serializing_if = "ManaResolutionShare::is_recipient_only"
+        )]
+        resolution: ManaResolutionShare,
         #[serde(default, skip_serializing_if = "ManaAbilityTriggerState::is_pending")]
         trigger_state: ManaAbilityTriggerState,
     },

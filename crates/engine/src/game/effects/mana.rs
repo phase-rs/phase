@@ -8,7 +8,7 @@ use crate::types::ability::{
     ManaSpendRestriction, ManaTargetRole, ManaTargetSlot, ObjectScope, ResolvedAbility, TargetRef,
 };
 use crate::types::ability::{DevotionColors, QuantityRef};
-use crate::types::events::{GameEvent, ManaAbilityTriggerState};
+use crate::types::events::{GameEvent, ManaAbilityTriggerState, ManaResolutionShare};
 use crate::types::game_state::{
     GameState, ManaChoice, ManaChoiceContext, ManaChoicePrompt, MayTriggerOrigin, WaitingFor,
 };
@@ -398,9 +398,10 @@ pub fn resolve(
     // CR 106.4: When an effect instructs a player to add mana, that mana goes
     // into that player's mana pool.
     let produced_mana = !mana_types.is_empty();
-    let mut deposited = false;
+    let mut total = 0_u32;
     for &mana_type in &mana_types {
-        deposited |= !mana_payment::produce_mana_with_attributes_from_source_quality(
+        // CR 614.1a: Count the units deposited after mana replacements.
+        let deposited = mana_payment::produce_mana_with_attributes_from_source_quality(
             state,
             ability.source_id,
             mana_type,
@@ -411,19 +412,20 @@ pub fn resolve(
             grants,
             expiry,
             events,
-        )
-        .is_empty();
+        );
+        total = total.saturating_add(u32::try_from(deposited.len()).unwrap_or(u32::MAX));
     }
     complete_triggered_mana_production(
         state,
         ability,
-        is_triggered_mana_inline && deposited,
+        is_triggered_mana_inline,
+        total,
         recipient,
         mana_types,
         events,
     );
     record_firebending_if_marked(state, ability, produced_mana, events);
-    record_triggered_ability_added_mana(state, ability, recipient, deposited);
+    record_triggered_ability_added_mana(state, ability, recipient, total != 0);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -439,20 +441,22 @@ pub fn resolve(
 fn complete_triggered_mana_production(
     state: &mut GameState,
     ability: &ResolvedAbility,
-    deposited_triggered_mana: bool,
+    is_triggered_mana_inline: bool,
+    total: u32,
     recipient: PlayerId,
     produced: Vec<ManaType>,
     events: &mut Vec<GameEvent>,
 ) {
     // CR 605.1b is traded away under Off: this production event is emitted only where loop
     // detection samples, the only modes that can recognise the self-retrigger it may start.
-    if !(deposited_triggered_mana && state.loop_detection.samples()) {
+    if !is_triggered_mana_inline || total == 0 || !state.loop_detection.samples() {
         return;
     }
     let event = GameEvent::ManaAbilityProduced {
         player_id: recipient,
         source_id: ability.source_id,
         produced,
+        resolution: ManaResolutionShare::WholeResolution { total },
         trigger_state: ManaAbilityTriggerState::Pending,
     };
     // CR 104.4b + CR 732.4: a mandatory self-retrigger inside one mana resolution
@@ -531,10 +535,11 @@ pub fn handle_choose_mana_effect(
     let produced_mana = recipient.is_some() && !mana_types.is_empty();
     let is_triggered_mana_inline =
         crate::game::mana_abilities::is_resolving_triggered_mana(state, ability);
-    let mut deposited = false;
+    let mut total = 0_u32;
     if let Some(recipient) = recipient {
         for &mana_type in &mana_types {
-            deposited |= !mana_payment::produce_mana_with_attributes_from_source_quality(
+            // CR 614.1a: Count the units deposited after mana replacements.
+            let deposited = mana_payment::produce_mana_with_attributes_from_source_quality(
                 state,
                 ability.source_id,
                 mana_type,
@@ -545,13 +550,14 @@ pub fn handle_choose_mana_effect(
                 grants,
                 *expiry,
                 events,
-            )
-            .is_empty();
+            );
+            total = total.saturating_add(u32::try_from(deposited.len()).unwrap_or(u32::MAX));
         }
         complete_triggered_mana_production(
             state,
             ability,
-            is_triggered_mana_inline && deposited,
+            is_triggered_mana_inline,
+            total,
             recipient,
             mana_types,
             events,
@@ -559,7 +565,7 @@ pub fn handle_choose_mana_effect(
     }
     record_firebending_if_marked(state, ability, produced_mana, events);
     if let Some(recipient) = recipient {
-        record_triggered_ability_added_mana(state, ability, recipient, deposited);
+        record_triggered_ability_added_mana(state, ability, recipient, total != 0);
     }
 
     events.push(GameEvent::EffectResolved {
@@ -3649,6 +3655,7 @@ mod tests {
             player_id: P0,
             source_id: forest,
             produced: vec![ManaType::Green],
+            resolution: ManaResolutionShare::WholeResolution { total: 1 },
             trigger_state: ManaAbilityTriggerState::Pending,
         };
         let candidates = crate::game::trigger_index::candidates_for_event(&state, &forest_event);
@@ -3943,6 +3950,7 @@ mod tests {
                 player_id: P0,
                 source_id: sun,
                 produced: vec![ManaType::Green],
+                resolution: ManaResolutionShare::WholeResolution { total: 1 },
                 trigger_state: ManaAbilityTriggerState::Pending,
             };
             assert_eq!(
