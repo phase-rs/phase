@@ -478,6 +478,20 @@ fn trigger_firing_is_unknown(firing: &TriggerFiring) -> bool {
 pub type DeferredTrigger = PendingTriggerContext;
 
 impl PendingTriggerContext {
+    /// Sources whose mana resolution this deferred observer was bound to.
+    pub(super) fn mana_resolution_sources(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.pending
+            .trigger_event
+            .iter()
+            .chain(&self.trigger_events)
+            .filter_map(|event| match event {
+                GameEvent::TappedForMana { source_id, .. }
+                | GameEvent::ManaAbilityProduced { source_id, .. }
+                | GameEvent::ManaAdded { source_id, .. } => Some(*source_id),
+                _ => None,
+            })
+    }
+
     pub fn single(pending: PendingTrigger) -> Self {
         let trigger_events = pending.trigger_event.iter().cloned().collect();
         // CR 603.2d: reflexive/delayed triggers (including GotchaSaid) are not

@@ -1381,8 +1381,10 @@ pub(crate) fn activate_mana_source_option_with_output_and_settle(
 /// `events` and whose boundary observation bound nothing
 /// (`ActivationObservers::Unbound`). An activation still paused mid-cost (a
 /// replacement choice) has not been observed yet, so it is never recorded;
-/// one an activation trigger observed (CR 603.10) queued an ability or spent
-/// a "triggers only once each turn" limit, which undo cannot reverse. Callers
+/// observing an activation (CR 603.10) can queue an ability or spend a
+/// "triggers only once each turn" limit, which undo cannot reverse. A tap whose
+/// resolution an ordinary trigger observed (CR 608.2p) is ineligible for the
+/// same reason: that trigger is already deferred when this runs. Callers
 /// decide the penalty axis (`ManaSourcePenalty::is_undoable`) first.
 pub(crate) fn record_undoable_mana_tap(
     state: &mut GameState,
@@ -1404,7 +1406,13 @@ pub(crate) fn record_undoable_mana_tap(
             } if *player_id == player && *activated == source_id
         )
     });
-    if !completed_unobserved {
+    if !completed_unobserved
+        || state.deferred_triggers.iter().any(|context| {
+            context
+                .mana_resolution_sources()
+                .any(|source| source == source_id)
+        })
+    {
         return;
     }
     state

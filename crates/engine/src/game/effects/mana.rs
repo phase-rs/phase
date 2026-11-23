@@ -4055,7 +4055,21 @@ mod tests {
                 2,
                 "{mode:?}: reach: the echo added the chosen type"
             );
-            assert_eq!(produced_by(&answered.events, lens).len(), 1, "{mode:?}");
+            let expected_state = match mode {
+                LoopDetectionMode::Off => ManaAbilityTriggerState::ObserversOnly,
+                LoopDetectionMode::Interactive => ManaAbilityTriggerState::Pending,
+            };
+            assert!(
+                matches!(
+                    produced_by(&answered.events, lens).as_slice(),
+                    [GameEvent::ManaAbilityProduced {
+                        trigger_state,
+                        resolution: ManaResolutionShare::WholeResolution { total: 1 },
+                        ..
+                    }] if *trigger_state == expected_state
+                ),
+                "{mode:?}: the echo announces exactly one completed production"
+            );
         }
     }
 }

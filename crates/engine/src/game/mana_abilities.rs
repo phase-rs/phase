@@ -1103,7 +1103,8 @@ fn produce_mana_from_bound_ability(
         }
     }
 
-    // CR 608.2p: Resolution can trigger an ability even when no mana was added.
+    // CR 605.2 + CR 608.2p: This is still a mana ability, and its resolution
+    // can trigger an ability even when no mana was added.
     if produced_for_ability_events.is_empty() {
         produced_for_ability_events.push((player, Vec::new()));
     }

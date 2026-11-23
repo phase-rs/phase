@@ -1,4 +1,8 @@
+use engine::game::interaction::{
+    bind_interaction_authority, derive_viewer_interaction, interaction_action_id,
+};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::ChosenAttribute;
 use engine::types::actions::GameAction;
 use engine::types::events::{GameEvent, ManaResolutionShare};
@@ -6,6 +10,9 @@ use engine::types::game_state::{
     ActionResult, CastPaymentMode, LoopDetectionMode, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
+use engine::types::interaction::{
+    InteractionOpportunityResponse, InteractionPresentationSurface, InteractionSessionId,
+};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -36,10 +43,27 @@ fn llanowar_elves(scenario: &mut GameScenario, controller: PlayerId) -> ObjectId
         .id()
 }
 
-fn vitalize(scenario: &mut GameScenario, cost: ManaCost) -> ObjectId {
+fn one_mana(shard: ManaCostShard) -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![shard],
+        generic: 0,
+    }
+}
+
+fn seed_mana(scenario: &mut GameScenario, colors: &[ManaType]) {
+    scenario.with_mana_pool(
+        P0,
+        colors
+            .iter()
+            .map(|&color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+}
+
+fn vitalize(scenario: &mut GameScenario) -> ObjectId {
     scenario
         .add_spell_to_hand_from_oracle(P0, "Vitalize", true, "Untap all creatures you control.")
-        .with_mana_cost(cost)
+        .with_mana_cost(one_mana(ManaCostShard::Green))
         .id()
 }
 
@@ -117,8 +141,11 @@ fn tyvar_limits_the_grant_per_creature_per_turn() {
     let first = llanowar_elves(&mut scenario, P0);
     let second = llanowar_elves(&mut scenario, P0);
     let opponent = llanowar_elves(&mut scenario, P1);
-    let untap = vitalize(&mut scenario, ManaCost::zero());
-    let untap_next_turn = vitalize(&mut scenario, ManaCost::zero());
+    let untap = vitalize(&mut scenario);
+    let untap_next_turn = vitalize(&mut scenario);
+    seed_mana(&mut scenario, &[ManaType::Green]);
+    // The initial pool empties before P1's upkeep.
+    let forest = scenario.add_basic_land(P0, ManaColor::Green);
     let mut runner = scenario.build();
     let turn = runner.state().turn_number;
 
@@ -163,6 +190,7 @@ fn tyvar_limits_the_grant_per_creature_per_turn() {
             .expect("give P0 priority in P1's upkeep");
     }
     assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0));
+    tap_land(&mut runner, forest);
     runner
         .cast(untap_next_turn)
         .resolve()
@@ -355,9 +383,10 @@ fn tyvar_spends_the_turn_limit_on_zero_output() {
             true,
             "Put a +1/+1 counter on target creature.",
         )
-        .with_mana_cost(ManaCost::zero())
+        .with_mana_cost(one_mana(ManaCostShard::Green))
         .id();
-    let untap = vitalize(&mut scenario, ManaCost::zero());
+    let untap = vitalize(&mut scenario);
+    seed_mana(&mut scenario, &[ManaType::Green; 2]);
     let mut runner = scenario.build();
 
     let empty = activate(&mut runner, producer);
@@ -369,12 +398,7 @@ fn tyvar_spends_the_turn_limit_on_zero_output() {
             ManaResolutionShare::WholeResolution { total: 0 }
         )]
     );
-    assert_eq!(
-        runner.state().players[0]
-            .mana_pool
-            .count_color(ManaType::Green),
-        0
-    );
+    assert_eq!(runner.state().players[0].mana_pool.total(), 2);
     resolve_only_trigger(&mut runner, producer, 0);
 
     runner
@@ -461,16 +485,135 @@ fn vorinclex(scenario: &mut GameScenario) -> ObjectId {
         .id()
 }
 
-fn tap_forest(runner: &mut GameRunner, forest: ObjectId) -> ActionResult {
+fn tap_land(runner: &mut GameRunner, land: ObjectId) -> ActionResult {
     let (_, _, grouped) = engine::ai_support::legal_actions_full(runner.state());
     let tap = grouped
-        .get(&forest)
+        .get(&land)
         .into_iter()
         .flatten()
         .find(|action| matches!(action, GameAction::TapLandForMana { .. }))
         .cloned()
-        .expect("the Forest can tap for mana");
-    runner.act(tap).expect("tap the Forest for mana")
+        .expect("the land can tap for mana");
+    runner.act(tap).expect("tap the land for mana")
+}
+
+fn assert_undo_unavailable(runner: &mut GameRunner, land: ObjectId) {
+    let undo = GameAction::UntapLandForMana { object_id: land };
+    let undo_id = interaction_action_id(&undo);
+    let state = runner.state_mut();
+    bind_interaction_authority(state, InteractionSessionId("mana-undo".to_string()))
+        .expect("bind the human interaction view");
+    let view = derive_viewer_interaction(state, state, P0);
+    assert!(view.can_submit);
+    let choices: Vec<_> = view
+        .opportunities
+        .iter()
+        .flat_map(|opportunity| match &opportunity.response {
+            InteractionOpportunityResponse::ExactChoices { choices } => choices,
+            InteractionOpportunityResponse::Schema { candidates, .. } => candidates,
+        })
+        .collect();
+    assert!(!choices.is_empty(), "the human player has legal choices");
+    assert!(
+        !choices.iter().flat_map(|choice| &choice.surfaces).any(|surface| {
+            matches!(surface, InteractionPresentationSurface::Action { action_id: Some(id), .. } if id == &undo_id)
+        }),
+        "the human player is not offered undo for this tap"
+    );
+    assert!(runner.act(undo).is_err(), "the reducer refuses undo");
+}
+
+#[test]
+fn tyvar_dryad_arbor_tap_cannot_be_undone_after_the_granted_trigger_fires() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    for tap in [
+        tap_land as fn(&mut GameRunner, ObjectId) -> ActionResult,
+        activate,
+    ] {
+        let (mut scenario, _) = tyvar_board(Phase::PreCombatMain);
+        let arbor = scenario.add_real_card(P0, "Dryad Arbor", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+
+        tap(&mut runner, arbor);
+        assert_top_trigger(&runner, arbor);
+        assert_undo_unavailable(&mut runner, arbor);
+        resolve_only_trigger(&mut runner, arbor, 1);
+        assert!(runner.state().objects[&arbor].tapped);
+    }
+}
+
+fn manabarbs_board() -> (GameScenario, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let barbs = scenario
+        .add_enchantment_from_oracle(
+            P1,
+            "Manabarbs",
+            "Whenever a player taps a land for mana, this enchantment deals 1 damage to that player.",
+        )
+        .id();
+    // A printed Forest has only its intrinsic ability, exercising the tap path
+    // that records undo before collecting the resolution's observers.
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let forest = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    (scenario, barbs, forest)
+}
+
+fn assert_manabarbs_trigger(runner: &GameRunner, barbs: ObjectId, forest: ObjectId) {
+    assert!(matches!(
+        runner.state().stack.back().map(|entry| &entry.kind),
+        Some(StackEntryKind::TriggeredAbility {
+            source_id,
+            trigger_event: Some(GameEvent::TappedForMana { source_id: mana_source, .. }),
+            ..
+        }) if *source_id == barbs && *mana_source == forest
+    ));
+}
+
+#[test]
+fn manabarbs_blocks_undo_of_an_intrinsic_land_tap_at_priority() {
+    let (scenario, barbs, forest) = manabarbs_board();
+    let mut runner = scenario.build();
+
+    tap_land(&mut runner, forest);
+    assert_manabarbs_trigger(&runner, barbs, forest);
+    assert_undo_unavailable(&mut runner, forest);
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().players[0].life, 19);
+    assert!(runner.state().objects[&forest].tapped);
+}
+
+#[test]
+fn manabarbs_blocks_undo_while_the_tap_observer_is_deferred_for_payment() {
+    let (mut scenario, barbs, forest) = manabarbs_board();
+    let spell = vitalize(&mut scenario);
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("announce Vitalize");
+    assert!(matches!(result.waiting_for, WaitingFor::ManaPayment { .. }));
+
+    let tapped = tap_land(&mut runner, forest);
+    assert!(matches!(tapped.waiting_for, WaitingFor::ManaPayment { .. }));
+    assert!(!runner
+        .state()
+        .stack
+        .iter()
+        .any(|entry| entry.source_id == barbs));
+    assert_undo_unavailable(&mut runner, forest);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("pay for Vitalize");
+    assert_manabarbs_trigger(&runner, barbs, forest);
+    runner.pass_both_players();
+    assert_eq!(runner.state().players[0].life, 19);
+    assert!(runner.state().objects[&forest].tapped);
 }
 
 /// CR 605.1b + CR 608.2p: Tyvar's grant observes Vorinclex's triggered mana
@@ -484,7 +627,7 @@ fn tyvar_counts_a_creatures_triggered_mana_ability_in_both_loop_modes() {
         let mut runner = scenario.build();
         runner.state_mut().loop_detection = mode;
 
-        tap_forest(&mut runner, forest);
+        tap_land(&mut runner, forest);
         assert_eq!(
             runner.state().players[0]
                 .mana_pool
@@ -538,7 +681,7 @@ fn off_announces_vorinclex_to_tyvar_without_a_second_caged_sun_firing() {
             .push(ChosenAttribute::Color(ManaColor::Green));
         state.layers_dirty.mark_full();
 
-        let result = tap_forest(&mut runner, forest);
+        let result = tap_land(&mut runner, forest);
         let vorinclex_types = &runner.state().objects[&vorinclex].card_types;
         assert!(vorinclex_types.core_types.contains(&CoreType::Land));
         assert!(vorinclex_types
@@ -569,13 +712,7 @@ fn off_announces_vorinclex_to_tyvar_without_a_second_caged_sun_firing() {
 fn assert_payment_trigger_resolves_first(mode: CastPaymentMode) {
     let (mut scenario, _) = tyvar_board(Phase::PreCombatMain);
     let elf = llanowar_elves(&mut scenario, P0);
-    let spell = vitalize(
-        &mut scenario,
-        ManaCost::Cost {
-            shards: vec![ManaCostShard::Green],
-            generic: 0,
-        },
-    );
+    let spell = vitalize(&mut scenario);
     let mut runner = scenario.build();
     let card_id = runner.state().objects[&spell].card_id;
     let result = runner
@@ -640,11 +777,12 @@ fn tyvar_trigger_resolves_above_spell_after_auto_tap() {
 fn tyvar_returning_grants_a_fresh_trigger_this_turn() {
     let (mut scenario, tyvar) = tyvar_board(Phase::PreCombatMain);
     let elf = llanowar_elves(&mut scenario, P0);
-    let untap = vitalize(&mut scenario, ManaCost::zero());
+    let untap = vitalize(&mut scenario);
     let blink = scenario.add_spell_to_hand_from_oracle(
         P0, "Cloudshift", true,
         "Exile target creature you control, then return that card to the battlefield under your control.",
-    ).with_mana_cost(ManaCost::zero()).id();
+    ).with_mana_cost(one_mana(ManaCostShard::White)).id();
+    seed_mana(&mut scenario, &[ManaType::Green, ManaType::White]);
     let mut runner = scenario.build();
     let turn = runner.state().turn_number;
     let incarnation = runner.state().objects[&tyvar].incarnation;
