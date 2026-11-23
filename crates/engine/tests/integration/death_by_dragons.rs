@@ -1297,6 +1297,95 @@ fn death_by_dragons_declined_esix_keeps_the_shared_entry() {
     );
 }
 
+/// CR 614.6 + CR 609.3 + CR 608.2f: the Owner-scope Nothing arm on a
+/// multi-owner event. Esix is the only creature, so its verbatim "choose a
+/// creature other than Esix" pool (Creature + Another, pinned by
+/// esix_fractal_bloom.rs V1) is empty and accepting decides the substitute at
+/// once (`Nothing`: it creates no tokens) with NO `CopyTargetChoice` raised —
+/// the V11 seam, one owner up. Only the decider's views are dropped; P1's
+/// batch survives and still converts via Reflection.
+///
+/// Board note: Reflection targets Esix itself. Printed Esix is legendary, so
+/// printed Reflection could not choose it — but this file's Esix fixture
+/// carries no legendary supertype (the E2-V3 precedent above), and any second
+/// creature would make the pool non-empty. This is the nearest board that is
+/// both empty-pool and convertible-via-Reflection through the real pipeline.
+#[test]
+fn death_by_dragons_esix_empty_pool_drops_only_the_deciders_batch() {
+    let mut scenario = game();
+    let esix = scenario
+        .add_creature_from_oracle(P0, "Esix, Fractal Bloom", 6, 6, ESIX)
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    resolve_reflection(&mut runner, mystic, esix);
+
+    let creatures: Vec<ObjectId> = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            runner.state().objects[id]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature)
+        })
+        .collect();
+    assert_eq!(
+        creatures,
+        vec![esix],
+        "reach guard: Esix must be the only creature, so its pool is empty"
+    );
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    answer_optional(&mut runner, P0, esix, ACCEPT);
+    // No further prompt: the empty pool is decided at the accept (CR 609.3).
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::CopyTargetChoice { .. }
+        ),
+        "an empty copy pool raises no CopyTargetChoice; got {:?}",
+        runner.state().waiting_for
+    );
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    assert!(
+        controlled_tokens(state, P0).is_empty(),
+        "Nothing must drop the decider's views: P0 creates no tokens"
+    );
+    let p1_tokens = controlled_tokens(state, P1);
+    assert_eq!(p1_tokens.len(), 1, "P1 must create one token");
+    let p1_copy = &state.objects[&p1_tokens[0]];
+    assert_eq!(p1_copy.controller, P1);
+    assert_eq!(
+        p1_copy.name, "Esix, Fractal Bloom",
+        "P1's token must enter as a copy of the Reflection-chosen Esix"
+    );
+    assert_eq!((p1_copy.power, p1_copy.toughness), (Some(6), Some(6)));
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_no_dragons(state);
+    assert!(
+        reflection_consumed(state),
+        "Reflection must be used by the shared entry"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(vec![p1_tokens[0]]),
+        "the created referent must be only P1's copy"
+    );
+}
+
 /// CR 614.6 + CR 608.2f + CR 616.1g (Moonlit R4: "The effect of Moonlit
 /// Meditation's last ability applies before anything that modifies how those
 /// tokens enter the battlefield"): Moonlit asks nothing after the accept — the

@@ -38,10 +38,10 @@
 //! consumers: [`ability_tree_any`], which lives in this module verbatim but is
 //! not built on the shared walk (it has a `_ => {}` wildcard and omits many
 //! carriers — broadening it would change the coverage report), and
-//! `game::replacement::ability_tree_creates_tokens` (which walks only `Token` /
-//! `ChooseOneOf` / `sub_ability` / `else_ability` — broadening it would change
-//! replacement behavior). Neither is migrated onto the shared walk, because
-//! either migration would change behavior.
+//! `game::replacement::ability_tree_copies_tokens` (which walks only
+//! `CopyTokenOf` / `ChooseOneOf` / `sub_ability` / `else_ability` — broadening
+//! it would change replacement behavior). Neither is migrated onto the shared
+//! walk, because either migration would change behavior.
 //!
 //! The effect-axis walk is one `define_walk!` body, expanded as the shared
 //! `&Effect` walk here and as the exclusive definition-node walk in [`nodes_mut`].

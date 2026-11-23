@@ -2058,7 +2058,7 @@ fn moonlit_then_jinnie(
 
 /// The one Jinnie Fay prompt on the event Moonlit Meditation modified, raised
 /// with Kiki-Jiki's single CopyToken owner parked (CR 614.5: one offer).
-fn assert_jinnie_prompted_on_moonlits_copy_event(run: &KikiJikiRun) {
+fn assert_jinnie_prompted_once_on_the_modified_event(run: &KikiJikiRun) {
     let jinnie: Vec<_> = run
         .prompts
         .iter()
@@ -2094,7 +2094,7 @@ fn r19_moonlit_copy_paused_inside_a_declined_jinnie_prompt_is_kiki_jikis_it() {
     let Some(run) = run else {
         return;
     };
-    assert_jinnie_prompted_on_moonlits_copy_event(&run);
+    assert_jinnie_prompted_once_on_the_modified_event(&run);
     assert!(
         branch_frames.is_empty(),
         "REACH-GUARD: no Jinnie Fay substitution was accepted"
@@ -2184,7 +2184,7 @@ fn r22_jinnie_cat_replacing_moonlits_copy_is_kiki_jikis_it() {
     let Some(run) = run else {
         return;
     };
-    assert_jinnie_prompted_on_moonlits_copy_event(&run);
+    assert_jinnie_prompted_once_on_the_modified_event(&run);
     // The branch prompt parks the replacement, not a continuation: no
     // PostReplacement frame, and Kiki-Jiki's single CopyToken owner.
     assert_eq!(
@@ -2217,7 +2217,7 @@ fn r22s_jinnie_cat_replacing_moonlits_copy_is_kiki_jikis_it_across_save_and_rest
     let Some(run) = run else {
         return;
     };
-    assert_jinnie_prompted_on_moonlits_copy_event(&run);
+    assert_jinnie_prompted_once_on_the_modified_event(&run);
     assert_eq!(
         branch_frames,
         vec![vec![FrameKind::AbilityContinuation, FrameKind::CopyToken]],
