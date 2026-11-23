@@ -16,7 +16,7 @@ use crate::types::resolution::CapturedDeclarationPayload;
 use crate::types::zones::Zone;
 use std::collections::HashSet;
 
-/// CR 603.4 + CR 400.7: bind the event object while enumerating targets for a
+/// CR 115.1d + CR 400.7: bind the event object while enumerating targets for a
 /// triggered ability. Target filters use the existing
 /// `FilterProp::OtherThanTriggerObject` marker for trigger-relative "another";
 /// this context bridge makes its identity predicate answer the event object

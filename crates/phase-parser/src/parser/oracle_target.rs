@@ -8156,7 +8156,7 @@ fn parse_power_suffix(
         if !has_trigger_event_context || has_prior_object {
             return None;
         }
-        // CR 603.4: in a triggered ability, "another" in this target noun
+        // CR 115.1d: in a triggered ability, "another" in this target noun
         // phrase excludes the object that caused the trigger, not the ability
         // source. Preserve the typed exclusion marker used by the runtime
         // trigger-object authority; leaving `Another` here would incorrectly

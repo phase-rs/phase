@@ -6615,7 +6615,7 @@ fn filter_needs_trigger_source(filter: &TargetFilter) -> bool {
             | FilterProp::AttackedThisTurn {
                 defender: Some(ControllerRef::DefendingPlayer),
             }
-            // CR 603.4 + CR 400.7: "other" in a triggered target clause is
+            // CR 115.1d + CR 400.7: "other" in a triggered target clause is
             // relative to the event object, so enumeration must carry the
             // current trigger event into the filter context.
             | FilterProp::OtherThanTriggerObject => true,
