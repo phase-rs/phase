@@ -16,6 +16,48 @@ use crate::types::resolution::CapturedDeclarationPayload;
 use crate::types::zones::Zone;
 use std::collections::HashSet;
 
+/// CR 603.7c + CR 400.7: the event provenance owned by one stack entry while
+/// its targets are re-evaluated. This is deliberately borrowed and call-scoped:
+/// retargeting must read the selected entry's event rather than temporarily
+/// replacing `GameState::current_trigger_event` with ambient state.
+#[derive(Debug, Clone, Copy)]
+pub struct StackTriggerContext<'a> {
+    pub(crate) event: &'a GameEvent,
+    pub(crate) events: &'a [GameEvent],
+}
+
+impl<'a> StackTriggerContext<'a> {
+    /// CR 603.7c: a non-empty per-entry batch is authoritative for both the
+    /// singular representative event and the full batched event slice. A
+    /// non-batched triggered entry falls back to its own stored event.
+    pub(crate) fn for_entry(state: &'a GameState, entry: &'a StackEntry) -> Option<Self> {
+        if let Some(events) = state
+            .stack_trigger_event_batches
+            .get(&entry.id)
+            .filter(|events| !events.is_empty())
+        {
+            return Some(Self {
+                event: events.first().expect("non-empty trigger event batch"),
+                events,
+            });
+        }
+        match &entry.kind {
+            StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event),
+                ..
+            } => Some(Self {
+                event,
+                events: std::slice::from_ref(event),
+            }),
+            StackEntryKind::Spell { .. }
+            | StackEntryKind::ActivatedAbility { .. }
+            | StackEntryKind::TriggeredAbility { .. }
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => None,
+        }
+    }
+}
+
 /// CR 115.1d + CR 400.7: bind the event object while enumerating targets for a
 /// triggered ability. Target filters use the existing
 /// `FilterProp::OtherThanTriggerObject` marker for trigger-relative "another";
@@ -55,6 +97,40 @@ fn ability_target_filter_context_with_controller<'a>(
         GameEvent::ZoneChanged { .. } => None,
         _ => event_context_incarnation(&TargetFilter::TriggeringSource, event, object_id)
             .map(|reference| reference.incarnation),
+    };
+    context.with_triggering_object(TriggeringObjectRef {
+        object_id,
+        incarnation,
+    })
+}
+
+fn ability_target_filter_context_with_trigger_context<'a>(
+    _state: &GameState,
+    ability: &'a ResolvedAbility,
+    controller: PlayerId,
+    trigger_context: Option<StackTriggerContext<'a>>,
+) -> super::filter::FilterContext<'a> {
+    let context = super::filter::FilterContext::from_ability_with_controller(ability, controller);
+    let Some(trigger_context) = trigger_context else {
+        return context;
+    };
+    let context = context.with_stack_trigger_context(trigger_context);
+    let Some(object_id) = extract_source_from_event(trigger_context.event) else {
+        return context;
+    };
+    let incarnation = match trigger_context.event {
+        GameEvent::ZoneChanged {
+            to: Zone::Battlefield,
+            record,
+            ..
+        } => record.entered_incarnation,
+        GameEvent::ZoneChanged { .. } => None,
+        _ => event_context_incarnation(
+            &TargetFilter::TriggeringSource,
+            trigger_context.event,
+            object_id,
+        )
+        .map(|reference| reference.incarnation),
     };
     context.with_triggering_object(TriggeringObjectRef {
         object_id,
@@ -135,6 +211,31 @@ pub(crate) fn find_legal_targets_for_ability_with_controller(
     )
 }
 
+/// CR 115.7 + CR 603.7c: enumerate a stack entry's legal targets against its
+/// own trigger event. Unlike the ambient-compatible wrapper, `None` here means
+/// that no entry-owned event exists and therefore no ambient event is consulted.
+pub(crate) fn find_legal_targets_for_ability_with_controller_and_trigger_context(
+    state: &GameState,
+    filter: &TargetFilter,
+    ability: &ResolvedAbility,
+    source_controller: PlayerId,
+    trigger_context: Option<StackTriggerContext<'_>>,
+) -> Vec<TargetRef> {
+    let target_ctx = ability_target_filter_context_with_trigger_context(
+        state,
+        ability,
+        source_controller,
+        trigger_context,
+    );
+    find_legal_targets_with_context(
+        state,
+        filter,
+        source_controller,
+        ability.source_id,
+        &target_ctx,
+    )
+}
+
 /// CR 601.2c + CR 115.7: legal targets for a slot whose filter reads another
 /// declared target slot (`FilterProp::AttachedTo { to: DeclaredTarget }`),
 /// evaluated against `view` — the selected-slot prefix during announcement, or
@@ -150,6 +251,32 @@ pub(crate) fn find_legal_targets_for_ability_with_view(
     let target_ctx =
         ability_target_filter_context_with_controller(state, ability, source_controller)
             .with_declared_slot_view(view);
+    find_legal_targets_with_context(
+        state,
+        filter,
+        source_controller,
+        ability.source_id,
+        &target_ctx,
+    )
+}
+
+/// CR 115.7 + CR 603.7c: the declared-slot view variant of the explicit stack
+/// trigger-context target enumerator.
+pub(crate) fn find_legal_targets_for_ability_with_view_and_trigger_context(
+    state: &GameState,
+    filter: &TargetFilter,
+    ability: &ResolvedAbility,
+    source_controller: PlayerId,
+    view: &[Option<DeclaredSlotBinding>],
+    trigger_context: Option<StackTriggerContext<'_>>,
+) -> Vec<TargetRef> {
+    let target_ctx = ability_target_filter_context_with_trigger_context(
+        state,
+        ability,
+        source_controller,
+        trigger_context,
+    )
+    .with_declared_slot_view(view);
     find_legal_targets_with_context(
         state,
         filter,

@@ -444,8 +444,14 @@ impl<'s> RetargetSearch<'s> {
         if bindings.is_empty() {
             return None;
         }
-        let slot_pools =
-            crate::game::effects::change_targets::derive_slot_pools(state, entry, pre, &bindings);
+        let trigger_context = crate::game::targeting::StackTriggerContext::for_entry(state, entry);
+        let slot_pools = crate::game::effects::change_targets::derive_slot_pools(
+            state,
+            entry,
+            pre,
+            &bindings,
+            trigger_context,
+        );
         let mut legal_new_targets: Vec<TargetRef> = Vec::new();
         for target in slot_pools.iter().flatten() {
             if !legal_new_targets.contains(target) {

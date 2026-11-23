@@ -4377,6 +4377,7 @@ fn retarget_proposals(
             entry,
             stack_ability,
             &bindings,
+            crate::game::targeting::StackTriggerContext::for_entry(state, entry),
         );
         // CR 115.7a + INVARIANT SC (phase-rs/phase#8355 round-8 review finding
         // H1, second pass): mirrors `engine::apply_retarget`'s same guard — a

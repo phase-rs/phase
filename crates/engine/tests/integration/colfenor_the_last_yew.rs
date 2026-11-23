@@ -6,21 +6,23 @@
 //! power and the second is toughness.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::game::triggers::process_triggers;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 const COLFENOR_ORACLE: &str =
     "Reach, vigilance\nWhenever Colfenor or another creature you control dies, return up to one other target creature card with lesser toughness from your graveyard to your hand.";
+const MURDER_ORACLE: &str = "Destroy target creature.";
 
 fn resolve_colfenor_trigger(
     runner: &mut GameRunner,
     expected_target: ObjectId,
     forbidden_target: ObjectId,
+    equal_target: ObjectId,
 ) {
     for _ in 0..128 {
         match runner.state().waiting_for.clone() {
@@ -53,6 +55,12 @@ fn resolve_colfenor_trigger(
                         .contains(&TargetRef::Object(forbidden_target)),
                     "the creature whose death caused the trigger must be excluded: {slot:?}"
                 );
+                assert!(
+                    !slot
+                        .legal_targets
+                        .contains(&TargetRef::Object(equal_target)),
+                    "equal toughness must not be a legal target: {slot:?}"
+                );
                 runner
                     .act(GameAction::ChooseTarget {
                         target: Some(TargetRef::Object(expected_target)),
@@ -75,36 +83,54 @@ fn resolve_colfenor_trigger(
 fn colfenor_returns_strictly_lesser_card_and_excludes_dying_trigger_object() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|index| {
+                ManaUnit::new(
+                    if index == 0 {
+                        ManaType::Colorless
+                    } else {
+                        ManaType::Black
+                    },
+                    ObjectId(0),
+                    false,
+                    vec![],
+                )
+            })
+            .collect(),
+    );
 
     let colfenor = scenario
-        .add_creature_from_oracle(P0, "Colfenor, the Last Yew", 3, 4, COLFENOR_ORACLE)
+        .add_creature_from_oracle(P0, "Colfenor, the Last Yew", 3, 7, COLFENOR_ORACLE)
         .id();
     let dying = scenario
-        .add_creature(P0, "Dying Candidate", 2, 3)
+        .add_creature(P0, "Alaborn Trooper", 2, 3)
         .with_plus_counters(1)
         .id();
     let strict_lesser = scenario
-        .add_creature_to_graveyard(P0, "Strict Lesser", 2, 3)
+        .add_creature_to_graveyard(P0, "Elvish Warrior", 2, 3)
         .id();
     let equal_toughness = scenario
-        .add_creature_to_graveyard(P0, "Equal Toughness", 2, 4)
+        .add_creature_to_graveyard(P0, "Pillarfield Ox", 2, 4)
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER_ORACLE)
         .id();
 
     let mut runner = scenario.build();
+    let card_id = runner.state().objects[&murder].card_id;
     runner
-        .state_mut()
-        .objects
-        .get_mut(&dying)
-        .expect("dying creature exists")
-        .damage_marked = 99;
+        .act(GameAction::CastSpell {
+            object_id: murder,
+            card_id,
+            targets: vec![dying],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast real Murder through the public action path");
 
-    let mut events = Vec::new();
-    engine::game::sba::check_state_based_actions(runner.state_mut(), &mut events);
-    process_triggers(runner.state_mut(), &events);
-
-    assert_eq!(runner.state().objects[&dying].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&colfenor].zone, Zone::Battlefield);
-    resolve_colfenor_trigger(&mut runner, strict_lesser, dying);
+    resolve_colfenor_trigger(&mut runner, strict_lesser, dying, equal_toughness);
 
     assert_eq!(
         runner.state().objects[&strict_lesser].zone,

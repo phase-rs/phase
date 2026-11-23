@@ -33,9 +33,12 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
+use engine::types::ability::TargetRef;
 use engine::types::ability::{Effect, QuantityExpr};
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -288,6 +291,97 @@ fn jace_ultimate_steals_three_creatures_through_target_selection() {
         P0,
         "CR 601.2c: \"up to three target creatures\" must offer three selectable slots",
     );
+}
+
+/// CR 601.2c + CR 603.3d: Rangers of Ithilien is a public ETB trigger, so
+/// the production trigger-target prompt must expose exactly the lesser-power
+/// creature and reject equal/greater candidates before the trigger resolves.
+#[test]
+fn rangers_of_ithilien_public_trigger_prompt_validates_lesser_power() {
+    const RANGERS: &str = "Vigilance\nWhen this creature enters, gain control of up to one target creature with lesser power for as long as you control this creature. Then the Ring tempts you.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let lesser = scenario.add_creature(P1, "Lesser", 2, 2).id();
+    let equal = scenario.add_creature(P1, "Equal", 3, 3).id();
+    let greater = scenario.add_creature(P1, "Greater", 4, 4).id();
+    let rangers = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rangers of Ithilien", 3, 3, RANGERS)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&rangers].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: rangers,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast real Rangers of Ithilien");
+
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection {
+                target_slots,
+                selection,
+                ..
+            }
+            | WaitingFor::TargetSelection {
+                target_slots,
+                selection,
+                ..
+            } => {
+                let legal = &target_slots[selection.current_slot].legal_targets;
+                assert!(
+                    legal.contains(&TargetRef::Object(lesser)),
+                    "lesser target missing: {legal:?}"
+                );
+                assert!(
+                    !legal.contains(&TargetRef::Object(equal)),
+                    "equal target admitted: {legal:?}"
+                );
+                assert!(
+                    !legal.contains(&TargetRef::Object(greater)),
+                    "greater target admitted: {legal:?}"
+                );
+                assert!(
+                    engine::ai_support::legal_actions(runner.state())
+                        .iter()
+                        .any(|action| matches!(
+                            action,
+                            GameAction::ChooseTarget {
+                                target: Some(TargetRef::Object(id))
+                            } if *id == lesser
+                        )),
+                    "AI candidates must include the same legal Rangers target"
+                );
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(lesser)),
+                    })
+                    .expect("choose Rangers target");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order Rangers trigger");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("resolve Rangers trigger");
+            }
+            other => panic!("unexpected Rangers waiting state: {other:?}"),
+        }
+    }
+
+    assert_eq!(runner.state().objects[&lesser].controller, P0);
+    assert_eq!(runner.state().objects[&equal].controller, P1);
+    assert_eq!(runner.state().objects[&greater].controller, P1);
 }
 
 // NOTE — why there is no `GiveControl` RUNTIME witness here.

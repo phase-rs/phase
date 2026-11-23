@@ -3976,6 +3976,7 @@ fn assert_trigger_relative_pt_source(
     oracle: &str,
     stat: PtStat,
     comparator: Comparator,
+    expects_other_than: bool,
 ) {
     let triggers = parse_printed_card(oracle, name, &["Creature"], &[]);
     let trigger = triggers
@@ -3987,24 +3988,38 @@ fn assert_trigger_relative_pt_source(
             )
         })
         .unwrap_or_else(|| panic!("{name}: expected relative-P/T trigger"));
+    assert_no_unimplemented(trigger.execute.as_deref().expect("trigger effect"));
+    let expected_quantity = match stat {
+        PtStat::Power => Some(QuantityRef::Power {
+            scope: ObjectScope::CostPaidObject,
+        }),
+        PtStat::Toughness => Some(QuantityRef::Toughness {
+            scope: ObjectScope::CostPaidObject,
+        }),
+        // The helper is intentionally exhaustive: cards comparing against a
+        // combined power/toughness value are not witnesses for a single-stat
+        // trigger-relative binding.
+        PtStat::TotalPowerToughness => None,
+    };
     let expected = |prop: &FilterProp| {
-        matches!(
-            prop,
-            FilterProp::PtComparison {
-                stat: actual_stat,
-                scope: PtValueScope::Current,
-                comparator: actual_comparator,
-                value: QuantityExpr::Ref {
-                    qty: QuantityRef::Power {
-                        scope: ObjectScope::CostPaidObject,
+        let FilterProp::PtComparison {
+            stat: actual_stat,
+            scope,
+            comparator: actual_comparator,
+            value,
+        } = prop
+        else {
+            return false;
+        };
+        *actual_stat == stat
+            && *scope == PtValueScope::Current
+            && *actual_comparator == comparator
+            && expected_quantity.as_ref().is_some_and(|quantity| {
+                value
+                    == &QuantityExpr::Ref {
+                        qty: quantity.clone(),
                     }
-                } | QuantityExpr::Ref {
-                    qty: QuantityRef::Toughness {
-                        scope: ObjectScope::CostPaidObject,
-                    }
-                },
-            } if *actual_stat == stat && *actual_comparator == comparator
-        )
+            })
     };
     let mut target_filters =
         trigger_effects(trigger)
@@ -4021,26 +4036,27 @@ fn assert_trigger_relative_pt_source(
         "{name}: expected target filter bound to CostPaidObject, got {:?}",
         trigger_effects(trigger)
     );
-    let mut target_filters =
-        trigger_effects(trigger)
-            .into_iter()
-            .filter_map(|effect| match effect {
-                Effect::ChangeZone { target, .. }
-                | Effect::GainControl { target, .. }
-                | Effect::GiveControl { target, .. }
-                | Effect::SetTapState { target, .. } => Some(target),
-                _ => None,
-            });
-    assert!(
-        target_filters.any(|target| {
-            filter_contains_filter_prop(&target, &|prop| {
-                *prop == FilterProp::OtherThanTriggerObject
-            }) && !filter_contains_filter_prop(&target, &|prop| *prop == FilterProp::Another)
-        }),
-        "{name}: expected 'another' to bind to the trigger object, got {:?}",
-        trigger_effects(trigger)
-    );
-    assert_no_unimplemented(trigger.execute.as_deref().expect("trigger effect"));
+    if expects_other_than {
+        let mut target_filters =
+            trigger_effects(trigger)
+                .into_iter()
+                .filter_map(|effect| match effect {
+                    Effect::ChangeZone { target, .. }
+                    | Effect::GainControl { target, .. }
+                    | Effect::GiveControl { target, .. }
+                    | Effect::SetTapState { target, .. } => Some(target),
+                    _ => None,
+                });
+        assert!(
+            target_filters.any(|target| {
+                filter_contains_filter_prop(&target, &|prop| {
+                    *prop == FilterProp::OtherThanTriggerObject
+                }) && !filter_contains_filter_prop(&target, &|prop| *prop == FilterProp::Another)
+            }),
+            "{name}: expected 'another' to bind to the trigger object, got {:?}",
+            trigger_effects(trigger)
+        );
+    }
 }
 
 #[test]
@@ -4050,6 +4066,35 @@ fn relative_pt_trigger_filters_bind_trigger_event_source() {
         "Whenever Colfenor or another creature you control dies, return up to one other target creature card with lesser toughness from your graveyard to your hand.",
         PtStat::Toughness,
         Comparator::LT,
+        true,
+    );
+    assert_trigger_relative_pt_source(
+        "Body Launderer",
+        "Deathtouch\nWhenever another nontoken creature you control dies, this creature connives.\nWhen this creature dies, return another target non-Rogue creature card with equal or lesser power from your graveyard to the battlefield.",
+        PtStat::Power,
+        Comparator::LE,
+        true,
+    );
+    assert_trigger_relative_pt_source(
+        "Gyrus, Waker of Corpses",
+        "Gyrus enters with a number of +1/+1 counters on it equal to the amount of mana spent to cast it.\nWhenever Gyrus attacks, you may exile target creature card with lesser power from your graveyard. If you do, create a token that's a copy of that card and that's tapped and attacking. Exile the token at end of combat.",
+        PtStat::Power,
+        Comparator::LT,
+        false,
+    );
+    assert_trigger_relative_pt_source(
+        "Rangers of Ithilien",
+        "Vigilance\nWhen this creature enters, gain control of up to one target creature with lesser power for as long as you control this creature. Then the Ring tempts you.",
+        PtStat::Power,
+        Comparator::LT,
+        false,
+    );
+    assert_trigger_relative_pt_source(
+        "Reverend Mother Jessica",
+        "Prowess, prowess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn twice.)\nWhenever Reverend Mother Jessica attacks, for each opponent, tap up to one target creature that player controls with lesser power and goad it. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)",
+        PtStat::Power,
+        Comparator::LT,
+        false,
     );
 }
 

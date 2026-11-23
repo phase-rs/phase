@@ -1,7 +1,6 @@
 use crate::game::ability_utils;
 use crate::game::ability_utils::{RetargetSlotBinding, SlotEnforcement};
 use crate::game::targeting;
-use crate::game::targeting::find_legal_targets;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -150,15 +149,23 @@ pub fn resolve(
     // because the forced path returns before the prompt would be constructed
     // (Invariant SC, `chain_retarget_slots`' doc) — this and the interactive
     // path below are its TWO call sites, both in this file.
-    let base = legal_new_targets_for_entry(state, &state.stack[stack_entry_index]);
-    let pool_controller =
-        retarget_pool_controller(state, &state.stack[stack_entry_index], &stack_ability);
+    let entry = &state.stack[stack_entry_index];
+    let trigger_context = crate::game::targeting::StackTriggerContext::for_entry(state, entry);
+    let base = legal_new_targets_for_entry(state, entry, trigger_context);
+    let pool_controller = retarget_pool_controller(state, entry, &stack_ability);
     let mut slot_pools: Vec<Vec<TargetRef>> = exposed
         .iter()
         .map(|b| {
             let node =
                 ability_utils::node_at(&stack_ability, &b.address.path).unwrap_or(&stack_ability);
-            slot_pool(state, node, &b.enforcement, pool_controller, &base)
+            slot_pool(
+                state,
+                node,
+                &b.enforcement,
+                pool_controller,
+                &base,
+                trigger_context,
+            )
         })
         .collect();
     ability_utils::widen_dependent_retarget_pools(
@@ -167,6 +174,7 @@ pub fn resolve(
         exposed,
         &mut slot_pools,
         pool_controller,
+        trigger_context,
     );
 
     if let Some(filter) = forced_to {
@@ -180,7 +188,14 @@ pub fn resolve(
         // the new creature) is not made. The validator's result is written:
         // its pins (a changed occurrence takes the live incarnation, CR 400.7)
         // and its re-derived chain targets.
-        let new_targets = find_legal_targets(state, filter, ability.controller, ability.source_id);
+        let new_targets =
+            targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
+                state,
+                filter,
+                ability,
+                ability.controller,
+                trigger_context,
+            );
         let accepted = crate::game::retarget_completion::RetargetSearch::for_stack_entry(
             state,
             stack_entry_index,
@@ -241,8 +256,9 @@ pub(crate) fn retarget_prompt(
         return None;
     }
     let slots: Vec<_> = exposed.iter().map(|b| b.address.clone()).collect();
-    let base = legal_new_targets_for_entry(state, entry);
-    let mut slot_pools = derive_slot_pools(state, entry, stack_ability, exposed);
+    let trigger_context = crate::game::targeting::StackTriggerContext::for_entry(state, entry);
+    let base = legal_new_targets_for_entry(state, entry, trigger_context);
+    let mut slot_pools = derive_slot_pools(state, entry, stack_ability, exposed, trigger_context);
     // CR 115.7a + CR 400.7: Single must elect a different target occurrence.
     if matches!(scope, RetargetScope::Single) {
         for (address, pool) in slots.iter().zip(&mut slot_pools) {
@@ -487,6 +503,7 @@ fn slot_pool(
     enforcement: &SlotEnforcement,
     pool_controller: PlayerId,
     base: &[TargetRef],
+    trigger_context: Option<crate::game::targeting::StackTriggerContext<'_>>,
 ) -> Vec<TargetRef> {
     match enforcement {
         // No per-slot authority exists here, so BASE's cascade IS this
@@ -495,12 +512,15 @@ fn slot_pool(
         SlotEnforcement::Legacy => base.to_vec(),
         // `f` is the whole authority for this slot, so its own legal set IS
         // the candidate set.
-        SlotEnforcement::Filtered(f) => targeting::find_legal_targets_for_ability_with_controller(
-            state,
-            f,
-            node,
-            pool_controller,
-        ),
+        SlotEnforcement::Filtered(f) => {
+            targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
+                state,
+                f,
+                node,
+                pool_controller,
+                trigger_context,
+            )
+        }
     }
 }
 
@@ -533,15 +553,23 @@ pub(crate) fn derive_slot_pools(
     entry: &StackEntry,
     stack_ability: &ResolvedAbility,
     bindings: &[RetargetSlotBinding],
+    trigger_context: Option<crate::game::targeting::StackTriggerContext<'_>>,
 ) -> Vec<Vec<TargetRef>> {
-    let base = legal_new_targets_for_entry(state, entry);
+    let base = legal_new_targets_for_entry(state, entry, trigger_context);
     let pool_controller = retarget_pool_controller(state, entry, stack_ability);
     let mut pools: Vec<Vec<TargetRef>> = bindings
         .iter()
         .map(|b| {
             let node =
                 ability_utils::node_at(stack_ability, &b.address.path).unwrap_or(stack_ability);
-            slot_pool(state, node, &b.enforcement, pool_controller, &base)
+            slot_pool(
+                state,
+                node,
+                &b.enforcement,
+                pool_controller,
+                &base,
+                trigger_context,
+            )
         })
         .collect();
     ability_utils::widen_dependent_retarget_pools(
@@ -550,6 +578,7 @@ pub(crate) fn derive_slot_pools(
         bindings,
         &mut pools,
         pool_controller,
+        trigger_context,
     );
     pools
 }
@@ -571,11 +600,18 @@ pub fn legal_new_targets_for_stack_entry(
     state
         .stack
         .get(stack_entry_index)
-        .map(|entry| legal_new_targets_for_entry(state, entry))
+        .map(|entry| {
+            let context = crate::game::targeting::StackTriggerContext::for_entry(state, entry);
+            legal_new_targets_for_entry(state, entry, context)
+        })
         .unwrap_or_default()
 }
 
-fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<TargetRef> {
+fn legal_new_targets_for_entry(
+    state: &GameState,
+    entry: &StackEntry,
+    trigger_context: Option<crate::game::targeting::StackTriggerContext<'_>>,
+) -> Vec<TargetRef> {
     let Some(stack_ability) = entry.ability() else {
         return Vec::new();
     };
@@ -633,7 +669,13 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
     // rejected and no actor could discharge the prompt.
     if matches!(entry.kind, StackEntryKind::Spell { .. }) {
         if let Some(filter) = aura_enchant_filter(state, stack_ability.source_id) {
-            return find_legal_targets(state, &filter, pool_controller, stack_ability.source_id);
+            return targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
+                state,
+                &filter,
+                stack_ability,
+                pool_controller,
+                trigger_context,
+            );
         }
     }
 
@@ -659,7 +701,13 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
         let options: Vec<TargetRef> = role
             .surfaced_filters()
             .flat_map(|(_slot, filter)| {
-                find_legal_targets(state, filter, pool_controller, active_ability.source_id)
+                targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
+                    state,
+                    filter,
+                    active_ability,
+                    pool_controller,
+                    trigger_context,
+                )
             })
             .collect();
         if !options.is_empty() {
@@ -700,7 +748,13 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
         crate::types::ability::extract_target_filter_from_effect(&active_ability.effect).is_some();
     if declares_primary_target {
         if let Some(filter) = extract_target_filter(&active_ability.effect) {
-            return find_legal_targets(state, filter, pool_controller, active_ability.source_id);
+            return targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
+                state,
+                filter,
+                active_ability,
+                pool_controller,
+                trigger_context,
+            );
         }
     }
 
@@ -711,24 +765,10 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
     // The entry's own triggering events, not whichever trigger is constructing.
     // Multi-event batches are stored per entry; a single event stays on the
     // entry, the same fallback resolution uses when binding its scope.
-    let entry_trigger_events = match (
-        state.stack_trigger_event_batches.get(&entry.id),
-        &entry.kind,
-    ) {
-        (Some(batch), _) => batch.as_slice(),
-        (
-            None,
-            StackEntryKind::TriggeredAbility {
-                trigger_event: Some(event),
-                ..
-            },
-        ) => std::slice::from_ref(event),
-        (None, _) => &[],
-    };
     if let Some(players) = crate::game::ability_utils::companion_target_player_retarget_options(
         state,
         active_ability,
-        entry_trigger_events,
+        trigger_context.map_or(&[][..], |context| context.events),
         pool_controller,
     ) {
         return players;
@@ -742,7 +782,13 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
     if !std::ptr::eq(active_ability, stack_ability) {
         if let Some(filter) = extract_target_filter(&stack_ability.effect) {
             if !filter.is_context_ref() {
-                return find_legal_targets(state, filter, pool_controller, stack_ability.source_id);
+                return targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
+                    state,
+                    filter,
+                    stack_ability,
+                    pool_controller,
+                    trigger_context,
+                );
             }
         }
     }
@@ -750,7 +796,13 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
     // Shapes whose only target is a context reference (SelfRef, …) still keep
     // their standard pool when the mass-aware authority was not the decider.
     if let Some(filter) = extract_target_filter(&active_ability.effect) {
-        return find_legal_targets(state, filter, pool_controller, active_ability.source_id);
+        return targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
+            state,
+            filter,
+            active_ability,
+            pool_controller,
+            trigger_context,
+        );
     }
 
     // CR 115.7a: No declared or derived target filter (e.g. a placeholder spell

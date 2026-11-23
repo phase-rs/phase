@@ -34195,6 +34195,7 @@ pub(crate) fn evaluate_condition(
                 entering: None,
                 source: ability.source_id,
                 trigger_source: ability.trigger_source.clone(),
+                stack_trigger_context: None,
                 recipient: None,
                 scoped_player: ability.scoped_player,
                 damage_source: None,

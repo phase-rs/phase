@@ -12919,6 +12919,7 @@ pub(crate) fn widen_dependent_retarget_pools(
     bindings: &[RetargetSlotBinding],
     pools: &mut [Vec<TargetRef>],
     pool_controller: PlayerId,
+    trigger_context: Option<crate::game::targeting::StackTriggerContext<'_>>,
 ) {
     let addresses = declared_position_addresses(stack_ability);
     let announced = retarget_declared_view(stack_ability, stack_ability);
@@ -12953,11 +12954,12 @@ pub(crate) fn widen_dependent_retarget_pools(
                 let mut widened = Vec::new();
                 for referent in referents {
                     let bound = resolved_ability_with_bound_object_target(node, referent);
-                    for target in targeting::find_legal_targets_for_ability_with_controller(
+                    for target in targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
                         state,
                         filter,
                         &bound,
                         pool_controller,
+                        trigger_context,
                     ) {
                         if !widened.contains(&target) {
                             widened.push(target);
@@ -13010,12 +13012,13 @@ pub(crate) fn widen_dependent_retarget_pools(
         }
         let mut widened = Vec::new();
         for view in &views {
-            for target in targeting::find_legal_targets_for_ability_with_view(
+            for target in targeting::find_legal_targets_for_ability_with_view_and_trigger_context(
                 state,
                 filter,
                 node,
                 pool_controller,
                 view,
+                trigger_context,
             ) {
                 if !widened.contains(&target) {
                     widened.push(target);

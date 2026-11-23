@@ -17662,15 +17662,20 @@ pub(crate) fn validate_retarget_submission(
         new_targets,
     } = *proposal;
 
+    let Some(entry) = state.stack.get(stack_entry_index) else {
+        return Err(EngineError::InvalidAction(
+            "Invalid stack entry index for retargeting".to_string(),
+        ));
+    };
+    let trigger_context = crate::game::targeting::StackTriggerContext::for_entry(state, entry);
+
     // CR 115.7d + CR 601.2c: derived here (rather than only after the match
     // below) because H3's outer-empty re-derivation needs it before
     // `pool_for` is built. The address space the player was OFFERED must be
     // the one their submission is validated, admitted and written against;
     // the payload snapshots it, `chain_retarget_slots` re-derives it.
-    let derived = state
-        .stack
-        .get(stack_entry_index)
-        .and_then(|entry| entry.ability())
+    let derived = entry
+        .ability()
         .map(crate::game::ability_utils::chain_retarget_slots)
         .unwrap_or_default();
 
@@ -17704,6 +17709,7 @@ pub(crate) fn validate_retarget_submission(
                     entry,
                     stack_ability,
                     &derived,
+                    trigger_context,
                 )
             }
             None => Vec::new(),
@@ -17795,12 +17801,7 @@ pub(crate) fn validate_retarget_submission(
         slot_pools.is_empty() || slot_pools.len() == slots.len(),
         "slot_pools must be aligned 1:1 with slots or absent",
     );
-    if stack_entry_index >= state.stack.len() {
-        return Err(EngineError::InvalidAction(
-            "Invalid stack entry index for retargeting".to_string(),
-        ));
-    }
-    let Some(pre) = state.stack[stack_entry_index].ability() else {
+    let Some(pre) = entry.ability() else {
         return Err(EngineError::InvalidAction(
             "Retarget: stack entry has no ability to retarget".to_string(),
         ));
