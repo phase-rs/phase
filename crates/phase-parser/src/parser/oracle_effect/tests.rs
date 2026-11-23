@@ -104607,8 +104607,9 @@ fn legions_end_chain_exiles_from_hand_and_graveyard_after_the_reveal() {
     );
 }
 
-/// P1 (SHAPE). CR 608.2c: Hour of Glory's exile reaches the revealed hand only and
-/// continues the God-gated reveal, so a false condition stops it too.
+/// P1 (SHAPE). CR 608.2c: Hour of Glory's exile reaches the revealed hand only,
+/// carries the God gate itself, and continues the God-gated reveal, so a false
+/// condition stops it too.
 #[test]
 fn hour_of_glory_chain_gates_the_hand_exile_on_the_reveal() {
     let parsed = parse_oracle_text(
@@ -104632,6 +104633,16 @@ fn hour_of_glory_chain_gates_the_hand_exile_on_the_reveal() {
     };
     assert_eq!(*target, same_name_zone_exile_filter(vec![Zone::Hand]));
     assert_eq!(spine[2].sub_link, SubAbilityLink::ContinuationStep);
+    // P3c: the sentence's "If that creature was a God" governs the exile too.
+    assert!(
+        matches!(
+            spine[2].condition,
+            Some(AbilityCondition::TargetMatchesFilter { .. })
+        ),
+        "the exile carries the God gate: {:?}",
+        spine[2].condition
+    );
+    assert_eq!(spine[2].condition, spine[1].condition);
 }
 
 /// P2 (SHAPE). CR 608.2c: a conjugated conjunct after an own-hand reveal with no
@@ -104724,6 +104735,45 @@ fn reveal_hand_conjunct_without_grammar_is_an_explicit_gap() {
             .collect();
         assert_eq!(gaps, *expected, "{name}");
     }
+}
+
+/// P3b (SHAPE). CR 608.2c: Crosis's "If you do, …" body is split inside the
+/// conditional, so its gap node carries the same optional-effect gate as the reveal
+/// before it. The discard stays an explicit gap (coverage unchanged).
+#[test]
+fn crosis_reveal_conjunct_gap_carries_the_if_you_do_gate() {
+    let parsed = parse_oracle_text(
+        "Flying\nWhenever Crosis deals combat damage to a player, you may pay {2}{B}. If you do, choose a color, then that player reveals their hand and discards all cards of that color.",
+        "Crosis, the Purger",
+        &["Flying".to_string()],
+        &["Creature".to_string()],
+        &[],
+    );
+    let nodes = all_card_defs(&parsed);
+    let reveal = nodes
+        .iter()
+        .find(|d| matches!(&*d.effect, Effect::RevealHand { .. }))
+        .unwrap_or_else(|| panic!("Crosis has a reveal: {nodes:#?}"));
+    // REACH-GUARD: the reveal names the damaged player.
+    let Effect::RevealHand { target, .. } = &*reveal.effect else {
+        unreachable!();
+    };
+    assert_eq!(*target, TargetFilter::TriggeringPlayer, "{reveal:#?}");
+    let gap = reveal
+        .sub_ability
+        .as_deref()
+        .unwrap_or_else(|| panic!("the reveal must have a next node"));
+    assert_eq!(
+        gap.effect.unimplemented_description(),
+        Some("discard all cards of that color"),
+        "{gap:#?}"
+    );
+    assert_eq!(reveal.condition, Some(AbilityCondition::effect_performed()));
+    assert_eq!(
+        gap.condition,
+        Some(AbilityCondition::effect_performed()),
+        "the gap carries the \"if you do\" gate: {gap:#?}"
+    );
 }
 
 /// P2 (SHAPE). CR 701.9b: Rag Man's conjunct parses to a real random discard by the
@@ -104972,13 +105022,54 @@ fn discard_all_matching_cards_lowers_to_a_filtered_census_discard() {
             );
             // P3: Cabal Therapist's reflexive gate stays on the reveal and the discard
             // continues it (CR 603.12), so a declined sacrifice skips the discard.
+            // The discard is split inside the "When you do, …" body, so it carries
+            // the body's gate itself and the reveal's declared player (CR 608.2c).
             if *name == "Cabal Therapist" {
+                // REACH-GUARD: the reveal is the body's second instruction, after
+                // the gated name choice.
+                let choose = nodes
+                    .iter()
+                    .find(|d| {
+                        d.sub_ability
+                            .as_deref()
+                            .is_some_and(|sub| std::ptr::eq(sub, *reveal))
+                    })
+                    .unwrap_or_else(|| panic!("{name}: the reveal has a parent node"));
+                assert!(
+                    matches!(
+                        &*choose.effect,
+                        Effect::Choose {
+                            choice_type: ChoiceType::CardName { .. },
+                            ..
+                        }
+                    ),
+                    "{name}: the reveal follows the name choice: {:?}",
+                    choose.effect
+                );
+                assert_eq!(
+                    choose.condition,
+                    Some(AbilityCondition::WhenYouDo),
+                    "{name}"
+                );
                 assert_eq!(
                     reveal.condition,
                     Some(AbilityCondition::WhenYouDo),
                     "{name}"
                 );
                 assert_eq!(discard.sub_link, SubAbilityLink::ContinuationStep, "{name}");
+                assert_eq!(
+                    discard.condition,
+                    Some(AbilityCondition::WhenYouDo),
+                    "{name}: the discard carries the reflexive gate"
+                );
+                let group = reveal
+                    .declares_chosen_group
+                    .unwrap_or_else(|| panic!("{name}: the reveal declares its target player"));
+                assert_eq!(
+                    *target,
+                    TargetFilter::DeclaredPlayer { group },
+                    "{name}: the reveal's target player discards"
+                );
             }
         }
     }
