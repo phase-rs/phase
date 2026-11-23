@@ -38679,16 +38679,73 @@ fn strip_each_scope_who_didnt_discard_filter_this_way_is_exact() {
     assert!(matches!(filter, TargetFilter::Typed(_)));
     assert_eq!(body, "loses 3 life");
 
-    for unrelated in [
+    // Distract the Hydra's third sentence (verbatim): the anaphor is implicit.
+    let (scope, filter, body) = strip_each_scope_who_didnt_verb_filter_this_way_subject(
         "each player who didn't sacrifice a creature loses 3 life",
+    )
+    .expect("Distract-class decline tail without 'this way'");
+    assert_eq!(scope, PlayerFilter::All);
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected a creature-typed filter, got {filter:?}");
+    };
+    assert!(
+        tf.type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Creature)),
+        "expected Creature in the filter, got {tf:?}"
+    );
+    assert_eq!(body, "loses 3 life");
+
+    // Only Blood Ends Your Nightmares' tail (verbatim): implicit anaphor.
+    let (scope, filter, body) = strip_each_scope_who_didnt_verb_filter_this_way_subject(
+        "each opponent who didn't sacrifice a creature discards two cards",
+    )
+    .expect("Only-Blood-class decline tail without 'this way'");
+    assert_eq!(scope, PlayerFilter::Opponent);
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected a creature-typed filter, got {filter:?}");
+    };
+    assert!(
+        tf.type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Creature)),
+        "expected Creature in the filter, got {tf:?}"
+    );
+    assert_eq!(body, "discards two cards");
+
+    for unrelated in [
         "each player who didn't choose the lowest number discards their hand",
         "each opponent who didn't draws a card",
+        "each player who didn't discard a card this turn loses 2 life",
+        "each opponent who didn't sacrifice a permanent or discard a card this way loses 3 life",
+        "each opponent who didn't sacrifice a creature",
     ] {
         assert!(
             strip_each_scope_who_didnt_verb_filter_this_way_subject(unrelated).is_none(),
-            "only the supported discard-a/an-filter-this-way grammar may reserve: {unrelated}",
+            "only the supported decline-tail grammar may reserve: {unrelated}",
         );
     }
+
+    // Reach guards: the folding remainders prove the body guard — not an
+    // upstream short-circuit — refuses the three new rejects.
+    let (filter, rem) = parse_type_phrase_folding("card this turn loses 2 life");
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected a Typed filter, got {filter:?}");
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Card]);
+    assert_eq!(rem, " this turn loses 2 life");
+    let (filter, rem) = parse_type_phrase_folding("permanent or discard a card this way");
+    let TargetFilter::Typed(tf) = filter else {
+        panic!("expected a Typed filter, got {filter:?}");
+    };
+    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+    assert_eq!(rem, " or discard a card this way");
+    let (filter, rem) = parse_type_phrase_folding("creature");
+    assert!(
+        matches!(filter, TargetFilter::Typed(_)),
+        "expected a Typed filter, got {filter:?}"
+    );
+    assert_eq!(rem, "");
 }
 
 /// CR 101.4 + CR 608.2d: the chosen-number subject restriction is a CLASS, not
@@ -47113,14 +47170,47 @@ fn my_wealth_will_bury_you_full_oracle_parses_treasure_floor() {
     );
 }
 
+/// CR 509.1h + CR 506.3e: only "that creature" binds the blocking anaphor.
+/// Flash Foliage's Oracle line 2 names "target creature", so the token head
+/// parses with `enters_blocking == None` and the trailing clause stays an
+/// honest gap (unasserted here to avoid pinning gap text).
+#[test]
+fn flash_foliage_blocking_target_creature_leaves_enters_blocking_none() {
+    let def = parse_effect_chain(
+        "Create a 1/1 green Saproling creature token that's blocking target creature attacking you.",
+        AbilityKind::Spell,
+    );
+    let Effect::Token {
+        name,
+        power,
+        toughness,
+        colors,
+        enters_blocking,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected the Saproling token head, got {:?}", def.effect);
+    };
+    // Reach guard: the head parsed fully — a bare `None` from a total parse
+    // failure cannot pass.
+    assert_eq!(name, "Saproling");
+    assert_eq!(power, &PtValue::Fixed(1));
+    assert_eq!(toughness, &PtValue::Fixed(1));
+    assert_eq!(colors, &vec![ManaColor::Green]);
+    assert_eq!(
+        *enters_blocking, None,
+        "only 'that creature' binds the blocker"
+    );
+}
+
 #[test]
 fn only_blood_ends_your_nightmares_full_oracle_parses_sacrifice_tail() {
     // CR 701.32a + CR 904.9 + CR 701.21a + CR 608.2c + CR 109.5: verbatim
-    // Oracle. Each opponent sacrifices a creature; each opponent who didn't
-    // sacrifice a creature this way discards two cards (the Kroxa-class
-    // decline tail with the sacrifice verb).
+    // Oracle. Each opponent sacrifices a creature of their choice; each
+    // opponent who didn't sacrifice a creature discards two cards (the
+    // Kroxa-class decline tail with the sacrifice verb).
     let parsed = parse_oracle_text(
-        "When you set this scheme in motion, each opponent sacrifices a creature. Then each opponent who didn't sacrifice a creature this way discards two cards.",
+        "When you set this scheme in motion, each opponent sacrifices a creature of their choice. Then each opponent who didn't sacrifice a creature discards two cards.",
         "Only Blood Ends Your Nightmares",
         &[],
         &["Scheme".to_string()],
@@ -47135,11 +47225,26 @@ fn only_blood_ends_your_nightmares_full_oracle_parses_sacrifice_tail() {
         .execute
         .as_ref()
         .expect("trigger must carry its sacrifice instruction");
-    assert!(
-        matches!(execute.effect.as_ref(), Effect::Sacrifice { .. }),
-        "head must be the edict, got: {:?}",
-        execute.effect
-    );
+    match execute.effect.as_ref() {
+        Effect::Sacrifice { target, count, .. } => {
+            assert_eq!(
+                *count,
+                QuantityExpr::Fixed { value: 1 },
+                "the edict sacrifices one creature, got: {:?}",
+                execute.effect
+            );
+            let TargetFilter::Typed(tf) = target else {
+                panic!("expected a creature-typed sacrifice target, got {target:?}");
+            };
+            assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Creature)),
+                "expected Creature in the sacrifice target, got {tf:?}"
+            );
+        }
+        other => panic!("head must be the edict, got: {other:?}"),
+    }
     let sub = execute
         .sub_ability
         .as_ref()

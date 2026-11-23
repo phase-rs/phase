@@ -6685,10 +6685,12 @@ pub(super) fn strip_each_player_subject(
     target_anchor_in_scope: bool,
 ) -> (Option<PlayerFilter>, String) {
     // CR 701.9a + CR 608.2c: Reserve only the exact Kroxa/Strongarm
-    // mandatory-FILTERED decline-tail grammar for its dedicated dispatcher.
-    // A broad `who didn't` reservation also captures unrelated relative clauses
-    // (for example, choose), changing their parser routes even though this
-    // dispatcher intentionally supports only discard and sacrifice.
+    // mandatory-FILTERED decline-tail grammar — with or without the "this
+    // way" anaphor (Only Blood Ends Your Nightmares prints no anaphor) —
+    // for its dedicated dispatcher. A broad `who didn't` reservation also
+    // captures unrelated relative clauses (for example, choose), changing
+    // their parser routes even though this dispatcher intentionally
+    // supports only discard and sacrifice.
     if strip_each_scope_who_didnt_verb_filter_this_way_subject(text).is_some() {
         return (None, text.to_string());
     }
@@ -7072,7 +7074,7 @@ pub(super) fn strip_each_scope_who_does_subject(text: &str) -> Option<(PlayerFil
 }
 
 /// CR 701.9a + CR 608.2c + CR 109.5: Strip a leading "each <scope> who
-/// didn't / did not <verb> a [filter] this way, <body>" subject-only
+/// didn't / did not <verb> a [filter] [this way], <body>" subject-only
 /// mandatory-FILTERED decline-tail. Returns the player scope, the filter the
 /// scoped player's own zone change failed to match, and the body text.
 ///
@@ -7088,8 +7090,17 @@ pub(super) fn strip_each_scope_who_does_subject(text: &str) -> Option<(PlayerFil
 /// nonland card", matching the official ruling that Kroxa's life loss still
 /// applies to an opponent with no cards in hand.
 ///
-/// Verb covers "discard" and "sacrifice" — the only verb this exact "who didn't <verb>
-/// a [filter] this way" relative-clause construction is verified against
+/// "This way" may be implicit: Only Blood Ends Your Nightmares prints "each
+/// opponent sacrifices a creature of their choice. Then each opponent who
+/// didn't sacrifice a creature discards two cards." Distract the Hydra's
+/// third sentence ("Each player who didn't sacrifice a creature loses 3
+/// life.") is the same no-anaphor shape. The body guard rejects the adjacent
+/// grammar the anaphor used to exclude: a trailing "this turn" window, a
+/// leaked second "this way", and "or"/"and" coordinations (Osseous
+/// Sticktwister's disjunctive tail stays out); a missing body declines.
+///
+/// Verb covers "discard" and "sacrifice" — the only verbs this exact "who didn't <verb>
+/// a [filter]" relative-clause construction is verified against
 /// (Kroxa, Titan of Death's Hunger — opponent scope, nonland filter; and
 /// Strongarm Tactics — all-players scope, creature filter: "Each player
 /// discards a card. Then each player who didn't discard a creature card
@@ -7116,8 +7127,18 @@ pub(super) fn strip_each_scope_who_didnt_verb_filter_this_way_subject(
         if matches!(filter, TargetFilter::Any) {
             return Err(oracle_err(i));
         }
-        let (i, _) = tag("this way").parse(after_filter.trim_start())?;
+        let (i, _) = opt(preceded(multispace0, tag("this way"))).parse(after_filter)?;
         let (i, _) = preceded(opt(tag(",")), opt(multispace1)).parse(i)?;
+        let (_, _) = not(alt((
+            tag("this turn"),
+            tag("this way"),
+            tag("or "),
+            tag("and "),
+        )))
+        .parse(i)?;
+        if i.is_empty() {
+            return Err(oracle_err(i));
+        }
         Ok((i, (scope, filter)))
     })
     .map(|((scope, filter), rest)| (scope, filter, rest.to_string()))

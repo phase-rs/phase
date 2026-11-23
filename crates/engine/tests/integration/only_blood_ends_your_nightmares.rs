@@ -1,8 +1,8 @@
 //! Only Blood Ends Your Nightmares: sacrifice edict with a discard decline-tail.
 //!
 //! Oracle: "When you set this scheme in motion, each opponent sacrifices a
-//! creature. Then each opponent who didn't sacrifice a creature this way
-//! discards two cards."
+//! creature of their choice. Then each opponent who didn't sacrifice a
+//! creature discards two cards."
 //!
 //! CR 701.32a + CR 904.9: the set-in-motion trigger runs the edict.
 //! CR 701.21a + CR 608.2c + CR 109.5: the second sentence is the Kroxa-class
@@ -29,7 +29,7 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-const ONLY_BLOOD_ENDS_YOUR_NIGHTMARES: &str = "When you set this scheme in motion, each opponent sacrifices a creature. Then each opponent who didn't sacrifice a creature this way discards two cards.";
+const ONLY_BLOOD_ENDS_YOUR_NIGHTMARES: &str = "When you set this scheme in motion, each opponent sacrifices a creature of their choice. Then each opponent who didn't sacrifice a creature discards two cards.";
 
 const P2: PlayerId = PlayerId(2);
 

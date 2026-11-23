@@ -20804,7 +20804,12 @@ fn try_parse_you_attack_with_commander(lower: &str) -> Option<(TriggerMode, Trig
 }
 
 /// Parse "whenever N or more <subject> attack [a player]" patterns.
-/// CR 508.1a: Handles both "one or more" and "two or more" quantifiers.
+/// CR 508.1a: the temporal prefix composes with the shared `parse_number`
+/// count grammar (`terminated(verify(parse_number, >= 1), " or more ")`), so
+/// word counts ("two"), hyphenated compounds ("twenty-one"), and numerals
+/// ("10") all route through one dispatch. Newly accepted beyond the old
+/// one-to-ten table — numerals, `eleven`–`one hundred`/hyphenated words,
+/// `a`/`an` — touches zero printed lines; `0 or more` still declines.
 ///
 /// CR 508.1a + CR 805.10a: the attacking-player gate (`valid_target`) and the
 /// attacker count are both derived from the subject's controller clause via
@@ -20814,131 +20819,111 @@ fn try_parse_you_attack_with_commander(lower: &str) -> Option<(TriggerMode, Trig
 /// "your opponents control" watches opponents. Subject scopes the runtime
 /// cannot evaluate decline the parse.
 fn try_parse_n_or_more_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
-    for (prefix, min_count) in [
-        ("whenever one or more ", 1u32),
-        ("when one or more ", 1),
-        ("whenever two or more ", 2),
-        ("when two or more ", 2),
-        ("whenever three or more ", 3),
-        ("when three or more ", 3),
-        ("whenever four or more ", 4),
-        ("when four or more ", 4),
-        ("whenever five or more ", 5),
-        ("when five or more ", 5),
-        ("whenever six or more ", 6),
-        ("when six or more ", 6),
-        ("whenever seven or more ", 7),
-        ("when seven or more ", 7),
-        ("whenever eight or more ", 8),
-        ("when eight or more ", 8),
-        ("whenever nine or more ", 9),
-        ("when nine or more ", 9),
-        ("whenever ten or more ", 10),
-        ("when ten or more ", 10),
-    ] {
-        let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
-            continue;
-        };
-        // Strip optional target suffixes before checking for "attack". "attack
-        // you" names the controller defender (Nature Shields Its Own); "attack
-        // a player" narrows the attacked type only.
-        // (attacks_player, attacks_you) for the end-anchored attack tail.
-        fn attack_tail(input: &str) -> OracleResult<'_, (bool, bool)> {
-            alt((
-                value((true, false), (tag(" attack a player"), eof)),
-                value((false, true), (tag(" attack you"), eof)),
-                value((false, false), (tag(" attack"), eof)),
-                value((false, false), (tag(" attacks"), eof)),
-            ))
-            .parse(input)
-        }
-        let Ok((_, (subject_text, (attacks_player, attacks_you)))) = (
-            recognize(many_till(anychar, peek(attack_tail))),
-            attack_tail,
-        )
-            .parse(rest)
-        else {
-            continue;
-        };
-        // CR 508.1b: "one or more creatures attack you" (Orim's Prayer,
-        // Sabotage Strategist, Reveille Squad) needs the controller as the
-        // attacked player, which only the count condition below carries. At
-        // count one there is no count condition, so the arm would fire for an
-        // attack on ANY player; leave it to the `Attacks` arm that binds the
-        // controller as the attacked player.
-        if attacks_you && min_count == 1 {
-            continue;
-        }
-
-        // CR 303.4: Strip optional "that are enchanted/equipped by an <X> you control"
-        // relative clause and capture it as a non-source-relative attachment filter.
-        let (subject_core, attachment_prop) = strip_attachment_relative_clause(subject_text);
-
-        let (filter, remainder) = parse_type_phrase_folding(subject_core);
-        if !remainder.trim().is_empty() {
-            continue;
-        }
-
-        let filter = apply_attachment_prop(filter, attachment_prop);
-
-        // CR 508.1a + CR 805.10a: the subject's controller scope bounds the
-        // attacking players. Decided before any quantifier branch so an
-        // unevaluable scope declines at every count.
-        let Some(SubjectAttackScope { gate, count_scope }) =
-            subject_attack_scope(target_filter_controller_ref(&filter).as_ref())
-        else {
-            continue;
-        };
-
-        let mut def = make_base();
-        def.mode = TriggerMode::YouAttack;
-        // CR 508.3a: a lexical "attack a player" restriction narrows the attacked
-        // target through the purpose-built attack_target_filter channel, not the
-        // valid_target overload.
-        if attacks_player || attacks_you {
-            def.attack_target_filter = Some(AttackTargetFilter::Player);
-        }
-        def.valid_target = gate;
-        // At n==1 the matcher's valid_card gate plus the attack_target_filter
-        // carry the whole head (no head condition), so an "if any of those …"
-        // intervening-if binds alone — the Squall shape. Only above one does
-        // the head emit its own count.
-        if min_count > 1 {
-            if attacks_you {
-                // CR 508.1 + CR 508.5 + CR 603.2: the count names the
-                // controller defender through the purpose-built AttackTarget
-                // subject (a head fact — EventTime), mirroring the "attacks
-                // you with N or more" sibling below.
-                def.condition = Some(TriggerCondition::EventTime {
-                    condition: Box::new(TriggerCondition::AttackersDeclaredCount {
-                        subject: AttackersDeclaredCountSubject::AttackTarget {
-                            controller: ControllerRef::You,
-                            attacked: AttackTargetFilter::Player,
-                            filter: filter_narrows_beyond_creature(&filter)
-                                .then_some(filter.clone()),
-                        },
-                        comparator: Comparator::GE,
-                        count: min_count,
-                    }),
-                });
-            } else {
-                def.condition = Some(subject_attack_count_condition(
-                    count_scope,
-                    &filter,
-                    min_count,
-                ));
-            }
-        }
-        def.valid_card = Some(filter);
-        // CR 603.2c: "One or more creatures ... attack" fires once per batch of
-        // simultaneous attackers (not once per attacker). Killian's trigger relies
-        // on this to yield exactly one draw when multiple enchanted creatures
-        // attack together.
-        def.batched = true;
-        return Some((TriggerMode::YouAttack, def));
+    let (rest, ()) = value(
+        (),
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+    )
+    .parse(lower)
+    .ok()?;
+    let (rest, min_count) = terminated(
+        verify(nom_primitives::parse_number, |n: &u32| *n >= 1),
+        tag(" or more "),
+    )
+    .parse(rest)
+    .ok()?;
+    // Strip optional target suffixes before checking for "attack". "attack
+    // you" names the controller defender (Nature Shields Its Own); "attack
+    // a player" narrows the attacked type only.
+    // (attacks_player, attacks_you) for the end-anchored attack tail.
+    fn attack_tail(input: &str) -> OracleResult<'_, (bool, bool)> {
+        alt((
+            value((true, false), (tag(" attack a player"), eof)),
+            value((false, true), (tag(" attack you"), eof)),
+            value((false, false), (tag(" attack"), eof)),
+            value((false, false), (tag(" attacks"), eof)),
+        ))
+        .parse(input)
+    }
+    let Ok((_, (subject_text, (attacks_player, attacks_you)))) = (
+        recognize(many_till(anychar, peek(attack_tail))),
+        attack_tail,
+    )
+        .parse(rest)
+    else {
+        return None;
+    };
+    // CR 508.1b: "one or more creatures attack you" (Orim's Prayer,
+    // Sabotage Strategist, Reveille Squad) needs the controller as the
+    // attacked player, which only the count condition below carries. At
+    // count one there is no count condition, so the arm would fire for an
+    // attack on ANY player; leave it to the `Attacks` arm that binds the
+    // controller as the attacked player.
+    if attacks_you && min_count == 1 {
+        return None;
     }
 
-    None
+    // CR 303.4: Strip optional "that are enchanted/equipped by an <X> you control"
+    // relative clause and capture it as a non-source-relative attachment filter.
+    let (subject_core, attachment_prop) = strip_attachment_relative_clause(subject_text);
+
+    let (filter, remainder) = parse_type_phrase_folding(subject_core);
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+
+    let filter = apply_attachment_prop(filter, attachment_prop);
+
+    // CR 508.1a + CR 805.10a: the subject's controller scope bounds the
+    // attacking players. Decided before any quantifier branch so an
+    // unevaluable scope declines at every count.
+    let SubjectAttackScope { gate, count_scope } =
+        subject_attack_scope(target_filter_controller_ref(&filter).as_ref())?;
+
+    let mut def = make_base();
+    def.mode = TriggerMode::YouAttack;
+    // CR 508.3a: a lexical "attack a player" restriction narrows the attacked
+    // target through the purpose-built attack_target_filter channel, not the
+    // valid_target overload.
+    if attacks_player || attacks_you {
+        def.attack_target_filter = Some(AttackTargetFilter::Player);
+    }
+    def.valid_target = gate;
+    // At n==1 the matcher's valid_card gate plus the attack_target_filter
+    // carry the whole head (no head condition), so an "if any of those …"
+    // intervening-if binds alone — the Squall shape. Only above one does
+    // the head emit its own count.
+    if min_count > 1 {
+        if attacks_you {
+            // CR 508.1 + CR 508.5 + CR 603.2: the count names the
+            // controller defender through the purpose-built AttackTarget
+            // subject (a head fact — EventTime), mirroring the "attacks
+            // you with N or more" sibling below.
+            def.condition = Some(TriggerCondition::EventTime {
+                condition: Box::new(TriggerCondition::AttackersDeclaredCount {
+                    subject: AttackersDeclaredCountSubject::AttackTarget {
+                        controller: ControllerRef::You,
+                        attacked: AttackTargetFilter::Player,
+                        filter: filter_narrows_beyond_creature(&filter).then_some(filter.clone()),
+                    },
+                    comparator: Comparator::GE,
+                    count: min_count,
+                }),
+            });
+        } else {
+            def.condition = Some(subject_attack_count_condition(
+                count_scope,
+                &filter,
+                min_count,
+            ));
+        }
+    }
+    def.valid_card = Some(filter);
+    // CR 603.2c: "One or more creatures ... attack" fires once per batch of
+    // simultaneous attackers (not once per attacker). Killian's trigger relies
+    // on this to yield exactly one draw when multiple enchanted creatures
+    // attack together.
+    def.batched = true;
+    Some((TriggerMode::YouAttack, def))
 }
 
 /// CR 508.1 + CR 603.2c: Parse "whenever [actor] attack[s] with N or more creatures".

@@ -28856,6 +28856,45 @@ fn n_or_more_attacks_declines_uncountable_subject_scope() {
     );
 }
 
+/// Nearest printed card: Argent Dais — "Whenever two or more creatures
+/// attack, put an oil counter on this artifact." (verbatim Oracle). A numeral
+/// count is unprinted but routes through the same composed count grammar.
+#[test]
+fn n_or_more_attacks_accepts_numeral_count() {
+    let (mode, def) = try_parse_n_or_more_attacks("whenever 10 or more creatures attack")
+        .expect("numeral counts compose through parse_number");
+    assert_eq!(mode, TriggerMode::YouAttack);
+    assert!(def.batched);
+    assert_eq!(def.valid_target, Some(TargetFilter::Player));
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .properties(vec![FilterProp::Attacking { defender: None }])
+                        ),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 10 },
+            }),
+        })
+    );
+}
+
+/// The composed count grammar still rejects a zero count: `verify(n >= 1)`
+/// is what refuses, on the same `parse_number` path the numeral test proves.
+#[test]
+fn n_or_more_attacks_rejects_zero_count() {
+    assert!(
+        try_parse_n_or_more_attacks("whenever 0 or more creatures attack").is_none(),
+        "0 or more must decline"
+    );
+}
+
 // --- Plan 03: SpellCast trigger sub-patterns ---
 
 #[test]
@@ -42727,8 +42766,14 @@ fn seraph_chain_keeps_its_lifted_sacrifice() {
     );
 }
 
+/// CR 110.2 + CR 608.2c: "an opponent gains control of" objects other than
+/// the source (Rohgahh of Kher Keep's tapped set) fails closed. The runtime
+/// binds the chosen opponent as recipient only for `SelfRef`
+/// (`gain_control_controller`); a `GainControl { ParentTarget }` here would
+/// hand the creatures to the ability's controller instead. Akroan Horse pins
+/// the surviving `SelfRef` shape.
 #[test]
-fn rohgahh_plural_control_transfer_preserves_parent_operand() {
+fn rohgahh_non_source_gain_control_fails_closed() {
     let parsed = parse_oracle_text(
         "At the beginning of your upkeep, you may pay {R}{R}{R}. If you don't, tap Rohgahh and all creatures named Kobolds of Kher Keep, then an opponent gains control of them.",
         "Rohgahh of Kher Keep",
@@ -42737,24 +42782,24 @@ fn rohgahh_plural_control_transfer_preserves_parent_operand() {
         &[],
     );
     assert_eq!(parsed.triggers.len(), 1);
-    let execute = parsed.triggers[0].execute.as_ref().expect("upkeep execute");
-    let mut pending = vec![execute.as_ref()];
-    let mut transfers = 0;
-    while let Some(ability) = pending.pop() {
-        if let Effect::GainControl { target } = ability.effect.as_ref() {
-            assert_eq!(target, &TargetFilter::ParentTarget);
-            transfers += 1;
-        }
-        if let Some(sub) = ability.sub_ability.as_deref() {
-            pending.push(sub);
-        }
-        if let Some(otherwise) = ability.else_ability.as_deref() {
-            pending.push(otherwise);
-        }
-    }
-    assert_eq!(
-        transfers, 1,
-        "printed plural control transfer must be reached"
+    let effects = trigger_chain_effects(&parsed.triggers[0]);
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Unimplemented {
+                name,
+                description: Some(description),
+                ..
+            } if name == "chosen_recipient_gain_control"
+                && description == "an opponent gains control of objects other than the source"
+        )),
+        "Rohgahh's non-source handoff must fail closed: {effects:?}"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::GainControl { .. })),
+        "Rohgahh must not claim a GainControl the runtime would give to the wrong player: {effects:?}"
     );
 }
 
@@ -47794,6 +47839,18 @@ fn nature_shields_defending_player_guard_is_intervening_if() {
         })
     );
     let execute = def.execute.as_deref().expect("token body");
+    match execute.effect.as_ref() {
+        Effect::Token {
+            enters_blocking, ..
+        } => {
+            assert_eq!(
+                *enters_blocking,
+                Some(TargetFilter::TriggeringSource),
+                "'that creature' binds the triggering attacker"
+            );
+        }
+        other => panic!("expected the Plant token body, got {other:?}"),
+    }
     assert_no_unimplemented(execute);
 }
 

@@ -53563,9 +53563,9 @@ fn parse_effect_chain_ir_body(
                 // mandatory-FILTERED decline-tail (Kroxa, Titan of Death's Hunger:
                 // "each opponent discards a card, then each opponent who didn't
                 // discard a nonland card this way loses 3 life."; Only Blood Ends
-                // Your Nightmares: "each opponent sacrifices a creature. Then each
-                // opponent who didn't sacrifice a creature this way discards two
-                // cards."). Unlike the `who can't` arm (whether
+                // Your Nightmares: "each opponent sacrifices a creature of their
+                // choice. Then each opponent who didn't sacrifice a creature
+                // discards two cards."). Unlike the `who can't` arm (whether
                 // the action happened at all), this gates on WHAT moved:
                 // `Not { ZoneChangedThisWay { filter } }` reads `last_zone_changed_ids`
                 // from the just-completed per-iteration discard/sacrifice/exile, so an
