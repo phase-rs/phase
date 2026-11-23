@@ -286,45 +286,56 @@ fn aim_trigger(r: &mut GameRunner, target: TargetRef) {
     panic!("no trigger target prompt");
 }
 
-/// P0 casts Sparkmage Apprentice ("When this creature enters, it deals 1 damage
-/// to any target"); its trigger T1 aims at P1, who controls No Mercy. With
-/// `blink`, P0 Ephemerates the Apprentice in response and aims the new trigger
-/// at itself, so only T1, dealt by the departed Apprentice, damages P1.
-/// Returns the Apprentice's zone once settled.
-fn sparkmage(blink: bool) -> Zone {
+/// P0 casts Sonic Shrieker ("When this creature enters, it deals 2 damage to any
+/// target and you gain 2 life. If a player is dealt damage this way, they discard
+/// a card."); its trigger T1 aims at P1, who controls No Mercy. With `blink`, P0
+/// Ephemerates the Shrieker in response and aims the new trigger at itself, so
+/// only T1, dealt by the departed Shrieker, damages P1. Hands are empty, so no
+/// discard prompt. Returns the Shrieker's zone once settled.
+fn shrieker(blink: bool) -> Zone {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
-    let apprentice = s.add_real_card(P0, "Sparkmage Apprentice", Zone::Hand, db());
+    let shrieker = s.add_real_card(P0, "Sonic Shrieker", Zone::Hand, db());
     let eph = s.add_real_card(P0, "Ephemerate", Zone::Hand, db());
     let mercy = s.add_real_card(P1, "No Mercy", Zone::Battlefield, db());
     let mut r = s.build();
-    pay(&mut r, P0, &[ManaType::Red, ManaType::Colorless]);
-    r.cast(apprentice).commit();
+    pay(
+        &mut r,
+        P0,
+        &[
+            ManaType::Red,
+            ManaType::White,
+            ManaType::Black,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ],
+    );
+    r.cast(shrieker).commit();
     aim_trigger(&mut r, TargetRef::Player(P1));
-    assert_eq!(triggers_of(&r, apprentice).len(), 1, "reach: T1 aims at P1");
+    assert_eq!(triggers_of(&r, shrieker).len(), 1, "reach: T1 aims at P1");
     if blink {
-        let before = incarnation(&r, apprentice);
+        let before = incarnation(&r, shrieker);
         pay(&mut r, P0, &[ManaType::White]);
-        r.cast(eph).target_object(apprentice).commit();
+        r.cast(eph).target_object(shrieker).commit();
         aim_trigger(&mut r, TargetRef::Player(P0));
-        assert_ne!(incarnation(&r, apprentice), before, "reach: blinked");
-        assert_eq!(triggers_of(&r, apprentice).len(), 2, "reach: T1 and T2");
+        assert_ne!(incarnation(&r, shrieker), before, "reach: blinked");
+        assert_eq!(triggers_of(&r, shrieker).len(), 2, "reach: T1 and T2");
     }
     drive(&mut r, |r| triggers_of(r, mercy).len() == 1);
     drive(&mut r, settled);
-    zone(&r, apprentice)
+    zone(&r, shrieker)
 }
 
 #[test]
 fn damage_source_control_is_destroyed() {
-    assert_eq!(sparkmage(false), Zone::Graveyard);
+    assert_eq!(shrieker(false), Zone::Graveyard);
 }
 
-/// CR 400.7 + CR 113.7a: T1's damage was dealt by the departed Apprentice; No
+/// CR 400.7 + CR 113.7a: T1's damage was dealt by the departed Shrieker; No
 /// Mercy's "it" names that object, not the returned one.
 #[test]
 fn damage_source_spares_blinked_dealer() {
-    assert_eq!(sparkmage(true), Zone::Battlefield);
+    assert_eq!(shrieker(true), Zone::Battlefield);
 }
 
 // ---------------------------------------------------------------------------
