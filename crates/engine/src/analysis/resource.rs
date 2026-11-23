@@ -3806,6 +3806,7 @@ fn static_mode_projected_count(mode: &crate::types::statics::StaticMode) -> Opti
         | StaticMode::MustAttackDefender { .. }
         | StaticMode::Continuous
         | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::LethalDamageDeterminedByPower
         | StaticMode::CantAttack
         | StaticMode::CantBlock
         | StaticMode::CantAttackOrBlock
@@ -5506,6 +5507,8 @@ macro_rules! history_members {
             /// Each player's graveyard (CR 404.1), read as a count of its cards. The comparand
             /// compares the zone itself, so no cover equalizes it; only its readers are recorded.
             PlayerGraveyards,
+            /// Dependency marker for the completed cycling ledger, outside history equalization.
+            CompletedCyclingHistory,
         }
 
         impl HistoryMember {
@@ -5541,7 +5544,7 @@ macro_rules! history_members {
                         equalize_field(&mut into.lki_copiable_values, &from.lki_copiable_values)
                             || records
                     }
-                    HistoryMember::PlayerGraveyards => false,
+                    HistoryMember::PlayerGraveyards | HistoryMember::CompletedCyclingHistory => false,
                 }
             }
 
@@ -5562,6 +5565,7 @@ macro_rules! history_members {
                         rise(&prior.tracked_object_sets, &current.tracked_object_sets)
                     }
                     HistoryMember::LastKnownRecords => rise(&prior.lki_cache, &current.lki_cache),
+                    HistoryMember::CompletedCyclingHistory => 0,
                     HistoryMember::PlayerGraveyards => prior
                         .players
                         .iter()
@@ -5581,6 +5585,7 @@ macro_rules! history_members {
                     HistoryMember::TrackedObjectSets => true,
                     HistoryMember::LastKnownRecords => false,
                     HistoryMember::PlayerGraveyards => true,
+                    HistoryMember::CompletedCyclingHistory => false,
                 }
             }
         }
@@ -6057,6 +6062,16 @@ pub(crate) fn turn_cycle_covers(
         }
     }
     if !turn_stamps_keep_their_relation(prior, &copy) {
+        return false;
+    }
+    // CR 500.1 + CR 732.2a: aligning turns must preserve which completed cycles
+    // happened this turn so a current-turn count stays predictable.
+    if current
+        .cycles_completed_this_game_by_player
+        .values()
+        .flatten()
+        .any(|record| (record.turn == current.turn_number) != (record.turn == prior.turn_number))
+    {
         return false;
     }
     let grown: Vec<HistoryMember> = HistoryMember::iter()
@@ -7907,6 +7922,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         // board reads.
         StaticMode::Continuous
         | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::LethalDamageDeterminedByPower
         | StaticMode::CantAttack
         | StaticMode::CantBlock
         | StaticMode::CantAttackOrBlock
@@ -9656,11 +9672,19 @@ fn project_out_resources(state: &GameState) -> ResourceProjectedFrame {
     // `triggers_fired_this_game` (OncePerGame) are likewise NOT cleared here — consistent
     // with the preserved `crew_activated_this_turn`.
     // CR 120: who has dealt damage + the per-turn damage event log.
+    // The per-object `dealt_damage_kinds` latch is deliberately NOT projected:
+    // it decides "hasn't dealt combat damage yet" hexproof (which targets are
+    // legal), so `object_content_eq` compares it (CR 732.2a). The set clear is
+    // retained because strict `PartialEq` compares the set; for objects in
+    // `state.objects` it is redundant, since the damage writer keeps the set and
+    // the latch in lockstep, and it matters only for set entries without an object.
     s.objects_that_dealt_damage.clear();
     // CR 601: per-turn / per-game cast journals.
     s.spells_cast_this_turn_by_player.clear();
     s.spells_cast_this_game.clear();
     s.spells_cast_this_game_by_player.clear();
+    // CR 104.4b + CR 732.2a: retain completed cycling occurrences in position
+    // equality. A changed count can change the next action of a repeating sequence.
     // CR 602.2 + CR 611.3a: the per-turn activation journal is the activation
     // analog of the cast journal above, and every row of it is pumped history
     // EXCEPT the one fact a "first activated ability … each turn" cost reads:
@@ -9967,10 +9991,7 @@ pub(crate) fn driving_resources_non_decreasing_carried(
             .map(|o| o.damage_marked as u64)
             .sum()
     };
-    if damage_total(current) > damage_total(prior) {
-        return false;
-    }
-    true
+    damage_total(current) <= damage_total(prior)
 }
 
 /// CR 602.5c: the ability a usage key names, re-derived by acquisition
@@ -13617,6 +13638,184 @@ mod tests {
         );
     }
 
+    fn append_cycle(state: &mut GameState, player: PlayerId, name: &str, turn: u32) {
+        use crate::types::game_state::CyclingRecord;
+        let record = CyclingRecord {
+            name: name.into(),
+            turn,
+        };
+        let records = state
+            .cycles_completed_this_game_by_player
+            .entry(player)
+            .or_default();
+        records.push_back(record.clone());
+        assert_eq!(records.back(), Some(&record));
+    }
+
+    fn cycling_count(
+        state: &GameState,
+        player: PlayerId,
+        scope: crate::types::ability::CountScope,
+        window: crate::types::ability::CyclingHistoryWindow,
+        name: Option<&str>,
+    ) -> i32 {
+        let ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), player);
+        crate::game::quantity::resolve_quantity_with_targets(
+            state,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::CardsCycled {
+                    scope,
+                    window,
+                    name: name.map(str::to_owned),
+                },
+            },
+            &ability,
+        )
+    }
+
+    fn with_added_cycle(current: &GameState) -> GameState {
+        use crate::types::ability::{CountScope, CyclingHistoryWindow};
+        let caster = PlayerId(0);
+        let count = |state: &GameState| {
+            cycling_count(
+                state,
+                caster,
+                CountScope::Controller,
+                CyclingHistoryWindow::ThisTurn,
+                None,
+            )
+        };
+        let mut changed = current.clone();
+        append_cycle(&mut changed, caster, "Street Wraith", current.turn_number);
+        assert_eq!(count(&changed), count(current) + 1);
+        changed
+    }
+
+    #[test]
+    fn phase4_v1_resource_comparison_retains_completed_cycles() {
+        use crate::types::game_state::WaitingFor;
+
+        let caster = PlayerId(0);
+        let mut before = GameState::new_two_player(7);
+        assert!(matches!(before.waiting_for, WaitingFor::Priority { .. }));
+        let permanent = battlefield_creature(&mut before, 500, 0);
+        let with_cycle = with_added_cycle(&before);
+        let strict = |a: &GameState, b: &GameState| {
+            loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop())
+        };
+        for state in [&before, &with_cycle] {
+            let copy = state.clone();
+            assert!(strict(state, &copy));
+            assert!(loop_states_equal_modulo_resources(state, &copy));
+        }
+        assert_eq!(
+            resource_recurrence_covers(&with_cycle, &with_cycle.clone(), caster, None, None),
+            Some(PairCover::Certified(
+                CoveredGrowth::Mintable,
+                RecurrenceCover::Equal
+            ))
+        );
+        let ledger = with_cycle.cycles_completed_this_game_by_player.clone();
+        assert!(!strict(&before, &with_cycle));
+        assert!(!loop_states_equal_modulo_resources(&before, &with_cycle));
+        assert_eq!(
+            resource_recurrence_covers(&before, &with_cycle, caster, None, None),
+            None
+        );
+        assert!(before.cycles_completed_this_game_by_player.is_empty());
+        assert_eq!(with_cycle.cycles_completed_this_game_by_player, ledger);
+
+        let mut tapped = with_cycle.clone();
+        tapped.objects.get_mut(&permanent).unwrap().tapped = true;
+        assert!(!loop_states_equal_modulo_resources(&with_cycle, &tapped));
+    }
+
+    #[test]
+    fn phase4_v2_resource_comparison_retains_cycling_ledger_shape() {
+        use crate::types::ability::{CountScope, CyclingHistoryWindow::*};
+        let caster = PlayerId(0);
+        let other = PlayerId(1);
+        let yidaro = "Yidaro, Wandering Monster";
+        let wraith = "Street Wraith";
+        let mut three = GameState::new_two_player(7);
+        three.turn_number = 4;
+        for turn in [1, 2, 4] {
+            append_cycle(&mut three, caster, yidaro, turn);
+        }
+        append_cycle(&mut three, other, wraith, 4);
+        let mut four = three.clone();
+        append_cycle(&mut four, caster, yidaro, 4);
+
+        let readings = |state: &GameState| {
+            [
+                cycling_count(
+                    state,
+                    caster,
+                    CountScope::Controller,
+                    ThisGame,
+                    Some(yidaro),
+                ),
+                cycling_count(state, caster, CountScope::Controller, ThisTurn, None),
+                cycling_count(state, caster, CountScope::Controller, ThisGame, None),
+                cycling_count(state, caster, CountScope::All, ThisTurn, None),
+            ]
+        };
+        let check = |prior: &GameState, later: &GameState, expected| {
+            assert!(loop_states_equal_modulo_resources(prior, &prior.clone()));
+            assert!(loop_states_equal_modulo_resources(later, &later.clone()));
+            assert_eq!([readings(prior), readings(later)], expected);
+            assert!(!loop_states_equal_modulo_resources(prior, later));
+        };
+        let four_reads = [4, 2, 4, 3];
+        check(&three, &four, [[3, 1, 3, 2], four_reads]);
+
+        let edit = |change: fn(&mut im::Vector<crate::types::game_state::CyclingRecord>)| {
+            let mut later = four.clone();
+            change(
+                later
+                    .cycles_completed_this_game_by_player
+                    .get_mut(&caster)
+                    .unwrap(),
+            );
+            later
+        };
+        let renamed = edit(|records| records[3].name = "Street Wraith".into());
+        check(&four, &renamed, [four_reads, [3, 2, 4, 3]]);
+
+        let mut moved = edit(|records| {
+            records.pop_back().unwrap();
+        });
+        append_cycle(&mut moved, other, yidaro, 4);
+        check(&four, &moved, [four_reads, [3, 1, 3, 3]]);
+
+        let duplicate = edit(|records| records.push_back(records[3].clone()));
+        check(&four, &duplicate, [four_reads, [5, 3, 5, 4]]);
+
+        // The other seat has exactly two occurrences, one of which moves out of this turn.
+        let mut two = three.clone();
+        append_cycle(&mut two, other, wraith, 4);
+        let mut earlier = two.clone();
+        earlier
+            .cycles_completed_this_game_by_player
+            .get_mut(&other)
+            .unwrap()[1]
+            .turn = 3;
+        let other_counts = |state: &GameState| {
+            [ThisTurn, ThisGame]
+                .map(|window| cycling_count(state, other, CountScope::Controller, window, None))
+        };
+        assert_eq!(
+            [other_counts(&two), other_counts(&earlier)],
+            [[2, 2], [1, 2]]
+        );
+        check(&two, &earlier, [[3, 1, 3, 3], [3, 1, 3, 2]]);
+
+        let reordered = edit(|records| records.swap(0, 1));
+        check(&four, &reordered, [four_reads, four_reads]);
+        let restamped = edit(|records| records[0].turn = 3);
+        check(&four, &restamped, [four_reads, four_reads]);
+    }
+
     /// THE KEY DISCRIMINATOR (CR 732.2a vs CR 104.4b): same board but different
     /// life, mana, and counters must be **modulo-resources equal** (a beneficial
     /// loop point) yet **strictly unequal** (not a mandatory-draw loop). This is
@@ -13752,6 +13951,18 @@ mod tests {
             loop_states_cover_modulo_counter_growth(&a, &b),
             "strict Generic charge growth (CR 122.1) must be covered (CR 732.2a)"
         );
+        let recurrence =
+            |current: &GameState| resource_recurrence_covers(&a, current, PlayerId(0), None, None);
+        assert_eq!(
+            recurrence(&b),
+            Some(PairCover::Certified(
+                CoveredGrowth::Mintable,
+                RecurrenceCover::CounterGrowth
+            ))
+        );
+        let changed = with_added_cycle(&b);
+        assert!(!loop_states_cover_modulo_counter_growth(&a, &changed));
+        assert_eq!(recurrence(&changed), None);
     }
 
     /// A CONSUMED `Generic` charge counter (2 -> 1) is REJECTED — an
@@ -15197,6 +15408,37 @@ mod tests {
     fn n1_p1_homogeneous_cover_true() {
         let (prior, current) = cover_base();
         assert!(loop_states_cover_modulo_growth(&prior, &current));
+    }
+
+    // CR 603.3: after placement, each Warden firing is a separate mandatory
+    // controller life-gain ability with the same source binding as its entry.
+    fn warden_trigger(id: u64, source: u64, name: &str) -> StackEntry {
+        let mut entry = trigger_entry(id, source, 0);
+        let StackEntryKind::TriggeredAbility { source_name, .. } = &mut entry.kind else {
+            unreachable!("trigger_entry produces a triggered ability");
+        };
+        *source_name = name.into();
+        entry
+    }
+
+    #[test]
+    fn phase4_v5_scoped_stack_growth_retains_cycling_history() {
+        let (mut prior, mut current) = cover_base();
+        for frame in [&mut prior, &mut current] {
+            for entry in frame.stack.iter_mut() {
+                *entry = warden_trigger(entry.id.0, 500, "Soul Warden");
+            }
+        }
+        let before = cover_projection(&prior).stack.into_normalized();
+        let after = cover_projection(&current).stack.into_normalized();
+        assert_eq!((before.len(), after.len()), (2, 3));
+        assert!(stack_covers(&before, &after));
+        assert!(loop_states_cover_modulo_growth(&prior, &current));
+        assert!(!loop_states_cover_modulo_growth(&prior, &prior));
+        assert!(!loop_states_cover_modulo_growth(
+            &prior,
+            &with_added_cycle(&current)
+        ));
     }
 
     #[test]
@@ -17213,6 +17455,7 @@ mod tests {
             cover(&prior, &current),
             "pure inert single-token growth of an existing class must COVER"
         );
+        assert!(!cover(&prior, &with_added_cycle(&current)));
     }
 
     /// A retained damage carrier naming the freshly grown token is part of the growth,
@@ -18863,6 +19106,12 @@ mod tests {
         assert!(
             !loop_states_cover_modulo_object_growth(&prior, &current),
             "the absolute-ObjectId object-growth predicate must reject the tap drift"
+        );
+        let changed = with_added_cycle(&current);
+        assert!(!fodder_cover(&prior, &changed));
+        assert_eq!(
+            fodder_growth_cover_refusals(&prior, &changed, &saproling_class(), PlayerId(0)).0,
+            vec![FodderCoverRefusal::NonObjectRemainder],
         );
     }
 
@@ -25901,6 +26150,73 @@ mod tests {
         (prior, current)
     }
 
+    #[test]
+    fn phase4_v3_turn_cycle_preserves_current_turn_membership() {
+        use crate::types::ability::{CountScope, CyclingHistoryWindow::*};
+        use crate::types::format::FormatConfig;
+        let caster = PlayerId(0);
+        let other = PlayerId(1);
+        let pair = |drawn| {
+            let (mut prior, mut current) = turn_cycle_pair(FormatConfig::standard(), caster, drawn);
+            prior.turn_number = 4;
+            current.turn_number = 5;
+            assert_eq!(current.turn_number - prior.turn_number, 1);
+            assert_eq!(
+                current.players[0].turns_taken - prior.players[0].turns_taken,
+                1
+            );
+            assert_eq!(
+                (prior.active_player, current.active_player),
+                (caster, caster)
+            );
+            (prior, current)
+        };
+        let recurrence = |prior: &GameState, current: &GameState| {
+            resource_recurrence_covers(prior, current, caster, None, None)
+        };
+        let admits = |prior: &GameState, current: &GameState| {
+            assert!(turn_cycle_covers(prior, current, caster, None));
+            assert_eq!(
+                recurrence(prior, current),
+                Some(PairCover::Certified(
+                    CoveredGrowth::EQUALIZED_HISTORY,
+                    RecurrenceCover::TurnCycle,
+                ))
+            );
+        };
+        let (mut prior, mut current) = pair(0);
+        admits(&prior, &current);
+        for frame in [&mut prior, &mut current] {
+            append_cycle(frame, other, "Street Wraith", 3);
+        }
+        admits(&prior, &current);
+        let changed = with_added_cycle(&current);
+        assert!(!turn_cycle_covers(&prior, &changed, caster, None));
+        assert_eq!(recurrence(&prior, &changed), None);
+
+        let (mut prior, mut current) = pair(0);
+        for frame in [&mut prior, &mut current] {
+            append_cycle(frame, other, "Street Wraith", 4);
+        }
+        assert_eq!(
+            prior.cycles_completed_this_game_by_player,
+            current.cycles_completed_this_game_by_player
+        );
+        let reads = |state: &GameState| {
+            [ThisTurn, ThisGame]
+                .map(|window| cycling_count(state, other, CountScope::Controller, window, None))
+        };
+        assert_eq!([reads(&prior), reads(&current)], [[1, 1], [0, 1]]);
+        assert!(!turn_cycle_covers(&prior, &current, caster, None));
+        assert_eq!(recurrence(&prior, &current), None);
+
+        let (mut prior, mut current) = pair(1);
+        for frame in [&mut prior, &mut current] {
+            append_cycle(frame, other, "Street Wraith", 3);
+        }
+        assert!(!turn_cycle_covers(&prior, &current, caster, None));
+    }
+
     /// CR 504.1 + CR 732.2a: the turn-cycle cover equalizes a non-canonical caster's draw off
     /// the pile its library is stored in, and refuses a reordered pile or a draw from below the top.
     #[test]
@@ -25973,6 +26289,52 @@ mod tests {
         let (prior, current) = in_step_draw(2);
         assert!(library_departures_restored(&prior, &current, caster).is_none());
         assert!(!library_departures_cover(&prior, &current, caster, None));
+    }
+
+    #[test]
+    fn phase4_v7_library_movement_and_spend_retain_cycling_history() {
+        use crate::game::effects::drawn_this_turn_choice::record_drawn_card;
+
+        let caster = PlayerId(0);
+        let recurrence = |prior: &GameState, current: &GameState| {
+            resource_recurrence_covers(prior, current, caster, None, None)
+        };
+        let (prior, mut current) = in_step_draw(0);
+        record_drawn_card(&mut current, caster, prior.library_of(caster)[0]);
+        assert!(library_departures_cover(&prior, &current, caster, None));
+        assert_eq!(
+            recurrence(&prior, &current),
+            Some(PairCover::Certified(
+                CoveredGrowth::EQUALIZED_HISTORY,
+                RecurrenceCover::LibraryDepartures,
+            ))
+        );
+        let changed = with_added_cycle(&current);
+        assert!(!library_departures_cover(&prior, &changed, caster, None));
+        assert_eq!(recurrence(&prior, &changed), None);
+        let (prior, current) = in_step_draw(2);
+        assert!(!library_departures_cover(&prior, &current, caster, None));
+
+        let (mut prior, mut current) = no_mint_pair_with_departure(PlayerId(1), Zone::Graveyard);
+        for frame in [&mut prior, &mut current] {
+            battlefield_creature(frame, 800, 0);
+        }
+        assert_eq!(
+            recurrence(&prior, &current),
+            Some(PairCover::Certified(
+                CoveredGrowth::PerformedOnly,
+                RecurrenceCover::Departure,
+            ))
+        );
+        assert_eq!(recurrence(&prior, &with_added_cycle(&current)), None);
+
+        set_tapped(&mut current, 800, true);
+        assert_eq!(recurrence(&prior, &current), Some(PairCover::Spend));
+        assert_eq!(recurrence(&prior, &with_added_cycle(&current)), None);
+
+        let (prior, mut current) = no_mint_pair_with_departure(caster, Zone::Graveyard);
+        recorded_as_drawn(&mut current, caster);
+        assert_eq!(recurrence(&prior, &current), None);
     }
 
     /// CR 401.2: in the caster's hidden view its library cards are known only by where they lie,
@@ -26104,11 +26466,30 @@ mod tests {
     #[test]
     fn a_growth_read_repeats_only_at_a_constant_rise() {
         let frames = [0, 1, 2, 4].map(moraug_frame);
+        assert!(growth_read_members(&frames[0], &frames[1], None)
+            .contains(&HistoryMember::AttackerDeclarationsThisTurn));
+        assert_eq!(
+            HistoryMember::AttackerDeclarationsThisTurn.rise(&frames[0], &frames[1]),
+            1
+        );
         assert!(
             !history_covers(&frames[0], &frames[1], None),
             "reach: the static reads it"
         );
         assert!(growth_read_covers(&frames[0], &frames[1], None));
+        let recurrence = |current: &GameState| {
+            resource_recurrence_covers(&frames[0], current, PlayerId(0), None, None)
+        };
+        assert_eq!(
+            recurrence(&frames[1]),
+            Some(PairCover::Certified(
+                CoveredGrowth::EQUALIZED_HISTORY,
+                RecurrenceCover::GrowthRead,
+            ))
+        );
+        let changed = with_added_cycle(&frames[1]);
+        assert!(!growth_read_covers(&frames[0], &changed, None));
+        assert_eq!(recurrence(&changed), None);
         assert!(
             !growth_read_covers(&frames[1], &frames[1], None),
             "nothing grew"
@@ -26307,11 +26688,22 @@ mod tests {
             state
         };
         let prior = with_sets(&[(1, &[900])]);
-        assert!(history_covers(
-            &prior,
-            &with_sets(&[(1, &[900]), (2, &[900])]),
-            None
-        ));
+        let current = with_sets(&[(1, &[900]), (2, &[900])]);
+        let recurrence = |current: &GameState| {
+            resource_recurrence_covers(&prior, current, PlayerId(0), None, None)
+        };
+        assert!(history_covers(&prior, &current, None));
+        assert_eq!(
+            recurrence(&current),
+            Some(PairCover::Certified(
+                CoveredGrowth::EQUALIZED_HISTORY,
+                RecurrenceCover::History,
+            ))
+        );
+        let changed = with_added_cycle(&current);
+        assert!(!history_covers(&prior, &changed, None));
+        assert_eq!(recurrence(&changed), None);
+        assert!(!history_covers(&prior, &prior, None));
         assert!(history_covers(
             &prior,
             &with_sets(&[(1, &[900]), (2, &[])]),
@@ -28207,15 +28599,38 @@ mod tests {
     /// working stacks matching, is covered; a floor that falls is not.
     #[test]
     fn buried_growth_is_covered_only_below_a_rising_floor() {
-        let prior = stacked(vec![buried(1), working(2)]);
-        let current = stacked(vec![buried(1), buried(3), working(4)]);
+        let soul = |id| warden_trigger(id, 500, "Soul Warden");
+        let essence = |id| warden_trigger(id, 501, "Essence Warden");
+        let prior = stacked(vec![soul(1), essence(2)]);
+        let current = stacked(vec![soul(1), soul(3), essence(4)]);
+        let floors = (1, 2);
+        let before = buried_ids(&prior, floors.0);
+        let after = buried_ids(&current, floors.1);
+        assert_eq!(before.as_slice(), &after[..1]);
+        assert!(after.len() > before.len());
         assert_eq!(
-            (
-                covers_at(&prior, &current, (1, 2)),
-                covers_at(&current, &prior, (2, 1)),
-            ),
-            (true, false)
+            cover_projection(&without_buried(&prior, &before))
+                .stack
+                .into_normalized(),
+            cover_projection(&without_buried(&current, &after))
+                .stack
+                .into_normalized(),
         );
+        let recurrence = |current: &GameState| {
+            resource_recurrence_covers(&prior, current, PlayerId(0), Some(floors), None)
+        };
+        assert!(covers_at(&prior, &current, floors));
+        assert_eq!(
+            recurrence(&current),
+            Some(PairCover::Certified(
+                CoveredGrowth::PerformedOnly,
+                RecurrenceCover::StackGrowth,
+            ))
+        );
+        let changed = with_added_cycle(&current);
+        assert!(!covers_at(&prior, &changed, floors));
+        assert_eq!(recurrence(&changed), None);
+        assert!(!covers_at(&current, &prior, (2, 1)));
     }
 
     /// CR 405.5 + CR 608.1 + CR 121.1: a pair whose stack grew only by the entries the period

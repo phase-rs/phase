@@ -1022,10 +1022,14 @@ fn bind_transient_effect(
             }
         }
         // TriggeringSource is handled via early short-circuit to avoid target propagation bugs.
+        // CR 730.3c: the parent's chain set as its finder reads it: the members,
+        // then the components this reader finds (D2, D7).
         Some(TargetFilter::ParentTarget) if ability.targets.is_empty() => {
             let tracked = state
                 .chain_tracked_set_id
-                .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+                .map(|id| {
+                    crate::game::merge::tracked_set_found_objects(state, id, Some(ability), None)
+                })
                 .unwrap_or_default();
             for obj_id in tracked {
                 install_transient(

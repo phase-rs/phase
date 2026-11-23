@@ -71,8 +71,8 @@ use super::oracle_target::{
 };
 use super::oracle_util::{
     canonicalize_subtype_name, is_core_type_name, is_non_subtype_subject_name, merge_or_filters,
-    normalize_card_name_refs, parse_number, parse_ordinal, parse_subtype, strip_after,
-    strip_reminder_text, TextPair, GRANTING_SELF_PLACEHOLDER,
+    normalize_card_name_refs, parse_number, parse_ordinal, parse_ordinal_list, parse_subtype,
+    strip_after, strip_reminder_text, TextPair, GRANTING_SELF_PLACEHOLDER,
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::ManaProduction;
@@ -94,9 +94,10 @@ use crate::types::ability::{
     ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope, ProhibitedActivity,
     PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     RestrictionExpiry, RestrictionPlayerScope, SacrificeAggregateStat, SacrificeCost,
-    SacrificeRequirement, SharedQuality, SpentColor, StaticCondition, TapCreaturesRequirement,
-    TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
-    TriggerLimitSpend, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause, ZoneRef,
+    SacrificeRequirement, SharedQuality, SourceExclusion, SpentColor, StaticCondition,
+    TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TriggerLimitSpend, TypeFilter, TypedFilter, UnlessPayModifier,
+    ZoneChangeClause, ZoneRef,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -7986,7 +7987,7 @@ pub fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Tri
         // Variants with no TriggerCondition equivalent (combat-only / source-state / cost).
         // CR 702.11b + CR 120.3: "has dealt damage since entering" is a static-only
         // Layer-6 gate with no intervening-if (`TriggerCondition`) equivalent.
-        StaticCondition::SourceHasDealtDamage
+        StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -8698,6 +8699,45 @@ impl IfExtraction {
     }
 }
 
+/// CR 508.1a + CR 508.4: These conditions refer to declared attackers in the
+/// current combat, including creatures subsequently removed from combat.
+fn parse_attacked_this_combat_condition(input: &str) -> OracleResult<'_, TriggerCondition> {
+    use super::oracle_nom::condition::parse_ge_threshold;
+
+    let source = map(
+        preceded(
+            tag("~"),
+            opt(preceded(
+                tag(" and "),
+                terminated(parse_ge_threshold, tag("other creatures")),
+            )),
+        ),
+        |count| match count {
+            None => TriggerCondition::SourceAttackedThisCombat,
+            Some(count) => TriggerCondition::And {
+                conditions: vec![
+                    TriggerCondition::SourceAttackedThisCombat,
+                    TriggerCondition::AttackersDeclaredCount {
+                        subject: AttackersDeclaredCountSubject::CurrentCombat {
+                            exclude_source: SourceExclusion::Exclude,
+                        },
+                        comparator: Comparator::GE,
+                        count,
+                    },
+                ],
+            },
+        },
+    );
+    preceded(
+        tag("if "),
+        terminated(
+            source,
+            pair(tag(" attacked this combat"), peek(alt((tag(","), eof)))),
+        ),
+    )
+    .parse(input)
+}
+
 fn extract_if_condition_with_card_name(
     text: &str,
     card_name: &str,
@@ -9120,17 +9160,11 @@ fn extract_if_condition_with_card_name(
         );
     }
 
-    // CR 400.7 + CR 508.1 + CR 603.4: source-combat history is a distinct
-    // grammar production, not a card-text table entry. The scanner applies the
-    // nom production at word boundaries so a leading intervening-if is retained
-    // while later sentence-local conditionals remain outside this function.
-    if let Some((prefix, _, rest)) = scan_preceded(&lower, |i| {
-        tag::<_, _, OracleError<'_>>("if ~ attacked this combat").parse(i)
-    }) {
-        let clause_len = lower.len() - prefix.len() - rest.len();
+    // CR 603.4: Only a leading if-clause gates the trigger and its resolution.
+    if let Ok((rest, condition)) = parse_attacked_this_combat_condition(&lower) {
         return IfExtraction::hoisted(
-            strip_condition_clause(text, prefix.len(), clause_len),
-            TriggerCondition::SourceAttackedThisCombat,
+            strip_condition_clause(text, 0, lower.len() - rest.len()),
+            condition,
         );
     }
 
@@ -15024,11 +15058,30 @@ fn parse_object_head_noun(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+fn parse_self_cycle_trigger_head(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        terminated(
+            preceded(
+                pair(alt((tag("when "), tag("whenever "))), tag("you cycle ")),
+                alt((tag("this card"), tag("~"))),
+            ),
+            eof,
+        ),
+    )
+    .parse(input)
+}
+
 fn trigger_object_pronoun_ref_for_condition(
     condition_text: &str,
     trigger_subject: &TargetFilter,
 ) -> Option<TargetFilter> {
     let lower = condition_text.to_lowercase();
+    // CR 608.2k + CR 702.29c: "it" refers to the card named by the cycle trigger.
+    if parse_self_cycle_trigger_head(&lower).is_ok() {
+        return Some(TargetFilter::SelfRef);
+    }
+
     let after_keyword = alt((
         value((), tag::<_, _, OracleError<'_>>("whenever ")),
         value((), tag("when ")),
@@ -22791,9 +22844,8 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::SpellCast, def));
     }
 
-    // "when you cycle this card" / "when you cycle ~" — cycling self-trigger
-    // The card is in the graveyard by the time this trigger is checked.
-    if scan_contains(lower, "you cycle this card") || scan_contains(lower, "you cycle ~") {
+    // CR 702.29c: use the existing graveyard self-cycle delivery route.
+    if parse_self_cycle_trigger_head(lower).is_ok() {
         let mut def = make_base();
         def.mode = TriggerMode::Cycled;
         def.valid_card = Some(TargetFilter::SelfRef);
@@ -24019,6 +24071,20 @@ fn try_parse_nth_draw_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefini
     None
 }
 
+fn parse_nth_draw_ordinal(after: &str) -> Option<(u32, Comparator, &str)> {
+    let (ordinals, rest) = parse_ordinal_list(after)?;
+    match ordinals.as_slice() {
+        [single] => Some((*single, Comparator::EQ, rest)),
+        [first, .., last] => {
+            let contiguous = ordinals
+                .windows(2)
+                .all(|pair| pair[0].checked_add(1) == Some(pair[1]));
+            (contiguous && *first == 1).then_some((*last, Comparator::LE, rest))
+        }
+        [] => None,
+    }
+}
+
 /// "you draw your <ordinal> card each turn"
 ///
 /// CR 121.2 + CR 603.2: The "you" subject restricts the trigger to the
@@ -24028,14 +24094,14 @@ fn try_parse_nth_draw_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefini
 fn try_parse_nth_draw_you(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let prefix = "you draw your ";
     let after = strip_after(lower, prefix)?;
-    let (n, rest) = parse_ordinal(after)?;
+    let (n, comparator, rest) = parse_nth_draw_ordinal(after)?;
     let timing = classify_nth_draw_timing(rest)?;
     let mut def = make_base();
     def.mode = TriggerMode::Drawn;
     def.valid_target = Some(TargetFilter::Typed(
         TypedFilter::default().controller(ControllerRef::You),
     ));
-    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n });
+    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n, comparator });
     def.condition = timing_condition(timing);
     Some((TriggerMode::Drawn, def))
 }
@@ -24044,14 +24110,14 @@ fn try_parse_nth_draw_you(lower: &str) -> Option<(TriggerMode, TriggerDefinition
 fn try_parse_nth_draw_opponent(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let prefix = "an opponent draws their ";
     let after = strip_after(lower, prefix)?;
-    let (n, rest) = parse_ordinal(after)?;
+    let (n, comparator, rest) = parse_nth_draw_ordinal(after)?;
     let timing = classify_nth_draw_timing(rest)?;
     let mut def = make_base();
     def.mode = TriggerMode::Drawn;
     def.valid_target = Some(TargetFilter::Typed(
         TypedFilter::default().controller(ControllerRef::Opponent),
     ));
-    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n });
+    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n, comparator });
     def.condition = timing_condition(timing);
     Some((TriggerMode::Drawn, def))
 }
@@ -24061,11 +24127,11 @@ fn try_parse_nth_draw_opponent(lower: &str) -> Option<(TriggerMode, TriggerDefin
 fn try_parse_nth_draw_any_player(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     let prefix = "a player draws their ";
     let after = strip_after(lower, prefix)?;
-    let (n, rest) = parse_ordinal(after)?;
+    let (n, comparator, rest) = parse_nth_draw_ordinal(after)?;
     let timing = classify_nth_draw_timing(rest)?;
     let mut def = make_base();
     def.mode = TriggerMode::Drawn;
-    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n });
+    def.constraint = Some(TriggerConstraint::NthDrawThisTurn { n, comparator });
     def.condition = timing_condition(timing);
     Some((TriggerMode::Drawn, def))
 }

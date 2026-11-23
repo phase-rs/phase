@@ -18,6 +18,9 @@
 //!     fully, so no part of a cost is charged when another part is unpayable.
 //!   - CR 118.12a: "[do something] unless [a player does something else]" is
 //!     an optional cost paid when the spell or ability resolves.
+//!   - CR 605.3a: a mana ability may be activated when an effect asks for a
+//!     mana payment. A Ward with a mana leg keeps that window; a Ward that asks
+//!     only for life (Dwarven Forge-Chanter: "Ward—Pay 2 life.") opens none.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{AbilityCost, QuantityExpr};
@@ -479,5 +482,150 @@ fn compound_ward_completes_when_mana_sources_supply_the_life_leg() {
         runner.state().objects[&warded].zone,
         Zone::Graveyard,
         "the paid Ward lets the destroy spell resolve"
+    );
+}
+
+/// Dwarven Forge-Chanter, verbatim Oracle text: a Ward whose only cost is life.
+const DWARVEN_FORGE_CHANTER: &str = "Ward—Pay 2 life. (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays 2 life.)\nProwess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn.)";
+
+/// Every mana action the legal-action lists offer, flat or per object.
+fn offered_mana_actions(runner: &GameRunner) -> Vec<GameAction> {
+    let (flat, _, by_object) = engine::ai_support::legal_actions_full(runner.state());
+    flat.iter()
+        .chain(by_object.values().flatten())
+        .filter(|action| {
+            matches!(
+                action,
+                GameAction::TapLandForMana { .. }
+                    | GameAction::UntapLandForMana { .. }
+                    | GameAction::ActivateAbility { .. }
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+/// Reach guard: `land`'s mana ability is activatable for P1, the Ward's payer.
+fn payer_land_selection(
+    runner: &GameRunner,
+    land: ObjectId,
+) -> engine::types::mana::ManaSourceSelection {
+    engine::game::mana_sources::activatable_mana_source_selections(runner.state(), P1)
+        .into_iter()
+        .find(|selection| selection.source.object_id == land)
+        .expect("reach guard: the Plains' mana ability is activatable")
+}
+
+/// CR 702.21a + CR 605.3a: Dwarven Forge-Chanter's "Ward—Pay 2 life." asks
+/// for life (CR 119.4), not mana, so the targeting player may not tap a land
+/// at the Ward prompt: the tap is refused and offered by no legal-action list,
+/// and the Ward is then paid with 2 life.
+#[test]
+fn a_life_only_ward_opens_no_mana_window() {
+    let mut board = target_warded_creature("Dwarven Forge-Chanter", DWARVEN_FORGE_CHANTER, 1);
+    let cost = assert_payment_prompt(&board.runner, board.warded);
+    assert_eq!(
+        cost,
+        AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 2 }
+        },
+        "reach guard: the Ward asks for 2 life"
+    );
+    let offered = offered_mana_actions(&board.runner);
+    assert!(
+        offered.is_empty(),
+        "no mana action is offered at a life-only Ward: {offered:?}"
+    );
+    let plains = board.lands[0];
+    let selection = payer_land_selection(&board.runner, plains);
+    let prompt = board.runner.state().waiting_for.clone();
+    let refused = board.runner.act(GameAction::TapLandForMana { selection });
+    assert!(
+        matches!(
+            &refused,
+            Err(engine::game::engine::EngineError::InvalidAction(reason))
+                if reason.contains("asks for no mana")
+        ),
+        "CR 605.3a refuses the tap at a life-only Ward: {refused:?}"
+    );
+    assert_eq!(
+        board.runner.state().waiting_for,
+        prompt,
+        "the Ward prompt stays open"
+    );
+    assert!(
+        !board.runner.state().objects[&plains].tapped,
+        "the Plains is untapped"
+    );
+    assert_eq!(
+        board.runner.state().players[P1.0 as usize]
+            .mana_pool
+            .total(),
+        0,
+        "no mana was produced"
+    );
+
+    board
+        .runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("P1 pays 2 life");
+    board.runner.advance_until_stack_empty();
+
+    assert_eq!(life_of(&board.runner, P1), 18, "the Ward charged 2 life");
+    assert_eq!(
+        board.runner.state().objects[&board.warded].zone,
+        Zone::Graveyard,
+        "a paid Ward lets the destroy spell resolve"
+    );
+    assert_eq!(
+        board.runner.state().objects[&board.destroy].zone,
+        Zone::Graveyard
+    );
+    assert!(board.runner.state().stack.is_empty(), "the stack is empty");
+}
+
+/// CR 702.21a + CR 605.3a: Captain Howler's "Ward—{2}, Pay 2 life." includes a
+/// mana payment, so its prompt keeps the mana window: a Plains is offered and
+/// tapped at the prompt, and the payment then charges both legs. The control
+/// for `a_life_only_ward_opens_no_mana_window`.
+#[test]
+fn a_compound_ward_with_a_mana_leg_keeps_its_mana_window() {
+    let mut board = target_warded_creature("Captain Howler, Sea Scourge", CAPTAIN_HOWLER, 2);
+    let cost = assert_payment_prompt(&board.runner, board.warded);
+    assert!(
+        matches!(&cost, AbilityCost::Composite { costs } if costs.len() == 2),
+        "reach guard: the Ward asks for {{2}} and 2 life: {cost:?}"
+    );
+    assert!(
+        offered_mana_actions(&board.runner)
+            .iter()
+            .any(|action| matches!(action, GameAction::TapLandForMana { .. })),
+        "a land's mana ability is offered at a payment that asks for mana"
+    );
+    let first = board.lands[0];
+    let selection = payer_land_selection(&board.runner, first);
+    board
+        .runner
+        .act(GameAction::TapLandForMana { selection })
+        .expect("CR 605.3a: a mana ability may be activated when an effect asks for mana");
+    assert!(board.runner.state().objects[&first].tapped);
+    let life_before = life_of(&board.runner, P1);
+
+    board
+        .runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("P1 pays {2} and 2 life");
+    board.runner.advance_until_stack_empty();
+
+    assert_lands_tapped(&board);
+    assert_eq!(
+        life_of(&board.runner, P1),
+        life_before - 2,
+        "the life leg is charged"
+    );
+    assert_eq!(
+        board.runner.state().objects[&board.warded].zone,
+        Zone::Graveyard,
+        "a paid Ward lets the destroy spell resolve"
     );
 }

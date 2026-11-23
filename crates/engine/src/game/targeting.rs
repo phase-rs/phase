@@ -1672,6 +1672,28 @@ fn resolution_carrier_entry<'a>(
         .filter(|entry| entry_carries_ability(entry, ability))
 }
 
+/// CR 608.2c: the root of the resolution that is reading `set_id` through its own chain rung —
+/// `Some` only while `set_id` is this resolution's `chain_tracked_set_id` and `reader` belongs to
+/// the resolution carrier. Strict: no stack search, no fallback to `reader` (unlike
+/// `resolving_root_ability`).
+///
+/// Chain ids are allocated fresh from the monotone `next_tracked_set_id` during the current
+/// resolution, and the chain is reset at depth 0, at each mode boundary and at each repeat
+/// iteration. An id carried into the resolution (a delayed bound id, a cost-exile id, a concrete
+/// id a writer stamped into a filter) was allocated earlier, so it never equals the chain id.
+/// `chain_tracked_set_id` is stale after a resolution ends; the carrier conjunct excludes every
+/// reader outside that resolution.
+pub(crate) fn chain_rung_root<'a>(
+    state: &'a GameState,
+    set_id: TrackedSetId,
+    reader: &ResolvedAbility,
+) -> Option<&'a ResolvedAbility> {
+    (state.chain_tracked_set_id == Some(set_id))
+        .then(|| resolution_carrier_entry(state, reader))
+        .flatten()
+        .and_then(StackEntry::ability)
+}
+
 /// CR 608.2b: the declared-slot illegality stamp for `ability`'s resolution,
 /// read from the resolution carrier's root. Empty when no carrier carries
 /// the ability — mirroring the live slot authority's fail-open read — so
@@ -2451,17 +2473,21 @@ pub(crate) fn resolved_object_ids_for_filter_with_context(
         }
         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
             let effective_filter = resolve_tracked_set_sentinel(state, filter.clone());
+            // CR 730.3c (D2 enumeration form): the members, then the components
+            // the reader finds under its D7 gate; the retain below is the same
+            // predicate (`filter.rs`), read with the same reader.
             let target_ids: Vec<ObjectId> = match &effective_filter {
-                TargetFilter::TrackedSet { id } => state
-                    .tracked_object_sets
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_default(),
-                TargetFilter::TrackedSetFiltered { id, .. } => state
-                    .tracked_object_sets
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_default(),
+                TargetFilter::TrackedSet { id } => {
+                    super::merge::tracked_set_found_objects(state, *id, ctx.ability, None)
+                }
+                TargetFilter::TrackedSetFiltered { id, caused_by, .. } => {
+                    super::merge::tracked_set_found_objects(
+                        state,
+                        *id,
+                        ctx.ability,
+                        caused_by.as_ref(),
+                    )
+                }
                 _ => state.battlefield.iter().copied().collect(),
             };
             target_ids

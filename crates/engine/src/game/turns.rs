@@ -515,14 +515,17 @@ pub(super) fn resume_abandoned_phase_transition(
     }
 }
 
-/// CR 104.1: a finished game owes no transition a parked choice held.
-pub(super) fn abandon_phase_begin_choice(state: &mut GameState) {
+/// CR 800.4a/j + CR 104.1: retire a genuinely cancelled phase-begin event,
+/// or its terminal-game obligation. A surviving reconsult does not call this:
+/// its transition remains parked until the ordinary replacement result arrives.
+pub(super) fn abandon_phase_begin_choice(state: &mut GameState, phase: Phase) {
     let parked = state
         .pending_phase_transition_progress
         .as_ref()
         .is_some_and(|progress| {
-            progress.drain_state
-                == crate::types::game_state::PhaseTransitionDrainState::AwaitingBeginChoice
+            progress.next_phase == phase
+                && progress.drain_state
+                    == crate::types::game_state::PhaseTransitionDrainState::AwaitingBeginChoice
         });
     if parked {
         state.pending_phase_transition_progress = None;
@@ -4434,18 +4437,23 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 None,
                 events,
             ) {
-                // `Priority` is the resume's "nothing further is owed" sentinel and
-                // is always addressed to `state.active_player` — the seat that just
-                // left. Fall through to the turn's step rather than surfacing it.
+                // `Priority` is the resume's "nothing further is owed" sentinel,
+                // addressed to `living_priority_seat` (CR 800.4j), never to the seat
+                // that just left. Fall through to the turn's step rather than
+                // surfacing it.
                 //
-                // CR 800.4a: everything else is a real prompt, but this is the one
-                // call site of `resume_pending_combat_lifelink` reached while the
-                // active player is NOT in the game (the other two run with a living
-                // active player by construction), so a wait it produces can name a
+                // CR 800.4a: everything else is a real prompt, but this call site of
+                // `resume_pending_combat_lifelink` is reached while the
+                // active player is NOT in the game (`handle_replacement_choice`
+                // remaps its own `Priority` with `living_priority_seat`;
+                // `resolve_combat_damage`'s re-entry guard can also be reached after
+                // a departure, from priority.rs's completeness gate; the
+                // action-boundary convergence applies this same test to the wait it
+                // surfaces), so a wait it produces can name a
                 // seat that cannot answer. `elimination` already enforces exactly
                 // this invariant once, at elimination time, with the same accessor
-                // and the same aliveness test; re-apply it here because this is the
-                // only place a NEW wait can be installed after that reconcile has
+                // and the same aliveness test; re-apply it here because a NEW wait
+                // can be installed here after that reconcile has
                 // run. `acting_player()` is `None` for `GameOver`, which is terminal
                 // and must still be surfaced — hence `is_some_and`, not a check that
                 // an acting player exists and is alive.
@@ -4845,8 +4853,8 @@ mod tests {
     use crate::types::card_type::{CardType, CoreType, Supertype};
     use crate::types::game_state::{
         CastOccurrence, DelayedTrigger, PendingContinuation, PendingResolutionCompletion,
-        PersistentAxisMaterialization, SpellCastRecord, StackEntry, StackEntryKind,
-        StackResolutionPolicy, StepTally,
+        PersistentAxisMaterialization, PhaseTransitionDrainState, PhaseTransitionProgress,
+        SpellCastRecord, StackEntry, StackEntryKind, StackResolutionPolicy, StepTally,
     };
     use crate::types::identifiers::{CardId, ExtraPhaseId, ObjectId};
     use crate::types::phase::{PhaseStop, PhaseStopScope, TurnSegment};
@@ -14681,6 +14689,44 @@ card into your hand at the beginning of your next end step.";
         assert_eq!(
             state.current_combat_attacker_restriction_source,
             Some(ObjectId(99))
+        );
+    }
+
+    #[test]
+    fn phase_begin_abandonment_retires_only_its_unanswered_transition() {
+        let mut state = setup();
+        state.phase = Phase::EndCombat;
+        state.pending_phase_transition_progress = Some(PhaseTransitionProgress {
+            remaining_players: std::collections::VecDeque::new(),
+            next_phase: Phase::BeginCombat,
+            previous_phase: Some(Phase::EndCombat),
+            owed_life_loss: std::collections::VecDeque::new(),
+            in_flight_life_loss: None,
+            entering_cleanup: false,
+            drain_state: PhaseTransitionDrainState::AwaitingBeginChoice,
+            scheduled_begin: None,
+        });
+
+        abandon_phase_begin_choice(&mut state, Phase::Upkeep);
+        assert!(state.pending_phase_transition_progress.is_some());
+        state
+            .pending_phase_transition_progress
+            .as_mut()
+            .unwrap()
+            .drain_state = PhaseTransitionDrainState::Ready;
+        abandon_phase_begin_choice(&mut state, Phase::BeginCombat);
+        assert!(state.pending_phase_transition_progress.is_some());
+        state
+            .pending_phase_transition_progress
+            .as_mut()
+            .unwrap()
+            .drain_state = PhaseTransitionDrainState::AwaitingBeginChoice;
+        abandon_phase_begin_choice(&mut state, Phase::BeginCombat);
+        assert!(state.pending_phase_transition_progress.is_none());
+        assert_eq!(
+            state.phase,
+            Phase::EndCombat,
+            "cancellation must not begin the step"
         );
     }
 

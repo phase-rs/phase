@@ -59,6 +59,7 @@ fn record_opponent_land_entry(runner: &mut GameRunner, object_id: u64) {
         .state_mut()
         .battlefield_entries_this_turn
         .push_back(BattlefieldEntryRecord {
+            token_status: Some(engine::types::game_state::EntryTokenStatus::Nontoken),
             object_id: ObjectId(object_id),
             name: format!("Land {object_id}"),
             core_types: vec![CoreType::Land],

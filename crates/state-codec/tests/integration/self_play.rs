@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::File;
-use std::io::{BufReader, Write};
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use engine::database::{CardDatabase, ComboTable};
@@ -27,12 +26,7 @@ use serde_json::value::RawValue;
 use state_codec::{decode, encode, state_hash, Frame, FrameKind, WireState};
 
 fn database() -> CardDatabase {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../engine/tests/fixtures/integration_cards.json.gz");
-    CardDatabase::from_export_reader(flate2::read::GzDecoder::new(BufReader::new(
-        File::open(path).expect("committed card fixture opens"),
-    )))
-    .expect("committed card fixture loads")
+    CardDatabase::from_integration_fixture().expect("committed card fixture loads")
 }
 
 fn deck(db: &CardDatabase, green: bool) -> PlayerDeckList {

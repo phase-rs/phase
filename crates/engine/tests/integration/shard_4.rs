@@ -5,6 +5,9 @@
 //! `crate::<module>`, and every module with an insta snapshot; it may also hold modules from this
 //! range. `no_top_level_test_binaries` enforces that each file here is registered in exactly one
 //! shard root.
+// The auto-trait (`Send`) proof for the im-backed `GameState` exceeds the default
+// recursion limit of 128 (a future-incompatibility error on newer toolchains).
+#![recursion_limit = "512"]
 
 pub mod support;
 
@@ -231,6 +234,7 @@ mod kicker_enters_with_keyword_rider;
 mod kicker_enters_with_quoted_rider;
 mod kicker_x_cap_search_termination;
 mod kid_loki_counter_hexproof_static;
+mod kili_the_resourceful;
 mod kiora_self_library_peek_cast;
 mod klaw_play_from_exile_trigger_msh_wave1;
 mod knighthood_first_strike_grant;
@@ -246,6 +250,7 @@ mod kroxa_titan_nonland_discard_life_loss;
 mod kutzils_flanker_mode_one_counter;
 mod kwain_drew_this_way_gains_life;
 mod kylox_voltstrider;
+mod kytheon_end_of_combat;
 mod l02_bb1_activation_conditions;
 mod l02_bb2_cast_origin;
 mod l02_bb3_cast_permission_finality;
@@ -279,6 +284,7 @@ mod life_at_stake_both_choosers_6965;
 mod life_changed_this_turn_quantity;
 mod life_lost_last_turn;
 mod lifeblood_hydra_shared_equal_to_quantity;
+mod light_of_sanction_controlled_source_prevention;
 mod lightning_dart_disjunctive_color_instead;
 mod liliana_dreadhorde_multi_dies;
 mod liliana_waker_cross_scope_decline;
@@ -287,7 +293,9 @@ mod liminal_copy_token_etb_observers;
 mod limited_command_zone;
 mod limited_companion_match_launch;
 mod limited_deck_format_gate;
+mod lingering_modal_land_face;
 mod linked_exile_ltb_return;
+mod linked_exile_return_binding;
 mod living_armor_target_mana_value_1375;
 mod living_conundrum_skip_empty_draw;
 mod living_death_ordering_2932;
@@ -431,6 +439,7 @@ mod necrobloom_dredge;
 mod necrodominance_pay_any_life_draw;
 mod negated_turn_spell_cost_reduction;
 mod nettling_imp_continuity_target;
+mod new_master_of_arms_tapped_blocker_prevention;
 mod niko_light_of_hope;
 mod ninjutsu_cluster;
 mod nissa_ascended_animist_loyalty_token_6012;
@@ -461,6 +470,7 @@ mod omo_queen_of_vesuva;
 mod onakke_oathkeeper;
 mod one_ring_burden_upkeep_lethal;
 mod one_sided_fight_illegal_damage_source;
+mod open_the_vaults_staged_entry_answers;
 mod opening_play_draw_view;
 mod opponent_gains_control_from_you_trigger;
 mod opposition_agent_final;
@@ -502,6 +512,7 @@ mod palace_jailer;
 mod palantir_of_orthanc;
 mod panther_habit_equipped_prevention_scope;
 mod park_heights_pegasus_draw_condition_runtime;
+mod parked_draw_payment_and_staged_population_concessions;
 mod parker_luck;
 mod parser_oracle_casting;
 mod parser_oracle_static;
@@ -588,6 +599,7 @@ mod queen_velocity_upkeep;
 mod quest_counter_sacrifice_it_cost;
 mod quick_draw_target_opponent;
 mod quirion_ranger_activation;
+mod raffine_informant_departed_connive;
 mod rage_reflection_double_strike_grant;
 mod ral_crackling_wit_emblem_storm;
 mod rally_the_righteous_radiance_pump;

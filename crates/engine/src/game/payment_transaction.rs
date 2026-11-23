@@ -336,17 +336,16 @@ fn settle_canonical_tail(
         return Ok(());
     };
     engine::resume_pending_continuation_if_priority(state, events)?;
-    let completed = Some(carrier).filter(|_| {
-        state.resolving_stack_entry.is_none()
-            && matches!(
-                state.waiting_for,
-                crate::types::game_state::WaitingFor::Priority { .. }
-            )
-            && state.game_end.is_none()
-            && state.payment_transaction.is_none()
-            && !state.payment_transaction_replay
-            && !triggers::is_pending_trigger_construction_active(state)
-    });
+    let completed = (state.resolving_stack_entry.is_none()
+        && matches!(
+            state.waiting_for,
+            crate::types::game_state::WaitingFor::Priority { .. }
+        )
+        && state.game_end.is_none()
+        && state.payment_transaction.is_none()
+        && !state.payment_transaction_replay
+        && !triggers::is_pending_trigger_construction_active(state))
+    .then_some(carrier);
     let default_wf = state.waiting_for.clone();
     let waiting_for = engine_priority::run_post_action_pipeline_for_canonical_tail(
         state,

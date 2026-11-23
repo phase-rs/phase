@@ -13,13 +13,15 @@ use crate::game::game_object::AttachTarget;
 use crate::game::perf_counters;
 use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContext};
 
-use super::ability::{ChosenAttribute, ContinuousModification, TriggerDefinitionRef};
+use super::ability::{
+    ChosenAttribute, ContinuousModification, ResolvedAbility, TriggerDefinitionRef,
+};
 use super::card::TokenImageRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
 use super::game_state::{
-    CastOccurrence, DelayedTrigger, SpellCastRecord, StackEntry, StackEntryKind, StackPaidSnapshot,
-    TransientContinuousEffect, ZoneChangeRecord,
+    CastOccurrence, CyclingOccurrence, CyclingRecord, DelayedTrigger, SpellCastRecord, StackEntry,
+    StackEntryKind, StackPaidSnapshot, TransientContinuousEffect, ZoneChangeRecord,
 };
 use super::identifiers::{
     DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
@@ -1013,6 +1015,13 @@ pub enum ResolvedOncePerTurnPermission {
 /// bulk clears intentionally belong to the future turn-transition family.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolvedLedgerEdit {
+    /// CR 702.29c + CR 702.29f: Append one completed cycling activation.
+    CompletedCycle {
+        player: PlayerId,
+        record: CyclingRecord,
+        expected_history_len: usize,
+        stack_entry: ObjectId,
+    },
     /// CR 601.2i: Append one finalized spell-cast fact to this player's history.
     SpellCast {
         player: PlayerId,
@@ -1456,17 +1465,95 @@ pub struct ResolvedStackEntryFinalizeCommand {
     pub expected_old_kind: Box<StackEntryKind>,
     pub resulting_kind: Box<StackEntryKind>,
     pub expected_old_paid_facts: Option<Box<StackPaidSnapshot>>,
-    pub resulting_paid_facts: Box<StackPaidSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resulting_paid_facts: Option<Box<StackPaidSnapshot>>,
     /// The spell object's occurrence carrier settles with the finalized entry.
     /// Legacy journals predate this provenance and therefore replay `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_old_cast_occurrence: Option<CastOccurrence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resulting_cast_occurrence: Option<CastOccurrence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resulting_cycling_occurrence: Option<CyclingOccurrence>,
     pub cause: RulesExecutionNodeRef,
 }
 
-/// Typed failure while applying one already-resolved CR 601.2i finalization.
+impl ResolvedStackEntryFinalizeCommand {
+    pub(crate) fn validate_shape(
+        &self,
+    ) -> Result<(), ResolvedStackEntryFinalizeReplayInvariantError> {
+        use ResolvedStackEntryFinalizeReplayInvariantError as Error;
+
+        match (
+            self.expected_old_kind.as_ref(),
+            self.resulting_kind.as_ref(),
+        ) {
+            (StackEntryKind::Spell { .. }, StackEntryKind::Spell { ability, .. }) => {
+                if self.resulting_paid_facts.is_none() {
+                    return Err(Error::MissingResultPaidFacts(self.object));
+                }
+                if self.resulting_cycling_occurrence.is_some()
+                    || ability.as_deref().is_some_and(has_cycling_stamp)
+                {
+                    return Err(Error::CyclingOccurrenceMismatch(self.object));
+                }
+                if self.resulting_cast_occurrence.is_some_and(|occurrence| {
+                    ability
+                        .as_deref()
+                        .is_some_and(|root| !root.cast_occurrence_matches_recursive(occurrence))
+                }) {
+                    return Err(Error::CastOccurrenceMismatch(self.object));
+                }
+            }
+            (
+                StackEntryKind::ActivatedAbility { .. },
+                StackEntryKind::ActivatedAbility { ability, .. },
+            ) => {
+                if self.expected_old_paid_facts.is_some() || self.resulting_paid_facts.is_some() {
+                    return Err(Error::PaidFactsMismatch(self.object));
+                }
+                if self.expected_old_cast_occurrence.is_some()
+                    || self.resulting_cast_occurrence.is_some()
+                {
+                    return Err(Error::CastOccurrenceMismatch(self.object));
+                }
+                let invalid_cycling_graph = match self.resulting_cycling_occurrence {
+                    Some(occurrence) => !ability.cycling_occurrence_matches_recursive(occurrence),
+                    None => has_cycling_stamp(ability),
+                };
+                if invalid_cycling_graph {
+                    return Err(Error::CyclingOccurrenceMismatch(self.object));
+                }
+            }
+            // CR 601.2i + CR 602.2b: finalization settles a spell or an
+            // activated ability in place, so any other pairing changes the
+            // entry's kind or names a kind that is never finalized. Each kind
+            // is listed so a new one must be classified here.
+            (
+                StackEntryKind::Spell { .. }
+                | StackEntryKind::ActivatedAbility { .. }
+                | StackEntryKind::TriggeredAbility { .. }
+                | StackEntryKind::KeywordAction { .. }
+                | StackEntryKind::CombatDamage { .. },
+                StackEntryKind::Spell { .. }
+                | StackEntryKind::ActivatedAbility { .. }
+                | StackEntryKind::TriggeredAbility { .. }
+                | StackEntryKind::KeywordAction { .. }
+                | StackEntryKind::CombatDamage { .. },
+            ) => return Err(Error::EntryKindMismatch(self.entry_position)),
+        }
+        Ok(())
+    }
+}
+
+fn has_cycling_stamp(ability: &ResolvedAbility) -> bool {
+    ability.cycling_occurrence.is_some()
+        || ability
+            .child_links()
+            .any(|(_, child)| has_cycling_stamp(child))
+}
+
+/// Typed failure while applying one already-resolved stack entry finalization.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ResolvedStackEntryFinalizeReplayInvariantError {
     #[error("stack-entry finalize targets position {position}, but the stack holds {depth}")]
@@ -1483,6 +1570,10 @@ pub enum ResolvedStackEntryFinalizeReplayInvariantError {
     PaidFactsMismatch(ObjectId),
     #[error("stack-entry finalize expected different cast provenance for {0:?}")]
     CastOccurrenceMismatch(ObjectId),
+    #[error("stack-entry finalize cycling provenance disagrees with the installed history or resulting ability graph for {0:?}")]
+    CyclingOccurrenceMismatch(ObjectId),
+    #[error("stack-entry finalize requires a resulting paid-facts snapshot for {0:?}")]
+    MissingResultPaidFacts(ObjectId),
 }
 
 /// One exact CR 603.3d removal of an uncommitted triggered ability.
@@ -2040,6 +2131,7 @@ impl std::error::Error for ResolvedInformationReplayInvariantError {}
 pub enum ResolvedLedgerEditReplayInvariantError {
     UnknownPlayer(PlayerId),
     SpellCastPreconditionMismatch,
+    CompletedCyclePreconditionMismatch,
     AbilityActivationPreconditionMismatch,
     CrimeCommittedPreconditionMismatch,
     CardsDrawnPreconditionMismatch,
@@ -2067,6 +2159,10 @@ impl std::fmt::Display for ResolvedLedgerEditReplayInvariantError {
                     "resolved spell-cast command does not match its ledger prefix"
                 )
             }
+            Self::CompletedCyclePreconditionMismatch => write!(
+                f,
+                "resolved completed-cycle command has invalid facts or does not match its ledger prefix"
+            ),
             Self::AbilityActivationPreconditionMismatch => write!(
                 f,
                 "resolved activated-ability command does not match its ledger prefix"
@@ -3027,7 +3123,7 @@ impl ResolvedRulesJournal {
         )
     }
 
-    /// Records one exact CR 601.2i cast finalization under its causal node.
+    /// Records one resolved stack-entry finalization under its causal node.
     pub fn record_stack_entry_finalize(
         &mut self,
         command: ResolvedStackEntryFinalizeCommand,
@@ -3891,20 +3987,35 @@ impl ResolvedRulesJournal {
                                 .to_string(),
                         ));
                     }
-                    let graph_matches = matches!(
-                        command.resulting_kind.as_ref(),
-                        StackEntryKind::Spell { ability, .. }
-                            if ability.as_deref().is_none_or(|ability| {
-                                ability.cast_occurrence_matches_recursive(occurrence)
-                            })
-                    );
-                    if !graph_matches {
+                }
+                if let Some(occurrence) = command.resulting_cycling_occurrence {
+                    let matching_cycles = self
+                        .entries
+                        .iter()
+                        .take_while(|candidate| candidate.ordinal != entry.ordinal)
+                        .filter(|candidate| {
+                            matches!(
+                                candidate.command.as_ref(),
+                                Some(ResolvedRulesCommand::LedgerEdit(ledger))
+                                    if matches!(&ledger.edit, ResolvedLedgerEdit::CompletedCycle {
+                                        player, expected_history_len, stack_entry, ..
+                                    } if *player == occurrence.activator
+                                        && *expected_history_len == occurrence.journal_index
+                                        && *stack_entry == command.object)
+                            )
+                        })
+                        .count();
+                    if matching_cycles != 1 {
                         return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
-                            "stack-entry finalize cast provenance disagrees with its resulting ability graph"
+                            "stack-entry finalize cycling provenance requires exactly one matching prior completed-cycle ledger edit"
                                 .to_string(),
                         ));
                     }
                 }
+                // A missing coordinate is valid only for an unstamped result graph.
+                command.validate_shape().map_err(|error| {
+                    ResolvedRulesJournalError::InvalidSerializedAuthority(error.to_string())
+                })?;
             }
             ResolvedRulesCommand::UncommittedTriggerRemoval(command) => {
                 // Cause-only, plus the one invariant checkable without state: a
@@ -4036,6 +4147,11 @@ fn zone_change_command_is_invalid(command: &ResolvedZoneChangeCommand) -> bool {
 
 pub(crate) fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
     match edit {
+        ResolvedLedgerEdit::CompletedCycle {
+            record,
+            stack_entry,
+            ..
+        } => record.name.is_empty() || stack_entry.0 == 0,
         ResolvedLedgerEdit::SpellCast {
             expected_game_count,
             expected_turn_history_len,

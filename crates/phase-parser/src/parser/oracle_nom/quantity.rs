@@ -54,6 +54,32 @@ use crate::types::player::PlayerCounterKind;
 use crate::types::text_grammar::parse_article_number;
 use crate::types::zones::Zone;
 
+/// CR 201.2 + CR 201.2a: use a single literal name to filter recorded cycles.
+pub(super) fn named_game_cycling_quantity(name: &str) -> Option<QuantityExpr> {
+    let name = name
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    if name.is_empty()
+        || all_consuming(tag::<_, _, OracleError<'_>>("~"))
+            .parse(name.as_str())
+            .is_ok()
+    {
+        return None;
+    }
+    if crate::parser::oracle_target::named_filter_name_end(&name) != name.len() {
+        return None;
+    }
+    Some(QuantityExpr::Ref {
+        qty: QuantityRef::CardsCycled {
+            scope: CountScope::Controller,
+            window: crate::types::ability::CyclingHistoryWindow::ThisGame,
+            name: Some(name),
+        },
+    })
+}
+
 /// Parse a quantity expression: either a fractional expression, a dynamic reference,
 /// or a fixed number. Fractional forms ("half X, rounded up/down") compose over the
 /// same `parse_quantity_ref` / `parse_number` primitives used for plain quantities.
@@ -2533,6 +2559,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         alt((
             parse_entered_this_turn_ref,
             parse_number_of_creatures_died_this_turn,
+            parse_number_of_objects_exiled_under_controller_this_turn,
             parse_number_of_sacrificed_this_turn,
             parse_number_of_descended_this_turn,
             // CR 404.1 + CR 111.7 + CR 303.4b: "cards put into [possessive]
@@ -6957,8 +6984,8 @@ enum EnteredControlBinding {
 }
 
 /// CR 608.2h + CR 608.2i: Parse "[type] that entered (the battlefield) [under
-/// <whose> control] this turn" into whichever of the two readings the grammar
-/// selects — see [`EnteredControlBinding`].
+/// <whose> control] this turn" or "[type] you had enter … under your control
+/// this turn". See [`EnteredControlBinding`] for how the controller binds.
 fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, (type_text, binding)) = parse_entered_this_turn_clause(input)?;
     let (filter, remainder) = parse_type_phrase_folding(type_text.trim());
@@ -6977,8 +7004,8 @@ fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // which likewise omits the controller injection.
         //
         // CR 608.2i: the look-back tally is only honest if the entry-record matcher can evaluate
-        // the filter. `battlefield_entry_matches_filter` fails closed on the 94 `FilterProp`s the
-        // entry snapshot cannot answer (game/restrictions.rs:517), which would resolve to a silent
+        // the filter. `battlefield_entry_matches_filter` fails closed on properties the
+        // entry snapshot cannot answer, which would resolve to a silent
         // constant 0 while `coverage.rs` reported the card supported. Refusing here is measurably
         // better on this path: a failed quantity clause becomes `Effect::Unimplemented`, so the
         // gap is visible to `cargo parser-gaps` instead of shipping a wrong number.
@@ -7007,19 +7034,31 @@ fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 }
 
 fn parse_entered_this_turn_clause(input: &str) -> OracleResult<'_, (&str, EnteredControlBinding)> {
-    pair(
-        take_until(" that entered"),
-        preceded(
-            pair(tag(" that entered"), opt(tag(" the battlefield"))),
-            alt((
+    alt((
+        pair(
+            take_until(" that entered"),
+            preceded(
+                pair(tag(" that entered"), opt(tag(" the battlefield"))),
+                alt((
+                    map(
+                        parse_entry_event_controller,
+                        EnteredControlBinding::EntryEvent,
+                    ),
+                    value(EnteredControlBinding::SubjectNoun, tag(" this turn")),
+                )),
+            ),
+        ),
+        pair(
+            take_until(" you had enter"),
+            preceded(
+                pair(tag(" you had enter"), opt(tag(" the battlefield"))),
                 map(
                     parse_entry_event_controller,
                     EnteredControlBinding::EntryEvent,
                 ),
-                value(EnteredControlBinding::SubjectNoun, tag(" this turn")),
-            )),
+            ),
         ),
-    )
+    ))
     .parse(input)
 }
 
@@ -7833,6 +7872,53 @@ fn parse_for_each_creature_died_this_turn(input: &str) -> OracleResult<'_, Quant
 fn parse_number_of_creatures_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, (controller, nontoken)) = parse_creatures_died_this_turn_tail(input)?;
     Ok((rest, creatures_died_this_turn_ref(controller, nontoken)))
+}
+
+/// CR 400.7 + CR 109.5: Count typed permanents exiled from the battlefield
+/// this turn under a specified controller's control, using each zone-change
+/// record's last-known characteristics.
+fn parse_number_of_objects_exiled_under_controller_this_turn(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    let (filter, rest) = parse_type_phrase_folding(input);
+    if !quantity_filter_has_meaningful_content(&filter) {
+        return Err(oracle_err(input));
+    }
+    let (rest, _) = alt((
+        tag(" that were exiled under "),
+        tag(" that was exiled under "),
+    ))
+    .parse(rest)?;
+    // CR 109.4 + CR 109.5: the possessor is a typed controller reference.
+    // `parse_opponent_possessive` is the shared opponent-possessive combinator
+    // (straight and curly apostrophes), also used by the "died under ... control"
+    // condition grammar.
+    let (rest, controller) = alt((
+        value(ControllerRef::You, tag("your control")),
+        value(
+            ControllerRef::Opponent,
+            preceded(
+                (
+                    opt(tag("your ")),
+                    super::condition::parse_opponent_possessive,
+                ),
+                tag("control"),
+            ),
+        ),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" this turn").parse(rest)?;
+    // CR 109.4: shared controller injection (also adds the battlefield-presence
+    // property, matching `from_zone` on the zone-change record), as used by the
+    // sibling `parse_died_under_control_this_turn`.
+    Ok((
+        rest,
+        QuantityRef::ZoneChangeCountThisTurn {
+            from: Some(Zone::Battlefield),
+            to: Some(Zone::Exile),
+            filter: super::condition::inject_controller(filter, controller),
+        },
+    ))
 }
 
 /// CR 701.21a: Parse "[type] you['ve] sacrificed this turn" -> `TargetFilter`.
@@ -9766,6 +9852,54 @@ mod tests {
             ("", None)
         );
         assert!(parse_died_this_turn_suffix("you control").is_err());
+    }
+
+    #[test]
+    fn zone_change_count_exiled_under_controller_supports_type_and_number_forms() {
+        // Only Vren, the Relentless prints this shape ("...the number of creatures that were exiled under your opponents' control this turn"); the singular, "your" and artifact rows exercise the combinator's axes, not printed cards.
+        for (phrase, filter, controller) in [
+            (
+                "creatures that were exiled under your opponents' control this turn",
+                TypedFilter::creature(),
+                ControllerRef::Opponent,
+            ),
+            (
+                "creature that was exiled under your opponent's control this turn",
+                TypedFilter::creature(),
+                ControllerRef::Opponent,
+            ),
+            (
+                "artifacts that were exiled under your control this turn",
+                TypedFilter::new(TypeFilter::Artifact),
+                ControllerRef::You,
+            ),
+            (
+                "creatures that were exiled under your opponents\u{2019} control this turn",
+                TypedFilter::creature(),
+                ControllerRef::Opponent,
+            ),
+        ] {
+            // CR 109.4: expectation built through the shared injector, which also
+            // adds `InZone { Battlefield }` (== the record's `from_zone`).
+            let expected_filter =
+                super::super::condition::inject_controller(TargetFilter::Typed(filter), controller);
+            assert!(
+                matches!(&expected_filter, TargetFilter::Typed(t) if t.properties.contains(&FilterProp::InZone { zone: Zone::Battlefield })),
+                "phrase {phrase:?}"
+            );
+            let expected = QuantityRef::ZoneChangeCountThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Exile),
+                filter: expected_filter,
+            };
+            let (rest, quantity) = parse_number_of_inner(phrase).expect("exiled object count");
+            assert_eq!(rest, "", "phrase {phrase:?}");
+            assert_eq!(quantity, expected, "phrase {phrase:?}");
+        }
+        assert!(parse_number_of_inner(
+            "creatures that were exiled under your opponents' control last turn"
+        )
+        .is_err());
     }
 
     /// CR 400.7d: each subject anaphora maps to the correct
@@ -13940,6 +14074,63 @@ mod tests {
         // filter must NOT carry a controller of its own.
         assert_eq!(controller, None);
         assert!(properties.is_empty());
+    }
+
+    #[test]
+    fn issue_634_causative_battlefield_entry_quantities() {
+        let (rest, quantity) = parse_quantity_ref(
+            "the number of nontoken creatures you had enter the battlefield under your control this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            assert_ledger_entries_this_turn_typed(quantity),
+            (
+                PlayerScope::Controller,
+                vec![TypeFilter::Creature],
+                None,
+                vec![FilterProp::NonToken]
+            )
+        );
+
+        for text in [
+            "land you had enter the battlefield under your control this turn",
+            "land you had enter under your control this turn",
+        ] {
+            let (rest, quantity) = parse_for_each_clause_ref(text).unwrap();
+            assert_eq!(rest, "");
+            assert_eq!(
+                assert_ledger_entries_this_turn_typed(quantity),
+                (
+                    PlayerScope::Controller,
+                    vec![TypeFilter::Land],
+                    None,
+                    vec![]
+                )
+            );
+        }
+
+        for text in [
+            "land you had enter this turn",
+            "land you had enter under your control",
+            "land you had enter under an opponent's control this turn",
+        ] {
+            assert!(parse_entered_this_turn_ref(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn issue_634_entry_quantity_refuses_tapped_snapshot_filter() {
+        let (filter, rest) = parse_type_phrase_folding("tapped creatures");
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Tapped]))
+        );
+        assert!(parse_entered_this_turn_ref(
+            "tapped creatures that entered the battlefield under your control this turn"
+        )
+        .is_err());
     }
 
     #[test]

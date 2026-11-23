@@ -284,13 +284,20 @@ fn parse_max_untap_per_type_static(tp: &TextPair<'_>, text: &str) -> Option<Stat
         let condition_text = after_cond.original.trim().trim_end_matches('.');
         let mut def = parse_max_untap_per_type_static(&before_cond, text)?;
         // CR 611.3a: MaxUntapPerType has no attached-subject ("enchanted
-        // creature") variant — its condition is always a state check on the
-        // cap's own source, so the self-pronoun rewrite always applies
-        // (unlike parse_continuous_gets_has's SelfRef-only guard).
-        let condition = parse_static_condition(&rewrite_self_pronoun_subject(condition_text))
-            .unwrap_or_else(|| {
-                unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
-            });
+        // creature") variant — a singular "it" in its condition is a state
+        // check on the cap's own source, so the self-pronoun rewrite always
+        // applies (unlike parse_continuous_gets_has's SelfRef-only guard).
+        // The printed subject is the players, not the source, so the subject
+        // is `PrintedSubject::Other`: the singular "it" arms still run, but a
+        // plural "they" names the players and must not become the source's
+        // damage-history gate.
+        let condition = parse_static_condition(&rewrite_self_pronoun_subject(
+            condition_text,
+            PrintedSubject::Other,
+        ))
+        .unwrap_or_else(|| {
+            unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
+        });
         def.condition = Some(condition);
         return Some(def);
     }
@@ -689,6 +696,38 @@ pub(crate) fn parse_damage_not_removed_during_cleanup(
     )
 }
 
+/// CR 120.6 + CR 704.5g: "Lethal damage dealt to <subject> is determined by their power rather
+/// than their toughness." (Zilortha, Strength Incarnate). Exact grammar on purpose: only the
+/// power-for-toughness substitution is modelled, so any other shape keeps its honest
+/// `Unimplemented`.
+fn parse_lethal_damage_determined_by_power(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (input, _) = tag("lethal damage dealt to ").parse(input)?;
+    let (input, affected) = nom_target::parse_type_phrase(input)?;
+    let (input, _) = tag(" is determined by ").parse(input)?;
+    let (input, _) = nom_filter::parse_pt_possessive(input)?;
+    let (input, _) = tag("power rather than ").parse(input)?;
+    let (input, _) = nom_filter::parse_pt_possessive(input)?;
+    let (input, _) = tag("toughness").parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    eof(input)?;
+    Ok((input, affected))
+}
+
+pub(crate) fn is_lethal_damage_determined_by_power_static(lower: &str) -> bool {
+    parse_lethal_damage_determined_by_power(lower).is_ok()
+}
+
+pub(crate) fn try_parse_lethal_damage_determined_by_power_static(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    nom_on_lower(text, lower, parse_lethal_damage_determined_by_power).map(|(affected, _)| {
+        StaticDefinition::new(StaticMode::LethalDamageDeterminedByPower)
+            .affected(affected)
+            .description(text.to_string())
+    })
+}
+
 /// CR 509.1b: "Creatures with power <comparison> <quantity> can't
 /// block this creature." — a can't-be-blocked-by restriction whose blocker
 /// filter gates on a power threshold that may be DYNAMIC (Kraken of the Straits:
@@ -936,6 +975,11 @@ pub(crate) fn parse_static_line_inner(
     }
     // CR 514.2: "Damage isn't removed from [subject] during cleanup steps."
     if let Some(def) = parse_damage_not_removed_during_cleanup(&tp, &text) {
+        return Some(def);
+    }
+    // CR 120.6 + CR 704.5g: "Lethal damage dealt to [subject] is determined by their power
+    // rather than their toughness." (Zilortha, Strength Incarnate).
+    if let Some(def) = try_parse_lethal_damage_determined_by_power_static(&text, &lower) {
         return Some(def);
     }
     // CR 101.2 + CR 109.5: "Each opponent who [did X] this turn can't [Y]" —
@@ -1692,7 +1736,7 @@ pub(crate) fn parse_static_line_inner(
                     defender: Some(defender),
                 }]),
             );
-        if let Some(def) = parse_continuous_gets_has(rest, filter, &text) {
+        if let Some(def) = parse_continuous_gets_has(rest, filter, &text, PrintedSubject::Other) {
             return Some(def);
         }
     }
@@ -1705,7 +1749,9 @@ pub(crate) fn parse_static_line_inner(
     // construction and `TargetFilter::Or` for the union case.
     if let Some(rest) = nom_tag_tp(&tp, "each creature you control that's a ") {
         if let Some((filter, predicate)) = try_parse_thats_a_subtype_list(rest.original) {
-            if let Some(def) = parse_continuous_gets_has(predicate, filter, &text) {
+            if let Some(def) =
+                parse_continuous_gets_has(predicate, filter, &text, PrintedSubject::Other)
+            {
                 return Some(def);
             }
         }
@@ -1737,9 +1783,12 @@ pub(crate) fn parse_static_line_inner(
                 let subject_len = tp.lower.len() - rest.lower.len() + qualifier.len();
                 let (subject, predicate) = tp.split_at(subject_len);
                 if let Some(affected) = parse_continuous_subject_filter(subject.original) {
-                    if let Some(def) =
-                        parse_continuous_gets_has(predicate.original, affected, &text)
-                    {
+                    if let Some(def) = parse_continuous_gets_has(
+                        predicate.original,
+                        affected,
+                        &text,
+                        PrintedSubject::Other,
+                    ) {
                         return Some(def);
                     }
                 }
@@ -1749,6 +1798,7 @@ pub(crate) fn parse_static_line_inner(
                     rest.original,
                     TargetFilter::Typed(TypedFilter::creature()),
                     &text,
+                    PrintedSubject::Other,
                 ) {
                     return Some(def);
                 }
@@ -1956,7 +2006,9 @@ pub(crate) fn parse_static_line_inner(
                 after_prefix,
             )
         };
-        if let Some(def) = parse_continuous_gets_has(predicate_text, filter, &text) {
+        if let Some(def) =
+            parse_continuous_gets_has(predicate_text, filter, &text, PrintedSubject::Other)
+        {
             return Some(def);
         }
     }
@@ -2035,7 +2087,9 @@ pub(crate) fn parse_static_line_inner(
                 after_prefix,
             )
         };
-        if let Some(def) = parse_continuous_gets_has(predicate_text, filter, &text) {
+        if let Some(def) =
+            parse_continuous_gets_has(predicate_text, filter, &text, PrintedSubject::Other)
+        {
             return Some(def);
         }
     }
@@ -2359,9 +2413,16 @@ pub(crate) fn parse_static_line_inner(
             // condition + "has first strike".
             let (effective_predicate, suffix_condition) = strip_suffix_turn_condition(&predicate);
 
-            if let Some(mut def) =
-                parse_continuous_gets_has(&effective_predicate, TargetFilter::SelfRef, tp.original)
-            {
+            // CR 611.3a: `affected` is hardcoded `SelfRef` while the subject
+            // check above is only a negative list ("Enchanted artifact", "Each
+            // artifact", "It" all pass it), so the gate's pronoun scope comes
+            // from the printed subject of the host line, not from `affected`.
+            if let Some(mut def) = parse_continuous_gets_has(
+                &effective_predicate,
+                TargetFilter::SelfRef,
+                tp.original,
+                printed_subject(&tp),
+            ) {
                 if let Some(cond) = suffix_condition {
                     def.condition = Some(cond);
                 }

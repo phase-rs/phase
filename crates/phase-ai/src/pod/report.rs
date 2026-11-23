@@ -272,7 +272,7 @@ fn guard_combo_table(
             field: FIELD,
             baseline: baseline
                 .as_ref()
-                .map_or_else(|| "unknown (re-record the baseline)".to_string(), &render),
+                .map_or_else(|| "unknown (re-record the baseline)".to_string(), render),
             current: current
                 .as_ref()
                 .map_or_else(|| "unknown (re-record the baseline)".to_string(), render),

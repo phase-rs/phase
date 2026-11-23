@@ -30,6 +30,7 @@ const ABILITY_KEYS: &[&str] = &[
     "modal",
     "mode_abilities",
     "repeat_for",
+    "repeat_timing",
     "min_x_value",
     "announced_x",
     "cant_be_copied",

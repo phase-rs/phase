@@ -244,14 +244,15 @@ pub(crate) fn consult_sacrifice(
 }
 
 /// CR 101.4 + CR 616.1: finish the consult of a sacrifice that
-/// [`consult_sacrifice`] parked on a CR 616.1 choice, with the answer `index`.
+/// [`consult_sacrifice`] parked on a CR 616.1 choice, through `operation`: the
+/// chooser's answer, or a departure's reconsultation of the changed event.
 /// Like the consult itself, nothing moves: an approved move is returned
 /// `Ready` for the caller to queue with the rest of the batch, and another
 /// pending choice is returned `NeedsChoice`.
 pub(crate) fn consult_answered_sacrifice(
     state: &mut GameState,
-    index: usize,
     events: &mut Vec<GameEvent>,
+    operation: impl FnOnce(&mut GameState, &mut Vec<GameEvent>) -> ReplacementResult,
 ) -> SacrificeConsult {
     // The inner graveyard move carries the sacrifice it belongs to; the outer
     // Sacrifice proposal names it itself.
@@ -260,7 +261,7 @@ pub(crate) fn consult_answered_sacrifice(
         .as_ref()
         .and_then(|pending| pending.sacrifice_provenance);
     with_consult_rider(state, |state| {
-        let result = replacement::continue_replacement(state, index, events);
+        let result = operation(state, events);
         match inner {
             Some(PendingSacrificeProvenance {
                 object_id,
