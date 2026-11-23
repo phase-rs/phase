@@ -12313,9 +12313,9 @@ fn your_own_face_mocks_you_full_oracle_parses_copy_and_difference_tail() {
     assert_eq!(**right, QuantityExpr::Fixed { value: 2 });
     assert_eq!(name, "Scarecrow");
     assert!(
-        types.contains(&"Artifact".to_string())
-            && types.contains(&"Creature".to_string())
-            && types.contains(&"Scarecrow".to_string()),
+        types.iter().any(|t| t == "Artifact")
+            && types.iter().any(|t| t == "Creature")
+            && types.iter().any(|t| t == "Scarecrow"),
         "Scarecrow must be an artifact creature, got {types:?}"
     );
     assert!(
