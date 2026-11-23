@@ -703,7 +703,7 @@ fn deflecting_swat_uses_the_selected_rangers_event_with_two_triggers() {
     assert_eq!(board.runner.state().objects[&board.equal].controller, P0);
 }
 
-/// CR 603.3a + CR 115.7e + CR 400.7: a restored prompt that still carries an old
+/// CR 603.2 + CR 115.7e + CR 400.7: a restored prompt that still carries an old
 /// alternative must fail closed when its stack entry has lost the event that
 /// supplies the Rangers source-relative power. The raw state round trip is the
 /// same checked persistence boundary used by production restore; this test

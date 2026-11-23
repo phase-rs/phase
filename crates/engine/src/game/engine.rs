@@ -17849,7 +17849,7 @@ pub(crate) fn validate_retarget_submission(
     let trigger_context = Some(crate::game::targeting::StackTriggerContext::for_entry(
         state, entry,
     ));
-    // CR 603.3a + CR 115.7e + CR 400.7: a restored triggered entry whose own event
+    // CR 603.2 + CR 115.7e + CR 400.7: a restored triggered entry whose own event
     // provenance is absent cannot safely accept a changed target. The prompt's
     // saved pool may still contain the pre-save alternatives, but re-evaluating
     // a trigger-relative filter without its event would otherwise let that

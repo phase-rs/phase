@@ -16,7 +16,7 @@ use crate::types::resolution::CapturedDeclarationPayload;
 use crate::types::zones::Zone;
 use std::collections::HashSet;
 
-/// CR 603.3a + CR 400.7: the event provenance owned by one stack entry while
+/// CR 603.2 + CR 400.7: the event provenance owned by one stack entry while
 /// its targets are re-evaluated. This is deliberately borrowed and call-scoped:
 /// retargeting must read the selected entry's event rather than temporarily
 /// replacing `GameState::current_trigger_event` with ambient state.

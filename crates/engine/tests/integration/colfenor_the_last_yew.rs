@@ -198,7 +198,7 @@ fn colfenor_returns_strictly_lesser_card_and_excludes_dying_trigger_object() {
     assert_eq!(
         runner.state().objects[&strict_lesser].zone,
         Zone::Hand,
-        "a card with toughness strictly less than Colfenor's LKI toughness returns"
+        "a card with toughness strictly less than the dying creature's LKI toughness returns"
     );
     assert_eq!(
         runner.state().objects[&equal_toughness].zone,
