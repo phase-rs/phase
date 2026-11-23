@@ -670,7 +670,8 @@ fn cost_rider_reads_a_hand(rider: &CostReduction) -> bool {
         || rider.condition.as_ref().is_some_and(condition_reads_a_hand)
 }
 
-/// Follow the source's counter threshold, including its Boolean filter wrappers.
+/// Any counter threshold anywhere in the source's filter grammar that reads a hand
+/// (via `filter_contains_filter_prop`).
 fn source_filter_reads_a_hand(filter: &TargetFilter) -> bool {
     engine::types::ability::filter_contains_filter_prop(
         filter,

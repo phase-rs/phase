@@ -883,7 +883,8 @@ fn split_second_suppresses_the_exiled_sacrifice_but_preserves_mana_abilities() {
         .expect("the untapped Mountain can still produce mana");
     runner.act(mana).unwrap();
     assert_eq!(runner.state().players[0].mana_pool.total(), 1);
-    // CR 702.61b: a mana ability submitted as an activation is still allowed.
+    // CR 702.61b + CR 605.3b: a mana ability submitted through ActivateAbility
+    // resolves before any split-second gate.
     runner
         .act(GameAction::ActivateAbility {
             source_id: elves,
