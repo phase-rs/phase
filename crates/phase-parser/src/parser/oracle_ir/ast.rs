@@ -1261,6 +1261,7 @@ impl ImperativeFamilyAst {
             | Self::TakeTheInitiative
             | Self::Planeswalk
             | Self::AbandonScheme
+            | Self::SetSchemeInMotion { .. }
             | Self::OpenAttractions { .. }
             | Self::RollToVisitAttractions
             | Self::AssembleContraptions { .. }

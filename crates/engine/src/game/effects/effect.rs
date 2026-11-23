@@ -648,6 +648,7 @@ fn bind_transient_effect(
                 affected,
                 modifications,
                 static_def.condition.clone(),
+                bound_actor,
             );
             return;
         }

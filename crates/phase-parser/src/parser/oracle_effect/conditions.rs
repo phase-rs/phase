@@ -12,10 +12,9 @@ use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use super::super::oracle_nom::condition as nom_condition;
 use super::super::oracle_nom::condition::{
     inject_controller, inject_controller_you, parse_cast_using_teamwork_phrase,
-    parse_pair_attack_predicate,
-    parse_scoped_player_opponent_and_has_condition, parse_spell_target_superlative_suffix,
-    parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
-    DamagedThisWayRecipient,
+    parse_pair_attack_predicate, parse_scoped_player_opponent_and_has_condition,
+    parse_spell_target_superlative_suffix, parse_you_put_onto_battlefield_this_way_clause,
+    parse_zone_changed_this_way_clause, DamagedThisWayRecipient,
 };
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
@@ -7994,6 +7993,7 @@ fn static_condition_to_delayed_ability_condition(
         | StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsAttacking
         | StaticCondition::SourceIsBlocking

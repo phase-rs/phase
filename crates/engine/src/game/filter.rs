@@ -8985,6 +8985,7 @@ pub fn type_filter_matches(
             | TypeFilter::Planeswalker
             | TypeFilter::Battle
             | TypeFilter::Kindred
+            | TypeFilter::Scheme
             | TypeFilter::Permanent
             | TypeFilter::Subtype(_) => false,
         };
