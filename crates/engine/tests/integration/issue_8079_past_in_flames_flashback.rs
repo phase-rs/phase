@@ -39,7 +39,7 @@ use engine::game::combat::AttackTarget;
 use engine::game::keywords::effective_keyword_instances;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::game::zones::move_to_zone;
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastingVariant, CastingVariantChoiceOption, WaitingFor};
@@ -135,6 +135,17 @@ fn assert_only_the_spare_is_left(runner: &GameRunner) {
         vec![(ManaType::Red, SPARE_SOURCE)],
         "everything funded was spent"
     );
+}
+
+/// Move `card` through the replacement-aware zone pipeline and check it arrived.
+fn move_card(runner: &mut GameRunner, card: ObjectId, zone: Zone) {
+    let needs_choice = move_object_for_test(
+        runner.state_mut(),
+        ZoneMoveRequest::effect(card, zone, card),
+        &mut Vec::new(),
+    );
+    assert!(!needs_choice, "the move to {zone:?} needs no choice");
+    assert_eq!(runner.state().objects[&card].zone, zone, "{card:?} moved");
 }
 
 fn assert_settled(runner: &GameRunner) {
@@ -476,18 +487,8 @@ fn a_card_that_leaves_the_graveyard_and_returns_loses_the_grant() {
         ..
     } = board_after_past_in_flames();
     fund(&mut runner, "CR");
-    move_to_zone(
-        runner.state_mut(),
-        desperate_ritual,
-        Zone::Hand,
-        &mut Vec::new(),
-    );
-    move_to_zone(
-        runner.state_mut(),
-        desperate_ritual,
-        Zone::Graveyard,
-        &mut Vec::new(),
-    );
+    move_card(&mut runner, desperate_ritual, Zone::Hand);
+    move_card(&mut runner, desperate_ritual, Zone::Graveyard);
 
     assert!(flashbacks(&runner, desperate_ritual).is_empty());
     assert_eq!(casts_offered(&runner, desperate_ritual), 0);
@@ -638,7 +639,7 @@ fn backdraft_hellkite_attack_grants_flashback_even_if_it_leaves() {
     runner
         .declare_attackers(&[(hellkite, AttackTarget::Player(P1))])
         .expect("Backdraft Hellkite attacks");
-    move_to_zone(runner.state_mut(), hellkite, Zone::Exile, &mut Vec::new());
+    move_card(&mut runner, hellkite, Zone::Exile);
     for _ in 0..40 {
         match &runner.state().waiting_for {
             WaitingFor::Priority { .. }
@@ -664,12 +665,7 @@ fn backdraft_hellkite_attack_grants_flashback_even_if_it_leaves() {
     }
     assert_eq!(runner.state().phase, Phase::PostCombatMain);
     assert_eq!(runner.state().objects[&hellkite].zone, Zone::Exile);
-    move_to_zone(
-        runner.state_mut(),
-        late_ritual,
-        Zone::Graveyard,
-        &mut Vec::new(),
-    );
+    move_card(&mut runner, late_ritual, Zone::Graveyard);
     fund(&mut runner, "CR");
 
     assert_eq!(
@@ -847,12 +843,7 @@ fn ghost_ark_crew_trigger_grants_unearth_to_the_artifact_creature_cards() {
         .expect("crew with the 2/2");
     runner.advance_until_stack_empty();
     assert_settled(&runner);
-    move_to_zone(
-        runner.state_mut(),
-        late_artifact_creature,
-        Zone::Graveyard,
-        &mut Vec::new(),
-    );
+    move_card(&mut runner, late_artifact_creature, Zone::Graveyard);
 
     assert_eq!(unearths(&runner, ornithopter).len(), 1);
     assert!(
