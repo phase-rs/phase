@@ -4455,7 +4455,7 @@ fn collect_matching_triggers_inner(
                 }
                 let later_equal_in_batch =
                     count_later_equal_damage_events_in_batch(event_batch, event, &trigger_event);
-                seed_damage_event_recipient_pin(
+                seed_event_referent_pins(
                     state,
                     &mut pending_ability,
                     Some(&trigger_event),
@@ -13512,7 +13512,7 @@ pub(crate) fn seed_event_context_parent_targets(
 /// Returns the destination incarnation recorded by the zone-change authority.
 /// Never consult live state here: trigger placement can be deferred until after
 /// the same storage id has already left and returned as a different object.
-fn zone_change_parent_target_pin(event: &GameEvent) -> Option<ObjectIncarnationRef> {
+pub(crate) fn zone_change_parent_target_pin(event: &GameEvent) -> Option<ObjectIncarnationRef> {
     let GameEvent::ZoneChanged {
         object_id,
         from,
@@ -13577,23 +13577,6 @@ fn effect_uses_parent_target(effect: &Effect) -> bool {
             .target_filter()
             .is_some_and(|f| matches!(f, TargetFilter::ParentTarget | TargetFilter::AttachedTo)),
     }
-}
-
-fn ability_uses_event_target_prevent_damage(ability: &ResolvedAbility) -> bool {
-    matches!(
-        &ability.effect,
-        Effect::PreventDamage {
-            target: TargetFilter::EventTarget,
-            ..
-        }
-    ) || ability
-        .sub_ability
-        .as_deref()
-        .is_some_and(ability_uses_event_target_prevent_damage)
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(ability_uses_event_target_prevent_damage)
 }
 
 fn count_later_equal_damage_events_in_batch(
@@ -13673,29 +13656,337 @@ fn damage_event_recipient_pin(
     Some(ObjectIncarnationRef::of(*target_id, incarnation))
 }
 
-/// CR 400.7 + CR 608.2k + CR 120.1: Pin the exact damage recipient incarnation
-/// on an ability chain that resolves `TargetFilter::EventTarget` into a
-/// prevention shield (`Effect::PreventDamage`). Captured when the trigger is
-/// collected / placed on the stack so that if the recipient leaves the
-/// battlefield and returns before the trigger resolves — even if the same
-/// dealer deals an equal amount of damage to the returned incarnation before
-/// the original trigger resolves — the original trigger remains bound to its
-/// own event's recipient incarnation and does not shield the new object.
-pub(crate) fn seed_damage_event_recipient_pin(
+/// CR 400.7 + CR 603.3 + CR 608.2k: capture, when the trigger is collected (and
+/// again, without overwriting, when it is placed on the stack), the exact
+/// incarnation of each event-context object every chain node names through an
+/// operand slot `effect_parent_ref_slots` surfaces: `TriggeringSource` and
+/// `EventTarget`, plus `ParentTarget` where the node's own resolver reads it
+/// from the event (an Attach operand, a perpetual boon's cast spell). The pins
+/// are keyed per node in `target_incarnations` and read by
+/// `targeting::resolve_event_referent`. A damage recipient's pin comes from the
+/// ledger record of this very event (`later_equal_in_batch` disambiguates equal
+/// hits in one batch), so a later equal hit on a returned object is not
+/// mistaken for it.
+pub(crate) fn seed_event_referent_pins(
     state: &GameState,
     ability: &mut ResolvedAbility,
     trigger_event: Option<&GameEvent>,
     later_equal_in_batch: usize,
 ) {
-    if !ability.target_incarnations.is_empty() || !ability_uses_event_target_prevent_damage(ability)
-    {
+    let Some(event) = trigger_event else {
         return;
+    };
+    let mut ids = Vec::new();
+    // CR 707.10 + CR 608.2h: a spell copy reads its source's information, from
+    // the departed-spell record once the spell has left the stack;
+    // `copy_spell::copy_source_entry` owns that identity, so it takes no pin.
+    let informs_only = matches!(ability.effect, Effect::CopySpell { .. });
+    for slot in crate::types::ability::effect_parent_ref_slots(&ability.effect)
+        .into_iter()
+        .filter(|_| !informs_only)
+    {
+        for anaphor in [TargetFilter::TriggeringSource, TargetFilter::EventTarget] {
+            if crate::types::ability::filter_refs_event_subject(slot, &anaphor) {
+                ids.extend(event_object(state, &anaphor, ability.source_id, event));
+            }
+        }
+        if *slot == TargetFilter::ParentTarget {
+            // CR 400.7 + CR 608.2k: an untargeted ParentTarget names an object
+            // from the trigger event only for these resolvers: a perpetual
+            // boon's subject, and the entering attachment of "attach it".
+            ids.extend(match &ability.effect {
+                Effect::ApplyPerpetual { .. } => {
+                    super::effects::perpetual::parent_object_from_trigger_event(Some(event))
+                }
+                Effect::Attach { attachment, .. } => std::ptr::eq(attachment, slot)
+                    .then(|| super::effects::attach::entering_object(event))
+                    .flatten(),
+                Effect::StartYourEngines { .. }
+                | Effect::ChangeSpeed { .. }
+                | Effect::DealDamage { .. }
+                | Effect::ApplyPostReplacementDamage { .. }
+                | Effect::ResumeDamageBatch { .. }
+                | Effect::EachDealsDamageEqualToPower { .. }
+                | Effect::EachSourceDealsDamage { .. }
+                | Effect::Draw { .. }
+                | Effect::Pump { .. }
+                | Effect::PairWith { .. }
+                | Effect::Destroy { .. }
+                | Effect::Regenerate { .. }
+                | Effect::RemoveAllDamage { .. }
+                | Effect::Counter { .. }
+                | Effect::CounterAll { .. }
+                | Effect::Token { .. }
+                | Effect::GainLife { .. }
+                | Effect::LoseLife { .. }
+                | Effect::SetTapState { .. }
+                | Effect::RemoveCounter { .. }
+                | Effect::Sacrifice { .. }
+                | Effect::DiscardCard { .. }
+                | Effect::Mill { .. }
+                | Effect::Scry { .. }
+                | Effect::PumpAll { .. }
+                | Effect::DamageAll { .. }
+                | Effect::DamageEachPlayer { .. }
+                | Effect::DestroyAll { .. }
+                | Effect::ChangeZone { .. }
+                | Effect::ChangeZoneAll { .. }
+                | Effect::Dig { .. }
+                | Effect::GainControl { .. }
+                | Effect::GainControlAll { .. }
+                | Effect::ControlNextTurn { .. }
+                | Effect::UnattachAll { .. }
+                | Effect::Surveil { .. }
+                | Effect::Fight { .. }
+                | Effect::Bounce { .. }
+                | Effect::BounceAll { .. }
+                | Effect::Explore
+                | Effect::ExploreAll { .. }
+                | Effect::Investigate
+                | Effect::Tribute { .. }
+                | Effect::TimeTravel
+                | Effect::BecomeMonarch { .. }
+                | Effect::NoOp
+                | Effect::Proliferate
+                | Effect::ProliferateTarget { .. }
+                | Effect::Populate
+                | Effect::Clash
+                | Effect::ExileTopCardContest { .. }
+                | Effect::Behold { .. }
+                | Effect::EndTheTurn
+                | Effect::EndCombatPhase
+                | Effect::Vote { .. }
+                | Effect::SeparateIntoPiles { .. }
+                | Effect::SwitchPT { .. }
+                | Effect::CopySpell { .. }
+                | Effect::EpicCopy { .. }
+                | Effect::CastCopyOfCard { .. }
+                | Effect::CopyTokenOf { .. }
+                | Effect::CreateTokenCopyFromPool { .. }
+                | Effect::Myriad
+                | Effect::Encore
+                | Effect::CombineHost { .. }
+                | Effect::ChooseAugmentAndCombineWithHost { .. }
+                | Effect::Meld { .. }
+                | Effect::ExileHaunting { .. }
+                | Effect::HideawayConceal { .. }
+                | Effect::CopyTokenBlockingAttacker { .. }
+                | Effect::BecomeCopy { .. }
+                | Effect::ChoosePermanent { .. }
+                | Effect::GainActivatedAbilitiesOfTarget { .. }
+                | Effect::ChooseCard { .. }
+                | Effect::PutCounter { .. }
+                | Effect::ChooseCounterKind { .. }
+                | Effect::PutChosenCounter { .. }
+                | Effect::PutCounterAll { .. }
+                | Effect::MultiplyCounter { .. }
+                | Effect::ChooseCounterAdjustment { .. }
+                | Effect::DoublePT { .. }
+                | Effect::DoublePTAll { .. }
+                | Effect::MoveCounters { .. }
+                | Effect::ReproduceEventCounters { .. }
+                | Effect::Animate { .. }
+                | Effect::ReturnAsAura { .. }
+                | Effect::RegisterBending { .. }
+                | Effect::GenericEffect { .. }
+                | Effect::Cleanup { .. }
+                | Effect::Mana { .. }
+                | Effect::Discard { .. }
+                | Effect::Shuffle { .. }
+                | Effect::Transform { .. }
+                | Effect::FlipPermanent { .. }
+                | Effect::SearchLibrary { .. }
+                | Effect::SearchOutsideGame { .. }
+                | Effect::OpenBoosterPack { .. }
+                | Effect::RevealHand { .. }
+                | Effect::RevealFromHand { .. }
+                | Effect::Reveal { .. }
+                | Effect::RevealChosenNumbers { .. }
+                | Effect::RevealTop { .. }
+                | Effect::ExileTop { .. }
+                | Effect::ExileFaceDownPile { .. }
+                | Effect::TargetOnly { .. }
+                | Effect::Choose { .. }
+                | Effect::OpponentGuess { .. }
+                | Effect::SwapChosenLabels { .. }
+                | Effect::ChooseDamageSource { .. }
+                | Effect::Suspect { .. }
+                | Effect::Unsuspect { .. }
+                | Effect::Connive { .. }
+                | Effect::PhaseOut { .. }
+                | Effect::PhaseIn { .. }
+                | Effect::ForceBlock { .. }
+                | Effect::ForceAttack { .. }
+                | Effect::SolveCase
+                | Effect::BecomePrepared { .. }
+                | Effect::BecomeUnprepared { .. }
+                | Effect::BecomeSaddled { .. }
+                | Effect::SetClassLevel { .. }
+                | Effect::CreateDelayedTrigger { .. }
+                | Effect::AddTargetReplacement { .. }
+                | Effect::AddRestriction { .. }
+                | Effect::ReduceNextSpellCost { .. }
+                | Effect::GrantNextSpellAbility { .. }
+                | Effect::AddPendingETBCounters { .. }
+                | Effect::AddPendingEntersModifications { .. }
+                | Effect::CreateEmblem { .. }
+                | Effect::CreateBoon { .. }
+                | Effect::NoteNumber { .. }
+                | Effect::PayCost { .. }
+                | Effect::CastFromZone { .. }
+                | Effect::FreeCastFromZones { .. }
+                | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+                | Effect::PreventDamage { .. }
+                | Effect::CreateDamageReplacement { .. }
+                | Effect::CreateDrawReplacement { .. }
+                | Effect::CreatePlaneswalkReplacement { .. }
+                | Effect::LoseTheGame { .. }
+                | Effect::WinTheGame { .. }
+                | Effect::RollDie { .. }
+                | Effect::FlipCoins { .. }
+                | Effect::RingTemptsYou
+                | Effect::VentureIntoDungeon
+                | Effect::VentureInto { .. }
+                | Effect::TakeTheInitiative
+                | Effect::ArrangePlanarDeckTop { .. }
+                | Effect::Planeswalk
+                | Effect::AbandonScheme
+                | Effect::ChaosEnsues
+                | Effect::ReverseTurnOrder
+                | Effect::RedistributeLifeTotals
+                | Effect::OpenAttractions { .. }
+                | Effect::RollToVisitAttractions
+                | Effect::AssembleContraptions { .. }
+                | Effect::AssembleContraptionsFromRollDifference
+                | Effect::CrankContraptions { .. }
+                | Effect::ReassembleContraption { .. }
+                | Effect::AssembleContraptionOnSprocket { .. }
+                | Effect::ReassembleContraptionOnSprocket { .. }
+                | Effect::PutSticker { .. }
+                | Effect::ApplySticker { .. }
+                | Effect::ProcessRadCounters
+                | Effect::GrantCastingPermission { .. }
+                | Effect::ChooseFromZone { .. }
+                | Effect::RememberCard { .. }
+                | Effect::NoteManaSpent
+                | Effect::ForEachCategory { .. }
+                | Effect::ChooseObjectsIntoTrackedSet { .. }
+                | Effect::ChooseAndSacrificeRest { .. }
+                | Effect::EachPlayerCopyChosen { .. }
+                | Effect::Exploit { .. }
+                | Effect::GainEnergy { .. }
+                | Effect::GivePlayerCounter { .. }
+                | Effect::LoseAllPlayerCounters { .. }
+                | Effect::ExileFromTopUntil { .. }
+                | Effect::RevealUntil { .. }
+                | Effect::Discover { .. }
+                | Effect::PhysicalContest { .. }
+                | Effect::Heist { .. }
+                | Effect::HeistExile
+                | Effect::Cascade
+                | Effect::Ripple { .. }
+                | Effect::MiracleCast { .. }
+                | Effect::MadnessCast { .. }
+                | Effect::PutAtLibraryPosition { .. }
+                | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+                | Effect::PutOnTopOrBottom { .. }
+                | Effect::GiftDelivery { .. }
+                | Effect::Goad { .. }
+                | Effect::GoadAll { .. }
+                | Effect::Detain { .. }
+                | Effect::SetRoomDoorLock { .. }
+                | Effect::ExchangeControl { .. }
+                | Effect::ChangeTargets { .. }
+                | Effect::Manifest { .. }
+                | Effect::ManifestDread
+                | Effect::Cloak { .. }
+                | Effect::TurnFaceUp { .. }
+                | Effect::TurnFaceDown { .. }
+                | Effect::ExtraTurn { .. }
+                | Effect::GrantExtraLoyaltyActivations { .. }
+                | Effect::SkipNextTurn { .. }
+                | Effect::SkipNextStep { .. }
+                | Effect::AdditionalPhase { .. }
+                | Effect::ModifyAnnouncedX { .. }
+                | Effect::Double { .. }
+                | Effect::RuntimeHandled { .. }
+                | Effect::Incubate { .. }
+                | Effect::Amass { .. }
+                | Effect::EmpowerJace { .. }
+                | Effect::Monstrosity { .. }
+                | Effect::HordePlayCard { .. }
+                | Effect::Specialize
+                | Effect::Renown { .. }
+                | Effect::Bolster { .. }
+                | Effect::Adapt { .. }
+                | Effect::Learn
+                | Effect::Forage
+                | Effect::CompletePlayerAction { .. }
+                | Effect::Harness
+                | Effect::CollectEvidence { .. }
+                | Effect::Endure { .. }
+                | Effect::BlightEffect { .. }
+                | Effect::Seek { .. }
+                | Effect::SetLifeTotal { .. }
+                | Effect::ExchangeLifeWithStat { .. }
+                | Effect::ExchangeLifeTotals { .. }
+                | Effect::SetDayNight { .. }
+                | Effect::GiveControl { .. }
+                | Effect::RemoveFromCombat { .. }
+                | Effect::BecomeBlocked { .. }
+                | Effect::Conjure { .. }
+                | Effect::CreateCardCopyByName { .. }
+                | Effect::Intensify { .. }
+                | Effect::DraftFromSpellbook { .. }
+                | Effect::ChooseOneOf { .. }
+                | Effect::Unimplemented { .. } => None,
+            });
+        }
     }
-    if let Some(pin) = damage_event_recipient_pin(state, trigger_event, later_equal_in_batch) {
-        ability.set_target_incarnations_recursive(vec![pin]);
+    for id in ids {
+        if ability.target_incarnations.iter().any(|pin| {
+            pin.object_id == id && pin.incarnation != crate::types::identifiers::LEGACY_INCARNATION
+        }) {
+            continue;
+        }
+        let recipient = matches!(event, GameEvent::DamageDealt { target: TargetRef::Object(t), .. } if *t == id);
+        let pin = if recipient {
+            damage_event_recipient_pin(state, Some(event), later_equal_in_batch)
+        } else {
+            // CR 400.7 + CR 113.7a: the incarnation the event itself recorded (a
+            // zone change's arrival, a damage dealer's, tapped or attacking
+            // object's stamp) decides; the live object only when it recorded none.
+            super::targeting::event_recorded_pin(event, id).or_else(|| {
+                state
+                    .objects
+                    .get(&id)
+                    .map(ObjectIncarnationRef::from_object)
+            })
+        };
+        ability.target_incarnations.extend(pin);
+    }
+    for (_, child) in ability.child_links_mut() {
+        seed_event_referent_pins(state, child, Some(event), later_equal_in_batch);
     }
 }
 
+fn event_object(
+    state: &GameState,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    event: &GameEvent,
+) -> Option<ObjectId> {
+    // allow-raw-event-referent: names the event's object so its identity can be pinned
+    match super::targeting::resolve_event_context_target_for_event_or_state(
+        state,
+        filter,
+        source_id,
+        Some(event),
+    )? {
+        TargetRef::Object(id) => Some(id),
+        TargetRef::Player(_) => None,
+    }
+}
 pub(crate) fn push_pending_trigger_to_stack_with_event_batch(
     state: &mut GameState,
     trigger: PendingTrigger,
@@ -13830,7 +14121,7 @@ fn push_pending_trigger_to_stack_with_firing_and_duration_events(
         trigger_event.as_ref(),
         EventContextSeedTiming::StackPush,
     );
-    seed_damage_event_recipient_pin(state, &mut ability, trigger_event.as_ref(), 0);
+    seed_event_referent_pins(state, &mut ability, trigger_event.as_ref(), 0);
 
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
@@ -14112,6 +14403,13 @@ fn assign_pending_trigger_entry_ability(
             StackEntryKind::TriggeredAbility { trigger_event, .. } => trigger_event.as_ref(),
             _ => None,
         });
+    let provisional_ability = state
+        .stack
+        .iter()
+        .rev()
+        .find(|entry| entry.id == entry_id)
+        .and_then(|entry| entry.ability())
+        .cloned();
     let mut assigned_ability = source_ability.clone();
     // CR 603.3c + CR 603.3d: Target/mode construction replaces the provisional stack
     // ability before any player receives priority. Rebind event-referential
@@ -14125,7 +14423,12 @@ fn assign_pending_trigger_entry_ability(
     // push time (`push_pending_trigger_to_stack_with_firing_and_duration_events`)
     // for "that spell" / self-cast "this spell".
     assigned_ability.context.triggering_spell = triggering_spell_pin(state, trigger_event);
-    seed_damage_event_recipient_pin(state, &mut assigned_ability, trigger_event, 0);
+    // CR 400.7 + CR 603.3d: the event pins captured at collection (with the
+    // batch ordinal) survive target construction; seeding then fills only gaps.
+    if let (Some(provisional), Some(event)) = (provisional_ability.as_ref(), trigger_event) {
+        carry_event_referent_pins(state, provisional, &mut assigned_ability, event);
+    }
+    seed_event_referent_pins(state, &mut assigned_ability, trigger_event, 0);
 
     let Some(entry) = state
         .stack
@@ -14144,14 +14447,36 @@ fn assign_pending_trigger_entry_ability(
     for duration_event in ability.latched_duration_events() {
         assigned_ability.record_duration_event_recursive(duration_event);
     }
-    if assigned_ability.target_incarnations.is_empty()
-        && !ability.target_incarnations.is_empty()
-        && ability_uses_event_target_prevent_damage(&assigned_ability)
-    {
-        assigned_ability.set_target_incarnations_recursive(ability.target_incarnations.clone());
-    }
     *ability = assigned_ability;
     true
+}
+
+/// Copies, node by node, the provisional entry's pins for objects the trigger
+/// `event` names onto the constructed ability (whose chain has the same shape).
+fn carry_event_referent_pins(
+    state: &GameState,
+    from: &ResolvedAbility,
+    to: &mut ResolvedAbility,
+    event: &GameEvent,
+) {
+    let named: Vec<ObjectId> = [TargetFilter::TriggeringSource, TargetFilter::EventTarget]
+        .iter()
+        .filter_map(|filter| event_object(state, filter, to.source_id, event))
+        .chain(super::targeting::extract_source_from_event(event))
+        .collect();
+    for pin in &from.target_incarnations {
+        if named.contains(&pin.object_id)
+            && !to
+                .target_incarnations
+                .iter()
+                .any(|own| own.object_id == pin.object_id)
+        {
+            to.target_incarnations.push(*pin);
+        }
+    }
+    for ((_, from_child), (_, to_child)) in from.child_links().zip(to.child_links_mut()) {
+        carry_event_referent_pins(state, from_child, to_child, event);
+    }
 }
 
 /// Outcome of dispatching one pending-trigger context through

@@ -617,6 +617,12 @@ fn runtime_granted_top_of_library_plot_abilities(
     )]
 }
 
+/// CR 406.3a: a face-down card in exile has no printed characteristics.
+/// Abilities granted independently to that object retain their own provenance.
+fn printed_activation_is_hidden(obj: &GameObject, ability: &AbilityDefinition) -> bool {
+    obj.zone == Zone::Exile && obj.face_down && ability.granting_object.is_none()
+}
+
 pub fn activated_ability_definitions(
     state: &GameState,
     source_id: ObjectId,
@@ -625,8 +631,13 @@ pub fn activated_ability_definitions(
         return Vec::new();
     };
     let printed_len = obj.abilities.len();
-    let mut abilities: Vec<(usize, AbilityDefinition)> =
-        obj.abilities.iter().cloned().enumerate().collect();
+    let mut abilities: Vec<(usize, AbilityDefinition)> = obj
+        .abilities
+        .iter()
+        .enumerate()
+        .filter(|(_, ability)| !printed_activation_is_hidden(obj, ability))
+        .map(|(index, ability)| (index, ability.clone()))
+        .collect();
     abilities.extend(
         runtime_granted_cycling_abilities(state, source_id)
             .into_iter()
@@ -657,6 +668,9 @@ pub(crate) fn activation_ability_definition(
 ) -> Option<AbilityDefinition> {
     let obj = state.objects.get(&source_id)?;
     let mut ability = if let Some(ability) = obj.abilities.get(ability_index) {
+        if printed_activation_is_hidden(obj, ability) {
+            return None;
+        }
         ability.clone()
     } else {
         let offset = ability_index.checked_sub(obj.abilities.len())?;
@@ -30727,6 +30741,12 @@ fn manual_activation_life_retry_possible(
         .any(|route| activation_cost_pays_life(route, life_colors))
 }
 
+/// CR 702.61a: split second bars non-mana activations while the spell is on the stack.
+fn split_second_prevents_activation(state: &GameState, ability: &AbilityDefinition) -> bool {
+    super::keywords::stack_has_split_second(state)
+        && !super::mana_abilities::is_mana_ability(ability)
+}
+
 /// CR 602.5 + CR 118.3: the one activation-legality evaluation, shared by
 /// enforcement (`ActivationQuery::Legality`) and the display read-out
 /// (`ActivationQuery::BlockReason`). See [`ActivationQuery`] for what the two
@@ -30766,11 +30786,7 @@ pub(crate) fn activation_verdict(
         return ActivationVerdict::Illegal;
     }
 
-    // CR 702.61a + CR 702.61b: While a spell with split second is on the stack,
-    // players can't activate abilities that aren't mana abilities.
-    if super::keywords::stack_has_split_second(state)
-        && !super::mana_abilities::is_mana_ability(&ability_def)
-    {
+    if split_second_prevents_activation(state, &ability_def) {
         return ActivationVerdict::Illegal;
     }
 
@@ -32300,6 +32316,12 @@ fn activate_with_cost_carrier(
                 required_zone
             )));
         }
+    }
+
+    if split_second_prevents_activation(state, &ability_def) {
+        return Err(EngineError::ActionNotAllowed(
+            "Split second prevents activating a non-mana ability".into(),
+        ));
     }
 
     // CR 702.170b + CR 116.2k + CR 602.1c: Plot is a SPECIAL ACTION, not the
@@ -34811,6 +34833,9 @@ impl TargetRead {
 fn parsed_condition_reads_targets(condition: &ParsedCondition, read: TargetRead) -> bool {
     match condition {
         // CR 115.1: the condition is ABOUT the chosen targets.
+        ParsedCondition::SourceMatchesFilter { filter } => {
+            target_filter_reads_chosen_target(filter, read)
+        }
         ParsedCondition::SpellTargetsFilter { .. } => read.includes_bindable(),
         ParsedCondition::QuantityComparison { lhs, rhs, .. } => {
             quantity_expr_reads_target_object(lhs, read)

@@ -229,10 +229,12 @@ pub fn resolve(
             // sub-ability cannot inherit the parent's targets via chain
             // propagation in `effects::mod.rs::resolve_ability_chain` (issue
             // #323 class).
-            crate::game::effects::resolved_effect_object_ids(
+            // CR 707.2 + CR 608.2h: the copy reads the referent's copiable values.
+            crate::game::effects::resolved_effect_object_ids_with(
                 state,
                 resolution_ability,
                 target_filter,
+                crate::game::targeting::ReferentRead::Inform,
             )
         };
         copy_source_ids

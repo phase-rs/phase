@@ -61,7 +61,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 | 3 | Anaphor bound to wrong referent | 395 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 377 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 321 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
-| 6 | Disjunctive (or-list) collapsed to first branch | 223 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
+| 6 | Disjunctive (or-list) collapsed to first branch | 222 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 207 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 207 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 176 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
@@ -86,7 +86,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2379/4504 ≈ 52.8% of all misparse appearances; the top 10 cover 3355/4504 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
+> The top **5** root causes cover 2376/4499 ≈ 52.8% of all misparse appearances; the top 10 cover 3350/4499 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
 
 ## Full card lists per root cause
 
@@ -2517,7 +2517,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 </details>
 
-### 6. Disjunctive (or-list) collapsed to first branch  (223 cards)
+### 6. Disjunctive (or-list) collapsed to first branch  (222 cards)
 
 **Signature.** An 'A or B (or C)' enumeration in a target/filter/cost/trigger/effect collapses to the first branch (or splits into a dangling Unknown); the OR/AnyOf union is never built.
 
@@ -2618,7 +2618,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Glittering Massif
 - Godhunter Octopus
 - Golem Artisan
-- Greater Gargadon
 - Guru Pathik
 - HYDRA Assault Robot
 - Hand of Vecna

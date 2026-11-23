@@ -325,6 +325,23 @@ pub(crate) fn resolved_effect_object_ids(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
 ) -> Vec<ObjectId> {
+    resolved_effect_object_ids_with(
+        state,
+        ability,
+        target_filter,
+        crate::game::targeting::ReferentRead::Affect,
+    )
+}
+
+/// [`resolved_effect_object_ids`] with an explicit
+/// [`crate::game::targeting::ReferentRead`]; `Inform` is for CR 608.2h
+/// information readers (a copy source, a name to conjure).
+pub(crate) fn resolved_effect_object_ids_with(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    read: crate::game::targeting::ReferentRead,
+) -> Vec<ObjectId> {
     match target_filter {
         TargetFilter::ParentTargetSlot { .. } => {
             crate::game::targeting::resolved_object_ids_for_filter(state, ability, target_filter)
@@ -336,7 +353,7 @@ pub(crate) fn resolved_effect_object_ids(
         {
             let mut ids = effect_object_targets(
                 target_filter,
-                &crate::game::targeting::resolved_targets(ability, target_filter, state),
+                &crate::game::targeting::resolved_targets_with(ability, target_filter, state, read),
             );
             if ability.self_ref_is_current(state) && !ids.contains(&ability.source_id) {
                 ids.insert(0, ability.source_id);
@@ -345,7 +362,7 @@ pub(crate) fn resolved_effect_object_ids(
         }
         _ => effect_object_targets(
             target_filter,
-            &crate::game::targeting::resolved_targets(ability, target_filter, state),
+            &crate::game::targeting::resolved_targets_with(ability, target_filter, state, read),
         ),
     }
 }
@@ -966,6 +983,25 @@ pub(crate) fn settle_forwarded_zone_result(
     state: &mut GameState,
     group: &crate::types::game_state::LogicalZoneChangeGroup,
 ) {
+    // CR 400.7j: a paused move of this effect completed; its later instructions,
+    // parked in the active continuation, find what it moved.
+    let moved: Vec<GameEvent> = group
+        .all_origin_occurrences
+        .iter()
+        .map(|occurrence| occurrence.event.clone())
+        .collect();
+    if let Some(chain) = state.active_ability_continuation().and_then(|pending| {
+        let trigger_event = pending
+            .trigger_context
+            .as_ref()
+            .and_then(|context| context.event.as_ref())
+            .or(state.current_trigger_event.as_ref());
+        relatch_event_referent_pins(trigger_event, &pending.chain, &moved)
+    }) {
+        if let Some(frame) = state.resolution_stack.active_ability_continuation_mut() {
+            frame.pending.chain = chain;
+        }
+    }
     let Some(marker) = state
         .ability_continuation_at_top_or_parent()
         .and_then(|frame| {
@@ -13253,7 +13289,8 @@ fn parsed_condition_reads_filter_population(
         ParsedCondition::YouCastSpellThisTurn { filter } => filter.as_ref().is_some_and(has_filter),
         ParsedCondition::BattlefieldEntriesThisTurn { filter, .. } => has_filter(filter),
         ParsedCondition::PlayerCountAtLeast { filter, .. } => has_player(filter),
-        ParsedCondition::SpellTargetsFilter { filter } => has_filter(filter),
+        ParsedCondition::SourceMatchesFilter { filter }
+        | ParsedCondition::SpellTargetsFilter { filter } => has_filter(filter),
         ParsedCondition::And { conditions } => conditions.iter().any(recurse),
         ParsedCondition::Or { conditions } => conditions.iter().any(recurse),
         ParsedCondition::Not { condition } => recurse(condition),
@@ -22227,10 +22264,8 @@ fn ability_with_event_context_targets(
                             .into_iter()
                             .next()
                     }
-                    _ => crate::game::targeting::resolve_event_context_target(
-                        state,
-                        filter,
-                        pending.source_id,
+                    _ => crate::game::targeting::affected_event_context_target(
+                        state, &pending, filter,
                     ),
                 };
                 if let Some(target) = target {
@@ -22300,11 +22335,8 @@ fn hydrate_event_context_targets<'a>(
                 ) || !ability.has_authoritative_empty_binding()
             })
             .and_then(|filter| {
-                let target = crate::game::targeting::resolve_event_context_target(
-                    state,
-                    filter,
-                    ability.source_id,
-                )?;
+                let target =
+                    crate::game::targeting::affected_event_context_target(state, ability, filter)?;
                 // CR 400.7: hydration is an inference seam too; it admits an
                 // own-source referent only through the self-reference authority.
                 if matches!(filter, TargetFilter::ParentTarget) {
@@ -22346,6 +22378,86 @@ fn hydrate_event_context_targets<'a>(
     Cow::Owned(resolved)
 }
 
+/// CR 400.7j: "If an effect causes an object to move to a public zone, other
+/// parts of that effect can find that object." When this instruction's own
+/// events moved an event referent, re-pin the later instructions' captured pin
+/// from the departed incarnation to the arrival. An unpinned node gets the
+/// arrival pin when the departure is the incarnation the trigger event recorded. A move by another spell or ability never appears
+/// in these events, so it can't relatch. Delayed-trigger nodes keep their own
+/// creation-time successor rule.
+fn relatch_event_referent_pins(
+    trigger_event: Option<&GameEvent>,
+    sub: &ResolvedAbility,
+    effect_events: &[GameEvent],
+) -> Option<Box<ResolvedAbility>> {
+    let moves: Vec<_> = effect_events
+        .iter()
+        .filter_map(|event| {
+            let GameEvent::ZoneChanged {
+                object_id,
+                to,
+                record,
+                ..
+            } = event
+            else {
+                return None;
+            };
+            let departed = record.trigger_source_context()?.identity.reference;
+            let arrived = crate::game::triggers::zone_change_parent_target_pin(event)?;
+            (to.is_public() && departed.object_id == *object_id).then_some((departed, arrived))
+        })
+        .collect();
+    if moves.is_empty() {
+        return None;
+    }
+    let recorded: Vec<_> = trigger_event
+        .into_iter()
+        .flat_map(|event| {
+            moves.iter().filter_map(move |(departed, _)| {
+                crate::game::targeting::event_recorded_pin(event, departed.object_id)
+            })
+        })
+        .collect();
+    let mut owned = Box::new(sub.clone());
+    relatch_node(&mut owned, &moves, &recorded).then_some(owned)
+}
+
+fn relatch_node(
+    node: &mut ResolvedAbility,
+    moves: &[(
+        crate::types::identifiers::ObjectIncarnationRef,
+        crate::types::identifiers::ObjectIncarnationRef,
+    )],
+    recorded: &[crate::types::identifiers::ObjectIncarnationRef],
+) -> bool {
+    if matches!(node.effect, Effect::CreateDelayedTrigger { .. }) {
+        return false;
+    }
+    let mut changed = false;
+    for (departed, arrived) in moves {
+        if let Some(pin) = node
+            .target_incarnations
+            .iter_mut()
+            .find(|pin| *pin == departed)
+        {
+            *pin = *arrived;
+            changed = true;
+        } else if recorded.contains(departed)
+            && !node
+                .target_incarnations
+                .iter()
+                .any(|pin| pin.object_id == departed.object_id)
+        {
+            node.target_incarnations.push(*arrived);
+            changed = true;
+        }
+    }
+    for (_, child) in node.child_links_mut() {
+        changed |= relatch_node(child, moves, recorded);
+    }
+    changed
+}
+
 /// CR 603.2 + CR 701.3a: Resolve `ParentTarget` for a nested forward-result
 /// Attach host when the chain still has no bound parent target.
 fn nested_forward_result_attach_parent_target_ref(
@@ -22377,11 +22489,7 @@ fn nested_forward_result_attach_parent_target_ref(
     else {
         return None;
     };
-    crate::game::targeting::resolve_event_context_target(
-        state,
-        &TargetFilter::ParentTarget,
-        ability.source_id,
-    )
+    crate::game::targeting::affected_event_context_target(state, sub, &TargetFilter::ParentTarget)
 }
 
 /// CR 603.2: Filters that auto-resolve from `state.current_trigger_event` during
@@ -30021,6 +30129,20 @@ fn resolve_chain_body(
             // live, and a parked outer instruction's resume is its own boundary.
             return Ok(progress);
         };
+        // CR 400.7j: an event referent this instruction moved to a public zone is
+        // still found there by the later instructions of the same effect.
+        let relatched;
+        let sub = match relatch_event_referent_pins(
+            state.current_trigger_event.as_ref(),
+            sub,
+            &events[events_before..],
+        ) {
+            Some(owned) => {
+                relatched = owned;
+                &relatched
+            }
+            None => sub,
+        };
         // CR 603.10 + CR 608.2c: the parent instruction completed; its entries are observed
         // before the next instruction can change the entrant (S-a). The boundary is the next
         // WRITTEN instruction, judged after the metadata splice: a consumed rider modifies only
@@ -32997,20 +33119,25 @@ fn shared_quality_operand_values(
                     &state.all_creature_types,
                 )
             }),
-        _ => crate::game::targeting::resolved_targets(ability, operand, state)
-            .into_iter()
-            .find_map(|target| match target {
-                TargetRef::Object(id) => Some(id),
-                TargetRef::Player(_) => None,
-            })
-            .and_then(|id| state.objects.get(&id))
-            .map(|obj| {
-                crate::game::filter::object_shared_quality_values_public(
-                    obj,
-                    quality,
-                    &state.all_creature_types,
-                )
-            }),
+        _ => crate::game::targeting::resolved_targets_with(
+            ability,
+            operand,
+            state,
+            crate::game::targeting::ReferentRead::Inform,
+        )
+        .into_iter()
+        .find_map(|target| match target {
+            TargetRef::Object(id) => Some(id),
+            TargetRef::Player(_) => None,
+        })
+        .and_then(|id| state.objects.get(&id))
+        .map(|obj| {
+            crate::game::filter::object_shared_quality_values_public(
+                obj,
+                quality,
+                &state.all_creature_types,
+            )
+        }),
     }
 }
 
@@ -33656,19 +33783,24 @@ pub(crate) fn evaluate_condition(
             _ => false,
         },
         AbilityCondition::TargetSharesNameWithOtherExiledThisWay { target } => {
-            crate::game::targeting::resolved_targets(ability, target, state)
-                .into_iter()
-                .find_map(|target_ref| match target_ref {
-                    TargetRef::Object(id) => Some(id),
-                    _ => None,
-                })
-                .is_some_and(|id| {
-                    crate::game::exile_links::shares_name_with_other_exiled_by_source(
-                        state,
-                        ability.source_id,
-                        id,
-                    )
-                })
+            crate::game::targeting::resolved_targets_with(
+                ability,
+                target,
+                state,
+                crate::game::targeting::ReferentRead::Inform,
+            )
+            .into_iter()
+            .find_map(|target_ref| match target_ref {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .is_some_and(|id| {
+                crate::game::exile_links::shares_name_with_other_exiled_by_source(
+                    state,
+                    ability.source_id,
+                    id,
+                )
+            })
         }
         // CR 400.7: source permanent entered the battlefield this turn.
         // For the "unless ~ entered this turn" sense, wrap with `Not`.
