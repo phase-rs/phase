@@ -6,6 +6,10 @@ import {
   exportMtgaDeck,
   detectAndParseDeck,
   deriveImportedDeckName,
+  deckEntryKey,
+  deduplicateEntries,
+  type DeckEntry,
+  looksCommanderSingleton,
   repairParsedDeck,
   assignOathbreakerSlots,
   expandParsedDeck,
@@ -785,20 +789,70 @@ describe('sourcePrinting capture', () => {
     expect(result.main[0].sourcePrinting).toBeUndefined();
   });
 
-  it('preserves sourcePrinting through deduplicateEntries', () => {
-    const content = '2 Lightning Bolt (FDN) 123\n2 Lightning Bolt (FDN) 123';
-    const result = parseMtgaDeck(content);
-    expect(result.main).toHaveLength(1);
-    expect(result.main[0].count).toBe(4);
-    expect(result.main[0].sourcePrinting).toEqual({ setCode: 'fdn', collectorNumber: '123' });
+  it('keys a malformed stored printing like an entry without printing data', () => {
+    const entry = { count: 1, name: 'Forest' };
+    const malformed = { ...entry, sourcePrinting: { collectorNumber: '276' } } as DeckEntry;
+    expect(deckEntryKey(malformed)).toBe(deckEntryKey(entry));
   });
 
-  it('keeps first sourcePrinting when deduplicating entries from different sets', () => {
-    const content = '2 Lightning Bolt (FDN) 123\n1 Lightning Bolt (A25) 141';
-    const result = parseMtgaDeck(content);
-    expect(result.main).toHaveLength(1);
-    expect(result.main[0].count).toBe(3);
-    expect(result.main[0].sourcePrinting).toEqual({ setCode: 'fdn', collectorNumber: '123' });
+  it('merges matching printings case-insensitively by set and keeps collector numbers exact', () => {
+    const entry = { count: 2, name: 'Forest', sourcePrinting: { setCode: 'one', collectorNumber: '276a' } };
+    expect(deduplicateEntries([
+      entry,
+      { ...entry, sourcePrinting: { setCode: 'ONE', collectorNumber: '276a' } },
+      { ...entry, sourcePrinting: { setCode: 'one', collectorNumber: '276A' } },
+      { count: 3, name: 'Forest' },
+      { count: 5, name: 'Forest' },
+    ])).toEqual([
+      { ...entry, count: 4 },
+      { ...entry, sourcePrinting: { setCode: 'one', collectorNumber: '276A' } },
+      { count: 8, name: 'Forest' },
+    ]);
+  });
+
+  it.each([
+    ['MTGA', 'Deck\n4 Forest (ONE) 276\n3 Forest (DMU) 277\n5 Forest (NEO) 292'],
+    ['Forge', '[Main]\n4 Forest|ONE|[276]\n3 Forest|DMU|[277]\n5 Forest|NEO|[292]'],
+  ])('keeps three Forest printings in %s imports', (_format, text) => {
+    expect(detectAndParseDeck(text).main).toEqual([
+      { count: 4, name: 'Forest', sourcePrinting: { setCode: 'one', collectorNumber: '276' } },
+      { count: 3, name: 'Forest', sourcePrinting: { setCode: 'dmu', collectorNumber: '277' } },
+      { count: 5, name: 'Forest', sourcePrinting: { setCode: 'neo', collectorNumber: '292' } },
+    ]);
+  });
+
+  it('counts all printings of a non-basic together for singleton detection', () => {
+    const deck = detectAndParseDeck('1 Lightning Bolt (FDN) 123\n1 Lightning Bolt (A25) 141');
+    expect(deck.main).toHaveLength(2);
+    expect(looksCommanderSingleton(deck.main)).toBe(false);
+  });
+
+  it.each([
+    ['MTGA', exportMtgaDeck, '276 A'],
+    ['MTGA', exportMtgaDeck, 'F'],
+    ['Forge', exportDeckFile, '276]'],
+    ['Forge', exportDeckFile, '276\nA'],
+  ] as const)('exports a plain %s line for an unrepresentable collector number', (_format, exporter, collectorNumber) => {
+    const entry = { count: 4, name: 'Forest' };
+    const exported = exporter({
+      main: [{ ...entry, sourcePrinting: { setCode: 'one', collectorNumber } }],
+      sideboard: [],
+    });
+    expect(exported.split('\n')).toContain('4 Forest');
+    expect(detectAndParseDeck(exported).main).toEqual([entry]);
+  });
+
+  it.each([
+    [exportMtgaDeck, '4 Forest (ONE) 276a', '1 Negate (NEO) A-12'],
+    [exportDeckFile, '4 Forest|ONE|[276a]', '1 Negate|NEO|[A-12]'],
+  ])('round-trips main and sideboard printings with %s', (exporter, mainLine, sideboardLine) => {
+    const parsed = detectAndParseDeck(
+      'Deck\n4 Forest (ONE) 276a\n3 Forest (DMU) 276\n5 Forest (NEO) 12★\n2 Forest\n\nSideboard\n1 Negate (NEO) A-12',
+    );
+    const exported = exporter(parsed);
+    expect(exported).toContain(mainLine);
+    expect(exported).toContain(sideboardLine);
+    expect(detectAndParseDeck(exported)).toEqual(parsed);
   });
 
   it.each([
@@ -933,7 +987,8 @@ describe('resolveCommander waterfall', () => {
       '1 Zimone, Infinite Analyst (SOC) 10',
       ...singletons,
       '7 Island (SOS) 274',
-      '6 Forest (SOS) 280',
+      '4 Forest (SOS) 280',
+      '2 Forest (ONE) 276',
     ].join('\n');
 
     const parsed = detectAndParseDeck(content);
@@ -944,6 +999,10 @@ describe('resolveCommander waterfall', () => {
     const resolved = await resolveCommander(parsed);
     expect(resolved.commander).toEqual(['Zimone, Infinite Analyst']);
     expect(resolved.main).not.toContainEqual({ count: 1, name: 'Zimone, Infinite Analyst' });
+    expect(resolved.main.filter(({ name }) => name === 'Forest')).toEqual([
+      { count: 4, name: 'Forest', sourcePrinting: { setCode: 'sos', collectorNumber: '280' } },
+      { count: 2, name: 'Forest', sourcePrinting: { setCode: 'one', collectorNumber: '276' } },
+    ]);
     expect(resolved.main.reduce((s, e) => s + e.count, 0)).toBe(99);
   });
 

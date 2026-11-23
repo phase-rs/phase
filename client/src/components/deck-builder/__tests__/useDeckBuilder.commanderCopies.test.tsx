@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 
+import type { DeckEntry } from "../../../services/deckParser";
+import type { ScryfallCard } from "../../../services/scryfall";
 import type { GameFormat } from "../../../adapter/types";
 import {
   evaluateDeckCompatibility,
@@ -19,7 +21,9 @@ vi.mock("../../../services/engineRuntime", () => ({
     (partnerCandidates as unknown as (...a: unknown[]) => Promise<string[]>)(...args),
   companionCandidates: vi.fn(async () => [] as string[]),
   isCardCommanderEligible: vi.fn(async () => false),
-  maxDeckCopies: vi.fn(async () => ({ type: "Limited", data: 1 })),
+  maxDeckCopies: vi.fn(async (name: string) => name === "Forest"
+    ? { type: "Unlimited" }
+    : { type: "Limited", data: 1 }),
   signatureSpellSelectionPolicy: vi.fn(async () => null),
 }));
 
@@ -76,7 +80,7 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
   /** Install a main deck and wait for the engine's eligibility scan to land. */
   async function withMain(
     result: { current: ReturnType<typeof useDeckBuilder> },
-    main: Array<{ count: number; name: string }>,
+    main: DeckEntry[],
   ) {
     act(() => {
       result.current.handleImport({ main, sideboard: [] });
@@ -110,6 +114,31 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
     cleanup();
   });
 
+  it("edits only the selected printing and adds by name to the first row", async () => {
+    const { result } = setup();
+    const one = { count: 4, name: "Forest", sourcePrinting: { setCode: "one", collectorNumber: "276" } };
+    const dmu = { count: 3, name: "Forest", sourcePrinting: { setCode: "dmu", collectorNumber: "277" } };
+    const sideOne = { ...one, count: 2 };
+    await act(async () => result.current.handleImport({ main: [one, dmu], sideboard: [sideOne] }));
+    expect(result.current.deck.main).toEqual([one, dmu]);
+    expect(result.current.cardCounts.get("Forest")).toBe(7);
+
+    act(() => result.current.handleIncrementCard(dmu, "main"));
+    expect(result.current.deck.main).toEqual([one, { ...dmu, count: 4 }]);
+    act(() => result.current.handleRemoveCard(dmu, "main"));
+    expect(result.current.deck.main).toEqual([one, dmu]);
+
+    act(() => result.current.handleMoveCard(dmu, "main"));
+    expect(result.current.deck.main).toEqual([one, { ...dmu, count: 2 }]);
+    expect(result.current.deck.sideboard).toEqual([sideOne, { ...dmu, count: 1 }]);
+    act(() => result.current.handleMoveCard(dmu, "sideboard"));
+    expect(result.current.deck.main).toEqual([one, dmu]);
+    expect(result.current.deck.sideboard).toEqual([sideOne]);
+
+    act(() => result.current.handleAddCard({ name: "Forest" } as ScryfallCard));
+    expect(result.current.deck.main).toEqual([{ ...one, count: 5 }, dmu]);
+  });
+
   it("decrements the main-deck copy count rather than removing every copy", async () => {
     const { result } = setup();
     await withMain(result, [{ count: 3, name: LEGEND }]);
@@ -123,6 +152,20 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
     });
     // REVERT-FAILING: the base `filter` leaves `undefined` here.
     expect(mainCount(result, LEGEND)).toBe(2);
+  });
+
+  it("decrements only the selected commander printing", async () => {
+    const { result } = setup();
+    const first = { count: 3, name: LEGEND, sourcePrinting: { setCode: "one", collectorNumber: "12" } };
+    const second = { count: 2, name: LEGEND, sourcePrinting: { setCode: "dmu", collectorNumber: "34" } };
+    await withMain(result, [first, second]);
+
+    await act(async () => {
+      result.current.handleSetCommander(result.current.deck.main[1]);
+    });
+
+    expect(result.current.commanders).toEqual([LEGEND]);
+    expect(result.current.deck.main).toEqual([first, { ...second, count: 1 }]);
   });
 
   it("removes the row entirely when the last copy is designated", async () => {

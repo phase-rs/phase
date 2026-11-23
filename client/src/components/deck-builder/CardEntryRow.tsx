@@ -42,16 +42,17 @@ function ParseItemPill({ item, depth = 0 }: { item: ParsedItem; depth?: number }
 
 export interface CardEntryRowProps {
   entry: DeckEntry;
+  printingLabel?: string;
   section: "main" | "sideboard";
-  onMove: (name: string, from: "main" | "sideboard") => void;
+  onMove: (entry: DeckEntry, from: "main" | "sideboard") => void;
   /** Optional — when omitted, the `-` remove button is not rendered.
    *  The BO3 between-games sideboarding modal uses this to enforce a pure
    *  partition UI (cards can only be moved between sections, not removed). */
-  onRemove?: (name: string, section: "main" | "sideboard") => void;
+  onRemove?: (entry: DeckEntry, section: "main" | "sideboard") => void;
   /** Optional — when omitted, the `+` increment button is not rendered. Paired
    *  with `canIncrement`; the BO3 sideboarding modal omits both so its list
    *  stays a pure partition (see `onRemove`). */
-  onIncrement?: (name: string, section: "main" | "sideboard") => void;
+  onIncrement?: (entry: DeckEntry, section: "main" | "sideboard") => void;
   /** CR 100.2a: whether another copy fits under the engine-resolved copy limit
    *  for this card and format. Disables the `+` when it doesn't. Defaults to
    *  permitting the increment so a not-yet-loaded limit never blocks a legal
@@ -63,7 +64,7 @@ export interface CardEntryRowProps {
   /** When defined and the card is commander-eligible in the current format,
    *  renders a crown button that promotes the card to commander (add/partner
    *  /swap semantics handled by the parent). Only shown in main section. */
-  onSetAsCommander?: (name: string) => void;
+  onSetAsCommander?: (entry: DeckEntry) => void;
   /** Eligibility predicate paired with `onSetAsCommander`. The row consults it
    *  per-entry so the parent doesn't have to fan out card-data lookups. */
   isCommanderEligible?: (name: string) => boolean;
@@ -85,6 +86,7 @@ export interface CardEntryRowProps {
 
 export function CardEntryRow({
   entry,
+  printingLabel,
   section,
   onMove,
   onRemove,
@@ -153,6 +155,7 @@ export function CardEntryRow({
         >
           <span className="mr-1 text-gray-500">{entry.count}x</span>
           {entry.name}
+          {printingLabel && <span className="ml-1 whitespace-nowrap text-[10px] text-gray-500">{printingLabel}</span>}
           {unsupported && (
             <button
               onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v); }}
@@ -192,7 +195,7 @@ export function CardEntryRow({
           {showCommanderButton && (
             <button
               type="button"
-              onClick={() => onSetAsCommander?.(entry.name)}
+              onClick={() => onSetAsCommander?.(entry)}
               className={`${controlVisibility} ml-1 ${controlSize} rounded text-purple-300 hover:bg-purple-900/40`}
               aria-label={t("card.makeCommander", { name: entry.name })}
               title={t("card.makeCommanderTitle")}
@@ -202,7 +205,7 @@ export function CardEntryRow({
           )}
           <button
             type="button"
-            onClick={() => onMove(entry.name, section)}
+            onClick={() => onMove(entry, section)}
             className={`${controlVisibility} ml-2 ${moveControlSize} inline-flex items-center justify-center gap-0.5 whitespace-nowrap rounded text-sky-300 hover:bg-sky-900/40`}
             aria-label={moveAriaLabel}
             title={moveAriaLabel}
@@ -221,7 +224,7 @@ export function CardEntryRow({
           {onIncrement && (
             <button
               type="button"
-              onClick={() => onIncrement(entry.name, section)}
+              onClick={() => onIncrement(entry, section)}
               disabled={!incrementAllowed}
               className={`${controlVisibility} ml-1 ${controlSize} rounded text-emerald-300 hover:bg-emerald-900/40 disabled:cursor-not-allowed disabled:text-slate-600 disabled:hover:bg-transparent`}
               aria-label={
@@ -241,7 +244,7 @@ export function CardEntryRow({
           {onRemove && (
             <button
               type="button"
-              onClick={() => onRemove(entry.name, section)}
+              onClick={() => onRemove(entry, section)}
               className={`${controlVisibility} ml-1 ${controlSize} rounded text-red-400 hover:bg-red-900/40`}
               aria-label={t("card.removeOne", { name: entry.name })}
               title={t("card.removeOne", { name: entry.name })}

@@ -305,7 +305,29 @@ describe("DeckStack", () => {
     fireEvent.click(
       screen.getByRole("button", { name: /move one arcane signet to main/i }),
     );
-    expect(onMoveCard).toHaveBeenCalledWith("Arcane Signet", "sideboard");
+    expect(onMoveCard).toHaveBeenCalledWith(expect.objectContaining({ name: "Arcane Signet", count: 1 }), "sideboard");
+  });
+
+  it("renders separate labelled tiles and increments the clicked printing", () => {
+    const one = { count: 4, name: "Forest", sourcePrinting: { setCode: "one", collectorNumber: "276" } };
+    const dmu = { count: 3, name: "Forest", sourcePrinting: { setCode: "dmu", collectorNumber: "277" } };
+    const onAddCard = vi.fn();
+    const consoleError = vi.spyOn(console, "error");
+    try {
+      render(
+        <DeckStack deck={{ main: [one, dmu], sideboard: [{ ...one, count: 1 }] }}
+          commanders={[]} cardDataCache={new Map()} onAddCard={onAddCard}
+          canAddCard={() => true} onRemoveCard={vi.fn()} onMoveCard={vi.fn()}
+          onRemoveCommander={vi.fn()} groupMode="type" />,
+      );
+      expect(screen.getByText("ONE 276")).toBeInTheDocument();
+      expect(screen.getByText("DMU 277")).toBeInTheDocument();
+      expect(consoleError.mock.calls.flat().join(" ")).not.toContain("same key");
+      fireEvent.click(screen.getAllByTitle("Add one Forest")[1]);
+      expect(onAddCard).toHaveBeenCalledWith(expect.objectContaining(dmu));
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
   it("returns focus to the durable deck surface after the art picker closes", async () => {

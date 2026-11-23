@@ -6,7 +6,7 @@ import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useAppNotificationStore } from "../../stores/appToastStore";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
 import { resolveCommander } from "../../services/commanderResolution";
-import { deduplicateEntries, expandParsedDeck } from "../../services/deckParser";
+import { addOneCopy, countDeckEntriesByName, deckEntryKey, deduplicateEntries, expandParsedDeck, removeOneCopy } from "../../services/deckParser";
 import { evaluateDeckCompatibility, type DeckCompatibilityResult } from "../../services/deckCompatibility";
 import {
   STORAGE_KEY_PREFIX,
@@ -288,7 +288,7 @@ export function useDeckBuilder({
       setCommanderEligibleNames(new Set());
       return;
     }
-    const names = deck.main.map((entry) => entry.name);
+    const names = [...new Set(deck.main.map((entry) => entry.name))];
     if (names.length === 0) {
       setCommanderEligibleNames(new Set());
       return;
@@ -388,50 +388,13 @@ export function useDeckBuilder({
     cacheCards([card]);
     markDirty();
 
-    setDeck((prev) => {
-      const existing = prev.main.find((e) => e.name === card.name);
-      if (existing) {
-        return {
-          ...prev,
-          main: prev.main.map((e) =>
-            e.name === card.name ? { ...e, count: e.count + 1 } : e,
-          ),
-        };
-      }
-      return {
-        ...prev,
-        main: [...prev.main, { count: 1, name: card.name }],
-      };
-    });
+    setDeck((prev) => ({ ...prev, main: addOneCopy(prev.main, card.name) }));
   }, [cacheCards, markDirty]);
 
-  const handleAddCardByName = useCallback((name: string) => {
-    const card = cardDataCache.get(name);
-    if (!card) return;
-    handleAddCard(card);
-  }, [cardDataCache, handleAddCard]);
-
   const handleRemoveCard = useCallback(
-    (name: string, section: "main" | "sideboard") => {
+    (entry: DeckEntry, section: "main" | "sideboard") => {
       markDirty();
-      setDeck((prev) => {
-        const entries = prev[section];
-        const existing = entries.find((e) => e.name === name);
-        if (!existing) return prev;
-
-        if (existing.count <= 1) {
-          return {
-            ...prev,
-            [section]: entries.filter((e) => e.name !== name),
-          };
-        }
-        return {
-          ...prev,
-          [section]: entries.map((e) =>
-            e.name === name ? { ...e, count: e.count - 1 } : e,
-          ),
-        };
-      });
+      setDeck((prev) => ({ ...prev, [section]: removeOneCopy(prev[section], entry) }));
     },
     [markDirty],
   );
@@ -507,52 +470,31 @@ export function useDeckBuilder({
   );
 
   const handleIncrementCard = useCallback(
-    (name: string, section: "main" | "sideboard") => {
-      if (!canIncrement(name)) return;
+    (entry: DeckEntry, section: "main" | "sideboard") => {
+      if (!canIncrement(entry.name)) return;
+      const key = deckEntryKey(entry);
       markDirty();
-      setDeck((prev) => {
-        const entries = prev[section];
-        if (!entries.some((e) => e.name === name)) return prev;
-        return {
-          ...prev,
-          [section]: entries.map((e) =>
-            e.name === name ? { ...e, count: e.count + 1 } : e,
-          ),
-        };
-      });
+      setDeck((prev) => ({
+        ...prev,
+        [section]: prev[section].map((row) =>
+          deckEntryKey(row) === key ? { ...row, count: row.count + 1 } : row,
+        ),
+      }));
     },
     [canIncrement, markDirty],
   );
 
   const handleMoveCard = useCallback(
-    (name: string, from: "main" | "sideboard") => {
-      const to: "main" | "sideboard" = from === "main" ? "sideboard" : "main";
+    (entry: DeckEntry, from: "main" | "sideboard") => {
+      const to = from === "main" ? "sideboard" : "main";
       markDirty();
       setDeck((prev) => {
-        const source = prev[from];
-        const target = prev[to];
-        const sourceEntry = source.find((e) => e.name === name);
-        if (!sourceEntry) return prev;
-
-        const targetEntry = target.find((e) => e.name === name);
-
-        const nextSource =
-          sourceEntry.count <= 1
-            ? source.filter((e) => e.name !== name)
-            : source.map((e) =>
-                e.name === name ? { ...e, count: e.count - 1 } : e,
-              );
-
-        const nextTarget = targetEntry
-          ? target.map((e) =>
-              e.name === name ? { ...e, count: e.count + 1 } : e,
-            )
-          : [...target, { count: 1, name }];
-
+        const source = removeOneCopy(prev[from], entry);
+        if (source === prev[from]) return prev;
         return {
           ...prev,
-          [from]: nextSource,
-          [to]: nextTarget,
+          [from]: source,
+          [to]: deduplicateEntries([...prev[to], { count: 1, name: entry.name, sourcePrinting: entry.sourcePrinting }]),
         };
       });
     },
@@ -833,7 +775,8 @@ export function useDeckBuilder({
   //      the new card as sole commander. This is the swap UX users need when
   //      cycling through legendary creatures to pick the right commander.
   const handleSetCommander = useCallback(
-    (cardName: string) => {
+    (card: string | DeckEntry) => {
+      const cardName = typeof card === "string" ? card : card.name;
       if (!commanderEligibleNames.has(cardName)) return;
       // CR 702.124: a second pick joins as a co-commander only when the engine
       // confirms it legally pairs with the existing one; otherwise it swaps. The
@@ -873,24 +816,8 @@ export function useDeckBuilder({
           // already uses in `moveOneMainCardToSpecialSlot` below. Then
           // re-introduce any displaced commanders so they remain in the deck
           // for the user to re-pick.
-          const selected = prev.main.find((entry) => entry.name === cardName);
-          const filtered =
-            selected?.count === 1
-              ? prev.main.filter((entry) => entry.name !== cardName)
-              : prev.main.map((entry) =>
-                  entry.name === cardName
-                    ? { ...entry, count: entry.count - 1 }
-                    : entry,
-                );
-          const restored = displaced.reduce<DeckEntry[]>((acc, name) => {
-            const existing = acc.find((e) => e.name === name);
-            if (existing) {
-              return acc.map((e) =>
-                e.name === name ? { ...e, count: e.count + 1 } : e,
-              );
-            }
-            return [...acc, { count: 1, name }];
-          }, filtered);
+          const filtered = removeOneCopy(prev.main, card);
+          const restored = displaced.reduce(addOneCopy, filtered);
           return { ...prev, main: restored };
         });
       })();
@@ -910,13 +837,11 @@ export function useDeckBuilder({
   const handleRemoveCommander = useCallback((cardName: string) => {
     markDirty();
     setCommanders((prev) => prev.filter((n) => n !== cardName));
-    // CR 903.3: the exact inverse of `handleSetCommander`'s decrement. Routed
-    // through the merge this file already uses so a card still present in main
-    // gains a copy rather than gaining a DUPLICATE ROW; designate-then-remove
-    // therefore returns the deck to its exact prior multiset, for any count.
+    // CR 903.3: the inverse of `handleSetCommander`'s decrement. A card still
+    // present in main gains a copy on its first row rather than a DUPLICATE ROW.
     setDeck((prev) => ({
       ...prev,
-      main: deduplicateEntries([...prev.main, { count: 1, name: cardName }]),
+      main: addOneCopy(prev.main, cardName),
     }));
   }, [markDirty]);
 
@@ -924,16 +849,11 @@ export function useDeckBuilder({
     (cardName: string, slot: "signature_spell" | "companion") => {
       markDirty();
       setDeck((prev) => {
-        const selected = prev.main.find((entry) => entry.name === cardName);
-        if (!selected) return prev;
+        const mainWithoutSelected = removeOneCopy(prev.main, cardName);
+        if (mainWithoutSelected === prev.main) return prev;
         const prior = slot === "signature_spell" ? prev.signature_spell?.[0] : prev.companion;
-        const mainWithoutSelected = selected.count === 1
-          ? prev.main.filter((entry) => entry.name !== cardName)
-          : prev.main.map((entry) => entry.name === cardName
-            ? { ...entry, count: entry.count - 1 }
-            : entry);
         const main = prior && prior !== cardName
-          ? deduplicateEntries([...mainWithoutSelected, { count: 1, name: prior }])
+          ? addOneCopy(mainWithoutSelected, prior)
           : mainWithoutSelected;
         return slot === "signature_spell"
           ? { ...prev, main, signature_spell: [cardName] }
@@ -956,7 +876,7 @@ export function useDeckBuilder({
       return {
         ...prev,
         signature_spell: [],
-        main: deduplicateEntries([...prev.main, { count: 1, name: signature }]),
+        main: addOneCopy(prev.main, signature),
       };
     });
   }, [markDirty]);
@@ -973,7 +893,7 @@ export function useDeckBuilder({
       return {
         ...prev,
         companion: undefined,
-        main: deduplicateEntries([...prev.main, { count: 1, name: prev.companion }]),
+        main: addOneCopy(prev.main, prev.companion),
       };
     });
   }, [markDirty]);
@@ -990,7 +910,7 @@ export function useDeckBuilder({
   }
   const colorDistribution = compatibility?.color_distribution ?? [];
 
-  const cardCounts = new Map(deck.main.map((entry) => [entry.name, entry.count]));
+  const cardCounts = countDeckEntriesByName(deck.main);
   for (const commander of commanders) {
     cardCounts.set(commander, (cardCounts.get(commander) ?? 0) + 1);
   }
@@ -1055,7 +975,6 @@ export function useDeckBuilder({
     handleSearchResults,
     handleSearchTrigger,
     handleAddCard,
-    handleAddCardByName,
     handleRemoveCard,
     handleIncrementCard,
     canIncrement,
