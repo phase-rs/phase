@@ -40624,9 +40624,11 @@ fn marker_in_another_clause_keeps_its_owning_production() {
     let granted_modes: Vec<&StaticMode> = granted
         .modifications
         .iter()
-        .filter_map(|m| match m {
-            ContinuousModification::GrantStaticAbility { definition } => Some(&definition.mode),
-            _ => None,
+        .filter_map(|m| {
+            let ContinuousModification::GrantStaticAbility { definition } = m else {
+                return None;
+            };
+            Some(&definition.mode)
         })
         .collect();
     assert_eq!(

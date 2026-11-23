@@ -7095,9 +7095,11 @@ mod toggo_rock {
         let (restriction, filter) = state.objects[&bearer]
             .static_definitions
             .iter_all()
-            .find_map(|definition| match &definition.mode {
-                StaticMode::CantBeBlockedBy { filter } => Some((definition, filter)),
-                _ => None,
+            .find_map(|definition| {
+                let StaticMode::CantBeBlockedBy { filter } = &definition.mode else {
+                    return None;
+                };
+                Some((definition, filter))
             })
             .expect("the equipped creature has the granted blocking restriction");
         assert_eq!(

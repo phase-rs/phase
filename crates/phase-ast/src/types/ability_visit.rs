@@ -1695,14 +1695,12 @@ pub fn own_fields_name_granter(def: &StaticDefinition) -> bool {
 pub fn token_static_creator_grant(
     modification: &ContinuousModification,
 ) -> Option<&StaticDefinition> {
-    match modification {
-        ContinuousModification::GrantStaticAbility { definition }
-            if definition.has_legacy_static_mode_shape() =>
-        {
-            Some(definition)
-        }
-        _ => None,
-    }
+    let ContinuousModification::GrantStaticAbility { definition } = modification else {
+        return None;
+    };
+    definition
+        .has_legacy_static_mode_shape()
+        .then_some(definition.as_ref())
 }
 
 /// CR 201.5a: whether a definition nested in `def`'s modifications names an unbound
