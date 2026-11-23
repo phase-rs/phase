@@ -369,6 +369,13 @@ fn rangers_of_ithilien_public_trigger_prompt_validates_lesser_power() {
                     })
                     .expect("order Rangers trigger");
             }
+            WaitingFor::ChooseRingBearer { candidates, .. } => {
+                runner
+                    .act(GameAction::ChooseRingBearer {
+                        target: candidates[0],
+                    })
+                    .expect("choose a Rangers ring bearer");
+            }
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             WaitingFor::Priority { .. } => {
                 runner
