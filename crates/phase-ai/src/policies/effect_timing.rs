@@ -748,19 +748,18 @@ Wilson, Subtle Bear can't be blocked.
                 } = effect
                 {
                     for outer in static_abilities {
-                        if outer
-                            .modifications
-                            .iter()
-                            .any(|modification| match modification {
-                                ContinuousModification::GrantStaticAbility { definition } => {
-                                    definition.mode == StaticMode::CantBeBlocked
+                        if outer.modifications.iter().any(|modification| {
+                            matches!(
+                                modification,
+                                ContinuousModification::GrantStaticAbility { definition }
+                                    if definition.mode == StaticMode::CantBeBlocked
+                            ) || matches!(
+                                modification,
+                                ContinuousModification::AddStaticMode {
+                                    mode: StaticMode::CantBeBlocked
                                 }
-                                ContinuousModification::AddStaticMode { mode } => {
-                                    *mode == StaticMode::CantBeBlocked
-                                }
-                                _ => false,
-                            })
-                        {
+                            )
+                        }) {
                             found = true;
                             assert_eq!(outer.mode, StaticMode::Continuous, "{name}");
                             assert!(!bare_cant_be_blocked(outer), "{name}");

@@ -2675,17 +2675,17 @@ pub(crate) fn object_cant_be_sacrificed_by(
         {
             return false;
         }
-        tce.modifications
-            .iter()
-            .any(|modification| match modification {
-                ContinuousModification::AddStaticMode { mode: granted } => {
-                    *granted == mode && tce.bound_actor.is_none_or(|bound| bound == actor)
-                }
-                ContinuousModification::GrantStaticAbility { definition } => {
-                    definition.has_legacy_static_mode_shape() && definition.mode == mode
-                }
-                _ => false,
-            })
+        tce.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::AddStaticMode { mode: granted }
+                    if *granted == mode && tce.bound_actor.is_none_or(|bound| bound == actor)
+            ) || matches!(
+                modification,
+                ContinuousModification::GrantStaticAbility { definition }
+                    if definition.has_legacy_static_mode_shape() && definition.mode == mode
+            )
+        })
     };
     // Live-TCE scan: an installer-bound TCE bars only its bound actor; an
     // unbound (object-wide) TCE bars every actor. CR 701.21a already

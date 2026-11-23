@@ -1331,21 +1331,201 @@ fn generic_effect_flash_cast_permission_redundancy(
 fn redundancy_static_mode(modification: &ContinuousModification) -> Option<&StaticMode> {
     match modification {
         ContinuousModification::AddStaticMode { mode } => Some(mode),
-        ContinuousModification::GrantStaticAbility { definition }
-            if definition.has_legacy_static_mode_shape() =>
-        {
-            match &definition.mode {
-                mode @ (StaticMode::CantBlock
-                | StaticMode::MustAttack
-                | StaticMode::BlockRestriction { .. }
-                | StaticMode::CantBeBlocked
-                | StaticMode::CantBeBlockedByMoreThan { .. }
-                | StaticMode::CanAttackWithDefender) => Some(mode),
-                mode @ StaticMode::Other(name) if name == "CantBeSacrificed" => Some(mode),
-                _ => None,
-            }
-        }
-        _ => None,
+        ContinuousModification::GrantStaticAbility { definition } => (definition
+            .has_legacy_static_mode_shape()
+            && quoted_static_mode_supports_redundancy(&definition.mode))
+        .then_some(&definition.mode),
+        // Exhaustive: the remaining modifications supply no static mode for redundancy.
+        ContinuousModification::CopyValues { .. }
+        | ContinuousModification::CopyChosen
+        | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
+        | ContinuousModification::SubstituteTextWord { .. }
+        | ContinuousModification::AddPower { .. }
+        | ContinuousModification::AddToughness { .. }
+        | ContinuousModification::SetPower { .. }
+        | ContinuousModification::SetToughness { .. }
+        | ContinuousModification::AddKeyword { .. }
+        | ContinuousModification::RemoveKeyword { .. }
+        | ContinuousModification::GrantAbility { .. }
+        | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        | ContinuousModification::GrantTrigger { .. }
+        | ContinuousModification::GrantReplacement { .. }
+        | ContinuousModification::RemoveAllAbilities
+        | ContinuousModification::AddType { .. }
+        | ContinuousModification::RemoveType { .. }
+        | ContinuousModification::AddSubtype { .. }
+        | ContinuousModification::RemoveSubtype { .. }
+        | ContinuousModification::SetCardTypes { .. }
+        | ContinuousModification::RemoveAllSubtypes { .. }
+        | ContinuousModification::SetDynamicPower { .. }
+        | ContinuousModification::SetDynamicToughness { .. }
+        | ContinuousModification::SetPowerDynamic { .. }
+        | ContinuousModification::SetToughnessDynamic { .. }
+        | ContinuousModification::AddDynamicPower { .. }
+        | ContinuousModification::AddDynamicToughness { .. }
+        | ContinuousModification::AddDynamicKeyword { .. }
+        | ContinuousModification::AddKeywordWithDerivedCost { .. }
+        | ContinuousModification::AddAllCreatureTypes
+        | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
+        | ContinuousModification::AddChosenSubtype { .. }
+        | ContinuousModification::AddChosenColor { .. }
+        | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddChosenKeyword
+        | ContinuousModification::SetColor { .. }
+        | ContinuousModification::AddColor { .. }
+        | ContinuousModification::SwitchPowerToughness
+        | ContinuousModification::AssignDamageFromToughness
+        | ContinuousModification::AssignDamageAsThoughUnblocked
+        | ContinuousModification::AssignNoCombatDamage
+        | ContinuousModification::ChangeController
+        | ContinuousModification::ChangeControllerToDesignation { .. }
+        | ContinuousModification::SetBasicLandType { .. }
+        | ContinuousModification::SetChosenBasicLandType
+        | ContinuousModification::SetChosenName
+        | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+        | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
+        | ContinuousModification::AddSupertype { .. }
+        | ContinuousModification::RemoveSupertype { .. }
+        | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::SetStartingLoyalty { .. }
+        | ContinuousModification::RemoveManaCost => None,
+    }
+}
+
+/// Whether redundancy for a quoted static grant can be determined from its mode alone.
+fn quoted_static_mode_supports_redundancy(mode: &StaticMode) -> bool {
+    match mode {
+        StaticMode::CantBlock
+        | StaticMode::MustAttack
+        | StaticMode::BlockRestriction { .. }
+        | StaticMode::CantBeBlocked
+        | StaticMode::CantBeBlockedByMoreThan { .. }
+        | StaticMode::CanAttackWithDefender => true,
+        StaticMode::Other(name) => name == "CantBeSacrificed",
+        // Exhaustive: classify each new StaticMode explicitly here to decide
+        // whether it supports redundancy.
+        StaticMode::Continuous
+        | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::LethalDamageDeterminedByPower
+        | StaticMode::CantAttack
+        | StaticMode::CantAttackOrBlock
+        | StaticMode::AttackOnlyNeighbor
+        | StaticMode::CantBecomeSuspected
+        | StaticMode::MaxAttackersEachCombat { .. }
+        | StaticMode::MaxBlockersEachCombat { .. }
+        | StaticMode::CantBeTargeted { .. }
+        | StaticMode::CantBeCast { .. }
+        | StaticMode::CantBeActivated { .. }
+        | StaticMode::CantSearchLibrary { .. }
+        | StaticMode::RestrictLibrarySearchToTop { .. }
+        | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
+        | StaticMode::CantCauseSacrificeOrExile { .. }
+        | StaticMode::CantCauseForcedAction { .. }
+        | StaticMode::CastWithFlash
+        | StaticMode::GrantsExtraVote
+        | StaticMode::GrantsExtraVillainousChoice
+        | StaticMode::CastWithKeyword { .. }
+        | StaticMode::CastWithAlternativeCost { .. }
+        | StaticMode::AlternativeKeywordCost { .. }
+        | StaticMode::ModifyCost { .. }
+        | StaticMode::ImposeAdditionalCost { .. }
+        | StaticMode::ReduceAbilityCost { .. }
+        | StaticMode::ReduceActionCost { .. }
+        | StaticMode::ModifyActivationLimit { .. }
+        | StaticMode::ActivateAsInstant { .. }
+        | StaticMode::CantPayCost { .. }
+        | StaticMode::CantGainLife
+        | StaticMode::CantLoseLife
+        | StaticMode::PlayerProtection(..)
+        | StaticMode::MustAttackDefender { .. }
+        | StaticMode::MustBlock
+        | StaticMode::MustBlockAttacker { .. }
+        | StaticMode::CantDraw { .. }
+        | StaticMode::DrawFromBottom { .. }
+        | StaticMode::DoubleTriggers { .. }
+        | StaticMode::IgnoreHexproof
+        | StaticMode::ExtraBlockers { .. }
+        | StaticMode::RevealTopOfLibrary { .. }
+        | StaticMode::RevealHand { .. }
+        | StaticMode::GraveyardCastPermission { .. }
+        | StaticMode::TopOfLibraryCastPermission { .. }
+        | StaticMode::TopOfLibraryHasPlot
+        | StaticMode::TopOfLibraryPlotPermission
+        | StaticMode::CastFromHandFree { .. }
+        | StaticMode::ExileCastPermission { .. }
+        | StaticMode::LinkedCollectionCounterPlayPermission
+        | StaticMode::CountersPersistAcrossZones { .. }
+        | StaticMode::CantBeCountered
+        | StaticMode::CantBeCopied
+        | StaticMode::CantEnterBattlefieldFrom
+        | StaticMode::CantCastFrom { .. }
+        | StaticMode::CantCastDuring { .. }
+        | StaticMode::CantActivateDuring { .. }
+        | StaticMode::PerTurnCastLimit { .. }
+        | StaticMode::PerTurnDrawLimit { .. }
+        | StaticMode::SuppressTriggers { .. }
+        | StaticMode::CantBeBlockedExceptBy { .. }
+        | StaticMode::CantBeBlockedBy { .. }
+        | StaticMode::CantBeBlockedUnlessAllBlock
+        | StaticMode::AttachmentRestriction { .. }
+        | StaticMode::Protection
+        | StaticMode::Indestructible
+        | StaticMode::CantBeDestroyed
+        | StaticMode::CantBeRegenerated
+        | StaticMode::FlashBack
+        | StaticMode::Shroud
+        | StaticMode::Hexproof
+        | StaticMode::Vigilance
+        | StaticMode::Menace
+        | StaticMode::Reach
+        | StaticMode::Flying
+        | StaticMode::Trample
+        | StaticMode::Deathtouch
+        | StaticMode::Lifelink
+        | StaticMode::CantTap
+        | StaticMode::CantUntap
+        | StaticMode::MustBeBlocked { .. }
+        | StaticMode::MustBeBlockedByAll { .. }
+        | StaticMode::Goaded
+        | StaticMode::MustAttackAwayFromSource
+        | StaticMode::CombatAlone { .. }
+        | StaticMode::CantCrew
+        | StaticMode::CantPhaseIn
+        | StaticMode::CrewContribution { .. }
+        | StaticMode::MayLookAtTopOfLibrary
+        | StaticMode::MayLookAtFaceDown
+        | StaticMode::CantBeTurnedFaceUp
+        | StaticMode::MayChooseNotToUntap
+        | StaticMode::AdditionalLandDrop { .. }
+        | StaticMode::EmblemStatic
+        | StaticMode::NoMaximumHandSize
+        | StaticMode::MaximumHandSize { .. }
+        | StaticMode::MayPlayAdditionalLand
+        | StaticMode::CantHaveKeyword { .. }
+        | StaticMode::CantWinTheGame
+        | StaticMode::CantLoseTheGame
+        | StaticMode::LegendRuleDoesntApply
+        | StaticMode::SpeedCanIncreaseBeyondFour
+        | StaticMode::DefilerCostReduction { .. }
+        | StaticMode::SkipStep { .. }
+        | StaticMode::SpendManaAsAnyColor { .. }
+        | StaticMode::PayLifeAsColoredMana { .. }
+        | StaticMode::StepEndUnspentMana { .. }
+        | StaticMode::UnspentManaLossCausesLifeLoss
+        | StaticMode::WinFirstCoinFlipSetEachTurn
+        | StaticMode::IgnoreLandwalkForBlocking { .. }
+        | StaticMode::CanActivateAbilitiesAsThoughHaste
+        | StaticMode::CanBlockShadow
+        | StaticMode::AssignNoCombatDamage
+        | StaticMode::UntapsDuringEachOtherPlayersUntapStep
+        | StaticMode::MaxUntapPerType { .. }
+        | StaticMode::EntersWithAdditionalCounters { .. }
+        | StaticMode::CountersCantBeRemoved { .. }
+        | StaticMode::CountsAsNamed { .. } => false,
     }
 }
 
@@ -1358,15 +1538,10 @@ fn collect_grants(static_abilities: &[StaticDefinition]) -> Vec<Grant> {
     let mut out = Vec::new();
     for stat in static_abilities {
         for modification in &stat.modifications {
-            match modification {
-                ContinuousModification::AddKeyword { keyword } => {
-                    out.push(Grant::Keyword(keyword.clone()));
-                }
-                _ => {
-                    if let Some(mode) = redundancy_static_mode(modification) {
-                        out.push(Grant::StaticMode(mode.clone()));
-                    }
-                }
+            if let ContinuousModification::AddKeyword { keyword } = modification {
+                out.push(Grant::Keyword(keyword.clone()));
+            } else if let Some(mode) = redundancy_static_mode(modification) {
+                out.push(Grant::StaticMode(mode.clone()));
             }
         }
     }
@@ -2386,14 +2561,12 @@ mod tests {
 
     #[test]
     fn repeated_surge_activation_is_redundant_only_for_the_affected_creature() {
-        use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use engine::game::scenario::{GameRunner, GameScenario, P0};
         use engine::types::mana::ManaColor;
         use engine::types::phase::Phase;
 
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
-        scenario.with_library_top(P0, &["Island", "Island"]);
-        scenario.with_library_top(P1, &["Island", "Island"]);
         scenario.add_basic_land(P0, ManaColor::Blue);
         scenario.add_basic_land(P0, ManaColor::Blue);
         let add_surge = |scenario: &mut GameScenario| {
@@ -2451,18 +2624,65 @@ mod tests {
             }
         }
         assert_eq!(activation_delta(different_source.state(), source), -2.0);
+    }
+
+    #[test]
+    fn full_steam_ahead_redundancy_resets_at_cleanup() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor};
+        use engine::types::phase::Phase;
+        use engine::types::zones::Zone;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P1, &["Forest"]);
+        for _ in 0..5 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let source = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Full Steam Ahead",
+                false,
+                r#"Until end of turn, each creature you control gets +2/+2 and gains trample and "This creature can't be blocked by more than one creature.""#,
+            )
+            .with_mana_cost(parse_mtgjson_mana_cost("{3}{G}{G}"))
+            .id();
+        // Intrinsic trample makes the score depend solely on the quoted restriction.
+        scenario
+            .add_creature(P0, "Attacker", 2, 2)
+            .with_keyword(Keyword::Trample);
+        let mut runner = scenario.build();
+        let Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } = runner.state().objects[&source].abilities[0]
+            .effect
+            .as_ref()
+            .clone()
+        else {
+            panic!("expected Full Steam Ahead's quoted grant");
+        };
+        let redundancy = |state: &GameState| {
+            generic_effect_grant_redundancy(state, source, &static_abilities, target.as_ref())
+        };
+        assert_eq!(redundancy(runner.state()), None);
+        runner
+            .cast(source)
+            .resolve()
+            .assert_zone(&[source], Zone::Graveyard);
+        assert_eq!(
+            redundancy(runner.state()),
+            Some((-2.0, KIND_GENERIC_STATIC_MODE, 2))
+        );
 
         runner.advance_to_combat();
         runner.declare_attackers(&[]).unwrap();
         runner.advance_to_end_step();
         runner.advance_to_phase(Phase::PreCombatMain);
         assert_eq!(runner.state().active_player, P1);
-        assert!(runner
-            .state()
-            .transient_continuous_effects
-            .iter()
-            .all(|effect| effect.source_id != source));
-        assert_eq!(activation_delta(runner.state(), source), 0.0);
+        assert_eq!(redundancy(runner.state()), None);
     }
 
     #[test]

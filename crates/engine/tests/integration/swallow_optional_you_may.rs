@@ -388,27 +388,29 @@ Solved — Sacrifice this Case: Creature cards in your graveyard gain "You may c
             &face.card_type.subtypes,
         );
         assert!(
-            parsed
-                .abilities
-                .iter()
-                .any(|ability| match ability.effect.as_ref() {
-                    Effect::GenericEffect {
-                        static_abilities, ..
-                    } => static_abilities.iter().any(|outer| {
-                        outer.modifications.iter().any(|modification| matches!(
-                    modification,
-                    ContinuousModification::GrantStaticAbility { definition }
-                        if definition.affected == Some(TargetFilter::SelfRef)
-                            && definition.active_zones == [Zone::Graveyard]
-                            && matches!(
-                                definition.mode,
-                                StaticMode::GraveyardCastPermission { play_mode: mode, .. }
-                                    if mode == play_mode
-                            )
-                ))
-                    }),
-                    _ => false,
-                }),
+            parsed.abilities.iter().any(|ability| {
+                let Effect::GenericEffect {
+                    static_abilities, ..
+                } = ability.effect.as_ref()
+                else {
+                    return false;
+                };
+                static_abilities.iter().any(|outer| {
+                    outer.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::GrantStaticAbility { definition }
+                                if definition.affected == Some(TargetFilter::SelfRef)
+                                    && definition.active_zones == [Zone::Graveyard]
+                                    && matches!(
+                                        definition.mode,
+                                        StaticMode::GraveyardCastPermission { play_mode: mode, .. }
+                                            if mode == play_mode
+                                    )
+                        )
+                    })
+                })
+            }),
             "{name}: full quoted permission"
         );
         assert!(!tree_has_unimplemented(&parsed), "{name}");
