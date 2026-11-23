@@ -789,10 +789,15 @@ describe('sourcePrinting capture', () => {
     expect(result.main[0].sourcePrinting).toBeUndefined();
   });
 
-  it('keys a malformed stored printing like an entry without printing data', () => {
+  it.each([
+    ['a missing set code', { collectorNumber: '276' }],
+    ['an empty set code', { setCode: '', collectorNumber: '276' }],
+    ['an empty collector number', { setCode: 'one', collectorNumber: '' }],
+  ])('keys a stored printing with %s like an entry without printing data', (_case, sourcePrinting) => {
     const entry = { count: 1, name: 'Forest' };
-    const malformed = { ...entry, sourcePrinting: { collectorNumber: '276' } } as DeckEntry;
+    const malformed = { ...entry, sourcePrinting } as DeckEntry;
     expect(deckEntryKey(malformed)).toBe(deckEntryKey(entry));
+    expect(repairParsedDeck({ main: [entry, malformed], sideboard: [] }).main).toEqual([{ count: 2, name: 'Forest' }]);
   });
 
   it('merges matching printings case-insensitively by set and keeps collector numbers exact', () => {

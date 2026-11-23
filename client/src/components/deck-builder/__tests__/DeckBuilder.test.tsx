@@ -167,9 +167,8 @@ describe("DeckBuilder", () => {
 
     await screen.findByText("3 Forest");
     await user.click(screen.getByRole("button", { name: "Stack view" }));
-    const addButtons = await screen.findAllByTitle("Add one Forest");
-    expect(addButtons).toHaveLength(2);
-    await user.click(addButtons[1]);
+    await screen.findByTitle("Add one Forest (ONE 276)");
+    await user.click(screen.getByTitle("Add one Forest (DMU 277)"));
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {

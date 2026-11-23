@@ -168,21 +168,35 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
     expect(result.current.deck.main).toEqual([first, { ...second, count: 1 }]);
   });
 
-  it("takes a copy by name when the clicked printing row is gone", async () => {
+  it("takes a copy by name when the clicked printing row moves during the partner check", async () => {
     const { result } = setup();
     const first = { count: 3, name: LEGEND, sourcePrinting: { setCode: "one", collectorNumber: "12" } };
     const second = { count: 1, name: LEGEND, sourcePrinting: { setCode: "dmu", collectorNumber: "34" } };
-    await withMain(result, [first, second]);
+    await withMain(result, [first, second, { count: 1, name: OTHER }]);
+    await act(async () => {
+      result.current.handleSetCommander(OTHER);
+    });
+    await waitFor(() => {
+      expect(result.current.commanders).toEqual([OTHER]);
+    });
 
-    // The row the crown was clicked on leaves main while the pairing check is pending.
+    // CR 702.124h: the pairing answer is held open while the clicked row leaves main.
+    let confirmPair: (names: string[]) => void = () => {};
+    partnerCandidates.mockReturnValue(new Promise<string[]>((resolve) => { confirmPair = resolve; }));
+    act(() => {
+      result.current.handleSetCommander(second);
+    });
     act(() => {
       result.current.handleMoveCard(second, "main");
     });
+    expect(result.current.commanders).toEqual([OTHER]);
     await act(async () => {
-      result.current.handleSetCommander(second);
+      confirmPair([LEGEND]);
     });
 
-    expect(result.current.commanders).toEqual([LEGEND]);
+    await waitFor(() => {
+      expect(result.current.commanders).toEqual([OTHER, LEGEND]);
+    });
     expect(result.current.deck.main).toEqual([{ ...first, count: 2 }]);
     expect(result.current.deck.sideboard).toEqual([second]);
   });

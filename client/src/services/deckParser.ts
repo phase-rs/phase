@@ -246,7 +246,8 @@ function normalizeCardName(name: string): string {
 }
 
 function hasUsablePrinting(printing: SourcePrinting | undefined): printing is SourcePrinting {
-  return typeof printing?.setCode === "string" && typeof printing.collectorNumber === "string";
+  const isFilled = (field: unknown) => typeof field === "string" && field !== "";
+  return isFilled(printing?.setCode) && isFilled(printing?.collectorNumber);
 }
 
 function normalizeEntries(entries: DeckEntry[]): DeckEntry[] {

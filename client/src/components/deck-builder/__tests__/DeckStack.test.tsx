@@ -323,7 +323,10 @@ describe("DeckStack", () => {
       expect(screen.getByText("ONE 276")).toBeInTheDocument();
       expect(screen.getByText("DMU 277")).toBeInTheDocument();
       expect(consoleError.mock.calls.flat().join(" ")).not.toContain("same key");
-      fireEvent.click(screen.getAllByTitle("Add one Forest")[1]);
+      // The main tiles share a name, so each control names its printing.
+      expect(screen.getByTitle("Add one Forest (ONE 276)")).toBeInTheDocument();
+      expect(screen.getByTitle("Remove one Forest")).toBeInTheDocument();
+      fireEvent.click(screen.getByTitle("Add one Forest (DMU 277)"));
       expect(onAddCard).toHaveBeenCalledWith(expect.objectContaining(dmu));
     } finally {
       consoleError.mockRestore();

@@ -198,6 +198,8 @@ function DeckStackCard({
     sourcePrinting: item.sourcePrinting,
   };
   const showAddButton = item.section === "main";
+  // Same-name tiles differ only by printing, so their controls name it too.
+  const controlName = item.printingLabel ? `${item.name} (${item.printingLabel})` : item.name;
   // The commander isn't part of the main/maybeboard partition, so it has no
   // move target. Main cards move out to the sideboard/maybeboard; second-section
   // cards move back to main — the destination is shown on the button label so
@@ -280,7 +282,7 @@ function DeckStackCard({
             onClick={handleAdd}
             disabled={!canAdd}
             className="absolute right-10 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-black/78 text-sm font-bold text-emerald-300 transition hover:bg-emerald-500/85 hover:text-white disabled:cursor-not-allowed disabled:text-slate-500 disabled:hover:bg-black/78"
-            title={canAdd ? t("stack.addOne", { name: item.name }) : t("stack.copyLimit", { name: item.name })}
+            title={canAdd ? t("stack.addOne", { name: controlName }) : t("stack.copyLimit", { name: controlName })}
           >
             +
           </button>
@@ -291,7 +293,7 @@ function DeckStackCard({
           title={
             item.section === "commander"
               ? t("stack.removeCommander", { name: item.name })
-              : t("stack.removeOne", { name: item.name })
+              : t("stack.removeOne", { name: controlName })
           }
         >
           -
@@ -324,8 +326,8 @@ function DeckStackCard({
               type="button"
               onClick={handleMove}
               className="pointer-events-auto inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-full bg-black/78 px-2 py-1 text-[10px] font-semibold text-sky-300 transition hover:bg-sky-500/85 hover:text-white"
-              aria-label={t("card.moveToTarget", { name: item.name, target: moveTargetLabel })}
-              title={t("card.moveToTarget", { name: item.name, target: moveTargetLabel })}
+              aria-label={t("card.moveToTarget", { name: controlName, target: moveTargetLabel })}
+              title={t("card.moveToTarget", { name: controlName, target: moveTargetLabel })}
             >
               <span aria-hidden="true">→</span>
               {moveTargetLabel}
