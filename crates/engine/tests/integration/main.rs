@@ -387,7 +387,6 @@ mod reveal_hand_choose_single_prompt_9841;
 mod ignite_memories_random_reveal;
 mod issue_8115_temporal_extortion_extra_turn;
 mod niambi_granted_trigger_once_each_turn;
-mod niv_mizzet_ghost_counsel;
 mod q_stacking_the_deck;
 mod risky_move_gain_control_trigger;
 mod token_attack_destination;

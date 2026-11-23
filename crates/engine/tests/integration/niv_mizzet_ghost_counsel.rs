@@ -103,7 +103,7 @@ fn niv_mizzet_tap_engine_accept_pays_1_draws_1() {
     );
 }
 
-/// CR 603.2c: the payment and the draw both read the triggering event's amount
+/// CR 608.2c: the payment and the draw both read the triggering event's amount
 /// (6), not a default 1.
 #[test]
 fn niv_mizzet_outside_gain_6_accept_pays_6_draws_6() {
