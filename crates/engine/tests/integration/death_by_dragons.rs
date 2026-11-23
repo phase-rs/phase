@@ -8,10 +8,14 @@
 
 use engine::game::filter_state_for_viewer;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
+use engine::types::ability::{
+    ControllerRef, CopyTargetPurpose, StaticDefinition, TargetFilter, TargetRef, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{GameState, ReplacementChoiceKind, WaitingFor};
+use engine::types::game_state::{
+    GameState, PendingTokenSubstitute, ReplacementChoiceKind, TokenSubstituteChoice, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost};
@@ -242,6 +246,12 @@ const DOUBLING_SEASON: &str = "If an effect would create one or more tokens unde
 const DIVINE_VISITATION: &str = "If one or more creature tokens would be created under your control, that many 4/4 white Angel creature tokens with flying and vigilance are created instead.";
 
 const JINNIE_FAY: &str = "If you would create one or more tokens, you may instead create that many 2/2 green Cat creature tokens with haste or that many 3/1 green Dog creature tokens with vigilance.";
+
+// Verbatim Oracle text (MTGJSON).
+const ESIX: &str = "Flying\nThe first time you would create one or more tokens during each of your turns, you may instead choose a creature other than Esix and create that many tokens that are copies of that creature.";
+
+// Verbatim Oracle text (MTGJSON).
+const MOONLIT_MEDITATION: &str = "Enchant artifact or creature you control\nThe first time you would create one or more tokens each turn, you may instead create that many tokens that are copies of enchanted permanent.";
 
 // Verbatim Oracle text (MTGJSON).
 const HALVING_SEASON: &str = "If an opponent would create one or more tokens, they create half that many of each of those kinds of tokens instead, rounded down.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
@@ -927,11 +937,11 @@ fn death_by_dragons_declined_optional_keeps_one_shared_entry() {
 /// applies only to P0's tokens; its chooser is its controller), and P1's
 /// Dragon is converted by Reflection.
 ///
-/// P0's token identity is deliberately NOT asserted (E2, deferred follow-up):
-/// the rules-derived value is Grizzly Bears (one simultaneous entry, rulings
-/// of The Pit and Jinnie Fay), while the engine creates the accepted
-/// substitute as a post-replacement continuation after Reflection was used on
-/// P1's batch, so it enters as a Cat.
+/// CR 614.6 + CR 608.2f + CR 616.1g: the accepted substitute rewrites P0's
+/// part of the one simultaneous event before the shared entry, so Reflection
+/// converts it too and P0's token enters as a Bear (The Pit ruling: every
+/// token enters at the same time; the Jinnie ruling keeps the creating
+/// instruction's entry state).
 /// The paused clause record is server authority (it can hold hidden-zone moves, CR 400.2 + CR 800.4a), absent from every viewer projection.
 #[test]
 fn death_by_dragons_accepted_optional_completes_one_clause() {
@@ -962,10 +972,33 @@ fn death_by_dragons_accepted_optional_completes_one_clause() {
     assert!(
         runner
             .state()
-            .pending_simultaneous_token_clause
+            .pending_replacement
             .as_ref()
-            .is_some_and(|record| !record.accumulated.is_empty()),
-        "reach guard: the paused clause record is installed and fed"
+            .is_some_and(|pending| {
+                matches!(
+                    pending.token_substitute,
+                    Some(PendingTokenSubstitute {
+                        awaits: TokenSubstituteChoice::Branch,
+                        ..
+                    })
+                )
+            }),
+        "the accept parks the branch substitute on the compound, got {:?}",
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| pending.token_substitute)
+    );
+    assert!(
+        controlled_tokens(runner.state(), P0).is_empty()
+            && controlled_tokens(runner.state(), P1).is_empty(),
+        "nothing is delivered before the substitute choice"
+    );
+    assert!(
+        runner.state().pending_simultaneous_token_clause.is_some(),
+        "reach guard: the paused clause record is installed (still unfed: \
+         nothing is delivered before the substitute choice)"
     );
     for viewer in [P0, P1, P2] {
         assert!(
@@ -987,11 +1020,7 @@ fn death_by_dragons_accepted_optional_completes_one_clause() {
     let state = runner.state();
     let p0_tokens = controlled_tokens(state, P0);
     assert_eq!(p0_tokens.len(), 1, "P0 must create exactly one token");
-    assert_eq!(state.objects[&p0_tokens[0]].controller, P0);
-    assert_ne!(
-        state.objects[&p0_tokens[0]].name, "Dragon",
-        "Jinnie replaced P0's Dragon"
-    );
+    assert_bears(state, p0_tokens[0], P0);
     let p1_tokens = controlled_tokens(state, P1);
     assert_eq!(p1_tokens.len(), 1, "P1 must create one token");
     assert_bears(state, p1_tokens[0], P1);
@@ -1003,7 +1032,7 @@ fn death_by_dragons_accepted_optional_completes_one_clause() {
     assert_eq!(
         last_created_sorted(state),
         sorted(vec![p0_tokens[0], p1_tokens[0]]),
-        "the created referent must be P0's token and P1's Bear"
+        "the created referent must be both Bears"
     );
 }
 
@@ -1047,6 +1076,12 @@ fn death_by_dragons_accepted_optional_releases_the_clause_for_the_next_fan_out()
     assert_clause_completed(&runner, dragons_1);
     let p0_before = controlled_tokens(runner.state(), P0);
     let p1_before = controlled_tokens(runner.state(), P1);
+    assert_eq!(
+        p0_before.len(),
+        1,
+        "the first clause creates P0's token exactly once"
+    );
+    assert_bears(runner.state(), p0_before[0], P0);
 
     // Second clause: a fresh Reflection, then a second Death by Dragons.
     resolve_reflection(&mut runner, mystic_2, bears);
@@ -1138,6 +1173,314 @@ fn death_by_dragons_two_optional_owners_decide_in_apnap_order() {
         last_created_sorted(state),
         sorted(vec![p0_tokens[0], p1_tokens[0]]),
         "the created referent must be both Bears"
+    );
+}
+
+/// CR 614.6 + CR 608.2f + CR 616.1g (Esix R4: "This effect applies before
+/// anything that modifies how those tokens enter the battlefield"): Esix's
+/// creature choice happens inside the pipeline, and the copies enter with the
+/// shared entry, so Reflection converts them too.
+#[test]
+fn death_by_dragons_accepted_esix_copy_enters_with_the_shared_entry() {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let esix = scenario
+        .add_creature_from_oracle(P0, "Esix, Fractal Bloom", 6, 6, ESIX)
+        .id();
+    let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    resolve_reflection(&mut runner, mystic, bears);
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    answer_optional(&mut runner, P0, esix, ACCEPT);
+    let WaitingFor::CopyTargetChoice {
+        player,
+        valid_targets,
+        purpose,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "accepting Esix must ask for the creature to copy, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0, "Esix's controller chooses the copy source");
+    assert_eq!(
+        purpose,
+        CopyTargetPurpose::CopyTokenSource,
+        "the prompt is the copy-source choice"
+    );
+    assert!(
+        valid_targets.contains(&giant) && valid_targets.contains(&bears),
+        "Hill Giant and Bears are legal copy sources, got {valid_targets:?}"
+    );
+    assert!(
+        !valid_targets.contains(&esix),
+        "Esix excludes itself, got {valid_targets:?}"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(giant)),
+        })
+        .expect("choose the Hill Giant to copy");
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    let p0_tokens = controlled_tokens(state, P0);
+    assert_eq!(p0_tokens.len(), 1, "P0 must create exactly one token");
+    assert_bears(state, p0_tokens[0], P0);
+    let p1_tokens = controlled_tokens(state, P1);
+    assert_eq!(p1_tokens.len(), 1, "P1 must create one token");
+    assert_bears(state, p1_tokens[0], P1);
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_no_dragons(state);
+    assert!(
+        reflection_consumed(state),
+        "Reflection must be used by the shared entry"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(vec![p0_tokens[0], p1_tokens[0]]),
+        "the created referent must be both Bears"
+    );
+}
+
+/// Decline control for the Esix row: declining keeps the shared entry — both
+/// seats' Dragons enter as Bears.
+#[test]
+fn death_by_dragons_declined_esix_keeps_the_shared_entry() {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let esix = scenario
+        .add_creature_from_oracle(P0, "Esix, Fractal Bloom", 6, 6, ESIX)
+        .id();
+    let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    resolve_reflection(&mut runner, mystic, bears);
+    let _ = giant;
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    answer_optional(&mut runner, P0, esix, DECLINE);
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    let p0_tokens = controlled_tokens(state, P0);
+    assert_eq!(p0_tokens.len(), 1, "P0 must create one token");
+    assert_bears(state, p0_tokens[0], P0);
+    let p1_tokens = controlled_tokens(state, P1);
+    assert_eq!(p1_tokens.len(), 1, "P1 must create one token");
+    assert_bears(state, p1_tokens[0], P1);
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_no_dragons(state);
+    assert!(
+        reflection_consumed(state),
+        "Reflection must be used by the shared entry"
+    );
+}
+
+/// CR 614.6 + CR 608.2f + CR 616.1g (Moonlit R4: "The effect of Moonlit
+/// Meditation's last ability applies before anything that modifies how those
+/// tokens enter the battlefield"): Moonlit asks nothing after the accept — the
+/// copy rewrites P0's part at once and enters with the shared entry.
+#[test]
+fn death_by_dragons_accepted_moonlit_copy_enters_with_the_shared_entry() {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let moonlit = scenario
+        .add_enchantment_from_oracle(P0, "Moonlit Meditation", MOONLIT_MEDITATION)
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    runner.attach_as_bestowed_aura(moonlit, giant);
+    resolve_reflection(&mut runner, mystic, bears);
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    answer_optional(&mut runner, P0, moonlit, ACCEPT);
+    // No further prompt: the choice-free substitute rewrote P0's part at once.
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    let p0_tokens = controlled_tokens(state, P0);
+    assert_eq!(p0_tokens.len(), 1, "P0 must create exactly one token");
+    assert_bears(state, p0_tokens[0], P0);
+    let p1_tokens = controlled_tokens(state, P1);
+    assert_eq!(p1_tokens.len(), 1, "P1 must create one token");
+    assert_bears(state, p1_tokens[0], P1);
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_no_dragons(state);
+    assert!(
+        reflection_consumed(state),
+        "Reflection must be used by the shared entry"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(vec![p0_tokens[0], p1_tokens[0]]),
+        "the created referent must be both Bears"
+    );
+}
+
+/// CR 614.6 + CR 608.2f + CR 616.1g + CR 101.4: two substitute deciders on one
+/// compound decide in APNAP order, and both copies enter in the one shared
+/// entry Reflection converts.
+#[test]
+fn death_by_dragons_two_accepted_substitutes_decide_in_apnap_order() {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let jinnie_p0 = scenario
+        .add_creature_from_oracle(P0, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    let jinnie_p1 = scenario
+        .add_creature_from_oracle(P1, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    resolve_reflection(&mut runner, mystic, bears);
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    answer_optional(&mut runner, P0, jinnie_p0, ACCEPT);
+    let WaitingFor::ChooseOneOfBranch { player, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "P0's accept must park on P0's branch choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        player, P0,
+        "P1 is offered nothing before P0's branch is answered (APNAP)"
+    );
+    runner
+        .act(GameAction::ChooseBranch { index: 0 })
+        .expect("P0 chooses the Cat branch");
+    answer_optional(&mut runner, P1, jinnie_p1, ACCEPT);
+    let WaitingFor::ChooseOneOfBranch { player, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "P1's accept must park on P1's branch choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P1, "the fourth prompt is P1's branch choice");
+    runner
+        .act(GameAction::ChooseBranch { index: 1 })
+        .expect("P1 chooses the Dog branch");
+    assert_clause_completed(&runner, dragons);
+
+    let state = runner.state();
+    let p0_tokens = controlled_tokens(state, P0);
+    assert_eq!(p0_tokens.len(), 1, "P0 must create exactly one token");
+    assert_bears(state, p0_tokens[0], P0);
+    let p1_tokens = controlled_tokens(state, P1);
+    assert_eq!(p1_tokens.len(), 1, "P1 must create exactly one token");
+    assert_bears(state, p1_tokens[0], P1);
+    assert!(
+        controlled_tokens(state, P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    assert_no_dragons(state);
+    assert!(
+        reflection_consumed(state),
+        "Reflection must be used by the shared entry"
+    );
+    assert_eq!(
+        last_created_sorted(state),
+        sorted(vec![p0_tokens[0], p1_tokens[0]]),
+        "the created referent must be both Bears"
+    );
+}
+
+/// The parked substitute is a parked replacement: when its decider leaves, the
+/// prompt and the record are torn down like any other parked replacement. The
+/// survivors' part is phase 3's work and is not asserted here.
+#[test]
+fn death_by_dragons_substitute_decider_concedes_is_torn_down() {
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let jinnie = scenario
+        .add_creature_from_oracle(P1, "Jinnie Fay, Jetmir's Second", 3, 4, JINNIE_FAY)
+        .id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    resolve_reflection(&mut runner, mystic, bears);
+
+    let _ = runner.cast(dragons).target_player(P2).resolve();
+    answer_optional(&mut runner, P1, jinnie, ACCEPT);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseOneOfBranch {
+                player: _p1,
+                ..
+            } if _p1 == P1
+        ),
+        "the accept parks on P1's branch choice, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("P1 concedes while its substitute is parked");
+
+    assert!(
+        runner.state().players[1].is_eliminated,
+        "reach guard: P1 left the game"
+    );
+    assert!(
+        runner.state().pending_replacement.is_none(),
+        "eliminating the parked decider clears the parked substitute"
+    );
+    assert!(
+        runner.state().waiting_for.acting_player() != Some(P1),
+        "no prompt waits on the departed decider, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().pending_simultaneous_token_clause.is_none(),
+        "the paused token clause is gone after the Concede boundary"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the stack is empty after the Concede boundary"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the game is at Priority after the Concede boundary, got {:?}",
+        runner.state().waiting_for
     );
 }
 

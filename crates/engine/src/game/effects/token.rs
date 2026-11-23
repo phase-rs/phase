@@ -889,7 +889,9 @@ pub(crate) fn propose_token_batch(
     );
 
     // CR 614.1a: Propose entire token batch for replacement pipeline.
-    // Replacement effects (Doubling Season, Primal Vigor) modify count.
+    // Replacement effects (Doubling Season, Primal Vigor) modify count. A
+    // token substitute's branch tokens are rewritten into the event they
+    // modify, so a fresh proposal carries an empty applied set.
     TokenBatchProposal::Ready(ProposedEvent::CreateToken {
         owner: token_owner,
         spec: Box::new(spec),
@@ -897,10 +899,7 @@ pub(crate) fn propose_token_batch(
         enter_tapped: crate::types::proposed_event::EtbTapState::from_seeded_tapped(tapped),
         count,
         appended: Vec::new(),
-        applied: state
-            .post_replacement_token_choice_applied
-            .clone()
-            .unwrap_or_default(),
+        applied: HashSet::new(),
     })
 }
 
@@ -1762,13 +1761,12 @@ fn repark_event_copy_frame(
 ) {
     if let Some((mut frame, boundary)) = held {
         // CR 614.6 + CR 609.3: a delivery that completed having created nothing did not
-        // deliver the offered batch's tokens. The event was replaced by a different creation
-        // (Jinnie Fay, Moonlit Meditation, Esix), or reduced to nothing (Halving Season).
-        // Either way the owner adopts on resume whatever replaced it, which is nothing in the
-        // second case. Every other handoff settles. This reads "replaced by a different
-        // creation" exactly only while a substituted event delivers none of its batches
-        // (`replacement::apply_single_replacement` zeroes only a substituted event's own
-        // batch, not the batches a replacement appended to it).
+        // deliver the offered batch's tokens. The event was reduced to nothing
+        // (Halving Season on one token; an accepted Esix with no legal copy
+        // source is Prevented, not delivered). A token substitute's tokens are
+        // delivered by this delivery, so they always settle through the handoff
+        // below. This reads "reduced to nothing" exactly only while a
+        // substituted event delivers none of its batches.
         let delivered_nothing = matches!(
             completion,
             super::token_copy::CopyTokenApplyCompletion::Completed

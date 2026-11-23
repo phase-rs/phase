@@ -7168,6 +7168,7 @@ mod tests {
                 stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
+            token_substitute: None,
             sacrifice_provenance: None,
             candidates: vec![ReplacementId {
                 source: ObjectId(7),

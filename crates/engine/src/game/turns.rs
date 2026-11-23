@@ -2060,14 +2060,6 @@ fn begin_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.crew_history_this_turn.clear();
     // CR 701.14a: "fought this turn" is per-turn history.
     state.creatures_fought_this_turn.clear();
-    // Belt-and-suspenders: these transient replacement-continuation seeds are
-    // normally nulled by the full-drain clear (effects/mod.rs) on the next
-    // action, but EventContextAmount reads
-    // post_replacement_token_substitution_count at highest priority
-    // (quantity.rs) — guarantee a clean slate each turn so no stale copy-count
-    // can shadow a later EventContextAmount read.
-    state.post_replacement_token_substitution_count = None;
-    state.post_replacement_token_choice_applied = None;
     reset_loyalty_activation_counts(state);
     // CR 606.1 + CR 603.4: Per-player loyalty-activation history is a CR 603.4
     // "this turn" record. The cap-raising grant from

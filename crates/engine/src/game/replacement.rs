@@ -8,13 +8,13 @@ use crate::game::filter::ReplacementDefinitionFilterExt;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, CastingPermission, ChoiceType, ChosenAttribute, CoinFlipRun,
-    CombatDamageScope, ControllerRef, DamageModification, DamageRedirectTarget, DamageTargetFilter,
-    DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope,
-    EntryAttackDestination, ManaSpendPermission, PermissionGrantee, PostReplacementContinuation,
-    PreventionAmount, PreventionFormula, QuantityExpr, QuantityModification, QuantityRef,
-    RedirectionLifetime, ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, ResolvedAbility, RoundingMode, ShieldKind, SplitDamagePortion, TapStateChange,
-    TargetFilter, TargetRef,
+    CombatDamageScope, ControllerRef, CopyTargetPurpose, DamageModification, DamageRedirectTarget,
+    DamageTargetFilter, DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect,
+    EffectScope, EntryAttackDestination, ManaSpendPermission, PermissionGrantee, PlayerFilter,
+    PostReplacementContinuation, PreventionAmount, PreventionFormula, QuantityExpr,
+    QuantityModification, RedirectionLifetime, ReplacementChoiceAuthority, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, ResolvedAbility, RoundingMode, ShieldKind,
+    SplitDamagePortion, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::actions::ReplacementAutoChoice;
 use crate::types::card_type::CoreType;
@@ -30,11 +30,12 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::DamageBatchLedger;
 use crate::types::game_state::{
     DrainStatus, GameState, HeldBatchRider, LiminalEntry, LiminalEntryKind, NamedChoiceSource,
-    NamedChoiceSourceBinding, PayableResource, PendingCombatLegChoice, PendingCombatLegProgress,
-    PendingCostMoveResume, PendingReplacement, PostReplacementDrain, ReplacementAutoChoiceId,
-    ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord,
-    ReplacementAutoChoiceTail, ReplacementCandidateSummary, ReplacementChoiceKind,
-    ReplacementIndexEntry, ResidentDrainPolicy, ResolutionPaymentOrigin, RiderTiming, WaitingFor,
+    NamedChoiceSourceBinding, ParentTargetOccurrences, PayableResource, PendingCombatLegChoice,
+    PendingCombatLegProgress, PendingCostMoveResume, PendingReplacement, PendingTokenSubstitute,
+    PostReplacementDrain, ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity,
+    ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail,
+    ReplacementCandidateSummary, ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy,
+    ResolutionPaymentOrigin, RiderTiming, TokenSubstituteChoice, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
@@ -43,12 +44,12 @@ use crate::types::proposed_event::{
     AppliedReplacementKey, BoundSearchFoundCandidate, BoundSearchFoundDisposition,
     BoundSearchFoundGrant, CopyTokenSpec, CounterCause, CounterMoveStage, CounterPlacement,
     DrawEventStage, EnterWithGrant, EnterWithGrants, EtbTapState, ProposedEvent, ReplacementId,
-    SearchFoundDisposition, TokenAttackRequest, TokenBatch,
+    SearchFoundDisposition, TokenAttackRequest, TokenBatch, TokenSpec,
 };
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
-use super::ability_utils::build_resolved_from_def;
+use super::ability_utils::{build_resolved_from_def, build_resolved_from_def_with_targets};
 use super::arithmetic::u32_to_i32_saturating;
 use super::game_object::GameObject;
 
@@ -1235,72 +1236,13 @@ fn damage_rider_placement(state: &GameState) -> Option<PausedRider> {
     Some(PausedRider { owner })
 }
 
-fn ability_tree_creates_tokens(def: &AbilityDefinition) -> bool {
-    let effect_creates_tokens = match &*def.effect {
-        Effect::Token { .. } => true,
-        Effect::ChooseOneOf { branches, .. } => branches.iter().any(ability_tree_creates_tokens),
-        _ => false,
-    };
-    effect_creates_tokens || {
-        def.sub_ability
-            .as_deref()
-            .is_some_and(ability_tree_creates_tokens)
-            || def
-                .else_ability
-                .as_deref()
-                .is_some_and(ability_tree_creates_tokens)
-    }
-}
-
-/// CR 614.1a + CR 614.6 + CR 608.2h: bind a token-choice substitution's branch
-/// templates to the creation it replaces (Jinnie Fay: "you may instead create
-/// that many …"). Every `Effect::Token` reached through the same descend set as
-/// [`ability_tree_creates_tokens`] keeps the creating instruction's tapped entry
-/// (`instruction_tapped`), and a count that is exactly "that many"
-/// (`EventContextAmount`) becomes `that_many`, the number of tokens replaced,
-/// fixed when the replacement applies. Any other count is left as authored.
-fn bind_substitute_token_entry(
-    def: &mut AbilityDefinition,
-    instruction_tapped: bool,
-    that_many: i32,
-) {
-    match &mut *def.effect {
-        Effect::Token { tapped, count, .. } => {
-            *tapped |= instruction_tapped;
-            if matches!(
-                count,
-                QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount
-                }
-            ) {
-                *count = QuantityExpr::Fixed { value: that_many };
-            }
-        }
-        Effect::ChooseOneOf { branches, .. } => {
-            for branch in branches {
-                bind_substitute_token_entry(branch, instruction_tapped, that_many);
-            }
-        }
-        _ => {}
-    }
-    for child in [
-        def.sub_ability.as_deref_mut(),
-        def.else_ability.as_deref_mut(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        bind_substitute_token_entry(child, instruction_tapped, that_many);
-    }
-}
-
 /// CR 614.1a + CR 614.5: does this ability tree reach a `CopyTokenOf`? The
-/// single authority behind both the copy-source prompt's `purpose` and the
-/// `CreateToken` applied-set / "that many" stamp, so the two can never disagree.
+/// authority behind the copy-source prompt's `purpose` on the post-replacement
+/// route; the token substitutes applied inside the event are classified by
+/// [`token_substitute_shape`] instead.
 ///
 /// The descend set is deliberately narrow — `sub_ability`, `else_ability`, and
-/// `ChooseOneOf` branches — and mirrors `ability_tree_creates_tokens` exactly.
-/// It must NOT reach a `CopyTokenOf` that lives inside a granted trigger
+/// `ChooseOneOf` branches. It must NOT reach a `CopyTokenOf` that lives inside a granted trigger
 /// (CR 603.3: a triggered ability is put on the stack and resolves separately,
 /// so it is not part of *this* replacement's substitution). That is Progenitor
 /// Mimic's measured shape — `BecomeCopy.additional_modifications` →
@@ -1320,6 +1262,84 @@ pub(super) fn ability_tree_copies_tokens(def: &AbilityDefinition) -> bool {
             .else_ability
             .as_deref()
             .is_some_and(ability_tree_copies_tokens)
+}
+
+/// CR 614.6 + CR 614.5: the shape of an accepted token substitute that is
+/// applied inside the event it modifies, as [`token_substitute_shape`]
+/// classifies it.
+#[derive(Debug, Clone)]
+pub(crate) enum TokenSubstituteShape {
+    /// A `CopyTokenOf` with a card-fixed source (Moonlit Meditation): no
+    /// choice, rewritten at once.
+    Fixed(AbilityDefinition),
+    /// A controller's branch choice whose every branch creates tokens (Jinnie
+    /// Fay): parked for the branch answer, then rewritten.
+    Branch { branches: Vec<AbilityDefinition> },
+    /// A creature choice whose tail copies it (Esix, Fractal Bloom): parked
+    /// for the copy source, then rewritten.
+    CopySource {
+        filter: TargetFilter,
+        tail: AbilityDefinition,
+    },
+}
+
+/// CR 614.6 + CR 614.5: the one classifier of the token substitutes that are
+/// applied inside the event. A future CreateToken substitute whose shape is
+/// not admitted here (a ChooseOneOf with a token tail, a choice nested in
+/// another choice, a CopyTokenOf with a tail) falls back to the
+/// post-replacement continuation, whose fresh token event no longer inherits
+/// the applied set: it must be classified here, or it re-opens the #4886
+/// re-offer loop.
+fn token_substitute_shape(def: &ReplacementDefinition) -> Option<TokenSubstituteShape> {
+    if def.event != ReplacementEvent::CreateToken {
+        return None;
+    }
+    if def.quantity_modification.is_some()
+        || def.additional_token_spec.is_some()
+        || def.ensure_token_specs.is_some()
+        || def.token_owner_redirect.is_some()
+    {
+        return None;
+    }
+    let work = EventModifiers::first_non_modifier_ability(def.execute.as_deref())?;
+    match &*work.effect {
+        Effect::CopyTokenOf { .. } if work.sub_ability.is_none() && work.else_ability.is_none() => {
+            Some(TokenSubstituteShape::Fixed((*work).clone()))
+        }
+        Effect::ChooseOneOf {
+            chooser, branches, ..
+        } if matches!(chooser, PlayerFilter::Controller)
+            && work.sub_ability.is_none()
+            && work.else_ability.is_none()
+            && !branches.is_empty()
+            && branches.iter().all(|branch| {
+                EventModifiers::first_non_modifier_ability(Some(branch)).is_some_and(|work| {
+                    matches!(work.effect.as_ref(), Effect::Token { .. })
+                        && work.sub_ability.is_none()
+                        && work.else_ability.is_none()
+                })
+            }) =>
+        {
+            Some(TokenSubstituteShape::Branch {
+                branches: (*branches).clone(),
+            })
+        }
+        Effect::ChoosePermanent { filter } if work.else_ability.is_none() => {
+            let tail = work.sub_ability.as_deref()?;
+            match &*tail.effect {
+                Effect::CopyTokenOf { .. }
+                    if tail.sub_ability.is_none() && tail.else_ability.is_none() =>
+                {
+                    Some(TokenSubstituteShape::CopySource {
+                        filter: (*filter).clone(),
+                        tail: (*tail).clone(),
+                    })
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// CR 614.1c + CR 611.2a: is this chain link a strippable "and with …" entry
@@ -1406,52 +1426,18 @@ fn strip_entry_grant_links(
     Some((filtered_tail, grants))
 }
 
-// CR 614.12a + issue #4886 (review #6): must classify the WHOLE ability tree,
-// not just the ChooseOneOf's branches — `ability_tree_creates_tokens` already
-// walks `def.sub_ability`/`def.else_ability`, so a token created by a tail
-// chained after the choice (`ChooseOneOf(non-token branches).sub_ability(Token)`)
-// is caught too. A branches-only check (the previous bug) missed that shape
-// entirely, so the tail token was never seeded and could re-prompt the
-// originating replacement.
-fn is_token_replacement_choice(def: &AbilityDefinition) -> bool {
-    matches!(&*def.effect, Effect::ChooseOneOf { .. }) && ability_tree_creates_tokens(def)
-}
-
-/// A `CopyTokenOf`-substitution replacement post-effect. Sibling of
-/// `is_token_replacement_choice` (the Jinnie Fay `ChooseOneOf` shape) — both name
-/// the token-creation substitution families whose continuation must inherit the
-/// originating event's applied set to self-suppress.
-///
-/// Two members, which is why this is a tree walk rather than a root `matches!`:
-/// the copy sits at the ROOT when the source is fixed by the card (Moonlit
-/// Meditation: "create that many tokens that are copies of enchanted
-/// permanent"), and under a `ChoosePermanent`'s `sub_ability` when the source is
-/// chosen during resolution (Esix, Fractal Bloom). Walking via
-/// `ability_tree_copies_tokens` brings this into agreement with its sibling,
-/// which already walks (`ChooseOneOf` root ∧ `ability_tree_creates_tokens`).
-fn is_copy_token_substitution(def: &AbilityDefinition) -> bool {
-    ability_tree_copies_tokens(def)
-}
-
 /// CR 614.6: Single authority for ABANDONING a live post-replacement
 /// continuation (as opposed to draining it normally via
 /// `apply_pending_post_replacement_effect`, which only clears
 /// `post_replacement_source` itself once the continuation is dispatched).
 /// Every field here is tightly coupled to the continuation's lifetime — a
 /// caller that clears a subset by hand risks stranding a sibling field when a
-/// new one is added later. `post_replacement_token_choice_applied` (issue
-/// #4886, review #6) was missed by the one pre-existing abandonment path
-/// (player elimination mid-resolution, `elimination.rs`) precisely because it
-/// was hand-listed there instead of routed through one function.
+/// new one is added later.
 pub(crate) fn abandon_post_replacement_continuation(state: &mut GameState) {
     // The drain owns its source / applied / event-source / event-target, so one
     // call abandons all four. This is precisely the hand-listing hazard the doc
     // above describes: those four could no longer be stranded individually.
     state.abandon_active_replacement_tails();
-    state.post_replacement_token_choice_applied = None;
-    // CR 614.1a: the Moonlit-scoped "that many" copy count is single-authority
-    // abandoned alongside the applied seed it rides with.
-    state.post_replacement_token_substitution_count = None;
     // CR 121.2 + CR 800.4a: draw frames are single-player-scoped (each tracks one
     // player's own in-flight instruction), so the whole stack is abandoned outright
     // here — unlike the deliberately-preserved multi-player queue fields nearby in
@@ -1464,15 +1450,13 @@ pub(crate) fn abandon_post_replacement_continuation(state: &mut GameState) {
 
 /// CR 800.4a + CR 121.6b: [`abandon_post_replacement_continuation`] for a
 /// departure inside a substitute for a surviving player's draw: the leaver's
-/// replacement tails and the choice-scoped seeds go, and the surviving
-/// player's draw sequences stay (`GameState::abandon_active_replacement_tails_of`).
+/// replacement tails go, and the surviving player's draw sequences stay
+/// (`GameState::abandon_active_replacement_tails_of`).
 pub(crate) fn abandon_departed_substitute_continuation(
     state: &mut GameState,
     leaving: &std::collections::HashSet<PlayerId>,
 ) {
     state.abandon_active_replacement_tails_of(leaving);
-    state.post_replacement_token_choice_applied = None;
-    state.post_replacement_token_substitution_count = None;
 }
 
 pub type ReplacementMatcher = fn(&ProposedEvent, ObjectId, &GameState) -> bool;
@@ -1495,6 +1479,11 @@ pub(crate) fn pending_replacement_option_count(
     state: &GameState,
     pending: &PendingReplacement,
 ) -> usize {
+    // CR 614.6 + CR 616.1: a parked token substitute is answered by its own
+    // prompt, never by an ordering index.
+    if pending.token_substitute.is_some() {
+        return 0;
+    }
     if matches!(pending.proposed, ProposedEvent::EmptyManaPool { .. }) {
         return executable_candidate_positions(state, pending).len();
     }
@@ -1600,6 +1589,48 @@ pub(crate) fn parked_prompt_is_stale(state: &GameState, pending: &PendingReplace
         || !pending_candidates_are_current(state, pending)
 }
 
+/// CR 614.6 + CR 616.1: whether the live prompt is the parked token
+/// substitute's own prompt: the branch choice on its source for a `Branch`
+/// record, the copy-source choice on its source for a `CopySource` record.
+pub(crate) fn pending_token_substitute_prompt_is_live(state: &GameState) -> bool {
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        return false;
+    };
+    let Some(rec) = pending.token_substitute else {
+        return false;
+    };
+    match rec.awaits {
+        TokenSubstituteChoice::Branch => matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch { source_id, .. }
+            if source_id == rec.replacement.source
+        ),
+        TokenSubstituteChoice::CopySource => matches!(
+            state.waiting_for,
+            WaitingFor::CopyTargetChoice {
+                source_id,
+                purpose: CopyTargetPurpose::CopyTokenSource,
+                ..
+            } if source_id == rec.replacement.source
+        ),
+    }
+}
+
+/// CR 614.6 + CR 616.1: whether a token substitute awaiting `awaits` is
+/// parked on `source_id` — the routing predicate of the branch-choice and
+/// copy-target-choice answers.
+pub(crate) fn parked_token_substitute(
+    state: &GameState,
+    source_id: ObjectId,
+    awaits: TokenSubstituteChoice,
+) -> bool {
+    state.pending_replacement.as_ref().is_some_and(|pending| {
+        pending
+            .token_substitute
+            .is_some_and(|rec| rec.replacement.source == source_id && rec.awaits == awaits)
+    })
+}
+
 /// Build a `WaitingFor::ReplacementChoice` from the current `pending_replacement` state.
 /// Centralizes candidate count and description extraction so callers don't repeat this logic.
 ///
@@ -1626,6 +1657,13 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
     // the zone pipeline's post-`NeedsChoice` render would clobber the
     // `PayAmountChoice` with a degenerate one-candidate ordering prompt.
     if pending_entry_payment_is_live(state) {
+        return state.waiting_for.clone();
+    }
+    // CR 614.6 + CR 616.1: likewise preserve an accepted token substitute's
+    // prompt on its parked creation. Without this every caller that renders
+    // after `NeedsChoice` would clobber the branch or copy-source choice with
+    // a degenerate zero-option ordering prompt.
+    if pending_token_substitute_prompt_is_live(state) {
         return state.waiting_for.clone();
     }
     // CR 616.1 / CR 614: each option carries its source object so the frontend
@@ -2650,11 +2688,10 @@ fn stub_applier(
 // --- 1. Moved (ZoneChange) ---
 
 fn change_zone_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
-    // CR 701.7a + CR 614.3: a creation of zero tokens (Halving Season on one token;
-    // Moonlit Meditation / Jinnie Fay zeroing the original event before their
-    // substitute is created) puts nothing onto the battlefield, so it contains no
-    // entry for an entry replacement to modify. A one-shot one ("the next time one or
-    // more creatures … enter") is not used up by it and waits for a real entry.
+    // CR 701.7a + CR 614.3: a creation of zero tokens (Halving Season on one
+    // token) puts nothing onto the battlefield, so it contains no entry for an
+    // entry replacement to modify. A one-shot one ("the next time one or more
+    // creatures … enter") is not used up by it and waits for a real entry.
     // Mirrors `draw_matcher`'s `count > 0`. A compound event is matched per batch
     // view, so an empty batch is skipped while its siblings still match.
     matches!(
@@ -5921,17 +5958,6 @@ fn create_token_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameS
     matches!(event, ProposedEvent::CreateToken { .. })
 }
 
-fn is_choose_token_substitution(def: &AbilityDefinition) -> bool {
-    let Effect::ChooseOneOf { branches, .. } = def.effect.as_ref() else {
-        return false;
-    };
-    !branches.is_empty()
-        && branches.iter().all(|branch| {
-            EventModifiers::first_non_modifier_ability(Some(branch))
-                .is_some_and(|work| matches!(work.effect.as_ref(), Effect::Token { .. }))
-        })
-}
-
 fn create_token_applier(
     event: ProposedEvent,
     rid: ReplacementId,
@@ -5939,7 +5965,7 @@ fn create_token_applier(
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
     use crate::types::ability::QuantityModification;
-    // Extract the seven fields the applier reads, given a def and the controller
+    // Extract the six fields the applier reads, given a def and the controller
     // that installed it. Shared by the object-hosted branch and the floating
     // (`ObjectId(0)` sentinel) branch so both produce an identical tuple.
     let extract = |def: &ReplacementDefinition, controller: PlayerId| {
@@ -5955,9 +5981,6 @@ fn create_token_applier(
                 .as_deref()
                 .filter(|ability| matches!(*ability.effect, Effect::Token { .. }))
                 .cloned(),
-            def.execute
-                .as_deref()
-                .is_some_and(is_choose_token_substitution),
             controller,
         )
     };
@@ -5967,7 +5990,6 @@ fn create_token_applier(
         ensure_specs,
         owner_redirect,
         substitute,
-        choose_token_substitution,
         source_controller,
     ) = if rid.source == ObjectId(0) {
         // CR 614.1a + CR 111.2: Floating token-creation replacements (Kaya,
@@ -5982,7 +6004,7 @@ fn create_token_applier(
                 let controller = def.source_controller.unwrap_or(state.active_player);
                 extract(def, controller)
             })
-            .unwrap_or((None, None, None, None, None, false, PlayerId(0)))
+            .unwrap_or((None, None, None, None, None, PlayerId(0)))
     } else {
         state
             .objects
@@ -5992,7 +6014,7 @@ fn create_token_applier(
                     .get(rid.index)
                     .map(|def| extract(def, obj.controller))
             })
-            .unwrap_or((None, None, None, None, None, false, PlayerId(0)))
+            .unwrap_or((None, None, None, None, None, PlayerId(0)))
     };
 
     if let ProposedEvent::CreateToken {
@@ -6047,23 +6069,6 @@ fn create_token_applier(
             Some(QuantityModification::Prevent) => return ApplyResult::Prevented,
             None => count,
         };
-
-        // CR 614.1a + CR 608.2d: An interactive token substitution (Jinnie
-        // Fay class) replaces the original token event with the token event
-        // from the branch the player chooses. The branch runs later as a
-        // post-replacement continuation and inherits this event's applied set;
-        // the original batch is therefore suppressed here.
-        if choose_token_substitution {
-            return ApplyResult::Modified(ProposedEvent::CreateToken {
-                owner,
-                spec,
-                copy,
-                enter_tapped,
-                count: 0,
-                appended,
-                applied,
-            });
-        }
 
         // CR 614.1a + CR 111.1: Full token substitution (Divine Visitation —
         // "that many 4/4 white Angel creature tokens … are created instead").
@@ -10984,7 +10989,7 @@ fn replacement_depth_limit(proposed: &ProposedEvent) -> u16 {
 /// ProposedEvent modifications (enter_tapped, counters) and must flow through the same
 /// propagation logic so the replacement pipeline sees them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReplacementBranch {
+pub(crate) enum ReplacementBranch {
     Execute,
     Decline,
 }
@@ -12329,12 +12334,14 @@ fn apply_single_replacement(
                         *count = 0;
                     }
                 }
-                // CR 614.6 + CR 111.1: A CreateToken replacement whose execute is
-                // a non-Token substitute chain (Jinnie Fay's ChooseOneOf branch
-                // choice) fully replaces the original token event. Zero the
+                // CR 614.6: a token substitute (Jinnie Fay, Esix, Moonlit Meditation)
+                // rewrites the batch in the event instead, so it never reaches
+                // this zeroing. A non-token substitute chain still zeroes the
                 // surviving count here so the delivery path creates no original
                 // tokens while the substitute chain runs via the continuation.
-                if matches!(proposed, ProposedEvent::CreateToken { .. }) {
+                if matches!(proposed, ProposedEvent::CreateToken { .. })
+                    && token_substitute_shape(repl_def).is_none()
+                {
                     let is_non_token_substitute = match ability {
                         Some(def) => {
                             !matches!(*def.effect, Effect::Token { .. })
@@ -13231,7 +13238,7 @@ fn apply_replacement_to_token_batches(
     proposed: ProposedEvent,
     rid: ReplacementId,
     owner: PlayerId,
-    branch: ReplacementBranch,
+    work: ChosenReplacementWork,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ProposedEvent, ApplyResult> {
@@ -13263,8 +13270,19 @@ fn apply_replacement_to_token_batches(
             survivors.push(view);
             continue;
         }
-        match apply_single_replacement(state, view, rid, branch, registry, events) {
-            Ok(applied) => survivors.push(applied),
+        match apply_single_replacement(state, view, rid, work.branch(), registry, events) {
+            Ok(applied) => match &work {
+                ChosenReplacementWork::Branch(_) => survivors.push(applied),
+                ChosenReplacementWork::TokenSubstitute(sub) => {
+                    match substitute_token_batch(applied, sub) {
+                        Ok(rewritten) => survivors.push(rewritten),
+                        Err(ApplyResult::Prevented) => {}
+                        Err(ApplyResult::Modified(_)) => {
+                            unreachable!("substitute_token_batch reports modification through Ok")
+                        }
+                    }
+                }
+            },
             Err(ApplyResult::Prevented) => {}
             Err(ApplyResult::Modified(_)) => {
                 unreachable!("apply_single_replacement reports modification through Ok")
@@ -13279,39 +13297,6 @@ fn apply_replacement_to_token_batches(
             unreachable!("a CreateToken replacement leaves every batch a CreateToken")
         }),
     )
-}
-
-/// CR 614.1a: how many of this event's tokens replacement `rid` applies to —
-/// the summed `count` of the batches it matches. For a non-compound event this
-/// is the event's own `count`. On a compound event only the batches `scope`
-/// covers count. The "that many" of a whole-event substitution (Moonlit
-/// Meditation's copies) is this number.
-fn token_count_affected_by(
-    state: &GameState,
-    proposed: &ProposedEvent,
-    rid: ReplacementId,
-    scope: TokenBatchScope,
-    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
-) -> u32 {
-    let Some(views) = proposed.token_batch_views() else {
-        return proposed.create_token_count().unwrap_or(0);
-    };
-    let spent = one_shots_spent_by_compound(state, &views);
-    views
-        .iter()
-        .filter(|view| match (scope, view) {
-            (TokenBatchScope::WholeEvent, _) => true,
-            (
-                TokenBatchScope::Owner(owner),
-                ProposedEvent::CreateToken {
-                    owner: batch_owner, ..
-                },
-            ) => *batch_owner == owner,
-            (TokenBatchScope::Owner(_), _) => false,
-        })
-        .filter(|view| token_batch_admits(state, view, rid, registry, &spent))
-        .filter_map(ProposedEvent::create_token_count)
-        .fold(0, u32::saturating_add)
 }
 
 /// Whose part of an event one chosen replacement covers.
@@ -13363,6 +13348,178 @@ fn mark_chosen_declined(proposed: &mut ProposedEvent, rid: ReplacementId, actor:
     }
 }
 
+/// CR 614.6 + the Jinnie Fay ruling ("The tokens' characteristics are
+/// entirely replaced ... Anything else specified in the effect creating the
+/// tokens ... still applies"): an accepted token substitute, built from its
+/// decider's answer (or at once, when it asks nothing) and rewritten into the
+/// decider's batches of the event.
+#[derive(Debug, Clone)]
+pub(crate) enum TokenSubstitute {
+    /// A predefined substitute (Jinnie Fay's Cats or Dogs).
+    Token(Box<TokenSpec>),
+    /// Copies of a chosen or card-fixed source (Esix, Moonlit Meditation;
+    /// CR 707.2: they acquire its copiable values).
+    Copy(Box<CopyTokenSpec>),
+    /// CR 609.3: the substitute creates nothing (Esix with no legal copy
+    /// source), so each covered view is dropped.
+    Nothing,
+}
+
+/// The entry-state fields of a substitute spec. [`TokenSpec`] and
+/// [`CopyTokenSpec`] carry the same four fields; this trait lets the one
+/// entry-state rule below write both.
+trait SubstituteEntryTarget {
+    fn tapped(&self) -> bool;
+    fn set_tapped(&mut self, tapped: bool);
+    fn enters_attacking(&self) -> bool;
+    fn set_enters_attacking(&mut self, enters_attacking: bool);
+    fn set_attack_request(&mut self, request: TokenAttackRequest);
+    fn set_sacrifice_at(&mut self, sacrifice_at: Option<Duration>);
+}
+
+impl SubstituteEntryTarget for TokenSpec {
+    fn tapped(&self) -> bool {
+        self.tapped
+    }
+    fn set_tapped(&mut self, tapped: bool) {
+        self.tapped = tapped;
+    }
+    fn enters_attacking(&self) -> bool {
+        self.enters_attacking
+    }
+    fn set_enters_attacking(&mut self, enters_attacking: bool) {
+        self.enters_attacking = enters_attacking;
+    }
+    fn set_attack_request(&mut self, request: TokenAttackRequest) {
+        self.attack_request = request;
+    }
+    fn set_sacrifice_at(&mut self, sacrifice_at: Option<Duration>) {
+        self.sacrifice_at = sacrifice_at;
+    }
+}
+
+impl SubstituteEntryTarget for CopyTokenSpec {
+    fn tapped(&self) -> bool {
+        self.tapped
+    }
+    fn set_tapped(&mut self, tapped: bool) {
+        self.tapped = tapped;
+    }
+    fn enters_attacking(&self) -> bool {
+        self.enters_attacking
+    }
+    fn set_enters_attacking(&mut self, enters_attacking: bool) {
+        self.enters_attacking = enters_attacking;
+    }
+    fn set_attack_request(&mut self, request: TokenAttackRequest) {
+        self.attack_request = request;
+    }
+    fn set_sacrifice_at(&mut self, sacrifice_at: Option<Duration>) {
+        self.sacrifice_at = sacrifice_at;
+    }
+}
+
+/// CR 614.6 + the Jinnie Fay ruling ("Anything else specified in the effect
+/// creating the tokens ... still applies"): the one entry-state rule. The
+/// creating instruction's tapped and attacking merge onto the substitute, and
+/// its named attack destination and token-spec rider (`sacrifice_at`, CR 603.7a)
+/// replace the substitute's own when the instruction names one.
+fn keep_creating_instruction_entry(orig: &TokenSpec, sub: &mut impl SubstituteEntryTarget) {
+    sub.set_tapped(sub.tapped() | orig.tapped);
+    sub.set_enters_attacking(sub.enters_attacking() | orig.enters_attacking);
+    if !orig.attack_request.is_unspecified() {
+        sub.set_attack_request(orig.attack_request.clone());
+    }
+    if orig.sacrifice_at.is_some() {
+        sub.set_sacrifice_at(orig.sacrifice_at.clone());
+    }
+}
+
+/// CR 614.6: rewrite one covered `CreateToken` view of the event with an
+/// accepted token substitute, keeping the view's `owner`, `count` ("that
+/// many"), `enter_tapped`, `appended` and `applied`. `Nothing` drops the view
+/// (`Prevented`, dropped per batch on a compound).
+#[allow(clippy::result_large_err)]
+fn substitute_token_batch(
+    view: ProposedEvent,
+    sub: &TokenSubstitute,
+) -> Result<ProposedEvent, ApplyResult> {
+    let ProposedEvent::CreateToken {
+        owner,
+        spec: orig,
+        enter_tapped,
+        count,
+        appended,
+        applied,
+        ..
+    } = view
+    else {
+        debug_assert!(
+            false,
+            "token-substitute work applies only to CreateToken views"
+        );
+        return Ok(view);
+    };
+    match sub {
+        TokenSubstitute::Token(new) => {
+            let mut spec = new.as_ref().clone();
+            keep_creating_instruction_entry(&orig, &mut spec);
+            Ok(ProposedEvent::CreateToken {
+                owner,
+                spec: Box::new(spec),
+                copy: None,
+                enter_tapped,
+                count,
+                appended,
+                applied,
+            })
+        }
+        TokenSubstitute::Copy(new) => {
+            let mut copy = new.as_ref().clone();
+            keep_creating_instruction_entry(&orig, &mut copy);
+            let mut spec = crate::game::effects::token::copy_probe_spec_for(
+                copy.source_id,
+                copy.controller,
+                copy.sacrifice_at.clone(),
+                &copy.values,
+            );
+            spec.tapped = copy.tapped;
+            spec.enters_attacking = copy.enters_attacking;
+            spec.attack_request = copy.attack_request.clone();
+            Ok(ProposedEvent::CreateToken {
+                owner,
+                spec: Box::new(spec),
+                copy: Some(Box::new(copy)),
+                enter_tapped,
+                count,
+                appended,
+                applied,
+            })
+        }
+        TokenSubstitute::Nothing => Err(ApplyResult::Prevented),
+    }
+}
+
+/// CR 614.5 + CR 616.1: what applying one chosen replacement does: an
+/// optional branch, or an accepted token substitute rewritten into the covered
+/// views after the registered application runs.
+#[derive(Debug, Clone)]
+pub(crate) enum ChosenReplacementWork {
+    Branch(ReplacementBranch),
+    TokenSubstitute(TokenSubstitute),
+}
+
+impl ChosenReplacementWork {
+    /// The branch the registered application runs with. A substitute is always
+    /// accepted work.
+    fn branch(&self) -> ReplacementBranch {
+        match self {
+            ChosenReplacementWork::Branch(branch) => *branch,
+            ChosenReplacementWork::TokenSubstitute(_) => ReplacementBranch::Execute,
+        }
+    }
+}
+
 /// The one authority that applies a replacement chosen by `actor`: marks `rid`
 /// applied on the part of `proposed` it covers (`token_batch_scope`) and
 /// applies it there, then runs the shared post-application tail.
@@ -13372,7 +13529,7 @@ fn apply_chosen_replacement(
     mut proposed: ProposedEvent,
     rid: ReplacementId,
     actor: PlayerId,
-    branch: ReplacementBranch,
+    work: ChosenReplacementWork,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ProposedEvent, ApplyResult> {
@@ -13388,13 +13545,19 @@ fn apply_chosen_replacement(
     let before = proposed.clone();
     let mut result = match scope {
         TokenBatchScope::WholeEvent => {
-            apply_single_replacement(state, proposed, rid, branch, registry, events)
+            apply_single_replacement(state, proposed, rid, work.branch(), registry, events)
+                .and_then(|event| match &work {
+                    ChosenReplacementWork::Branch(_) => Ok(event),
+                    ChosenReplacementWork::TokenSubstitute(sub) => {
+                        substitute_token_batch(event, sub)
+                    }
+                })
         }
         // `apply_replacement_to_token_batches` marks `owner`'s batches itself,
         // before it applies.
-        TokenBatchScope::Owner(owner) => apply_replacement_to_token_batches(
-            state, proposed, rid, owner, branch, registry, events,
-        ),
+        TokenBatchScope::Owner(owner) => {
+            apply_replacement_to_token_batches(state, proposed, rid, owner, work, registry, events)
+        }
     };
     // CR 614.5 normally records a replacement once per event. CR 903.9b is the
     // express exception: after ANOTHER replacement actually modifies the event
@@ -14416,6 +14579,7 @@ fn park_entry_controller_choice(
         may_cost_remaining: None,
         delivery_boundary: None,
         unrepresentable_life_change: state.ingress_life_policy(),
+        token_substitute: None,
     });
     state.waiting_for = WaitingFor::EntryControllerChoice { player, candidates };
     ReplacementResult::NeedsChoice(player)
@@ -14593,6 +14757,7 @@ fn park_as_enters_named_choice(
         may_cost_remaining: None,
         delivery_boundary: None,
         unrepresentable_life_change: state.ingress_life_policy(),
+        token_substitute: None,
     });
     raise_as_enters_named_choice(state, object_id, choice, events)
 }
@@ -14924,6 +15089,7 @@ fn park_as_enters_pay_choice(
         may_cost_remaining: None,
         delivery_boundary: None,
         unrepresentable_life_change: state.ingress_life_policy(),
+        token_substitute: None,
     });
     raise_as_enters_pay_choice(state, rid.source, choice, events)
 }
@@ -15592,7 +15758,7 @@ fn replay_pending_replacement(
     } else {
         state.record_point_answer(crate::game::play_trace::AnswerOptionality::Mandatory, point);
     }
-    let result = continue_replacement_impl(state, index, events);
+    let result = continue_replacement_impl(state, ReplacementResume::Index(index), events);
     if !matches!(result, ReplacementResult::Execute(_)) {
         state.replacement_auto_choice_tail = None;
     }
@@ -15732,6 +15898,7 @@ fn pipeline_loop(
                     may_cost_remaining: None,
                     delivery_boundary: None,
                     unrepresentable_life_change: state.ingress_life_policy(),
+                    token_substitute: None,
                 });
                 return replay_pending_replacement(state, affected, events);
             }
@@ -15768,7 +15935,7 @@ fn pipeline_loop(
                 proposed,
                 rid,
                 actor,
-                ReplacementBranch::Execute,
+                ChosenReplacementWork::Branch(ReplacementBranch::Execute),
                 registry,
                 events,
             ) {
@@ -15816,6 +15983,7 @@ fn pipeline_loop(
                 may_cost_remaining: None,
                 delivery_boundary: None,
                 unrepresentable_life_change: state.ingress_life_policy(),
+                token_substitute: None,
             });
             return replay_pending_replacement(state, actor, events);
         } else {
@@ -15846,7 +16014,7 @@ fn pipeline_loop(
                 proposed,
                 rid,
                 actor,
-                ReplacementBranch::Execute,
+                ChosenReplacementWork::Branch(ReplacementBranch::Execute),
                 registry,
                 events,
             ) {
@@ -16716,9 +16884,302 @@ fn continue_search_found_after_decline(
     }
 }
 
+/// CR 616.1 + CR 614.6: what resumes a parked replacement: an ordering
+/// index, or the answer to an accepted token substitute's prompt.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ReplacementResume {
+    Index(usize),
+    TokenSubstitute(TokenSubstituteAnswer),
+}
+
+/// CR 614.6: the answer an accepted token substitute's decider gives: a branch
+/// (Jinnie Fay), or the creature its tokens copy (Esix, Fractal Bloom).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TokenSubstituteAnswer {
+    Branch(usize),
+    CopySource(ObjectId),
+}
+
+/// CR 614.6: build the substitute of a choice-free copy replacement (Moonlit
+/// Meditation) at once. No copy source resolves (or resolution fails) → the
+/// substitute creates nothing (CR 609.3); otherwise the first spec.
+fn fixed_copy_substitute(
+    state: &GameState,
+    rid: ReplacementId,
+    work: &AbilityDefinition,
+    controller: PlayerId,
+) -> TokenSubstitute {
+    let ability = build_resolved_from_def(work, rid.source, controller);
+    let entry = crate::game::effects::token_copy::CopyEntryState::resolve(state, &ability);
+    let specs = entry.map(|(_, entry)| {
+        crate::game::effects::token_copy::resolve_copy_token_specs(state, &ability, entry)
+    });
+    match specs {
+        Some(Ok(specs)) => match specs.into_iter().next() {
+            Some(spec) => TokenSubstitute::Copy(Box::new(spec)),
+            None => TokenSubstitute::Nothing,
+        },
+        _ => TokenSubstitute::Nothing,
+    }
+}
+
+/// CR 614.6 + CR 616.1f: rewrite a choiceless substitute at once (a card-fixed
+/// copy, or an impossible copy choice) and resume the pipeline.
+fn apply_token_substitute_now(
+    state: &mut GameState,
+    pending: PendingReplacement,
+    rid: ReplacementId,
+    payer: PlayerId,
+    sub: TokenSubstitute,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    match apply_chosen_replacement(
+        state,
+        pending.proposed,
+        rid,
+        payer,
+        ChosenReplacementWork::TokenSubstitute(sub),
+        registry,
+        events,
+    ) {
+        Ok(event) => pipeline_loop(state, event, pending.depth + 1, registry, events, None),
+        Err(ApplyResult::Prevented) => ReplacementResult::Prevented,
+        Err(ApplyResult::Modified(_)) => unreachable!(),
+    }
+}
+
+/// CR 614.6 + CR 614.12a: park an accepted choice-bearing substitute for its
+/// decider's answer. The `rid` is not marked yet: marking happens at
+/// application, when the answer arrives.
+fn park_token_substitute(
+    state: &mut GameState,
+    mut pending: PendingReplacement,
+    rid: ReplacementId,
+    payer: PlayerId,
+    awaits: TokenSubstituteChoice,
+) {
+    pending.candidates = vec![rid];
+    pending.is_optional = false;
+    pending.choice_player = Some(payer);
+    pending.token_substitute = Some(PendingTokenSubstitute {
+        replacement: rid,
+        awaits,
+    });
+    state.pending_replacement = Some(pending);
+}
+
+/// CR 614.6 + CR 616.1f: apply an accepted token substitute. A choice-free
+/// substitute rewrites at once; a choice-bearing one parks the replacement
+/// and raises its prompt, and the answer resumes through
+/// `continue_token_substitute`. Either way the drain stack is untouched: the
+/// substitute installs no rider, so an enclosing continuation (a Kalitas
+/// replacement creating these tokens) keeps its own lifecycle.
+fn accept_token_substitute(
+    state: &mut GameState,
+    pending: PendingReplacement,
+    rid: ReplacementId,
+    payer: PlayerId,
+    shape: TokenSubstituteShape,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    // "If you would create" plus `token_owner_scope: You` means the payer is
+    // the substitute's controller: the decider.
+    let controller = replacement_definition_for_id(state, rid)
+        .map(|def| replacement_ability_controller(state, rid, def))
+        .unwrap_or(payer);
+    debug_assert_eq!(controller, payer);
+    match shape {
+        TokenSubstituteShape::Fixed(work) => {
+            let sub = fixed_copy_substitute(state, rid, &work, controller);
+            apply_token_substitute_now(state, pending, rid, payer, sub, registry, events)
+        }
+        TokenSubstituteShape::CopySource { filter, .. } => {
+            let valid = super::engine_replacement::find_copy_targets(
+                state, &filter, rid.source, controller, None,
+            );
+            if valid.is_empty() {
+                // CR 609.3: "choose a creature" is impossible, so the
+                // substitute creates nothing.
+                apply_token_substitute_now(
+                    state,
+                    pending,
+                    rid,
+                    payer,
+                    TokenSubstitute::Nothing,
+                    registry,
+                    events,
+                )
+            } else {
+                park_token_substitute(
+                    state,
+                    pending,
+                    rid,
+                    payer,
+                    TokenSubstituteChoice::CopySource,
+                );
+                state.waiting_for = WaitingFor::CopyTargetChoice {
+                    player: controller,
+                    source_id: rid.source,
+                    valid_targets: valid,
+                    max_mana_value: None,
+                    purpose: CopyTargetPurpose::CopyTokenSource,
+                };
+                ReplacementResult::NeedsChoice(payer)
+            }
+        }
+        TokenSubstituteShape::Branch { branches } => {
+            park_token_substitute(state, pending, rid, payer, TokenSubstituteChoice::Branch);
+            let choice = replacement_definition_for_id(state, rid)
+                .and_then(|def| EventModifiers::first_non_modifier_ability(def.execute.as_deref()))
+                .expect("a parked token substitute's choice is still installed");
+            let resolved = build_resolved_from_def(choice, rid.source, controller);
+            // CR 614.6 + CR 614.12a: the substitute's choice is made as it is
+            // applied, before the modified event happens; the rest of the event
+            // waits (CR 616.1f).
+            crate::game::effects::choose_one_of::prompt_next(
+                state,
+                crate::game::effects::choose_one_of::PromptRequest {
+                    controller,
+                    source_id: rid.source,
+                    branches,
+                    parent_occurrences: ParentTargetOccurrences::of(&resolved),
+                    context: resolved.context.clone(),
+                    continuation: None,
+                    replacement_applied: HashSet::new(),
+                    players: vec![controller],
+                    trigger_context: None,
+                },
+            );
+            ReplacementResult::NeedsChoice(payer)
+        }
+    }
+}
+
+/// CR 614.6 + CR 616.1f: answer a parked token substitute: build it from the
+/// decider's answer, rewrite the decider's batches, mark, and resume the
+/// pipeline. The drain stack is untouched, as at the accept. A record or
+/// definition that cannot answer re-parks for the decider.
+fn continue_token_substitute(
+    state: &mut GameState,
+    pending: PendingReplacement,
+    answer: TokenSubstituteAnswer,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    let (rec, decider) = match (pending.token_substitute, pending.choice_player) {
+        (Some(rec), Some(decider)) => (rec, decider),
+        _ => {
+            debug_assert!(
+                false,
+                "a token-substitute answer resumes a park with no substitute record or decider"
+            );
+            let fallback = pending
+                .choice_player
+                .unwrap_or_else(|| pending.proposed.affected_player(state));
+            state.pending_replacement = Some(pending);
+            return ReplacementResult::NeedsChoice(fallback);
+        }
+    };
+    let shape =
+        replacement_definition_for_id(state, rec.replacement).and_then(token_substitute_shape);
+    let sub = match (&rec.awaits, answer) {
+        (TokenSubstituteChoice::Branch, TokenSubstituteAnswer::Branch(i)) => {
+            let branches = match shape {
+                Some(TokenSubstituteShape::Branch { branches }) => branches,
+                _ => {
+                    debug_assert!(false, "a parked branch substitute has no branch shape");
+                    state.pending_replacement = Some(pending);
+                    return ReplacementResult::NeedsChoice(decider);
+                }
+            };
+            let branch = match branches.get(i) {
+                Some(branch) => branch,
+                None => {
+                    state.pending_replacement = Some(pending);
+                    return ReplacementResult::NeedsChoice(decider);
+                }
+            };
+            // Resolve the branch's first non-modifier work (the branch itself
+            // for every classified shape).
+            let work = match EventModifiers::first_non_modifier_ability(Some(branch)) {
+                Some(work) => work,
+                None => {
+                    state.pending_replacement = Some(pending);
+                    return ReplacementResult::NeedsChoice(decider);
+                }
+            };
+            let resolved = build_resolved_from_def(work, rec.replacement.source, decider);
+            match crate::game::effects::token::resolve_token_spec(state, &resolved) {
+                Some((spec, _, _, _)) => TokenSubstitute::Token(Box::new(spec)),
+                None => {
+                    state.pending_replacement = Some(pending);
+                    return ReplacementResult::NeedsChoice(decider);
+                }
+            }
+        }
+        (TokenSubstituteChoice::CopySource, TokenSubstituteAnswer::CopySource(id)) => {
+            let tail = match shape {
+                Some(TokenSubstituteShape::CopySource { tail, .. }) => tail,
+                _ => {
+                    debug_assert!(false, "a parked copy-source substitute has no copy shape");
+                    state.pending_replacement = Some(pending);
+                    return ReplacementResult::NeedsChoice(decider);
+                }
+            };
+            let resolved = build_resolved_from_def_with_targets(
+                &tail,
+                rec.replacement.source,
+                decider,
+                vec![TargetRef::Object(id)],
+            );
+            let entry =
+                match crate::game::effects::token_copy::CopyEntryState::resolve(state, &resolved) {
+                    Some((_, entry)) => entry,
+                    None => {
+                        state.pending_replacement = Some(pending);
+                        return ReplacementResult::NeedsChoice(decider);
+                    }
+                };
+            match crate::game::effects::token_copy::resolve_copy_token_specs(
+                state, &resolved, entry,
+            ) {
+                Ok(specs) => match specs.into_iter().next() {
+                    Some(spec) => TokenSubstitute::Copy(Box::new(spec)),
+                    // CR 609.3: the answered source supplies nothing to copy.
+                    None => TokenSubstitute::Nothing,
+                },
+                Err(_) => TokenSubstitute::Nothing,
+            }
+        }
+        _ => {
+            debug_assert!(
+                false,
+                "a token-substitute answer mismatches its parked record"
+            );
+            state.pending_replacement = Some(pending);
+            return ReplacementResult::NeedsChoice(decider);
+        }
+    };
+    match apply_chosen_replacement(
+        state,
+        pending.proposed,
+        rec.replacement,
+        decider,
+        ChosenReplacementWork::TokenSubstitute(sub),
+        registry,
+        events,
+    ) {
+        Ok(event) => pipeline_loop(state, event, pending.depth + 1, registry, events, None),
+        Err(ApplyResult::Prevented) => ReplacementResult::Prevented,
+        Err(ApplyResult::Modified(_)) => unreachable!(),
+    }
+}
+
 fn continue_replacement_impl(
     state: &mut GameState,
-    chosen_index: usize,
+    resume: ReplacementResume,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
     let mut pending = match state.pending_replacement.take() {
@@ -16733,15 +17194,24 @@ fn continue_replacement_impl(
         }
     };
 
+    let registry = replacement_registry();
+    prepare_replacement_index_for_pipeline(state);
+
+    // CR 614.6 + CR 616.1: a token-substitute answer resumes through its own
+    // authority, past the ordering-index checks below.
+    let chosen_index = match resume {
+        ReplacementResume::TokenSubstitute(answer) => {
+            return continue_token_substitute(state, pending, answer, registry, events);
+        }
+        ReplacementResume::Index(index) => index,
+    };
+
     let option_count = pending_replacement_option_count(state, &pending);
     if chosen_index >= option_count {
         let affected = pending.proposed.affected_player(state);
         state.pending_replacement = Some(pending);
         return ReplacementResult::NeedsChoice(affected);
     }
-
-    let registry = replacement_registry();
-    prepare_replacement_index_for_pipeline(state);
 
     // CR 616.1: the chooser chooses among the effects that apply now: a stored
     // candidate that no longer applies is not one of them, and an effect that
@@ -16968,6 +17438,7 @@ fn continue_replacement_impl(
                     // the predecessor's stamp (a boxed cost-move resume restores it
                     // unchanged).
                     unrepresentable_life_change: reparked_unrepresentable_life_change,
+                    token_substitute: None,
                 };
                 match state.pending_cost_move_resume.as_mut() {
                     // CR 614.12a + CR 616.1: an inner cost move already owns
@@ -17026,7 +17497,22 @@ fn continue_replacement_impl(
             }
         };
 
-        let (branch, mut post_effect) = if chosen_index == 0 && paid_may_cost {
+        // CR 614.6: the substitute's work is the in-event rewrite; it installs
+        // no rider, so other replacements' drains (an enclosing Kalitas
+        // continuation creating these tokens) stay.
+        if chosen_index == 0
+            && paid_may_cost
+            && matches!(pending.proposed, ProposedEvent::CreateToken { .. })
+        {
+            let shape = replacement_definition_for_id(state, rid).and_then(token_substitute_shape);
+            if let Some(shape) = shape {
+                return accept_token_substitute(
+                    state, pending, rid, payer, shape, registry, events,
+                );
+            }
+        }
+
+        let (branch, post_effect) = if chosen_index == 0 && paid_may_cost {
             // CR 614.1c: Accept path — walk past modifier-only effects (already
             // applied to ProposedEvent by event_modifiers_for_ability) to find the
             // first non-modifier as the real post-replacement work. Covers composed
@@ -17081,50 +17567,6 @@ fn continue_replacement_impl(
         // No applier reads the drain stack (production `replacement.rs` reads it
         // only in `replace_combat_damage_batch`); draw substitution is classified
         // from the branch AST by `draw_is_substituted_away`.
-        // CR 614.12a + CR 616.1: Seed the inherited replacement-applied set ONLY
-        // when this replacement originates a token-choice continuation (Jinnie
-        // Fay-class `CreateToken -> ChooseOneOf(Token, Token)`). The seed is
-        // owned and cleared by that originating ChooseOneOf's completion (see
-        // effects/choose_one_of.rs), NOT by the replacement pipeline. Any other
-        // replacement running here — including a NESTED one whose continuation
-        // drains while an outer token-choice is still resolving — must NOT touch
-        // the field: clobbering it would let the same token-choice replacement
-        // re-prompt on a later token sub-ability (issue #4886 loop).
-        // Keep this gate: FIX B's per-source flag also suppresses the copy
-        // re-entry, but this gate is the sole stamp site for
-        // `post_replacement_token_substitution_count` (B2's "that many" count) —
-        // removing it as "redundant" would silently zero the copy count.
-        if let (ProposedEvent::CreateToken { spec, .. }, Some(def)) =
-            (&proposed, post_effect.as_deref_mut())
-        {
-            let scope = token_batch_scope(&proposed, payer);
-            if is_token_replacement_choice(def) {
-                state.post_replacement_token_choice_applied = Some(applied_after.clone());
-                // CR 614.6 + CR 608.2h + the Jinnie Fay ruling ("Anything else
-                // specified in the effect creating the tokens (such as tapped
-                // …) still applies"): the chosen branch creates "that many" —
-                // the tokens this replacement replaces — with the creating
-                // instruction's tapped entry. Both are bound into this
-                // continuation's own template, so neither can reach any other
-                // "that many" of the resolution.
-                let that_many = u32_to_i32_saturating(token_count_affected_by(
-                    state, &proposed, rid, scope, registry,
-                ));
-                bind_substitute_token_entry(def, spec.tapped, that_many);
-            } else if is_copy_token_substitution(def) {
-                // CR 614.1a + CR 616.1: Moonlit-class copy substitution. The
-                // continuation inherits the payer's applied set (carrying
-                // Moonlit's rid, `applied_after`) so it self-suppresses;
-                // and the number of the event's tokens it replaces — every batch
-                // it matches, appended batches included (CR 614.1a: one modified
-                // event) — is latched as the "that many" copy count read by
-                // `QuantityRef::EventContextAmount`.
-                let replaced = token_count_affected_by(state, &proposed, rid, scope, registry);
-                state.post_replacement_token_choice_applied = Some(applied_after.clone());
-                state.post_replacement_token_substitution_count =
-                    Some(u32_to_i32_saturating(replaced));
-            }
-        }
         // CR 614.6: install the optional branch's continuation (the replacement's
         // own actions for the branch that was taken); a no-post-effect ACCEPT
         // clears the resident drains, a no-post-effect DECLINE leaves them
@@ -17231,7 +17673,15 @@ fn continue_replacement_impl(
             (ReplacementBranch::Execute, None) => state.abandon_active_post_replacement_drains(),
         }
 
-        match apply_chosen_replacement(state, proposed, rid, payer, branch, registry, events) {
+        match apply_chosen_replacement(
+            state,
+            proposed,
+            rid,
+            payer,
+            ChosenReplacementWork::Branch(branch),
+            registry,
+            events,
+        ) {
             Ok(new_event) => proposed = new_event,
             Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
             Err(ApplyResult::Modified(_)) => unreachable!(),
@@ -17365,7 +17815,7 @@ fn continue_replacement_impl(
         proposed,
         rid,
         actor,
-        ReplacementBranch::Execute,
+        ChosenReplacementWork::Branch(ReplacementBranch::Execute),
         registry,
         events,
     ) {
@@ -17380,6 +17830,14 @@ fn continue_replacement_impl(
 pub fn continue_replacement(
     state: &mut GameState,
     chosen_index: usize,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    continue_replacement_with(state, ReplacementResume::Index(chosen_index), events)
+}
+
+pub(crate) fn continue_replacement_with(
+    state: &mut GameState,
+    resume: ReplacementResume,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
     // CR 614.12: a resumed pause reuses its own resident `TransformedEntry`
@@ -17431,9 +17889,9 @@ pub fn continue_replacement(
         .filter(|guards| !guards.is_empty());
     let result = match parked_guards {
         Some(guards) => with_settled_damage_guards(state, guards, |state| {
-            continue_replacement_impl(state, chosen_index, events)
+            continue_replacement_impl(state, resume, events)
         }),
-        None => continue_replacement_impl(state, chosen_index, events),
+        None => continue_replacement_impl(state, resume, events),
     };
     // CR 616.1f: backstop for the stamp — a record re-parked while a stamped
     // record is answered stays stamped (a fresh park already reads the open
@@ -17525,6 +17983,7 @@ mod tests {
             delivery_boundary: None,
             unrepresentable_life_change: state.ingress_life_policy(),
             settled_damage_guards: Vec::new(),
+            token_substitute: None,
         };
         assert_eq!(pending_replacement_option_count(&state, &pending), 2);
         assert!(pending_candidates_are_current(&state, &pending));
@@ -17783,7 +18242,7 @@ mod tests {
     /// is NOT part of this replacement's substitution. That is Progenitor
     /// Mimic's measured shape (`BecomeCopy.additional_modifications` →
     /// `GrantTrigger.trigger` → `CopyTokenOf`), and widening
-    /// `is_copy_token_substitution` to a walk must not newly swallow it.
+    /// `token_substitute_shape` to a walk must not newly swallow it.
     ///
     /// The two positives are what give the negative meaning: without them a
     /// walker that simply returned `false` for everything would pass.
@@ -20741,6 +21200,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            token_substitute: None,
         });
 
         let WaitingFor::ReplacementChoice {
@@ -20807,6 +21267,7 @@ mod tests {
                 may_cost_remaining: None,
                 delivery_boundary: None,
                 unrepresentable_life_change: Default::default(),
+                token_substitute: None,
             });
 
             let WaitingFor::ReplacementChoice { candidates, .. } =
@@ -20894,6 +21355,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            token_substitute: None,
         });
 
         let WaitingFor::ReplacementChoice { candidates, .. } =
@@ -27505,6 +27967,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            token_substitute: None,
         });
 
         let waiting_for = replacement_choice_waiting_for(PlayerId(0), &state);
@@ -29299,10 +29762,10 @@ mod tests {
     }
 
     /// CR 614.1a + CR 614.5 + CR 608.2d: Optional interactive token
-    /// substitution (Jinnie Fay class) suppresses the original token event and
-    /// lets the chosen branch create the substitute token. The branch-created
-    /// token event must inherit the original event's applied replacement set so
-    /// the same replacement does not prompt again.
+    /// substitution (Jinnie Fay class) parks on the branch choice before the
+    /// modified event happens. The chosen branch rewrites the event's own
+    /// batch, so the applied set that suppresses a re-prompt is the event's
+    /// own — no second event is created.
     #[test]
     fn optional_choose_token_substitution_inherits_applied_set_and_does_not_reprompt() {
         fn token_branch(name: &str, power: i32, toughness: i32) -> AbilityDefinition {
@@ -29369,38 +29832,37 @@ mod tests {
             panic!("optional substitution should ask whether to apply");
         };
 
-        let ReplacementResult::Execute(primary) = continue_replacement(&mut state, 0, &mut events)
+        let ReplacementResult::NeedsChoice(PlayerId(0)) =
+            continue_replacement(&mut state, 0, &mut events)
         else {
-            panic!("accepted substitution should execute a suppressed primary event");
+            panic!("accepted substitution should park on the branch choice");
         };
-        let ProposedEvent::CreateToken { count, .. } = primary.clone() else {
-            panic!("expected CreateToken after accepting token substitution");
-        };
-        assert_eq!(count, 0, "accepted substitution suppresses original batch");
+        let pending = state
+            .pending_replacement
+            .as_ref()
+            .expect("the accepted substitution parks its replacement");
         assert!(
-            state.has_post_replacement_drain(),
-            "accepted substitution must park the branch choice as a continuation"
+            matches!(
+                pending.token_substitute,
+                Some(PendingTokenSubstitute {
+                    awaits: TokenSubstituteChoice::Branch,
+                    ..
+                })
+            ),
+            "the parked record names the branch substitute, got {:?}",
+            pending.token_substitute
         );
-
-        apply_create_token_after_replacement(&mut state, primary, &mut events);
-        let waiting = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-            &mut state,
-            Some(source),
-            None,
-            Some(ReplacementEvent::CreateToken),
-            &mut events,
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ChooseOneOfBranch {
+                    player: PlayerId(0),
+                    ..
+                }
+            ),
+            "accepting the replacement must park on the branch choice, got {:?}",
+            state.waiting_for
         );
-        assert!(matches!(
-            waiting,
-            Some(WaitingFor::ChooseOneOfBranch { .. })
-        ));
-        assert!(matches!(
-            state.waiting_for,
-            WaitingFor::ChooseOneOfBranch {
-                player: PlayerId(0),
-                ..
-            }
-        ));
 
         state.priority_player = PlayerId(0);
         crate::game::engine::apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 })
@@ -29415,6 +29877,193 @@ mod tests {
         assert_eq!(tokens[0].name, "Cat");
         assert_eq!(tokens[0].power, Some(2));
         assert_eq!(tokens[0].toughness, Some(2));
+    }
+
+    /// CR 614.6 + the Jinnie Fay ruling ("Anything else specified in the
+    /// effect creating the tokens ... still applies"): the entry-state rule
+    /// carries the creating instruction's tapped, attacking, attack request
+    /// and `sacrifice_at` onto every substitute arm.
+    #[test]
+    fn substitute_token_batch_keeps_the_creating_instructions_entry() {
+        use crate::game::game_object::{DisplayIdentity, DisplaySource};
+
+        let mut state = GameState::new_two_player(42);
+        let donor = ObjectId(7);
+        state.objects.insert(
+            donor,
+            GameObject::new(
+                donor,
+                CardId(1),
+                PlayerId(1),
+                "Donor".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.battlefield.push_back(donor);
+        let marker = AppliedReplacementKey::object(donor, 3);
+
+        // The creating instruction's spec: tapped, attacking a named
+        // destination, with an end-of-combat sacrifice rider.
+        let mut orig = test_token_spec(PlayerId(0), CoreType::Artifact);
+        orig.tapped = true;
+        orig.enters_attacking = true;
+        orig.attack_request = TokenAttackRequest::Named {
+            first: PlayerId(1),
+            rest: Vec::new(),
+        };
+        orig.sacrifice_at = Some(Duration::UntilEndOfCombat);
+
+        let view = || ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(orig.clone()),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count: 2,
+            appended: Vec::new(),
+            applied: HashSet::from([marker]),
+        };
+
+        // Token arm: the substitute's characteristics replace the original's,
+        // and the four entry fields are carried.
+        let mut cat = test_token_spec(PlayerId(0), CoreType::Creature);
+        cat.characteristics.display_name = "Cat".to_string();
+        let rewritten = substitute_token_batch(view(), &TokenSubstitute::Token(Box::new(cat)))
+            .expect("a token substitute rewrites its view");
+        let ProposedEvent::CreateToken {
+            owner,
+            spec,
+            copy,
+            enter_tapped,
+            count,
+            applied,
+            ..
+        } = rewritten
+        else {
+            panic!("a token substitute keeps a CreateToken view");
+        };
+        assert_eq!(owner, PlayerId(0));
+        assert_eq!(count, 2, "\"that many\" is the view's own count");
+        assert!(copy.is_none());
+        assert!(
+            matches!(enter_tapped, EtbTapState::Unspecified),
+            "the entry-layer tap state is untouched"
+        );
+        assert!(applied.contains(&marker), "the applied set is kept");
+        assert_eq!(spec.characteristics.display_name, "Cat");
+        assert!(spec.tapped, "the instruction's tapped is carried");
+        assert!(
+            spec.enters_attacking,
+            "the instruction's attacking is carried"
+        );
+        assert_eq!(
+            spec.attack_request,
+            TokenAttackRequest::Named {
+                first: PlayerId(1),
+                rest: Vec::new(),
+            },
+            "the instruction's attack destination is carried"
+        );
+        assert_eq!(
+            spec.sacrifice_at,
+            Some(Duration::UntilEndOfCombat),
+            "the instruction's sacrifice rider is carried"
+        );
+
+        // Copy arm: carried onto the copy payload and the probe spec alike.
+        let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&donor]);
+        let copy = CopyTokenSpec {
+            values: Box::new(values),
+            display: DisplayIdentity {
+                display_source: DisplaySource::Token,
+                ..Default::default()
+            },
+            extra_keywords: Vec::new(),
+            additional_modifications: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            attack_request: TokenAttackRequest::Unspecified,
+            sacrifice_at: None,
+            source_id: donor,
+            controller: PlayerId(0),
+            donor: None,
+            double_faced: None,
+        };
+        let rewritten = substitute_token_batch(view(), &TokenSubstitute::Copy(Box::new(copy)))
+            .expect("a copy substitute rewrites its view");
+        let ProposedEvent::CreateToken {
+            owner,
+            spec,
+            copy,
+            count,
+            ..
+        } = rewritten
+        else {
+            panic!("a copy substitute keeps a CreateToken view");
+        };
+        assert_eq!(owner, PlayerId(0));
+        assert_eq!(count, 2);
+        let copy = copy.expect("a copy substitute sets the copy payload");
+        assert_eq!(copy.values.name, "Donor");
+        assert!(copy.tapped);
+        assert!(copy.enters_attacking);
+        assert_eq!(
+            copy.attack_request,
+            TokenAttackRequest::Named {
+                first: PlayerId(1),
+                rest: Vec::new(),
+            }
+        );
+        assert_eq!(copy.sacrifice_at, Some(Duration::UntilEndOfCombat));
+        assert_eq!(spec.characteristics.display_name, "Donor");
+        assert!(spec.tapped);
+        assert!(spec.enters_attacking);
+        assert_eq!(spec.attack_request, copy.attack_request);
+        assert_eq!(spec.sacrifice_at, copy.sacrifice_at);
+
+        // Nothing arm: the covered view is dropped.
+        assert!(
+            matches!(
+                substitute_token_batch(view(), &TokenSubstitute::Nothing),
+                Err(ApplyResult::Prevented)
+            ),
+            "Nothing drops its view"
+        );
+
+        // Negative: an instruction naming none of the four leaves the
+        // substitute's own values alone.
+        let plain = test_token_spec(PlayerId(0), CoreType::Artifact);
+        let bare_view = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(plain),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count: 2,
+            appended: Vec::new(),
+            applied: HashSet::new(),
+        };
+        let mut sub = test_token_spec(PlayerId(0), CoreType::Creature);
+        sub.tapped = true;
+        sub.enters_attacking = true;
+        sub.attack_request = TokenAttackRequest::Named {
+            first: PlayerId(0),
+            rest: Vec::new(),
+        };
+        sub.sacrifice_at = Some(Duration::UntilEndOfCombat);
+        let rewritten = substitute_token_batch(bare_view, &TokenSubstitute::Token(Box::new(sub)))
+            .expect("a token substitute rewrites its view");
+        let ProposedEvent::CreateToken { spec, .. } = rewritten else {
+            panic!("a token substitute keeps a CreateToken view");
+        };
+        assert!(spec.tapped);
+        assert!(spec.enters_attacking);
+        assert_eq!(
+            spec.attack_request,
+            TokenAttackRequest::Named {
+                first: PlayerId(0),
+                rest: Vec::new(),
+            }
+        );
+        assert_eq!(spec.sacrifice_at, Some(Duration::UntilEndOfCombat));
     }
 
     /// CR 616.1: `Effect::Token` execute on a Draw event fully substitutes the
@@ -31528,6 +32177,37 @@ mod tests {
                 );
                 match continue_replacement(&mut state, choice, &mut events) {
                     ReplacementResult::Execute(resumed) => without_applied(resumed),
+                    ReplacementResult::NeedsChoice(_) => {
+                        // CR 614.6: an accepted choice-bearing substitute parks
+                        // for its branch answer instead of resuming at once.
+                        // Only the token-substitution accept parks; a decline
+                        // or any other definition must resume directly.
+                        assert_eq!(choice, 0, "{label}: choice {choice} must resume the event");
+                        let parked = state
+                            .pending_replacement
+                            .as_ref()
+                            .expect("the accepted token substitution parks its substitute");
+                        assert!(
+                            matches!(
+                                parked.token_substitute,
+                                Some(PendingTokenSubstitute {
+                                    awaits: TokenSubstituteChoice::Branch,
+                                    ..
+                                })
+                            ),
+                            "{label}: the park names the branch substitute"
+                        );
+                        match continue_replacement_with(
+                            &mut state,
+                            ReplacementResume::TokenSubstitute(TokenSubstituteAnswer::Branch(0)),
+                            &mut events,
+                        ) {
+                            ReplacementResult::Execute(resumed) => without_applied(resumed),
+                            other => {
+                                panic!("{label}: the branch answer must resume the event, got {other:?}")
+                            }
+                        }
+                    }
                     other => {
                         panic!("{label}: choice {choice} must resume the event, got {other:?}")
                     }

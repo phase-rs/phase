@@ -1896,7 +1896,6 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     {
         drain_active_repeat_until(state, events);
     }
-    clear_post_replacement_token_choice_seed_if_resolution_drained(state);
     clear_return_result_frames_if_idle(state);
     if waits_for_resolution_choice(&state.waiting_for) {
         state.resolution_stack.note_repeat_until_descendant_choice();
@@ -2033,23 +2032,6 @@ fn branch_declares_return_result(
             .mode_abilities
             .iter()
             .any(|mode| definition_declares_return_result(mode, result_id))
-}
-
-/// Clears replacement-scoped token facts only after the authoritative stack drains.
-fn clear_post_replacement_token_choice_seed_if_resolution_drained(state: &mut GameState) {
-    // CR 614.12a + issue #4886 (review #4): the originating token-choice
-    // applied seed must outlive every resolution drain, including
-    // `drain_active_repeat_until`, which can re-enter `resolve_ability_chain`
-    // and emit further token proposals. A dispatcher can retire the final frame
-    // after this function returns, so both it and this drain call this authority.
-    if matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.resolution_stack.is_empty()
-    {
-        state.post_replacement_token_choice_applied = None;
-        // CR 614.1a: the Moonlit-scoped "that many" copy count rides the same
-        // full-drain lifetime — clear it alongside the applied seed so it never
-        // leaks into a later, unrelated `EventContextAmount` read.
-        state.post_replacement_token_substitution_count = None;
-    }
 }
 
 /// CR 603.3 + CR 603.3b + CR 608.2c: retire every ownerless `Dispatching`
@@ -2455,7 +2437,6 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         resume_resolution_frames(state, events);
     }
 
-    clear_post_replacement_token_choice_seed_if_resolution_drained(state);
     if waits_for_resolution_choice(&state.waiting_for) {
         state.resolution_stack.note_repeat_until_descendant_choice();
     }
@@ -44564,25 +44545,6 @@ mod tests {
         assert!(
             !is_repeated_optional_payment(&scaled),
             "scaled mana is not the synchronous repeated-optional class"
-        );
-    }
-
-    #[test]
-    fn token_choice_seed_waits_for_the_resolution_stack_to_drain() {
-        let mut state = GameState::new_two_player(42);
-        state.post_replacement_token_substitution_count = Some(2);
-        state.push_proliferate_frame(crate::types::resolution::PendingProliferateActions {
-            actor: PlayerId(0),
-            source_id: ObjectId(9_503),
-            remaining: 1,
-        });
-
-        drain_pending_continuation(&mut state, &mut Vec::new());
-
-        assert_eq!(
-            state.post_replacement_token_substitution_count,
-            Some(2),
-            "a nonempty resolution stack retains the replacement-scoped token count"
         );
     }
 

@@ -177,14 +177,6 @@ fn assert_no_parked_resolution_work(state: &GameState) {
             state.replacement_may_cost_paused,
         ),
         (
-            "post_replacement_token_choice_applied",
-            state.post_replacement_token_choice_applied.is_some(),
-        ),
-        (
-            "post_replacement_token_substitution_count",
-            state.post_replacement_token_substitution_count.is_some(),
-        ),
-        (
             "pending_liminal_entry_resume",
             state.pending_liminal_entry_resume.is_some(),
         ),

@@ -3140,6 +3140,7 @@ mod tests {
         PendingReplacement {
             settled_damage_guards: Vec::new(),
             proposed: expected_event,
+            token_substitute: None,
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
@@ -5082,6 +5083,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            token_substitute: None,
         });
         // Latched chooser identity — the fix's key. C = P2.
         state.waiting_for = WaitingFor::ReplacementChoice {
@@ -5120,13 +5122,6 @@ mod tests {
             .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
             .expect("a drain must be resident")
             .event_target = Some(TargetRef::Object(o));
-        // Issue #4886 (review #6): a live Jinnie Fay-class token-choice applied
-        // seed, owned by this same abandoned continuation, must be abandoned
-        // alongside its siblings — this field was added after the teardown
-        // block below was written and was missed until this regression.
-        state.post_replacement_token_choice_applied = Some(HashSet::from([
-            crate::types::proposed_event::AppliedReplacementKey::object(o, 0),
-        ]));
         // Make the real atomic paused-drain/draw pair.
         // The dispatch handle proves that the parent is Paused, rather than the
         // Ready-parent approximation that cannot exercise child-before-parent
@@ -5173,11 +5168,6 @@ mod tests {
         assert!(state.post_replacement_source().is_none());
         assert!(state.post_replacement_event_source().is_none());
         assert!(state.post_replacement_event_target().is_none());
-        assert!(
-            state.post_replacement_token_choice_applied.is_none(),
-            "abandoning the parked chooser's continuation must also clear the token-choice \
-             applied seed, not just its established siblings (issue #4886, review #6)"
-        );
         assert!(
             state.active_draw_sequence().is_none(),
             "CR 121.2: the leaving chooser's paused draw instruction must be \
@@ -5233,6 +5223,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            token_substitute: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -5296,6 +5287,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            token_substitute: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -5351,6 +5343,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            token_substitute: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -5436,6 +5429,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            token_substitute: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
