@@ -12495,7 +12495,22 @@ pub(crate) fn retarget_requires_trigger_event_provenance(ability: &ResolvedAbili
         });
         let event_controller = filter_needs_trigger_source_for_retarget(&filter);
         let event_quantity =
-            !cost_or_effect_snapshot_present && filter.references_cost_paid_object();
+            crate::types::ability::filter_contains_filter_prop(&filter, &|prop| match prop {
+                FilterProp::Counters { count, .. }
+                | FilterProp::Cmc { value: count, .. }
+                | FilterProp::PtComparison { value: count, .. } => {
+                    [
+                        ObjectScope::Source,
+                        ObjectScope::EventSource,
+                        ObjectScope::EventTarget,
+                        ObjectScope::BatchSource,
+                    ]
+                    .into_iter()
+                    .any(|scope| crate::types::ability::quantity_expr_contains_scope(count, scope))
+                        || (!cost_or_effect_snapshot_present && count.references_cost_paid_object())
+                }
+                _ => false,
+            }) || (!cost_or_effect_snapshot_present && filter.references_cost_paid_object());
         event_subject || event_controller || event_quantity
     })
 }

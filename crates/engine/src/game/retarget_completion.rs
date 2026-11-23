@@ -614,6 +614,11 @@ impl<'s> RetargetSearch<'s> {
             self.state,
             &RetargetProposal {
                 stack_entry_index: self.stack_entry_index,
+                stack_entry_id: self
+                    .state
+                    .stack
+                    .get(self.stack_entry_index)
+                    .map(|entry| entry.id),
                 scope: &RetargetScope::All,
                 current_targets: &self.current_targets,
                 slots: &self.slots,

@@ -1576,7 +1576,7 @@ pub struct FilterContext<'a> {
     /// source-relative filter fact must read through it rather than rebinding
     /// `source_id` to whichever object currently owns that storage slot.
     pub trigger_source: Option<&'a TriggerSourceContext>,
-    /// CR 603.7c + CR 400.7: selected stack-entry trigger provenance for a
+    /// CR 603.2 + CR 400.7: selected stack-entry trigger provenance for a
     /// retarget legality call. This is absent for ordinary callers, which keep
     /// their existing ambient fallback.
     pub stack_trigger_context: Option<crate::game::targeting::StackTriggerContext<'a>>,
@@ -1661,7 +1661,7 @@ impl<'a> FilterContext<'a> {
         }
     }
 
-    /// CR 603.7c: bind the selected stack entry's event for one legality call.
+    /// CR 603.2: bind the selected stack entry's event for one legality call.
     pub(crate) fn with_stack_trigger_context(
         &self,
         context: crate::game::targeting::StackTriggerContext<'a>,
@@ -10321,7 +10321,7 @@ pub(crate) struct SourceContext<'a> {
     /// projection so nested filter evaluation cannot rebind a recycled id.
     pub(crate) lki: LKISnapshot,
     pub(crate) trigger_source: Option<&'a TriggerSourceContext>,
-    /// CR 603.7c + CR 400.7: selected stack-entry trigger provenance carried
+    /// CR 603.2 + CR 400.7: selected stack-entry trigger provenance carried
     /// into dynamic quantity thresholds.
     pub(crate) stack_trigger_context: Option<crate::game::targeting::StackTriggerContext<'a>>,
     /// CR 303.4 + CR 301.5: Resolved host of the source's attachment, if any.

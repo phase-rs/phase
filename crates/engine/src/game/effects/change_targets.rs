@@ -330,6 +330,7 @@ pub(crate) fn retarget_prompt(
     Some(WaitingFor::RetargetChoice {
         player: chooser,
         stack_entry_index,
+        stack_entry_id: Some(state.stack[stack_entry_index].id),
         scope: scope.clone(),
         current_targets,
         slots,

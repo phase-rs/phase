@@ -2570,10 +2570,21 @@ fn restore_engine_derived_retarget_prompts(
     if let WaitingFor::RetargetChoice {
         player,
         stack_entry_index,
+        stack_entry_id,
         scope,
         ..
     } = state.waiting_for.clone()
     {
+        if stack_entry_id.is_some_and(|expected| {
+            state
+                .stack
+                .get(stack_entry_index)
+                .is_none_or(|entry| entry.id != expected)
+        }) {
+            return Err(PersistedRestoreError::PrioritySettlementFailed(
+                "retarget prompt stack entry identity no longer matches".into(),
+            ));
+        }
         if let Some(prompt) =
             effects::change_targets::retarget_prompt(state, stack_entry_index, &scope, player)
         {
@@ -17251,6 +17262,7 @@ fn apply_non_priority_pass_action(
             WaitingFor::RetargetChoice {
                 player,
                 stack_entry_index,
+                stack_entry_id,
                 scope,
                 current_targets,
                 slots,
@@ -17265,6 +17277,7 @@ fn apply_non_priority_pass_action(
             RetargetSubmission {
                 player: *player,
                 stack_entry_index: *stack_entry_index,
+                stack_entry_id: *stack_entry_id,
                 scope,
                 current_targets,
                 slots,
@@ -17282,6 +17295,7 @@ fn apply_non_priority_pass_action(
             WaitingFor::RetargetChoice {
                 player,
                 stack_entry_index,
+                stack_entry_id,
                 scope: RetargetScope::Single,
                 current_targets,
                 slots,
@@ -17296,6 +17310,7 @@ fn apply_non_priority_pass_action(
             RetargetSubmission {
                 player: *player,
                 stack_entry_index: *stack_entry_index,
+                stack_entry_id: *stack_entry_id,
                 scope: &RetargetScope::Single,
                 current_targets,
                 slots,
@@ -17589,6 +17604,7 @@ fn check_debug_action_access(state: &GameState, actor: PlayerId) -> Result<(), E
 #[derive(Clone, Copy)]
 pub(crate) struct RetargetProposal<'a> {
     pub(crate) stack_entry_index: usize,
+    pub(crate) stack_entry_id: Option<ObjectId>,
     pub(crate) scope: &'a RetargetScope,
     pub(crate) current_targets: &'a [TargetRef],
     pub(crate) slots: &'a [RetargetSlotAddress],
@@ -17601,6 +17617,7 @@ pub(crate) struct RetargetProposal<'a> {
 struct RetargetSubmission<'a> {
     player: PlayerId,
     stack_entry_index: usize,
+    stack_entry_id: Option<ObjectId>,
     scope: &'a RetargetScope,
     current_targets: &'a [TargetRef],
     slots: &'a [RetargetSlotAddress],
@@ -17620,10 +17637,21 @@ fn apply_retarget(
 ) -> Result<WaitingFor, EngineError> {
     let player = submission.player;
     let stack_entry_index = submission.stack_entry_index;
+    if submission.stack_entry_id.is_some_and(|expected| {
+        state
+            .stack
+            .get(stack_entry_index)
+            .is_none_or(|entry| entry.id != expected)
+    }) {
+        return Err(EngineError::InvalidAction(
+            "Retarget prompt no longer refers to the selected stack entry".into(),
+        ));
+    }
     let mutated = validate_retarget_submission(
         state,
         &RetargetProposal {
             stack_entry_index,
+            stack_entry_id: submission.stack_entry_id,
             scope: submission.scope,
             current_targets: submission.current_targets,
             slots: submission.slots,
@@ -17799,6 +17827,7 @@ pub(crate) fn validate_retarget_submission(
 ) -> Result<crate::types::ability::ResolvedAbility, EngineError> {
     let RetargetProposal {
         stack_entry_index,
+        stack_entry_id,
         scope,
         current_targets,
         slots,
@@ -17812,6 +17841,11 @@ pub(crate) fn validate_retarget_submission(
             "Invalid stack entry index for retargeting".to_string(),
         ));
     };
+    if stack_entry_id.is_some_and(|expected| entry.id != expected) {
+        return Err(EngineError::InvalidAction(
+            "Retarget prompt no longer refers to the selected stack entry".to_string(),
+        ));
+    }
     let trigger_context = Some(crate::game::targeting::StackTriggerContext::for_entry(
         state, entry,
     ));
