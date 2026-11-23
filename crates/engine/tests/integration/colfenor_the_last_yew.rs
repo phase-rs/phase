@@ -217,7 +217,7 @@ fn colfenor_returns_strictly_lesser_card_and_excludes_dying_trigger_object() {
     );
 }
 
-/// CR 400.7 + CR 603.7c + CR 115.7d: the object that caused Colfenor's trigger
+/// CR 400.7 + CR 603.2 + CR 115.7d: the object that caused Colfenor's trigger
 /// is excluded by its original graveyard incarnation, but a later incarnation
 /// reusing the same storage id is a legal Swat retarget. This drives the public
 /// Tortured Existence path twice before Deflecting Swat re-evaluates the trigger.

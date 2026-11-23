@@ -12475,6 +12475,50 @@ pub fn chain_retarget_slots(ability: &ResolvedAbility) -> Vec<RetargetSlotBindin
     bindings
 }
 
+/// CR 115.7e + CR 400.7 + CR 608.2h: whether a retargeted slot's legality
+/// needs the triggered entry's own event rather than only the saved candidate
+/// pool and the live board. A missing event must not reject ordinary filters
+/// such as Bolt Bend's "any other target"; it must fail closed only for a
+/// filter whose referent or comparison is supplied by that event.
+pub(crate) fn retarget_requires_trigger_event_provenance(ability: &ResolvedAbility) -> bool {
+    let cost_or_effect_snapshot_present =
+        ability.cost_paid_object.is_some() || ability.effect_context_object.is_some();
+    chain_retarget_slots(ability).into_iter().any(|binding| {
+        let SlotEnforcement::Filtered(filter) = binding.enforcement else {
+            return false;
+        };
+        let event_subject = crate::types::ability::filter_contains(&filter, &|node| {
+            matches!(
+                node,
+                TargetFilter::TriggeringSource | TargetFilter::EventTarget
+            )
+        });
+        let event_controller = filter_needs_trigger_source_for_retarget(&filter);
+        let event_quantity =
+            !cost_or_effect_snapshot_present && filter.references_cost_paid_object();
+        event_subject || event_controller || event_quantity
+    })
+}
+
+/// The target-enumeration helper also treats `OtherThanTriggerObject` as a
+/// context-routing signal. Retarget validation is narrower: that marker can
+/// still be checked against the prompt's saved alternatives when the event is
+/// absent, while controller and event-subject references cannot.
+fn filter_needs_trigger_source_for_retarget(filter: &TargetFilter) -> bool {
+    fn prop_needs(prop: &FilterProp) -> bool {
+        matches!(
+            prop,
+            FilterProp::Attacking {
+                defender: Some(ControllerRef::DefendingPlayer)
+            } | FilterProp::AttackedThisTurn {
+                defender: Some(ControllerRef::DefendingPlayer)
+            }
+        )
+    }
+
+    crate::types::ability::filter_contains_filter_prop(filter, &|prop| prop_needs(prop))
+}
+
 /// Exhaustive over `ChainStep`; `None` when the path does not resolve, which
 /// `apply_retarget` turns into `InvalidAction` rather than writing elsewhere.
 pub(crate) fn node_at<'a>(

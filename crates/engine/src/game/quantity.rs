@@ -65,7 +65,7 @@ pub struct QuantityContext<'a> {
     /// triggered ability or its intervening-if. `source` remains attribution;
     /// source-relative facts must use this context instead of rebinding it.
     pub trigger_source: Option<TriggerSourceContext>,
-    /// CR 603.7c + CR 400.7: selected stack-entry trigger provenance for a
+    /// CR 603.2 + CR 400.7: selected stack-entry trigger provenance for a
     /// call-scoped legality evaluation. This never mutates ambient game state.
     pub stack_trigger_context: Option<StackTriggerContext<'a>>,
     /// CR 613.4c: The per-recipient binding for "<subject> gets +N/+M for
@@ -4156,7 +4156,7 @@ pub fn resolve_quantity_with_targets(
     resolve_quantity_with_targets_and_trigger_context(state, expr, ability, None)
 }
 
-/// CR 603.7c + CR 400.7: resolve a quantity against an explicitly selected
+/// CR 603.2 + CR 400.7: resolve a quantity against an explicitly selected
 /// stack entry's trigger event. The ordinary wrapper above retains ambient
 /// compatibility for callers that are not operating on a selected entry.
 pub(crate) fn resolve_quantity_with_targets_and_trigger_context(
@@ -9007,7 +9007,19 @@ fn trigger_event_source_identity(
             record,
             ..
         } if *event_object == object_id => record.entered_incarnation,
-        _ => None,
+        crate::types::events::GameEvent::AttackersDeclared {
+            declaration_records,
+            ..
+        } => declaration_records
+            .iter()
+            .find(|record| record.object_id == object_id)
+            .and_then(|record| record.incarnation),
+        _ => crate::game::targeting::event_context_incarnation(
+            &crate::types::ability::TargetFilter::TriggeringSource,
+            &event,
+            object_id,
+        )
+        .map(|reference| reference.incarnation),
     };
     Some((object_id, expected_incarnation))
 }

@@ -31,6 +31,7 @@
 //! Revert-proof: restoring the discarded binding drops `multi_target` back to
 //! `None`/1 and the count assertions below fail.
 
+use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::TargetRef;
@@ -38,7 +39,9 @@ use engine::types::ability::{Effect, QuantityExpr};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastPaymentMode, RetargetScope, StackEntryKind, WaitingFor};
+use engine::types::game_state::{
+    CastPaymentMode, PersistedGameState, RetargetScope, StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -613,11 +616,11 @@ fn deflecting_swat_retargets_public_rangers_trigger_by_lesser_power() {
     assert_eq!(board.runner.state().objects[&board.greater].controller, P1);
 }
 
-/// CR 603.7c + CR 115.7e: a restored prompt that still carries an old
+/// CR 603.3a + CR 115.7e + CR 400.7: a restored prompt that still carries an old
 /// alternative must fail closed when its stack entry has lost the event that
 /// supplies the Rangers source-relative power. The raw state round trip is the
-/// same serialization boundary used by the game runner; this test deliberately
-/// removes the entry-owned event after the prompt was offered.
+/// same checked persistence boundary used by production restore; this test
+/// deliberately removes the entry-owned event after the prompt was offered.
 #[test]
 fn restored_rangers_retarget_rejects_without_entry_event_provenance() {
     let mut board = rangers_retarget_board("swat");
@@ -648,6 +651,20 @@ fn restored_rangers_retarget_rejects_without_entry_event_provenance() {
         } => *stack_entry_index,
         other => panic!("expected retarget prompt, got {other:?}"),
     };
+    let valid_restored = PersistedGameState::capture(board.runner.state().clone())
+        .into_game_state()
+        .expect("checked restore must preserve a valid Rangers retarget prompt");
+    assert!(matches!(
+        valid_restored.waiting_for,
+        WaitingFor::RetargetChoice { .. }
+    ));
+    let mut valid_runner = GameRunner::from_state(valid_restored);
+    valid_runner
+        .act(GameAction::RetargetSpell {
+            new_targets: vec![Some(TargetRef::Object(board.lesser))],
+        })
+        .expect("checked restore must preserve a legal Rangers retarget");
+
     let entry_id = board.runner.state().stack[stack_entry_index].id;
     let entry = &mut board.runner.state_mut().stack[stack_entry_index];
     let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut entry.kind else {
@@ -659,10 +676,9 @@ fn restored_rangers_retarget_rejects_without_entry_event_provenance() {
         .state_mut()
         .stack_trigger_event_batches
         .remove(&entry_id);
-    let restored_state: engine::types::game_state::GameState = serde_json::from_str(
-        &serde_json::to_string(board.runner.state()).expect("serialize restored prompt"),
-    )
-    .expect("deserialize restored prompt");
+    let restored_state = PersistedGameState::capture(board.runner.state().clone())
+        .into_game_state()
+        .expect("checked restore must accept the fail-closed Rangers prompt");
     let mut restored = GameRunner::from_state(restored_state);
     assert!(restored
         .act(GameAction::RetargetSpell {
@@ -718,6 +734,102 @@ fn strionic_resonator_copies_public_rangers_trigger_by_lesser_power() {
     assert_eq!(board.runner.state().objects[&board.lesser].controller, P0);
     assert_eq!(board.runner.state().objects[&board.equal].controller, P1);
     assert_eq!(board.runner.state().objects[&board.greater].controller, P1);
+}
+
+/// CR 400.7 + CR 608.2h: an attack trigger's source power is read from the
+/// recorded attacker incarnation, not a same-id permanent that blinked before
+/// the trigger resolved. Reverend Mother Jessica attacks as a 3/3, blinks, and
+/// returns as her printed 2/2; the opponent's 2/2 remains a legal lesser-power
+/// target because the trigger keeps the attack-time 3 power.
+#[test]
+fn reverend_mother_jessica_uses_attack_incarnation_after_blink() {
+    const REVEREND: &str = "Prowess, prowess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn twice.)\nWhenever Reverend Mother Jessica attacks, for each opponent, tap up to one target creature that player controls with lesser power and goad it. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)";
+    const FLICKER: &str =
+        "Exile target creature or enchantment, then return it to the battlefield under its owner's control.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario
+        .add_creature_from_oracle(P0, "Reverend Mother Jessica", 2, 2, REVEREND)
+        .with_plus_counters(1)
+        .id();
+    let target = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let flicker = scenario
+        .add_spell_to_hand_from_oracle(P1, "Flicker of Fate", true, FLICKER)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 1,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner.state_mut().add_mana_to_pool(
+        P1,
+        ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
+    );
+    runner.state_mut().add_mana_to_pool(
+        P1,
+        ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+    );
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .expect("declare Reverend Mother Jessica as an attacker");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(target)),
+        })
+        .expect("choose the opponent's lesser-power creature for Jessica's trigger");
+    let old_incarnation = runner.state().objects[&attacker].incarnation;
+
+    // P0 passes, then P1 casts and resolves a real blink while the attack
+    // trigger is pending on the stack.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("pass priority to the defending player");
+    assert_eq!(runner.state().priority_player, P1);
+    let p1 = runner
+        .state()
+        .players
+        .iter()
+        .find(|player| player.id == P1)
+        .expect("P1 exists");
+    assert_eq!(p1.mana_pool.units().count(), 2);
+    let card_id = runner.state().objects[&flicker].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: flicker,
+            card_id,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("cast Flicker of Fate in response");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(attacker)),
+        })
+        .expect("choose Jessica for Flicker of Fate");
+    for _ in 0..8 {
+        if runner.state().objects[&flicker].zone == engine::types::zones::Zone::Graveyard {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("resolve Flicker without resolving Jessica's trigger");
+    }
+    assert_ne!(
+        runner.state().objects[&attacker].incarnation,
+        old_incarnation,
+        "Flicker must return Jessica as a new object"
+    );
+    assert_eq!(runner.state().objects[&attacker].power, Some(2));
+    assert!(!runner.state().objects[&target].tapped);
+
+    runner.advance_until_stack_empty();
+    assert!(
+        runner.state().objects[&target].tapped,
+        "the attack-time 3 power must keep the opponent's 2/2 legal after Jessica blinks"
+    );
 }
 
 // NOTE — why there is no `GiveControl` RUNTIME witness here.

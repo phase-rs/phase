@@ -16,7 +16,7 @@ use crate::types::resolution::CapturedDeclarationPayload;
 use crate::types::zones::Zone;
 use std::collections::HashSet;
 
-/// CR 603.7c + CR 400.7: the event provenance owned by one stack entry while
+/// CR 603.3a + CR 400.7: the event provenance owned by one stack entry while
 /// its targets are re-evaluated. This is deliberately borrowed and call-scoped:
 /// retargeting must read the selected entry's event rather than temporarily
 /// replacing `GameState::current_trigger_event` with ambient state.
@@ -27,7 +27,7 @@ pub struct StackTriggerContext<'a> {
 }
 
 impl<'a> StackTriggerContext<'a> {
-    /// CR 603.7c: a non-empty per-entry batch is authoritative for both the
+    /// CR 603.2: a non-empty per-entry batch is authoritative for both the
     /// singular representative event and the full batched event slice. A
     /// non-batched triggered entry falls back to its own stored event.
     pub(crate) fn for_entry(state: &'a GameState, entry: &'a StackEntry) -> Self {
@@ -238,7 +238,7 @@ pub(crate) fn find_legal_targets_for_ability_with_controller(
     )
 }
 
-/// CR 115.7 + CR 603.7c: enumerate a stack entry's legal targets against its
+/// CR 115.7 + CR 603.2: enumerate a stack entry's legal targets against its
 /// own trigger event. Unlike the ambient-compatible wrapper, `None` here means
 /// that no entry-owned event exists and therefore no ambient event is consulted.
 pub(crate) fn find_legal_targets_for_ability_with_controller_and_trigger_context(
@@ -287,7 +287,7 @@ pub(crate) fn find_legal_targets_for_ability_with_view(
     )
 }
 
-/// CR 115.7 + CR 603.7c: the declared-slot view variant of the explicit stack
+/// CR 115.7 + CR 603.2: the declared-slot view variant of the explicit stack
 /// trigger-context target enumerator.
 pub(crate) fn find_legal_targets_for_ability_with_view_and_trigger_context(
     state: &GameState,
