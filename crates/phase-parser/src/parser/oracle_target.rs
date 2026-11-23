@@ -11805,7 +11805,7 @@ fn parse_targets_only_constraint(
 /// Handles:
 /// - "~" / "it" / "this creature" / "this permanent" → `Targets { SelfRef }`
 /// - "you" → `Targets { Controller }`
-/// - "you or a [type]" → `Targets { Or(Controller, Typed) }`
+/// - "you or a/an [type]" / "an opponent or a/an [type]" → a player filter OR a typed filter
 /// - "one or more [type phrase]" → strip prefix, then parse type phrase
 /// - "a/an [type phrase]" → `Targets { filter }`
 ///
@@ -11854,23 +11854,31 @@ fn parse_targets_constraint(
         }
     }
 
-    // "you or a [type]" / "you or an [type]" — compound controller + typed filter
+    // "you or a/an [type]" / "an opponent or a/an [type]" — compound player + typed filter
     let lower = text.to_lowercase();
-    let you_or_result =
-        nom::branch::alt((tag::<_, _, OracleError<'_>>("you or an "), tag("you or a ")))
-            .parse(lower.as_str());
-    if let Ok((_, matched)) = you_or_result {
-        let you_or_len = matched.len();
-        let after_you_or = &text[you_or_len..];
-        let (type_filter, remainder) = parse_type_phrase_folding(after_you_or);
-        let consumed = after_you_or.len() - remainder.len();
+    let player_or_type = nom_on_lower(text, lower.as_str(), |input| {
+        let (input, player_filter) = alt((
+            value(TargetFilter::Controller, tag("you")),
+            value(TargetFilter::Opponent, tag("an opponent")),
+        ))
+        .parse(input)?;
+        let (input, _) = tag(" or ").parse(input)?;
+        let (input, _) = nom_primitives::parse_article(input)?;
+        Ok((input, player_filter))
+    });
+    if let Some((player_filter, after_article)) = player_or_type {
+        let (type_filter, remainder) = parse_type_phrase_folding(after_article);
+        if remainder.len() == after_article.len() {
+            return None;
+        }
+        let consumed = text.len() - remainder.len();
         let combined = TargetFilter::Or {
-            filters: vec![TargetFilter::Controller, type_filter],
+            filters: vec![player_filter, type_filter],
         };
         let props = vec![FilterProp::Targets {
             filter: Box::new(combined),
         }];
-        return Some((props, prefix_len + you_or_len + consumed));
+        return Some((props, prefix_len + consumed));
     }
 
     // "you" — targets the controller (a player), with word boundary
@@ -24039,6 +24047,47 @@ mod tests {
             consumed,
             " that targets you or a creature you control".len()
         );
+    }
+
+    #[test]
+    fn targets_player_or_creature_preserves_oracle_remainder() {
+        for (text, expected_remainder, expected_player, expected_controller) in [
+            // Reparations
+            (
+                " that targets you or a creature you control, you may draw a card.",
+                ", you may draw a card.",
+                TargetFilter::Controller,
+                ControllerRef::You,
+            ),
+            // Danitha, Spear of Agony
+            (
+                " that targets an opponent or a creature an opponent controls, put a +1/+1 counter on Danitha.",
+                ", put a +1/+1 counter on Danitha.",
+                TargetFilter::Opponent,
+                ControllerRef::Opponent,
+            ),
+        ] {
+            let (props, consumed) =
+                parse_that_clause_suffix(text, None).expect("constraint parses");
+            assert_eq!(&text[consumed..], expected_remainder, "remainder for {text:?}");
+            let [FilterProp::Targets { filter }] = props.as_slice() else {
+                panic!("expected one Targets property, got {props:?}");
+            };
+            let TargetFilter::Or { filters } = filter.as_ref() else {
+                panic!("expected an Or target filter, got {filter:?}");
+            };
+            assert_eq!(filters.len(), 2, "branches for {text:?}");
+            assert_eq!(filters[0], expected_player, "player leg for {text:?}");
+            let TargetFilter::Typed(typed) = &filters[1] else {
+                panic!("expected a Typed object leg, got {:?}", filters[1]);
+            };
+            assert!(typed.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(
+                typed.controller,
+                Some(expected_controller),
+                "object controller for {text:?}"
+            );
+        }
     }
 
     #[test]

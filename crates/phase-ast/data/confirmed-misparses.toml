@@ -493,7 +493,6 @@ face = [
   { key = "dan lewis", class = "missing_effect", clauses = ["and equip {1}."] },
   { key = "dangerous", class = "missing_effect", clauses = ["All creatures able to block target creature this turn do so."] },
   { key = "danitha, benalia's hope", class = "missing_effect", clauses = ["When Danitha enters, you may put an Aura or Equipment card from your hand or graveyard onto the battlefield attached to Danitha."] },
-  { key = "danitha, spear of agony", class = "dropped_qualifier", clauses = ["Whenever you cast a spell that targets an opponent or a creature an opponent controls, put a +1/+1 counter on Danitha."] },
   { key = "danitha, sword of hope", class = "trigger_wrong", clauses = ["Whenever you cast an Equipment spell or a spell that targets a creature you control, draw a card."] },
   { key = "daredevil, man without fear", class = "wrong_object", clauses = ["If that card is a Hero card, Daredevil gets +2/+1 until end of turn."] },
   { key = "daretti, ingenious iconoclast", class = "wrong_zone", clauses = ["[−6]: Choose target artifact card in a graveyard or artifact on the battlefield."] },
