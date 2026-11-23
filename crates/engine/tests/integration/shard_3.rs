@@ -154,6 +154,7 @@ mod eureka_moment_draw_trigger_strands_optional_frame;
 mod evelyn_regression;
 mod event_controller_last_known;
 mod event_deadline_duration;
+mod event_referent_identity;
 mod event_source_lift_referent_stops;
 mod event_target_controller_damage_anaphor;
 mod event_window_trigger_gate;
