@@ -583,6 +583,7 @@ pub fn resolve(
         // payload may still read information from it ("its owner draws a
         // card"), which uses its last known information. Bind the subject;
         // what may act on it is decided by the pins below.
+        let mut gate_rejected = None;
         if targets.is_empty() {
             if let Some(subject) = creation_subject.as_ref() {
                 targets = crate::game::targeting::admit_inferred_source_referents(
@@ -590,6 +591,7 @@ pub fn resolve(
                     ability,
                     vec![TargetRef::Object(subject.id)],
                 );
+                gate_rejected = Some(subject);
             }
         }
         let pins_object_anaphor = super::ability_pins_object_anaphor(&delayed_ability)
@@ -637,7 +639,10 @@ pub fn resolve(
                             // the event made, or to its departed incarnation
                             // once that object has moved again. The source is
                             // decided by `admit_inferred_source_referents`.
-                            TargetRef::Object(id) => match bound_subject {
+                            TargetRef::Object(id) => match bound_subject.or(gate_rejected) {
+                                // CR 603.7c + CR 400.7: a subject the referent gate rejected
+                                // is pinned to its departed incarnation whatever the
+                                // condition, so no later firing affects the new object.
                                 Some(subject) if subject.id == *id && *id != ability.source_id => {
                                     Some(subject.arrival)
                                 }
@@ -5838,7 +5843,9 @@ mod tests {
         }
 
         /// G3 — an event-delayed condition (nearest printed: Long River Lurker)
-        /// keeps today's live pin and gets no components.
+        /// gets no components. Its subject was put back before the creator
+        /// resolved, so it is pinned to its departed incarnation: a later
+        /// firing must not return the new object (CR 603.7c + CR 400.7).
         #[test]
         fn g3_event_delayed_condition_keeps_its_binding() {
             let mut fixture = fixture();
@@ -5852,7 +5859,8 @@ mod tests {
                 vec![],
             );
             assert_eq!(targets, vec![TargetRef::Object(fixture.subject)]);
-            assert_eq!(pins, vec![live(&fixture, fixture.subject)]);
+            assert_eq!(pins, vec![fixture.departed]);
+            assert!(!pins[0].is_current(&fixture.state));
         }
 
         /// G4 — a `Bounce` root (The Locust God shape) takes the arrival pin
