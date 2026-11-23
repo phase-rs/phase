@@ -612,7 +612,7 @@ fn backdraft_hellkite_attack_grants_flashback_even_if_it_leaves() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let hellkite = scenario
-        .add_creature_from_oracle(P0, "Backdraft Hellkite", 4, 6, BACKDRAFT_HELLKITE)
+        .add_creature_from_oracle(P0, "Backdraft Hellkite", 4, 4, BACKDRAFT_HELLKITE)
         .with_subtypes(vec!["Dragon"])
         .with_mana_cost(cost(3, vec![ManaCostShard::Red, ManaCostShard::Red]))
         .id();
@@ -797,10 +797,10 @@ fn ghost_ark_crew_trigger_grants_unearth_to_the_artifact_creature_cards() {
     library(&mut scenario, P0, 3);
     let mut runner = scenario.build();
     let ark_object = runner.state_mut().objects.get_mut(&ark).expect("the Ark");
-    ark_object.base_power = Some(4);
-    ark_object.base_toughness = Some(4);
-    ark_object.power = Some(4);
-    ark_object.toughness = Some(4);
+    ark_object.base_power = Some(3);
+    ark_object.base_toughness = Some(3);
+    ark_object.power = Some(3);
+    ark_object.toughness = Some(3);
 
     let unearths = |runner: &GameRunner, card| {
         effective_keyword_instances(runner.state(), card, KeywordKind::Unearth)
