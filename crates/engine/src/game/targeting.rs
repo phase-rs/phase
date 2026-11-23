@@ -91,16 +91,10 @@ fn ability_target_filter_context_with_controller<'a>(
     // by the move. The event proves identity by its object id for this
     // exclusion; only a battlefield entrant has a live incarnation that can be
     // compared directly during target enumeration.
-    let incarnation = match event {
-        GameEvent::ZoneChanged {
-            to: Zone::Battlefield,
-            record,
-            ..
-        } => record.entered_incarnation,
-        GameEvent::ZoneChanged { .. } => None,
-        _ => event_context_incarnation(&TargetFilter::TriggeringSource, event, object_id)
-            .map(|reference| reference.incarnation),
-    };
+    let incarnation = zone_change_parent_target_pin(event)
+        .filter(|reference| reference.object_id == object_id)
+        .or_else(|| event_context_incarnation(&TargetFilter::TriggeringSource, event, object_id))
+        .map(|reference| reference.incarnation);
     context.with_triggering_object(TriggeringObjectRef {
         object_id,
         incarnation,
@@ -124,20 +118,51 @@ fn ability_target_filter_context_with_trigger_context<'a>(
     let Some(object_id) = extract_source_from_event(event) else {
         return context;
     };
-    let incarnation = match event {
-        GameEvent::ZoneChanged {
-            to: Zone::Battlefield,
-            record,
-            ..
-        } => record.entered_incarnation,
-        GameEvent::ZoneChanged { .. } => None,
-        _ => event_context_incarnation(&TargetFilter::TriggeringSource, event, object_id)
-            .map(|reference| reference.incarnation),
-    };
+    let incarnation = zone_change_parent_target_pin(event)
+        .filter(|reference| reference.object_id == object_id)
+        .or_else(|| event_context_incarnation(&TargetFilter::TriggeringSource, event, object_id))
+        .map(|reference| reference.incarnation);
     context.with_triggering_object(TriggeringObjectRef {
         object_id,
         incarnation,
     })
+}
+
+/// CR 400.7 + CR 608.2h: return the exact destination incarnation named by a
+/// zone-change event. A battlefield entry records its arrival incarnation;
+/// every other destination advances the event's source incarnation. This is
+/// the same authority used when a zone-change trigger pins its parent target,
+/// and is required by target-relative "another" checks as well.
+pub(crate) fn zone_change_parent_target_pin(event: &GameEvent) -> Option<ObjectIncarnationRef> {
+    let GameEvent::ZoneChanged {
+        object_id,
+        from,
+        to,
+        record,
+    } = event
+    else {
+        return None;
+    };
+    if record.object_id != *object_id || record.from_zone != *from || record.to_zone != *to {
+        return None;
+    }
+
+    let incarnation = if *to == Zone::Battlefield {
+        record.entered_incarnation?
+    } else {
+        let source = record.trigger_source_context()?;
+        if source.identity.reference.object_id != *object_id
+            || from.is_some_and(|zone| source.identity.expected_zone != zone)
+        {
+            return None;
+        }
+        if from.is_some_and(|zone| zone != *to) {
+            source.identity.reference.incarnation.checked_add(1)?
+        } else {
+            source.identity.reference.incarnation
+        }
+    };
+    Some(ObjectIncarnationRef::of(*object_id, incarnation))
 }
 
 /// Find legal targets using a typed TargetFilter (CR 115.2 + CR 702.16b).

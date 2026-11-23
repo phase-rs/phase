@@ -38,8 +38,9 @@ use engine::types::ability::{Effect, QuantityExpr};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, RetargetScope, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
@@ -389,6 +390,334 @@ fn rangers_of_ithilien_public_trigger_prompt_validates_lesser_power() {
     assert_eq!(runner.state().objects[&lesser].controller, P0);
     assert_eq!(runner.state().objects[&equal].controller, P1);
     assert_eq!(runner.state().objects[&greater].controller, P1);
+}
+
+const RANGERS_OF_ITHILIEN: &str = "Vigilance\nWhen this creature enters, gain control of up to one target creature with lesser power for as long as you control this creature. Then the Ring tempts you.";
+const DEFLECTING_SWAT: &str = "If you control a commander, you may cast this spell without paying its mana cost.\nYou may choose new targets for target spell or ability.";
+const STRIONIC_RESONATOR: &str = "{2}, {T}: Copy target triggered ability you control. You may choose new targets for the copy. (A triggered ability uses the words \"when,\" \"whenever,\" or \"at.\")";
+
+struct RangersRetargetBoard {
+    runner: GameRunner,
+    rangers: ObjectId,
+    initial: ObjectId,
+    lesser: ObjectId,
+    equal: ObjectId,
+    greater: ObjectId,
+    swat: Option<ObjectId>,
+    resonator: Option<ObjectId>,
+}
+
+fn rangers_retarget_board(response: &str) -> RangersRetargetBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let initial = scenario.add_creature(P1, "Initial lesser", 2, 2).id();
+    let lesser = scenario.add_creature(P1, "Lesser", 1, 1).id();
+    let equal = scenario.add_creature(P1, "Equal", 3, 3).id();
+    let greater = scenario.add_creature(P1, "Greater", 4, 4).id();
+    let rangers = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rangers of Ithilien", 3, 3, RANGERS_OF_ITHILIEN)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let swat = (response == "swat").then(|| {
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Deflecting Swat", true, DEFLECTING_SWAT)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 2,
+            })
+            .id()
+    });
+    let resonator = (response == "resonator").then(|| {
+        scenario
+            .add_artifact_from_oracle(P0, "Strionic Resonator", STRIONIC_RESONATOR)
+            .id()
+    });
+    let mana = if swat.is_some() { 3 } else { 2 };
+    scenario.with_mana_pool(
+        P0,
+        (0..mana)
+            .map(|index| {
+                ManaUnit::new(
+                    if swat.is_some() && index == 0 {
+                        ManaType::Red
+                    } else {
+                        ManaType::Colorless
+                    },
+                    ObjectId(0),
+                    false,
+                    vec![],
+                )
+            })
+            .collect(),
+    );
+    RangersRetargetBoard {
+        runner: scenario.build(),
+        rangers,
+        initial,
+        lesser,
+        equal,
+        greater,
+        swat,
+        resonator,
+    }
+}
+
+/// CR 603.3d: announce the real Rangers card and answer its ETB target with A,
+/// leaving the trigger on the stack for a public retarget/copy action.
+fn put_rangers_trigger_on_stack(board: &mut RangersRetargetBoard) -> ObjectId {
+    let card_id = board.runner.state().objects[&board.rangers].card_id;
+    board
+        .runner
+        .act(GameAction::CastSpell {
+            object_id: board.rangers,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast real Rangers of Ithilien");
+    for _ in 0..64 {
+        if matches!(
+            board.runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ) {
+            if let Some(trigger) = board.runner.state().stack.iter().find(|entry| {
+                entry.source_id == board.rangers
+                    && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+            }) {
+                return trigger.id;
+            }
+            board
+                .runner
+                .act(GameAction::PassPriority)
+                .expect("resolve Rangers onto the battlefield");
+            continue;
+        }
+        match board.runner.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection {
+                target_slots,
+                selection,
+                ..
+            }
+            | WaitingFor::TargetSelection {
+                target_slots,
+                selection,
+                ..
+            } => {
+                assert_eq!(selection.current_slot, 0);
+                assert!(target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(board.initial)));
+                board
+                    .runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(board.initial)),
+                    })
+                    .expect("choose Rangers target A");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                board
+                    .runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order Rangers trigger");
+            }
+            other => panic!("unexpected Rangers setup state: {other:?}"),
+        }
+    }
+    panic!("Rangers trigger did not reach a priority window");
+}
+
+fn assert_rangers_retarget_prompt(
+    runner: &GameRunner,
+    lesser: ObjectId,
+    equal: ObjectId,
+    greater: ObjectId,
+) {
+    let WaitingFor::RetargetChoice {
+        scope,
+        legal_new_targets,
+        slot_pools,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected a retarget prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(matches!(scope, RetargetScope::All));
+    assert!(legal_new_targets.contains(&TargetRef::Object(lesser)));
+    assert!(slot_pools[0].contains(&TargetRef::Object(lesser)));
+    assert!(!slot_pools[0].contains(&TargetRef::Object(equal)));
+    assert!(!slot_pools[0].contains(&TargetRef::Object(greater)));
+}
+
+/// CR 115.7d + CR 601.2c: Deflecting Swat's public retarget action must use
+/// the Rangers trigger's source-relative lesser-power filter, not its saved
+/// ambient target pool. Equal and greater candidates are rejected by the same
+/// reducer that supplied the prompt; the AI exposes the accepted alternative.
+#[test]
+fn deflecting_swat_retargets_public_rangers_trigger_by_lesser_power() {
+    let mut board = rangers_retarget_board("swat");
+    let trigger = put_rangers_trigger_on_stack(&mut board);
+    let swat = board.swat.expect("Swat on the board");
+    board.runner.cast(swat).target_object(trigger).commit();
+    for _ in 0..32 {
+        match board.runner.state().waiting_for.clone() {
+            WaitingFor::OptionalEffectChoice { .. } => {
+                board
+                    .runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept Deflecting Swat");
+            }
+            WaitingFor::RetargetChoice { .. } => break,
+            WaitingFor::Priority { .. } => {
+                board
+                    .runner
+                    .act(GameAction::PassPriority)
+                    .expect("resolve Deflecting Swat");
+            }
+            other => panic!("unexpected Swat state: {other:?}"),
+        }
+    }
+    assert_rangers_retarget_prompt(&board.runner, board.lesser, board.equal, board.greater);
+    let ai_actions = engine::ai_support::candidate_actions(board.runner.state());
+    assert!(
+        ai_actions.iter().any(|candidate| {
+            matches!(
+                &candidate.action,
+                GameAction::RetargetSpell { new_targets }
+                    if new_targets == &vec![Some(TargetRef::Object(board.lesser))]
+            )
+        }),
+        "AI must offer B at the Swat prompt: {ai_actions:?}"
+    );
+    for bad in [board.equal, board.greater] {
+        assert!(board
+            .runner
+            .act(GameAction::RetargetSpell {
+                new_targets: vec![Some(TargetRef::Object(bad))],
+            })
+            .is_err());
+    }
+    board
+        .runner
+        .act(GameAction::RetargetSpell {
+            new_targets: vec![Some(TargetRef::Object(board.lesser))],
+        })
+        .expect("choose lesser-power creature B");
+    board.runner.advance_until_stack_empty();
+    assert_eq!(board.runner.state().objects[&board.lesser].controller, P0);
+    assert_eq!(board.runner.state().objects[&board.equal].controller, P1);
+    assert_eq!(board.runner.state().objects[&board.greater].controller, P1);
+}
+
+/// CR 603.7c + CR 115.7e: a restored prompt that still carries an old
+/// alternative must fail closed when its stack entry has lost the event that
+/// supplies the Rangers source-relative power. The raw state round trip is the
+/// same serialization boundary used by the game runner; this test deliberately
+/// removes the entry-owned event after the prompt was offered.
+#[test]
+fn restored_rangers_retarget_rejects_without_entry_event_provenance() {
+    let mut board = rangers_retarget_board("swat");
+    let trigger = put_rangers_trigger_on_stack(&mut board);
+    let swat = board.swat.expect("Swat on the board");
+    board.runner.cast(swat).target_object(trigger).commit();
+    for _ in 0..32 {
+        match board.runner.state().waiting_for.clone() {
+            WaitingFor::OptionalEffectChoice { .. } => {
+                board
+                    .runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept Deflecting Swat");
+            }
+            WaitingFor::RetargetChoice { .. } => break,
+            WaitingFor::Priority { .. } => {
+                board
+                    .runner
+                    .act(GameAction::PassPriority)
+                    .expect("resolve Deflecting Swat");
+            }
+            other => panic!("unexpected Swat state: {other:?}"),
+        }
+    }
+    let stack_entry_index = match &board.runner.state().waiting_for {
+        WaitingFor::RetargetChoice {
+            stack_entry_index, ..
+        } => *stack_entry_index,
+        other => panic!("expected retarget prompt, got {other:?}"),
+    };
+    let entry_id = board.runner.state().stack[stack_entry_index].id;
+    let entry = &mut board.runner.state_mut().stack[stack_entry_index];
+    let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut entry.kind else {
+        panic!("Rangers retarget subject must be a triggered ability");
+    };
+    *trigger_event = None;
+    board
+        .runner
+        .state_mut()
+        .stack_trigger_event_batches
+        .remove(&entry_id);
+    let restored_state: engine::types::game_state::GameState = serde_json::from_str(
+        &serde_json::to_string(board.runner.state()).expect("serialize restored prompt"),
+    )
+    .expect("deserialize restored prompt");
+    let mut restored = GameRunner::from_state(restored_state);
+    assert!(restored
+        .act(GameAction::RetargetSpell {
+            new_targets: vec![Some(TargetRef::Object(board.lesser))],
+        })
+        .is_err());
+}
+
+/// CR 707.10c: Strionic Resonator's copy walk must apply the same public
+/// source-relative target legality when it copies Rangers of Ithilien.
+#[test]
+fn strionic_resonator_copies_public_rangers_trigger_by_lesser_power() {
+    let mut board = rangers_retarget_board("resonator");
+    let trigger = put_rangers_trigger_on_stack(&mut board);
+    let resonator = board.resonator.expect("Resonator on the board");
+    board
+        .runner
+        .activate(resonator, 0)
+        .target_object(trigger)
+        .accept_optional()
+        .resolve();
+    let WaitingFor::CopyRetarget { target_slots, .. } = &board.runner.state().waiting_for else {
+        panic!(
+            "expected copy retarget prompt, got {:?}",
+            board.runner.state().waiting_for
+        );
+    };
+    let slot = &target_slots[0];
+    assert!(slot
+        .legal_alternatives
+        .contains(&TargetRef::Object(board.lesser)));
+    assert!(!slot
+        .legal_alternatives
+        .contains(&TargetRef::Object(board.equal)));
+    assert!(!slot
+        .legal_alternatives
+        .contains(&TargetRef::Object(board.greater)));
+    for bad in [board.equal, board.greater] {
+        assert!(board
+            .runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bad)),
+            })
+            .is_err());
+    }
+    board
+        .runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(board.lesser)),
+        })
+        .expect("choose lesser-power creature B for the copy");
+    board.runner.advance_until_stack_empty();
+    assert_eq!(board.runner.state().objects[&board.lesser].controller, P0);
+    assert_eq!(board.runner.state().objects[&board.equal].controller, P1);
+    assert_eq!(board.runner.state().objects[&board.greater].controller, P1);
 }
 
 // NOTE — why there is no `GiveControl` RUNTIME witness here.

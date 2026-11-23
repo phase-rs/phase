@@ -17815,6 +17815,14 @@ pub(crate) fn validate_retarget_submission(
     let trigger_context = Some(crate::game::targeting::StackTriggerContext::for_entry(
         state, entry,
     ));
+    // CR 603.7c + CR 115.7e: a restored triggered entry whose own event
+    // provenance is absent cannot safely accept a changed target. The prompt's
+    // saved pool may still contain the pre-save alternatives, but re-evaluating
+    // a trigger-relative filter without its event would otherwise let that
+    // stale pool bypass the live provenance check. Keeping every target is
+    // still the CR 115.7d no-change path; any election fails closed.
+    let missing_trigger_event = matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. })
+        && trigger_context.is_some_and(|context| context.event.is_none());
 
     // CR 115.7d + CR 601.2c: derived here (rather than only after the match
     // below) because H3's outer-empty re-derivation needs it before
@@ -17972,6 +17980,11 @@ pub(crate) fn validate_retarget_submission(
     // announced incarnation is gone (an election of the returned object).
     let positions_changed =
         crate::game::ability_utils::retarget_positions_changed(state, pre, &written, new_targets);
+    if missing_trigger_event && positions_changed.iter().any(|changed| *changed) {
+        return Err(EngineError::InvalidAction(
+            "Retarget: triggered entry is missing its event provenance".into(),
+        ));
+    }
     // CR 115.7a + CR 115.7b: Single changes one target; keeping the same
     // occurrence is not a response, including through the legacy pool fallback.
     if matches!(scope, RetargetScope::Single) && positions_changed.first() != Some(&true) {
