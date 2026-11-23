@@ -15601,6 +15601,144 @@ mod entry_onset_tests {
         }
     }
 
+    #[test]
+    fn permanent_token_riders_stay_separate_instructions() {
+        let overseer = card(
+            "Flying, Vigilance\nWhen Vv'viza enters, conjure a card of your choice from the Planets Spellbook onto the battlefield.\nWhenever you attack, create a Lander token. It becomes a 2/1 artifact creature and gains flying.",
+            "Vv'viza, Orbital Overseer",
+            &["Conjure", "Flying", "Vigilance"],
+            &["Legendary", "Creature"],
+            &["Jellyfish", "Advisor"],
+        );
+        let chandra = card(
+            "[0]: Put a loyalty counter on each red planeswalker you control.\n[0]: Create two 1/1 red Elemental creature tokens. They gain haste. Sacrifice them at the beginning of the next end step.\n[−2]: You may cast target instant or sorcery card with mana value 3 or less from your graveyard. If that spell would be put into your graveyard, exile it instead.",
+            "Chandra, Acolyte of Flame",
+            &[],
+            &["Legendary", "Planeswalker"],
+            &["Chandra"],
+        );
+        for (name, token, expected_mods) in [
+            (
+                "Lander",
+                overseer
+                    .triggers
+                    .iter()
+                    .filter_map(|trigger| trigger.execute.as_deref())
+                    .flat_map(nodes)
+                    .find(|node| matches!(&*node.effect, Effect::Token { name, .. } if name == "Lander"))
+                    .expect("Lander token"),
+                vec![
+                    ContinuousModification::SetPower { value: 2 },
+                    ContinuousModification::SetToughness { value: 1 },
+                    ContinuousModification::AddType {
+                        core_type: phase_ast::types::CoreType::Creature,
+                    },
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    },
+                ],
+            ),
+            (
+                "Elemental",
+                chandra
+                    .abilities
+                    .iter()
+                    .flat_map(nodes)
+                    .find(|node| matches!(&*node.effect, Effect::Token { name, .. } if name == "Elemental"))
+                    .expect("Elemental token"),
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }],
+            ),
+        ] {
+            let Effect::Token {
+                static_abilities, ..
+            } = &*token.effect
+            else {
+                unreachable!("token node was selected");
+            };
+            assert!(
+                static_abilities.is_empty(),
+                "{name}: rider must not be folded into token statics"
+            );
+            let rider = token.sub_ability.as_deref().expect("separate rider");
+            assert_eq!(rider.sub_link, SubAbilityLink::SequentialSibling);
+            assert_eq!(rider.entry_onset, WhenFollowed);
+            let Effect::GenericEffect {
+                static_abilities,
+                target: Some(TargetFilter::LastCreated),
+                duration: Some(Duration::Permanent),
+                ..
+            } = &*rider.effect
+            else {
+                panic!(
+                    "{name}: expected permanent LastCreated rider, got {:?}",
+                    rider.effect
+                );
+            };
+            let mods: Vec<_> = static_abilities
+                .iter()
+                .flat_map(|definition| &definition.modifications)
+                .collect();
+            for modification in &expected_mods {
+                assert!(
+                    mods.contains(&modification),
+                    "{name}: missing {modification:?} in {mods:?}"
+                );
+            }
+            if name == "Elemental" {
+                let delayed = rider.sub_ability.as_deref().expect("delayed sacrifice");
+                let Effect::CreateDelayedTrigger { effect, .. } = &*delayed.effect else {
+                    panic!("expected delayed trigger, got {:?}", delayed.effect);
+                };
+                assert!(
+                    matches!(
+                        &*effect.effect,
+                        Effect::Sacrifice {
+                            target: TargetFilter::LastCreated,
+                            ..
+                        }
+                    ),
+                    "{effect:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn estrids_token_defining_grant_still_folds() {
+        let estrid = card(
+            "[+2]: Untap each enchanted permanent you control.\n[−1]: Create a white Aura enchantment token named Mask attached to another target permanent. The token has enchant permanent and umbra armor.\n[−7]: Mill seven cards. Return all non-Aura enchantment cards from your graveyard to the battlefield, then do the same for Aura cards.\nEstrid, the Masked can be your commander.",
+            "Estrid, the Masked",
+            &["Mill"],
+            &["Legendary", "Planeswalker"],
+            &["Estrid"],
+        );
+        let mask = estrid
+            .abilities
+            .iter()
+            .flat_map(nodes)
+            .find(|node| matches!(&*node.effect, Effect::Token { name, .. } if name == "Mask"))
+            .expect("Mask token");
+        let Effect::Token {
+            static_abilities, ..
+        } = &*mask.effect
+        else {
+            unreachable!("Mask token node was selected");
+        };
+        assert!(
+            static_abilities
+                .iter()
+                .any(|definition| definition.description.as_deref()
+                    == Some("The token has enchant permanent and umbra armor")),
+            "Mask's defining grant must fold: {static_abilities:?}"
+        );
+        assert!(!mask
+            .sub_ability
+            .as_deref()
+            .is_some_and(|node| generic_effect(&node.effect)));
+    }
+
     /// CR 611.2e: every `WithEntry` stamp this module's fixtures produce lands on a kind that
     /// `ContinuousEffectOnset::kind_admits_with_entry` names, the parser invariant the persisted
     /// onset admission (`types::resolution::admit_entry_onset_record`) relies on to call every

@@ -1858,18 +1858,28 @@ pub(crate) fn bind_resolving_ability_referents(
     // the parser rebinds these possessives to `ScopedPlayer` in
     // `lower_trigger_ir`.
     if ability.scoped_player.is_none() {
-        if let Some(pid) = state.current_trigger_event.as_ref().and_then(|event| {
-            matches!(
-                event,
+        if let Some(event) = state.current_trigger_event.as_ref() {
+            match event {
+                GameEvent::AttackersDeclared { .. } => {
+                    // CR 506.2 + CR 101.4: the attacking player is the trigger's own binding,
+                    // not a `player_scope` seat leg, so the chain's instructions stay
+                    // boundaries where entries are observed (CR 603.6a + CR 608.2c).
+                    if let Some(pid) = targeting::extract_player_from_event(event, state) {
+                        ability.set_trigger_bound_player_recursive(pid);
+                    }
+                }
                 GameEvent::DamageDealt {
                     target: TargetRef::Player(_),
                     ..
-                } | GameEvent::AttackersDeclared { .. }
-            )
-            .then(|| targeting::extract_player_from_event(event, state))
-            .flatten()
-        }) {
-            ability.set_scoped_player_recursive(pid);
+                } => {
+                    // CR 120.3: unchanged, the damaged player still reads as an instruction
+                    // binding; no printed card's outcome depends on the difference.
+                    if let Some(pid) = targeting::extract_player_from_event(event, state) {
+                        ability.set_scoped_player_recursive(pid);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
