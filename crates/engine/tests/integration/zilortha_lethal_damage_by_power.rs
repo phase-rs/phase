@@ -31,6 +31,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{ChoiceType, ControllerRef, TargetFilter, TargetRef, TypedFilter};
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CombatDamageAssignmentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -190,6 +191,18 @@ fn attack_and_block(
     attackers: &[ObjectId],
     blocks: &[(ObjectId, ObjectId)],
 ) {
+    let attacks: Vec<_> = attackers
+        .iter()
+        .map(|&id| (id, AttackTarget::Player(P1)))
+        .collect();
+    declare_attacks_and_blocks(runner, &attacks, blocks);
+}
+
+fn declare_attacks_and_blocks(
+    runner: &mut GameRunner,
+    attacks: &[(ObjectId, AttackTarget)],
+    blocks: &[(ObjectId, ObjectId)],
+) {
     let mut declared_attackers = false;
     let mut declared_blockers = false;
     for _ in 0..64 {
@@ -203,12 +216,8 @@ fn attack_and_block(
                 assert_eq!(*player, P0);
                 assert!(!declared_attackers, "attackers are declared once");
                 declared_attackers = true;
-                let attacks: Vec<_> = attackers
-                    .iter()
-                    .map(|&id| (id, AttackTarget::Player(P1)))
-                    .collect();
                 runner
-                    .declare_attackers(&attacks)
+                    .declare_attackers(attacks)
                     .expect("declare attackers");
             }
             WaitingFor::DeclareBlockers { player, .. } => {
@@ -1293,16 +1302,7 @@ fn assert_zilortha_forecast_includes_first_step_trample_lifelink(regenerate: boo
         &[],
         "Serra Avatar's power and toughness are each equal to your life total.\nWhen Serra Avatar is put into a graveyard from anywhere, shuffle it into its owner's library.",
     );
-    let courage = scenario
-        .add_spell_to_hand(P0, "Unflinching Courage", false)
-        .as_enchantment()
-        .with_subtypes(vec!["Aura"])
-        .with_mana_cost(ManaCost::zero())
-        .from_oracle_text_with_keywords(
-            &["Enchant"],
-            "Enchant creature\nEnchanted creature gets +2/+2 and has trample and lifelink. (Damage dealt by the creature also causes its controller to gain that much life.)",
-        )
-        .id();
+    let courage = unflinching_courage(&mut scenario);
     let mastery = battle_mastery(&mut scenario);
     let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
     let shield = regenerate.then(|| regenerate_spell(&mut scenario));
@@ -1532,6 +1532,19 @@ fn zilortha_forecast_skips_regular_step_after_hyena_umbra_is_destroyed() {
     assert_eq!(forecast, actual, "forecast must skip the regular step");
 }
 
+fn unflinching_courage(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_spell_to_hand(P0, "Unflinching Courage", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::zero())
+        .from_oracle_text_with_keywords(
+            &["Enchant"],
+            "Enchant creature\nEnchanted creature gets +2/+2 and has trample and lifelink. (Damage dealt by the creature also causes its controller to gain that much life.)",
+        )
+        .id()
+}
+
 #[test]
 fn zilortha_forecast_counts_full_lifelink_against_regenerating_wall_of_ice() {
     let mut scenario = board();
@@ -1544,16 +1557,7 @@ fn zilortha_forecast_counts_full_lifelink_against_regenerating_wall_of_ice() {
         &[],
         "Serra Avatar's power and toughness are each equal to your life total.\nWhen Serra Avatar is put into a graveyard from anywhere, shuffle it into its owner's library.",
     );
-    let courage = scenario
-        .add_spell_to_hand(P0, "Unflinching Courage", false)
-        .as_enchantment()
-        .with_subtypes(vec!["Aura"])
-        .with_mana_cost(ManaCost::zero())
-        .from_oracle_text_with_keywords(
-            &["Enchant"],
-            "Enchant creature\nEnchanted creature gets +2/+2 and has trample and lifelink. (Damage dealt by the creature also causes its controller to gain that much life.)",
-        )
-        .id();
+    let courage = unflinching_courage(&mut scenario);
     let mastery = battle_mastery(&mut scenario);
     let wall = printed(
         &mut scenario,
@@ -1600,4 +1604,70 @@ fn zilortha_forecast_counts_full_lifelink_against_regenerating_wall_of_ice() {
     let actual = life_before - runner.life(P1);
     assert_eq!(actual, 59);
     assert_eq!(forecast, actual, "forecast must include full lifelink");
+}
+
+#[test]
+fn zilortha_forecast_preserves_planeswalker_damage_destination() {
+    let mut scenario = board();
+    scenario.with_life(P0, 20).with_life(P1, 20);
+    let malignus = printed(
+        &mut scenario,
+        P0,
+        "Malignus",
+        (0, 0),
+        &[],
+        "Malignus's power and toughness are each equal to half the highest life total among your opponents, rounded up.\nDamage that would be dealt by this creature can't be prevented.",
+    );
+    let mastery = battle_mastery(&mut scenario);
+    let courage = unflinching_courage(&mut scenario);
+    // Stage Karn after three +4 activations using the battlefield fixture's loyalty.
+    let karn = scenario
+        .add_creature(P1, "Karn Liberated", 0, 0)
+        .as_planeswalker_with_loyalty("Karn", 18)
+        .as_legendary()
+        .id();
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let mut runner = scenario.build();
+    cast_at(&mut runner, mastery, malignus);
+    cast_at(&mut runner, courage, malignus);
+    let loyalty_before = runner.state().objects[&karn].counters[&CounterType::Loyalty];
+    assert_eq!(loyalty_before, 18);
+    assert_eq!(runner.state().objects[&malignus].power, Some(12));
+
+    declare_attacks_and_blocks(
+        &mut runner,
+        &[(malignus, AttackTarget::Planeswalker(karn))],
+        &[(bears, malignus)],
+    );
+    assert_eq!(prompt_minimum(&runner, bears), 2);
+    let forecast = combat_damage_to_defender(runner.state(), malignus, &[bears]);
+
+    assign(&mut runner, bears, 2, 10).expect("Malignus assigns 2 to Bears and 10 to Karn");
+    assert_eq!(zone(&runner, bears), Zone::Graveyard);
+    assert_eq!(runner.life(P1), 20);
+    let loyalty_after_first = runner.state().objects[&karn].counters[&CounterType::Loyalty];
+    assert_eq!(loyalty_after_first, 8);
+    assert_eq!(runner.state().objects[&malignus].power, Some(12));
+
+    let outcome = runner.combat_damage();
+    let regular_damage: u32 = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(target_id),
+                amount,
+                is_combat: true,
+                ..
+            } if *source_id == malignus && *target_id == karn => Some(*amount),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(regular_damage, 12);
+    assert_eq!(zone(&runner, karn), Zone::Graveyard);
+    assert_eq!(runner.life(P1), 20);
+    let actual = loyalty_before - loyalty_after_first + regular_damage;
+    assert_eq!(actual, 22);
+    assert_eq!(i64::from(forecast), i64::from(actual));
 }

@@ -1609,7 +1609,6 @@ pub fn combat_damage_to_defender(
                 )
             }));
             let step = assign_step_to_defender(&slots, power, has_trample);
-            to_player += step.to_player;
             assignments.extend(step.to_blockers.into_iter().map(|(id, amount)| {
                 (
                     attacker_id,
@@ -1620,15 +1619,30 @@ pub fn combat_damage_to_defender(
                 )
             }));
             if step.to_player > 0 {
-                assignments.push((
-                    attacker_id,
-                    DamageAssignment {
-                        target: DamageTarget::Player(forecast_defending_player(
-                            state, attacker, blockers,
-                        )),
-                        amount: step.to_player,
-                    },
-                ));
+                let declared_attack = state.combat.as_ref().and_then(|combat| {
+                    combat
+                        .attackers
+                        .iter()
+                        .find(|info| info.object_id == attacker_id)
+                });
+                let target = match declared_attack {
+                    // CR 702.19b + CR 506.4c: standard trample follows the live attack target.
+                    Some(info) => info.resolve_damage_target(state, false),
+                    // Assume a defending player only before the attack is declared.
+                    None => Some(DamageTarget::Player(forecast_defending_player(
+                        state, attacker, blockers,
+                    ))),
+                };
+                if let Some(target) = target {
+                    to_player += step.to_player;
+                    assignments.push((
+                        attacker_id,
+                        DamageAssignment {
+                            target,
+                            amount: step.to_player,
+                        },
+                    ));
+                }
             }
         }
         // CR 702.7b: first-striking blockers assign now, and can kill the attacker
@@ -1820,14 +1834,24 @@ fn preview_first_step(
             DamageTarget::Object(id) => TargetRef::Object(id),
             DamageTarget::Player(id) => TargetRef::Player(id),
         };
-        DamageContext::from_source(state, *source).is_some_and(|context| {
+        let damage_can_change = DamageContext::from_source(state, *source).is_some_and(|context| {
             damage_is_not_fixed(state, &context, &target, assignment.amount)
                 // CR 702.15b: a double striker's own lifelink gain, from damage to a blocker
-                // or the player, can change what it assigns in the regular step.
+                // or the attack target, can change what it assigns in the regular step.
                 || (*source == attacker.id
                     && context.has_lifelink
                     && attacker.has_keyword(&Keyword::DoubleStrike))
-        }) || matches!(target, TargetRef::Object(id) if lethal_destruction_is_not_fixed(state, id))
+        });
+        // CR 704.5g + CR 704.5h: only a creature is destroyed by lethal damage; an attacked
+        // planeswalker loses loyalty instead (CR 120.3c).
+        let destruction_can_change = matches!(assignment.target, DamageTarget::Object(id)
+            if state.objects.get(&id).is_some_and(|object| {
+                object
+                    .card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Creature)
+            }) && lethal_destruction_is_not_fixed(state, id));
+        damage_can_change || destruction_can_change
     });
     if !needs_preview {
         return None;
