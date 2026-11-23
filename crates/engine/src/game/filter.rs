@@ -7574,8 +7574,7 @@ fn filter_inner_for_object(
         TargetFilter::AllPlayers => false,
         TargetFilter::Controller => false, // Controller is a player, not an object
         TargetFilter::SourceController => false, // SourceController is a player, not an object
-        // CR 102.3: Opponent is a player reference (used only as a slot announcer),
-        // never an object.
+        // CR 102.3: Opponent is a player reference, never an object.
         TargetFilter::Opponent => false,
         // CR 109.5: OriginalController is a player reference, not an object.
         TargetFilter::OriginalController => false,
@@ -7638,20 +7637,15 @@ fn filter_inner_for_object(
                         }
                     }
                     ControllerRef::Opponent => {
-                        if source_controller == Some(obj_ctrl) {
+                        // CR 102.2 / CR 102.3: Use the opponent relationship of
+                        // the source controller, including in team games.
+                        if source_controller.is_some_and(|controller| {
+                            !super::players::is_opponent(state, controller, obj_ctrl)
+                        }) {
                             return false;
                         }
-                        // Two claims, two authorities — kept apart deliberately.
-                        // SEAT: CR 800.4 + CR 102.1 — a player who has left the game is
-                        // no longer one of the people in the game, so they are not an
-                        // opponent. (CR 102.3 is scoped to games BETWEEN TEAMS and does
-                        // not define "opponent" in a free-for-all, which is the board
-                        // this seam serves; the engine's free-for-all authority is
-                        // `topology::is_opponent`.)
-                        // OBJECTS: CR 800.4a — "all objects owned by that player leave
-                        // the game" — so cards in their zones are not legal targets
-                        // (Captain N'ghathrod class). This is the half CR 800.4a really
-                        // governs.
+                        // CR 800.4 + CR 102.1: A player who has left the game is
+                        // no longer one of the people in the game.
                         if !super::players::is_alive(state, obj_ctrl) {
                             return false;
                         }
@@ -12383,6 +12377,29 @@ pub(crate) fn stack_entry_targets_satisfy(
     entry_targets_satisfy(state, entry, &ctx, filter, require_all)
 }
 
+/// CR 109.2 + CR 115.9b: Match a spell or ability's object target in its current
+/// zone. Evaluate each alternative's zone independently so a permanent
+/// description requires the battlefield and an explicitly scoped one can match
+/// in its own zone.
+pub(crate) fn matches_stack_entry_object_target(
+    state: &GameState,
+    object_id: ObjectId,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    if let TargetFilter::Or { filters } = filter {
+        return filters
+            .iter()
+            .any(|filter| matches_stack_entry_object_target(state, object_id, filter, ctx));
+    }
+    let on_battlefield = state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| object.zone == Zone::Battlefield);
+    (on_battlefield || !filter_denotes_battlefield_permanent(filter))
+        && matches_target_filter(state, object_id, filter, ctx)
+}
+
 /// CR 115.9b/115.9c: [`stack_entry_targets_satisfy`] for a given entry, with
 /// "you" read from `ctx` — the looking ability's controller (CR 109.5), not
 /// its source's current controller.
@@ -12395,7 +12412,7 @@ pub(crate) fn entry_targets_satisfy(
 ) -> bool {
     let slots = stack_entry_counted_targets(state, entry);
     let check = |t: &TargetRef| match t {
-        TargetRef::Object(id) => matches_target_filter(state, *id, filter, ctx),
+        TargetRef::Object(id) => matches_stack_entry_object_target(state, *id, filter, ctx),
         TargetRef::Player(pid) => player_matches_target_filter_in_state(
             state,
             filter,
@@ -14202,6 +14219,10 @@ fn player_matches_target_filter_with(
 ) -> bool {
     match filter {
         TargetFilter::Any | TargetFilter::Player => true,
+        // CR 102.2 / CR 102.3: Match players opposing the source controller.
+        TargetFilter::Opponent => {
+            source_controller.is_some_and(|controller| is_opponent(controller, player_id))
+        }
         TargetFilter::SelfRef => false, // SelfRef refers to objects, not players
         TargetFilter::Controller => source_controller == Some(player_id),
         // CR 109.5: Without ability context, OriginalController is indistinguishable
@@ -17557,6 +17578,29 @@ mod tests {
         let state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
         let opponent_filter =
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+        let bare_opponent_filter = TargetFilter::Opponent;
+
+        assert!(!player_matches_target_filter_in_state(
+            &state,
+            &bare_opponent_filter,
+            PlayerId(0),
+            Some(PlayerId(0)),
+            None,
+        ));
+        assert!(!player_matches_target_filter_in_state(
+            &state,
+            &bare_opponent_filter,
+            PlayerId(1),
+            Some(PlayerId(0)),
+            None,
+        ));
+        assert!(player_matches_target_filter_in_state(
+            &state,
+            &bare_opponent_filter,
+            PlayerId(2),
+            Some(PlayerId(0)),
+            None,
+        ));
 
         assert!(!player_matches_target_filter_in_state(
             &state,
