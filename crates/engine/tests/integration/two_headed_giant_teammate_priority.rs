@@ -10,12 +10,11 @@ use engine::game::engine as game_engine;
 use engine::game::game_object::RoomDoor;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{Effect, ResolvedAbility};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{StackEntry, StackEntryKind, WaitingFor};
-use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::game_state::WaitingFor;
+use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -176,7 +175,7 @@ fn team_pass_requires_both_teammates() {
 /// deals ..."). The verified text below is used.
 const NINJA_ORACLE: &str = "Ninjutsu {1}{U} ({1}{U}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)\nWhenever this creature deals combat damage to a player, you may draw a card.";
 
-fn teammate_ninjutsu_board() -> (GameRunner, ObjectId, ObjectId) {
+fn teammate_ninjutsu_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut sc = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
     sc.at_phase(Phase::DeclareBlockers);
     let ninja = sc
@@ -190,6 +189,15 @@ fn teammate_ninjutsu_board() -> (GameRunner, ObjectId, ObjectId) {
             ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
         ],
     );
+    let db = crate::support::shared_card_db().expect("integration card fixture must load");
+    let shock = sc.add_real_card(P2, "Sudden Shock", Zone::Hand, db);
+    sc.with_mana_pool(
+        P2,
+        vec![
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
     let mut runner = sc.build();
     runner.state_mut().active_player = P0;
     runner.state_mut().priority_player = P0;
@@ -198,7 +206,7 @@ fn teammate_ninjutsu_board() -> (GameRunner, ObjectId, ObjectId) {
         attackers: vec![AttackerInfo::attacking_player(attacker, P2)],
         ..Default::default()
     });
-    (runner, ninja, attacker)
+    (runner, ninja, attacker, shock)
 }
 
 fn offers_ninjutsu_for(runner: &GameRunner, viewer: PlayerId, ninja: ObjectId) -> bool {
@@ -219,7 +227,7 @@ fn offers_ninjutsu_for(runner: &GameRunner, viewer: PlayerId, ninja: ObjectId) -
 /// representative may.
 #[test]
 fn teammate_ninjutsu_offered_and_applies_on_team_priority() {
-    let (mut runner, ninja, attacker) = teammate_ninjutsu_board();
+    let (mut runner, ninja, attacker, shock) = teammate_ninjutsu_board();
     assert!(
         runner.state().objects[&ninja]
             .base_keywords
@@ -275,35 +283,105 @@ fn teammate_ninjutsu_offered_and_applies_on_team_priority() {
         "reach-guard: restoring the combat window restores the offer"
     );
 
-    // Split second suppresses the offer; the positive above is the paired
-    // reach-guard proving the gate body runs.
-    {
-        let state = runner.state_mut();
-        let split_obj = engine::game::zones::create_object(
-            state,
-            CardId(7_007),
-            P2,
-            "Split Second Shell".to_string(),
-            Zone::Battlefield,
-        );
-        let target = state.objects.get_mut(&split_obj).expect("shell exists");
-        target.keywords.push(Keyword::SplitSecond);
-        target.base_keywords.push(Keyword::SplitSecond);
-        state.stack.push_back(StackEntry {
-            id: split_obj,
-            source_id: split_obj,
-            controller: P2,
-            kind: StackEntryKind::ActivatedAbility {
-                source_id: split_obj,
-                ability: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], split_obj, P2)),
-            },
-        });
-    }
+    // A printed split-second spell, cast through the pipeline, suppresses the
+    // offer while it is on the stack; the combat-window positive above is the
+    // paired reach-guard proving the gate body runs.
+    runner
+        .pass_holding_team()
+        .expect("active team passes to P2");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P2
+        ),
+        "P2 must hold priority to cast, got {:?}",
+        runner.state().waiting_for
+    );
+    let _committed = runner.cast(shock).target_player(P0).commit();
+    runner
+        .pass_holding_team()
+        .expect("opposing team passes back");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "priority must return to the active representative, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.stack_names(), ["Sudden Shock"]);
+
+    // Reach guards: the printed spell carries split second and is live on the
+    // stack in the combat window.
+    assert!(
+        runner.state().objects[&shock]
+            .keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::SplitSecond)),
+        "premise: the cast Sudden Shock carries split second"
+    );
+    assert!(
+        engine::game::keywords::stack_has_split_second(runner.state()),
+        "premise: split second is live on the stack"
+    );
+    assert_eq!(runner.state().phase, Phase::DeclareBlockers);
+
+    // Negative (offer): CR 702.61a + CR 702.49a — ninjutsu is an activated
+    // ability that isn't a mana ability, so it can't be offered now.
     assert!(
         !offers_ninjutsu_for(&runner, P1, ninja),
-        "split second must suppress the ninjutsu offer"
+        "CR 702.61a + CR 702.49a: ninjutsu must not be offered while Sudden Shock is on the stack"
     );
-    runner.state_mut().stack.pop_back();
+    // Negative (reducer): the activation is refused and mutates nothing.
+    let err = game_engine::apply(
+        runner.state_mut(),
+        P1,
+        GameAction::ActivateNinjutsu {
+            ninjutsu_object_id: ninja,
+            creature_to_return: attacker,
+        },
+    )
+    .expect_err("CR 702.61a: ninjutsu can't be activated while Sudden Shock is on the stack");
+    assert!(
+        format!("{err:?}").contains("split second"),
+        "unexpected rejection (want the split-second gate): {err:?}"
+    );
+    assert_eq!(
+        runner.state().objects[&ninja].zone,
+        Zone::Hand,
+        "the refused activation must leave the ninja in hand"
+    );
+    assert_eq!(
+        runner.state().objects[&attacker].zone,
+        Zone::Battlefield,
+        "the refused activation must leave the attacker in combat"
+    );
+    assert_eq!(runner.stack_names(), ["Sudden Shock"]);
+
+    // The active team passes; all four have passed, so the Shock resolves.
+    runner
+        .pass_holding_team()
+        .expect("active team passes; all four have passed");
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.state().objects[&shock].zone, Zone::Graveyard);
+    // CR 117.4: only the top object resolves — the step does not end.
+    assert_eq!(runner.state().phase, Phase::DeclareBlockers);
+    // CR 117.3b: the active player receives priority after the resolution.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "priority must return to the active player, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // Positive (restored): after a split-second spell resolves, ninjutsu is
+    // offered again in the same step.
+    assert!(
+        offers_ninjutsu_for(&runner, P1, ninja),
+        "the ninjutsu offer must return after Sudden Shock resolves"
+    );
 
     // Apply through the authenticated boundary as the teammate.
     game_engine::apply(
