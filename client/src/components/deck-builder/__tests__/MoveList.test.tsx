@@ -46,13 +46,15 @@ describe("MoveList", () => {
       expect(screen.queryByText("NEO 295")).not.toBeInTheDocument();
       expect(container.querySelectorAll('[data-card-name="forest"]')).toHaveLength(3);
       expect(consoleError.mock.calls.flat().join(" ")).not.toContain("same key");
-      fireEvent.click(screen.getAllByRole("button", { name: /add one forest/i })[1]);
-      fireEvent.click(screen.getAllByRole("button", { name: /remove one forest/i })[1]);
-      fireEvent.click(screen.getAllByRole("button", { name: /^move one forest/i })[1]);
+      // Same-name rows name their printing in each control; the unprinted row does not.
+      expect(screen.getByRole("button", { name: "Add one Forest" })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Add one Forest (DMU 277)" }));
+      fireEvent.click(screen.getByRole("button", { name: "Remove one Forest (DMU 277)" }));
+      fireEvent.click(screen.getByRole("button", { name: "Move one Forest (DMU 277) to sideboard" }));
       expect(onIncrement).toHaveBeenCalledWith(dmu, "main");
       expect(onRemove).toHaveBeenCalledWith(dmu, "main");
       expect(onMove).toHaveBeenCalledWith(dmu, "main");
-      fireEvent.click(screen.getAllByRole("button", { name: /make forest the commander/i })[1]);
+      fireEvent.click(screen.getByRole("button", { name: "Make Forest (DMU 277) the commander" }));
       expect(onSetAsCommander).toHaveBeenCalledWith(dmu);
     } finally {
       consoleError.mockRestore();

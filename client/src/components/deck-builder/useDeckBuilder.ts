@@ -816,7 +816,10 @@ export function useDeckBuilder({
           // already uses in `moveOneMainCardToSpecialSlot` below. Then
           // re-introduce any displaced commanders so they remain in the deck
           // for the user to re-pick.
-          const filtered = removeOneCopy(prev.main, card);
+          // The clicked row can be gone by the time the pairing check
+          // returns; the designation still takes one copy of that name.
+          const exact = removeOneCopy(prev.main, card);
+          const filtered = exact === prev.main ? removeOneCopy(prev.main, cardName) : exact;
           const restored = displaced.reduce(addOneCopy, filtered);
           return { ...prev, main: restored };
         });

@@ -168,6 +168,25 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
     expect(result.current.deck.main).toEqual([first, { ...second, count: 1 }]);
   });
 
+  it("takes a copy by name when the clicked printing row is gone", async () => {
+    const { result } = setup();
+    const first = { count: 3, name: LEGEND, sourcePrinting: { setCode: "one", collectorNumber: "12" } };
+    const second = { count: 1, name: LEGEND, sourcePrinting: { setCode: "dmu", collectorNumber: "34" } };
+    await withMain(result, [first, second]);
+
+    // The row the crown was clicked on leaves main while the pairing check is pending.
+    act(() => {
+      result.current.handleMoveCard(second, "main");
+    });
+    await act(async () => {
+      result.current.handleSetCommander(second);
+    });
+
+    expect(result.current.commanders).toEqual([LEGEND]);
+    expect(result.current.deck.main).toEqual([{ ...first, count: 2 }]);
+    expect(result.current.deck.sideboard).toEqual([second]);
+  });
+
   it("removes the row entirely when the last copy is designated", async () => {
     const { result } = setup();
     await withMain(result, [{ count: 1, name: LEGEND }]);

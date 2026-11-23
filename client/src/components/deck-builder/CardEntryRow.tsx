@@ -120,14 +120,16 @@ export function CardEntryRow({
   const oracleId = printingsLoaded ? resolveOracleIdSync(entry.name) : null;
   const hasAlternates = oracleId ? hasAlternatePrintingsSync(oracleId) : false;
   const hoverInfo = { name: entry.name, sourcePrinting: entry.sourcePrinting };
+  // Same-name rows differ only by printing, so their controls name it too.
+  const controlName = printingLabel ? `${entry.name} (${printingLabel})` : entry.name;
   // Labelled "→ {target}" pill when the destination name is known (deck
   // builder); bare directional arrow otherwise (BO3 sideboard modal). The
   // labelled variant widens to fit text, so it overrides the square sizing.
   const moveAriaLabel = moveTargetLabel
-    ? t("card.moveToTarget", { name: entry.name, target: moveTargetLabel })
+    ? t("card.moveToTarget", { name: controlName, target: moveTargetLabel })
     : section === "main"
-      ? t("card.moveToSideboard", { name: entry.name })
-      : t("card.moveToMain", { name: entry.name });
+      ? t("card.moveToSideboard", { name: controlName })
+      : t("card.moveToMain", { name: controlName });
   const moveControlSize = moveTargetLabel
     ? comfortable
       ? "h-9 px-2 text-xs lg:h-7"
@@ -197,7 +199,7 @@ export function CardEntryRow({
               type="button"
               onClick={() => onSetAsCommander?.(entry)}
               className={`${controlVisibility} ml-1 ${controlSize} rounded text-purple-300 hover:bg-purple-900/40`}
-              aria-label={t("card.makeCommander", { name: entry.name })}
+              aria-label={t("card.makeCommander", { name: controlName })}
               title={t("card.makeCommanderTitle")}
             >
               ♛
@@ -229,13 +231,13 @@ export function CardEntryRow({
               className={`${controlVisibility} ml-1 ${controlSize} rounded text-emerald-300 hover:bg-emerald-900/40 disabled:cursor-not-allowed disabled:text-slate-600 disabled:hover:bg-transparent`}
               aria-label={
                 incrementAllowed
-                  ? t("card.addOne", { name: entry.name })
-                  : t("card.copyLimit", { name: entry.name })
+                  ? t("card.addOne", { name: controlName })
+                  : t("card.copyLimit", { name: controlName })
               }
               title={
                 incrementAllowed
-                  ? t("card.addOne", { name: entry.name })
-                  : t("card.copyLimit", { name: entry.name })
+                  ? t("card.addOne", { name: controlName })
+                  : t("card.copyLimit", { name: controlName })
               }
             >
               +
@@ -246,8 +248,8 @@ export function CardEntryRow({
               type="button"
               onClick={() => onRemove(entry, section)}
               className={`${controlVisibility} ml-1 ${controlSize} rounded text-red-400 hover:bg-red-900/40`}
-              aria-label={t("card.removeOne", { name: entry.name })}
-              title={t("card.removeOne", { name: entry.name })}
+              aria-label={t("card.removeOne", { name: controlName })}
+              title={t("card.removeOne", { name: controlName })}
             >
               -
             </button>
