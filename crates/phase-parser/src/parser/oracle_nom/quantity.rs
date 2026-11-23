@@ -6984,8 +6984,8 @@ enum EnteredControlBinding {
 }
 
 /// CR 608.2h + CR 608.2i: Parse "[type] that entered (the battlefield) [under
-/// <whose> control] this turn" into whichever of the two readings the grammar
-/// selects — see [`EnteredControlBinding`].
+/// <whose> control] this turn" or "[type] you had enter … under your control
+/// this turn". See [`EnteredControlBinding`] for how the controller binds.
 fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, (type_text, binding)) = parse_entered_this_turn_clause(input)?;
     let (filter, remainder) = parse_type_phrase_folding(type_text.trim());
@@ -7004,8 +7004,8 @@ fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // which likewise omits the controller injection.
         //
         // CR 608.2i: the look-back tally is only honest if the entry-record matcher can evaluate
-        // the filter. `battlefield_entry_matches_filter` fails closed on the 94 `FilterProp`s the
-        // entry snapshot cannot answer (game/restrictions.rs:517), which would resolve to a silent
+        // the filter. `battlefield_entry_matches_filter` fails closed on properties the
+        // entry snapshot cannot answer, which would resolve to a silent
         // constant 0 while `coverage.rs` reported the card supported. Refusing here is measurably
         // better on this path: a failed quantity clause becomes `Effect::Unimplemented`, so the
         // gap is visible to `cargo parser-gaps` instead of shipping a wrong number.
@@ -7034,19 +7034,31 @@ fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 }
 
 fn parse_entered_this_turn_clause(input: &str) -> OracleResult<'_, (&str, EnteredControlBinding)> {
-    pair(
-        take_until(" that entered"),
-        preceded(
-            pair(tag(" that entered"), opt(tag(" the battlefield"))),
-            alt((
+    alt((
+        pair(
+            take_until(" that entered"),
+            preceded(
+                pair(tag(" that entered"), opt(tag(" the battlefield"))),
+                alt((
+                    map(
+                        parse_entry_event_controller,
+                        EnteredControlBinding::EntryEvent,
+                    ),
+                    value(EnteredControlBinding::SubjectNoun, tag(" this turn")),
+                )),
+            ),
+        ),
+        pair(
+            take_until(" you had enter"),
+            preceded(
+                pair(tag(" you had enter"), opt(tag(" the battlefield"))),
                 map(
                     parse_entry_event_controller,
                     EnteredControlBinding::EntryEvent,
                 ),
-                value(EnteredControlBinding::SubjectNoun, tag(" this turn")),
-            )),
+            ),
         ),
-    )
+    ))
     .parse(input)
 }
 
@@ -14062,6 +14074,63 @@ mod tests {
         // filter must NOT carry a controller of its own.
         assert_eq!(controller, None);
         assert!(properties.is_empty());
+    }
+
+    #[test]
+    fn issue_634_causative_battlefield_entry_quantities() {
+        let (rest, quantity) = parse_quantity_ref(
+            "the number of nontoken creatures you had enter the battlefield under your control this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            assert_ledger_entries_this_turn_typed(quantity),
+            (
+                PlayerScope::Controller,
+                vec![TypeFilter::Creature],
+                None,
+                vec![FilterProp::NonToken]
+            )
+        );
+
+        for text in [
+            "land you had enter the battlefield under your control this turn",
+            "land you had enter under your control this turn",
+        ] {
+            let (rest, quantity) = parse_for_each_clause_ref(text).unwrap();
+            assert_eq!(rest, "");
+            assert_eq!(
+                assert_ledger_entries_this_turn_typed(quantity),
+                (
+                    PlayerScope::Controller,
+                    vec![TypeFilter::Land],
+                    None,
+                    vec![]
+                )
+            );
+        }
+
+        for text in [
+            "land you had enter this turn",
+            "land you had enter under your control",
+            "land you had enter under an opponent's control this turn",
+        ] {
+            assert!(parse_entered_this_turn_ref(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn issue_634_entry_quantity_refuses_tapped_snapshot_filter() {
+        let (filter, rest) = parse_type_phrase_folding("tapped creatures");
+        assert_eq!(rest, "");
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Tapped]))
+        );
+        assert!(parse_entered_this_turn_ref(
+            "tapped creatures that entered the battlefield under your control this turn"
+        )
+        .is_err());
     }
 
     #[test]

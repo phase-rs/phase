@@ -671,6 +671,7 @@ face = [
   { key = "embolden", class = "target_wrong", clauses = ["Prevent the next 4 damage that would be dealt this turn to any number of targets, divided as you choose."] },
   { key = "embrace my diabolical vision", class = "extra_effect", clauses = ["When you set this scheme in motion, each player shuffles their hand and graveyard into their library."] },
   { key = "emerald collector", class = "condition_wrong", clauses = ["When you draw your third card in a turn, conjure a card named Mox Emerald into your hand."] },
+  { key = "emergent sequence", class = "wrong_object", clauses = ["Put a +1/+1 counter on it for each land you had enter the battlefield under your control this turn."] },
   { key = "emergent ultimatum", class = "wrong_object", clauses = ["and exile them.", "An opponent chooses one of those cards.", "You may cast the other cards without paying their mana costs."] },
   { key = "emet-selch of the third seat", class = "other", clauses = ["If that spell would be put into your graveyard, exile it instead.", "Do this only once each turn."] },
   { key = "emperor apatzec intli iv", class = "condition_wrong", clauses = ["Whenever another creature enters under your control, that creature perpetually gains haste if its power is 4 or greater.", "If its toughness is 4 or greater, you gain 4 life.", "If its mana value is 4 or greater, seek a creature card."] },
