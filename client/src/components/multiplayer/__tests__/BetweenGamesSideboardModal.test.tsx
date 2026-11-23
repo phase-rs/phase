@@ -48,30 +48,6 @@ describe("BetweenGamesSideboardModal", () => {
     expect(screen.getByText(/Sideboard \(3\/15\)/)).toBeInTheDocument();
   });
 
-  it("coalesces same-name pool rows before moving and submitting cards", () => {
-    const main = [entry("Forest", 4), entry("Forest", 3)];
-    const onSubmit = vi.fn();
-    render(
-      <BetweenGamesSideboardModal
-        pool={{ registered_main: main, current_main: main, registered_sideboard: [], current_sideboard: [] }}
-        gameNumber={2}
-        score={score}
-        minMainDeckSize={6}
-        maxSideboardSize={15}
-        onSubmit={onSubmit}
-      />,
-    );
-
-    expect(screen.getAllByText("Forest")).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: /move one forest to sideboard/i }));
-    fireEvent.click(screen.getByRole("button", { name: /submit deck for next game/i }));
-
-    expect(onSubmit).toHaveBeenCalledExactlyOnceWith(
-      [{ name: "Forest", count: 6 }],
-      [{ name: "Forest", count: 1 }],
-    );
-  });
-
   it("preserves total pool size when moving cards (partition invariant)", () => {
     render(
       <BetweenGamesSideboardModal

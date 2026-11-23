@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { MoveList } from "../deck-builder/MoveList";
 import type { DeckCardCount, MatchScore } from "../../adapter/types";
-import { deduplicateEntries, removeOneCopy, type DeckEntry } from "../../services/deckParser";
+import type { DeckEntry } from "../../services/deckParser";
 
 interface DeckPoolEntry {
   card: { name: string };
@@ -37,7 +37,7 @@ export interface BetweenGamesSideboardModalProps {
  * `DeckEntry` shape (`{name, count}`) used by `MoveList`.
  */
 function poolToEntries(pool: DeckPoolEntry[]): DeckEntry[] {
-  return deduplicateEntries(pool.map((e) => ({ name: e.card.name, count: e.count })));
+  return pool.map((e) => ({ name: e.card.name, count: e.count }));
 }
 
 function entriesToCounts(entries: DeckEntry[]): DeckCardCount[] {
@@ -51,7 +51,7 @@ function totalCards(entries: DeckEntry[]): number {
 }
 
 /**
- * Atomically relocate one copy of `entry` from `source` to `target`. Preserves
+ * Atomically relocate one copy of `name` from `source` to `target`. Preserves
  * the combined multiset `source ∪ target` by construction — this is the
  * partition invariant that matches the engine's pool-equality check in
  * `handle_submit_sideboard` (`match_flow.rs`).
@@ -59,14 +59,19 @@ function totalCards(entries: DeckEntry[]): number {
 function moveOne(
   source: DeckEntry[],
   target: DeckEntry[],
-  entry: DeckEntry,
+  name: string,
 ): { source: DeckEntry[]; target: DeckEntry[] } | null {
-  const nextSource = removeOneCopy(source, entry);
-  if (nextSource === source) return null;
-  return {
-    source: nextSource,
-    target: deduplicateEntries([...target, { ...entry, count: 1 }]),
-  };
+  const sourceEntry = source.find((e) => e.name === name);
+  if (!sourceEntry) return null;
+  const targetEntry = target.find((e) => e.name === name);
+  const nextSource =
+    sourceEntry.count <= 1
+      ? source.filter((e) => e.name !== name)
+      : source.map((e) => (e.name === name ? { ...e, count: e.count - 1 } : e));
+  const nextTarget = targetEntry
+    ? target.map((e) => (e.name === name ? { ...e, count: e.count + 1 } : e))
+    : [...target, { count: 1, name }];
+  return { source: nextSource, target: nextTarget };
 }
 
 /**
@@ -104,13 +109,13 @@ export function BetweenGamesSideboardModal({
   );
 
   const moveCard = useCallback(
-    (entry: DeckEntry, from: "main" | "sideboard") => {
+    ({ name }: DeckEntry, from: "main" | "sideboard") => {
       setDrafts((prev) => {
         if (from === "main") {
-          const next = moveOne(prev.main, prev.side, entry);
+          const next = moveOne(prev.main, prev.side, name);
           return next ? { main: next.source, side: next.target } : prev;
         }
-        const next = moveOne(prev.side, prev.main, entry);
+        const next = moveOne(prev.side, prev.main, name);
         return next ? { main: next.target, side: next.source } : prev;
       });
     },
