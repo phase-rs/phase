@@ -478,17 +478,20 @@ fn trigger_firing_is_unknown(firing: &TriggerFiring) -> bool {
 pub type DeferredTrigger = PendingTriggerContext;
 
 impl PendingTriggerContext {
-    /// Sources whose mana resolution this deferred observer was bound to.
-    pub(super) fn mana_resolution_sources(&self) -> impl Iterator<Item = ObjectId> + '_ {
+    /// CR 608.2p: whether this trigger was bound to a mana ability's resolution
+    /// or to the mana it added.
+    pub(super) fn observes_mana_production(&self) -> bool {
         self.pending
             .trigger_event
             .iter()
             .chain(&self.trigger_events)
-            .filter_map(|event| match event {
-                GameEvent::TappedForMana { source_id, .. }
-                | GameEvent::ManaAbilityProduced { source_id, .. }
-                | GameEvent::ManaAdded { source_id, .. } => Some(*source_id),
-                _ => None,
+            .any(|event| {
+                matches!(
+                    event,
+                    GameEvent::TappedForMana { .. }
+                        | GameEvent::ManaAbilityProduced { .. }
+                        | GameEvent::ManaAdded { .. }
+                )
             })
     }
 

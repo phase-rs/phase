@@ -700,6 +700,52 @@ fn tyvar_vorinclex_forest_tap_cannot_be_undone_at_priority() {
     assert!(runner.state().objects[&forest].tapped);
 }
 
+/// CR 605.4a + CR 608.2p: an animated Caged Sun's triggered mana ability resolves
+/// right after the Forest's, so Tyvar's grant on the Sun is a consequence of the tap.
+#[test]
+fn tyvar_animated_caged_sun_forest_tap_cannot_be_undone_at_priority() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let (mut scenario, _) = tyvar_board(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(
+        P0,
+        "March of the Machines",
+        "Each noncreature artifact is an artifact creature with power and toughness each equal to its mana value. (Equipment that's a creature can't equip a creature.)",
+    );
+    let sun = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Caged Sun",
+            "As this artifact enters, choose a color.\nCreatures you control of the chosen color get +1/+1.\nWhenever a land's ability causes you to add one or more mana of the chosen color, add an additional one mana of that color.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 6,
+        })
+        .id();
+    let forest = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state
+        .objects
+        .get_mut(&sun)
+        .expect("Caged Sun")
+        .chosen_attributes
+        .push(ChosenAttribute::Color(ManaColor::Green));
+    state.layers_dirty.mark_full();
+
+    tap_land(&mut runner, forest);
+    assert_eq!(
+        runner.state().players[0]
+            .mana_pool
+            .count_color(ManaType::Green),
+        2
+    );
+    assert_top_trigger(&runner, sun);
+    assert_undo_unavailable(&mut runner, forest);
+    resolve_only_trigger(&mut runner, sun, 1);
+    assert!(runner.state().objects[&forest].tapped);
+}
+
 #[test]
 fn tyvar_wild_growth_forest_tap_can_be_undone_at_priority() {
     let db = crate::support::shared_card_db().expect("integration card fixture");
