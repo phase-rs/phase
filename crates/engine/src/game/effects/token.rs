@@ -4719,9 +4719,9 @@ fn resolve_attach_host(
             .copied()
             .map(AttachTarget::Player),
         // Event-context hosts ("attached to the triggering creature") resolve the
-        // triggering event's subject via the shared event-context resolver.
+        // triggering event's subject through the event-referent identity gate (CR 400.7).
         AttachHostAuthority::EventContext => {
-            crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
+            crate::game::targeting::affected_event_context_target(state, ability, filter)
                 .map(target_ref_to_attach_target)
         }
         // The bare-pronoun host ("attached to it"). It normally reads the chosen
