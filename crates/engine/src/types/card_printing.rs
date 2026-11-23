@@ -462,6 +462,20 @@ impl DeckPrintingRecord {
             .map(|entry| entry.name.as_str())
     }
 
+    /// `face`'s rows in `section`, in stream order. Both names are normalized round-trip
+    /// names (the row's by `normalize_deck_printings`, the binding's by `round_trip_name`),
+    /// never a raw face-name compare. Empty when the record binds no such face there.
+    pub(crate) fn rows_for(
+        &self,
+        section: DeckSection,
+        face: &CardFace,
+    ) -> impl Iterator<Item = &DeckPrinting> {
+        let name = self.lookup_name(section, face);
+        self.rows
+            .iter()
+            .filter(move |row| row.section == section && Some(row.name.as_str()) == name)
+    }
+
     /// The printing of copy `ordinal` (0-based) of `face` in `section`, counting that face's
     /// rows in stream order (the order `entry_copies` consumes them at load). Stateless.
     pub fn printing_of(
@@ -470,21 +484,15 @@ impl DeckPrintingRecord {
         face: &CardFace,
         ordinal: u32,
     ) -> Option<&CardPrinting> {
-        let name = self.lookup_name(section, face)?;
         let mut skip = ordinal;
-        // Both names are normalized round-trip names (the row's by `normalize_deck_printings`,
-        // the binding's by `round_trip_name`), never a raw face-name compare.
-        self.rows
-            .iter()
-            .filter(|row| row.section == section && row.name == name)
-            .find_map(|row| {
-                if skip < row.count {
-                    Some(&row.printing)
-                } else {
-                    skip -= row.count;
-                    None
-                }
-            })
+        self.rows_for(section, face).find_map(|row| {
+            if skip < row.count {
+                Some(&row.printing)
+            } else {
+                skip -= row.count;
+                None
+            }
+        })
     }
 }
 
