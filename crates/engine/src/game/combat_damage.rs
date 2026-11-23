@@ -1542,6 +1542,11 @@ fn assign_attacker_damage(
 /// player, since the attacking player chooses (CR 702.19b): lethal is assigned to
 /// the cheapest blockers first, maximising how many die and therefore how little
 /// absorption survives into the second step.
+///
+/// The total is what the attacker assigns, not what the defender has life left to
+/// take. Callers compare it with a life or loyalty total, so a regular step is
+/// counted even when the first step alone would be lethal (CR 704.5a), as it is
+/// for an unblocked double striker.
 pub fn combat_damage_to_defender(
     state: &GameState,
     attacker_id: ObjectId,
