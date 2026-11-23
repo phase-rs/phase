@@ -103,6 +103,11 @@ fn resolve_object_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<O
     // announced target slot. `resolve_event_context_targets` reads the event;
     // it returns empty for a plain targeted effect, which then falls through to
     // the announced targets below.
+    // CR 400.7 + CR 608.2k: an event subject binds only while it can be found.
+    if let Some(ids) = crate::game::targeting::bound_event_referent_objects(state, ability, target)
+    {
+        return ids;
+    }
     let event_targets =
         crate::game::targeting::resolve_event_context_targets(state, target, ability.source_id);
     if !event_targets.is_empty() {

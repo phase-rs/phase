@@ -3509,19 +3509,25 @@ pub struct ResolvedAbility {
     /// deliberately separate from the parsed grammatical selector on `Effect`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_block_attacker: Option<ObjectIncarnationRef>,
-    /// CR 400.7 + CR 603.7c: Incarnation pins for the object referents in
-    /// `targets`, captured when a delayed triggered ability snapshotted its
-    /// `ParentTarget` referent at creation. A delayed ability that refers to a
-    /// particular object must not affect a later object that merely reuses the
-    /// same storage `ObjectId` — CR 603.7c: "if that object left that zone and
-    /// then returned, it's a new object and thus won't be affected."
+    /// CR 400.7 + CR 603.7c: keyed incarnation pins for an ability's object
+    /// referents. Two producers write them:
+    /// - a delayed triggered ability snapshots its `ParentTarget` referent at
+    ///   creation, so it doesn't affect a later object that merely reuses the
+    ///   same storage `ObjectId` (CR 603.7c: "if that object left that zone and
+    ///   then returned, it's a new object and thus won't be affected");
+    /// - a triggered ability's event-context referents (`TriggeringSource`,
+    ///   `EventTarget`, and the perpetual / attach `ParentTarget` roles) are
+    ///   pinned to the incarnation the trigger event recorded, at collection,
+    ///   push and assignment (`triggers::seed_event_referent_pins`), and judged
+    ///   by `targeting::event_referent_is_findable`. A damage recipient's pin is
+    ///   occurrence-exact. The resolution's own zone move re-pins its arrival
+    ///   onto later chain nodes (CR 400.7j).
     ///
-    /// Empty for every ability that is not a pinned `ParentTarget` delayed
-    /// trigger — including delayed triggers whose own condition names a ZONE
-    /// CHANGE OF THE REFERENT, in either direction (CR 400.7e; see
-    /// `condition_names_referent_zone_change`), where the referent is EXPECTED
-    /// to have moved and must still be affected. An id with no pin here
-    /// resolves unchanged, so the guard is inert outside the pinned path.
+    /// A delayed trigger whose own condition names a ZONE CHANGE OF THE
+    /// REFERENT, in either direction (CR 400.7e; see
+    /// `condition_names_referent_zone_change`), takes no pin: the referent is
+    /// EXPECTED to have moved and must still be affected. An id with no pin
+    /// here resolves unchanged; `LEGACY_INCARNATION` pins are ignored.
     ///
     /// Element-level pins are deliberately non-`Option` so an individual
     /// referent can never degrade to "always matches" (contrast
@@ -3531,8 +3537,8 @@ pub struct ResolvedAbility {
     /// CR 400.7 + CR 601.2c: the incarnation announced for each target
     /// OCCURRENCE, aligned position-for-position with `targets` (`None` for a
     /// player, or an occurrence nothing pinned). Empty means every occurrence
-    /// is unpinned. Separate from `target_incarnations`, whose keyed pins are
-    /// reserved for delayed-trigger referents. Written only through the
+    /// is unpinned. Separate from `target_incarnations`, whose keyed pins hold
+    /// delayed-trigger and event-context referents. Written only through the
     /// occurrence authority (`game::target_occurrences`), which moves targets
     /// and pins together.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

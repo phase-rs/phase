@@ -141,10 +141,8 @@ fn resolve_single_object_targets(
             // CR 400.7: only the incarnation the event recorded for the role
             // the filter names, and only while it is a phased-in permanent.
             TargetFilter::TriggeringSource | TargetFilter::EventTarget => {
-                crate::game::targeting::resolve_event_referent_permanents(
-                    state,
-                    filter,
-                    ability.source_id,
+                crate::game::targeting::resolve_event_referent_permanents_for(
+                    state, ability, filter,
                 )
             }
             // CR 608.2k + CR 201.5a: a bound reference (`SpecificObject`, the

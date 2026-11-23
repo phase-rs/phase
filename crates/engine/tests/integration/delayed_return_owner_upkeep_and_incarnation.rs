@@ -617,6 +617,92 @@ fn phytotitan_put_back_into_graveyard_before_its_trigger_resolves_is_not_returne
 
 // ------------------------------------------------------------ non-self subject
 
+/// G2′ shape: a phase-delayed payload that reads only a player from the dead
+/// creature. No printed card has it (the export's 90 phase-delayed payloads
+/// under zone-change triggers include none), so the text is parsed like a card's.
+const OWNER_DRAWS_LATER: &str = "Whenever another nontoken creature you control dies, its owner draws a card at the beginning of the next end step.";
+
+/// P0 controls the observer and a Grizzly Bears that P1 owns; P0 Shocks the
+/// Bears. With `put_back`, P0 puts the dead Bears back into P1's graveyard (a
+/// new object, CR 400.7) before the observer's trigger resolves. Returns the
+/// cards each player drew at the end step.
+fn owner_draws_later(put_back: bool) -> (usize, usize) {
+    let (mut runner, _, spells, bears) = board(Phase::PreCombatMain, |scenario| {
+        scenario.add_creature_from_oracle(P0, "Observer", 1, 1, OWNER_DRAWS_LATER);
+        scenario
+            .add_creature(P1, "Grizzly Bears", 2, 2)
+            .controlled_by(P0)
+            .id()
+    });
+    cast_and_resolve_only(&mut runner, spells.p0_shock, TargetRef::Object(bears));
+    if put_back {
+        round_trip_through_library(&mut runner, bears, spells.p0_revival, spells.p0_scour, true);
+    }
+    runner.advance_until_stack_empty();
+    let delayed = only_delayed(&runner);
+    assert!(
+        format!("{:?}", delayed.ability.effect).contains("ParentTargetOwner"),
+        "reach-guard: the payload reads its owner: {:?}",
+        delayed.ability.effect
+    );
+    let hands = |r: &GameRunner| {
+        (
+            r.state().players[0].hand.len(),
+            r.state().players[1].hand.len(),
+        )
+    };
+    let before = hands(&runner);
+    through_end_step(&mut runner);
+    assert!(runner.state().delayed_triggers.is_empty(), "it fired");
+    let after = hands(&runner);
+    (after.0 - before.0, after.1 - before.1)
+}
+
+/// E1: the owner of the dead Bears draws (CR 108.3).
+#[test]
+fn owner_draws_later_control() {
+    assert_eq!(owner_draws_later(false), (0, 1));
+}
+
+/// E2: CR 608.2h: the Bears left the graveyard, so its owner is its last known
+/// information; that player still draws.
+#[test]
+fn owner_draws_later_after_the_creature_is_put_back() {
+    assert_eq!(owner_draws_later(true), (0, 1));
+}
+
+/// E3: stolen and put back before its trigger resolves: "their" is still the
+/// owner, read from the departed object (CR 108.3, CR 608.2h); nothing returns.
+#[test]
+fn phytotitan_stolen_put_back_waits_for_owners_upkeep_and_returns_nothing() {
+    let (mut runner, phytotitan, spells, ()) = board(Phase::PreCombatMain, |_| ());
+    to_main_of(&mut runner, P1);
+    cast_and_resolve_all(
+        &mut runner,
+        spells.p1_treason,
+        TargetRef::Object(phytotitan),
+    );
+    cast_and_resolve_only(&mut runner, spells.p1_shock, TargetRef::Object(phytotitan));
+    round_trip_through_library(
+        &mut runner,
+        phytotitan,
+        spells.p1_revival,
+        spells.p1_scour,
+        true,
+    );
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(
+            only_delayed(&runner).condition,
+            DelayedTriggerCondition::AtNextPhaseForPlayer { player, .. } if player == P0
+        ),
+        "\"their\" is the owner"
+    );
+    through_next_upkeep_of(&mut runner, P0);
+    assert!(runner.state().delayed_triggers.is_empty(), "it fired");
+    assert_eq!(zone(&runner, phytotitan), Zone::Graveyard);
+}
+
 fn avacyn_board() -> (GameRunner, ObjectId, Spells) {
     let (runner, _phytotitan, spells, bears) = board(Phase::PreCombatMain, |scenario| {
         scenario.add_creature_from_oracle(

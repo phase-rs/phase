@@ -1139,6 +1139,160 @@ fn event_recipient_is_live_incarnation(
     stamped.peek().is_none() || stamped.any(|incarnation| incarnation == obj.incarnation)
 }
 
+/// CR 400.7 + CR 603.7c + CR 608.2k: how a resolving ability binds an
+/// event-context object referent (`TriggeringSource`, `EventTarget`, or an
+/// untargeted `ParentTarget` read from the trigger event).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EventReferentBinding {
+    /// The event names this object and the ability can still find it.
+    Found(ObjectId),
+    /// The event names an object that has since become a new object (or is phased out).
+    Unfindable,
+    /// The event names no object for this filter; the caller keeps its own fallbacks.
+    NotNamed,
+}
+
+/// Whether a binding mutates its referent or only reads information from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReferentRead {
+    /// The instruction acts on the referent: it must be the object the event named.
+    Affect,
+    /// CR 608.2h: the instruction only reads the referent's information, so the
+    /// raw event referent is read unchanged (compatibility read, not last known
+    /// information).
+    Inform,
+}
+
+/// The incarnation a trigger `event` itself records for object `id`: the
+/// zone-change authority's arrival, a damage dealer's or tapped object's stamp.
+/// `None` when the event records nothing for `id`.
+pub(crate) fn event_recorded_pin(event: &GameEvent, id: ObjectId) -> Option<ObjectIncarnationRef> {
+    match super::triggers::zone_change_parent_target_pin(event) {
+        Some(arrival) if arrival.object_id == id => Some(arrival),
+        Some(_) | None => event_context_incarnation(&TargetFilter::TriggeringSource, event, id),
+    }
+}
+
+/// CR 400.7 + CR 400.7e + CR 400.7j + CR 702.26b + CR 110.1: whether object
+/// `id`, named by the trigger `event` through `filter`, is still the object the
+/// ability may affect.
+///
+/// - A phased-out permanent can't be affected (CR 702.26b).
+/// - The same resolution's own moved object, forwarded as its result, is found (CR 400.7j);
+///   so is the ability's own source while the self-reference authority finds it.
+/// - Otherwise the occurrence-exact pin captured when the trigger was collected
+///   (`triggers::seed_event_referent_pins`) decides.
+/// - Unpinned abilities (released saves, abilities never placed on the stack) use the event's
+///   own record: the zone-change arrival (CR 400.7e), the dealer/tapped stamp, or for a damage
+///   recipient the ledger stamp. This compatibility path cannot tell equal hits apart.
+pub(crate) fn event_referent_is_findable(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+    filter: &TargetFilter,
+    event: &GameEvent,
+    id: ObjectId,
+) -> bool {
+    // An id with no object is no new incarnation either; the caller's own
+    // existence check decides it, as before.
+    let Some(obj) = state.objects.get(&id) else {
+        return true;
+    };
+    if obj.zone == Zone::Battlefield && !obj.is_phased_in() {
+        return false;
+    }
+    if let Some(ability) = ability {
+        if ability
+            .context
+            .forwarded_result_context
+            .as_ref()
+            .is_some_and(|ctx| {
+                ctx.targets.contains(&TargetRef::Object(id)) && ctx.object_pin_is_current(id, state)
+            })
+            || (id == ability.source_id && ability.self_ref_binding(state) == Some(id))
+        {
+            return true;
+        }
+        if let Some(pin) = ability.target_incarnations.iter().find(|pin| {
+            pin.object_id == id && pin.incarnation != crate::types::identifiers::LEGACY_INCARNATION
+        }) {
+            return pin.is_current(state);
+        }
+    }
+    // CR 120.1: a damage recipient's identity is in the damage ledger; every other
+    // event-named object is judged by the event's own record.
+    if !matches!(filter, TargetFilter::TriggeringSource)
+        && extract_target_object_from_event(event) == Some(id)
+    {
+        return event_recipient_is_live_incarnation(state, event, obj);
+    }
+    event_recorded_pin(event, id).is_none_or(|pin| pin.is_current(state))
+}
+
+/// CR 400.7 + CR 608.2k: the single authority binding an event-context object
+/// referent for an instruction that affects it. Reads the referent from the
+/// current trigger event and judges it with [`event_referent_is_findable`].
+pub(crate) fn resolve_event_referent(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> EventReferentBinding {
+    let Some(event) = state.current_trigger_event.as_ref() else {
+        return EventReferentBinding::NotNamed;
+    };
+    if !matches!(
+        filter,
+        TargetFilter::TriggeringSource | TargetFilter::EventTarget | TargetFilter::ParentTarget
+    ) {
+        return EventReferentBinding::NotNamed;
+    }
+    match resolve_event_context_target_for_event_or_state(
+        state,
+        filter,
+        ability.source_id,
+        Some(event),
+    ) {
+        Some(TargetRef::Object(id)) => {
+            if event_referent_is_findable(state, Some(ability), filter, event, id) {
+                EventReferentBinding::Found(id)
+            } else {
+                EventReferentBinding::Unfindable
+            }
+        }
+        None | Some(TargetRef::Player(_)) => EventReferentBinding::NotNamed,
+    }
+}
+
+/// [`resolve_event_referent`] as a target list for callers that fall back on
+/// `NotNamed`: `Some(vec)` is authoritative (`Unfindable` is the empty list).
+pub(crate) fn bound_event_referent(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Option<Vec<ObjectId>> {
+    match resolve_event_referent(state, ability, filter) {
+        EventReferentBinding::Found(id) => Some(vec![id]),
+        EventReferentBinding::Unfindable => Some(Vec::new()),
+        EventReferentBinding::NotNamed => None,
+    }
+}
+
+/// [`resolve_event_context_target`] for a binder that affects the referent: an
+/// event-context object binds only through [`resolve_event_referent`] (an
+/// unfindable one binds nothing); every other referent resolves unchanged.
+pub(crate) fn affected_event_context_target(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Option<TargetRef> {
+    match resolve_event_referent(state, ability, filter) {
+        EventReferentBinding::Found(id) => Some(TargetRef::Object(id)),
+        EventReferentBinding::Unfindable => None,
+        EventReferentBinding::NotNamed => {
+            resolve_event_context_target(state, filter, ability.source_id)
+        }
+    }
+}
+
 /// CR 608.2k + CR 400.7: the objects a pure event-context reference ("that
 /// creature", "it") names, resolved from the published trigger event(s) and
 /// kept only while each is still the incarnation the event recorded. A referent
@@ -1147,8 +1301,20 @@ fn event_recipient_is_live_incarnation(
 /// Callers that mutate the referent (rather than read its characteristics, which
 /// CR 608.2k lets follow the same object) use this instead of
 /// [`resolve_event_context_targets`].
+#[cfg(test)]
 pub(crate) fn resolve_event_referent_objects(
     state: &GameState,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+) -> Vec<ObjectId> {
+    event_referent_objects(state, None, filter, source_id)
+}
+
+/// [`resolve_event_referent_objects`], judged against `ability`'s own captured
+/// event pins and forwarded result as well (the resolver-facing form).
+fn event_referent_objects(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
     filter: &TargetFilter,
     source_id: ObjectId,
 ) -> Vec<ObjectId> {
@@ -1195,13 +1361,7 @@ pub(crate) fn resolve_event_referent_objects(
             else {
                 return None;
             };
-            let live = state.objects.get(&id)?;
-            let is_live = if recipient {
-                event_recipient_is_live_incarnation(state, event, live)
-            } else {
-                event_source_is_live_incarnation(event, live)
-            };
-            is_live.then_some(id)
+            event_referent_is_findable(state, ability, filter, event, id).then_some(id)
         })
         .filter(|id| seen.insert(*id))
         .collect()
@@ -1225,6 +1385,7 @@ pub(crate) fn is_phased_in_battlefield_permanent(state: &GameState, id: ObjectId
 /// incarnation-checked referents of [`resolve_event_referent_objects`] that are
 /// still phased-in battlefield permanents. Shared by every resolver that
 /// mutates a permanent referent (tap/untap, prepare, transient grants).
+#[cfg(test)]
 pub(crate) fn resolve_event_referent_permanents(
     state: &GameState,
     filter: &TargetFilter,
@@ -1236,39 +1397,59 @@ pub(crate) fn resolve_event_referent_permanents(
         .collect()
 }
 
+/// [`resolve_event_referent_permanents`] for a resolving `ability`: its captured
+/// occurrence pins and forwarded result decide identity (CR 400.7 + CR 603.7c).
+pub(crate) fn resolve_event_referent_permanents_for(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    event_referent_objects(state, Some(ability), filter, ability.source_id)
+        .into_iter()
+        .filter(|&id| is_phased_in_battlefield_permanent(state, id))
+        .collect()
+}
+
+/// CR 400.7 + CR 608.2k: the event-subject objects (`TriggeringSource` /
+/// `EventTarget`) of the current trigger event batch that `ability` may affect,
+/// or `None` when the filter is not an event subject or the events name no
+/// object. `Some(vec![])` is authoritative: every named object became new.
+pub(crate) fn bound_event_referent_objects(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Option<Vec<ObjectId>> {
+    if !matches!(
+        filter,
+        TargetFilter::TriggeringSource | TargetFilter::EventTarget
+    ) || state.current_trigger_event.is_none()
+        || !resolve_event_context_targets(state, filter, ability.source_id)
+            .iter()
+            .any(|target| matches!(target, TargetRef::Object(_)))
+    {
+        return None;
+    }
+    Some(event_referent_objects(
+        state,
+        Some(ability),
+        filter,
+        ability.source_id,
+    ))
+}
+
 /// CR 400.7 + CR 608.2k: the object a resolving ability may MUTATE through a
 /// singular `TriggeringSource` reference ("that attacking creature gains
-/// deathtouch"). It must be the incarnation the trigger event recorded for that
-/// role ([`event_source_is_live_incarnation`]), whatever zone it is in now: an
-/// object that left and returned (or left at all, for an event that stamped a
-/// permanent) is a new object. A battlefield referent that is phased out can't
-/// be affected (CR 702.26b). Events that record no incarnation (a cast spell, a
-/// block declaration, …) cannot discriminate, so the live object stands.
-///
-/// Exception, scoped to the event role and preserving base behaviour verbatim:
-/// for a `ZoneChanged` to a non-battlefield zone this returns the event's
-/// referent id with no identity or phasing check, exactly as the resolver
-/// always has. That is NOT a claim that the binding is right in every case:
-/// CR 400.7e/400.7j license only the findable arrival or the effect's own move.
-/// It is a scope fence for the "return it … it's a Zombie" class (Dread Slaver).
+/// deathtouch", Dread Slaver's "That creature is a black Zombie"), bound through
+/// [`resolve_event_referent`]. With no trigger event (an Aura's phase trigger)
+/// the shared resolver's attached-host fallback stands.
 pub(crate) fn triggering_source_mutation_referent(
     state: &GameState,
-    source_id: ObjectId,
+    ability: &ResolvedAbility,
 ) -> Option<ObjectId> {
-    let TargetRef::Object(id) =
-        resolve_event_context_target(state, &TargetFilter::TriggeringSource, source_id)?
-    else {
-        return None;
-    };
-    let Some(event) = state.current_trigger_event.as_ref() else {
-        return Some(id);
-    };
-    if matches!(event, GameEvent::ZoneChanged { to, .. } if *to != Zone::Battlefield) {
-        return Some(id);
+    match affected_event_context_target(state, ability, &TargetFilter::TriggeringSource)? {
+        TargetRef::Object(id) => Some(id),
+        TargetRef::Player(_) => None,
     }
-    let obj = state.objects.get(&id)?;
-    let phased_out_permanent = obj.zone == Zone::Battlefield && !obj.is_phased_in();
-    (event_source_is_live_incarnation(event, obj) && !phased_out_permanent).then_some(id)
 }
 
 /// CR 608.2c + CR 603.10a: Resolve the effective targets for a resolving
@@ -1308,6 +1489,18 @@ pub fn resolved_targets(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
     state: &GameState,
+) -> Vec<TargetRef> {
+    resolved_targets_with(ability, target_filter, state, ReferentRead::Affect)
+}
+
+/// [`resolved_targets`] with an explicit [`ReferentRead`]: `Affect` binds an
+/// event-context object referent through [`resolve_event_referent`]; `Inform`
+/// (CR 608.2h information readers) reads the raw event referent.
+pub(crate) fn resolved_targets_with(
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    state: &GameState,
+    read: ReferentRead,
 ) -> Vec<TargetRef> {
     // CR 608.2b: an unavailable announcement is bound to the empty set,
     // not an invitation to substitute an event, attached host, or source.
@@ -1465,13 +1658,20 @@ pub fn resolved_targets(
     // CR 400.7 + CR 608.2c: an untargeted `ParentTarget` / `None` with no
     // propagated targets names the referent inferred below; the ability's own
     // source is admitted only through the self-reference authority.
-    if let Some(refs) = inferred_anaphor_referents(state, ability, target_filter) {
+    if let Some(refs) = inferred_anaphor_referents(state, ability, target_filter, read) {
         return admit_inferred_source_referents(state, ability, refs);
     }
     // CR 603.7c: Pure event-context filters always resolve from the trigger
     // event / combat state, even when parent chain propagation populated
     // `ability.targets` with unrelated chosen targets (DefendingPlayer, etc.).
     if is_pure_event_context_filter(target_filter) {
+        // CR 400.7 + CR 608.2k: an affected event referent binds only while the
+        // ability can still find the object the event named.
+        if read == ReferentRead::Affect {
+            if let Some(ids) = bound_event_referent(state, ability, target_filter) {
+                return ids.into_iter().map(TargetRef::Object).collect();
+            }
+        }
         if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id)
         {
             return vec![target];
@@ -2466,6 +2666,10 @@ pub(crate) fn resolved_object_ids_for_filter_with_context(
         TargetFilter::LastRevealed => state.last_revealed_ids.clone(),
         TargetFilter::LastZoneChanged => state.last_zone_changed_ids.clone(),
         TargetFilter::TriggeringSource | TargetFilter::EventTarget | TargetFilter::AttachedTo => {
+            // CR 400.7 + CR 608.2k: an event subject binds through the identity gate.
+            if let Some(ids) = bound_event_referent(state, ability, filter) {
+                return ids;
+            }
             resolve_event_context_target(state, filter, ability.source_id)
                 .and_then(|target| target_ref_object(&target))
                 .into_iter()
@@ -3059,6 +3263,7 @@ fn inferred_anaphor_referents(
     state: &GameState,
     ability: &ResolvedAbility,
     filter: &TargetFilter,
+    read: ReferentRead,
 ) -> Option<Vec<TargetRef>> {
     if !matches!(filter, TargetFilter::ParentTarget | TargetFilter::None)
         || !ability.targets.is_empty()
@@ -3071,6 +3276,13 @@ fn inferred_anaphor_referents(
         }
         if let Some(targets) = parent_target_refs_from_spell_cast_event(state) {
             return Some(targets);
+        }
+        // CR 400.7 + CR 608.2k: an affected event referent that became a new
+        // object names nothing; it never falls back to the source tier.
+        if read == ReferentRead::Affect {
+            if let Some(ids) = bound_event_referent(state, ability, filter) {
+                return Some(ids.into_iter().map(TargetRef::Object).collect());
+            }
         }
         if let Some(target) = resolve_event_context_target(state, filter, ability.source_id) {
             return Some(vec![target]);
@@ -3104,7 +3316,7 @@ pub(crate) fn infers_own_source(
     ability: &ResolvedAbility,
     filter: &TargetFilter,
 ) -> bool {
-    inferred_anaphor_referents(state, ability, filter)
+    inferred_anaphor_referents(state, ability, filter, ReferentRead::Inform)
         .is_some_and(|refs| refs == [TargetRef::Object(ability.source_id)])
 }
 
@@ -3117,7 +3329,7 @@ pub(crate) fn inferred_source_referent_is_unbound(
     ability: &ResolvedAbility,
     filter: &TargetFilter,
 ) -> bool {
-    inferred_anaphor_referents(state, ability, filter).is_some_and(|refs| {
+    inferred_anaphor_referents(state, ability, filter, ReferentRead::Inform).is_some_and(|refs| {
         refs.contains(&TargetRef::Object(ability.source_id))
             && admit_inferred_source_referents(state, ability, refs).is_empty()
     })

@@ -1792,6 +1792,13 @@ fn evaluate_condition_for_granter(
     condition: &ParsedCondition,
 ) -> bool {
     match condition {
+        ParsedCondition::SourceMatchesFilter { filter } => {
+            let context =
+                super::filter::FilterContext::from_source_with_controller(source_id, player)
+                    .with_granting_object(granting_object);
+            state.objects.contains_key(&source_id)
+                && super::filter::matches_target_filter(state, source_id, filter, &context)
+        }
         ParsedCondition::SourceInZone { zone } => state
             .objects
             .get(&source_id)
@@ -3061,6 +3068,68 @@ mod tests {
     use crate::types::game_state::{ArrivalIdentity, WaitingFor, ZoneChangeRecord};
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn suspended_source_restriction_reads_the_grant_on_the_exiled_card() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::ActivationRestriction;
+        use crate::types::counter::CounterType;
+        use crate::types::keywords::KeywordKind;
+        use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+        use crate::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Blue);
+        let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let spell = scenario.add_spell_to_hand_from_oracle(P0, "Suspend", true,
+            "Exile target creature and put two time counters on it. If it doesn't have suspend, it gains suspend. (At the beginning of its owner's upkeep, they remove a time counter. When the last is removed, they may play it without paying its mana cost. If it's a creature, it has haste.)")
+            .with_mana_cost(ManaCost::Cost { generic: 0, shards: vec![ManaCostShard::Blue] }).id();
+        let mut runner = scenario.build();
+        runner.cast(spell).target_object(bear).resolve();
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Suspend 10—{R}\nSacrifice an artifact, creature, or land: Remove a time counter from this card. Activate only if this card is suspended.",
+            "Greater Gargadon", &["Suspend".into()], &["Creature".into()], &[]);
+        let condition = parsed
+            .abilities
+            .iter()
+            .flat_map(|a| &a.activation_restrictions)
+            .find_map(|r| match r {
+                ActivationRestriction::RequiresCondition {
+                    condition: Some(condition),
+                } => Some(condition),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(runner.state().objects[&bear].zone, Zone::Exile);
+        assert_eq!(
+            runner.state().objects[&bear].counters[&CounterType::Time],
+            2
+        );
+        assert!(crate::game::keywords::object_has_effective_keyword_kind(
+            runner.state(),
+            bear,
+            KeywordKind::Suspend
+        ));
+        assert!(evaluate_condition(runner.state(), P0, bear, condition));
+        // A second exile incarnation with time counters does not inherit that grant.
+        for zone in [Zone::Graveyard, Zone::Exile] {
+            crate::game::zones::move_to_zone(runner.state_mut(), bear, zone, &mut vec![]);
+        }
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .counters
+            .insert(CounterType::Time, 2);
+        assert!(!crate::game::keywords::object_has_effective_keyword_kind(
+            runner.state(),
+            bear,
+            KeywordKind::Suspend
+        ));
+        assert!(!evaluate_condition(runner.state(), P0, bear, condition));
+    }
 
     /// CR 109.5 + CR 400.1: the shared cast-origin predicate's whole matrix —
     /// caster vs the origin zone's owner, each pool, a graveyard vs a shared

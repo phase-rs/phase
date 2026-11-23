@@ -19107,6 +19107,10 @@ impl StaticCondition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ParsedCondition {
+    /// CR 602.5: an activation restriction testing the source itself.
+    SourceMatchesFilter {
+        filter: TargetFilter,
+    },
     SourceInZone {
         zone: Zone,
     },
@@ -30562,6 +30566,29 @@ impl TargetFilter {
     /// CR 702.6a: the target of ordinary equip is a creature you control.
     pub fn equip_target() -> Self {
         Self::Typed(TypedFilter::creature().controller(ControllerRef::You))
+    }
+
+    /// CR 702.62b: exile, suspend, and at least one time counter on this card.
+    pub fn suspended_card(owner: Option<ControllerRef>) -> TargetFilter {
+        let mut properties = vec![
+            // CR 400.1: in the exile zone.
+            FilterProp::InZone { zone: Zone::Exile },
+            // CR 702.62b: has suspend.
+            FilterProp::HasKeywordKind {
+                value: KeywordKind::Suspend,
+            },
+            // CR 702.62b: bears at least one time counter.
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Time),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        ];
+        if let Some(o) = owner {
+            // CR 108.3: owned by the given player reference.
+            properties.push(FilterProp::Owned { controller: o });
+        }
+        TargetFilter::Typed(TypedFilter::card().properties(properties))
     }
 
     /// CR 608.2c + CR 110.1: the members of a reveal's published set that are
