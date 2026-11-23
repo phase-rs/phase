@@ -848,6 +848,9 @@ fn split_second_suppresses_the_exiled_sacrifice_but_preserves_mana_abilities() {
         .with_keyword(Keyword::SplitSecond)
         .with_mana_cost(ManaCost::Cost{generic:1, shards:vec![ManaCostShard::Red]}).id();
     let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let elves = scenario
+        .add_creature_from_oracle(P0, "Llanowar Elves", 1, 1, "{T}: Add {G}.")
+        .id();
     let mut runner = scenario.build();
     let act = public_activations(&runner, source).pop().unwrap();
     let card_id = runner.state().objects[&spell].card_id;
@@ -880,6 +883,15 @@ fn split_second_suppresses_the_exiled_sacrifice_but_preserves_mana_abilities() {
         .expect("the untapped Mountain can still produce mana");
     runner.act(mana).unwrap();
     assert_eq!(runner.state().players[0].mana_pool.total(), 1);
+    // CR 702.61b: a mana ability submitted as an activation is still allowed.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: elves,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("split second does not stop a mana ability");
+    assert_eq!(runner.state().players[0].mana_pool.total(), 2);
     runner.resolve_top();
     assert_eq!(public_activations(&runner, source).len(), 1);
 }

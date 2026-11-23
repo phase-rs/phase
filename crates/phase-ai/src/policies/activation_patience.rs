@@ -672,14 +672,10 @@ fn cost_rider_reads_a_hand(rider: &CostReduction) -> bool {
 
 /// Follow the source's counter threshold, including its Boolean filter wrappers.
 fn source_filter_reads_a_hand(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(filter) => filter.properties.iter().any(|property| {
-            matches!(property, engine::types::ability::FilterProp::Counters { count, .. } if count.any_ref(&mut reads_a_hand))
-        }),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters.iter().any(source_filter_reads_a_hand),
-        TargetFilter::Not { filter } => source_filter_reads_a_hand(filter),
-        _ => false,
-    }
+    engine::types::ability::filter_contains_filter_prop(
+        filter,
+        &|property| matches!(property, engine::types::ability::FilterProp::Counters { count, .. } if count.any_ref(&mut reads_a_hand)),
+    )
 }
 
 /// Does `condition` test a hand that can be the AI's, in either direction? Unlike
