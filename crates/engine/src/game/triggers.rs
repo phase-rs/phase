@@ -13851,6 +13851,7 @@ pub(crate) fn seed_event_referent_pins(
                 | Effect::ArrangePlanarDeckTop { .. }
                 | Effect::Planeswalk
                 | Effect::AbandonScheme
+                | Effect::SetSchemeInMotion { .. }
                 | Effect::ChaosEnsues
                 | Effect::ReverseTurnOrder
                 | Effect::RedistributeLifeTotals

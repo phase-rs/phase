@@ -1407,6 +1407,7 @@ describe("Scryfall generation scripts — scheme layouts (Archenemy)", () => {
       writeFileSync(
         input,
         JSON.stringify([
+          ...basicLandPrintingFixtures(),
           {
             id: "c539d952-5c3d-4351-b682-db966348f862",
             oracle_id: destructionOracleId,
@@ -1594,6 +1595,7 @@ describe("Scryfall generation scripts — planar layouts (Planechase)", () => {
       writeFileSync(
         input,
         JSON.stringify([
+          ...basicLandPrintingFixtures(),
           {
             id: "6caf8b21-1807-442c-a461-c89c7591df70",
             oracle_id: agyremOracleId,
