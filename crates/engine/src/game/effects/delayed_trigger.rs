@@ -578,6 +578,20 @@ pub fn resolve(
         (targets, pins, Vec::new())
     } else if super::ability_refs_parent_target(&delayed_ability) {
         let mut targets = parent_target_snapshot(state, ability);
+        // CR 608.2h + CR 603.7c: the referent gate finds nothing once the
+        // creation event's subject has become a new object (CR 400.7), but the
+        // payload may still read information from it ("its owner draws a
+        // card"), which uses its last known information. Bind the subject;
+        // what may act on it is decided by the pins below.
+        if targets.is_empty() {
+            if let Some(subject) = creation_subject.as_ref() {
+                targets = crate::game::targeting::admit_inferred_source_referents(
+                    state,
+                    ability,
+                    vec![TargetRef::Object(subject.id)],
+                );
+            }
+        }
         let pins_object_anaphor = super::ability_pins_object_anaphor(&delayed_ability)
             && !condition_expects_referent_move;
         // CR 603.7c + CR 400.7e: binding gate G. The creation-referent
