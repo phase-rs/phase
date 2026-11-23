@@ -1577,7 +1577,11 @@ fn duodrone_rebinds_each_seat_without_observing_partial_entries() {
         }
     }
     assert_eq!(prompts, 2);
-    assert!(runner.state().stack.is_empty());
+    assert!(
+        settled(runner.state()),
+        "the trigger finished and priority returned, got {:?}",
+        runner.state().waiting_for
+    );
     let mut treasures = [0; 3];
     for id in battlefield_tokens(runner.state()) {
         let token = &runner.state().objects[&id];

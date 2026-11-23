@@ -5054,9 +5054,9 @@ fn rewrite_populated_anaphor_in_def(def: &mut AbilityDefinition, token_is_attach
 /// `GrantTrigger` installs such as Rite of the Raging Storm (#3297) — must
 /// remain sibling `GenericEffect`s targeting `LastCreated`.
 /// CR 111.3 + CR 608.2c: the caller offers only a grant stamped
-/// `ContinuousEffectOnset::WithEntry` ("is"/"has" text, which defines the
-/// token); a "becomes", "gains", or "gets" rider is a later instruction and
-/// never reaches this predicate.
+/// `ContinuousEffectOnset::WithEntry` (a clause with an "is"/"has" conjunct,
+/// which defines the token). A grant classified `WhenFollowed` remains a
+/// separate instruction.
 fn token_it_has_grant_should_fold_into_statics(
     token_effect: &Effect,
     static_abilities: &[StaticDefinition],
@@ -5093,9 +5093,10 @@ pub(super) fn fold_token_it_has_grants_into_token_statics(def: &mut AbilityDefin
     };
     let grant = *grant_box;
     // CR 111.3 + CR 608.2c: only text that defines the token folds into it. A
-    // `WhenFollowed` rider ("It becomes a 2/1 artifact creature and gains flying",
-    // Vv'viza, Orbital Overseer; "They gain haste", Chandra, Acolyte of Flame) is a
-    // separate instruction that changes the token after it has entered.
+    // grant classified `WhenFollowed` ("It becomes a 2/1 artifact creature and gains
+    // flying", Vv'viza, Orbital Overseer; "They gain haste", Chandra, Acolyte of
+    // Flame) remains a separate instruction that changes the token after it has
+    // entered.
     if grant.sub_link != SubAbilityLink::SequentialSibling
         || grant.entry_onset != ContinuousEffectOnset::WithEntry
     {

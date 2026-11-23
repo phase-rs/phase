@@ -1872,8 +1872,7 @@ pub(crate) fn bind_resolving_ability_referents(
                     target: TargetRef::Player(_),
                     ..
                 } => {
-                    // CR 120.3: unchanged, the damaged player still reads as an instruction
-                    // binding; no printed card's outcome depends on the difference.
+                    // Keep the existing instruction binding for the damaged player.
                     if let Some(pid) = targeting::extract_player_from_event(event, state) {
                         ability.set_scoped_player_recursive(pid);
                     }
