@@ -31501,6 +31501,21 @@ declare_game_state! {
     #[serde(skip)]
     pub(crate) revealed_publications: u64,
 
+    /// CR 608.2c + CR 109.5: the cards revealed by each seat's instruction
+    /// inside a player-scoped reveal fan-out. The ordinary tracked set remains
+    /// the clause-wide population; this resolution-local ledger lets a
+    /// co-scoped "for each card revealed this way" consumer read the current
+    /// seat's contribution rather than the fan-out union. Persisted so a
+    /// paused reveal choice can resume after a supported mid-resolution
+    /// save/restore.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
+    pub(crate) scoped_reveal_sets: HashMap<PlayerId, (u64, Vec<ObjectId>)>,
+    /// Monotone publication identity for the current resolution's tracked set.
+    /// A scoped reveal is valid only while this generation remains current.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub(crate) tracked_set_publication_generation: u64,
+
     /// CR 608.2c + CR 609.3 + issue #4950: Set when the most
     /// recently resolved `Dig`/`RevealTop`/`ChooseFromZone`/`RevealHand` reveal-choice/
     /// `ExileTop` / library search came up with nothing (empty library, no eligible card, an
@@ -41286,6 +41301,8 @@ impl GameState {
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),
             revealed_publications: 0,
+            scoped_reveal_sets: HashMap::new(),
+            tracked_set_publication_generation: 0,
             last_parent_target_missing_reason: None,
             private_look_ids: Vec::new(),
             private_look_player: None,
@@ -42690,6 +42707,12 @@ impl GameState {
         // eq-compared (AI-search dedup legitimately reads it), so it is
         // normalized away HERE rather than excluded from `PartialEq`.
         clone.resolving_modal_instruction = None;
+        // CR 104.4b: a scoped reveal generation is meaningful only while its
+        // resolution-local ledger is live.  Once the ledger is empty, erase
+        // the publication history so loop-equivalent positions compare equal.
+        if clone.scoped_reveal_sets.is_empty() {
+            clone.tracked_set_publication_generation = 0;
+        }
         // CR 608.2c + CR 104.4b: the chain tracked-set pointer is that latch's
         // lockstep partner and is resolution-scoped for the same reason — a chain's
         // "those cards" anaphor names only what THIS resolution's instructions
@@ -45344,6 +45367,8 @@ impl GameState {
             // are cleared with it by the loop projection.
             instruction_boundary_marks: _,
             batched_zone_change_trigger_fired: _,
+            scoped_reveal_sets: _,
+            tracked_set_publication_generation: _,
         } = s;
         if let Some(combat) = s.combat.as_ref() {
             let crate::game::combat::CombatState {
@@ -47057,6 +47082,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     object-growth lives in `objects` (stripped+compared by `eq_except_growable`), so
         //     excluding this single-object identity field cannot hide growth.
         resolution_source_relatch: _,
+        scoped_reveal_sets: _,
+        tracked_set_publication_generation: _,
     } = s;
 }
 
@@ -47407,6 +47434,9 @@ impl PartialEq for GameState {
             && self.tracked_object_sets == other.tracked_object_sets
             && self.next_tracked_set_id == other.next_tracked_set_id
             && self.chain_tracked_set_id == other.chain_tracked_set_id
+            && self.scoped_reveal_sets == other.scoped_reveal_sets
+            && self.tracked_set_publication_generation
+                == other.tracked_set_publication_generation
             && self.return_result_frames == other.return_result_frames
             && self.active_return_result_occurrence == other.active_return_result_occurrence
             && self.next_return_result_occurrence_id == other.next_return_result_occurrence_id

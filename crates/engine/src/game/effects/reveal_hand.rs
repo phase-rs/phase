@@ -150,7 +150,7 @@ pub fn resolve(
             // CR 107.1c: zero is the only possible choice; publish the empty
             // revealed set so a "for each card revealed this way" reader sees
             // this resolution's population rather than a stale one.
-            super::publish_tracked_set(state, Vec::new());
+            super::publish_scoped_reveal(state, target_player, Vec::new());
         } else {
             state.waiting_for = WaitingFor::RevealChoice {
                 player: target_player,

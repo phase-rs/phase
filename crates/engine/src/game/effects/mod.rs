@@ -8261,6 +8261,21 @@ fn resolve_optional_effect_decision_step(
             return Ok(progress);
         }
         AutoMayChoice::Decline => {
+            // CR 107.1c + CR 608.2c: a declined player-scoped "may reveal any
+            // number" contributes an explicit empty reveal set. Without this
+            // marker, the co-scoped quantity reader would fall back to the
+            // clause-wide union published by an earlier player and create
+            // tokens for cards this player did not reveal.
+            if let Effect::RevealHand {
+                target: TargetFilter::Controller,
+                cardinality: ObjectSelectionCardinality::AnyNumber,
+                ..
+            } = &ability.effect
+            {
+                if let Some(player) = ability.scoped_player {
+                    publish_scoped_reveal(state, player, Vec::new());
+                }
+            }
             let decline_branch = optional_decline_branch(state, &ability);
             // CR 608.2c: Declining the optional return skips its action, but
             // an independent following instruction can still read its named
@@ -18483,6 +18498,11 @@ pub(crate) fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameE
 /// consumer must bind that empty set rather than fall back to a preceding mode's
 /// non-empty one.
 pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<ObjectId>) {
+    if !affected_ids.is_empty() {
+        state.scoped_reveal_sets.clear();
+        state.tracked_set_publication_generation =
+            state.tracked_set_publication_generation.wrapping_add(1);
+    }
     // CR 608.2c: Chain unification. If an ancestor in this
     // resolution chain already published a tracked set, extend that set with
     // the current publish so compound zone-changing effects expose every
@@ -18538,6 +18558,27 @@ pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<Objec
         state.tracked_object_sets.insert(set_id, members);
         state.chain_tracked_set_id = Some(set_id);
     }
+}
+
+/// CR 608.2c + CR 109.5: retain the current seat's contribution to a
+/// player-scoped reveal while the enclosing resolution continues. The ordinary
+/// chain set is still published by [`publish_tracked_set`]; this side ledger is
+/// only for a later co-scoped quantity read.
+pub(crate) fn publish_scoped_reveal(
+    state: &mut GameState,
+    player: PlayerId,
+    revealed_ids: Vec<ObjectId>,
+) {
+    let prior_reveals = std::mem::take(&mut state.scoped_reveal_sets);
+    publish_tracked_set(state, revealed_ids.clone());
+    state.scoped_reveal_sets = prior_reveals
+        .into_iter()
+        .map(|(player, (_, ids))| (player, (state.tracked_set_publication_generation, ids)))
+        .collect();
+    state.scoped_reveal_sets.insert(
+        player,
+        (state.tracked_set_publication_generation, revealed_ids),
+    );
 }
 
 /// Append `affected` to `members`, skipping any id already there or earlier in
@@ -19170,6 +19211,12 @@ pub(crate) fn publish_fresh_tracked_set(
     state: &mut GameState,
     affected_ids: Vec<ObjectId>,
 ) -> TrackedSetId {
+    // CR 608.2c: a fresh tracked-set publication replaces the prior
+    // resolution-local population, so no player-scoped reveal may remain
+    // eligible for a later co-scoped quantity read.
+    state.scoped_reveal_sets.clear();
+    state.tracked_set_publication_generation =
+        state.tracked_set_publication_generation.wrapping_add(1);
     let set_id = TrackedSetId(state.next_tracked_set_id);
     state.next_tracked_set_id += 1;
     state.tracked_object_sets.insert(set_id, affected_ids);
@@ -26316,6 +26363,7 @@ fn bind_reveal_population(
 /// chain's first instruction.
 fn reset_top_level_resolution_state(state: &mut GameState) {
     state.last_revealed_ids.clear();
+    state.scoped_reveal_sets.clear();
     // CR 608.2c + CR 122.1: `ChooseCounterKind` overwrites this before
     // every instruction, and a new top-level resolution cannot inherit a
     // prior resolution's "that kind" if no such instruction is reached.

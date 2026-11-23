@@ -5934,7 +5934,7 @@ pub(super) fn handle_resolution_choice(
             if cardinality == crate::types::ability::ObjectSelectionCardinality::AnyNumber {
                 effects::reveal_hand::validate_reveal_selection(&cards, cardinality, &chosen)?;
                 effects::reveal_hand::reveal_selected_hand_cards(state, player, &chosen, events);
-                effects::publish_tracked_set(state, chosen);
+                effects::publish_scoped_reveal(state, player, chosen);
                 set_priority(state, player);
                 super::engine::resume_pending_continuation_if_priority(state, events)
                     .expect("a settled reveal choice must resume its continuation");

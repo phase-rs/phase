@@ -1233,7 +1233,6 @@ face = [
   { key = "kaalia, zenith seeker", class = "missing_effect", clauses = ["You may reveal an Angel card, a Demon card, and/or a Dragon card from among them and put them into your hand."] },
   { key = "kaervek's hex", class = "missing_effect", clauses = ["and an additional 1 damage to each green creature."] },
   { key = "kaima, the fractured calm", class = "dropped_qualifier", clauses = ["At the beginning of your end step, goad each creature your opponents control that's enchanted by an Aura you control."] },
-  { key = "kamahl's summons", class = "dropped_qualifier", clauses = ["Each player may reveal any number of creature cards from their hand."] },
   { key = "kamahl's will", class = "target_wrong", clauses = ["Choose target creature you don't control.", "Each creature you control deals damage equal to its power to that creature."] },
   { key = "kami of bamboo groves", class = "cost_wrong", clauses = ["Channel — {2}{G}, Discard Kami of Bamboo Groves: Conjure two cards named Forest into your hand."] },
   { key = "kami of false hope", class = "target_wrong", clauses = ["Sacrifice this creature: Prevent all combat damage that would be dealt this turn."] },
