@@ -21,6 +21,7 @@ use crate::parser::oracle_ir::diagnostic::{
     ClauseGap, ClauseGapKind, OracleDiagnostic, OracleItemId, OracleSourceSpan, SpanPrecision,
 };
 use crate::parser::oracle_util::normalize_card_name_refs;
+use crate::types::ability::{filter_contains_filter_prop, CombatDamageScope, TurnWindow};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
     ActivationRestriction, AdditionalCost, AggregateFunction, AttachmentReferent, AttackSubject,
@@ -39,7 +40,6 @@ use crate::types::ability::{
     StackAbilityKind, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
     TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
-use crate::types::ability::{CombatDamageScope, TurnWindow};
 use crate::types::ability_visit::{ability_tree_any, visit_direct_effect_ability_payloads};
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, SubtypeSet};
@@ -2252,6 +2252,20 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::DescendedThisTurn => "descended this turn".into(),
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player } => {
             format!("loyalty abilities activated this turn ({player:?})")
+        }
+        QuantityRef::CardsCycled {
+            scope,
+            window,
+            name,
+        } => {
+            let window = match window {
+                crate::types::ability::CyclingHistoryWindow::ThisTurn => "this turn",
+                crate::types::ability::CyclingHistoryWindow::ThisGame => "this game",
+            };
+            match name {
+                None => format!("cards cycled {window} ({scope:?})"),
+                Some(name) => format!("cards named {name} cycled {window} ({scope:?})"),
+            }
         }
         QuantityRef::SpellsCastThisGame { scope, filter } => match (scope, filter) {
             (CountScope::Controller, None) => "spells you've cast this game".into(),
@@ -11796,6 +11810,7 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
 fn window_attr_support(attr: &QuantityRef) -> FeatureSupport {
     use FeatureSupport::*;
     match attr {
+        QuantityRef::CardsCycled { .. } => Unhandled,
         QuantityRef::SpellsCast {
             scope: _,
             filter: _,
@@ -12449,7 +12464,14 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         // `cargo run --profile tool --bin coverage-report -- data --all`.
         QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => (
             "BattlefieldEntriesThisTurn",
-            if crate::types::ability::ledger_filter_is_evaluable(filter) {
+            // CR 611.3c: continuous effects apply as permanents enter. An effect's
+            // final instruction can still record pre-layer types instead of entry-time
+            // types, so coverage withholds support for reads that use token identity.
+            if crate::types::ability::ledger_filter_is_evaluable(filter)
+                && !filter_contains_filter_prop(filter, &|prop| {
+                    matches!(prop, FilterProp::Token | FilterProp::NonToken)
+                })
+            {
                 Handled
             } else {
                 Unhandled
@@ -12478,6 +12500,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } => {
             ("LoyaltyAbilitiesActivatedThisTurn", Handled)
         }
+        QuantityRef::CardsCycled { .. } => ("CardsCycled", Handled),
         QuantityRef::SpellsCastThisGame { .. } => ("SpellsCastThisGame", Handled),
         QuantityRef::CounterAddedThisTurn { .. } => ("CounterAddedThisTurn", Handled),
         QuantityRef::CardsDiscardedThisTurn { .. } => ("CardsDiscardedThisTurn", Handled),
@@ -24658,7 +24681,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     /// of them resolves a silent constant 0. The classifier must stop calling that
     /// `Handled`. The entry snapshot NOW captures `FaceDown` (FaceState enum), so
     /// Tunnel Tipster's intervening-if is answerable (case (a2)). Case (a) uses
-    /// `NonToken`, which the entry snapshot cannot answer. This test drives
+    /// `Tapped`, which the entry snapshot cannot answer. This test drives
     /// `quantity_ref_feature` directly; the classifier now also reaches Tunnel
     /// Tipster's trigger intervening-if through `extract_trigger_condition_features`,
     /// which `trigger_condition_walk_marks_tunnel_tipster_supported` proves is
@@ -24677,11 +24700,11 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             }),
         };
 
-        // (a) NonToken is unanswerable from the entry record (FaceDown IS answerable now).
+        // (a) Tapped is unanswerable from the entry record (FaceDown IS answerable now).
         assert_eq!(
-            quantity_ref_feature(&ledger(vec![FilterProp::NonToken])),
+            quantity_ref_feature(&ledger(vec![FilterProp::Tapped])),
             ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled),
-            "(a) NonToken is not answerable from a BattlefieldEntryRecord"
+            "(a) Tapped is not answerable from a BattlefieldEntryRecord"
         );
         // (a2) FaceDown IS answerable: the entry snapshot records the face state.
         assert_eq!(
@@ -24706,9 +24729,8 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let QuantityRef::BattlefieldEntriesThisTurn { filter: bare, .. } = ledger(vec![]) else {
             unreachable!()
         };
-        let QuantityRef::BattlefieldEntriesThisTurn {
-            filter: non_token, ..
-        } = ledger(vec![FilterProp::NonToken])
+        let QuantityRef::BattlefieldEntriesThisTurn { filter: tapped, .. } =
+            ledger(vec![FilterProp::Tapped])
         else {
             unreachable!()
         };
@@ -24716,7 +24738,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             quantity_ref_feature(&QuantityRef::BattlefieldEntriesThisTurn {
                 player: PlayerScope::Controller,
                 filter: TargetFilter::Or {
-                    filters: vec![bare, non_token]
+                    filters: vec![bare, tapped]
                 },
             }),
             ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled),
@@ -24725,10 +24747,47 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
     }
 
+    #[test]
+    fn battlefield_entries_coverage_fences_token_identity() {
+        let creature = |properties| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties,
+            })
+        };
+        let feature = |filter| {
+            quantity_ref_feature(&QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::Controller,
+                filter,
+            })
+        };
+
+        assert_eq!(
+            feature(creature(vec![FilterProp::NonToken])),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled)
+        );
+        assert_eq!(
+            feature(creature(vec![])),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Handled)
+        );
+        assert_eq!(
+            feature(TargetFilter::And {
+                filters: vec![
+                    creature(vec![]),
+                    TargetFilter::Or {
+                        filters: vec![creature(vec![]), creature(vec![FilterProp::Token])],
+                    },
+                ],
+            }),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled)
+        );
+    }
+
     // -----------------------------------------------------------------------
     // F2: condition-quantity walks and the sticky feature merge. Every real-card
     // row parses verbatim Oracle text; hostile rows mutate the parsed real shape
-    // (one ledger filter given an unevaluable prop like `FilterProp::NonToken`,
+    // (one ledger filter given an unevaluable prop like `FilterProp::Tapped`,
     // or the parsed leaf wrapped in a compound), never a free-hand AST.
     // -----------------------------------------------------------------------
 
@@ -24770,7 +24829,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             .collect()
     }
 
-    /// Gives a ledger read an unevaluable `FilterProp` (e.g., `NonToken`). Returns
+    /// Gives a ledger read an unevaluable `FilterProp` (e.g., `Tapped`). Returns
     /// how many ledger reads it mutated; each one is asserted to have been
     /// evaluable before (the reach guard that the parse produced the shape the
     /// row assumes).
@@ -24787,10 +24846,10 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     !typed
                         .properties
                         .iter()
-                        .any(|prop| matches!(prop, FilterProp::NonToken)),
+                        .any(|prop| matches!(prop, FilterProp::Tapped)),
                     "the parsed ledger read must start evaluable"
                 );
-                typed.properties.push(FilterProp::NonToken);
+                typed.properties.push(FilterProp::Tapped);
                 1
             }
             _ => 0,
@@ -24907,7 +24966,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     }
 
     /// Tunnel Tipster's leaf with its ledger filter made unanswerable
-    /// (`NonToken`), for traversal controls that need an `Unhandled` leaf now
+    /// (`Tapped`), for traversal controls that need an `Unhandled` leaf now
     /// that the entry snapshot answers `FaceDown`.
     fn unevaluable_tunnel_tipster_leaf() -> TriggerCondition {
         let mut leaf = tunnel_tipster_leaf();
@@ -29341,6 +29400,50 @@ mod unpublished_event_source_tests {
             "{:?}",
             card_face_gaps(&kain)
         );
+    }
+}
+
+#[cfg(test)]
+mod cycling_quantity_coverage_tests {
+    use super::*;
+    use crate::types::ability::CyclingHistoryWindow;
+
+    #[test]
+    fn phase3_v3_v4_cycling_quantity_support_is_context_sensitive() {
+        use crate::types::ability::PlayerRelation;
+
+        let named = "Yidaro, Wandering Monster".to_owned();
+        let feature = |qty, key| {
+            let mut features = HashMap::new();
+            extract_quantity_features(&QuantityExpr::Ref { qty }, &mut features);
+            features[&ResolverFeatureFamily::QuantityRef.key(key)]
+        };
+        for window in [
+            CyclingHistoryWindow::ThisTurn,
+            CyclingHistoryWindow::ThisGame,
+        ] {
+            let cycle = |name| QuantityRef::CardsCycled {
+                scope: CountScope::ScopedPlayer,
+                window,
+                name,
+            };
+            for name in [None, Some(named.clone())] {
+                let attr = cycle(name);
+                assert_eq!(
+                    feature(attr.clone(), "CardsCycled"),
+                    FeatureSupport::Handled
+                );
+                let outer = QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::All,
+                        attr: Box::new(attr),
+                        comparator: Comparator::GE,
+                        value: Box::new(QuantityExpr::Fixed { value: 0 }),
+                    },
+                };
+                assert_eq!(feature(outer, "PlayerCount"), FeatureSupport::Unhandled);
+            }
+        }
     }
 }
 

@@ -9,6 +9,7 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{
     AbilityUsageKey, BattlefieldEntryRecord, CastOccurrence, CastTimingRoute, CastingVariant,
+    EntryTokenStatus,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
@@ -561,6 +562,11 @@ pub(crate) fn battlefield_entry_record_for(
     obj: &GameObject,
 ) -> crate::types::game_state::BattlefieldEntryRecord {
     crate::types::game_state::BattlefieldEntryRecord {
+        token_status: Some(if obj.is_token {
+            EntryTokenStatus::Token
+        } else {
+            EntryTokenStatus::Nontoken
+        }),
         object_id: obj.id,
         name: obj.name.clone(),
         core_types: obj.card_types.core_types.clone(),
@@ -759,6 +765,9 @@ pub(crate) fn battlefield_entry_matches_filter(
                 // source context the predicate cannot exclude self, so it stays
                 // false (the prior behavior for this prop on these paths).
                 FilterProp::Another => source_id.is_some_and(|s| record.object_id != s),
+                // CR 111.1 + CR 608.2i: use the token identity captured at entry.
+                FilterProp::Token => record.token_status == Some(EntryTokenStatus::Token),
+                FilterProp::NonToken => record.token_status == Some(EntryTokenStatus::Nontoken),
                 _ => false,
             })
         }
@@ -3642,6 +3651,7 @@ mod tests {
     #[test]
     fn entry_type_filter_answers_instant_false_per_cr_403_3() {
         let record = BattlefieldEntryRecord {
+            token_status: Some(EntryTokenStatus::Nontoken),
             object_id: ObjectId(10),
             name: "Bbfu10 Permanent".to_string(),
             core_types: vec![CoreType::Creature],
@@ -3915,6 +3925,7 @@ mod tests {
         state
             .battlefield_entries_this_turn
             .push_back(BattlefieldEntryRecord {
+                token_status: Some(EntryTokenStatus::Nontoken),
                 object_id: ObjectId(99),
                 name: "Green Creature".to_string(),
                 core_types: vec![CoreType::Creature],
@@ -3985,6 +3996,7 @@ mod tests {
                     state
                         .battlefield_entries_this_turn
                         .push_back(BattlefieldEntryRecord {
+                            token_status: Some(EntryTokenStatus::Nontoken),
                             object_id: ObjectId(next_id),
                             name: "Bear".to_string(),
                             core_types: vec![CoreType::Creature],
@@ -5846,23 +5858,13 @@ mod tests {
     }
 
     /// T23 — the ANTI-DRIFT BINDER for [`ledger_filter_is_evaluable`]'s allow-list.
-    /// It replaces a 98-arm exhaustive `match`: the two functions are driven AS A
-    /// PAIR against one record that positively satisfies every allowed prop, so a
-    /// prop in the allow-list that the matcher does not actually answer fails here.
-    ///
-    /// REVERT-PROBES, both measured:
-    /// - add `FilterProp::NonToken` to the allow-list → the paired matcher drive
-    ///   returns `false` while the guard says `true` → FAIL.
-    /// - delete an allowed prop from the list → its paired row FAILS on the guard side.
+    /// Each supported predicate must have a matching entry snapshot and pass the guard.
     #[test]
     fn ledger_guard_agrees_with_matcher() {
         let player = PlayerId(0);
         let source_id = ObjectId(99);
-        // Positively satisfies four of the five answerable props: green, on the
-        // battlefield, flying, and not the ability source. FaceDown is covered by
-        // the separate face-down record below. Also legendary and
-        // nontoken/untapped-in-fact, none of which the SNAPSHOT can express.
         let record = BattlefieldEntryRecord {
+            token_status: Some(EntryTokenStatus::Nontoken),
             object_id: ObjectId(10),
             name: "Bbfu10 Binder Entrant".to_string(),
             core_types: vec![CoreType::Creature],
@@ -5908,6 +5910,7 @@ mod tests {
 
         // FaceDown — test with a face-down record.
         let face_down_record = BattlefieldEntryRecord {
+            token_status: Some(EntryTokenStatus::Nontoken),
             object_id: ObjectId(11),
             name: "Face Down Creature".to_string(),
             core_types: vec![CoreType::Creature],
@@ -5942,24 +5945,45 @@ mod tests {
             "FaceDown must NOT match a face-up record"
         );
 
-        // NOT ALLOWED — unanswerable from the entry snapshot, so the guard must
-        // refuse. (The record IS legendary and nontoken, so the matcher's `false`
-        // for those is the fail-closed arm, not a genuine mismatch.)
-        for prop in [
-            FilterProp::NonToken,
-            FilterProp::Token,
-            FilterProp::Tapped,
-            FilterProp::HasSupertype {
-                value: Supertype::Legendary,
-            },
+        for (prop, expected_status) in [
+            (FilterProp::Token, EntryTokenStatus::Token),
+            (FilterProp::NonToken, EntryTokenStatus::Nontoken),
         ] {
-            assert!(
-                !ledger_filter_is_evaluable(&typed(vec![prop.clone()], None)),
-                "{prop:?} is not answerable from a BattlefieldEntryRecord"
-            );
+            let filter = typed(vec![prop], None);
+            assert!(ledger_filter_is_evaluable(&filter));
+            for status in [
+                Some(EntryTokenStatus::Token),
+                Some(EntryTokenStatus::Nontoken),
+                None,
+            ] {
+                let snapshot = BattlefieldEntryRecord {
+                    token_status: status,
+                    ..record.clone()
+                };
+                assert_eq!(
+                    battlefield_entry_matches_filter(
+                        &snapshot,
+                        &filter,
+                        player,
+                        &[],
+                        Some(source_id)
+                    ),
+                    status == Some(expected_status),
+                    "{filter:?} against {status:?}"
+                );
+                assert_eq!(snapshot.clone(), snapshot);
+                let mut serialized = serde_json::to_value(&snapshot).unwrap();
+                if status.is_none() {
+                    assert_eq!(
+                        serialized.as_object_mut().unwrap().remove("token_status"),
+                        Some(serde_json::Value::Null)
+                    );
+                }
+                let decoded: BattlefieldEntryRecord = serde_json::from_value(serialized).unwrap();
+                assert_eq!(decoded, snapshot);
+            }
         }
 
-        // Structure: monotone connectives recurse; every leaf must be answerable.
         let bare = typed(vec![], None);
         let green = typed(
             vec![FilterProp::HasColor {
@@ -5967,14 +5991,29 @@ mod tests {
             }],
             None,
         );
-        let nontoken = typed(vec![FilterProp::NonToken], None);
         let tapped = typed(vec![FilterProp::Tapped], None);
+        let legendary = typed(
+            vec![FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            }],
+            None,
+        );
+        for unsupported in [&tapped, &legendary] {
+            assert!(!ledger_filter_is_evaluable(unsupported));
+            assert!(!battlefield_entry_matches_filter(
+                &record,
+                unsupported,
+                player,
+                &[],
+                Some(source_id)
+            ));
+        }
         assert!(ledger_filter_is_evaluable(&TargetFilter::Any));
         assert!(ledger_filter_is_evaluable(&TargetFilter::Or {
             filters: vec![bare.clone(), green]
         }));
         assert!(!ledger_filter_is_evaluable(&TargetFilter::Or {
-            filters: vec![bare.clone(), nontoken]
+            filters: vec![bare.clone(), tapped.clone()]
         }));
         assert!(!ledger_filter_is_evaluable(&TargetFilter::And {
             filters: vec![bare.clone(), tapped]

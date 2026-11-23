@@ -4485,6 +4485,398 @@ fn compound_mass_counter_first_conjunct_stays_put_counter_all() {
     assert!(!matches!(*sub.effect, Effect::Unimplemented { .. }));
 }
 
+/// CR 608.2c + CR 122.1: a verbless counter conjunct led by a NUMBER WORD carries the
+/// primary "put" verb forward exactly like its article twin (Stand Together: "Put two
+/// +1/+1 counters on target creature and two +1/+1 counters on another target creature").
+#[test]
+fn compound_targeted_counter_number_led_conjunct_carries_put_forward() {
+    let def = parse_effect_chain(
+        "Put two +1/+1 counters on target creature and two +1/+1 counters on another target creature.",
+        AbilityKind::Spell,
+    );
+    let second = assert_plus_counter_node(&def, 2, false).expect("second counter node");
+    assert!(
+        assert_plus_counter_node(second, 2, true).is_none(),
+        "counter chain should contain exactly two nodes",
+    );
+}
+
+/// CR 608.2c + CR 122.1: Ajani Unyielding's ultimate — the number-led conjunct names a
+/// different counter kind and a different recipient set ("five loyalty counters on each
+/// other planeswalker you control"), and both halves stay mass placements.
+#[test]
+fn compound_mass_counter_number_led_conjunct_stays_put_counter_all() {
+    let clause = parse_effect_clause(
+        "put five +1/+1 counters on each creature you control and five loyalty counters on each other planeswalker you control",
+        &mut ParseContext::default(),
+    );
+    match &clause.effect {
+        Effect::PutCounterAll {
+            counter_type,
+            count: QuantityExpr::Fixed { value },
+            target,
+        } => {
+            assert_eq!(*counter_type, CounterType::Plus1Plus1);
+            assert_eq!(*value, 5);
+            let tf = typed_leg(target).expect("primary target should be typed");
+            assert!(has_type(tf, TypeFilter::Creature));
+        }
+        other => panic!("expected primary PutCounterAll, got {other:?}"),
+    }
+    let sub = clause.sub_ability.expect("expected a trailing sub_ability");
+    match &*sub.effect {
+        Effect::PutCounterAll {
+            counter_type,
+            count: QuantityExpr::Fixed { value },
+            target,
+        } => {
+            assert_eq!(*counter_type, CounterType::Loyalty);
+            assert_eq!(*value, 5);
+            let tf = typed_leg(target).expect("sub target should be typed");
+            assert!(has_type(tf, TypeFilter::Planeswalker));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(tf.properties.contains(&FilterProp::Another));
+        }
+        other => panic!("expected sub PutCounterAll, got {other:?}"),
+    }
+}
+
+/// The count axis of `starts_counted_counter_placement` is the shared count grammar, and
+/// the noun axis is singular/plural; a conjunct that names no counters placed "on" a
+/// recipient is not a counter placement.
+#[test]
+fn counted_counter_placement_gate_ranges_over_counts_and_requires_a_recipient() {
+    for placement in [
+        "a loyalty counter on each planeswalker you control",
+        "an oil counter on target artifact",
+        "two +1/+1 counters on another target creature",
+        "five loyalty counters on each other planeswalker you control",
+        "3 +1/+1 counters on target creature",
+        "x +1/+1 counters on target creature",
+    ] {
+        assert!(
+            starts_counted_counter_placement(placement),
+            "{placement:?} is a verbless counter placement"
+        );
+    }
+    for other in [
+        "two cards from your graveyard",
+        "five +1/+1 counters",
+        "target creature",
+        "counters on target creature",
+    ] {
+        assert!(
+            !starts_counted_counter_placement(other),
+            "{other:?} is not a counted counter placement"
+        );
+    }
+}
+
+/// CR 400.1: whether a population leg constrains itself to `zone` — via either
+/// zone-property spelling (`InZone`, or an `InAnyZone` union covering it).
+fn leg_in_zone(tf: &TypedFilter, zone: Zone) -> bool {
+    TargetFilter::Typed(tf.clone())
+        .extract_zones()
+        .contains(&zone)
+}
+
+/// CR 608.2f + CR 603.10a: Shadows' Verdict's battlefield and graveyard
+/// populations are ONE simultaneous mass exile — a single `ChangeZoneAll`
+/// whose `Or` filter carries both zones, never a battlefield wipe chained
+/// ahead of a second zone-change event (Stonebound Mentor's
+/// leaves-the-graveyard trigger must still see the graveyard leg's cards
+/// leave after the battlefield leg exiled the Mentor itself).
+#[test]
+fn mass_exile_population_union_is_one_instruction() {
+    let verdict = parse_effect_chain(
+        "Exile all creatures and planeswalkers with mana value 3 or less from the battlefield and all creature and planeswalker cards with mana value 3 or less from all graveyards.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        verdict.sub_ability.is_none(),
+        "the two populations must be one effect, not a chained sub-ability"
+    );
+    let target = match &*verdict.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            origin: None,
+            target,
+            ..
+        } => target,
+        other => panic!("expected one mass exile with origin None, got {other:?}"),
+    };
+    let legs = typed_legs(target);
+    assert_eq!(
+        legs.len(),
+        4,
+        "expected four population legs, got {target:?}"
+    );
+    let cmc_le_3 = |tf: &TypedFilter| {
+        tf.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 3 }
+                }
+            )
+        })
+    };
+    assert!(
+        legs.iter().all(|tf| cmc_le_3(tf)),
+        "every leg carries the mana-value bound, got {target:?}"
+    );
+    let battlefield: Vec<&TypedFilter> = legs
+        .iter()
+        .copied()
+        .filter(|tf| leg_in_zone(tf, Zone::Battlefield))
+        .collect();
+    let graveyard: Vec<&TypedFilter> = legs
+        .iter()
+        .copied()
+        .filter(|tf| leg_in_zone(tf, Zone::Graveyard))
+        .collect();
+    assert_eq!(battlefield.len(), 2, "two battlefield legs, got {target:?}");
+    assert_eq!(graveyard.len(), 2, "two graveyard legs, got {target:?}");
+    for (group, zone) in [
+        (battlefield, Zone::Battlefield),
+        (graveyard, Zone::Graveyard),
+    ] {
+        assert!(
+            group.iter().any(|tf| has_type(tf, TypeFilter::Creature))
+                && group
+                    .iter()
+                    .any(|tf| has_type(tf, TypeFilter::Planeswalker)),
+            "each {zone:?} group needs a Creature leg and a Planeswalker leg, got {target:?}"
+        );
+    }
+    let zones = target.extract_zones();
+    assert_eq!(
+        zones.len(),
+        2,
+        "the scan must reach exactly Battlefield and Graveyard, got {zones:?}"
+    );
+    assert!(
+        zones.contains(&Zone::Battlefield) && zones.contains(&Zone::Graveyard),
+        "the scan must reach Battlefield and Graveyard, got {zones:?}"
+    );
+}
+
+/// CR 109.2 + CR 608.2f: Once More with Feeling — "Exile all permanents and
+/// all cards from all graveyards." The bare "all permanents" leg is a
+/// battlefield population, so it gains `InZone(Battlefield)` only because the
+/// "all cards from all graveyards" leg names a zone; the whole clause is one
+/// `ChangeZoneAll` with `origin: None`.
+#[test]
+fn mass_exile_bare_leg_gains_battlefield_beside_a_zoned_leg() {
+    let def = parse_effect_chain(
+        "Exile all permanents and all cards from all graveyards.",
+        AbilityKind::Spell,
+    );
+    assert!(def.sub_ability.is_none(), "one instruction, not a chain");
+    let target = match &*def.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            origin: None,
+            target,
+            ..
+        } => target,
+        other => panic!("expected one mass exile with origin None, got {other:?}"),
+    };
+    let legs = typed_legs(target);
+    assert_eq!(
+        legs.len(),
+        2,
+        "expected two population legs, got {target:?}"
+    );
+    assert!(
+        has_type(legs[0], TypeFilter::Permanent) && leg_in_zone(legs[0], Zone::Battlefield),
+        "the bare permanents leg is battlefield-scoped, got {target:?}"
+    );
+    assert!(
+        has_type(legs[1], TypeFilter::Card) && leg_in_zone(legs[1], Zone::Graveyard),
+        "the cards leg keeps its own graveyard zone, got {target:?}"
+    );
+}
+
+/// CR 608.2f + CR 109.2: a same-zone union ("Exile all creatures and all
+/// artifacts") is one battlefield population — returned UNCHANGED, with no
+/// `InZone` scoping injected (that belongs only beside a leg that names a
+/// zone; the resolver defaults an empty `extract_zones()` to the battlefield),
+/// and no chained second exile.
+#[test]
+fn mass_exile_same_zone_union_keeps_bare_legs_unscoped() {
+    let def = parse_effect_chain("Exile all creatures and all artifacts.", AbilityKind::Spell);
+    assert!(def.sub_ability.is_none(), "one instruction, not a chain");
+    let target = match &*def.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            origin: None,
+            target,
+            ..
+        } => target,
+        other => panic!("expected one mass exile with origin None, got {other:?}"),
+    };
+    let legs = typed_legs(target);
+    assert_eq!(
+        legs.len(),
+        2,
+        "expected two population legs, got {target:?}"
+    );
+    assert!(
+        legs.iter().all(|tf| tf.properties.is_empty()),
+        "a purely bare union carries no zone scoping, got {target:?}"
+    );
+    assert!(
+        legs.iter().any(|tf| has_type(tf, TypeFilter::Creature))
+            && legs.iter().any(|tf| has_type(tf, TypeFilter::Artifact)),
+        "expected Creature and Artifact legs, got {target:?}"
+    );
+}
+
+/// CR 608.2f: only a CROSS-zone union is claimed by the population-union recognizer. A union
+/// whose legs all name the one zone ("Exile all artifact and enchantment cards from all
+/// graveyards", Saprazzan Bailiff) is a single population: its parse keeps the single inferred
+/// origin the generic path always gave it.
+#[test]
+fn mass_exile_same_zone_union_keeps_its_single_origin() {
+    let def = parse_effect_chain(
+        "Exile all artifact and enchantment cards from all graveyards.",
+        AbilityKind::Spell,
+    );
+    assert!(def.sub_ability.is_none(), "one instruction, not a chain");
+    match &*def.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            origin: Some(Zone::Graveyard),
+            target,
+            ..
+        } => assert_eq!(typed_legs(target).len(), 2, "{target:?}"),
+        other => panic!("expected the single-origin graveyard exile, got {other:?}"),
+    }
+}
+
+/// Tested decline: a leg-scoped union is accepted only when the whole operand
+/// IS the union — an orphan instruction tail ("… and all artifacts and gain 2
+/// life") must not be swept into the population. The recognizer declines so
+/// the tail keeps its own clause path instead of being silently dropped.
+#[test]
+fn mass_exile_population_union_declines_orphan_instruction_tail() {
+    let rest = "creatures and all artifacts and gain 2 life";
+    let lower = rest.to_lowercase();
+    let mut ctx = ParseContext::default();
+    assert!(
+        imperative::try_parse_mass_exile_permanents_and_zones(rest, &lower, &mut ctx).is_none(),
+        "an orphan tail must decline, not be swallowed into one population"
+    );
+}
+
+/// Tested fence: a union whose legs all name one zone and are joined by a repeated "all" is not
+/// claimed (no cross-zone operation to unify), so the second population stays an honest gap
+/// instead of a second chained exile (the same parse the generic path gave before the union).
+/// Reach guard: the first leg parsed as a graveyard mass exile.
+#[test]
+fn mass_exile_same_zone_repeated_all_union_stays_an_honest_gap() {
+    let def = parse_effect_chain(
+        "Exile all artifact cards from all graveyards and all creature cards from all graveyards.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::ChangeZoneAll { .. }),
+        "reach guard: first leg is a graveyard mass exile, got {:?}",
+        def.effect
+    );
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("the second population is chained");
+    assert!(
+        matches!(&*sub.effect, Effect::Unimplemented { .. }),
+        "the same-zone repeated-all conjunct must stay unsupported, got {:?}",
+        sub.effect
+    );
+}
+
+/// CR 400.1 + CR 608.2c: the union refuses an operand whose anaphoric player's zone the filter
+/// would drop, exactly as the generic exile path does (Elder Brain's "from that player's hand"):
+/// accepting it would sweep every player's hand. Reach guard: the same shape without the
+/// anaphoric possessive is claimed.
+#[test]
+fn mass_exile_population_union_declines_an_unbound_anaphoric_zone() {
+    let claimed = "creatures from the battlefield and all cards from all hands";
+    let mut ctx = ParseContext::default();
+    assert!(
+        imperative::try_parse_mass_exile_permanents_and_zones(
+            claimed,
+            &claimed.to_lowercase(),
+            &mut ctx
+        )
+        .is_some(),
+        "reach guard: the cross-zone union without an anaphoric owner is claimed"
+    );
+    let anaphoric = "creatures from the battlefield and all cards from that player's hand";
+    let mut ctx = ParseContext::default();
+    assert!(
+        imperative::try_parse_mass_exile_permanents_and_zones(
+            anaphoric,
+            &anaphoric.to_lowercase(),
+            &mut ctx
+        )
+        .is_none(),
+        "an anaphoric player's zone with no bound owner must decline"
+    );
+}
+
+/// Tested fence: the mass-exile population union claims only "all
+/// <filter>" conjuncts that parse as `Typed` population legs. A possessive
+/// zone conjunct ("their graveyard") after a mass exile stays a strict
+/// failure (the pinned Strategic Betrayal shape: the first leg binds "they"
+/// to no player), and the deleted exile verb carry-forward must not return
+/// to re-head it into a second zone-change event.
+#[test]
+fn compound_mass_exile_possessive_zone_conjunct_stays_an_honest_gap() {
+    let def = parse_effect_chain(
+        "Exile all creatures they control and their graveyard.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::ChangeZoneAll { .. }),
+        "reach guard: first leg is a mass exile, got {:?}",
+        def.effect
+    );
+    let sub = def.sub_ability.as_ref().expect("second leg is chained");
+    assert!(
+        matches!(&*sub.effect, Effect::Unimplemented { .. }),
+        "the possessive-zone conjunct must stay unsupported, got {:?}",
+        sub.effect
+    );
+}
+
+/// Tested fence: a mass RETURN to hand is dispatched with one origin zone inferred from the
+/// whole remainder, so Soulquake's two-zone conjunction ("all creatures on the battlefield
+/// and all creature cards in graveyards") would carry the wrong origin for its first leg.
+/// The population-union recognizer is deliberately limited to mass exile; this card stays
+/// an honest gap until the return paths read each leg's own zone. Reach guard: the first
+/// leg parsed as a mass move, so the compound splitter was consulted.
+#[test]
+fn compound_mass_return_two_zone_conjunct_stays_an_honest_gap() {
+    let def = parse_effect_chain(
+        "Return all creatures on the battlefield and all creature cards in graveyards to their owners' hands.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::ChangeZoneAll { .. }),
+        "reach guard: first leg is a mass move, got {:?}",
+        def.effect
+    );
+    let sub = def.sub_ability.as_ref().expect("second leg is chained");
+    assert!(
+        matches!(&*sub.effect, Effect::Unimplemented { .. }),
+        "the mass-return conjunct must stay unsupported, got {:?}",
+        sub.effect
+    );
+}
+
 /// CR 608.2c + issue #6065: Inspiring Call — "Draw a card for each creature you
 /// control with a +1/+1 counter on it. Those creatures gain indestructible until
 /// end of turn." Unlike Nalia (whose `PutCounterAll` publishes a tracked set),
@@ -34256,12 +34648,13 @@ fn ultimate_nullification_exiles_creatures_and_all_graveyards() {
     );
 }
 
-/// Reach-guard: a pure permanent-type union with NO zone leg ("Exile all
-/// creatures and artifacts") must be DECLINED by the heterogeneous recognizer and
-/// keep the existing type-union lowering — crucially with NO `InZone(Battlefield)`
-/// scoping injected (that belongs only to the mixed permanent+zone form).
+/// CR 109.2: a purely bare leg union ("Exile all creatures and artifacts")
+/// is ONE battlefield population — the recognizer returns it UNCHANGED,
+/// with NO `InZone(Battlefield)` scoping injected (that belongs only beside
+/// a leg that names a zone; the resolver defaults an empty `extract_zones()`
+/// to the battlefield).
 #[test]
-fn exile_permanents_and_zones_declines_pure_type_union() {
+fn exile_pure_type_union_carries_no_zone_scoping() {
     let def = parse_effect_chain("Exile all creatures and artifacts.", AbilityKind::Spell);
     let filters = match &*def.effect {
         Effect::ChangeZoneAll {
@@ -106244,5 +106637,87 @@ fn each_target_player_bounds_comparison_to_the_sacrificing_player() {
     assert_eq!(
         target_filter_controller_ref(filter),
         Some(ControllerRef::ScopedPlayer)
+    );
+}
+
+#[test]
+fn issue_634_gyome_quantity_keeps_this_turn_and_activation_duration() {
+    let parsed = parse_oracle_text(
+        "Trample\nAt the beginning of your end step, create a number of Food tokens equal to the number of nontoken creatures you had enter the battlefield under your control this turn.\n{1}, Sacrifice a Food: Target creature gains indestructible until end of turn. Tap it.",
+        "Gyome, Master Chef",
+        &["Trample".to_string()],
+        &["Creature".to_string()],
+        &["Troll".to_string(), "Warlock".to_string()],
+    );
+    assert!(outer_gap_names(&parsed).is_empty(), "{parsed:#?}");
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("expected Gyome's end-step trigger");
+    };
+    assert_eq!(trigger.phase, Some(crate::types::phase::Phase::End));
+    let execute = trigger.execute.as_deref().unwrap();
+    assert_eq!(execute.duration, None);
+    let Effect::Token { name, count, .. } = execute.effect.as_ref() else {
+        panic!("expected Food token creation, got {:?}", execute.effect);
+    };
+    assert_eq!(name, "Food");
+    assert_eq!(
+        count,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::Controller,
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::NonToken])
+                ),
+            },
+        }
+    );
+    let [activation] = parsed.abilities.as_slice() else {
+        panic!("expected Gyome's activated ability");
+    };
+    assert_eq!(activation.duration, Some(Duration::UntilEndOfTurn));
+    assert!(matches!(
+        activation.effect.as_ref(),
+        Effect::GenericEffect {
+            duration: Some(Duration::UntilEndOfTurn),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn issue_634_emergent_sequence_counter_uses_historical_land_count() {
+    let parsed = parse_oracle_text(
+        "Search your library for a basic land card, put it onto the battlefield tapped, then shuffle. That land becomes a 0/0 green and blue Fractal creature that's still a land. Put a +1/+1 counter on it for each land you had enter the battlefield under your control this turn.",
+        "Emergent Sequence",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert!(outer_gap_names(&parsed).is_empty());
+    let mut definitions = Vec::new();
+    collect_parsed_roots(&parsed, false, &mut definitions);
+    let counter = definitions.last().unwrap();
+    assert_eq!(counter.duration, None);
+    let Effect::PutCounter {
+        target,
+        count,
+        counter_type,
+    } = counter.effect.as_ref()
+    else {
+        panic!("expected final counter placement, got {:?}", counter.effect);
+    };
+    assert_eq!(*counter_type, CounterType::Plus1Plus1);
+    // The recipient "it" still binds to the spell rather than the fetched land: a
+    // separate anaphor gap, recorded in `confirmed-misparses.toml`. This test pins
+    // only the historical land count.
+    let _ = target;
+    assert_eq!(
+        count,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::Controller,
+                filter: TargetFilter::Typed(TypedFilter::land()),
+            },
+        }
     );
 }

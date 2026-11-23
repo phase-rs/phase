@@ -446,6 +446,7 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::TargetObjectManaValue { .. }
         | QuantityRef::EventContextPlayerCount { .. }

@@ -33818,6 +33818,12 @@ pub(crate) fn record_activated_ability_placed(
     };
     let announced_zone = record.source_zone;
     let activation_cost = record.activation_cost.clone();
+    // CR 602.2a + CR 702.29a + CR 702.29f: Keep the announced cycling tag
+    // even when the discard takes the source out of the zone of its grant.
+    let ability_tag = record.ability_tag;
+    // CR 201.2: Use the English card name bound before the discard cost.
+    let cycle = (ability_tag == Some(AbilityTag::Cycling))
+        .then(|| (record.activator, record.source_lki.name.clone()));
     // CR 602.2a + CR 602.5b: the announced activation consumes its own key,
     // read off the placed entry's ability — never re-derived from
     // `(source_id, ability_index)`. Re-deriving post-payment would mis-record
@@ -33866,14 +33872,31 @@ pub(crate) fn record_activated_ability_placed(
         announced_zone,
         events,
     );
-    // CR 702.142b: Emit additional event when a boast ability is activated.
-    super::casting_targets::emit_keyword_ability_event_if_tagged(
-        state,
-        source_id,
-        ability_index,
-        player,
-        events,
-    );
+    // CR 602.2b + CR 601.2h + CR 601.2i: Publish after payment at engine stack
+    // placement. CR 702.29c + CR 702.29e + CR 702.29f: The discard cost of
+    // either cycling or typecycling makes this the activator's cycled card.
+    if let Some((activator, name)) = cycle {
+        let record = crate::types::game_state::CyclingRecord {
+            name,
+            turn: state.turn_number,
+        };
+        let occurrence =
+            super::ledger::record_completed_cycle(state, activator, record, placed_entry);
+        super::stack::finalize_completed_cycle(state, placed_entry, occurrence);
+        events.push(GameEvent::Cycled {
+            player_id: player,
+            object_id: source_id,
+        });
+    } else {
+        // CR 702.142b + CR 702.177a: Publish other keyword activations.
+        super::casting_targets::emit_keyword_ability_event_if_tagged(
+            state,
+            source_id,
+            ability_index,
+            player,
+            events,
+        );
+    }
 }
 
 /// CR 602.2 + CR 601.2c: capture an activation's journal facts while they are
@@ -35021,6 +35044,7 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::ChosenNumber
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::DungeonsCompleted
         | QuantityRef::CostXPaid
         | QuantityRef::KickerCount
@@ -38300,7 +38324,9 @@ fn is_blocked_by_cant_be_cast_with(
 /// per-property matcher here.
 /// `fused` requests the COMBINED-characteristics projection (CR 702.102b) for a
 /// pre-payment fused split spell; payment-time callers pass `false` and rely on
-/// the `fused_split_spell` marker OR-gate inside `spell_cast_record_for`.
+/// the `fused_split_spell` marker OR-gate inside `spell_cast_record_for`. The
+/// `HasChosenName` arm reads only the caller's `fused` hint (never the persisted
+/// marker, which can be stale).
 /// `announced_x: Some(x)` reads the spell's mana value with X announced as `x`
 /// (CR 202.3e); `None` reads the object as it currently presents itself.
 fn cant_cast_filter_matches_for(
@@ -38315,12 +38341,12 @@ fn cant_cast_filter_matches_for(
     use crate::types::ability::ChosenAttribute;
 
     match filter {
-        // CR 201.2: "spells with the chosen name" — the shared spell-filter path
-        // has no top-level chosen-name variant, so match the spell name against
-        // the source's chosen name here.
+        // CR 201.2a + CR 709.4a + CR 709.4d: "spells with the chosen name" —
+        // the shared spell-filter path has no top-level chosen-name variant,
+        // so match the spell's names against the source's chosen name here.
         TargetFilter::HasChosenName => source_obj.chosen_attributes.iter().any(|a| match a {
             ChosenAttribute::CardName(n) => {
-                crate::game::filter::card_names_match(n, &spell_obj.name)
+                crate::game::filter::spell_has_chosen_name(spell_obj, fused, n)
             }
             ChosenAttribute::Color(_)
             | ChosenAttribute::CreatureType(_)

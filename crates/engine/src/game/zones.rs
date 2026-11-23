@@ -2368,7 +2368,10 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
 /// the same pass as the ones in `events`, so every co-entrant is read at one boundary — but not
 /// while another battlefield entry is still being made, when the boundary belongs to a chain run
 /// inside that entry and the held entrants' event is not complete.
-pub(crate) fn settle_battlefield_entry_observations(state: &mut GameState, events: &[GameEvent]) {
+pub(crate) fn settle_battlefield_entry_observations<'a>(
+    state: &mut GameState,
+    events: impl IntoIterator<Item = &'a GameEvent>,
+) {
     let parked_entry_keys: Vec<(u32, usize)> = state
         .parked_entry_events()
         .filter_map(|event| match event {
@@ -2383,30 +2386,33 @@ pub(crate) fn settle_battlefield_entry_observations(state: &mut GameState, event
     } else {
         &state.unsettled_entry_batch_events
     };
-    let pending: Vec<(usize, ObjectId, Option<u64>)> = held
-        .iter()
-        .chain(events.iter())
-        .filter_map(|event| match event {
-            GameEvent::ZoneChanged { to, record, .. } if *to == Zone::Battlefield => Some(record),
-            _ => None,
-        })
-        .filter(|record| {
-            record.recorded_turn_number == state.turn_number
-                && !state
-                    .battlefield_entry_observations
-                    .contains_key(&record.turn_zone_change_index)
+    // The entry's ledger key and entrant, read off the event alone so the held
+    // batch (borrowed from `state`) and the caller's events share one item type.
+    let entry_key = |event: &GameEvent| match event {
+        GameEvent::ZoneChanged {
+            to: Zone::Battlefield,
+            record,
+            ..
+        } => Some((
+            record.recorded_turn_number,
+            record.turn_zone_change_index,
+            record.object_id,
+            record.entered_incarnation,
+        )),
+        _ => None,
+    };
+    let mut entries: Vec<_> = held.iter().filter_map(entry_key).collect();
+    entries.extend(events.into_iter().filter_map(entry_key));
+    let pending: Vec<_> = entries
+        .into_iter()
+        .filter(|&(turn, index, _, _)| {
+            turn == state.turn_number
+                && state.battlefield_entry_observations.get(&index).is_none()
                 // CR 614.12a + CR 707.5: a parked mid-entry entry is matched by its ledger key,
                 // not by full event equality, so later record stamping cannot unpark it.
-                && !parked_entry_keys
-                    .contains(&(record.recorded_turn_number, record.turn_zone_change_index))
+                && !parked_entry_keys.contains(&(turn, index))
         })
-        .map(|record| {
-            (
-                record.turn_zone_change_index,
-                record.object_id,
-                record.entered_incarnation,
-            )
-        })
+        .map(|(_, index, object_id, entered_incarnation)| (index, object_id, entered_incarnation))
         .collect();
     if pending.is_empty() {
         return;
@@ -2426,6 +2432,19 @@ pub(crate) fn settle_battlefield_entry_observations(state: &mut GameState, event
             })
             .map(|obj| super::triggers::trigger_source_context_for_latch(state, obj));
         if let Some(observation) = observation {
+            // CR 611.3c: the ledger's type filters see the same entry-time
+            // characteristics as the trigger observation.
+            let entry_index = state
+                .battlefield_entry_zone_changes()
+                .position(|record| record.turn_zone_change_index == index);
+            if let Some(entry) = entry_index
+                .and_then(|index| state.battlefield_entries_this_turn.get_mut(index))
+                .filter(|entry| entry.object_id == object_id)
+            {
+                entry.core_types.clone_from(&observation.lki.card_types);
+                entry.subtypes.clone_from(&observation.lki.subtypes);
+                entry.supertypes.clone_from(&observation.lki.supertypes);
+            }
             state
                 .battlefield_entry_observations
                 .insert(index, observation);

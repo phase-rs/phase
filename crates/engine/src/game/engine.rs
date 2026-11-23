@@ -19114,6 +19114,7 @@ fn handle_play_land(
         Zone::Library
     };
 
+    let event_start = events.len();
     match commit_land_play(
         state,
         player,
@@ -19124,8 +19125,19 @@ fn handle_play_land(
         library_permission_src,
         events,
     ) {
-        // Player retains priority after playing a land
-        LandPlayCommit::Entered => Ok(WaitingFor::Priority { player }),
+        LandPlayCommit::Entered => {
+            // CR 116.2a + CR 611.3c: a completed special-action land play
+            // sees the continuous effects applying to the land as it enters.
+            let land_entries = events.iter().skip(event_start).filter(|event| {
+                matches!(event, GameEvent::ZoneChanged {
+                    object_id: entrant,
+                    to: Zone::Battlefield,
+                    ..
+                } if *entrant == object_id)
+            });
+            super::zones::settle_battlefield_entry_observations(state, land_entries);
+            Ok(WaitingFor::Priority { player })
+        }
         LandPlayCommit::AwaitingEntryChoice(waiting_for) => Ok(*waiting_for),
         LandPlayCommit::Prevented => Ok(WaitingFor::Priority {
             player: state.priority_player,

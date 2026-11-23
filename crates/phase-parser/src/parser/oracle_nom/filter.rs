@@ -362,7 +362,7 @@ pub(crate) fn parse_superlative_property_head(
 /// CR 208.1: Possessive phrase introducing a creature's *own* stat in a
 /// self-referential P/T comparison — "its", "their", or "that creature's".
 /// All refer to the candidate object itself, not the ability source.
-fn parse_pt_possessive(input: &str) -> OracleResult<'_, &str> {
+pub(crate) fn parse_pt_possessive(input: &str) -> OracleResult<'_, &str> {
     alt((tag("its "), tag("their "), tag("that creature's "))).parse(input)
 }
 
