@@ -8,6 +8,7 @@ import init, {
 } from "@wasm/engine";
 import { WasmAdapter } from "../../adapter/wasm-adapter";
 import type { GameAction, TrustedGameStateEnvelope } from "../../adapter/types";
+import { readIntegrationCards } from "../../test/helpers/integrationCards";
 import { captureTrustedCheckpoint, loadGameStrict, saveResumableGameStrict } from "../gamePersistence";
 
 let adapter: WasmAdapter;
@@ -15,8 +16,7 @@ let adapter: WasmAdapter;
 beforeAll(async () => {
   const bytes = await readFile(resolve(__dirname, "../../wasm/engine_wasm_bg.wasm"));
   await init({ module_or_path: await WebAssembly.compile(bytes) });
-  const fixture = await readFile(resolve(__dirname, "../../../../crates/engine/tests/fixtures/integration_cards.json.gz"));
-  const faces = JSON.parse(gunzipSync(fixture).toString("utf8")) as Record<string, unknown>;
+  const faces = await readIntegrationCards();
   const names = ["lightning greaves", "grizzly bears", "not of this world"];
   const cards = JSON.stringify(Object.fromEntries(names.map((name) => [name, faces[name]])));
   vi.stubGlobal("Worker", undefined);
