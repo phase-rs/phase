@@ -3,11 +3,12 @@ use engine::game::interaction::{
 };
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::ChosenAttribute;
+use engine::types::ability::{ChosenAttribute, Effect};
 use engine::types::actions::GameAction;
 use engine::types::events::{GameEvent, ManaResolutionShare};
 use engine::types::game_state::{
-    ActionResult, CastPaymentMode, LoopDetectionMode, StackEntryKind, WaitingFor,
+    ActionResult, CastPaymentMode, ExileLink, ExileLinkKind, LoopDetectionMode, ManaChoice,
+    StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{
@@ -744,6 +745,63 @@ fn tyvar_animated_caged_sun_forest_tap_cannot_be_undone_at_priority() {
     assert_undo_unavailable(&mut runner, forest);
     resolve_only_trigger(&mut runner, sun, 1);
     assert!(runner.state().objects[&forest].tapped);
+}
+
+/// CR 605.4a + CR 608.2p: an animated Extraplanar Lens pauses for its mana type after
+/// the Chamber's tap, so Tyvar's grant on the Lens is collected only once that choice
+/// is answered. The Chamber's tap is not undoable at any point.
+#[test]
+fn tyvar_animated_lens_echo_choice_leaves_no_undo_for_the_land() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let (mut scenario, _) = tyvar_board(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(
+        P0,
+        "March of the Machines",
+        "Each noncreature artifact is an artifact creature with power and toughness each equal to its mana value. (Equipment that's a creature can't equip a creature.)",
+    );
+    let lens = scenario.add_real_card(P0, "Extraplanar Lens", Zone::Battlefield, db);
+    let chamber = scenario.add_real_card(P0, "Simic Growth Chamber", Zone::Battlefield, db);
+    let imprinted = scenario.add_real_card(P0, "Simic Growth Chamber", Zone::Exile, db);
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.objects.get_mut(&chamber).expect("Chamber").tapped = false;
+    state.exile_links.push(ExileLink {
+        source_id: lens,
+        exiled_id: imprinted,
+        kind: ExileLinkKind::TrackedBySource,
+    });
+    state.layers_dirty.mark_full();
+    let ability_index =
+        engine::game::casting::activated_ability_definitions(runner.state(), chamber)
+            .into_iter()
+            .find(|(_, ability)| matches!(&*ability.effect, Effect::Mana { .. }))
+            .expect("the Chamber's printed mana ability")
+            .0;
+
+    // The raw activation leaves the Lens's echo type to a real choice.
+    let tapped = runner
+        .act(GameAction::ActivateAbility {
+            source_id: chamber,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("tap the Chamber for mana");
+    assert!(
+        matches!(tapped.waiting_for, WaitingFor::ChooseManaColor { .. }),
+        "the Lens pauses for its mana type, got {:?}",
+        tapped.waiting_for
+    );
+    runner
+        .act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Green),
+            count: 1,
+        })
+        .expect("choose green for the Lens");
+    assert_eq!(runner.state().players[0].mana_pool.total(), 3);
+    assert_top_trigger(&runner, lens);
+    assert_undo_unavailable(&mut runner, chamber);
+    resolve_only_trigger(&mut runner, lens, 1);
+    assert!(runner.state().objects[&chamber].tapped);
 }
 
 #[test]

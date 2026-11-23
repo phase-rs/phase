@@ -1388,7 +1388,9 @@ pub(crate) fn activate_mana_source_option_with_output_and_settle(
 /// set off (Vorinclex, Caged Sun), whose source is not the land. No tap is
 /// recorded while any ordinary observer of mana production is deferred: the
 /// record does not attribute such an observer to one tap, so within a payment
-/// a tap made after an observed one is not undoable either.
+/// a tap made after an observed one is not undoable either. A tap whose
+/// triggered mana abilities are still suspended on a choice is not recorded:
+/// their observers are collected only once the choice is answered.
 /// Callers decide the penalty axis (`ManaSourcePenalty::is_undoable`) first.
 pub(crate) fn record_undoable_mana_tap(
     state: &mut GameState,
@@ -1411,6 +1413,7 @@ pub(crate) fn record_undoable_mana_tap(
         )
     });
     if !completed_unobserved
+        || state.pending_triggered_mana_resume.is_some()
         || state
             .deferred_triggers
             .iter()
