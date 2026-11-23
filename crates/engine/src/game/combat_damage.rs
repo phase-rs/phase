@@ -934,14 +934,7 @@ fn collect_damage_assignments(
         }
 
         let has_deathtouch = obj.has_keyword(&Keyword::Deathtouch);
-        // CR 702.19c takes precedence when both present — it subsumes regular trample behavior
-        let trample = if obj.has_keyword(&Keyword::TrampleOverPlaneswalkers) {
-            Some(TrampleKind::OverPlaneswalkers)
-        } else if obj.has_keyword(&Keyword::Trample) {
-            Some(TrampleKind::Standard)
-        } else {
-            None
-        };
+        let trample = combat_trample_kind(obj);
 
         // CR 510.1c + CR 702.19b: Check if interactive assignment is needed
         // (2+ blockers, or a single-blocker trample attacker with excess damage).
@@ -1357,6 +1350,45 @@ fn assign_trample_over_pw_excess(
     result
 }
 
+/// Which trample variant `obj` assigns combat damage with, if any.
+fn combat_trample_kind(obj: &GameObject) -> Option<TrampleKind> {
+    // CR 702.19c takes precedence when both present — it subsumes regular trample behavior.
+    if obj.has_keyword(&Keyword::TrampleOverPlaneswalkers) {
+        Some(TrampleKind::OverPlaneswalkers)
+    } else if obj.has_keyword(&Keyword::Trample) {
+        Some(TrampleKind::Standard)
+    } else {
+        None
+    }
+}
+
+/// Where a trampler's damage beyond its blockers' lethal damage goes (CR 702.19b). The one
+/// authority for combat's automatic assignment and for the forecast's first-step preview.
+fn assign_trample_excess(
+    state: &GameState,
+    attacker_info: &AttackerInfo,
+    trample_kind: TrampleKind,
+    excess: u32,
+) -> Vec<DamageAssignment> {
+    if trample_kind == TrampleKind::OverPlaneswalkers
+        && matches!(attacker_info.attack_target, AttackTarget::Planeswalker(..))
+    {
+        // CR 702.19c: Split excess between the planeswalker (up to loyalty) and its controller.
+        // CR 702.19e: If the planeswalker left combat, excess goes to the defending player.
+        assign_trample_over_pw_excess(state, attacker_info, excess)
+    } else {
+        // CR 702.19f + CR 506.4c: Excess follows the live attack target, with no
+        // fallback to the defending player if the attacked permanent left combat.
+        match attacker_info.resolve_damage_target(state, false) {
+            Some(target) => vec![DamageAssignment {
+                target,
+                amount: excess,
+            }],
+            None => Vec::new(),
+        }
+    }
+}
+
 fn combat_damage_assignment_modes(
     obj: &GameObject,
     blocked: bool,
@@ -1411,24 +1443,8 @@ fn assign_attacker_damage(
             if attacker_info.blocked {
                 // CR 702.19d: Trample (both variants) — blocked but no blockers remaining,
                 // assign all damage to attack target as though lethal was assigned.
-                if trample.is_some() {
-                    let is_over_pw = trample == Some(TrampleKind::OverPlaneswalkers);
-                    if is_over_pw
-                        && matches!(attacker_info.attack_target, AttackTarget::Planeswalker(..))
-                    {
-                        // CR 702.19d + CR 702.19c: Trample-over-PW with no blockers attacking PW
-                        return assign_trample_over_pw_excess(state, attacker_info, power);
-                    }
-                    // CR 702.19d: Standard trample with no blockers — all to attack target
-                    match attacker_info.resolve_damage_target(state, false) {
-                        Some(target) => {
-                            return vec![DamageAssignment {
-                                target,
-                                amount: power,
-                            }]
-                        }
-                        None => return Vec::new(),
-                    }
+                if let Some(trample_kind) = trample {
+                    return assign_trample_excess(state, attacker_info, trample_kind, power);
                 }
                 // CR 509.1h + CR 510.1c: Non-trample blocked creature with all
                 // blockers removed — still "blocked" and assigns no damage.
@@ -1467,27 +1483,12 @@ fn assign_attacker_damage(
                         amount: to_blocker,
                     }];
                     if excess > 0 {
-                        if trample_kind == TrampleKind::OverPlaneswalkers
-                            && matches!(attacker_info.attack_target, AttackTarget::Planeswalker(..))
-                        {
-                            // CR 702.19c: Trample-over-PW attacking PW — split excess
-                            // between PW (up to loyalty) and PW controller.
-                            result.extend(assign_trample_over_pw_excess(
-                                state,
-                                attacker_info,
-                                excess,
-                            ));
-                        } else {
-                            // CR 702.19f: Standard trample or trample-over-PW attacking
-                            // non-PW — excess goes to the attack target directly.
-                            if let Some(target) = attacker_info.resolve_damage_target(state, false)
-                            {
-                                result.push(DamageAssignment {
-                                    target,
-                                    amount: excess,
-                                });
-                            }
-                        }
+                        result.extend(assign_trample_excess(
+                            state,
+                            attacker_info,
+                            trample_kind,
+                            excess,
+                        ));
                     }
                     result
                 } else {
@@ -1564,7 +1565,7 @@ pub fn combat_damage_to_defender(
     if power == 0 {
         return 0;
     }
-    let has_trample = attacker.has_keyword(&Keyword::Trample);
+    let trample = combat_trample_kind(attacker);
     let has_deathtouch = attacker.has_keyword(&Keyword::Deathtouch);
     let has_double_strike = attacker.has_keyword(&Keyword::DoubleStrike);
     let attacker_strikes_first = has_double_strike || attacker.has_keyword(&Keyword::FirstStrike);
@@ -1608,7 +1609,7 @@ pub fn combat_damage_to_defender(
                     ),
                 )
             }));
-            let step = assign_step_to_defender(&slots, power, has_trample);
+            let step = assign_step_to_defender(&slots, power, trample.is_some());
             assignments.extend(step.to_blockers.into_iter().map(|(id, amount)| {
                 (
                     attacker_id,
@@ -1618,31 +1619,32 @@ pub fn combat_damage_to_defender(
                     },
                 )
             }));
-            if step.to_player > 0 {
+            if let Some(trample_kind) = trample.filter(|_| step.to_player > 0) {
                 let declared_attack = state.combat.as_ref().and_then(|combat| {
                     combat
                         .attackers
                         .iter()
                         .find(|info| info.object_id == attacker_id)
                 });
-                let target = match declared_attack {
-                    // CR 702.19b + CR 506.4c: standard trample follows the live attack target.
-                    Some(info) => info.resolve_damage_target(state, false),
+                let excess_assignments = match declared_attack {
+                    Some(info) => assign_trample_excess(state, info, trample_kind, step.to_player),
                     // Assume a defending player only before the attack is declared.
-                    None => Some(DamageTarget::Player(forecast_defending_player(
-                        state, attacker, blockers,
-                    ))),
+                    None => vec![DamageAssignment {
+                        target: DamageTarget::Player(forecast_defending_player(
+                            state, attacker, blockers,
+                        )),
+                        amount: step.to_player,
+                    }],
                 };
-                if let Some(target) = target {
-                    to_player += step.to_player;
-                    assignments.push((
-                        attacker_id,
-                        DamageAssignment {
-                            target,
-                            amount: step.to_player,
-                        },
-                    ));
-                }
+                to_player += excess_assignments
+                    .iter()
+                    .map(|assignment| assignment.amount)
+                    .sum::<u32>();
+                assignments.extend(
+                    excess_assignments
+                        .into_iter()
+                        .map(|assignment| (attacker_id, assignment)),
+                );
             }
         }
         // CR 702.7b: first-striking blockers assign now, and can kill the attacker
@@ -1722,7 +1724,7 @@ pub fn combat_damage_to_defender(
         if power == 0 {
             return to_player as i32;
         }
-        let has_trample = attacker.has_keyword(&Keyword::Trample);
+        let has_trample = combat_trample_kind(attacker).is_some();
         let has_deathtouch = attacker.has_keyword(&Keyword::Deathtouch);
         // CR 506.4: a blocker removed from combat is no longer owed lethal damage. Each
         // remaining blocker is owed it counting what the first step marked on it

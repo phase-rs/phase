@@ -203,12 +203,23 @@ fn declare_attacks_and_blocks(
     attacks: &[(ObjectId, AttackTarget)],
     blocks: &[(ObjectId, ObjectId)],
 ) {
+    declare_attacks_and_blocks_until(runner, attacks, blocks, Phase::CombatDamage);
+}
+
+fn declare_attacks_and_blocks_until(
+    runner: &mut GameRunner,
+    attacks: &[(ObjectId, AttackTarget)],
+    blocks: &[(ObjectId, ObjectId)],
+    stop_at: Phase,
+) {
     let mut declared_attackers = false;
     let mut declared_blockers = false;
     for _ in 0..64 {
         match &runner.state().waiting_for {
             WaitingFor::AssignCombatDamage { .. } => break,
-            WaitingFor::Priority { .. } if runner.state().phase == Phase::CombatDamage => break,
+            WaitingFor::Priority { .. } if declared_blockers && runner.state().phase == stop_at => {
+                break;
+            }
             WaitingFor::Priority { .. } => {
                 runner.act(GameAction::PassPriority).expect("pass priority");
             }
@@ -1670,4 +1681,65 @@ fn zilortha_forecast_preserves_planeswalker_damage_destination() {
     let actual = loyalty_before - loyalty_after_first + regular_damage;
     assert_eq!(actual, 22);
     assert_eq!(i64::from(forecast), i64::from(actual));
+}
+
+#[test]
+fn zilortha_forecast_counts_trample_over_removed_planeswalker() {
+    let mut scenario = board();
+    let thrasta = printed(
+        &mut scenario,
+        P0,
+        "Thrasta, Tempest's Roar",
+        (7, 7),
+        &["Trample", "Haste", "Trample over planeswalkers"],
+        "This spell costs {3} less to cast for each other spell cast this turn.\nTrample, haste\nTrample over planeswalkers (This creature can deal excess combat damage to the controller of the planeswalker it's attacking.)\nThrasta has hexproof as long as it entered this turn.",
+    );
+    let mastery = battle_mastery(&mut scenario);
+    let karn = scenario
+        .add_creature(P1, "Karn Liberated", 0, 0)
+        .as_planeswalker_with_loyalty("Karn", 6)
+        .as_legendary()
+        .id();
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let downfall = scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Hero's Downfall",
+            true,
+            "Destroy target creature or planeswalker.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    cast_at(&mut runner, mastery, thrasta);
+
+    declare_attacks_and_blocks_until(
+        &mut runner,
+        &[(thrasta, AttackTarget::Planeswalker(karn))],
+        &[(bears, thrasta)],
+        Phase::DeclareBlockers,
+    );
+    // CR 509.2: Pass the active player's post-blocks priority to the defender.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("pass priority to P1");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    cast_at(&mut runner, downfall, karn);
+    assert_eq!(zone(&runner, karn), Zone::Graveyard);
+
+    let forecast = combat_damage_to_defender(runner.state(), thrasta, &[bears]);
+    let life_before = runner.life(P1);
+    runner.combat_damage();
+    assert_eq!(prompt_minimum(&runner, bears), 2);
+    assign(&mut runner, bears, 2, 5).expect("Thrasta assigns 2 to Bears and 5 to P1");
+    assert_eq!(zone(&runner, bears), Zone::Graveyard);
+    // CR 702.19e + CR 702.4b: The first step spills 5 to P1 and the regular step deals 7.
+    assert_eq!(life_before - runner.life(P1), 5);
+    finish_combat(&mut runner);
+    let actual = life_before - runner.life(P1);
+    assert_eq!(actual, 12);
+    assert_eq!(forecast, actual);
 }
