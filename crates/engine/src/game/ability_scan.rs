@@ -13406,6 +13406,13 @@ mod tests {
                  resolution) intersected with the battlefield, not a board-scaling mass read",
             ),
             (
+                "effect.rs",
+                false,
+                "GenericEffect broadcast bind (affected_object_ids): snapshots the objects the \
+                 filter names once, when the effect begins (CR 611.2c); GenericEffect relaxes \
+                 in effect_target_ctx and effect_census_role",
+            ),
+            (
                 "mana.rs",
                 false,
                 "bounded aggregate: distinct_colors_among_permanents returns <=5 colors, \

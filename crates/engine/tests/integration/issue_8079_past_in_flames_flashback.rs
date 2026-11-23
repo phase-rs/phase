@@ -431,7 +431,10 @@ fn a_card_with_a_printed_flashback_gains_a_second_cost_option() {
     assert!(casts_offered(&runner, strike_it_rich) >= 1);
     runner.cast(strike_it_rich).resolve();
     assert_eq!(runner.state().objects[&strike_it_rich].zone, Zone::Exile);
-    assert!(runner.battlefield_names().contains(&"Treasure".to_string()));
+    assert!(runner
+        .battlefield_names()
+        .iter()
+        .any(|name| name == "Treasure"));
     assert_only_the_spare_is_left(&runner);
 }
 
