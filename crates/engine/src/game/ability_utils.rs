@@ -12721,6 +12721,7 @@ pub(crate) fn unchanged_targets_stay_legal(
     bindings: &[RetargetSlotBinding],
     changed: &dyn Fn(usize) -> bool,
     pool_controller: PlayerId,
+    trigger_context: Option<crate::game::targeting::StackTriggerContext<'_>>,
 ) -> Result<(), EngineError> {
     let slot_is_legal = |chain: &ResolvedAbility,
                          path: &[ChainStep],
@@ -12743,20 +12744,22 @@ pub(crate) fn unchanged_targets_stay_legal(
         let judged = bound.as_ref().unwrap_or(node);
         if crate::types::ability::filter_reads_declared_slot(filter) {
             let view = retarget_declared_view(pre, chain);
-            targeting::find_legal_targets_for_ability_with_view(
+            targeting::find_legal_targets_for_ability_with_view_and_trigger_context(
                 state,
                 filter,
                 judged,
                 pool_controller,
                 &view,
+                trigger_context,
             )
             .contains(current)
         } else {
-            targeting::find_legal_targets_for_ability_with_controller(
+            targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
                 state,
                 filter,
                 judged,
                 pool_controller,
+                trigger_context,
             )
             .contains(current)
         }
@@ -12827,6 +12830,7 @@ pub(crate) fn changed_dependent_targets_are_legal(
     bindings: &[RetargetSlotBinding],
     changed: &dyn Fn(usize) -> bool,
     pool_controller: PlayerId,
+    trigger_context: Option<crate::game::targeting::StackTriggerContext<'_>>,
 ) -> Result<(), EngineError> {
     let view = retarget_declared_view(pre, post);
     for (i, binding) in bindings.iter().enumerate() {
@@ -12850,19 +12854,21 @@ pub(crate) fn changed_dependent_targets_are_legal(
         };
         let judged = bound.as_ref().unwrap_or(post_node);
         let legal = if reads_declared_slot {
-            targeting::find_legal_targets_for_ability_with_view(
+            targeting::find_legal_targets_for_ability_with_view_and_trigger_context(
                 state,
                 filter,
                 judged,
                 pool_controller,
                 &view,
+                trigger_context,
             )
         } else {
-            targeting::find_legal_targets_for_ability_with_controller(
+            targeting::find_legal_targets_for_ability_with_controller_and_trigger_context(
                 state,
                 filter,
                 judged,
                 pool_controller,
+                trigger_context,
             )
         };
         if !legal.contains(post_current) {

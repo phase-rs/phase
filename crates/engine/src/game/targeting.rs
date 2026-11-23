@@ -22,7 +22,7 @@ use std::collections::HashSet;
 /// replacing `GameState::current_trigger_event` with ambient state.
 #[derive(Debug, Clone, Copy)]
 pub struct StackTriggerContext<'a> {
-    pub(crate) event: &'a GameEvent,
+    pub(crate) event: Option<&'a GameEvent>,
     pub(crate) events: &'a [GameEvent],
 }
 
@@ -30,30 +30,33 @@ impl<'a> StackTriggerContext<'a> {
     /// CR 603.7c: a non-empty per-entry batch is authoritative for both the
     /// singular representative event and the full batched event slice. A
     /// non-batched triggered entry falls back to its own stored event.
-    pub(crate) fn for_entry(state: &'a GameState, entry: &'a StackEntry) -> Option<Self> {
+    pub(crate) fn for_entry(state: &'a GameState, entry: &'a StackEntry) -> Self {
         if let Some(events) = state
             .stack_trigger_event_batches
             .get(&entry.id)
             .filter(|events| !events.is_empty())
         {
-            return Some(Self {
-                event: events.first().expect("non-empty trigger event batch"),
+            return Self {
+                event: events.first(),
                 events,
-            });
+            };
         }
         match &entry.kind {
             StackEntryKind::TriggeredAbility {
                 trigger_event: Some(event),
                 ..
-            } => Some(Self {
-                event,
+            } => Self {
+                event: Some(event),
                 events: std::slice::from_ref(event),
-            }),
+            },
             StackEntryKind::Spell { .. }
             | StackEntryKind::ActivatedAbility { .. }
             | StackEntryKind::TriggeredAbility { .. }
             | StackEntryKind::KeywordAction { .. }
-            | StackEntryKind::CombatDamage { .. } => None,
+            | StackEntryKind::CombatDamage { .. } => Self {
+                event: None,
+                events: &[],
+            },
         }
     }
 }
@@ -115,22 +118,21 @@ fn ability_target_filter_context_with_trigger_context<'a>(
         return context;
     };
     let context = context.with_stack_trigger_context(trigger_context);
-    let Some(object_id) = extract_source_from_event(trigger_context.event) else {
+    let Some(event) = trigger_context.event else {
         return context;
     };
-    let incarnation = match trigger_context.event {
+    let Some(object_id) = extract_source_from_event(event) else {
+        return context;
+    };
+    let incarnation = match event {
         GameEvent::ZoneChanged {
             to: Zone::Battlefield,
             record,
             ..
         } => record.entered_incarnation,
         GameEvent::ZoneChanged { .. } => None,
-        _ => event_context_incarnation(
-            &TargetFilter::TriggeringSource,
-            trigger_context.event,
-            object_id,
-        )
-        .map(|reference| reference.incarnation),
+        _ => event_context_incarnation(&TargetFilter::TriggeringSource, event, object_id)
+            .map(|reference| reference.incarnation),
     };
     context.with_triggering_object(TriggeringObjectRef {
         object_id,

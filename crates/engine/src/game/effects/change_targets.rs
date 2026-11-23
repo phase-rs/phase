@@ -150,7 +150,9 @@ pub fn resolve(
     // (Invariant SC, `chain_retarget_slots`' doc) — this and the interactive
     // path below are its TWO call sites, both in this file.
     let entry = &state.stack[stack_entry_index];
-    let trigger_context = crate::game::targeting::StackTriggerContext::for_entry(state, entry);
+    let trigger_context = Some(crate::game::targeting::StackTriggerContext::for_entry(
+        state, entry,
+    ));
     let base = legal_new_targets_for_entry(state, entry, trigger_context);
     let pool_controller = retarget_pool_controller(state, entry, &stack_ability);
     let mut slot_pools: Vec<Vec<TargetRef>> = exposed
@@ -256,7 +258,9 @@ pub(crate) fn retarget_prompt(
         return None;
     }
     let slots: Vec<_> = exposed.iter().map(|b| b.address.clone()).collect();
-    let trigger_context = crate::game::targeting::StackTriggerContext::for_entry(state, entry);
+    let trigger_context = Some(crate::game::targeting::StackTriggerContext::for_entry(
+        state, entry,
+    ));
     let base = legal_new_targets_for_entry(state, entry, trigger_context);
     let mut slot_pools = derive_slot_pools(state, entry, stack_ability, exposed, trigger_context);
     // CR 115.7a + CR 400.7: Single must elect a different target occurrence.
@@ -601,7 +605,9 @@ pub fn legal_new_targets_for_stack_entry(
         .stack
         .get(stack_entry_index)
         .map(|entry| {
-            let context = crate::game::targeting::StackTriggerContext::for_entry(state, entry);
+            let context = Some(crate::game::targeting::StackTriggerContext::for_entry(
+                state, entry,
+            ));
             legal_new_targets_for_entry(state, entry, context)
         })
         .unwrap_or_default()

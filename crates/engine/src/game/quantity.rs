@@ -8245,14 +8245,13 @@ fn object_lookback_event(
     ability: Option<&ResolvedAbility>,
     trigger_context: Option<StackTriggerContext<'_>>,
 ) -> Option<GameEvent> {
-    trigger_context
-        .map(|context| context.event.clone())
-        .or_else(|| {
-            ability
-                .and_then(|a| a.context.creation_lookback_event.as_deref())
-                .cloned()
-        })
-        .or_else(|| current_or_detection_trigger_event(state))
+    let creation_lookback = ability
+        .and_then(|a| a.context.creation_lookback_event.as_deref())
+        .cloned();
+    match trigger_context {
+        Some(context) => creation_lookback.or_else(|| context.event.cloned()),
+        None => creation_lookback.or_else(|| current_or_detection_trigger_event(state)),
+    }
 }
 
 /// CR 603.2 + CR 603.7 + CR 608.2h: whether an object look-back read has a triggering-event source.
@@ -9492,10 +9491,11 @@ fn event_source_mana_value_override(
     state: &GameState,
     trigger_context: Option<StackTriggerContext<'_>>,
 ) -> Option<i32> {
-    match trigger_context
-        .map(|context| context.event.clone())
-        .or_else(|| current_or_detection_trigger_event(state))?
-    {
+    let event = match trigger_context {
+        Some(context) => context.event.cloned(),
+        None => current_or_detection_trigger_event(state),
+    }?;
+    match event {
         GameEvent::SagaChapterAbilityResolved { saga, .. } => {
             Some(u32_to_i32_saturating(saga.lki.mana_value))
         }

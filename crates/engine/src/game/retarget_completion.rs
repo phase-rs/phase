@@ -444,7 +444,9 @@ impl<'s> RetargetSearch<'s> {
         if bindings.is_empty() {
             return None;
         }
-        let trigger_context = crate::game::targeting::StackTriggerContext::for_entry(state, entry);
+        let trigger_context = Some(crate::game::targeting::StackTriggerContext::for_entry(
+            state, entry,
+        ));
         let slot_pools = crate::game::effects::change_targets::derive_slot_pools(
             state,
             entry,

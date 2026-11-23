@@ -17667,7 +17667,9 @@ pub(crate) fn validate_retarget_submission(
             "Invalid stack entry index for retargeting".to_string(),
         ));
     };
-    let trigger_context = crate::game::targeting::StackTriggerContext::for_entry(state, entry);
+    let trigger_context = Some(crate::game::targeting::StackTriggerContext::for_entry(
+        state, entry,
+    ));
 
     // CR 115.7d + CR 601.2c: derived here (rather than only after the match
     // below) because H3's outer-empty re-derivation needs it before
@@ -17960,6 +17962,7 @@ pub(crate) fn validate_retarget_submission(
         &derived,
         &changed,
         pool_controller,
+        trigger_context,
     )?;
     crate::game::ability_utils::changed_dependent_targets_are_legal(
         state,
@@ -17968,6 +17971,7 @@ pub(crate) fn validate_retarget_submission(
         &derived,
         &changed,
         pool_controller,
+        trigger_context,
     )?;
     Ok(mutated)
 }
