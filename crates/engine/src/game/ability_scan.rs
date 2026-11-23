@@ -4846,7 +4846,8 @@ fn scan_parsed_condition(x: &ParsedCondition, mode: ScanMode) -> Axes<'_> {
         }
         ParsedCondition::IsOpponentsTurn => Axes::NONE,
         // CR 601.2c: the targets the spell being cast has chosen.
-        ParsedCondition::SpellTargetsFilter { filter } => {
+        ParsedCondition::SourceMatchesFilter { filter }
+        | ParsedCondition::SpellTargetsFilter { filter } => {
             scan_target_filter(filter, FilterReadContext::SnapshotOrEvent, mode)
         }
         ParsedCondition::And { conditions } | ParsedCondition::Or { conditions } => conditions
@@ -13405,6 +13406,13 @@ mod tests {
                  resolution-time division) are the \
                  chain's tracked set (published by an earlier instruction of the same \
                  resolution) intersected with the battlefield, not a board-scaling mass read",
+            ),
+            (
+                "effect.rs",
+                false,
+                "GenericEffect broadcast bind (affected_object_ids): snapshots the objects the \
+                 filter names once, when the effect begins (CR 611.2c); GenericEffect relaxes \
+                 in effect_target_ctx and effect_census_role",
             ),
             (
                 "mana.rs",

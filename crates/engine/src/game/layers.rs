@@ -12388,20 +12388,22 @@ fn unstarted_effect_generator_is_suppressed(
 ///   `StackSpell`-filtered statics); `{keywords, controller}` reset. CR 112.2: this pass also
 ///   reseeds each stack object's controller from its `StackEntry` default.
 ///
-/// SCOPE OF THIS PREDICATE — it does NOT govern the keyword half only. Its single call site
-/// is `collect_scan_zones`' `TargetFilter::SpecificObject` arm, which picks the scan zone for
-/// EVERY identity-filtered continuous effect regardless of modification kind. That includes
-/// the `ContinuousModification::ChangeController` that `exchange_control::resolve` installs on
-/// a stolen spell, so `Zone::Stack`'s membership here is load-bearing for the CR 613.1b
-/// controller derivation and not merely for keyword grants. Narrowing this predicate would
-/// silently stop a stolen spell's control change from reaching its object.
+/// SCOPE OF THIS PREDICATE — it does NOT govern the keyword half only. It has two callers:
+/// `effects::effect::affected_object_ids`, which binds a resolution-time grant only to cards in
+/// the zones the pass does not own, and `collect_scan_zones`' `TargetFilter::SpecificObject`
+/// arm, which picks the scan zone for EVERY identity-filtered continuous effect regardless of
+/// modification kind. That includes the `ContinuousModification::ChangeController` that
+/// `exchange_control::resolve` installs on a stolen spell, so `Zone::Stack`'s membership here
+/// is load-bearing for the CR 613.1b controller derivation and not merely for keyword grants.
+/// Narrowing this predicate would silently stop a stolen spell's control change from reaching
+/// its object.
 ///
 /// Every OTHER zone (library, graveyard, exile) is owned by `off_zone_characteristics`, which
 /// computes keywords ON DEMAND from base + active effects and never materializes them.
 /// `keywords::object_has_effective_keyword_kind` is the reader that routes by exactly this
 /// split. Materializing into an off-zone object from here would install a second writer behind
 /// that authority's back.
-fn layer_pass_materializes_keywords(zone: Zone) -> bool {
+pub(crate) fn layer_pass_materializes_keywords(zone: Zone) -> bool {
     matches!(zone, Zone::Battlefield | Zone::Hand | Zone::Stack)
 }
 
