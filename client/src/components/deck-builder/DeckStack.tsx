@@ -200,6 +200,10 @@ function DeckStackCard({
   const showAddButton = item.section === "main";
   // Same-name tiles differ only by printing, so their controls name it too.
   const controlName = item.printingLabel ? `${item.name} (${item.printingLabel})` : item.name;
+  const removeLabel =
+    item.section === "commander"
+      ? t("stack.removeCommander", { name: item.name })
+      : t("stack.removeOne", { name: controlName });
   // The commander isn't part of the main/maybeboard partition, so it has no
   // move target. Main cards move out to the sideboard/maybeboard; second-section
   // cards move back to main — the destination is shown on the button label so
@@ -282,6 +286,7 @@ function DeckStackCard({
             onClick={handleAdd}
             disabled={!canAdd}
             className="absolute right-10 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-black/78 text-sm font-bold text-emerald-300 transition hover:bg-emerald-500/85 hover:text-white disabled:cursor-not-allowed disabled:text-slate-500 disabled:hover:bg-black/78"
+            aria-label={canAdd ? t("stack.addOne", { name: controlName }) : t("stack.copyLimit", { name: controlName })}
             title={canAdd ? t("stack.addOne", { name: controlName }) : t("stack.copyLimit", { name: controlName })}
           >
             +
@@ -290,11 +295,8 @@ function DeckStackCard({
         <button
           onClick={handleRemove}
           className="absolute right-2 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-black/78 text-sm font-bold text-red-300 transition hover:bg-red-500/85 hover:text-white"
-          title={
-            item.section === "commander"
-              ? t("stack.removeCommander", { name: item.name })
-              : t("stack.removeOne", { name: controlName })
-          }
+          aria-label={removeLabel}
+          title={removeLabel}
         >
           -
         </button>

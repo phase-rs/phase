@@ -793,6 +793,7 @@ describe('sourcePrinting capture', () => {
     ['a missing set code', { collectorNumber: '276' }],
     ['an empty set code', { setCode: '', collectorNumber: '276' }],
     ['an empty collector number', { setCode: 'one', collectorNumber: '' }],
+    ['a blank collector number', { setCode: 'one', collectorNumber: ' ' }],
   ])('keys a stored printing with %s like an entry without printing data', (_case, sourcePrinting) => {
     const entry = { count: 1, name: 'Forest' };
     const malformed = { ...entry, sourcePrinting } as DeckEntry;

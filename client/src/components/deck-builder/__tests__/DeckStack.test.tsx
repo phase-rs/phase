@@ -326,7 +326,8 @@ describe("DeckStack", () => {
       // The main tiles share a name, so each control names its printing.
       expect(screen.getByTitle("Add one Forest (ONE 276)")).toBeInTheDocument();
       expect(screen.getByTitle("Remove one Forest")).toBeInTheDocument();
-      fireEvent.click(screen.getByTitle("Add one Forest (DMU 277)"));
+      expect(screen.getByRole("button", { name: "Remove one Forest (DMU 277)" })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Add one Forest (DMU 277)" }));
       expect(onAddCard).toHaveBeenCalledWith(expect.objectContaining(dmu));
     } finally {
       consoleError.mockRestore();
