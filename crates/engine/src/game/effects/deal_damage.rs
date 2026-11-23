@@ -22,9 +22,9 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CombatPreventionTally, DamageBatchKind, DamageBatchLedger, DamageRecord, DistributionScope,
-    EventLosses, GameState, HeldBatchRider, PendingContinuation, PendingDamagePostCounter,
-    PreventedDamageEntry, ResidentDrainPolicy, RiderTiming, TriggerSourceRead, WaitingFor,
+    CombatPreventionTally, DamageBatchLedger, DamageRecord, DistributionScope, EventLosses,
+    GameState, HeldBatchRider, PendingContinuation, PendingDamagePostCounter, PreventedDamageEntry,
+    ResidentDrainPolicy, RiderTiming, TriggerSourceRead, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, KeywordKind, MatchedProtectionQuality};
@@ -2246,10 +2246,8 @@ fn run_damage_batch(
     // CR 615.13: so does its prevention tally (opened in Phase B); a batch nested in this one
     // (a rider's damage) aggregates on its own, and the enclosing tally is restored.
     let enclosing_tally = state.combat_prevention_tally.take();
-    let enclosing_tally_batch = state.prevention_tally_batch.take();
     let result = run_damage_batch_phases(state, ability, kind, replaced, portions, parked, events);
     state.combat_prevention_tally = enclosing_tally;
-    state.prevention_tally_batch = enclosing_tally_batch;
     state.damage_event_losses = enclosing;
     result
 }
@@ -2257,13 +2255,11 @@ fn run_damage_batch(
 /// CR 615.13: open a noncombat batch's prevention tally on what it has prevented so far.
 fn open_batch_prevention_tally(state: &mut GameState, entries: &[PreventedDamageEntry]) {
     state.combat_prevention_tally = Some(tally_map_from_record_entries(entries));
-    state.prevention_tally_batch = Some(DamageBatchKind::Noncombat);
 }
 
 /// CR 615.13: close the batch's prevention tally, as the entries a park carries or the
 /// publication fires.
 fn take_batch_prevention_tally(state: &mut GameState) -> Vec<PreventedDamageEntry> {
-    state.prevention_tally_batch = None;
     state
         .combat_prevention_tally
         .take()
@@ -2576,12 +2572,8 @@ fn run_damage_batch_phases(
     // `DamagePrevented` per (shield, recipient), and each shield's rider once, against what it
     // prevented across the batch.
     if !prevention.is_empty() {
-        let outcome = crate::game::combat_damage::fire_batch_prevention_riders(
-            state,
-            &prevention,
-            events,
-            true,
-        );
+        let outcome =
+            crate::game::combat_damage::fire_batch_prevention_riders(state, &prevention, events);
         // CR 104.1: a rider that ended the game ends the batch.
         if state.game_end.is_some() {
             return Ok(DamageTail::Caller);
@@ -3112,13 +3104,9 @@ pub(crate) fn hold_riders_for_awaited_portion<T>(
         .map(|parked| tally_map_from_record_entries(&parked.prevention_tally))
         .unwrap_or_default();
     let enclosing_tally = state.combat_prevention_tally.replace(parked_tally);
-    let enclosing_tally_batch = state
-        .prevention_tally_batch
-        .replace(DamageBatchKind::Noncombat);
     let result = answer(state);
     let prevention_tally = take_batch_prevention_tally(state);
     state.combat_prevention_tally = enclosing_tally;
-    state.prevention_tally_batch = enclosing_tally_batch;
     let held = take_held_riders(state);
     // CR 614.9: a capped redirect the answer applied splits a portion off into the batch too.
     let split = take_split_portions(state);
@@ -3895,7 +3883,10 @@ pub fn resolve_post_replacement(
 /// When absent (e.g. activated abilities), the ability's own source is read through
 /// its pinned announcement epoch: the live object only while it is still that
 /// incarnation, else that incarnation's exit LKI.
-fn damage_context_from_ability(state: &GameState, ability: &ResolvedAbility) -> DamageContext {
+pub(crate) fn damage_context_from_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> DamageContext {
     damage_context_for_subject(
         state,
         ability.source_id,
@@ -4179,7 +4170,7 @@ pub(super) fn damage_sources(state: &GameState, ability: &ResolvedAbility) -> Ve
 
 /// CR 120.3: the recipients of a `DealDamage` node. Shared by `resolve` and
 /// `stack_reach`, so a pending node is read with the resolver's own binding.
-pub(super) fn damage_recipients(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
+pub(crate) fn damage_recipients(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
     let Effect::DealDamage {
         damage_source,
         target: target_filter,

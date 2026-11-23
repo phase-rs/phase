@@ -29,13 +29,13 @@ use crate::types::ability::{DamageGuardReading, SettledDamageGuard};
 use crate::types::events::GameEvent;
 use crate::types::game_state::DamageBatchLedger;
 use crate::types::game_state::{
-    CombatPreventionTally, DamageBatchKind, DrainStatus, GameState, HeldBatchRider, LiminalEntry,
-    LiminalEntryKind, NamedChoiceSource, NamedChoiceSourceBinding, PayableResource,
-    PendingCombatLegChoice, PendingCombatLegProgress, PendingCostMoveResume, PendingReplacement,
-    PostReplacementDrain, ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity,
-    ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail,
-    ReplacementCandidateSummary, ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy,
-    ResolutionPaymentOrigin, RiderTiming, WaitingFor,
+    CombatPreventionTally, DrainStatus, GameState, HeldBatchRider, LiminalEntry, LiminalEntryKind,
+    NamedChoiceSource, NamedChoiceSourceBinding, PayableResource, PendingCombatLegChoice,
+    PendingCombatLegProgress, PendingCostMoveResume, PendingReplacement, PostReplacementDrain,
+    ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
+    ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail, ReplacementCandidateSummary,
+    ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy, ResolutionPaymentOrigin,
+    RiderTiming, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, ProtectionReplacementSourceExt};
 use crate::types::keywords::{
@@ -1032,9 +1032,9 @@ pub struct PausedRider {
 /// How a damage rider drain ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DamageRiderDrain {
-    /// The rider ran to completion, or (in combat) every pause it raised was settled.
+    /// The rider ran to completion.
     Completed,
-    /// The rider left a prompt standing (noncombat). `owner` is the frame of its paused work.
+    /// The rider left a prompt standing. `owner` is the frame of its paused work.
     Paused {
         owner: crate::types::game_state::PostReplacementFrameId,
     },
@@ -1103,25 +1103,15 @@ fn stash_post_replacement_continuation(
 /// Faith: "For each 1 damage prevented this way, put a +1/+1 counter on that creature.") takes
 /// place immediately afterward, each reading the amount latched on its own drain
 /// (`replaced_event_amount`). A rider queued behind another recipient's paused rider keeps its
-/// place in that queue (Command Zone #172).
+/// place in that queue (Command Zone #172). In combat the same order holds: a substitute that
+/// leaves its prompt standing parks the leg on it (`settle_combat_damage_replacement`), and the
+/// earlier rider runs after that answer (CR 615.5).
 fn stash_damage_substitute(
     state: &mut GameState,
     substitute: PostReplacementDrain,
     placement: Option<PausedRider>,
     events: &mut Vec<GameEvent>,
 ) {
-    if in_combat_damage_batch(state) {
-        // strict-failure: CR 615.5 puts the earlier rider after the substitute, but a combat
-        // leg can't park on a rider's prompt yet (Command Zone #267), and running the
-        // substitute here would settle its own prompt inside the batch (Dralnu, Lich Lord's
-        // sacrifice would be cleared). The rider runs first, settled in the batch, and the
-        // substitute's prompts are asked at the leg.
-        if state.has_post_replacement_drain() {
-            drain_combat_damage_rider(state, events);
-        }
-        stash_post_replacement_continuation(state, substitute, placement);
-        return;
-    }
     let earlier = placement
         .is_none()
         .then(|| state.take_ready_post_replacement_drain())
@@ -1181,13 +1171,6 @@ fn hold_damage_rider(
         });
     }
     None
-}
-
-/// CR 510.2: whether a combat damage batch is replacing its events. Both kinds of simultaneous
-/// batch open the prevention tally (CR 615.13); its kind says which.
-fn in_combat_damage_batch(state: &GameState) -> bool {
-    state.combat_prevention_tally.is_some()
-        && state.prevention_tally_batch == Some(DamageBatchKind::Combat)
 }
 
 /// CR 616.1: whether a two-phase batch is settling its original replacement choices, so a
@@ -11433,6 +11416,8 @@ pub(crate) enum ReplacementPromptCause {
     /// as a `PostReplacementContinuation` and drained through an arbitrary
     /// `ResolvedAbility`, which can set a non-priority `waiting_for`.
     MandatoryBodyContinuation,
+    /// CR 614.6: a mandatory life gain substitute can open its own choice.
+    LifeGainSubstituteMayPrompt,
     /// CR 616.1: two or more candidates whose ordering is material — the
     /// affected player orders them.
     OrderingMaterial,
@@ -11444,6 +11429,7 @@ impl ReplacementPromptCause {
             ReplacementPromptCause::OptionalCandidate => 1 << 0,
             ReplacementPromptCause::MandatoryBodyContinuation => 1 << 1,
             ReplacementPromptCause::OrderingMaterial => 1 << 2,
+            ReplacementPromptCause::LifeGainSubstituteMayPrompt => 1 << 3,
         }
     }
 }
@@ -11490,6 +11476,149 @@ impl ReplacementPromptCauses {
     }
 }
 
+/// CR 101.4 + CR 616.1f: a replacement prompt gates the choices its answer
+/// may create. Visit that chooser before projecting any follow-up events.
+pub(crate) fn visit_proposed_event_choosers(
+    state: &GameState,
+    event: &ProposedEvent,
+    visit: &mut impl FnMut(PlayerId),
+) -> bool {
+    let registry = replacement_registry();
+    let candidates = find_applicable_replacements(state, event, registry);
+    if is_counter_placement_event(event) && counter_placement_prevention_applies(state, &candidates)
+    {
+        return false;
+    }
+    let choosable = choosable_replacement_candidates(state, event, candidates.clone());
+    let chooser = match choosable.as_slice() {
+        [candidate] if replacement_is_optional(state, *candidate) => {
+            replacement_choice_player(state, event, *candidate)
+        }
+        [_, _, ..] if replacement_ordering_is_material(state, &choosable, event) => {
+            replacement_order_choice_player(state, event)
+        }
+        _ => None,
+    };
+    if let Some(player) = chooser {
+        visit(player);
+        return true;
+    }
+    for candidate in candidates {
+        let Some(definition) = replacement_definition_for_id(state, candidate) else {
+            continue;
+        };
+        if replacement_mode_is_optional(&definition.mode) {
+            continue;
+        }
+        let prompted = match event {
+            ProposedEvent::LifeGain {
+                player_id, amount, ..
+            } if plain_life_gain_draw(state, *player_id, candidate, definition) => {
+                visit_draw_event_choosers(state, *player_id, *amount, visit)
+            }
+            ProposedEvent::Draw {
+                player_id, applied, ..
+            } => {
+                let Some(execute) = definition.execute.as_deref() else {
+                    continue;
+                };
+                let controller = replacement_ability_controller(state, candidate, definition);
+                if let Effect::Draw { target, .. } = execute.effect.as_ref() {
+                    if !draw_head_draws_for_other_player(target, controller, *player_id) {
+                        continue;
+                    }
+                    // CR 121.2: either draw stage can substitute an individual draw
+                    // for another player. CR 614.5 + CR 616.1f: retain the applied
+                    // effects when checking the new recipient's replacements.
+                    // CR 101.4 + CR 616.1: that recipient's first prompt now
+                    // determines when this chain may ask for a choice.
+                    let mut redirected = ProposedEvent::Draw {
+                        player_id: controller,
+                        count: 1,
+                        stage: DrawEventStage::Individual,
+                        applied: applied.clone(),
+                    };
+                    redirected.mark_applied(candidate);
+                    visit_proposed_event_choosers(state, &redirected, visit)
+                } else {
+                    let resolved = build_resolved_from_def(execute, candidate.source, controller);
+                    visit_draw_fanout_choosers(state, &resolved, *player_id, visit)
+                }
+            }
+            _ => false,
+        };
+        if prompted {
+            return true;
+        }
+    }
+    false
+}
+
+/// CR 121.2 + CR 616.1: project the draw instruction and individual delivery stages.
+pub(crate) fn visit_draw_event_choosers(
+    state: &GameState,
+    player_id: PlayerId,
+    count: u32,
+    visit: &mut impl FnMut(PlayerId),
+) -> bool {
+    // The instruction settles before any individual draw is proposed.
+    if count > 1
+        && visit_proposed_event_choosers(
+            state,
+            &ProposedEvent::Draw {
+                player_id,
+                count,
+                stage: DrawEventStage::Instruction,
+                applied: HashSet::new(),
+            },
+            visit,
+        )
+    {
+        return true;
+    }
+    visit_proposed_event_choosers(
+        state,
+        &ProposedEvent::Draw {
+            player_id,
+            count: 1,
+            stage: DrawEventStage::Individual,
+            applied: HashSet::new(),
+        },
+        visit,
+    )
+}
+
+/// CR 608.2d + CR 101.4: a draw substitute can address its "may" to
+/// eligible seats other than the drawer (for example, "any other player").
+fn visit_draw_fanout_choosers(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    drawer: PlayerId,
+    visit: &mut impl FnMut(PlayerId),
+) -> bool {
+    use crate::types::ability::OpponentMayScope;
+    if let Some(scope) = ability.optional_for.filter(|_| ability.optional) {
+        let excluded = match scope {
+            OpponentMayScope::AnyOpponent => Some(ability.controller),
+            OpponentMayScope::AnyPlayer => None,
+            OpponentMayScope::AnyOtherPlayer => Some(drawer),
+        };
+        if let Some(player) = super::players::apnap_order(state)
+            .into_iter()
+            .find(|&player| {
+                Some(player) != excluded
+                    && !super::effects::offered_seat_cannot_accept(state, ability, player)
+            })
+        {
+            visit(player);
+            return true;
+        }
+    }
+    ability
+        .child_links()
+        .any(|(_, child)| visit_draw_fanout_choosers(state, child, drawer, visit))
+}
+
 /// CR 614.1a + CR 616.1: can the live replacement pipeline open a player choice
 /// on THIS proposed event, and why? Read-only (`&GameState`, no
 /// `apply_single_replacement`), and derived from the pipeline's own candidate
@@ -11525,6 +11654,16 @@ pub(crate) fn proposed_event_prompt_cause(
             causes = causes.union(ReplacementPromptCauses::of(
                 ReplacementPromptCause::MandatoryBodyContinuation,
             ));
+            if matches!(event, ProposedEvent::LifeGain { .. })
+                && def.quantity_modification.is_none()
+                && gain_life_execute_substitutes_event_type(state, *rid)
+                && (candidates.len() > 1
+                    || life_gain_substitute_may_prompt(state, event, *rid, def, registry))
+            {
+                causes = causes.union(ReplacementPromptCauses::of(
+                    ReplacementPromptCause::LifeGainSubstituteMayPrompt,
+                ));
+            }
         }
     }
     // CR 616.1: ordering is only a choice when at least two candidates compete.
@@ -11534,6 +11673,79 @@ pub(crate) fn proposed_event_prompt_cause(
         ));
     }
     causes
+}
+
+/// CR 614.6 + CR 121.2a: classify a plain draw substitute at both draw stages.
+/// Other substitutes and draws with applicable delivery replacements are
+/// conservatively staged early.
+fn life_gain_substitute_may_prompt(
+    state: &GameState,
+    event: &ProposedEvent,
+    rid: ReplacementId,
+    def: &ReplacementDefinition,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+) -> bool {
+    let ProposedEvent::LifeGain {
+        player_id, amount, ..
+    } = event
+    else {
+        return true;
+    };
+    if !plain_life_gain_draw(state, *player_id, rid, def) {
+        return true;
+    }
+    let has_replacement = |event| !find_applicable_replacements(state, &event, registry).is_empty();
+    [
+        (DrawEventStage::Instruction, *amount),
+        (DrawEventStage::Individual, 1),
+    ]
+    .into_iter()
+    .any(|(stage, count)| {
+        has_replacement(ProposedEvent::Draw {
+            player_id: *player_id,
+            count,
+            stage,
+            applied: HashSet::new(),
+        })
+    }) || state.library_of(*player_id).iter().any(|&card| {
+        has_replacement(ProposedEvent::zone_change(
+            card,
+            Zone::Library,
+            Zone::Hand,
+            None,
+        ))
+    })
+}
+
+fn plain_life_gain_draw(
+    state: &GameState,
+    player_id: PlayerId,
+    rid: ReplacementId,
+    def: &ReplacementDefinition,
+) -> bool {
+    let Some(execute) = def.execute.as_deref() else {
+        return false;
+    };
+    let Effect::Draw {
+        target: TargetFilter::Controller,
+        count: QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        },
+    } = execute.effect.as_ref()
+    else {
+        return false;
+    };
+    def.runtime_execute.is_none()
+        && !execute.optional
+        && execute.sub_ability.is_none()
+        && execute.else_ability.is_none()
+        && execute.repeat_for.is_none()
+        && execute.modal.is_none()
+        && execute.unless_pay.is_none()
+        && state
+            .objects
+            .get(&rid.source)
+            .is_some_and(|source| source.controller == player_id)
 }
 
 /// CR 732.2a: does this proposed event's applier write a board axis the
@@ -16489,19 +16701,15 @@ pub(crate) fn replace_event_on_entry_board(
 }
 
 /// CR 614.6 + CR 615.5: run the resident damage rider, immediately after the replacement that
-/// stashed it. Inside a combat batch (its tally is open, CR 510.2) the rider's pauses are
-/// settled before the batch moves on (`drain_combat_damage_rider`).
-///
-/// Outside combat a rider may leave its prompt standing; the result names the frame of that
-/// paused work, so later work for the same event can wait behind it (CR 608.2c).
+/// stashed it. Its event is not a portion of the batch (CR 700.1), so it runs outside the batch's
+/// ledger. A rider may leave its prompt standing; the result names the frame of that paused work,
+/// so later work for the same event can wait behind it (CR 608.2c), and the batch's ledger records
+/// it: a noncombat batch's later riders queue behind it (`damage_rider_placement`), and a combat
+/// leg parks on it (`settle_combat_damage_replacement`).
 pub(crate) fn drain_damage_rider(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> DamageRiderDrain {
-    if in_combat_damage_batch(state) {
-        drain_combat_damage_rider(state, events);
-        return DamageRiderDrain::Completed;
-    }
     // CR 700.1: Follow-up damage is an independent event, even if its
     // source also participates in the original simultaneous instance.
     let ledger = state.damage_batch_ledger.take();
@@ -16519,136 +16727,6 @@ pub(crate) fn drain_damage_rider(
             DamageRiderDrain::Paused { owner: pause.frame }
         }
     }
-}
-
-/// CR 615.5 + CR 510.2: run the resident damage rider at a combat drain that still settles in
-/// the batch: `stash_damage_substitute`'s drain of an earlier rider inside a leg, and Phase D's
-/// aggregate drain, and settle every pause it raises before the batch moves on. The rider's
-/// event is not a portion of the batch (CR 700.1), so it and every answer below run outside
-/// the batch's ledger, as `drain_damage_rider` does. The caller's wait is restored afterwards,
-/// as a rider that never paused leaves it.
-pub(crate) fn drain_combat_damage_rider(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    let waiting_before = state.waiting_for.clone();
-    let rider_depth = state.resolution_stack.len();
-    let ledger = state.damage_batch_ledger.take();
-    let pause = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-        state, None, None, None, events,
-    );
-    settle_combat_rider_pauses(state, pause, rider_depth, &waiting_before, events);
-    state.damage_batch_ledger = ledger;
-    state.waiting_for = waiting_before;
-}
-
-/// What a damage rider left waiting inside a combat batch.
-enum CombatRiderPause {
-    /// CR 616.1: the rider's event met two or more replacements and its player orders them.
-    Order,
-    /// A parked "may" on the rider's event (Abundance: "you may instead …"), with the index
-    /// that declines it.
-    May { decline: usize },
-    /// A choice the rider's own effect asks for (Channel Harm's "you may have Channel Harm deal
-    /// that much damage"; Outfitted Jouster's "sacrifice an Equipment attached to Outfitted
-    /// Jouster" with two attached). A rider that ended the game (Nefarious Lich: "If you can't,
-    /// you lose the game") lands here too: restoring the caller's wait overwrites its
-    /// `GameOver`, and the action boundary restores it from `game_end`
-    /// (`elimination::ensure_game_over_if_terminal`, CR 104.1); the batch skips its remaining
-    /// portions (`replace_combat_damage_batch`).
-    OwnPrompt,
-}
-
-impl CombatRiderPause {
-    fn of(state: &GameState) -> Self {
-        match state.pending_replacement.as_ref() {
-            Some(pending) if pending.is_optional => Self::May {
-                decline: pending.candidates.len(),
-            },
-            Some(_) => Self::Order,
-            None => Self::OwnPrompt,
-        }
-    }
-}
-
-/// CR 510.2 + CR 616.1: settle every pause a combat damage rider raised at the in-leg
-/// earlier-rider and Phase D drains (`drain_combat_damage_rider`). Those drains can't pause for
-/// a rider's choice yet (Command Zone #140), so nothing the rider parks may outlive the batch: a park left behind blocks state-based actions for the rest of the game (Ironscale
-/// Hydra with Hardened Scales and Doubling Season, blocked by a 3/3: the 3/3 survives 5
-/// damage, and the turn never passes Cleanup).
-fn settle_combat_rider_pauses(
-    state: &mut GameState,
-    mut pause: Option<WaitingFor>,
-    rider_depth: usize,
-    waiting_before: &WaitingFor,
-    events: &mut Vec<GameEvent>,
-) {
-    while pause.is_some() {
-        pause = match CombatRiderPause::of(state) {
-            // strict-failure: CR 616.1 gives the affected player this order (Hardened Scales
-            // ruling: "you choose the order to apply those effects"), and CR 510.2's batch can't
-            // ask yet (Command Zone #140), so the engine takes the first candidate in the player's
-            // place. CR 616.1f: an answer can leave candidates still in order, so repeat.
-            CombatRiderPause::Order => {
-                answer_combat_rider_park(state, 0, rider_depth, waiting_before, events)
-            }
-            // strict-failure: CR 510.2 + CR 616.1: a "may" on the rider's event is its
-            // controller's to answer, and combat can't ask it yet (Command Zone #140), so the engine
-            // declines it in the controller's place, which keeps the rider's event (Swans of Bryn
-            // Argoll under Abundance: the source's controller still draws the cards).
-            CombatRiderPause::May { decline } => {
-                answer_combat_rider_park(state, decline, rider_depth, waiting_before, events)
-            }
-            // strict-failure: CR 510.2: the rider's own choice belongs to its player, and combat
-            // can't ask it yet (Command Zone #140); it is cleared and the rider ends there.
-            CombatRiderPause::OwnPrompt => {
-                abandon_combat_rider_pause(state, rider_depth, waiting_before);
-                None
-            }
-        };
-    }
-}
-
-/// Answer the rider event's park with `index` through the replacement-choice authority (the
-/// first candidate of an order park, the decline of a "may"). Returns the next pause the answer
-/// raised, if any.
-fn answer_combat_rider_park(
-    state: &mut GameState,
-    index: usize,
-    rider_depth: usize,
-    waiting_before: &WaitingFor,
-    events: &mut Vec<GameEvent>,
-) -> Option<WaitingFor> {
-    match super::engine_replacement::handle_replacement_choice(state, index, events) {
-        Ok(WaitingFor::Priority { .. }) => None,
-        Ok(next) => Some(next),
-        Err(_) => {
-            abandon_combat_rider_pause(state, rider_depth, waiting_before);
-            None
-        }
-    }
-}
-
-/// Clear a combat damage rider's pause: its park, the frames its prompt raised above the
-/// rider's own drain, and that drain's paused dispatch, leaving the stack as a rider that
-/// completed leaves it.
-fn abandon_combat_rider_pause(
-    state: &mut GameState,
-    rider_depth: usize,
-    waiting_before: &WaitingFor,
-) {
-    state.pending_replacement = None;
-    state.waiting_for = waiting_before.clone();
-    while state.resolution_stack.len() > rider_depth {
-        let kind = state
-            .resolution_stack
-            .last()
-            .map(crate::types::resolution::ResolutionFrame::kind)
-            .expect("a frame above the rider's depth exists");
-        state
-            .resolve_and_apply_frame_transition(
-                crate::types::resolved_commands::ResolvedFrameTransition::PopExpected { kind },
-            )
-            .expect("the rider's own frame pops at the caller's wait");
-    }
-    state.finish_active_paused_post_replacement_dispatch();
 }
 
 /// CR 510.2 + CR 615.7 + CR 615.13: Run the replacement pipeline over a whole
@@ -16715,9 +16793,6 @@ pub(crate) fn replace_combat_damage_batch(
     // A parked pass carries its tally out (`pass.tally`) and the state field is
     // restored, so nothing outside the batch aggregates while it waits.
     let restore_tally = state.combat_prevention_tally.take();
-    let restore_tally_batch = state
-        .prevention_tally_batch
-        .replace(DamageBatchKind::Combat);
     state.combat_prevention_tally = Some(std::mem::take(&mut pass.tally));
     // CR 510.2 + CR 700.1 + CR 615.8 + CR 608.2f: the batch's ledger is installed on every entry:
     // the one-shot applications and the printed guards' reading travel with the pass exactly like
@@ -16941,7 +17016,6 @@ pub(crate) fn replace_combat_damage_batch(
 
     pass.tally = state.combat_prevention_tally.take().unwrap_or_default();
     state.combat_prevention_tally = restore_tally;
-    state.prevention_tally_batch = restore_tally_batch;
     if let Some(ledger) = state.damage_batch_ledger.take() {
         pass.one_shot_applications = ledger.applications;
         pass.settled_guards = ledger.settled_guards;
@@ -17212,8 +17286,10 @@ enum CombatDamageReplacementStep {
 /// continuation — a `Prevention::Next(N)` shield's rider (the `Prevention::All`
 /// batch path suppresses its stash and fires once post-batch instead), or a
 /// damage substitution's substitute (Szadek's counters and mill) — runs
-/// inline, "immediately afterward", for full replacement (`Prevented`) and
-/// partial prevention (`Execute`) alike, and never leaks past the batch.
+/// inside the leg, "immediately afterward", for full replacement (`Prevented`)
+/// and partial prevention (`Execute`) alike. A substitute that already ran ahead
+/// of an earlier rider and paused (`stash_damage_substitute`) parks the pass on
+/// its prompt. Nothing leaks past the batch.
 fn settle_combat_damage_replacement(
     state: &mut GameState,
     result: ReplacementResult,
@@ -17226,19 +17302,39 @@ fn settle_combat_damage_replacement(
             return CombatDamageReplacementStep::NeedsChoice(player)
         }
     };
+    // CR 614.6 + CR 615.5 + CR 616.1g: a damage substitution's action ran inside this leg's
+    // pipeline ahead of an earlier rider and left its prompt standing (Dralnu, Lich Lord's
+    // sacrifice before Test of Faith's counters); the rider waits behind it, and the pass parks
+    // on that prompt.
+    let paused = state
+        .damage_batch_ledger
+        .as_mut()
+        .and_then(|ledger| ledger.paused_rider.take());
+    // CR 104.1: a substitute that ended the game ends the leg; nothing after it is asked.
+    if state.game_end.is_some() {
+        return CombatDamageReplacementStep::Settled(survivor);
+    }
+    if paused.is_some() {
+        return CombatDamageReplacementStep::ContinuationPaused {
+            survivor,
+            waiting_for: Box::new(state.waiting_for.clone()),
+        };
+    }
     drain_combat_damage_continuation(state, survivor, events)
 }
 
 /// CR 616.1g: drain the settled event's continuation. A prompt it raises (a
 /// counter-replacement ordering choice inside the substitute, a per-card zone
 /// replacement choice inside its mill) is surfaced, never discarded: the
-/// continuation stays resident and paused, and the batch waits for it.
+/// continuation stays resident and paused, and the batch waits for it. Every
+/// ready drain runs in turn (an earlier rider re-stashed behind a completed
+/// substitute), so none is left behind.
 fn drain_combat_damage_continuation(
     state: &mut GameState,
     survivor: Option<ProposedEvent>,
     events: &mut Vec<GameEvent>,
 ) -> CombatDamageReplacementStep {
-    if state.has_post_replacement_drain() {
+    while state.has_post_replacement_drain() {
         // CR 700.1: Follow-up damage is an independent event, even if its
         // source also participates in the original simultaneous instance.
         let ledger = state.damage_batch_ledger.take();

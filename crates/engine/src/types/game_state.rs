@@ -25422,6 +25422,10 @@ pub struct PendingCombatLifelink {
     /// `ProposedEvent::LifeGain` is owned by `state.pending_replacement` and is
     /// recorded by `engine_replacement`'s LifeGain arm (`take_staged_answer`). Re-queueing
     /// it here would gain the life twice.
+    ///
+    /// CR 614.6 + CR 616.2: the batch can also park on a lifelink gain's
+    /// substitute, whose own action asks a choice (Nefarious Lich's "draw that
+    /// many cards instead" meeting Abundance); the gains after it stay here.
     pub remaining: VecDeque<PendingLifelinkGain>,
     /// CR 101.4 + CR 616.1 + CR 702.15b: gains already staged (their
     /// replacement choices made, their final post-replacement amounts
@@ -25442,6 +25446,10 @@ pub struct PendingCombatLifelink {
     /// `process_combat_damage_triggers` as ONE batch — CR 702.15b makes the gain
     /// simultaneous with the damage, and no player received priority for the
     /// CR 616.1 choice.
+    ///
+    /// It also holds the events of an answer that left the batch parked
+    /// (`combat_damage::hold_parked_combat_damage_answer_events`), so their
+    /// triggers join the batch's one placement too (CR 510.3a).
     pub batch_events: Vec<GameEvent>,
     /// CR 510.2: the per-player `CombatDamageDealtToPlayer` aggregate, built in
     /// Phase C and emitted AFTER the lifelink gains — the position it occupies
@@ -25455,6 +25463,10 @@ pub struct PendingCombatLifelink {
     /// predicate over recipients and a single batch routinely prevents damage for
     /// several of them; the entries are sorted so each shield's recipients stay
     /// contiguous and the CR 615.5 rider can still fire once per shield.
+    ///
+    /// Once Phase D has begun, it holds the shields not yet published: a rider
+    /// that left its prompt standing parks the batch with the later shields
+    /// here (CR 608.2c).
     #[serde(deserialize_with = "deserialize_prevention_tally_with_legacy_reject")]
     pub prevention_tally: Vec<PreventedDamageEntry>,
     /// CR 510.4: which sub-step owns this batch. Snapshotted because
@@ -25469,11 +25481,11 @@ pub struct PendingCombatLifelink {
     /// written before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement: Option<PendingCombatDamageReplacement>,
-    /// CR 510.2 + CR 616.1: the unfinished Phase C tail, present only when
-    /// the batch parked on a LEG's life-loss pause or poison-counter result
-    /// pause (infect/toxic; no stash — the damage fact was recorded at the
-    /// pause) rather than a lifelink gain's. The resume completes it before
-    /// draining `remaining`.
+    /// CR 510.2 + CR 616.1: the unfinished Phase C tail, present when the batch
+    /// parked on a LEG's result pause (its life-loss or `-1/-1` counter
+    /// replacements, each with a combat-flagged stash, or its poison-counter
+    /// result with nothing left owed and no stash) or on a pause while staging a
+    /// gain ahead of a leg. The resume completes it before draining `remaining`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase_c_remnant: Option<PendingCombatPhaseCRemnant>,
 }
@@ -32354,12 +32366,6 @@ declare_game_state! {
     /// clippy's `type_complexity` lint demands one — `replace_combat_damage_batch`'s
     /// return type.
     pub combat_prevention_tally: Option<HashMap<(AppliedReplacementKey, TargetRef), i32>>,
-    /// CR 510.2 + CR 615.13: which simultaneous batch opened `combat_prevention_tally`: a combat
-    /// damage step's (CR 510.2), whose rider pauses settle inside the batch, or a noncombat
-    /// instruction's, whose riders wait for its damage. Opened and restored with the tally, so
-    /// execution-local and excluded from serialization and equality like it.
-    #[serde(skip)]
-    pub(crate) prevention_tally_batch: Option<DamageBatchKind>,
     /// CR 510.2 + CR 700.1 + CR 615.8 + CR 611.3a: what one simultaneous damage batch has
     /// settled. Only this ledger is suspended during independent follow-ups, then restored
     /// before the next portion; the prevention tally remains active. Restored to its prior
@@ -32386,13 +32392,6 @@ declare_game_state! {
 pub(crate) enum EventLosses {
     Recording(crate::types::ability::EventOutcomes),
     Immediate,
-}
-
-/// CR 510.2 + CR 615.13: the kind of simultaneous damage batch whose prevention tally is open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DamageBatchKind {
-    Combat,
-    Noncombat,
 }
 
 /// The map-backed history entries `copy` does not share with `original`, a nested causes map
@@ -36176,12 +36175,12 @@ pub(crate) struct DamageBatchLedger {
     /// A printed guard reads once for the whole batch (Undergrowth Champion ruling: "its
     /// prevention effect will apply once to all that damage").
     pub(crate) settled_guards: Vec<crate::types::ability::SettledDamageGuard>,
-    /// CR 615.5 + CR 608.2c: the frame of the first noncombat rider in this batch that left its
-    /// prompt standing. The batch's later riders queue behind it
-    /// (`replacement::damage_rider_placement`). In combat a settled leg's own continuation parks
-    /// the pass (`replacement::drain_combat_damage_continuation`), and only the in-leg
-    /// earlier-rider and aggregate drains settle their pauses (`drain_combat_damage_rider`), so
-    /// it is never set there.
+    /// CR 615.5 + CR 608.2c: the frame of the first rider in this batch that left its prompt
+    /// standing (`replacement::drain_damage_rider`). A noncombat batch's later riders queue
+    /// behind it (`replacement::damage_rider_placement`). In combat it is a leg's: a damage
+    /// substitution's action that ran ahead of an earlier rider and paused (Dralnu, Lich Lord's
+    /// sacrifice before Test of Faith's counters); `replacement::settle_combat_damage_replacement`
+    /// takes it and parks the pass on that prompt, so it never outlives the leg.
     pub(crate) paused_rider: Option<PostReplacementFrameId>,
     /// CR 614.6 + CR 615.5 + CR 616.1: `Some` while a two-phase noncombat batch is settling its
     /// original replacement choices. A damage replacement's action or rider is held here
@@ -36869,6 +36868,18 @@ impl GameState {
             || self.pending_discard_for_cost.is_some()
             || self.waiting_for.is_mana_ability_continuation()
             || self.pending_triggered_mana_resume.is_some()
+    }
+
+    /// CR 510.2: a combat damage batch is parked on a choice; until it completes, no player has
+    /// priority, the deferred queue is not placed, and the batch takes custody of its answers'
+    /// events that no other owner collects (`combat_damage::take_answer_events_into_batch`)
+    /// (CR 510.3a + CR 603.3b).
+    ///
+    /// Deliberately not part of [`Self::withholds_priority`]: that predicate also reads "a play
+    /// is in progress" (`play_trace::play_in_progress`), and a combat damage batch is a
+    /// turn-based action, not a play.
+    pub(crate) fn combat_damage_batch_parked(&self) -> bool {
+        self.pending_combat_lifelink.is_some()
     }
 
     /// CR 601.2: The cast or activation announcement currently in flight, if
@@ -41366,7 +41377,6 @@ impl GameState {
             combat_prevention_tally: None,
             damage_batch_ledger: None,
             damage_event_losses: None,
-            prevention_tally_batch: None,
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),
             commander_declined_zone_return: HashSet::new(),
@@ -45284,7 +45294,6 @@ impl GameState {
             combat_prevention_tally: _,
             damage_batch_ledger: _,
             damage_event_losses: _,
-            prevention_tally_batch: _,
             liminal_entries: _,
             pending_liminal_entry_resume: _,
             entering_aura_authority: _,
@@ -46967,7 +46976,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         combat_prevention_tally: _,
         damage_batch_ledger: _,
         damage_event_losses: _,
-        prevention_tally_batch: _,
         // Post-rebase upstream additions (v0.21.x: #5515 discover + liminal mechanic).
         // Strict-compared by eq_except_growable's GameState PartialEq reuse (fail-safe:
         // a differing value is correctly not a fixed-point repeat); object-growth loops

@@ -2027,6 +2027,49 @@ pub fn resolve_add(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    let additions = resolved_counter_additions(state, ability);
+
+    let completion =
+        PendingEffectResolved::new(EffectKind::from(&ability.effect), ability.source_id);
+    for (index, addition) in additions.iter().enumerate() {
+        let PendingCounterAddition::Object {
+            object_id,
+            count,
+            counter_type,
+            ..
+        } = addition
+        else {
+            continue;
+        };
+        let event_start = events.len();
+        if !apply_object_counter_addition(state, addition.clone(), events) {
+            stash_pending_counter_additions(state, additions[index + 1..].to_vec(), completion);
+            return Ok(());
+        }
+        if *count > 0 {
+            emit_evolved_event_for_counter_addition(
+                ability,
+                events,
+                event_start,
+                *object_id,
+                counter_type,
+            );
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+        subject: None,
+    });
+
+    Ok(())
+}
+
+pub(crate) fn resolved_counter_additions(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<PendingCounterAddition> {
     let (counter_type, count) = match &ability.effect {
         Effect::PutCounter {
             counter_type,
@@ -2040,7 +2083,7 @@ pub fn resolve_add(
     };
 
     // CR 601.2d: If distribution was assigned at cast time, apply per-target counter counts.
-    let additions: Vec<PendingCounterAddition> = if let Some(distribution) = &ability.distribution {
+    if let Some(distribution) = &ability.distribution {
         distribution
             .iter()
             .filter_map(|(target, count)| {
@@ -2091,40 +2134,7 @@ pub fn resolve_add(
                 )
             })
             .collect()
-    };
-
-    let completion =
-        PendingEffectResolved::new(EffectKind::from(&ability.effect), ability.source_id);
-    for (index, addition) in additions.iter().cloned().enumerate() {
-        let PendingCounterAddition::Object {
-            object_id, count, ..
-        } = addition
-        else {
-            continue;
-        };
-        let event_start = events.len();
-        if !apply_object_counter_addition(state, addition, events) {
-            stash_pending_counter_additions(state, additions[index + 1..].to_vec(), completion);
-            return Ok(());
-        }
-        if count > 0 {
-            emit_evolved_event_for_counter_addition(
-                ability,
-                events,
-                event_start,
-                object_id,
-                &counter_type,
-            );
-        }
     }
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
-
-    Ok(())
 }
 
 fn emit_evolved_event_for_counter_addition(

@@ -15791,6 +15791,16 @@ pub(super) fn can_drain_deferred_triggers(
     if matches!(policy, DeferredTriggerDrainPolicy::Skip) {
         return false;
     }
+    // CR 510.2 + CR 510.3a + CR 603.3b: while a combat damage batch is parked no
+    // player would receive priority, so nothing queued is put on the stack; the
+    // batch's one placement takes each queued context whose `ZoneChanged` witness
+    // it folded (`collect_combat_damage_batch_triggers`); any other waits for the
+    // drain after it (D4c, pre-existing). Not part of
+    // `resolution_completion_can_settle` (that predicate also gates a resolution's
+    // final part).
+    if state.combat_damage_batch_parked() {
+        return false;
+    }
     if state.deferred_triggers.is_empty() || !resolution_completion_can_settle(state) {
         return false;
     }
