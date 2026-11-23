@@ -42284,18 +42284,57 @@ pub(crate) fn try_parse_named_choice_with_text(
     original: Option<&str>,
     has_number_choice: bool,
 ) -> Option<ChoiceType> {
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("choose "),
-        nom::sequence::preceded(tag("secretly "), tag("choose ")),
-    ))
-    .parse(lower)
-    .ok()?;
+    let (rest, ()) = parse_choose_verb(lower).ok()?;
     // Same byte offset in the original, which `TextPair` guarantees is the same
     // length; a caller whose pair does not line up passes `None` below.
     let rest_original = original.and_then(|original| {
         (original.len() == lower.len()).then(|| &original[original.len() - rest.len()..])
     });
     parse_named_choice_object_with_text(rest, rest_original, has_number_choice)
+}
+
+/// The "choose " / "secretly choose " verb that opens a named choice.
+fn parse_choose_verb(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    value(
+        (),
+        alt((tag("choose "), preceded(tag("secretly "), tag("choose ")))),
+    )
+    .parse(input)
+}
+
+/// CR 201.4 + CR 201.4a: the open card-name choice object and the
+/// characteristic it prints (`None` for "a card name" / "any card name").
+pub(crate) fn parse_open_card_name_choice(
+    input: &str,
+) -> nom::IResult<&str, Option<TypeFilter>, OracleError<'_>> {
+    alt((
+        value(None, tag("any card name")),
+        preceded(
+            tag("a "),
+            terminated(
+                opt(terminated(
+                    alt((
+                        value(TypeFilter::Non(Box::new(TypeFilter::Land)), tag("nonland")),
+                        value(TypeFilter::Creature, tag("creature")),
+                        value(TypeFilter::Land, tag("land")),
+                    )),
+                    tag(" "),
+                )),
+                tag("card name"),
+            ),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 201.4a: the characteristic a "choose a <characteristic> card name"
+/// clause prints, which `ChoiceType::CardName` drops. `None` for an open
+/// "choose a card name" / "choose any card name", or for a non-name choice.
+pub(crate) fn parse_card_name_choice_characteristic(lower: &str) -> Option<TypeFilter> {
+    let (rest, ()) = parse_choose_verb(lower).ok()?;
+    parse_open_card_name_choice(rest)
+        .ok()
+        .and_then(|(_, characteristic)| characteristic)
 }
 
 /// The object phrase of a named choice, with any leading "choose "/"secretly
@@ -42353,16 +42392,7 @@ pub(crate) fn parse_named_choice_object_with_text(
         // CR 201.4: the CLOSED domain must be tried before the open
         // "a card name" tag below, which matches it as a prefix and drops the list.
         Some(ChoiceType::card_name_from(options, distinctness))
-    } else if alt((
-        tag::<_, _, E>("a card name"),
-        tag("any card name"),
-        tag("a nonland card name"),
-        tag("a creature card name"),
-        tag("a land card name"),
-    ))
-    .parse(rest)
-    .is_ok()
-    {
+    } else if parse_open_card_name_choice(rest).is_ok() {
         Some(ChoiceType::card_name())
     } else if let Some((min, max)) = parse_number_enumeration(rest) {
         // CR 107.1: "choose 2, 3, or 4" (Haktos the Unscarred) — an explicit
@@ -50240,6 +50270,14 @@ fn parse_effect_chain_ir_body(
     // two distinct printed abilities (CR 607.2d). Seeded into each `chunk_ctx`
     // and read back after, mirroring `chain_chosen_player_count`.
     let mut chain_pending_choice_type: Option<ChoiceType> = None;
+    // CR 201.4a + CR 608.2c: Chain-spanning characteristic of the most recent
+    // "choose a <characteristic> card name" clause, carried to a later "… with
+    // that name" consumer. Seeded from the incoming ctx (not `None`) so a chain
+    // parsed recursively with an enclosing chunk ctx still sees a restricted
+    // name choice made earlier in the enclosing chain; carrying `Some` inward
+    // can only make that consumer fail closed, never execute.
+    let mut chain_pending_card_name_characteristic: Option<TypeFilter> =
+        ctx.pending_card_name_characteristic.clone();
     // CR 601.2c + CR 608.2c: Chain-spanning registry of target slots declared by
     // a "Choose target X and target Y" head clause, carried to later clauses so
     // their definite anaphors ("that Equipment", "the chosen creature", "the
@@ -53316,6 +53354,8 @@ fn parse_effect_chain_ir_body(
             next_declared_player_group: chain_declared_groups.max(ctx.next_declared_player_group),
             // CR 608.2c: propagate the committed `ChoiceType` to the guess clause.
             pending_choice_type: chain_pending_choice_type.clone(),
+            // CR 201.4a: propagate the card-name choice's dropped characteristic.
+            pending_card_name_characteristic: chain_pending_card_name_characteristic.clone(),
             // CR 105.4: this is the ONE context that WRITES this gate, because it is the
             // one that reads `pending_printed_color_choice` back (below) and injects the
             // choice. NOTE: `ParseContext` is `Clone` — a context derived from this one
@@ -56382,6 +56422,8 @@ fn parse_effect_chain_ir_body(
         // CR 608.2c: carry the committed `ChoiceType` forward to the next chunk
         // (the "If you do, an opponent guesses ..." sentence parses separately).
         chain_pending_choice_type = chunk_ctx.pending_choice_type.clone();
+        // CR 201.4a: carry the card-name characteristic forward the same way.
+        chain_pending_card_name_characteristic = chunk_ctx.pending_card_name_characteristic.clone();
         if let Some(scope @ ControllerRef::ChosenPlayer { .. }) = &chunk_ctx.relative_player_scope {
             chain_chosen_player_scope = Some(scope.clone());
         }

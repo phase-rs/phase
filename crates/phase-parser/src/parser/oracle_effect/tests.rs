@@ -104882,7 +104882,11 @@ fn hand_card_filter_parts(filter: &TargetFilter) -> (Vec<&TypeFilter>, &[FilterP
 /// discards all <filter> cards" instruction lowers, as the reveal's next node, to a
 /// discard by the declared player whose count is the census of the matching cards in
 /// that player's hand (`ZoneCardCount` over `ScopedPlayer`) and whose card filter is
-/// the same filter. Runtime rows: `discard_all_matching_cards.rs`.
+/// the same filter. Covers Amnesia, Trapfinder's Trick, Shatter Assumptions and
+/// Tsabo's Decree; the "with that name" rows after a characteristic name choice
+/// (Cabal Therapy, Cabal Therapist) are fenced, see
+/// `discard_all_after_a_characteristic_card_name_choice_is_fenced`. Runtime rows:
+/// `discard_all_matching_cards.rs`.
 #[test]
 fn discard_all_matching_cards_lowers_to_a_filtered_census_discard() {
     type FilterCheck = fn(&TargetFilter);
@@ -104939,20 +104943,6 @@ fn discard_all_matching_cards_lowers_to_a_filtered_census_discard() {
                     );
                 },
             ],
-        ),
-        (
-            "Cabal Therapy",
-            "Sorcery",
-            "Choose a nonland card name. Target player reveals their hand and discards all cards with that name.\nFlashback—Sacrifice a creature. (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
-            &["Flashback"],
-            &[|f| assert_eq!(*f, TargetFilter::HasChosenName)],
-        ),
-        (
-            "Cabal Therapist",
-            "Creature",
-            "Menace\nAt the beginning of your first main phase, you may sacrifice a creature. When you do, choose a nonland card name, then target player reveals their hand and discards all cards with that name.",
-            &["Menace"],
-            &[|f| assert_eq!(*f, TargetFilter::HasChosenName)],
         ),
         (
             "Tsabo's Decree",
@@ -105020,59 +105010,271 @@ fn discard_all_matching_cards_lowers_to_a_filtered_census_discard() {
                 },
                 "{name}: the count is the census of the same filter in the discarder's hand"
             );
-            // P3: Cabal Therapist's reflexive gate stays on the reveal and the discard
-            // continues it (CR 603.12), so a declined sacrifice skips the discard.
-            // The discard is split inside the "When you do, …" body, so it carries
-            // the body's gate itself and the reveal's declared player (CR 608.2c).
-            if *name == "Cabal Therapist" {
-                // REACH-GUARD: the reveal is the body's second instruction, after
-                // the gated name choice.
-                let choose = nodes
-                    .iter()
-                    .find(|d| {
-                        d.sub_ability
-                            .as_deref()
-                            .is_some_and(|sub| std::ptr::eq(sub, *reveal))
-                    })
-                    .unwrap_or_else(|| panic!("{name}: the reveal has a parent node"));
-                assert!(
-                    matches!(
-                        &*choose.effect,
-                        Effect::Choose {
-                            choice_type: ChoiceType::CardName { .. },
-                            ..
-                        }
-                    ),
-                    "{name}: the reveal follows the name choice: {:?}",
-                    choose.effect
-                );
-                assert_eq!(
-                    choose.condition,
-                    Some(AbilityCondition::WhenYouDo),
-                    "{name}"
-                );
-                assert_eq!(
-                    reveal.condition,
-                    Some(AbilityCondition::WhenYouDo),
-                    "{name}"
-                );
-                assert_eq!(discard.sub_link, SubAbilityLink::ContinuationStep, "{name}");
-                assert_eq!(
-                    discard.condition,
-                    Some(AbilityCondition::WhenYouDo),
-                    "{name}: the discard carries the reflexive gate"
-                );
-                let group = reveal
-                    .declares_chosen_group
-                    .unwrap_or_else(|| panic!("{name}: the reveal declares its target player"));
-                assert_eq!(
-                    *target,
-                    TargetFilter::DeclaredPlayer { group },
-                    "{name}: the reveal's target player discards"
-                );
-            }
         }
     }
+}
+
+/// True when THIS node is the "with that name" discard fence's explicit gap
+/// (CR 201.4a), carrying the printed discard clause.
+fn is_chosen_name_characteristic_gap(def: &AbilityDefinition) -> bool {
+    matches!(
+        &*def.effect,
+        Effect::Unimplemented { name, .. }
+            if name == imperative::DISCARD_CHOSEN_NAME_CHARACTERISTIC_GAP
+    ) && def.effect.unimplemented_description() == Some("discard all cards with that name")
+}
+
+/// F1 (SHAPE, fail closed). CR 201.4a + CR 608.2c: a "choose a nonland card name"
+/// instruction prints a characteristic `ChoiceType::CardName` cannot carry, so a
+/// later "discards all cards with that name" would discard every copy of an
+/// out-of-characteristic name (a land). Both printed class cards (verbatim Oracle
+/// text) keep the name choice and the reveal executable and lower the discard to
+/// the explicit `discard_chosen_name_characteristic` gap. For Cabal Therapist the
+/// choice and reveal stay inside the "When you do, …" reflexive body (CR 603.12).
+#[test]
+fn discard_all_after_a_characteristic_card_name_choice_is_fenced() {
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "Cabal Therapy",
+            "Sorcery",
+            "Choose a nonland card name. Target player reveals their hand and discards all cards with that name.\nFlashback—Sacrifice a creature. (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
+            "Flashback",
+        ),
+        (
+            "Cabal Therapist",
+            "Creature",
+            "Menace\nAt the beginning of your first main phase, you may sacrifice a creature. When you do, choose a nonland card name, then target player reveals their hand and discards all cards with that name.",
+            "Menace",
+        ),
+    ];
+    for (name, card_type, text, keyword) in cases {
+        let parsed = parse_oracle_text(
+            text,
+            name,
+            &[keyword.to_string()],
+            &[card_type.to_string()],
+            &[],
+        );
+        let nodes = all_card_defs(&parsed);
+        // REACH-GUARD: the name choice and the reveal parsed, so the discard clause
+        // reached the discard grammar rather than failing upstream.
+        let choose = nodes
+            .iter()
+            .find(|d| {
+                matches!(
+                    &*d.effect,
+                    Effect::Choose {
+                        choice_type: ChoiceType::CardName { .. },
+                        ..
+                    }
+                )
+            })
+            .unwrap_or_else(|| panic!("{name}: the name choice parses: {nodes:#?}"));
+        let reveals: Vec<&&AbilityDefinition> = nodes
+            .iter()
+            .filter(|d| matches!(&*d.effect, Effect::RevealHand { .. }))
+            .collect();
+        assert_eq!(reveals.len(), 1, "{name}: {reveals:#?}");
+        let reveal = reveals[0];
+        let next = reveal
+            .sub_ability
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name}: reveal must have a next node"));
+        assert!(
+            is_chosen_name_characteristic_gap(next),
+            "{name}: the reveal's next node is the fence gap: {:?}",
+            next.effect
+        );
+        assert!(
+            !nodes
+                .iter()
+                .any(|d| matches!(&*d.effect, Effect::Discard { .. })),
+            "{name}: no discard executes: {nodes:#?}"
+        );
+        if *name == "Cabal Therapist" {
+            // CR 603.12: the reflexive body keeps its gate on the choice and the
+            // reveal; the reveal follows the name choice and declares its target
+            // player. No gate assertion on the gap: it has no runtime meaning.
+            assert!(
+                choose
+                    .sub_ability
+                    .as_deref()
+                    .is_some_and(|sub| std::ptr::eq(sub, *reveal)),
+                "{name}: the reveal's parent is the name choice: {choose:#?}"
+            );
+            assert_eq!(
+                choose.condition,
+                Some(AbilityCondition::WhenYouDo),
+                "{name}"
+            );
+            assert_eq!(
+                reveal.condition,
+                Some(AbilityCondition::WhenYouDo),
+                "{name}"
+            );
+            assert!(
+                reveal.declares_chosen_group.is_some(),
+                "{name}: the reveal declares its target player"
+            );
+        }
+    }
+}
+
+/// F1 building block. CR 201.4 + CR 201.4a: the open card-name combinator records
+/// the characteristic the shared `ChoiceType::CardName` drops, the choose
+/// dispatch threads it, and the "all … with that name" discard keys its fence on
+/// that record AND on the filter binding the chosen name.
+#[test]
+fn card_name_characteristic_record_gates_the_all_discard() {
+    // (i) The combinator reads the characteristic; the serialized choice shape is
+    // unchanged for all five phrases. This invariant is only behavior-neutrality
+    // for card data: the qualifier is still lost on `ChoiceType::CardName`
+    // (CR 201.4a), which is the out-of-scope follow-up, not a correct reading.
+    let phrases: &[(&str, Option<TypeFilter>)] = &[
+        ("a card name", None),
+        ("any card name", None),
+        (
+            "a nonland card name",
+            Some(TypeFilter::Non(Box::new(TypeFilter::Land))),
+        ),
+        ("a creature card name", Some(TypeFilter::Creature)),
+        ("a land card name", Some(TypeFilter::Land)),
+    ];
+    for (phrase, expected) in phrases {
+        let (_, characteristic) = parse_open_card_name_choice(phrase)
+            .unwrap_or_else(|_| panic!("{phrase}: open card-name choice"));
+        assert_eq!(characteristic, *expected, "{phrase}");
+        assert_eq!(
+            parse_named_choice_object(phrase),
+            Some(ChoiceType::card_name()),
+            "{phrase}"
+        );
+        assert_eq!(
+            parse_card_name_choice_characteristic(&format!("choose {phrase}")),
+            *expected,
+            "choose {phrase}"
+        );
+    }
+    assert!(parse_open_card_name_choice("a landfall card name").is_err());
+    assert_eq!(
+        parse_card_name_choice_characteristic("choose a color"),
+        None
+    );
+
+    // (ii) The fence keys on the recorded characteristic.
+    let discard = "discard all cards with that name";
+    for characteristic in [TypeFilter::Creature, TypeFilter::Land] {
+        let mut ctx = ParseContext {
+            pending_card_name_characteristic: Some(characteristic.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            imperative::parse_targeted_action_ast(discard, discard, &mut ctx),
+            Some(TargetedImperativeAst::Unimplemented {
+                gap: imperative::DISCARD_CHOSEN_NAME_CHARACTERISTIC_GAP,
+                fragment: discard.to_string(),
+            }),
+            "{characteristic:?}"
+        );
+    }
+    // POSITIVE: with no recorded characteristic the building block still lowers to
+    // the filtered census discard.
+    let chosen_name_census = |filter: TargetFilter| TargetedImperativeAst::Discard {
+        count: QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: crate::types::ability::ZoneRef::Hand,
+                card_types: vec![],
+                filter: Some(filter.clone()),
+                scope: crate::types::ability::CountScope::ScopedPlayer,
+            },
+        },
+        random: false,
+        up_to: false,
+        unless_filter: None,
+        filter: Some(filter),
+    };
+    assert_eq!(
+        imperative::parse_targeted_action_ast(discard, discard, &mut ParseContext::default()),
+        Some(chosen_name_census(TargetFilter::HasChosenName))
+    );
+    // Not over-broad: a characteristic is recorded but the noun does not bind the
+    // chosen name, so the discard still lowers.
+    let nonland = "discard all nonland cards";
+    let mut ctx = ParseContext {
+        pending_card_name_characteristic: Some(TypeFilter::Non(Box::new(TypeFilter::Land))),
+        ..Default::default()
+    };
+    let Some(TargetedImperativeAst::Discard {
+        filter: Some(filter),
+        ..
+    }) = imperative::parse_targeted_action_ast(nonland, nonland, &mut ctx)
+    else {
+        panic!("{nonland}: still a discard");
+    };
+    let (types, props) = hand_card_filter_parts(&filter);
+    assert_eq!(types, vec![&TypeFilter::Non(Box::new(TypeFilter::Land))]);
+    assert!(props.is_empty(), "{props:?}");
+
+    // Full-text threading. SYNTHETIC shapes (no printed card has them; the nearest
+    // printed cards are Cabal Therapy and Nebuchadnezzar): an unqualified name choice
+    // followed by an all-discard still lowers, and a later non-name choice does not
+    // clear a recorded characteristic.
+    let effects_of = |text: &str| {
+        let parsed = parse_oracle_text(text, "Test Card", &[], &["Sorcery".to_string()], &[]);
+        all_card_defs(&parsed)
+            .into_iter()
+            .map(|d| (*d.effect).clone())
+            .collect::<Vec<Effect>>()
+    };
+    let open = effects_of(
+        "Choose a card name. Target player reveals their hand and discards all cards with that name.",
+    );
+    assert!(
+        open.iter().any(|e| matches!(
+            e,
+            Effect::Discard {
+                filter: Some(TargetFilter::HasChosenName),
+                ..
+            }
+        )),
+        "{open:#?}"
+    );
+    assert!(
+        !open
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "{open:#?}"
+    );
+    let interleaved = effects_of(
+        "Choose a nonland card name. Choose a color. Target player reveals their hand and discards all cards with that name.",
+    );
+    // REACH-GUARD: both choices and the reveal parsed.
+    assert!(
+        interleaved.iter().any(|e| matches!(
+            e,
+            Effect::Choose {
+                choice_type: ChoiceType::Color { .. },
+                ..
+            }
+        )) && interleaved
+            .iter()
+            .any(|e| matches!(e, Effect::RevealHand { .. })),
+        "{interleaved:#?}"
+    );
+    assert!(
+        interleaved.iter().any(|e| matches!(
+            e,
+            Effect::Unimplemented { name, .. }
+                if name == imperative::DISCARD_CHOSEN_NAME_CHARACTERISTIC_GAP
+        )),
+        "{interleaved:#?}"
+    );
+    assert!(
+        !interleaved
+            .iter()
+            .any(|e| matches!(e, Effect::Discard { .. })),
+        "{interleaved:#?}"
+    );
 }
 
 /// P2 (SHAPE). CR 701.9a + CR 608.2c: "all <noun>" discards whose noun this unit

@@ -1468,6 +1468,12 @@ fn discard_all_filter_is_representable(filter: &TargetFilter) -> bool {
     })
 }
 
+/// CR 201.4a: the gap an "all … with that name" discard lowers to when the
+/// preceding card-name choice prints a characteristic `ChoiceType::CardName`
+/// cannot carry ("choose a nonland card name").
+pub(crate) const DISCARD_CHOSEN_NAME_CHARACTERISTIC_GAP: &str =
+    "discard_chosen_name_characteristic";
+
 /// CR 701.9a + CR 608.2c: Parse the card-type filter portion of a discard phrase.
 ///
 /// Recognizes "a <type> card" / "an <type> card" / "<N> <type> cards" where the
@@ -2249,6 +2255,26 @@ pub(super) fn parse_targeted_action_ast(
             )??;
             if !discard_all_filter_is_representable(&filter) {
                 return None;
+            }
+            // CR 201.4a + CR 608.2c: "with that name" reads the name an earlier "choose a
+            // <characteristic> card name" instruction chose, and `ChoiceType::CardName`
+            // cannot carry that characteristic, so an out-of-characteristic name (a land,
+            // for "nonland") would discard every copy. Fail closed with an explicit gap
+            // until the choice enforces it.
+            if ctx.pending_card_name_characteristic.is_some()
+                && crate::types::ability::filter_grammar_any(&filter, &|node| {
+                    matches!(
+                        node,
+                        crate::types::ability::FilterGrammarNode::Filter(
+                            TargetFilter::HasChosenName
+                        )
+                    )
+                })
+            {
+                return Some(TargetedImperativeAst::Unimplemented {
+                    gap: DISCARD_CHOSEN_NAME_CHARACTERISTIC_GAP,
+                    fragment: text.to_string(),
+                });
             }
             return Some(TargetedImperativeAst::Discard {
                 count: QuantityExpr::Ref {
@@ -3325,6 +3351,9 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             grantee: crate::types::ability::PermissionGrantee::ObjectOwner,
         },
         TargetedImperativeAst::ZoneCounterProxy(ast) => lower_zone_counter_ast(*ast),
+        TargetedImperativeAst::Unimplemented { gap, fragment } => {
+            Effect::unimplemented(gap, fragment)
+        }
     }
 }
 
@@ -5798,6 +5827,12 @@ pub(super) fn parse_choose_ast(
         // it in `GuessSubject::CommittedChoice` (in-order instructions within one
         // ability — not a CR 607.2d link between two distinct printed abilities).
         ctx.pending_choice_type = Some(choice_type.clone());
+        // CR 201.4a: record the characteristic the CardName choice drops, for the
+        // "with that name" discard fence in `parse_targeted_action_ast`.
+        if matches!(choice_type, ChoiceType::CardName { .. }) {
+            ctx.pending_card_name_characteristic =
+                super::parse_card_name_choice_characteristic(lower);
+        }
         return Some(ChooseImperativeAst::NamedChoice {
             choice_type,
             selection,

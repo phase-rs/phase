@@ -6,11 +6,16 @@
 //!
 //! Driving cards (verbatim Oracle text): **Amnesia** (nonland), **Trapfinder's Trick**
 //! (the Trap spell type, CR 205.3k), **Shatter Assumptions** (colorless nonland and
-//! multicolored, CR 105.2c / CR 105.2b), **Cabal Therapy** and **Cabal Therapist**
-//! (the name chosen earlier in the resolution, CR 201.2a; Cabal Therapist's reflexive
-//! "When you do", CR 603.12) and **Tsabo's Decree** (the creature type chosen earlier,
-//! CR 205.3m, with changeling, CR 702.73a). **Nicol Bolas** pins the same count
-//! binding for an existing whole-hand discard by a triggering player.
+//! multicolored, CR 105.2c / CR 105.2b) and **Tsabo's Decree** (the creature type
+//! chosen earlier, CR 205.3m, with changeling, CR 702.73a). **Nicol Bolas** pins the
+//! same count binding for an existing whole-hand discard by a triggering player.
+//!
+//! **Cabal Therapy** and **Cabal Therapist** discard "all cards with that name" after
+//! a "nonland card name" choice. The name choice cannot enforce that characteristic
+//! (CR 201.4a), so their discard is fenced: it moves no card, whatever name is chosen.
+//! The Cabal Therapist rows also pin the CR 603.12 reflexive-trigger boundaries: the
+//! trigger-target prompt, its own stack entry, and the priority window before it
+//! resolves.
 //!
 //! Every board gives the caster (and, where present, a third player) cards that match
 //! the filter, so a count or pool read against the wrong player's hand either prompts
@@ -19,10 +24,12 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{EffectKind, TargetRef};
+use engine::types::ability::{
+    AbilityDefinition, ChoiceType, Effect, EffectKind, ResolvedAbility, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost};
@@ -125,7 +132,9 @@ fn add_sorcery(scenario: &mut GameScenario, name: &str, text: &str) -> ObjectId 
 }
 
 fn with_card_names(runner: &mut GameRunner) {
-    runner.state_mut().all_card_names = ["Lightning Bolt", "Shock", "Opt"].map(String::from).into();
+    runner.state_mut().all_card_names = ["Lightning Bolt", "Shock", "Opt", "Forest"]
+        .map(String::from)
+        .into();
 }
 
 /// R1. CR 701.9a + CR 608.2c: Amnesia's target discards every nonland card in their
@@ -376,137 +385,109 @@ fn add_cabal_therapy(scenario: &mut GameScenario) -> ObjectId {
         .id()
 }
 
-/// R6. CR 201.2a + CR 608.2c: Cabal Therapy names a card as it resolves, and the target
-/// discards every copy of it — two copies, no prompt. The caster's own copy stays.
-/// With the count read against the caster's hand (one copy) a `DiscardChoice` stops
-/// resolution.
-#[test]
-fn cabal_therapy_discards_every_copy_of_the_named_card() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
+/// The gap the "with that name" discard after a characteristic name choice lowers to.
+const CHOSEN_NAME_CHARACTERISTIC_GAP: &str = "discard_chosen_name_characteristic";
 
-    let bolt_a = scenario.add_bolt_to_hand(P1);
-    let bolt_b = scenario.add_bolt_to_hand(P1);
-    let shock = scenario.add_spell_to_hand(P1, "Shock", true).id();
-    let forest = scenario.add_land_to_hand(P1, "Forest").id();
-    let casters_bolt = scenario.add_bolt_to_hand(P0);
-    let spell = add_cabal_therapy(&mut scenario);
-    let mut runner = scenario.build();
-    with_card_names(&mut runner);
-
-    let outcome = runner
-        .cast(spell)
-        .target_player(P1)
-        .choose_option("Lightning Bolt")
-        .resolve();
-
-    assert_resolved(&runner);
-    assert_zones(
-        &runner,
-        &[
-            ("P1 first Lightning Bolt", bolt_a, Zone::Graveyard),
-            ("P1 second Lightning Bolt", bolt_b, Zone::Graveyard),
-            ("P1 Shock", shock, Zone::Hand),
-            ("P1 Forest", forest, Zone::Hand),
-            ("caster's Lightning Bolt", casters_bolt, Zone::Hand),
-        ],
-    );
-    assert_eq!(
-        sorted(discarded(outcome.events())),
-        sorted(vec![bolt_a, bolt_b])
-    );
-}
-
-/// R7. CR 701.9a: naming a card the target doesn't hold discards nothing and resolves
-/// cleanly. Reach-guards: the name was chosen and the discard instruction resolved.
-#[test]
-fn cabal_therapy_naming_an_absent_card_discards_nothing() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-
-    let bolt = scenario.add_bolt_to_hand(P1);
-    let shock = scenario.add_spell_to_hand(P1, "Shock", true).id();
-    let spell = add_cabal_therapy(&mut scenario);
-    let mut runner = scenario.build();
-    with_card_names(&mut runner);
-
-    let outcome = runner
-        .cast(spell)
-        .target_player(P1)
-        .choose_option("Opt")
-        .resolve();
-
-    assert_resolved(&runner);
-    assert!(
-        outcome.events().iter().any(|event| matches!(
-            event,
-            GameEvent::CardNamed { player_id, name, .. } if *player_id == P0 && name == "Opt"
-        )),
-        "reach-guard: the name was chosen"
-    );
-    assert!(
-        discard_resolved(outcome.events()),
-        "reach-guard: the discard instruction resolved"
-    );
-    assert!(discarded(outcome.events()).is_empty());
-    assert_zones(
-        &runner,
-        &[
-            ("P1 Lightning Bolt", bolt, Zone::Hand),
-            ("P1 Shock", shock, Zone::Hand),
-        ],
-    );
-}
-
-/// What the Cabal Therapist trigger driver answers.
-struct TherapistAnswers {
-    accept_sacrifice: bool,
-    fodder: ObjectId,
-    name: &'static str,
-}
-
-/// Drives the Cabal Therapist first-main trigger from the moment it is put on the
-/// stack until the stack is empty, answering each prompt through the public action
-/// path. Returns every prompt kind seen and every event raised. Any prompt outside
-/// the expected set (a `DiscardChoice` in particular) fails the test.
-fn drive_therapist(
-    runner: &mut GameRunner,
-    answers: &TherapistAnswers,
-) -> (Vec<&'static str>, Vec<GameEvent>) {
-    let mut seen = Vec::new();
-    let mut events = Vec::new();
-    for _ in 0..64 {
-        seen.push(runner.waiting_for_kind());
-        let action = match &runner.state().waiting_for {
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
-                return (seen, events);
-            }
-            WaitingFor::Priority { .. } => GameAction::PassPriority,
-            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
-                GameAction::ChooseTarget {
-                    target: Some(TargetRef::Player(P1)),
-                }
-            }
-            WaitingFor::OptionalEffectChoice { .. } => GameAction::DecideOptionalEffect {
-                accept: answers.accept_sacrifice,
-            },
-            WaitingFor::EffectZoneChoice { cards, .. } => {
-                assert!(
-                    cards.contains(&answers.fodder),
-                    "the sacrifice offers the fodder creature: {cards:?}"
-                );
-                GameAction::SelectCards {
-                    cards: vec![answers.fodder],
-                }
-            }
-            WaitingFor::NamedChoice { .. } => GameAction::ChooseOption {
-                choice: answers.name.to_string(),
-            },
-            other => panic!("unexpected prompt while resolving Cabal Therapist: {other:?}"),
-        };
-        events.extend(runner.act(action).expect("the prompt is answered").events);
+/// Every node of a definition chain (head, sub chain, else branch, modes).
+fn definition_chain(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    let mut out = vec![def];
+    if let Some(sub) = def.sub_ability.as_deref() {
+        out.extend(definition_chain(sub));
     }
-    panic!("the Cabal Therapist trigger never finished resolving");
+    if let Some(other) = def.else_ability.as_deref() {
+        out.extend(definition_chain(other));
+    }
+    for mode in &def.mode_abilities {
+        out.extend(definition_chain(mode));
+    }
+    out
+}
+
+/// True when some reveal's next node in `defs` is the fence gap.
+fn reveal_is_followed_by_the_fence<'a>(
+    defs: impl IntoIterator<Item = &'a AbilityDefinition>,
+) -> bool {
+    defs.into_iter().any(|def| {
+        matches!(&*def.effect, Effect::RevealHand { .. })
+            && def.sub_ability.as_deref().is_some_and(|next| {
+                matches!(
+                    &*next.effect,
+                    Effect::Unimplemented { name, .. } if name == CHOSEN_NAME_CHARACTERISTIC_GAP
+                )
+            })
+    })
+}
+
+/// R6. CR 201.4a + CR 608.2c: Cabal Therapy's "discards all cards with that name"
+/// follows a "nonland card name" choice whose characteristic the name choice cannot
+/// enforce, so the discard is fenced and moves no card, for a land name (naming
+/// Forest must not discard Forests) and for a legal nonland name alike. Fails at the
+/// unfenced parse: the named copies are discarded. Reach-guards: the name was chosen
+/// (the unrestricted choice accepts a land name, the premise of the fence), the target
+/// revealed their hand before the fenced discard, and the live spell's reveal is
+/// followed by the fence gap, so an upstream short-circuit cannot make this vacuous.
+#[test]
+fn cabal_therapy_fenced_discard_moves_no_card_for_any_name() {
+    for name in ["Forest", "Lightning Bolt"] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        let bolt_a = scenario.add_bolt_to_hand(P1);
+        let bolt_b = scenario.add_bolt_to_hand(P1);
+        let shock = scenario.add_spell_to_hand(P1, "Shock", true).id();
+        let forest = scenario.add_land_to_hand(P1, "Forest").id();
+        let casters_bolt = scenario.add_bolt_to_hand(P0);
+        let spell = add_cabal_therapy(&mut scenario);
+        let mut runner = scenario.build();
+        with_card_names(&mut runner);
+        assert!(
+            reveal_is_followed_by_the_fence(
+                runner.state().objects[&spell]
+                    .abilities
+                    .iter()
+                    .flat_map(definition_chain)
+            ),
+            "reach-guard: Cabal Therapy's discard is the fence gap: {:?}",
+            runner.state().objects[&spell].abilities
+        );
+
+        let outcome = runner
+            .cast(spell)
+            .target_player(P1)
+            .choose_option(name)
+            .resolve();
+
+        assert_resolved(&runner);
+        assert!(
+            outcome.events().iter().any(|event| matches!(
+                event,
+                GameEvent::CardNamed { player_id, name: named, .. }
+                    if *player_id == P0 && named == name
+            )),
+            "{name}: reach-guard: the name was chosen"
+        );
+        assert!(
+            outcome.events().iter().any(|event| matches!(
+                event,
+                GameEvent::CardsRevealed { player, .. } if *player == P1
+            )),
+            "{name}: reach-guard: P1 revealed their hand"
+        );
+        assert!(
+            discarded(outcome.events()).is_empty(),
+            "{name}: the fenced discard moves no card"
+        );
+        assert_zones(
+            &runner,
+            &[
+                ("P1 first Lightning Bolt", bolt_a, Zone::Hand),
+                ("P1 second Lightning Bolt", bolt_b, Zone::Hand),
+                ("P1 Shock", shock, Zone::Hand),
+                ("P1 Forest", forest, Zone::Hand),
+                ("caster's Lightning Bolt", casters_bolt, Zone::Hand),
+            ],
+        );
+    }
 }
 
 struct TherapistBoard {
@@ -539,14 +520,22 @@ fn therapist_board() -> TherapistBoard {
 
     runner.advance_to_phase(Phase::PreCombatMain);
     assert_eq!(runner.state().phase, Phase::PreCombatMain);
+    // REACH-GUARD: exactly the first-main trigger is on the stack, from the Therapist,
+    // with the optional sacrifice at its root.
+    let stack = &runner.state().stack;
+    assert_eq!(
+        stack.len(),
+        1,
+        "the first-main trigger is on the stack: {stack:?}"
+    );
     assert!(
-        !runner.state().stack.is_empty()
-            || matches!(
-                runner.state().waiting_for,
-                WaitingFor::TriggerTargetSelection { .. }
-            ),
-        "reach-guard: the first-main trigger is being put on the stack, got {:?}",
-        runner.state().waiting_for
+        matches!(
+            &stack[0].kind,
+            StackEntryKind::TriggeredAbility { source_id, ability, .. }
+                if *source_id == therapist && matches!(ability.effect, Effect::Sacrifice { .. })
+        ),
+        "the Therapist's sacrifice trigger is on the stack: {:?}",
+        stack[0]
     );
 
     TherapistBoard {
@@ -559,65 +548,263 @@ fn therapist_board() -> TherapistBoard {
     }
 }
 
-/// R8. CR 603.12 + CR 201.2a: accepting Cabal Therapist's sacrifice runs the reflexive
-/// "When you do": the name is chosen, and the target discards every copy of it.
+/// Passes priority while a priority window is open over a non-empty stack, and
+/// returns at the first other waiting state (or an empty stack).
+fn pass_while_priority(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
+    for _ in 0..16 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            || runner.state().stack.is_empty()
+        {
+            return;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("priority is passed")
+                .events,
+        );
+    }
+    panic!("the priority window never closed");
+}
+
+/// Every node of a resolved ability chain (the root and its `sub_ability` descendants).
+fn resolved_chain(ability: &ResolvedAbility) -> Vec<&ResolvedAbility> {
+    let mut out = vec![ability];
+    let mut next = ability.sub_ability.as_deref();
+    while let Some(node) = next {
+        out.push(node);
+        next = node.sub_ability.as_deref();
+    }
+    out
+}
+
+/// R8. CR 603.12 + CR 603.3 + CR 603.3d + CR 608.2n + CR 117.3b: accepting Cabal
+/// Therapist's sacrifice creates a reflexive triggered ability. Its target is chosen as
+/// it is put on the stack (a `TriggerTargetSelection`, not an ordinary
+/// `TargetSelection`, and before any name is chosen), it is its own stack object after
+/// the parent trigger has left the stack, and players get priority before it resolves;
+/// the name is chosen only as it resolves (Cabal Therapist ruling). An inline
+/// continuation of the parent fails at the trigger-target prompt or at the priority
+/// window. CR 201.4a: the "with that name" discard after the "nonland card name" choice
+/// is fenced, so the reflexive resolves fully and the named cards stay in hand.
 #[test]
-fn cabal_therapist_when_you_do_discards_the_named_cards() {
+fn cabal_therapist_reflexive_trigger_targets_on_the_stack_and_its_fenced_discard_moves_nothing() {
     let mut board = therapist_board();
-    let (seen, events) = drive_therapist(
-        &mut board.runner,
-        &TherapistAnswers {
-            accept_sacrifice: true,
-            fodder: board.fodder,
-            name: "Lightning Bolt",
-        },
+    let runner = &mut board.runner;
+    let mut events = Vec::new();
+
+    pass_while_priority(runner, &mut events);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player, .. } if player == P0
+        ),
+        "the optional sacrifice is offered to P0, got {:?}",
+        runner.state().waiting_for
+    );
+    events.extend(
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("the sacrifice is accepted")
+            .events,
+    );
+    let WaitingFor::EffectZoneChoice { cards, .. } = &runner.state().waiting_for else {
+        panic!(
+            "the sacrifice asks for a creature, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(
+        cards.contains(&board.fodder),
+        "the sacrifice offers the fodder creature: {cards:?}"
+    );
+    events.extend(
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![board.fodder],
+            })
+            .expect("the fodder is sacrificed")
+            .events,
     );
 
-    assert_resolved(&board.runner);
+    // REACH-GUARD: the sacrifice happened.
+    assert_eq!(
+        zone(runner, board.fodder),
+        Zone::Graveyard,
+        "the fodder was sacrificed"
+    );
+    // (a) CR 603.3d: the reflexive trigger's target is chosen as it is put on the stack.
     assert!(
-        seen.contains(&"NamedChoice"),
-        "the name was chosen: {seen:?}"
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { player, .. } if player == P0
+        ),
+        "the reflexive trigger asks P0 for its target, got {:?}",
+        runner.state().waiting_for
+    );
+    events.extend(
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P1)),
+            })
+            .expect("the reflexive trigger targets P1")
+            .events,
+    );
+
+    // (b) CR 603.3 + CR 608.2n + CR 117.3b: the reflexive trigger is its own stack
+    // object, the parent has left the stack, and players get priority before it resolves.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "a priority window opens before the reflexive trigger resolves, got {:?}",
+        runner.state().waiting_for
+    );
+    let stack = &runner.state().stack;
+    assert_eq!(
+        stack.len(),
+        1,
+        "only the reflexive trigger is on the stack: {stack:?}"
+    );
+    assert_eq!(stack[0].controller, P0);
+    let StackEntryKind::TriggeredAbility {
+        source_id, ability, ..
+    } = &stack[0].kind
+    else {
+        panic!(
+            "the reflexive trigger is a triggered ability: {:?}",
+            stack[0]
+        );
+    };
+    assert_eq!(*source_id, board.therapist);
+    let chain = resolved_chain(ability);
+    assert!(
+        chain.iter().any(|node| matches!(
+            node.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::CardName { .. },
+                ..
+            }
+        )),
+        "the reflexive trigger carries the name choice: {chain:#?}"
+    );
+    assert!(
+        chain
+            .iter()
+            .any(|node| node.targets.contains(&TargetRef::Player(P1))),
+        "the reflexive trigger targets P1: {chain:#?}"
+    );
+    assert!(
+        !chain
+            .iter()
+            .any(|node| matches!(node.effect, Effect::Sacrifice { .. })),
+        "the parent's sacrifice is not part of the reflexive trigger: {chain:#?}"
+    );
+    // (c) The name is chosen only as the reflexive trigger resolves.
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CardNamed { .. })),
+        "no name is chosen before the reflexive trigger resolves"
+    );
+
+    let window_closes_at = events.len();
+    pass_while_priority(runner, &mut events);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::NamedChoice { player, .. } if player == P0
+        ),
+        "P0 names a card as the reflexive trigger resolves, got {:?}",
+        runner.state().waiting_for
+    );
+    events.extend(
+        runner
+            .act(GameAction::ChooseOption {
+                choice: "Lightning Bolt".to_string(),
+            })
+            .expect("the name is chosen")
+            .events,
+    );
+
+    assert_resolved(runner);
+    let after_window = &events[window_closes_at..];
+    assert!(
+        after_window.iter().any(|event| matches!(
+            event,
+            GameEvent::CardNamed { player_id, name, .. }
+                if *player_id == P0 && name == "Lightning Bolt"
+        )),
+        "reach-guard: the name was chosen after the priority window"
+    );
+    assert!(
+        after_window.iter().any(|event| matches!(
+            event,
+            GameEvent::CardsRevealed { player, .. } if *player == P1
+        )),
+        "reach-guard: P1 revealed their hand after the priority window"
+    );
+    let therapist = &runner.state().objects[&board.therapist];
+    assert!(
+        reveal_is_followed_by_the_fence(
+            therapist
+                .trigger_definitions
+                .iter_unchecked()
+                .filter_map(|entry| entry.definition().execute.as_deref())
+                .flat_map(definition_chain)
+        ),
+        "reach-guard: the Therapist's discard is the fence gap"
+    );
+    assert!(
+        discarded(&events).is_empty(),
+        "the fenced discard moves no card"
     );
     assert_zones(
-        &board.runner,
+        runner,
         &[
             ("sacrificed fodder", board.fodder, Zone::Graveyard),
             ("Cabal Therapist", board.therapist, Zone::Battlefield),
-            ("P1 first Lightning Bolt", board.bolts[0], Zone::Graveyard),
-            ("P1 second Lightning Bolt", board.bolts[1], Zone::Graveyard),
+            ("P1 first Lightning Bolt", board.bolts[0], Zone::Hand),
+            ("P1 second Lightning Bolt", board.bolts[1], Zone::Hand),
             ("P1 Shock", board.shock, Zone::Hand),
             ("caster's Lightning Bolt", board.casters_bolt, Zone::Hand),
         ],
     );
-    assert_eq!(sorted(discarded(&events)), sorted(board.bolts.to_vec()));
 }
 
-/// R8b. CR 603.12: declining the sacrifice means "When you do" never happens — no name
-/// is chosen and nothing is discarded. Reach-guard: the optional sacrifice was offered.
+/// R8b. CR 603.12: declining the sacrifice means "When you do" never happens — no
+/// reflexive trigger is put on the stack, no name is chosen and nothing is discarded.
+/// Reach-guard: the optional sacrifice was offered. Any trigger-target or name prompt
+/// fails the test.
 #[test]
 fn cabal_therapist_declined_sacrifice_discards_nothing() {
     let mut board = therapist_board();
-    let (seen, events) = drive_therapist(
-        &mut board.runner,
-        &TherapistAnswers {
-            accept_sacrifice: false,
-            fodder: board.fodder,
-            name: "Lightning Bolt",
-        },
-    );
+    let runner = &mut board.runner;
+    let mut seen = Vec::new();
+    let mut events = Vec::new();
+    for _ in 0..64 {
+        seen.push(runner.waiting_for_kind());
+        let action = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::OptionalEffectChoice { .. } => {
+                GameAction::DecideOptionalEffect { accept: false }
+            }
+            other => panic!("unexpected prompt after declining the sacrifice: {other:?}"),
+        };
+        events.extend(runner.act(action).expect("the prompt is answered").events);
+    }
 
-    assert_resolved(&board.runner);
+    assert_resolved(runner);
     assert!(
         seen.contains(&"OptionalEffectChoice"),
         "reach-guard: the sacrifice was offered: {seen:?}"
     );
     assert!(
-        !seen.contains(&"NamedChoice"),
-        "no name is chosen: {seen:?}"
+        !seen.contains(&"TriggerTargetSelection") && !seen.contains(&"NamedChoice"),
+        "no reflexive trigger and no name choice: {seen:?}"
     );
     assert!(discarded(&events).is_empty(), "nothing is discarded");
     assert_zones(
-        &board.runner,
+        runner,
         &[
             ("fodder", board.fodder, Zone::Battlefield),
             ("P1 first Lightning Bolt", board.bolts[0], Zone::Hand),
