@@ -3661,7 +3661,7 @@ pub(crate) fn kinds_census_pronoun_self_antecedent(ctx: &ParseContext) -> Option
         && ctx.chain_declared_object_target.is_none()
         && !ctx.token_created_in_chain
         && ctx.chain_prior_mass_population.is_none()
-        && !ctx.chain_has_prior_exile_producer
+        && !ctx.chain_prior_publishers.includes_exile()
         && ctx.chain_prior_chosen_target.is_none();
     (names_own_object && chain_names_no_nearer_object).then_some(TargetFilter::SelfRef)
 }
@@ -4265,7 +4265,7 @@ fn with_target_controller(filter: TargetFilter, controller: ControllerRef) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::oracle_ir::context::ChosenColorQualifierScope;
+    use crate::parser::oracle_ir::context::{ChainPriorPublishers, ChosenColorQualifierScope};
     use crate::types::ability::ChoiceType;
     use crate::types::ability::{
         CardTypeSetSource, Comparator, ControllerRef, FilterProp, PtStat, PtValueScope,
@@ -5078,7 +5078,7 @@ mod tests {
             (
                 "prior exile producer",
                 ParseContext {
-                    chain_has_prior_exile_producer: true,
+                    chain_prior_publishers: ChainPriorPublishers::IncludesExile,
                     ..self_trigger.clone()
                 },
             ),
@@ -11061,8 +11061,11 @@ mod tests {
         else {
             panic!("{:?}", armor.statics[0].modifications[0]);
         };
+        let QuantityExpr::ClampMin { inner, minimum: 0 } = value else {
+            panic!("{value:?}");
+        };
         assert_eq!(
-            *aggregate_population(value),
+            *aggregate_population(inner),
             your_commanders_in_every_zone()
         );
         let ContinuousModification::AddDynamicToughness { value } =
@@ -11070,8 +11073,11 @@ mod tests {
         else {
             panic!("{:?}", armor.statics[0].modifications[1]);
         };
+        let QuantityExpr::ClampMin { inner, minimum: 0 } = value else {
+            panic!("{value:?}");
+        };
         assert_eq!(
-            *aggregate_population(value),
+            *aggregate_population(inner),
             your_commanders_in_every_zone()
         );
 

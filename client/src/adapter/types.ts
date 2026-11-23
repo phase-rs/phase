@@ -3137,6 +3137,7 @@ export type WaitingFor =
   | { type: "GameOver"; data: { winner: PlayerId | null } }
   | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidates?: ReplacementCandidateSummary[]; kind?: ReplacementChoiceKind; last_applied_decides?: boolean; remember_identity?: ReplacementAutoChoiceRecord["key"] } }
   | { type: "EntryControllerChoice"; data: { player: PlayerId; candidates: PlayerId[] } }
+  | { type: "ReplacementDecisionOrder"; data: { player: PlayerId; objects: ObjectId[] } }
   | { type: "OrderTriggers"; data: { player: PlayerId; triggers: PendingTriggerSummary[] } }
   | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null; purpose?: { type: "BecomeCopy" | "PersistChosenAttribute" | "CopyTokenSource" } } }
   | { type: "ExploreChoice"; data: { player: PlayerId; source_id: ObjectId; choosable: ObjectId[]; remaining: ObjectId[]; pending_effect: unknown } }
@@ -5182,6 +5183,19 @@ export interface GameState {
   /** CR 732.2a: opt-in gate for the live combo-detector (default Off). Set from the
    *  match's immutable `MatchConfig` at game creation; not mutable mid-game. */
   loop_detection?: LoopDetectionMode;
+  /** CR 101.4 + CR 101.4b: engine-projected APNAP scoped-unless poll state.
+   *  Public sacrifice selections keep their chosen object ids; discard card
+   *  identities are redacted by the engine for non-owning viewers. */
+  pending_player_scope_unless_punishment?: PendingPlayerScopeUnlessPunishmentView | null;
+}
+
+export interface PendingPlayerScopeUnlessPunishmentView {
+  declining_players: PlayerId[];
+  payments: Array<{
+    player: PlayerId;
+    action: "Sacrifice" | "Discard";
+    objects: Array<{ object_id: ObjectId; incarnation: number }>;
+  }>;
 }
 
 /**

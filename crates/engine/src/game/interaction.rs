@@ -378,6 +378,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::SeparatePilesChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::BattleProtectorChoice { .. }
         | WaitingFor::CopyRetarget { .. }
         | WaitingFor::CombatTaxPayment { .. } => {
@@ -636,6 +637,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::SeparatePilesChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::BattleProtectorChoice { .. }
         | WaitingFor::AssistChoosePlayer { .. }
@@ -5315,6 +5317,7 @@ fn selection_projection(
         | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::BattleProtectorChoice { .. }
         | WaitingFor::ProliferateChoice { .. }

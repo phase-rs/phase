@@ -402,16 +402,17 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes<'_> {
         reads_return_result,       // instruction-local result is a dynamic read
         source_id: _,              // object id
         cast_occurrence: _,        // finalized-cast provenance, no dynamic read
-        source_incarnation: _,     // self-transform epoch latch, no dynamic read
+        cycling_occurrence: _,
+        source_incarnation: _, // self-transform epoch latch, no dynamic read
         announced_source_incarnation: _, // announcement-time source epoch, no dynamic read
-        noted_mana_payment: _,     // concrete activation-payment snapshot, no dynamic read
-        trigger_source: _,         // exact triggered-source authority, no dynamic read
+        noted_mana_payment: _, // concrete activation-payment snapshot, no dynamic read
+        trigger_source: _,     // exact triggered-source authority, no dynamic read
         trigger_definition_ref: _, // exact trigger occurrence, no dynamic read
-        delayed_origin: _,         // delayed-trigger identity, no dynamic read
-        force_block_attacker: _,   // exact force-block referent, no dynamic read
-        target_incarnations: _,    // CR 400.7 referent pins, no dynamic read
-        target_pins: _,            // CR 400.7 selected-target pins, no dynamic read
-        chosen_target_slots: _,    // CR 115.1 announced-target record, no dynamic read
+        delayed_origin: _,     // delayed-trigger identity, no dynamic read
+        force_block_attacker: _, // exact force-block referent, no dynamic read
+        target_incarnations: _, // CR 400.7 referent pins, no dynamic read
+        target_pins: _,        // CR 400.7 selected-target pins, no dynamic read
+        chosen_target_slots: _, // CR 115.1 announced-target record, no dynamic read
         legacy_selected_target_incarnations: _,
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no dynamic read
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no dynamic read
@@ -459,7 +460,8 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes<'_> {
         entry_onset: _,  // ContinuousEffectOnset tag, no dynamic read
         sibling_condition: _, // SiblingCondition replication marker, no dynamic read
         instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
-        distribute: _,       // announcement unit tag/string, no resolution-time dynamic read
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the CR 101.4 admission authority (`simultaneous_unless::admits`)
+        distribute: _,    // announcement unit tag/string, no resolution-time dynamic read
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
         activation_record: _,
@@ -4008,6 +4010,17 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
             acc = acc.or(scan_player_scope(player));
             acc
         }
+        QuantityRef::CardsCycled { scope, window, .. } => {
+            // Resource comparison retains the ledger. The turn window also reads the frame turn.
+            let acc = Axes::history_of(HistoryMember::CompletedCyclingHistory)
+                .or(scan_count_scope(scope));
+            match window {
+                crate::types::ability::CyclingHistoryWindow::ThisTurn => {
+                    acc.or(Axes::history_of(HistoryMember::TurnNumber))
+                }
+                crate::types::ability::CyclingHistoryWindow::ThisGame => acc,
+            }
+        }
         QuantityRef::SpellsCastThisGame { scope, filter } => {
             let mut acc = Axes {
                 event: false,
@@ -5485,9 +5498,10 @@ fn scan_trigger_constraint(x: &TriggerConstraint, mode: ScanMode) -> Axes<'_> {
         }
         // Turn/phase windows, a draw ordinal, and class levels: literal thresholds only. No
         // filter, no board aggregate, no player resource.
-        TriggerConstraint::NthDrawThisTurn { n: _ } => {
-            Axes::history_of(HistoryMember::CardsDrawnThisTurn)
-        }
+        TriggerConstraint::NthDrawThisTurn {
+            n: _,
+            comparator: _,
+        } => Axes::history_of(HistoryMember::CardsDrawnThisTurn),
         TriggerConstraint::OnlyDuringYourTurn
         | TriggerConstraint::OnlyDuringOpponentsTurn
         | TriggerConstraint::OnlyDuringYourMainPhase
@@ -5559,7 +5573,12 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             history: HistoryReads::of(HistoryMember::TurnNumber),
             that_player: false,
         },
-        TriggerCondition::SourceAttackedThisCombat => Axes {
+        TriggerCondition::SourceAttackedThisCombat
+        | TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::CurrentCombat { exclude_source: _ },
+            comparator: _,
+            count: _,
+        } => Axes {
             event: false,
             sibling: SiblingReads::None,
             projected: true,
@@ -5938,18 +5957,19 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
         },
         TriggerCondition::ChosenLabelIs { label: _ } => Axes::NONE,
         TriggerCondition::AttackersDeclaredCount {
-            subject,
+            subject:
+                AttackersDeclaredCountSubject::Controller {
+                    scope: player,
+                    filter,
+                }
+                | AttackersDeclaredCountSubject::AttackTarget {
+                    controller: player,
+                    attacked: _,
+                    filter,
+                },
             comparator: _,
             count: _,
         } => {
-            let (player, filter) = match subject {
-                AttackersDeclaredCountSubject::Controller { scope, filter } => (scope, filter),
-                AttackersDeclaredCountSubject::AttackTarget {
-                    controller,
-                    attacked: _,
-                    filter,
-                } => (controller, filter),
-            };
             let mut acc = Axes::CONSERVATIVE.or(scan_controller_ref(player));
             if let Some(filter) = filter {
                 acc = acc.or(scan_target_filter(
@@ -6326,7 +6346,7 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes<'_> {
             that_player: false,
         },
         StaticCondition::SourceExertedThisTurn => Axes::CONSERVATIVE,
-        StaticCondition::SourceHasDealtDamage => Axes {
+        StaticCondition::SourceHasDealtDamage { kind: _ } => Axes {
             event: false,
             sibling: SiblingReads::None,
             projected: true,
@@ -7621,6 +7641,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes<'_> 
         iteration_kind_binding: _,
         sibling_condition: _,
         instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the CR 101.4 admission authority (`simultaneous_unless::admits`)
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on
         // every tree that pipeline produces — which is every tree a runtime walker
@@ -7629,6 +7650,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes<'_> 
         // and no runtime path reaches such a tree. See
         // `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        linked_exile_return: _,
         face_down_in_exile: _,
         granting_object: _,
         // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
@@ -9051,6 +9073,7 @@ fn static_mode_axes(static_mode: &StaticMode, mode: ScanMode) -> Axes<'_> {
         } => census_opt(spell_filter, mode).or(census_opt(activation_source_filter, mode)),
         StaticMode::Continuous
         | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::LethalDamageDeterminedByPower
         | StaticMode::CantAttack
         | StaticMode::CantBlock
         | StaticMode::CantAttackOrBlock
@@ -11785,11 +11808,14 @@ mod tests {
             matches!(
                 &effect,
                 Effect::Pump {
-                    power: PtValue::Quantity(QuantityExpr::Ref {
-                        qty: QuantityRef::PropertyAggregate(_)
-                    }),
+                    power: PtValue::Quantity(QuantityExpr::ClampMin { inner, minimum: 0 }),
                     ..
-                }
+                } if matches!(
+                    **inner,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::PropertyAggregate(_)
+                    }
+                )
             ),
             "fixture pin: the attack pump's `power` must be a `QuantityRef::PropertyAggregate` \
              (\"the greatest mana value among artifacts you control\"), else the paired \
@@ -13915,7 +13941,7 @@ mod tests {
         let face = db
             .face_index
             .get("park heights pegasus")
-            .expect("Park Heights Pegasus is in tests/fixtures/integration_cards.json.gz");
+            .expect("Park Heights Pegasus is in tests/fixtures/integration_cards/");
 
         // (1) the flip CANNOT be landing on the Conservative `condition` path.
         assert_eq!(face.triggers.len(), 1, "(1) exactly one trigger definition");
@@ -15721,5 +15747,102 @@ mod poison_condition_scan_tests {
                 "the static sibling arm reads no other axis ({player:?})"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cycling_quantity_scan_tests {
+    use super::*;
+    use crate::types::ability::{Comparator, CyclingHistoryWindow};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+
+    #[test]
+    fn phase3_v5_cycling_dependencies_reach_the_loop_firewall() {
+        let name = "Yidaro, Wandering Monster".to_owned();
+        let quantity = |window, name| QuantityExpr::Ref {
+            qty: QuantityRef::CardsCycled {
+                scope: CountScope::Controller,
+                window,
+                name,
+            },
+        };
+        let fixed = |value| QuantityExpr::Fixed { value };
+        let comparison_ability = |lhs, rhs| {
+            let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+            ability.condition = Some(AbilityCondition::QuantityCheck {
+                lhs,
+                comparator: Comparator::GE,
+                rhs,
+            });
+            ability
+        };
+        let comparison_trigger = |lhs, rhs| TriggerCondition::QuantityComparison {
+            lhs,
+            comparator: Comparator::GE,
+            rhs,
+        };
+        let ability = |lhs| comparison_ability(lhs, fixed(4));
+        let trigger = |lhs| comparison_trigger(lhs, fixed(2));
+        let named_cycles = quantity(CyclingHistoryWindow::ThisGame, Some(name));
+        let turn_cycles = quantity(CyclingHistoryWindow::ThisTurn, None);
+        // No printed card uses the synthetic comparison shapes below. The closest
+        // printed cases are Yidaro's resolution instruction (CR 608.2c), "If you've cycled a card
+        // named Yidaro, Wandering Monster four or more times this game", and Spellpyre Phoenix's
+        // intervening-if condition (CR 603.4), "if you cycled two or more cards this turn".
+        // The cast-count comparison isolates whether scanning the other operand still picks up
+        // its projected-resource dependency.
+        let yidaro = ability(named_cycles.clone());
+        let phoenix = trigger(turn_cycles.clone());
+        assert!(!ability_reads_projected_resource(&yidaro));
+        assert!(!trigger_condition_reads_projected_resource(&phoenix));
+        let casts = QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisGame {
+                scope: CountScope::Controller,
+                filter: None,
+            },
+        };
+        assert!(ability_reads_projected_resource(&ability(casts.clone())));
+        assert!(trigger_condition_reads_projected_resource(&trigger(
+            casts.clone()
+        )));
+        assert!(ability_reads_projected_resource(&comparison_ability(
+            named_cycles,
+            casts.clone(),
+        )));
+        assert!(trigger_condition_reads_projected_resource(
+            &comparison_trigger(turn_cycles, casts,)
+        ));
+        assert!(!ability_reads_projected_resource(&ability(fixed(0))));
+        assert!(!trigger_condition_reads_projected_resource(&trigger(
+            fixed(0)
+        )));
+        assert!(resolved_ability_history(&yidaro).reads(HistoryMember::CompletedCyclingHistory));
+        assert!(trigger_condition_history(&phoenix).reads(HistoryMember::CompletedCyclingHistory));
+        for (window, reads_turn) in [
+            (CyclingHistoryWindow::ThisTurn, true),
+            (CyclingHistoryWindow::ThisGame, false),
+        ] {
+            let lhs = quantity(window, None);
+            assert!(!ability_reads_projected_resource(&ability(lhs.clone())));
+            assert!(!trigger_condition_reads_projected_resource(&trigger(
+                lhs.clone()
+            )));
+            for history in [
+                resolved_ability_history(&ability(lhs.clone())),
+                trigger_condition_history(&trigger(lhs)),
+            ] {
+                assert!(history.reads(HistoryMember::CompletedCyclingHistory));
+                assert_eq!(history.reads(HistoryMember::TurnNumber), reads_turn);
+            }
+        }
+        assert_eq!(
+            resolved_ability_history(&ability(fixed(0))),
+            HistoryReads::NONE
+        );
+        assert_eq!(
+            trigger_condition_history(&trigger(fixed(0))),
+            HistoryReads::NONE
+        );
     }
 }

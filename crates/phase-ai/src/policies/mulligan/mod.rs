@@ -1250,12 +1250,7 @@ mod cedh_registration_tests {
             (0..k).fold(1.0, |acc, i| acc * (n - i) as f64 / (i + 1) as f64)
         }
 
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../engine/tests/fixtures/integration_cards.json.gz");
-        let decoder = flate2::read::GzDecoder::new(std::io::BufReader::new(
-            std::fs::File::open(path).expect("integration fixture should open"),
-        ));
-        let db = CardDatabase::from_export_reader(decoder).expect("integration fixture loads");
+        let db = CardDatabase::from_integration_fixture().expect("integration fixture loads");
         let mut state = GameState::new(FormatConfig::dandan(), 2, 0);
         load_and_hydrate_decks(&mut state, &DeckPayload::default(), Some(&db));
         let pool = state

@@ -1419,11 +1419,17 @@ mod tests {
                 CausedAbilitySource::CausingObject,
             ),
             (
-                TriggerCause::EntersBattlefield { core_types: vec![] },
+                TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: crate::types::statics::CausingObject::Any,
+                },
                 CausedAbilitySource::CausingObject,
             ),
             (
-                TriggerCause::EntersBattlefield { core_types: vec![] },
+                TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: crate::types::statics::CausingObject::Any,
+                },
                 CausedAbilitySource::Any,
             ),
         ] {

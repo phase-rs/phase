@@ -101,6 +101,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "RespondToPrecastCopyShortcut",
     "ReplacementChoice",
     "EntryControllerChoice",
+    // CR 101.4c: choose which held replacement decision to make first
+    // (ReplacementDecisionOrderModal).
+    "ReplacementDecisionOrder",
     "CopyTargetChoice",
     "CopyRetarget",
     "ExploreChoice",

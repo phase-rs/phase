@@ -1351,7 +1351,8 @@
       "title": "{{effect}} a menos que pagues",
       "titleChooseOne": "{{effect}} a menos que pagues uno",
       "dontPay": "No pagar",
-      "takeEffect": "Aceptar el efecto"
+      "takeEffect": "Aceptar el efecto",
+      "priorChoice": "Jugador {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "¿Empalmar con arcano?",
@@ -2157,6 +2158,13 @@
   "entryController": {
     "title": "Elegir controlador al entrar",
     "subtitle": "Elige qué oponente controla este permanente al entrar."
+  },
+  "replacementDecisionOrder": {
+    "title": "Elige qué decisión tomar primero",
+    "subtitle": "Estas elecciones de reemplazo ocurren a la vez. Elige cuál tomar primero.",
+    "unknownObject": "Objeto desconocido",
+    "attachedTo": "En {{host}}",
+    "attachments": "Con {{names}}"
   },
   "optionalCost": {
     "gift": {

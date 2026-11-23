@@ -4,6 +4,9 @@
 //! than `support` through `crate::<module>`, and every module with an insta snapshot; it may also
 //! hold modules from this range. `no_top_level_test_binaries` enforces that each file here is
 //! registered in exactly one shard root.
+// The auto-trait (`Send`) proof for the im-backed `GameState` exceeds the default
+// recursion limit of 128 (a future-incompatibility error on newer toolchains).
+#![recursion_limit = "512"]
 
 pub mod support;
 
@@ -42,14 +45,17 @@ mod ai_multi_target_selection;
 mod ajani_nacatl_pariah_co_departure_6427;
 mod ajani_nacatl_pariah_sacrifice_outlet_6018;
 mod ajani_nacatl_pariah_transform;
+mod ajani_resolute;
 mod ajani_strength_of_the_pride;
 mod akroan_horse;
 mod alania_divergent_storm;
 mod alchemists_gift_pump_modal_keyword_choice;
+mod algorithmic_ferocity;
 mod all_creatures_chosen_type_static_9566;
 mod all_player_library_wheel;
 mod altcast_plural_instances;
 mod alternative_cost_defiler_offers;
+mod alternative_cycling_cost_keeps_discard;
 mod amass_the_components;
 mod ambitious_augmenter;
 mod ambuscade_one_sided_fight_anaphoric;
@@ -84,6 +90,7 @@ mod arena_of_glory_any_of_that_mana_haste;
 mod ark_of_hunger_play_from_graveyard_751;
 mod arm_the_cathars_conjunct_anaphor_p6;
 mod armored_kincaller_or_condition;
+mod armored_transport_blocker_prevention;
 mod as_enters_dice_copy_work;
 mod as_enters_dice_counters;
 mod ashaya_nontoken_lands;
@@ -178,6 +185,8 @@ mod brigid_mana_ability;
 mod bring_the_ending_corrupted_instead_branch_5683;
 mod bring_to_light_converge_mana_value;
 mod broken_bond_land_prompt;
+mod bronze_horse_targeting_spell_prevention;
+mod burden_of_proof;
 mod burning_eye_zubera_damage_threshold;
 mod burning_rune_demon_exact_count_search;
 mod cait_sith_fortune_teller;
@@ -193,6 +202,9 @@ mod captain_america_throw;
 mod captain_marvel_apex_avenger;
 mod carmen_cruel_skymarcher_counter_lookback_8160;
 mod carrot_cake_self_sacrifice_trigger;
+mod carry_forward_counter_conjunct;
+mod carry_forward_counter_conjunct_picard;
+mod carry_forward_mass_exile_conjunct;
 mod cascade_intervening_if_pipeline;
 mod cascade_spell_ability_spells;
 mod cast_cost_exile_links;
@@ -213,6 +225,10 @@ mod census_release_batch_1;
 mod census_release_batch_2;
 mod census_release_batch_3;
 mod census_release_batch_4;
+mod census_release_batch_5;
+mod census_release_batch_6;
+mod census_release_batch_7;
+mod census_release_batch_8;
 mod chain_of_smog_copy;
 mod chain_root_target_suspension;
 mod chains_of_mephistopheles_discard_draw_or_mill;
@@ -238,6 +254,7 @@ mod claim_jumper_repeat;
 mod cleanup_control_reversion_triggers;
 mod cleanup_discard_trigger_pipeline;
 mod cleave_text_changing_cost;
+mod clever_concealment_convoke_color_9117;
 mod client_wire_viewer_projection;
 mod clone_copy_artillery_halo_lki;
 mod clone_copy_modal_artillery_halo_lki;

@@ -105,20 +105,25 @@ pub fn resolve(
         // `effects::publish_tracked_set`. Deliberately not routed through
         // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
         // under mode scoping not skipping is the correct semantics here.
+        // CR 730.3c + CR 608.2c (D7, B1): the highest-id binding is the chain
+        // rung only when it is `chain_tracked_set_id` (`targeting::chain_rung_root`);
+        // then E1's static count over this grant's own chain decides the finding.
+        // Any other binding finds raw members.
         TargetFilter::TrackedSet {
             id: TrackedSetId(0),
         } => state
             .tracked_object_sets
-            .iter()
-            .max_by_key(|(id, _)| id.0)
-            .map(|(id, objects)| (objects.clone(), Some(*id)))
+            .keys()
+            .max_by_key(|id| id.0)
+            .map(|id| {
+                (
+                    crate::game::merge::tracked_set_found_objects(state, *id, Some(ability), None),
+                    Some(*id),
+                )
+            })
             .unwrap_or_default(),
         TargetFilter::TrackedSet { id } => (
-            state
-                .tracked_object_sets
-                .get(id)
-                .cloned()
-                .unwrap_or_default(),
+            crate::game::merge::tracked_set_found_objects(state, *id, Some(ability), None),
             Some(*id),
         ),
         TargetFilter::ParentTarget => {
@@ -1431,6 +1436,144 @@ mod tests {
                 &state.objects[&exiled].mana_cost
             ),
             "AnyTypeOrColor should let red mana pay for a blue spell"
+        );
+    }
+
+    fn play_from_exile_grant(single_use: bool) -> Effect {
+        Effect::GrantCastingPermission {
+            permission: CastingPermission::PlayFromExile {
+                provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+                mode: crate::types::ability::CardPlayMode::Play,
+                duration: Duration::UntilEndOfTurn,
+                granted_to: PlayerId(0),
+                frequency: crate::types::statics::CastFrequency::Unlimited,
+                source_id: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: Some(
+                    crate::types::ability::ManaSpendPermission::AnyTypeOrColor,
+                ),
+                card_filter: None,
+                single_use_group: None,
+                single_use,
+                cast_cost_modifier: None,
+                alt_ability_cost: None,
+                without_paying_mana_cost: false,
+                land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                invalidation: None,
+            },
+            target: TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            grantee: PermissionGrantee::AbilityController,
+        }
+    }
+
+    fn single_use_groups(
+        state: &GameState,
+        id: crate::types::identifiers::ObjectId,
+    ) -> Vec<Option<TrackedSetId>> {
+        state.objects[&id]
+            .casting_permissions
+            .iter()
+            .filter_map(|p| match p {
+                CastingPermission::PlayFromExile {
+                    single_use: true,
+                    single_use_group,
+                    ..
+                } => Some(*single_use_group),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// R9. CR 730.3c + CR 611.2a: a single-use grant over a chain set stamps
+    /// every object the set finds, the component of a sacrificed merged member
+    /// included, and spending the grant strips every stamp wherever it sits; a
+    /// membership-only set stamps its members only.
+    ///
+    /// Nearest printed card: Heartless Conscription ("Exile all creatures. For
+    /// each card exiled this way, you may play that card for as long as it
+    /// remains exiled, and mana of any type can be spent to cast that spell.
+    /// Exile Heartless Conscription."). SYNTHETIC: every printed grant over a
+    /// tracked set reads an exile set, whose components are already members, or
+    /// has two or more publishers, so no printed grant finds a non-member
+    /// component; the graveyard board is staged by hand.
+    ///
+    /// Before this change: the rider carries no stamp after the grant.
+    /// Mutations: revert the grant routing -> rider unstamped; restore the
+    /// sweep's "members + exile" legs -> the graveyard rider keeps its stamp.
+    #[test]
+    fn r9_single_use_grant_stamps_and_the_sweep_strips_a_found_component() {
+        use crate::game::merge_tests::finding::{departed_merged, install_chain, sacrifice_effect};
+
+        for membership_only in [false, true] {
+            let mut d = departed_merged(false);
+            if membership_only {
+                d.state.tracked_set_member_origins.remove(&d.set);
+            }
+            let reader = install_chain(
+                &mut d.state,
+                vec![sacrifice_effect(), play_from_exile_grant(true)],
+            );
+            let mut events = Vec::new();
+            resolve(&mut d.state, &reader, &mut events).expect("the grant resolves");
+            assert_eq!(
+                single_use_groups(&d.state, d.host),
+                vec![Some(d.set)],
+                "the member carries the group"
+            );
+            assert_eq!(
+                single_use_groups(&d.state, d.rider),
+                if membership_only {
+                    vec![]
+                } else {
+                    vec![Some(d.set)]
+                },
+                "membership_only {membership_only}"
+            );
+            crate::game::casting::consume_single_use_play_from_exile(&mut d.state, d.set);
+            assert_eq!(single_use_groups(&d.state, d.host), vec![]);
+            assert_eq!(
+                single_use_groups(&d.state, d.rider),
+                vec![],
+                "the sweep strips the group wherever it sits"
+            );
+        }
+    }
+
+    /// R-RR-B. R-RR's positive control. CR 730.3c + CR 608.2c: from a line with
+    /// ONE publisher before the grant, the chain rung admits the finding, so the
+    /// grant stamps the component of a sacrificed token-topped merged member.
+    ///
+    /// Nearest printed card: Reno and Rude. SYNTHETIC: every printed grant over
+    /// a tracked set has an exile producer or two or more publishers, so no
+    /// printed card shows a single non-exile publisher before a grant.
+    ///
+    /// Before this change: the rider carries no stamp (raw grant).
+    /// Mutation: revert the grant routing -> the same.
+    #[test]
+    fn r_rr_b_one_publisher_grant_finds_the_component() {
+        use crate::game::merge_tests::finding::{
+            departed_merged_to, install_chain, sacrifice_effect,
+        };
+
+        let mut d = departed_merged_to(true, Zone::Exile);
+        let reader = install_chain(
+            &mut d.state,
+            vec![sacrifice_effect(), play_from_exile_grant(false)],
+        );
+        let mut events = Vec::new();
+        resolve(&mut d.state, &reader, &mut events).expect("the grant resolves");
+        let has_permission = |id| {
+            d.state.objects[&id]
+                .casting_permissions
+                .iter()
+                .any(|p| matches!(p, CastingPermission::PlayFromExile { .. }))
+        };
+        assert!(has_permission(d.host), "the member is granted");
+        assert!(
+            has_permission(d.rider),
+            "one publisher: the component the member split into is found (CR 730.3c)"
         );
     }
 }

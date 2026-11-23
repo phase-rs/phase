@@ -1840,7 +1840,7 @@ mod tests {
         assert_eq!(obj.name, "Secret Creature");
         assert_eq!(obj.power, Some(4));
         assert_eq!(obj.toughness, Some(5));
-        assert!(obj.card_types.subtypes.contains(&"Beast".to_string()));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Beast"));
         assert!(obj.keywords.contains(&Keyword::Trample));
         assert!(obj
             .keywords

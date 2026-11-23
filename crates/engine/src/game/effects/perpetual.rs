@@ -124,8 +124,9 @@ fn perpetual_target_object_ids(
     // every member of the set the preceding instruction published (Circadian
     // Struggle's sought cards), not the first one the singular
     // `resolved_targets` path would pick.
+    // CR 730.3c: "those cards perpetually ..." acts upon every object the set finds.
     if let TargetFilter::TrackedSet { id } = target {
-        return crate::game::quantity::tracked_set_object_ids(state, *id);
+        return crate::game::quantity::tracked_set_found_object_ids(state, *id, Some(ability));
     }
 
     if !ability.targets.is_empty() {

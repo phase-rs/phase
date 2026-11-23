@@ -411,6 +411,39 @@ pub enum SpellAnaphorBinding {
     EventSource,
 }
 
+/// CR 608.2c + CR 607.2a: the prior clauses of the current clause's OWN resolution chain (and, for a nested delayed / reflexive / continuation body, its enclosing chain), each treated as a potential tracked-set publisher because runtime publication is generic (`publish_tracked_set_for_resolution`). Distinguishes "no prior publisher"
+/// (the linked-ability LTB return `detect_etb_exile_ltb_return` pairs) from
+/// "only non-exile publishers" (the linked-exile return, `linked_exile_return_binding`: the source's linked exile when the return is printed on the source, the `Exiled`-caused chain members when an effect creates it) and "an exile producer" (same-chain binding).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ChainPriorPublishers {
+    /// No earlier clause in the chain (or its enclosing chain).
+    #[default]
+    Absent,
+    /// Earlier clauses exist, and none of them is an exile producer.
+    NonExileOnly,
+    /// At least one earlier clause is an exile producer
+    /// (`clause_ir_is_exile_producer`).
+    IncludesExile,
+}
+
+impl ChainPriorPublishers {
+    /// Lattice join: `Absent < NonExileOnly < IncludesExile`.
+    pub fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::IncludesExile, Self::IncludesExile | Self::NonExileOnly | Self::Absent)
+            | (Self::NonExileOnly | Self::Absent, Self::IncludesExile) => Self::IncludesExile,
+            (Self::NonExileOnly, Self::NonExileOnly | Self::Absent)
+            | (Self::Absent, Self::NonExileOnly) => Self::NonExileOnly,
+            (Self::Absent, Self::Absent) => Self::Absent,
+        }
+    }
+
+    /// Whether an earlier clause of the chain is an exile producer.
+    pub fn includes_exile(self) -> bool {
+        matches!(self, Self::IncludesExile)
+    }
+}
+
 /// CR 601.2c + CR 608.2c: the target slots announced by the earlier clauses of
 /// an effect chain, for resolving a demonstrative ("that creature") to the
 /// declared slot it names. Only the stable prefix is numbered: once a clause
@@ -969,22 +1002,28 @@ pub struct ParseContext {
     /// parsing leaves this false so bare "it" defaults to SelfRef instead of
     /// inventing a parent target.
     pub parent_target_available: bool,
-    /// CR 608.2c + CR 406.6 + CR 607.2a: Whether the current effect-chain
-    /// chunk has an EARLIER clause (in the SAME resolution chain) that
-    /// produces an exile — a `ChangeZone`/`ChangeZoneAll` to `Zone::Exile`,
-    /// `ExileTop`, `Dig { destination: Some(Zone::Exile), .. }`,
-    /// `ExileFromTopUntil`, or any other exile-producer shape recognized by
-    /// `chain_clause_is_exile_producer`. When true, a singular "the exiled
-    /// card" anaphor in a LATER clause of this chain refers to that
-    /// same-chain exile and keeps its pre-existing same-chain binding
-    /// (`TrackedSet{0}` / `ParentTarget`). When false, the referenced exile
-    /// happened in an earlier, SEPARATELY-RESOLVED ability (e.g. an ETB
-    /// Imprint or synthesized Hideaway ETB), so the anaphor must bind
-    /// durably via `TargetFilter::ExiledBySource` (CR 607.1 linked
-    /// abilities) instead. Seeded per top-level `parse_effect_chain_ir` call
-    /// from the chain-local clause accumulator; defaults `false` via
-    /// `derive(Default)` so standalone clause parsing is unaffected.
-    pub chain_has_prior_exile_producer: bool,
+    /// CR 608.2c + CR 406.6 + CR 607.2a: What the EARLIER clauses of the
+    /// current effect-chain chunk (in the SAME resolution chain, joined with
+    /// the enclosing chain's state for a nested body) publish — see
+    /// [`ChainPriorPublishers`]. `IncludesExile` when one of them produces an
+    /// exile — a `ChangeZone`/`ChangeZoneAll` to `Zone::Exile`, `ExileTop`,
+    /// `Dig { destination: Some(Zone::Exile), .. }`, `ExileFromTopUntil`, or
+    /// any other exile-producer shape recognized by
+    /// `chain_clause_is_exile_producer`: a singular "the exiled card" anaphor
+    /// in a LATER clause of this chain then refers to that same-chain exile
+    /// and keeps its pre-existing same-chain binding (`TrackedSet{0}` /
+    /// `ParentTarget`). Otherwise the referenced exile happened in an
+    /// earlier, SEPARATELY-RESOLVED ability (e.g. an ETB Imprint or
+    /// synthesized Hideaway ETB), so the singular anaphor binds durably via
+    /// `TargetFilter::ExiledBySource` (CR 607.1 linked abilities), and a
+    /// return over `NonExileOnly` publishers binds the cards the linked
+    /// exile put into exile (`linked_exile_return_binding`: `ExiledBySource`
+    /// when printed on the source, the `Exiled`-caused members of the chain
+    /// set when an effect creates it). Seeded per
+    /// top-level `parse_effect_chain_ir` call from the chain-local clause
+    /// accumulator; defaults to `Absent` via `derive(Default)` so standalone
+    /// clause parsing is unaffected.
+    pub chain_prior_publishers: ChainPriorPublishers,
     /// CR 608.2c: The current effect-chain chunk's MOST-RECENT prior object
     /// referent is a just-created token (Token/CopyTokenOf/Populate), so a bare
     /// "it" anaphor in this chunk binds to that token (`TargetFilter::LastCreated`)
@@ -1182,7 +1221,7 @@ pub struct ParseContext {
     /// THIS revealed player's hand instead of the exile-only
     /// `TargetFilter::ExiledBySource` default — no exile ever happened, so
     /// `ExiledBySource` would resolve to an empty set and silently swallow the
-    /// cast permission. Mirrors `chain_has_prior_exile_producer`'s same-chain
+    /// cast permission. Mirrors `chain_prior_publishers`' same-chain
     /// scan, but for the hand-reveal producer shape. `None` when no such
     /// producer exists in this chain, or during standalone clause parsing.
     pub chain_prior_hand_reveal_target: Option<TargetFilter>,
@@ -1219,7 +1258,7 @@ pub struct ParseContext {
     /// (look at the top N cards of YOUR library without exiling/moving them).
     /// The bare "from among them" cast anaphor that follows must route to the
     /// one-shot during-resolution cast (CR 608.2g), not the exile-and-grant
-    /// lingering path. Mirrors `chain_has_prior_exile_producer`.
+    /// lingering path. Mirrors `chain_prior_publishers`.
     // CR 608.2g + CR 701.20e
     pub chain_prior_self_library_peek: bool,
     /// CR 608.2c: the stop filter of the most recent earlier same-chain
@@ -1378,6 +1417,7 @@ impl ParseContext {
             relative_player_scope: self.relative_player_scope.clone(),
             declared_player_scope: self.declared_player_scope.clone(),
             prior_player_declaration: self.prior_player_declaration,
+            trigger_condition_scope: self.trigger_condition_scope,
             ..Self::default()
         }
     }

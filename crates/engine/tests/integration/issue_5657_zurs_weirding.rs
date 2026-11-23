@@ -117,13 +117,17 @@ fn zurs_weirding_accept_pays_life_and_bins_revealed_card() {
     drive_opponent_may_and_finish(&mut runner, true);
 
     assert!(
-        graveyard_card_names(runner.state(), P1).contains(&"Grizzly Bears".to_string()),
+        graveyard_card_names(runner.state(), P1)
+            .iter()
+            .any(|i| i == "Grizzly Bears"),
         "accepting must put the revealed top card into its owner's graveyard; \
          graveyard={:?}",
         graveyard_card_names(runner.state(), P1)
     );
     assert!(
-        !hand_card_names(runner.state(), P1).contains(&"Grizzly Bears".to_string()),
+        !hand_card_names(runner.state(), P1)
+            .iter()
+            .any(|i| i == "Grizzly Bears"),
         "the binned card must not enter the drawing player's hand"
     );
     assert_eq!(
@@ -161,11 +165,13 @@ fn zurs_weirding_decline_leaves_drawing_player_with_revealed_card() {
         "decline must let the drawing player draw the revealed card; hand={p1_hand_after:?}"
     );
     assert!(
-        p1_hand_after.contains(&"Grizzly Bears".to_string()),
+        p1_hand_after.iter().any(|i| i == "Grizzly Bears"),
         "the revealed top card must be drawn on decline; hand={p1_hand_after:?}"
     );
     assert!(
-        !graveyard_card_names(runner.state(), P1).contains(&"Grizzly Bears".to_string()),
+        !graveyard_card_names(runner.state(), P1)
+            .iter()
+            .any(|i| i == "Grizzly Bears"),
         "decline must not bin the revealed card"
     );
     assert_eq!(

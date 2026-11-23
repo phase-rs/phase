@@ -1384,7 +1384,8 @@
       "title": "支払わなければ：{{effect}}",
       "titleChooseOne": "いずれかを支払わなければ：{{effect}}",
       "dontPay": "支払わない",
-      "takeEffect": "効果を受ける"
+      "takeEffect": "効果を受ける",
+      "priorChoice": "プレイヤー{{id}}：{{choice}}"
     },
     "spliceOffer": {
       "title": "秘儀に連繋しますか？",
@@ -2195,6 +2196,13 @@
   "entryController": {
     "title": "戦場に出る際のコントローラーを選択",
     "subtitle": "このパーマネントが戦場に出る際にコントロールする対戦相手を選択"
+  },
+  "replacementDecisionOrder": {
+    "title": "先に行う選択を選ぶ",
+    "subtitle": "これらの置換の選択は同時に行われます。先に行う選択を選んでください。",
+    "unknownObject": "不明なオブジェクト",
+    "attachedTo": "{{host}}についている",
+    "attachments": "{{names}}がついている"
   },
   "optionalCost": {
     "gift": {

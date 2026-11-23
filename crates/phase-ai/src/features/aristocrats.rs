@@ -180,11 +180,7 @@ pub(crate) fn ability_is_sacrifice_outlet(ability: &AbilityDefinition) -> bool {
 
     // Gate 4: exclude pure-mana-producing sac outlets ("T, sacrifice this: add {G}").
     let effects = collect_chain_effects(ability);
-    if effects.iter().all(|e| matches!(e, Effect::Mana { .. })) {
-        return false;
-    }
-
-    true
+    !effects.iter().all(|e| matches!(e, Effect::Mana { .. }))
 }
 
 /// True if this ability is a sacrifice outlet with no mana component in the cost.

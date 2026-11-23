@@ -1960,6 +1960,7 @@ fn spell_alternative_cost_is_payable(
             legs,
             super::cost_payability::ObjectLegPayment::Unguided,
             super::cost_payability::CostSourceRole::SpellBeingCast,
+            super::cost_payability::ExileCostPopulation::PayerZones,
         )
         || !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, committed_life)
     {
@@ -16331,9 +16332,10 @@ fn finalize_cast_with_phyrexian_choices_inner(
             expected_old_kind: Box::new(expected_old_kind),
             resulting_kind: Box::new(resulting_kind),
             expected_old_paid_facts: expected_old_paid_facts.map(Box::new),
-            resulting_paid_facts: Box::new(resulting_paid_facts),
+            resulting_paid_facts: Some(Box::new(resulting_paid_facts)),
             expected_old_cast_occurrence,
             resulting_cast_occurrence: Some(occurrence),
+            resulting_cycling_occurrence: None,
             cause,
         })
         .expect("resolved stack entry finalize must have a live journal cause");
@@ -17481,6 +17483,27 @@ impl AutoTapSourceCache {
             .iter()
             .any(|option| option.object_id == source_id)
     }
+}
+
+/// CR 605.3a + CR 605.3b: The distinct permanents, in the planner's preference
+/// order, whose mana abilities the automatic planner may activate for `player`
+/// and whose activation can do more than tap the permanent for mana: a cost
+/// beyond `{T}` or a resolution beyond adding mana
+/// ([`mana_sources::mana_source_option_has_drawback`]), or any source when a
+/// `TapsForMana` triggered mana ability with a non-mana effect is on the
+/// battlefield ([`mana_sources::taps_for_mana_trigger_has_non_mana_effect`]).
+/// Tapping any other source only adds mana (CR 106.4), which changes nothing
+/// beyond the mana pool.
+pub(super) fn auto_tap_sources_beyond_mana(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+    let every_tap_has_effects = mana_sources::taps_for_mana_trigger_has_non_mana_effect(state);
+    let mut seen: HashSet<ObjectId> = HashSet::new();
+    collect_sorted_auto_tap_source_options(state, player, None, &HashSet::new(), None)
+        .iter()
+        .filter(|option| {
+            every_tap_has_effects || mana_sources::mana_source_option_has_drawback(state, option)
+        })
+        .filter_map(|option| seen.insert(option.object_id).then_some(option.object_id))
+        .collect()
 }
 
 pub(super) fn build_auto_tap_source_cache(

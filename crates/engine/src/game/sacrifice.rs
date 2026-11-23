@@ -6,7 +6,10 @@ use crate::game::zone_pipeline::{
     self, ApprovedZoneChange, DeliveryCtx, ExileLinkSpec, ZoneDeliveryResult,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingSacrificeProvenance};
+use crate::types::game_state::{
+    GameState, PendingSacrificeDelivery, PendingSacrificeMove, PendingSacrificeProvenance,
+    ResidentDrainPolicy,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
@@ -194,6 +197,287 @@ pub(crate) fn apply_sacrifice_after_replacement(
             deliver_sacrifice_zone_change(state, event, events)
         }
         _ => SacrificeApply::Complete,
+    }
+}
+
+/// Outcome of consulting a sacrifice's replacements ahead of its delivery.
+pub(crate) enum SacrificeConsult {
+    /// The move cleared every replacement consult; deliver it with
+    /// [`deliver_consulted_sacrifice`].
+    Ready(Box<PendingSacrificeDelivery>),
+    /// Nothing moves: the permanent is gone or the sacrifice itself was
+    /// replaced away.
+    NoMove,
+    /// CR 109.5 + CR 701.21: this actor is barred from sacrificing the object;
+    /// nothing was consulted or emitted (see [`SacrificeOutcome::Prohibited`]).
+    Prohibited,
+    /// CR 616.1: a replacement choice is pending and `state.pending_replacement`
+    /// owns the move. `state.waiting_for` is not set.
+    NeedsChoice(PlayerId),
+}
+
+impl SacrificeConsult {
+    fn ready(sacrifice: PendingSacrificeMove) -> Self {
+        Self::Ready(Box::new(PendingSacrificeDelivery {
+            sacrifice,
+            rider: None,
+        }))
+    }
+}
+
+/// CR 101.4 + CR 701.21a + CR 614.1: The consult half of
+/// [`sacrifice_permanent`] for a simultaneous sacrifice of several permanents.
+/// Runs the outer Sacrifice and inner graveyard `ZoneChange` replacement passes
+/// without moving anything, so each permanent's replacements are determined
+/// while every co-sacrificed permanent is still on the battlefield (e.g. Dauthi
+/// Voidwalker still exiles an opponent's card sacrificed alongside it). The
+/// caller delivers every `Ready` move afterwards.
+pub(crate) fn consult_sacrifice(
+    state: &mut GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> SacrificeConsult {
+    with_consult_rider(state, |state| {
+        consult_sacrifice_move(state, object_id, player, events)
+    })
+}
+
+/// CR 101.4 + CR 616.1: finish the consult of a sacrifice that
+/// [`consult_sacrifice`] parked on a CR 616.1 choice, through `operation`: the
+/// chooser's answer, or a departure's reconsultation of the changed event.
+/// Like the consult itself, nothing moves: an approved move is returned
+/// `Ready` for the caller to queue with the rest of the batch, and another
+/// pending choice is returned `NeedsChoice`.
+pub(crate) fn consult_answered_sacrifice(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    operation: impl FnOnce(&mut GameState, &mut Vec<GameEvent>) -> ReplacementResult,
+) -> SacrificeConsult {
+    // The inner graveyard move carries the sacrifice it belongs to; the outer
+    // Sacrifice proposal names it itself.
+    let inner = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.sacrifice_provenance);
+    with_consult_rider(state, |state| {
+        let result = operation(state, events);
+        match inner {
+            Some(PendingSacrificeProvenance {
+                object_id,
+                player_id,
+            }) => consult_graveyard_move(state, object_id, player_id, result),
+            None => consult_sacrifice_result(state, result, events),
+        }
+    })
+}
+
+/// CR 614.6: a ready drain resident before the consult belongs to earlier
+/// work; only one this consult installed is this move's rider.
+fn with_consult_rider(
+    state: &mut GameState,
+    consult: impl FnOnce(&mut GameState) -> SacrificeConsult,
+) -> SacrificeConsult {
+    let ready_before = state
+        .active_post_replacement_drains()
+        .is_some_and(|drains| drains.has_ready());
+    let mut consult = consult(state);
+    if let SacrificeConsult::Ready(delivery) = &mut consult {
+        if !ready_before {
+            delivery.rider = state.take_ready_post_replacement_drain();
+        }
+    }
+    consult
+}
+
+fn consult_sacrifice_move(
+    state: &mut GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> SacrificeConsult {
+    let on_battlefield = state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| obj.zone == Zone::Battlefield);
+    if !on_battlefield {
+        return SacrificeConsult::NoMove;
+    }
+    // CR 109.5 + CR 701.21: "Can't be sacrificed" prevents this action for the
+    // barred actor, exactly as in `sacrifice_permanent`.
+    if crate::game::static_abilities::object_cant_be_sacrificed_by(state, player, object_id) {
+        return SacrificeConsult::Prohibited;
+    }
+    let proposed = ProposedEvent::Sacrifice {
+        object_id,
+        player_id: player,
+        applied: HashSet::new(),
+    };
+    let result = replacement::replace_event(state, proposed, events);
+    consult_sacrifice_result(state, result, events)
+}
+
+/// CR 614.1: the outer Sacrifice replacement pass has a result; consult the
+/// graveyard move it leads to.
+fn consult_sacrifice_result(
+    state: &mut GameState,
+    result: ReplacementResult,
+    events: &mut Vec<GameEvent>,
+) -> SacrificeConsult {
+    match result {
+        ReplacementResult::Execute(ProposedEvent::Sacrifice {
+            object_id: oid,
+            player_id: pid,
+            ..
+        }) => {
+            // CR 701.21: record the sacrifice for restriction tracking before any
+            // redirect, as `apply_sacrifice_after_replacement` does.
+            restrictions::record_sacrifice(state, oid, pid);
+            let zone_proposed =
+                ProposedEvent::zone_change(oid, Zone::Battlefield, Zone::Graveyard, None);
+            let result = replacement::replace_event(state, zone_proposed, events);
+            consult_graveyard_move(state, oid, pid, result)
+        }
+        // CR 614.6: the outer replacement redirected straight to a zone change.
+        ReplacementResult::Execute(zone_event @ ProposedEvent::ZoneChange { .. }) => {
+            SacrificeConsult::ready(PendingSacrificeMove::DirectMove { zone_event })
+        }
+        ReplacementResult::Execute(_) | ReplacementResult::Prevented => SacrificeConsult::NoMove,
+        ReplacementResult::NeedsChoice(choice_player) => {
+            SacrificeConsult::NeedsChoice(choice_player)
+        }
+    }
+}
+
+/// CR 701.21a + CR 614.1: the inner graveyard move of an accepted sacrifice
+/// has a replacement result.
+fn consult_graveyard_move(
+    state: &mut GameState,
+    object_id: ObjectId,
+    player_id: PlayerId,
+    result: ReplacementResult,
+) -> SacrificeConsult {
+    match result {
+        ReplacementResult::Execute(zone_event @ ProposedEvent::ZoneChange { .. }) => {
+            SacrificeConsult::ready(PendingSacrificeMove::Sacrifice {
+                object_id,
+                player_id,
+                zone_event,
+            })
+        }
+        // Defensive: the inner proposal is always a ZoneChange. A prevented
+        // move is still a sacrifice (CR 701.21).
+        ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
+            SacrificeConsult::ready(PendingSacrificeMove::InnerPrevented {
+                object_id,
+                player_id,
+            })
+        }
+        ReplacementResult::NeedsChoice(choice_player) => {
+            if let Some(pending) = state.pending_replacement.as_mut() {
+                pending.sacrifice_provenance = Some(PendingSacrificeProvenance {
+                    object_id,
+                    player_id,
+                });
+            }
+            SacrificeConsult::NeedsChoice(choice_player)
+        }
+    }
+}
+
+/// Outcome of delivering a consulted sacrifice.
+pub(crate) enum SacrificeDelivery {
+    Delivered,
+    /// CR 400.7: the permanent left the battlefield (or its sacrificer's
+    /// control) after the consult; nothing moves.
+    Skipped,
+    /// The delivery tail paused on a choice; `state.waiting_for` is set.
+    NeedsChoice(PlayerId),
+}
+
+/// CR 701.21a: The delivery half of [`sacrifice_permanent`] for a move that
+/// [`consult_sacrifice`] already approved. Emits `PermanentSacrificed` for a
+/// sacrifice, whichever zone it was redirected to.
+pub(crate) fn deliver_consulted_sacrifice(
+    state: &mut GameState,
+    delivery: PendingSacrificeDelivery,
+    events: &mut Vec<GameEvent>,
+) -> SacrificeDelivery {
+    let PendingSacrificeDelivery { sacrifice, rider } = delivery;
+    let still_present = match &sacrifice {
+        PendingSacrificeMove::Sacrifice {
+            object_id,
+            player_id,
+            ..
+        } => state
+            .objects
+            .get(object_id)
+            .is_some_and(|obj| obj.zone == Zone::Battlefield && obj.controller == *player_id),
+        PendingSacrificeMove::InnerPrevented { .. } => true,
+        PendingSacrificeMove::DirectMove { zone_event } => zone_event
+            .affected_object_id()
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| obj.zone == Zone::Battlefield),
+    };
+    // CR 400.7: the permanent left the battlefield (or its sacrificer's
+    // control) after the consult; nothing moves, and the replacement's own
+    // work for that move does not happen either.
+    if !still_present {
+        return SacrificeDelivery::Skipped;
+    }
+    // CR 614.6: the replacement's own work (Kalitas's Zombie) happens with the
+    // move it modified, so it is resident when this move's delivery tail drains.
+    if let Some(rider) = rider {
+        state.install_post_replacement_drain(rider, ResidentDrainPolicy::KeepResident);
+    }
+    match sacrifice {
+        PendingSacrificeMove::Sacrifice {
+            object_id,
+            player_id,
+            zone_event,
+        } => {
+            if let SacrificeApply::NeedsChoice(choice_player) =
+                deliver_sacrifice_zone_change(state, zone_event, events)
+            {
+                if let Some(pending) = state.pending_replacement.as_mut() {
+                    pending.sacrifice_provenance = Some(PendingSacrificeProvenance {
+                        object_id,
+                        player_id,
+                    });
+                } else {
+                    // CR 701.21: the move completed; only a post-effect child
+                    // prompt paused.
+                    events.push(GameEvent::PermanentSacrificed {
+                        object_id,
+                        player_id,
+                    });
+                }
+                return SacrificeDelivery::NeedsChoice(choice_player);
+            }
+            events.push(GameEvent::PermanentSacrificed {
+                object_id,
+                player_id,
+            });
+            SacrificeDelivery::Delivered
+        }
+        PendingSacrificeMove::InnerPrevented {
+            object_id,
+            player_id,
+        } => {
+            events.push(GameEvent::PermanentSacrificed {
+                object_id,
+                player_id,
+            });
+            SacrificeDelivery::Delivered
+        }
+        PendingSacrificeMove::DirectMove { zone_event } => {
+            match deliver_sacrifice_zone_change(state, zone_event, events) {
+                SacrificeApply::Complete => SacrificeDelivery::Delivered,
+                SacrificeApply::NeedsChoice(choice_player) => {
+                    SacrificeDelivery::NeedsChoice(choice_player)
+                }
+            }
+        }
     }
 }
 

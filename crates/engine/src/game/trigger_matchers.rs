@@ -529,12 +529,14 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         (
             TriggerCause::EntersBattlefield {
                 core_types: Vec::new(),
+                entrant: crate::types::statics::CausingObject::Any,
             },
             CausedAbilitySource::CausingObject,
         ),
         (
             TriggerCause::EntersBattlefield {
                 core_types: Vec::new(),
+                entrant: crate::types::statics::CausingObject::Any,
             },
             CausedAbilitySource::Any,
         ),
@@ -2120,15 +2122,16 @@ pub(super) fn match_damage_done_once_by_controller(
                 amount: *amount,
                 is_combat: *is_combat,
             };
-            if *is_combat
+            !(*is_combat
                 || !damage_kind_matches(trigger.damage_kind, *is_combat)
                 || !damage_amount_matches(trigger, *amount)
-                || !valid_damage_done_once_player_target(trigger, state, *player_id, source_context)
-                || !damage_done_once_source_matches(trigger, state, damage, source_context)
-            {
-                return false;
-            }
-            true
+                || !valid_damage_done_once_player_target(
+                    trigger,
+                    state,
+                    *player_id,
+                    source_context,
+                )
+                || !damage_done_once_source_matches(trigger, state, damage, source_context))
         }
         _ => false,
     }
@@ -2500,7 +2503,15 @@ pub(super) fn match_ability_triggered(
     let mut subjects = causes
         .iter()
         .filter(|cause_event| {
-            super::triggers::trigger_cause_matches(state, cause, Some(cause_event), controller)
+            // The observer stands in for the doubler as the cause predicate's
+            // own object ("another permanent entering" excludes it).
+            super::triggers::trigger_cause_matches(
+                state,
+                cause,
+                Some(cause_event),
+                controller,
+                source_event_subject_id(source_context),
+            )
         })
         .flat_map(|cause_event| cause_subjects(cause, cause_event))
         .filter(|subject| valid_card_matches_with_lki(trigger, state, *subject, source_context));
@@ -2536,9 +2547,11 @@ fn cause_subjects(cause: &TriggerCause, event: &GameEvent) -> Vec<ObjectId> {
         },
         TriggerCause::Any
         | TriggerCause::CreatureDying
-        | TriggerCause::ControlledCreatureDealtDamage
+        | TriggerCause::ControlledCreature { .. }
         | TriggerCause::ControllerCastOrCopiedSpell { .. }
         | TriggerCause::RoomEntered
+        | TriggerCause::PlayerAction { .. }
+        | TriggerCause::TurnedFaceUp
         | TriggerCause::BattlefieldTransition { .. } => Vec::new(),
     }
 }
@@ -7366,11 +7379,17 @@ mod tests {
                 CausedAbilitySource::CausingObject,
             ),
             (
-                TriggerCause::EntersBattlefield { core_types: vec![] },
+                TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: crate::types::statics::CausingObject::Any,
+                },
                 CausedAbilitySource::CausingObject,
             ),
             (
-                TriggerCause::EntersBattlefield { core_types: vec![] },
+                TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: crate::types::statics::CausingObject::Any,
+                },
                 CausedAbilitySource::Any,
             ),
         ] {
