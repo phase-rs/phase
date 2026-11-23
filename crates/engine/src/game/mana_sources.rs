@@ -1382,10 +1382,12 @@ pub(crate) fn activate_mana_source_option_with_output_and_settle(
 /// (`ActivationObservers::Unbound`). An activation still paused mid-cost (a
 /// replacement choice) has not been observed yet, so it is never recorded;
 /// observing an activation (CR 603.10) can queue an ability or spend a
-/// "triggers only once each turn" limit, which undo cannot reverse. A tap whose
-/// resolution an ordinary trigger observed (CR 608.2p) is ineligible for the
-/// same reason: that trigger is already deferred when this runs. Callers
-/// decide the penalty axis (`ManaSourcePenalty::is_undoable`) first.
+/// "triggers only once each turn" limit, which undo cannot reverse.
+/// CR 605.4a + CR 608.2p: a triggered mana ability resolves immediately after
+/// the mana ability that triggered it. A deferred ordinary observer of the
+/// land's mana resolution or a coupled mana resolution prevents undo, even
+/// when the observer of the coupled source came from an earlier tap.
+/// Callers decide the penalty axis (`ManaSourcePenalty::is_undoable`) first.
 pub(crate) fn record_undoable_mana_tap(
     state: &mut GameState,
     player: PlayerId,
@@ -1407,10 +1409,13 @@ pub(crate) fn record_undoable_mana_tap(
         )
     });
     if !completed_unobserved
-        || state.deferred_triggers.iter().any(|context| {
-            context
-                .mana_resolution_sources()
-                .any(|source| source == source_id)
+        || (!state.deferred_triggers.is_empty() && {
+            let coupled_sources = aura_taps_for_mana_sources_for_land(state, source_id, player);
+            state
+                .deferred_triggers
+                .iter()
+                .flat_map(|context| context.mana_resolution_sources())
+                .any(|source| source == source_id || coupled_sources.contains(&source))
         })
     {
         return;

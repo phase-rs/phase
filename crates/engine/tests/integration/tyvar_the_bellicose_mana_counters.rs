@@ -616,6 +616,123 @@ fn manabarbs_blocks_undo_while_the_tap_observer_is_deferred_for_payment() {
     assert!(runner.state().objects[&forest].tapped);
 }
 
+fn tyvar_vorinclex_forest() -> (GameScenario, ObjectId, ObjectId) {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let (mut scenario, _) = tyvar_board(Phase::PreCombatMain);
+    let vorinclex = vorinclex(&mut scenario);
+    let forest = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    (scenario, vorinclex, forest)
+}
+
+#[test]
+fn tyvar_vorinclex_forest_tap_cannot_be_undone_during_payment() {
+    let (mut scenario, vorinclex, forest) = tyvar_vorinclex_forest();
+    let spell = vitalize(&mut scenario);
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    let announced = runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("announce Vitalize");
+    assert!(matches!(
+        announced.waiting_for,
+        WaitingFor::ManaPayment { player, .. } if player == P0
+    ));
+
+    let tapped = tap_land(&mut runner, forest);
+    assert!(matches!(
+        tapped.waiting_for,
+        WaitingFor::ManaPayment { player, .. } if player == P0
+    ));
+    assert_eq!(
+        runner.state().players[0]
+            .mana_pool
+            .count_color(ManaType::Green),
+        2
+    );
+    assert!(!runner
+        .state()
+        .stack
+        .iter()
+        .any(|entry| entry.source_id == vorinclex));
+    assert_undo_unavailable(&mut runner, forest);
+
+    runner
+        .act(GameAction::PassPriority)
+        .expect("pay for Vitalize");
+    assert_eq!(runner.state().stack.len(), 2);
+    assert_eq!(runner.state().stack.front().unwrap().source_id, spell);
+    assert_top_trigger(&runner, vorinclex);
+    assert_eq!(counters(&runner, vorinclex), 0);
+
+    runner.pass_both_players();
+    assert_eq!(counters(&runner, vorinclex), 1);
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    assert!(runner.state().objects[&forest].tapped);
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn tyvar_vorinclex_forest_tap_cannot_be_undone_at_priority() {
+    let (scenario, vorinclex, forest) = tyvar_vorinclex_forest();
+    let mut runner = scenario.build();
+
+    tap_land(&mut runner, forest);
+    assert_eq!(
+        runner.state().players[0]
+            .mana_pool
+            .count_color(ManaType::Green),
+        2
+    );
+    assert_top_trigger(&runner, vorinclex);
+    assert_undo_unavailable(&mut runner, forest);
+    resolve_only_trigger(&mut runner, vorinclex, 1);
+    assert!(runner.state().objects[&forest].tapped);
+}
+
+#[test]
+fn tyvar_wild_growth_forest_tap_can_be_undone_at_priority() {
+    let db = crate::support::shared_card_db().expect("integration card fixture");
+    let (mut scenario, _) = tyvar_board(Phase::PreCombatMain);
+    let forest = scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    let growth = scenario.add_real_card(P0, "Wild Growth", Zone::Hand, db);
+    seed_mana(&mut scenario, &[ManaType::Green]);
+    let mut runner = scenario.build();
+    runner
+        .cast(growth)
+        .target_object(forest)
+        .resolve()
+        .assert_zone(&[growth], Zone::Battlefield);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+
+    tap_land(&mut runner, forest);
+    assert!(runner.state().objects[&forest].tapped);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        runner.state().players[0]
+            .mana_pool
+            .count_color(ManaType::Green),
+        2
+    );
+
+    let undone = runner
+        .act(GameAction::UntapLandForMana { object_id: forest })
+        .expect("undo the Forest tap and refund both mana producers");
+    assert!(matches!(undone.waiting_for, WaitingFor::Priority { player } if player == P0));
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert!(!runner.state().objects[&forest].tapped);
+}
+
 /// CR 605.1b + CR 608.2p: Tyvar's grant observes Vorinclex's triggered mana
 /// ability and counts its production in either loop detection mode.
 #[test]
