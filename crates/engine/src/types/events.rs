@@ -113,8 +113,8 @@ pub enum ManaTapState {
     FromTapTriggersResolved,
 }
 
-/// CR 605.4a: Records whether the triggered mana abilities coupled to one
-/// aggregate mana-ability production event have already resolved inline.
+/// CR 605.4a + CR 608.2p: Controls how a mana production event is offered
+/// to triggered mana abilities. Ordinary triggers can observe every state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaAbilityTriggerState {
     /// Coupled triggered mana abilities have not yet resolved.
@@ -122,6 +122,9 @@ pub enum ManaAbilityTriggerState {
     Pending,
     /// Coupled triggered mana abilities resolved inline during a payment.
     InlineResolved,
+    /// With loop detection off, only ordinary triggers may observe a triggered
+    /// mana ability’s production. This prevents new mana-trigger chains.
+    ObserversOnly,
 }
 
 impl ManaAbilityTriggerState {
@@ -1276,10 +1279,12 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "ManaTapState::is_not_from_tap")]
         tap_state: ManaTapState,
     },
-    /// CR 605.1b + CR 608.2p: One aggregate event per recipient of a mana
-    /// ability resolution, including abilities without a tap cost. A completed
-    /// activated ability with no output reports one empty event for its activator.
-    /// Triggered mana production is reported only while loop detection samples.
+    /// CR 605.1b + CR 608.2p: An activated mana ability reports one aggregate
+    /// event per recipient, including abilities without a tap cost. A completed
+    /// activation with no output reports one empty event for its activator.
+    /// A triggered mana ability reports an event per mana instruction that
+    /// deposits mana. With loop detection off, only ordinary triggers can
+    /// observe those triggered-mana production events.
     ManaAbilityProduced {
         player_id: PlayerId,
         source_id: ObjectId,

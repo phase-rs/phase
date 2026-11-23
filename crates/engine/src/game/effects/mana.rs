@@ -10,7 +10,8 @@ use crate::types::ability::{
 use crate::types::ability::{DevotionColors, QuantityRef};
 use crate::types::events::{GameEvent, ManaAbilityTriggerState, ManaResolutionShare};
 use crate::types::game_state::{
-    GameState, ManaChoice, ManaChoiceContext, ManaChoicePrompt, MayTriggerOrigin, WaitingFor,
+    GameState, LoopDetectionMode, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
+    MayTriggerOrigin, WaitingFor,
 };
 use crate::types::mana::{ManaColor, ManaRestriction, ManaType};
 use crate::types::player::PlayerId;
@@ -436,8 +437,8 @@ pub fn resolve(
     Ok(())
 }
 
-/// CR 605.1b: a triggered mana ability that deposited mana announces its production, which a
-/// mana ability can trigger from, whether it resolved at once or after a type choice.
+/// CR 605.1b + CR 608.2p: Announce triggered mana production so ordinary
+/// resolution observers can see it, including after a mana type choice.
 fn complete_triggered_mana_production(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -447,21 +448,26 @@ fn complete_triggered_mana_production(
     produced: Vec<ManaType>,
     events: &mut Vec<GameEvent>,
 ) {
-    // CR 605.1b is traded away under Off: this production event is emitted only where loop
-    // detection samples, the only modes that can recognise the self-retrigger it may start.
-    if !is_triggered_mana_inline || total == 0 || !state.loop_detection.samples() {
+    if !is_triggered_mana_inline || total == 0 {
         return;
     }
+    let trigger_state = match state.loop_detection {
+        LoopDetectionMode::Off => ManaAbilityTriggerState::ObserversOnly,
+        LoopDetectionMode::Interactive => ManaAbilityTriggerState::Pending,
+    };
     let event = GameEvent::ManaAbilityProduced {
         player_id: recipient,
         source_id: ability.source_id,
         produced,
         resolution: ManaResolutionShare::WholeResolution { total },
-        trigger_state: ManaAbilityTriggerState::Pending,
+        trigger_state,
     };
     // CR 104.4b + CR 732.4: a mandatory self-retrigger inside one mana resolution
     // (CR 605.4a) is a loop of mandatory actions.
-    if crate::game::triggers::mana_production_retriggers_itself_mandatorily(state, ability, &event)
+    if trigger_state.is_pending()
+        && crate::game::triggers::mana_production_retriggers_itself_mandatorily(
+            state, ability, &event,
+        )
     {
         if state.game_end.is_none() {
             super::declare_mandatory_loop_draw(state, events);
@@ -3702,10 +3708,10 @@ mod tests {
             .count()
     }
 
-    /// CR 605.1b is traded away under Off: a Caged Sun land's production is no event, so the
-    /// resolution neither retriggers the Sun nor ends the game.
+    /// CR 605.1b + CR 608.2p: Off announces a Caged Sun land's production for
+    /// ordinary observers, without retriggering the Sun or ending the game.
     #[test]
-    fn a_caged_sun_land_under_off_emits_no_production_event() {
+    fn a_caged_sun_land_under_off_announces_production_for_ordinary_observers() {
         use crate::types::game_state::LoopDetectionMode;
 
         let (mut state, sun, ability, forest_event) =
@@ -3716,7 +3722,13 @@ mod tests {
             1,
             "reach: the Sun added its mana"
         );
-        assert!(produced_by(&events, sun).is_empty());
+        assert!(matches!(
+            produced_by(&events, sun).as_slice(),
+            [GameEvent::ManaAbilityProduced {
+                trigger_state: ManaAbilityTriggerState::ObserversOnly,
+                ..
+            }]
+        ));
         assert_eq!(game_overs(&events), 0);
         assert_eq!(state.game_end, None);
     }
@@ -3965,8 +3977,8 @@ mod tests {
         }
     }
 
-    /// CR 605.1b: Extraplanar Lens echoing a Simic Growth Chamber pauses for the type; the
-    /// answered production is an event wherever loop detection samples, as an unpaused one is.
+    /// CR 605.1b + CR 608.2p: Extraplanar Lens echoing a Simic Growth Chamber
+    /// pauses for the type, then announces production in either loop detection mode.
     #[test]
     fn an_echo_answered_after_its_type_choice_emits_its_production() {
         use crate::game::scenario::{GameScenario, P0};
@@ -4043,11 +4055,7 @@ mod tests {
                 2,
                 "{mode:?}: reach: the echo added the chosen type"
             );
-            assert_eq!(
-                produced_by(&answered.events, lens).len(),
-                usize::from(mode.samples()),
-                "{mode:?}"
-            );
+            assert_eq!(produced_by(&answered.events, lens).len(), 1, "{mode:?}");
         }
     }
 }

@@ -1,4 +1,5 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::ChosenAttribute;
 use engine::types::actions::GameAction;
 use engine::types::events::{GameEvent, ManaResolutionShare};
 use engine::types::game_state::{
@@ -9,7 +10,7 @@ use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
-use engine::types::CounterType;
+use engine::types::{CoreType, CounterType};
 
 const TYVAR: &str = concat!(
     "Whenever one or more Elves you control attack, they gain deathtouch until end of turn.\n",
@@ -448,39 +449,42 @@ fn tyvar_triggers_after_a_mana_ability_resumes_from_a_reveal() {
     resolve_only_trigger(&mut runner, metalworker, 2);
 }
 
-/// CR 605.1b + CR 608.2p: Vorinclex's triggered mana ability is a mana ability of that
-/// creature, so the grant counts the mana it adds. The engine announces a triggered mana
-/// ability's production only while loop detection samples (`complete_triggered_mana_production`),
-/// so with it off the grant does not see that resolution.
+fn vorinclex(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_from_oracle(
+            P0,
+            "Vorinclex, Voice of Hunger",
+            7,
+            6,
+            "Trample\nWhenever you tap a land for mana, add one mana of any type that land produced.\nWhenever an opponent taps a land for mana, that land doesn't untap during its controller's next untap step.",
+        )
+        .id()
+}
+
+fn tap_forest(runner: &mut GameRunner, forest: ObjectId) -> ActionResult {
+    let (_, _, grouped) = engine::ai_support::legal_actions_full(runner.state());
+    let tap = grouped
+        .get(&forest)
+        .into_iter()
+        .flatten()
+        .find(|action| matches!(action, GameAction::TapLandForMana { .. }))
+        .cloned()
+        .expect("the Forest can tap for mana");
+    runner.act(tap).expect("tap the Forest for mana")
+}
+
+/// CR 605.1b + CR 608.2p: Tyvar's grant observes Vorinclex's triggered mana
+/// ability and counts its production in either loop detection mode.
 #[test]
-fn tyvar_counts_a_creatures_triggered_mana_ability_while_loop_detection_samples() {
-    for (mode, expected) in [
-        (LoopDetectionMode::Interactive, 1),
-        (LoopDetectionMode::Off, 0),
-    ] {
+fn tyvar_counts_a_creatures_triggered_mana_ability_in_both_loop_modes() {
+    for mode in [LoopDetectionMode::Interactive, LoopDetectionMode::Off] {
         let (mut scenario, _) = tyvar_board(Phase::PreCombatMain);
-        let vorinclex = scenario
-            .add_creature_from_oracle(
-                P0,
-                "Vorinclex, Voice of Hunger",
-                7,
-                6,
-                "Trample\nWhenever you tap a land for mana, add one mana of any type that land produced.\nWhenever an opponent taps a land for mana, that land doesn't untap during its controller's next untap step.",
-            )
-            .id();
+        let vorinclex = vorinclex(&mut scenario);
         let forest = scenario.add_basic_land(P0, ManaColor::Green);
         let mut runner = scenario.build();
         runner.state_mut().loop_detection = mode;
 
-        let (_, _, grouped) = engine::ai_support::legal_actions_full(runner.state());
-        let tap = grouped
-            .get(&forest)
-            .into_iter()
-            .flatten()
-            .find(|action| matches!(action, GameAction::TapLandForMana { .. }))
-            .cloned()
-            .expect("the Forest can tap for mana");
-        runner.act(tap).expect("tap the Forest for mana");
+        tap_forest(&mut runner, forest);
         assert_eq!(
             runner.state().players[0]
                 .mana_pool
@@ -492,13 +496,73 @@ fn tyvar_counts_a_creatures_triggered_mana_ability_while_loop_detection_samples(
             runner.state().waiting_for,
             WaitingFor::Priority { .. }
         ));
-        if expected == 0 {
-            assert!(runner.state().stack.is_empty(), "{mode:?}");
-        } else {
-            resolve_only_trigger(&mut runner, vorinclex, expected);
-        }
-        assert_eq!(counters(&runner, vorinclex), expected, "{mode:?}");
+        resolve_only_trigger(&mut runner, vorinclex, 1);
         assert_eq!(counters(&runner, forest), 0, "{mode:?}");
+    }
+}
+
+/// CR 605.1b + CR 608.2p: Off keeps main's three green mana from the Forest,
+/// Vorinclex, and Caged Sun. Interactive also lets the Sun see Vorinclex's
+/// production, which is from a land because of Ashaya.
+#[test]
+fn off_announces_vorinclex_to_tyvar_without_a_second_caged_sun_firing() {
+    for (mode, sun_firings) in [
+        (LoopDetectionMode::Off, 1),
+        (LoopDetectionMode::Interactive, 2),
+    ] {
+        let (mut scenario, _) = tyvar_board(Phase::PreCombatMain);
+        let vorinclex = vorinclex(&mut scenario);
+        scenario.add_creature_from_oracle(
+            P0,
+            "Ashaya, Soul of the Wild",
+            0,
+            0,
+            "Ashaya's power and toughness are each equal to the number of lands you control.\nNontoken creatures you control are Forest lands in addition to their other types. (They're still affected by summoning sickness.)",
+        );
+        let sun = scenario
+            .add_artifact_from_oracle(
+                P0,
+                "Caged Sun",
+                "As this artifact enters, choose a color.\nCreatures you control of the chosen color get +1/+1.\nWhenever a land's ability causes you to add one or more mana of the chosen color, add an additional one mana of that color.",
+            )
+            .id();
+        let forest = scenario.add_basic_land(P0, ManaColor::Green);
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.loop_detection = mode;
+        state
+            .objects
+            .get_mut(&sun)
+            .expect("Caged Sun")
+            .chosen_attributes
+            .push(ChosenAttribute::Color(ManaColor::Green));
+        state.layers_dirty.mark_full();
+
+        let result = tap_forest(&mut runner, forest);
+        let vorinclex_types = &runner.state().objects[&vorinclex].card_types;
+        assert!(vorinclex_types.core_types.contains(&CoreType::Land));
+        assert!(vorinclex_types
+            .subtypes
+            .iter()
+            .any(|subtype| subtype == "Forest"));
+        assert_eq!(
+            production_shares(&result.events, vorinclex).len(),
+            1,
+            "{mode:?}"
+        );
+        assert_eq!(
+            production_shares(&result.events, sun).len(),
+            sun_firings,
+            "{mode:?}"
+        );
+        let pool = &runner.state().players[0].mana_pool;
+        assert_eq!(
+            pool.count_color(ManaType::Green),
+            2 + sun_firings,
+            "{mode:?}"
+        );
+        assert_eq!(pool.total(), 2 + sun_firings, "{mode:?}");
+        resolve_only_trigger(&mut runner, vorinclex, 1);
     }
 }
 
