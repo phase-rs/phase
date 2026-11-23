@@ -104642,44 +104642,6 @@ fn reveal_hand_conjunct_without_grammar_is_an_explicit_gap() {
     type GapCase<'a> = (&'a str, &'a str, &'a str, &'a [&'a str], &'a [&'a str]);
     let cases: &[GapCase] = &[
         (
-            "Amnesia",
-            "Sorcery",
-            "Target player reveals their hand and discards all nonland cards.",
-            &[],
-            &["discard all nonland cards"],
-        ),
-        (
-            "Trapfinder's Trick",
-            "Sorcery",
-            "Target player reveals their hand and discards all Trap cards.",
-            &[],
-            &["discard all Trap cards"],
-        ),
-        (
-            "Shatter Assumptions",
-            "Sorcery",
-            "Choose one —\n• Target opponent reveals their hand and discards all colorless nonland cards.\n• Target opponent reveals their hand and discards all multicolored cards.",
-            &[],
-            &[
-                "discard all colorless nonland cards",
-                "discard all multicolored cards",
-            ],
-        ),
-        (
-            "Cabal Therapy",
-            "Sorcery",
-            "Choose a nonland card name. Target player reveals their hand and discards all cards with that name.\nFlashback—Sacrifice a creature. (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
-            &["Flashback"],
-            &["discard all cards with that name"],
-        ),
-        (
-            "Cabal Therapist",
-            "Creature",
-            "Menace\nAt the beginning of your first main phase, you may sacrifice a creature. When you do, choose a nonland card name, then target player reveals their hand and discards all cards with that name.",
-            &["Menace"],
-            &["discard all cards with that name"],
-        ),
-        (
             "Persecute",
             "Sorcery",
             "Choose a color. Target player reveals their hand and discards all cards of that color.",
@@ -104692,13 +104654,6 @@ fn reveal_hand_conjunct_without_grammar_is_an_explicit_gap() {
             "Flying\nWhenever Crosis deals combat damage to a player, you may pay {2}{B}. If you do, choose a color, then that player reveals their hand and discards all cards of that color.",
             &["Flying"],
             &["discard all cards of that color"],
-        ),
-        (
-            "Tsabo's Decree",
-            "Instant",
-            "Choose a creature type. Target player reveals their hand and discards all creature cards of that type. Then destroy all creatures of that type that player controls. They can't be regenerated.",
-            &[],
-            &["discard all creature cards of that type"],
         ),
         (
             "Mind Extraction",
@@ -104802,11 +104757,11 @@ fn rag_man_reveal_conjunct_is_a_real_random_discard() {
     );
 }
 
-/// P3 (SHAPE). CR 608.2c: an explicit gap names no player the parser knows of, so
-/// Tsabo's Decree's "that player" reaches past the gap to the declared target player
-/// rather than falling back to the caster.
+/// P3 (SHAPE). CR 608.2c: Tsabo's Decree's discard is a real discard by the
+/// declared player, and its later "that player" still reaches the declared target
+/// player rather than falling back to the caster.
 #[test]
-fn tsabos_decree_that_player_reads_through_the_discard_gap() {
+fn tsabos_decree_that_player_reads_through_the_discard() {
     let parsed = parse_oracle_text(
         "Choose a creature type. Target player reveals their hand and discards all creature cards of that type. Then destroy all creatures of that type that player controls. They can't be regenerated.",
         "Tsabo's Decree",
@@ -104818,9 +104773,25 @@ fn tsabos_decree_that_player_reads_through_the_discard_gap() {
     assert!(nodes
         .iter()
         .any(|d| matches!(&*d.effect, Effect::Choose { .. })));
-    assert!(nodes
+    let reveal = nodes
         .iter()
-        .any(|d| matches!(&*d.effect, Effect::RevealHand { .. })));
+        .find(|d| matches!(&*d.effect, Effect::RevealHand { .. }))
+        .expect("the reveal must parse");
+    let discard = reveal
+        .sub_ability
+        .as_deref()
+        .expect("the reveal must have a next node");
+    assert!(
+        matches!(
+            &*discard.effect,
+            Effect::Discard {
+                target: TargetFilter::DeclaredPlayer { .. },
+                ..
+            }
+        ),
+        "the discard is no longer a gap: {:?}",
+        discard.effect
+    );
     let destroy = nodes
         .iter()
         .find_map(|d| match &*d.effect {
@@ -104834,6 +104805,352 @@ fn tsabos_decree_that_player_reads_through_the_discard_gap() {
             Some(ControllerRef::DeclaredPlayer { .. })
         ),
         "{destroy:?}"
+    );
+}
+
+/// The type filters of a hand-card noun filter other than the neutral
+/// `TypeFilter::Card` (every object in a hand is a card), and its properties.
+fn hand_card_filter_parts(filter: &TargetFilter) -> (Vec<&TypeFilter>, &[FilterProp]) {
+    let TargetFilter::Typed(TypedFilter {
+        type_filters,
+        controller: None,
+        properties,
+    }) = filter
+    else {
+        panic!("expected an uncontrolled typed card filter: {filter:?}");
+    };
+    (
+        type_filters
+            .iter()
+            .filter(|t| !matches!(t, TypeFilter::Card))
+            .collect(),
+        properties,
+    )
+}
+
+/// P1 (SHAPE). CR 701.9a + CR 608.2c: every supported "reveals their hand and
+/// discards all <filter> cards" instruction lowers, as the reveal's next node, to a
+/// discard by the declared player whose count is the census of the matching cards in
+/// that player's hand (`ZoneCardCount` over `ScopedPlayer`) and whose card filter is
+/// the same filter. Runtime rows: `discard_all_matching_cards.rs`.
+#[test]
+fn discard_all_matching_cards_lowers_to_a_filtered_census_discard() {
+    type FilterCheck = fn(&TargetFilter);
+    type SupportedCase<'a> = (&'a str, &'a str, &'a str, &'a [&'a str], &'a [FilterCheck]);
+    let cases: &[SupportedCase] = &[
+        (
+            "Amnesia",
+            "Sorcery",
+            "Target player reveals their hand and discards all nonland cards.",
+            &[],
+            &[|f| {
+                let (types, props) = hand_card_filter_parts(f);
+                assert_eq!(types, vec![&TypeFilter::Non(Box::new(TypeFilter::Land))]);
+                assert!(props.is_empty(), "{props:?}");
+            }],
+        ),
+        (
+            "Trapfinder's Trick",
+            "Sorcery",
+            "Target player reveals their hand and discards all Trap cards.",
+            &[],
+            &[|f| {
+                let (types, props) = hand_card_filter_parts(f);
+                assert_eq!(types, vec![&TypeFilter::Subtype("Trap".to_string())]);
+                assert!(props.is_empty(), "{props:?}");
+            }],
+        ),
+        (
+            "Shatter Assumptions",
+            "Sorcery",
+            "Choose one —\n• Target opponent reveals their hand and discards all colorless nonland cards.\n• Target opponent reveals their hand and discards all multicolored cards.",
+            &[],
+            &[
+                |f| {
+                    let (types, props) = hand_card_filter_parts(f);
+                    assert_eq!(types, vec![&TypeFilter::Non(Box::new(TypeFilter::Land))]);
+                    assert_eq!(
+                        props,
+                        &[FilterProp::ColorCount {
+                            comparator: Comparator::EQ,
+                            count: 0,
+                        }]
+                    );
+                },
+                |f| {
+                    let (types, props) = hand_card_filter_parts(f);
+                    assert!(types.is_empty(), "{types:?}");
+                    assert_eq!(
+                        props,
+                        &[FilterProp::ColorCount {
+                            comparator: Comparator::GE,
+                            count: 2,
+                        }]
+                    );
+                },
+            ],
+        ),
+        (
+            "Cabal Therapy",
+            "Sorcery",
+            "Choose a nonland card name. Target player reveals their hand and discards all cards with that name.\nFlashback—Sacrifice a creature. (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
+            &["Flashback"],
+            &[|f| assert_eq!(*f, TargetFilter::HasChosenName)],
+        ),
+        (
+            "Cabal Therapist",
+            "Creature",
+            "Menace\nAt the beginning of your first main phase, you may sacrifice a creature. When you do, choose a nonland card name, then target player reveals their hand and discards all cards with that name.",
+            &["Menace"],
+            &[|f| assert_eq!(*f, TargetFilter::HasChosenName)],
+        ),
+        (
+            "Tsabo's Decree",
+            "Instant",
+            "Choose a creature type. Target player reveals their hand and discards all creature cards of that type. Then destroy all creatures of that type that player controls. They can't be regenerated.",
+            &[],
+            &[|f| {
+                let (types, props) = hand_card_filter_parts(f);
+                assert_eq!(types, vec![&TypeFilter::Creature]);
+                assert_eq!(props, &[FilterProp::IsChosenCreatureType]);
+            }],
+        ),
+    ];
+    for (name, card_type, text, keywords, checks) in cases {
+        let keywords: Vec<String> = keywords.iter().map(|k| k.to_string()).collect();
+        let parsed = parse_oracle_text(text, name, &keywords, &[card_type.to_string()], &[]);
+        let nodes = all_card_defs(&parsed);
+        // REACH-GUARD: no clause of the card is left as a gap.
+        assert!(
+            !nodes.iter().any(|d| is_unimplemented_def(d)),
+            "{name}: {nodes:#?}"
+        );
+        let reveals: Vec<&&AbilityDefinition> = nodes
+            .iter()
+            .filter(|d| matches!(&*d.effect, Effect::RevealHand { .. }))
+            .collect();
+        assert_eq!(reveals.len(), checks.len(), "{name}: {reveals:#?}");
+        for (reveal, check) in reveals.into_iter().zip(checks.iter()) {
+            let discard = reveal
+                .sub_ability
+                .as_deref()
+                .unwrap_or_else(|| panic!("{name}: reveal must have a next node"));
+            let Effect::Discard {
+                count,
+                target,
+                selection,
+                unless_filter,
+                filter,
+            } = &*discard.effect
+            else {
+                panic!(
+                    "{name}: reveal's next node must be a discard: {:?}",
+                    discard.effect
+                );
+            };
+            assert!(
+                matches!(target, TargetFilter::DeclaredPlayer { .. }),
+                "{name}: the declared player discards: {target:?}"
+            );
+            assert_eq!(*selection, CardSelectionMode::Chosen, "{name}");
+            assert_eq!(*unless_filter, None, "{name}");
+            let filter = filter
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: the discard carries its card filter"));
+            check(filter);
+            assert_eq!(
+                *count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: crate::types::ability::ZoneRef::Hand,
+                        card_types: vec![],
+                        filter: Some(filter.clone()),
+                        scope: crate::types::ability::CountScope::ScopedPlayer,
+                    },
+                },
+                "{name}: the count is the census of the same filter in the discarder's hand"
+            );
+            // P3: Cabal Therapist's reflexive gate stays on the reveal and the discard
+            // continues it (CR 603.12), so a declined sacrifice skips the discard.
+            if *name == "Cabal Therapist" {
+                assert_eq!(
+                    reveal.condition,
+                    Some(AbilityCondition::WhenYouDo),
+                    "{name}"
+                );
+                assert_eq!(discard.sub_link, SubAbilityLink::ContinuationStep, "{name}");
+            }
+        }
+    }
+}
+
+/// P2 (SHAPE). CR 701.9a + CR 608.2c: "all <noun>" discards whose noun this unit
+/// cannot represent stay explicit gaps with their base description. Hint of
+/// Insanity's hand-relative pairing and Nebuchadnezzar's revealed subset fail in the
+/// noun grammar, and Noxious Vapors's "all other" fails the `not(tag("other "))`
+/// guard; Khorvath's Fury's "all cards from their hand" parses as a noun but names a
+/// zone, so the arm's representability check refuses it. Semantics remain
+/// unsupported.
+#[test]
+fn discard_all_unrepresentable_nouns_stay_gaps() {
+    type RevealGapCase<'a> = (&'a str, &'a str, &'a [&'a str], &'a str);
+    let reveal_cases: &[RevealGapCase] = &[
+        (
+            "Hint of Insanity",
+            "Target player reveals their hand. That player discards all nonland cards with the same name as another card in their hand.",
+            &["Sorcery"],
+            "discard all nonland cards with the same name as another card in their hand",
+        ),
+        (
+            "Nebuchadnezzar",
+            "{X}, {T}: Choose a card name. Target opponent reveals X cards at random from their hand. Then that player discards all cards with that name revealed this way. Activate only during your turn.",
+            &["Creature"],
+            "discard all cards with that name revealed this way",
+        ),
+        (
+            "Noxious Vapors",
+            "Each player reveals their hand, chooses one card of each color from it, then discards all other nonland cards.",
+            &["Sorcery"],
+            "discard all other nonland cards",
+        ),
+    ];
+    for (name, text, types, expected) in reveal_cases {
+        let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+        let parsed = parse_oracle_text(text, name, &[], &types, &[]);
+        let nodes = all_card_defs(&parsed);
+        // REACH-GUARD: the reveal parsed, so the discard clause reached the discard
+        // grammar rather than failing upstream.
+        assert!(
+            nodes
+                .iter()
+                .any(|d| matches!(&*d.effect, Effect::RevealHand { .. })),
+            "{name}: {nodes:#?}"
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|d| d.effect.unimplemented_description() == Some(*expected)),
+            "{name}: the discard clause stays a gap: {nodes:#?}"
+        );
+        assert!(
+            !nodes
+                .iter()
+                .any(|d| matches!(&*d.effect, Effect::Discard { .. })),
+            "{name}: {nodes:#?}"
+        );
+    }
+
+    // Khorvath's Fury (verbatim) reaches the arm through its friend-or-foe split.
+    let fury = parse_oracle_text(
+        "For each player, choose friend or foe. Each friend discards all cards from their hand, then draws that many cards plus one. Khorvath's Fury deals damage to each foe equal to the number of cards in their hand.",
+        "Khorvath's Fury",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert_eq!(fury.abilities.len(), 1, "{:#?}", fury.abilities);
+    let Effect::Vote {
+        choices,
+        per_choice_effect,
+        ..
+    } = &*fury.abilities[0].effect
+    else {
+        panic!(
+            "Khorvath's Fury is a friend-or-foe split: {:?}",
+            fury.abilities[0].effect
+        );
+    };
+    // REACH-GUARD: the friend branch exists, and its first node is the discard
+    // clause, so the clause reached the discard grammar.
+    assert_eq!(choices, &["friend".to_string(), "foe".to_string()]);
+    assert_eq!(
+        per_choice_effect[0].effect.unimplemented_description(),
+        Some("discard all cards from their hand"),
+        "{:#?}",
+        per_choice_effect[0]
+    );
+    let mut every = Vec::new();
+    for branch in per_choice_effect {
+        collect_defs(branch, &mut every);
+    }
+    assert!(
+        !every
+            .iter()
+            .any(|d| matches!(&*d.effect, Effect::Discard { .. })),
+        "{every:#?}"
+    );
+    // The noun itself parses — it is the zone refusal, not the noun grammar, that
+    // keeps the clause a gap.
+    let noun = imperative::parse_discard_card_filter("cards from their hand")
+        .expect("the zone-naming noun parses as a card filter");
+    assert!(
+        crate::types::ability::filter_contains_filter_prop(&noun, &|prop| matches!(
+            prop,
+            FilterProp::InZone { zone: Zone::Hand }
+        )),
+        "{noun:?}"
+    );
+}
+
+/// P2 (SHAPE). CR 608.2c + CR 202.3: Infernal Kirin's "cards with that spell's mana
+/// value" parses as a noun, but its demonstrative mana-value read can name a revealed
+/// card instead of the cast spell, so the arm refuses it and the clause stays a gap.
+/// Semantics remain unsupported.
+#[test]
+fn infernal_kirin_spell_mana_value_noun_stays_a_gap() {
+    let parsed = parse_oracle_text(
+        "Flying\nWhenever you cast a Spirit or Arcane spell, target player reveals their hand and discards all cards with that spell's mana value.",
+        "Infernal Kirin",
+        &["Flying".to_string()],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.triggers.len(), 1, "{:#?}", parsed.triggers);
+    // REACH-GUARD: the cast trigger's reveal parsed and its next node is the gap.
+    assert_eq!(
+        parsed.triggers[0].mode,
+        crate::types::triggers::TriggerMode::SpellCast
+    );
+    let reveal = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("the trigger executes the reveal");
+    assert!(
+        matches!(&*reveal.effect, Effect::RevealHand { .. }),
+        "{:?}",
+        reveal.effect
+    );
+    let child = reveal
+        .sub_ability
+        .as_deref()
+        .expect("the reveal must have a next node");
+    assert_eq!(
+        child.effect.unimplemented_description(),
+        Some("discard all cards with that spell's mana value")
+    );
+    assert!(
+        !all_card_defs(&parsed)
+            .iter()
+            .any(|d| matches!(&*d.effect, Effect::Discard { .. })),
+        "no discard is lowered"
+    );
+    // The noun itself parses — it is the referent refusal, not the noun grammar,
+    // that keeps the clause a gap.
+    let noun = imperative::parse_discard_card_filter("cards with that spell's mana value")
+        .expect("the demonstrative mana-value noun parses as a card filter");
+    assert!(
+        crate::types::ability::filter_contains_filter_prop(&noun, &|prop| matches!(
+            prop,
+            FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Demonstrative,
+                    },
+                },
+            }
+        )),
+        "{noun:?}"
     );
 }
 

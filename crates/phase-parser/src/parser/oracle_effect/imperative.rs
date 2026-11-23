@@ -1403,6 +1403,71 @@ fn parse_discard_unless_filter<'a>(
     (before, Some(filter))
 }
 
+/// CR 701.9a + CR 608.2c + CR 201.2a: the card filter of a discard
+/// instruction's noun phrase ("cards", "a creature card", "cards with that
+/// name", "nonland cards with that name"). The outer `None` means the noun is
+/// not recognized, so the instruction fails closed; the inner `None` means a
+/// plain "card(s)", which any card in the hand satisfies.
+fn parse_discard_noun_filter(noun: &str) -> Option<Option<TargetFilter>> {
+    // CR 201.2a + CR 608.2c: a trailing "with that name" binds the discard to the
+    // card name chosen earlier in this resolution (Brain Pry). It composes onto
+    // whatever type qualifier precedes it.
+    let (noun, has_chosen_name) = match terminated(
+        take_until::<_, _, OracleError<'_>>(" with that name"),
+        all_consuming(tag(" with that name")),
+    )
+    .parse(noun)
+    {
+        Ok((_, base)) => (base, true),
+        Err(_) => (noun, false),
+    };
+    let plain_noun = noun.to_lowercase();
+    let type_filter = if all_consuming((
+        opt(tag::<_, _, OracleError<'_>>("additional ")),
+        alt((tag("cards"), tag("card"))),
+    ))
+    .parse(plain_noun.as_str())
+    .is_ok()
+    {
+        None
+    } else {
+        Some(parse_discard_card_filter(noun)?)
+    };
+    Some(match (type_filter, has_chosen_name) {
+        (filter, false) => filter,
+        (None, true) => Some(TargetFilter::HasChosenName),
+        (Some(filter), true) => Some(TargetFilter::And {
+            filters: vec![filter, TargetFilter::HasChosenName],
+        }),
+    })
+}
+
+/// CR 701.9a + CR 608.2c: whether an "all <noun>" discard can carry this parsed
+/// noun filter. Two parsed shapes are refused (fail closed):
+/// - a noun that names a zone ("all cards from their hand", Khorvath's Fury): a
+///   discard's pool is always the discarding player's hand (CR 701.9a), so the
+///   zone restates the whole-hand instruction rather than filtering the hand.
+///   Accepting it here would be wrong, not merely misplaced: the printed
+///   instruction sits under a per-player friend-or-foe fan-out, and this arm
+///   establishes neither which player discards under that fan-out nor how the
+///   following "draws that many cards" reads the discarded count, so a lowered
+///   discard would claim semantics nothing here backs;
+/// - a mana-value comparison over an `Anaphoric` / `Demonstrative` object
+///   referent ("cards with that spell's mana value"): after a reveal of a
+///   one-card hand the earlier-instruction referent (CR 608.2c) is the revealed
+///   card, so the read would not name the spell (CR 202.3).
+fn discard_all_filter_is_representable(filter: &TargetFilter) -> bool {
+    !crate::types::ability::filter_contains_filter_prop(filter, &|prop| {
+        matches!(prop, FilterProp::InZone { .. })
+            || matches!(prop, FilterProp::Cmc { value, .. }
+            if crate::types::ability::quantity_expr_contains_scope(value, ObjectScope::Anaphoric)
+                || crate::types::ability::quantity_expr_contains_scope(
+                    value,
+                    ObjectScope::Demonstrative,
+                ))
+    })
+}
+
 /// CR 701.9a + CR 608.2c: Parse the card-type filter portion of a discard phrase.
 ///
 /// Recognizes "a <type> card" / "an <type> card" / "<N> <type> cards" where the
@@ -2165,6 +2230,40 @@ pub(super) fn parse_targeted_action_ast(
                 filter: None,
             });
         }
+        // CR 701.9a + CR 608.2c: "discards all <filter> cards" discards every card in the
+        // discarding player's hand that matches the filter. The count is the census of
+        // those cards in that player's hand (`ZoneCardCount`, scoped to the discarding
+        // player by the resolver), so the forced branch moves exactly the matching cards
+        // and a hand with none requires zero. "all other …" is relative to cards chosen
+        // earlier in the resolution, not to the source, so it fails closed.
+        if let Ok((rest, _)) =
+            (tag::<_, _, OracleError<'_>>("all "), not(tag("other "))).parse(after_discard)
+        {
+            if random || up_to {
+                return None;
+            }
+            let original_rest = &text[text.len() - rest.len()..];
+            let filter = parse_discard_noun_filter(
+                crate::parser::oracle_util::normalize_count_slot_text(original_rest),
+            )??;
+            if !discard_all_filter_is_representable(&filter) {
+                return None;
+            }
+            return Some(TargetedImperativeAst::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Hand,
+                        card_types: vec![],
+                        filter: Some(filter.clone()),
+                        scope: CountScope::ScopedPlayer,
+                    },
+                },
+                random: false,
+                up_to: false,
+                unless_filter: None,
+                filter: Some(filter),
+            });
+        }
         // CR 701.9a: "discard any number of [filter] cards" — opt-choice
         // discard where the player picks any 0..hand-size. Encoded as
         // count = HandSize with up_to = true so the controller chooses how
@@ -2221,37 +2320,7 @@ pub(super) fn parse_targeted_action_ast(
         ))
         .parse(noun_lower.as_str())
         .map_or(slot.noun, |(_, body)| &slot.noun[..body.len()]);
-        // CR 201.2a + CR 608.2c: a trailing "with that name" binds the discard to the
-        // card name chosen earlier in this resolution (Brain Pry). It composes onto
-        // whatever type qualifier precedes it.
-        let (noun, has_chosen_name) = match terminated(
-            take_until::<_, _, OracleError<'_>>(" with that name"),
-            all_consuming(tag(" with that name")),
-        )
-        .parse(noun)
-        {
-            Ok((_, base)) => (base, true),
-            Err(_) => (noun, false),
-        };
-        let plain_noun = noun.to_lowercase();
-        let type_filter = if all_consuming((
-            opt(tag::<_, _, OracleError<'_>>("additional ")),
-            alt((tag("cards"), tag("card"))),
-        ))
-        .parse(plain_noun.as_str())
-        .is_ok()
-        {
-            None
-        } else {
-            Some(parse_discard_card_filter(noun)?)
-        };
-        let filter = match (type_filter, has_chosen_name) {
-            (filter, false) => filter,
-            (None, true) => Some(TargetFilter::HasChosenName),
-            (Some(filter), true) => Some(TargetFilter::And {
-                filters: vec![filter, TargetFilter::HasChosenName],
-            }),
-        };
+        let filter = parse_discard_noun_filter(noun)?;
         return Some(TargetedImperativeAst::Discard {
             count,
             random,
