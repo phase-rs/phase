@@ -25,7 +25,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
+use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent, ReplacementId};
 use std::collections::VecDeque;
 
 /// CR 510.1a + CR 613.11: Returns the amount of combat damage a creature assigns.
@@ -165,7 +165,7 @@ pub fn resolve_combat_damage(
     // resume completes the unapplied legs. Placed AHEAD of
     // `state.combat.as_ref()?` so no combat teardown can strand the record
     // behind that `?`.
-    if state.pending_combat_lifelink.is_some() {
+    if state.combat_damage_batch_parked() {
         // Any live prompt — the CR 616.1 ordering choice itself, or a sub-choice
         // raised while answering it — means an answer is still coming. Surface it
         // rather than re-collecting assignments. The `matches!` below excludes
@@ -175,14 +175,18 @@ pub fn resolve_combat_damage(
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             return Some(state.waiting_for.clone());
         }
-        // Settled to priority with a batch still parked. Either the seat that
-        // owed the CR 616.1 answer left the game (CR 800.4a: `elimination` cleared
-        // `pending_replacement` and the reconcile wrote `Priority { next }`), or a
-        // sub-choice of the answer resolved through a dispatcher other than
-        // `handle_replacement_choice`. No further `ChooseReplacement` will arrive,
-        // so finish the batch here — otherwise the owed gains die with combat AND
-        // the `!regular_damage_done` completeness gate (priority.rs) re-enters
-        // this function forever.
+        // Settled to priority with a batch still parked. An answer that settles to
+        // priority finishes the batch in its own action
+        // (`engine::resume_parked_combat_damage_at_action_boundary`), also after the
+        // active player left the game (CR 800.4j: the completed batch's window goes
+        // to `engine::living_priority_seat`). So this is reached, from priority.rs's
+        // completeness gate, only when that convergence held back the batch's next
+        // prompt because it names a seat that left the game (CR 800.4a, the same
+        // aliveness test `turns::auto_advance_once` applies), or from a save written
+        // before that convergence existed. No further answer will
+        // arrive, so finish the batch here — otherwise the owed gains die with
+        // combat AND the `!regular_damage_done` completeness gate (priority.rs)
+        // re-enters this function forever.
         //
         // `events.len()` folds nothing: no answering action's events are in
         // flight on this path.
@@ -388,12 +392,14 @@ fn finish_combat_damage_sub_step(
 ///
 /// `action_event_start` is the index at which the ANSWERING action's events
 /// begin. It is a parameter, never stored: `handle_replacement_choice` captures
-/// it as a local before the answer is applied, and the re-entry guard passes
-/// `events.len()` when no answer is in flight. Both are `<= events.len()` by
-/// construction, so the slice below cannot be out of range.
+/// it as a local before the answer is applied, the action boundary takes it from
+/// its [`ParkedCombatDamageAnswer`], and the re-entry guard passes `events.len()`
+/// when no answer is in flight. It is clamped to `events.len()` at entry, so the
+/// fold and the claims below read one range that is never out of bounds.
 ///
 /// The answering action's events — the resumed `LifeChanged` among them — are
-/// folded into the parked batch, so "whenever you gain life" observers
+/// folded into the parked batch by the one fold rule,
+/// [`take_answer_events_into_batch`], so "whenever you gain life" observers
 /// (CR 119.9) join the SAME CR 603.3b batch as the combat-damage observers.
 /// CR 702.15b makes the gain simultaneous with the damage, and no player
 /// received priority for the CR 616.1 choice, so splitting them would be a rules
@@ -415,22 +421,18 @@ pub(crate) fn resume_pending_combat_lifelink(
     choice: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    let action_event_start = action_event_start.min(events.len());
     let mut record = *state.pending_combat_lifelink.take()?;
-    // Every pause below re-sets the marker when it re-parks on a gain; an
+    // Every pause below re-sets the marker when it re-parks on a gain's own choice; an
     // answer that resolved without reaching `take_staged_answer` (a Prevented
     // or substituted gain) must not leave it standing.
     record.awaiting_staged_gain = false;
-    record
-        .batch_events
-        .extend_from_slice(&events[action_event_start..]);
+    take_answer_events_into_batch(state, &mut record, events, action_event_start);
     let owed_from = record.batch_events.len();
     let sub_step = record.sub_step;
-    // CR 510.2 + CR 616.1: a batch parked on a LEG's life-loss pause or
-    // poison-counter result pause completes its Phase C tail before the
-    // lifelink drain runs. The paused leg's loss
-    // fully settled (the funnel only resumes here once the batch drain retires
-    // with no re-park). A re-pause re-parks with the batch so far, mirroring
-    // the lifelink arm below.
+    // CR 510.2 + CR 616.1: a batch parked in Phase C completes its Phase C tail
+    // before draining lifelink. The answer has settled the leg's result or the
+    // early gain's choice. Any new pause parks again with the batch so far.
     if let Some(remnant) = record.phase_c_remnant.take() {
         match complete_combat_phase_c_remnant(state, remnant, &mut record) {
             RemnantOutcome::Complete => {}
@@ -475,9 +477,17 @@ pub(crate) fn resume_pending_combat_lifelink(
             // entered through it by the all-pass gate in priority.rs, the one path
             // the inline first-strike step takes too; a regular batch is the last
             // step and ends with this window.
-            waiting_for.or(Some(WaitingFor::Priority {
-                player: state.active_player,
-            }))
+            //
+            // CR 800.4j: a batch answered after the active player left the game
+            // (a surviving chooser's answer to its parked choice) gives that window
+            // to the next player in turn order still in the game, never to the seat
+            // that left.
+            match waiting_for {
+                None | Some(WaitingFor::Priority { .. }) => Some(WaitingFor::Priority {
+                    player: super::engine::living_priority_seat(state),
+                }),
+                prompt => prompt,
+            }
         }
     }
 }
@@ -527,6 +537,116 @@ pub(crate) fn claim_combat_batch_events_for_ordinary_collection(
     event_start: usize,
 ) {
     triggers::claim_events_for_ordinary_collection(state, events, event_start);
+}
+
+/// CR 510.2: an action that answers a parked combat damage batch's choice, and
+/// where in its event buffer the answer's events begin.
+///
+/// Only an action that found the batch parked as it began is an answer. An
+/// action that parks the batch (declaring blockers, the step's start) publishes
+/// and claims its own events as it parks, so it never folds them a second time.
+/// Taken as a local at an action boundary and never stored, so no index outlives
+/// its action.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ParkedCombatDamageAnswer {
+    action_event_start: usize,
+}
+
+impl ParkedCombatDamageAnswer {
+    /// `Some` only when a combat damage batch is parked as the action begins;
+    /// `action_event_start` is the length of the action's event buffer then.
+    pub(crate) fn begin(state: &GameState, action_event_start: usize) -> Option<Self> {
+        state
+            .combat_damage_batch_parked()
+            .then_some(Self { action_event_start })
+    }
+
+    pub(crate) fn action_event_start(self) -> usize {
+        self.action_event_start
+    }
+}
+
+/// CR 510.2 + CR 603.2 + CR 603.2c + CR 603.3b: the one fold rule — a parked
+/// combat damage batch takes custody of its answering action's events, so each
+/// occurrence is collected once, by the batch's one placement when it completes.
+///
+/// Three kinds of occurrence are left out, each because another owner collects
+/// it, as the post-action pipeline leaves them out too:
+/// * an occurrence already claimed for ordinary collection, except a queued
+///   zone-change witness the batch has yet to take;
+/// * a parked battlefield entry, whose replay collects it (issue #830);
+/// * an occurrence a paused logical-zone or cost owner retains for its own
+///   settlement.
+///
+/// Keep a queued context's `ZoneChanged` witness even when a staged zone
+/// delivery claimed it for ordinary collection. The batch uses it to move
+/// the queued context into its placement instead of rescanning it. A claim
+/// covering delayed collectors still excludes the occurrence (CR 603.7b).
+/// Known gap: an occurrence claimed for all collectors while the batch is
+/// parked (a concession's departure, CR 800.4a) has no witness here, so its
+/// queued context is placed after the batch's placement, not in it
+/// (Command Zone #353).
+///
+/// The start is clamped: an anchor taken before the answer can exceed a buffer
+/// the answer shortened (`collect_answer_slice_matching` documents this for
+/// `zone_pipeline::drain_pending_batch_deliveries`).
+fn take_answer_events_into_batch(
+    state: &GameState,
+    record: &mut PendingCombatLifelink,
+    events: &[GameEvent],
+    action_event_start: usize,
+) {
+    let start = action_event_start.min(events.len());
+    let mut retained = crate::game::engine_priority::retained_logical_zone_events(state);
+    retained.extend(crate::game::engine_priority::retained_cost_events(state));
+    let consumed = &state.consumed_before_priority_trigger_events;
+    let ordinary = triggers::unclaimed_trigger_events_from(
+        events,
+        start,
+        triggers::TriggerCollectionRequester::Ordinary,
+        consumed,
+    );
+    let batch = triggers::unclaimed_trigger_events_from(
+        events,
+        start,
+        triggers::TriggerCollectionRequester::CombatDamageBatch,
+        consumed,
+    );
+    for (&position, event) in batch.positions().iter().zip(&batch.events) {
+        if crate::game::engine_replacement::entry_event_is_parked(state, event)
+            || retained.contains(event)
+        {
+            continue;
+        }
+        let queued_zone_witness = matches!(event, GameEvent::ZoneChanged { .. })
+            && !record.batch_events.contains(event)
+            && state.deferred_triggers.iter().any(|context| {
+                context.batch_origin == triggers::DeferredTriggerBatchOrigin::Ordinary
+                    && context.trigger_events.contains(event)
+            });
+        if ordinary.positions().binary_search(&position).is_ok() || queued_zone_witness {
+            record.batch_events.push(event.clone());
+        }
+    }
+}
+
+/// CR 603.2 + CR 603.3 + CR 510.3a: an answer that leaves the combat damage
+/// batch parked (its next choice is asked) hands the batch its events, so their
+/// triggers join the combat damage step's one placement once, when the batch
+/// completes. The events are claimed for ordinary collection, so no generic
+/// collector takes them in the meantime.
+pub(crate) fn hold_parked_combat_damage_answer_events(
+    state: &mut GameState,
+    answer: ParkedCombatDamageAnswer,
+    events: &[GameEvent],
+) {
+    let Some(mut record) = state.pending_combat_lifelink.take() else {
+        return;
+    };
+    let start = answer.action_event_start().min(events.len());
+    take_answer_events_into_batch(state, &mut record, events, start);
+    state.pending_combat_lifelink = Some(record);
+    claim_combat_batch_events_for_ordinary_collection(state, events, start);
 }
 
 /// Returns a terminal or trigger-ordering state produced while combat damage resolves.
@@ -1979,7 +2099,7 @@ pub(crate) enum CombatDamageBatch {
     Complete(Vec<GameEvent>),
     /// CR 616.1 + CR 616.1g: the batch parked on a choice made while one of its
     /// events is applied, and the unfinished rest is in
-    /// `state.pending_combat_lifelink`. Three park points:
+    /// `state.pending_combat_lifelink`. Five park points:
     /// * Phase B (`PendingCombatLifelink::replacement` is `Some`): a damage
     ///   event met two or more co-applicable replacements and the affected
     ///   player orders them (`state.pending_replacement` holds that event), or
@@ -1987,10 +2107,18 @@ pub(crate) enum CombatDamageBatch {
     ///   No damage has been dealt yet.
     /// * Phase C (`phase_c_remnant` is `Some`): a leg's life loss paused (Horde
     ///   damage->mill redirect, loss replacements); the unapplied legs ride the
-    ///   remnant and `state.pending_replacement` holds the paused event.
+    ///   remnant. A gain staged ahead of a leg can also park there, on its own
+    ///   ordering choice or its substitute's prompt.
     /// * The lifelink tail: a lifelink life-gain event met two or more
     ///   co-applicable replacement effects. All damage is already dealt;
     ///   `state.pending_replacement` holds the paused source's own `LifeGain`.
+    /// * The lifelink tail's substitute (CR 614.6 + CR 616.2): a gain's
+    ///   substitute asked a choice of its own (Nefarious Lich's draws meeting
+    ///   Abundance). The gain itself is settled; `remaining` holds the later
+    ///   gains.
+    /// * Phase D (CR 615.5 + CR 608.2d): a prevention rider asked its player a
+    ///   choice (Channel Harm's "may"). `prevention_tally` holds the shields not
+    ///   yet published.
     Paused {
         events: Vec<GameEvent>,
         /// Boxed: `WaitingFor` is ~1720 bytes against `Complete`'s 24, so an
@@ -2037,12 +2165,12 @@ enum PhaseCRunOutcome {
     /// CR 616.1 + CR 101.4: a lifelink gain staged ahead of `legs[index]`
     /// (an earlier-APNAP player's choice-capable gain before a leg whose
     /// result can open a later player's choice, or a gain of the player the
-    /// leg damages) paused on its own replacement choice before that leg
-    /// applied. The tail to park is `legs[index..]`; the paused gain is owned
-    /// by `state.pending_replacement` and its legs' markers are already
-    /// cleared.
+    /// leg damages) paused on its own replacement choice or its substitute
+    /// before that leg applied. The tail to park is `legs[index..]`; the
+    /// paused gain's legs already have their lifelink markers cleared.
     PausedOnGain {
         index: usize,
+        pause: GainStagePause,
     },
     /// CR 120.3d + CR 616.1: leg `index` paused on its `-1/-1` counter
     /// replacements (a combat-flagged counter stash is parked). Same folding
@@ -2058,8 +2186,7 @@ enum PhaseCRunOutcome {
 /// CR 510.2 + CR 616.1: outcome of completing a parked Phase C tail.
 enum RemnantOutcome {
     Complete,
-    /// `on_gain`: the re-pause is a lifelink gain being staged (the record's
-    /// `awaiting_staged_gain`), not a leg's result.
+    /// `on_gain` marks a pause awaiting the staged gain's own replacement answer.
     Repaused {
         remnant: PendingCombatPhaseCRemnant,
         on_gain: bool,
@@ -2219,13 +2346,22 @@ fn reorder_ranked_slots<T: Clone>(items: &mut [T], rank: impl Fn(&T) -> Option<u
 }
 
 /// CR 616.1 + CR 101.4 + CR 702.15b: the APNAP rank of a lifelink gain's
-/// choice owner (the gaining player, the source's controller) when the gain's
-/// own replacement pipeline can open a choice; `None` for a gain that cannot
-/// (it keeps its slot and is staged ahead of a leg only when its owner is the
-/// player that leg damages).
+/// first prompt. A gain's replacement order belongs to the gaining player.
+/// A substitute can address another player when the gain itself has no prompt.
+/// A gain with no rank keeps its slot and is staged ahead of a leg only when
+/// its owner is the player that leg damages.
 fn lifelink_gain_rank(state: &GameState, controller: PlayerId, amount: u32) -> Option<usize> {
-    crate::game::effects::life::life_gain_may_prompt(state, controller, amount)
-        .then(|| crate::game::topology::apnap_team_rank(state, controller))
+    use crate::game::effects::life;
+    use crate::game::topology::apnap_team_rank;
+    let event = life::proposed_life_gain(state, controller, amount)?;
+    let mut first = None;
+    replacement::visit_proposed_event_choosers(state, &event, &mut |player| {
+        first = Some(apnap_team_rank(state, player));
+    });
+    first.or_else(|| {
+        life::life_gain_may_prompt(state, controller, amount)
+            .then(|| apnap_team_rank(state, controller))
+    })
 }
 
 /// CR 120.4b: what a not-yet-applied leg will deal: its survivor's amount, or
@@ -2276,16 +2412,20 @@ enum GainStageOutcome {
     /// Nothing is owed: the gain never reached the pipeline, was fully
     /// replaced, or settled inline with its substitute (Lich class).
     Done,
-    /// The gain parked a CR 616.1 choice (owned by `state.pending_replacement`).
-    Paused,
+    Paused(GainStagePause),
+    GameOver,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GainStagePause {
+    ReplacementChoice,
+    SubstitutionContinuation,
 }
 
 /// CR 616.1 + CR 702.15e + CR 101.4: stage one source's combat lifelink gain
-/// as its own life-gain event: run its replacement pipeline WITHOUT writing
-/// the board (`effects::life::stage_life_gain`), so every gain of the batch is
-/// checked against the same pre-settlement board. The single staging
-/// authority shared by `drain_combat_lifelink` and the staging ahead of a
-/// leg in Phase C.
+/// as its own life-gain event. Hold final gains for simultaneous settlement
+/// while any cross-event substitute runs through its own continuation. Both
+/// `drain_combat_lifelink` and the staging ahead of a Phase C leg use this authority.
 ///
 /// On a CR 616.1 choice NOTHING was staged; `state.pending_replacement` is
 /// left populated ON PURPOSE: it is the resume's authority (the answered final
@@ -2296,13 +2436,18 @@ fn stage_combat_lifelink_gain(
     gain: PendingLifelinkGain,
     batch_events: &mut Vec<GameEvent>,
 ) -> GainStageOutcome {
-    let waiting_before = state.waiting_for.clone();
-    match crate::game::effects::life::stage_life_gain(
+    let outcome = crate::game::effects::life::stage_life_gain(
         state,
         gain.controller,
         gain.amount,
         batch_events,
-    ) {
+    );
+    // CR 104.1: a substitute can end the game (Laboratory Maniac's win).
+    if state.game_end.is_some() {
+        crate::game::elimination::ensure_game_over_if_terminal(state, batch_events);
+        return GainStageOutcome::GameOver;
+    }
+    match outcome {
         Ok(StagedLifeGain::Final(ProposedEvent::LifeGain {
             player_id, amount, ..
         })) => GainStageOutcome::Staged(PendingLifelinkGain {
@@ -2317,32 +2462,19 @@ fn stage_combat_lifelink_gain(
             GainStageOutcome::Done
         }
         Ok(StagedLifeGain::Settled(_)) => GainStageOutcome::Done,
-        Err(ReplacementDeferred::ReplacementChoice) => GainStageOutcome::Paused,
+        Err(ReplacementDeferred::ReplacementChoice) => {
+            GainStageOutcome::Paused(GainStagePause::ReplacementChoice)
+        }
         // CR 614.6 + CR 614.1: a cross-event substitute (Lich class) already
         // ran its replacing action. On Execute the gain was APPLIED before
         // `drain_substitution_continuation` ran, and on Prevented nothing was
-        // owed — so NO lifelink gain is outstanding on this arm and nothing
-        // needs parking.
+        // owed — so this source's gain is not re-queued.
         //
-        // strict-failure: restoring `waiting_for` here preserves the existing
-        // behavior byte-for-byte, and that behavior orphans the substitute's
-        // own interactive prompt. That is a PRE-EXISTING defect on the
-        // substitution-continuation seam, which this change neither owns nor
-        // worsens. The codebase distinguishes the two deferral kinds elsewhere
-        // for exactly this reason (`turns.rs` calls
-        // `mark_phase_transition_awaiting_post_replacement` only for the
-        // substitution variant), so the divergence here is deliberate, not an
-        // oversight.
-        //
-        // CR 104.1: a substitute that ended the game (Laboratory Maniac's win)
-        // left `GameOver`; the earlier wait is never restored over it.
+        // CR 614.6 + CR 616.2: the substitute's own action stopped at a choice
+        // (Nefarious Lich's draws meeting Abundance's "may"). Park the rest of
+        // the batch beneath that prompt and let the player's answer resume it.
         Err(ReplacementDeferred::SubstitutionContinuation { .. }) => {
-            if state.game_end.is_some() {
-                crate::game::elimination::ensure_game_over_if_terminal(state, batch_events);
-            } else {
-                state.waiting_for = waiting_before;
-            }
-            GainStageOutcome::Done
+            GainStageOutcome::Paused(GainStagePause::SubstitutionContinuation)
         }
     }
 }
@@ -2354,20 +2486,20 @@ fn stage_combat_lifelink_gain(
 ///   only when the leg's result can open a choice (`combat_leg_may_prompt`):
 ///   the damage and its lifelink gain are simultaneous results of the batch
 ///   (CR 510.2, CR 120.3f), so their choices are made in APNAP order;
-/// - EVERY gain (choice-capable or not) owned by an equal-rank player (the
-///   damaged player, or one shared-turn team, CR 805.6). CR 101.4c leaves the
-///   order of one player's own simultaneous choices to that player; staging
-///   the gain before the leg writes the board makes both read the pre-batch
-///   board, so the fixed order cannot change either result.
+/// - Gains of an equal-rank player (the damaged player or a shared-turn
+///   teammate, CR 805.6) whose chooser has the same or an earlier rank, plus
+///   choice-free gains. Staging the gain before the leg writes the board
+///   makes both read the pre-batch board. A
+///   gain's substitute runs during staging (CR 614.6), so it can end the game
+///   before the leg is applied (CR 104.1).
 ///
-/// Staging writes nothing: the staged gains settle with the batch's other
-/// gains (`drain_combat_lifelink`). Totals per source are the gains folded so
-/// far plus the planned amounts of `legs[index..]` (the per-source sum the
-/// fold produces, in first-seen order: aggregation is unchanged). A staged
+/// Final gains settle with the batch's other gains (`drain_combat_lifelink`).
+/// Totals per source are the gains folded so far plus the planned amounts of
+/// `legs[index..]` (the per-source sum the fold produces, in first-seen
+/// order: aggregation is unchanged). A staged
 /// source is removed from the sums and its remaining legs'
 /// `lifelink_controller` markers are cleared, so the later fold cannot gain it
-/// again. Returns true when a gain paused (owned by
-/// `state.pending_replacement`, never re-queued).
+/// again. A pause carries the kind of answer the batch is awaiting.
 fn stage_earlier_apnap_lifelink(
     state: &mut GameState,
     legs: &mut [PendingCombatLeg],
@@ -2375,7 +2507,7 @@ fn stage_earlier_apnap_lifelink(
     rank: usize,
     accums: &mut PhaseCAccumulators,
     events: &mut Vec<GameEvent>,
-) -> bool {
+) -> Option<GainStagePause> {
     let leg_may_prompt = combat_leg_may_prompt(state, &legs[index]);
     let mut totals = accums.lifelink_by_source.clone();
     for leg in &legs[index..] {
@@ -2398,10 +2530,11 @@ fn stage_earlier_apnap_lifelink(
         .into_iter()
         .filter_map(|(source_id, controller, amount)| {
             let gain_rank = crate::game::topology::apnap_team_rank(state, controller);
-            let earlier = leg_may_prompt
-                && lifelink_gain_rank(state, controller, amount)
-                    .is_some_and(|capable_rank| capable_rank < rank);
-            (earlier || gain_rank == rank).then_some((gain_rank, source_id, controller, amount))
+            let chooser_rank = lifelink_gain_rank(state, controller, amount);
+            let earlier = leg_may_prompt && chooser_rank.is_some_and(|chooser| chooser < rank);
+            let scheduled_rank = chooser_rank.unwrap_or(gain_rank);
+            let same_team = gain_rank == rank && scheduled_rank <= rank;
+            (earlier || same_team).then_some((scheduled_rank, source_id, controller, amount))
         })
         .collect();
     due.sort_by_key(|&(gain_rank, ..)| gain_rank);
@@ -2418,10 +2551,11 @@ fn stage_earlier_apnap_lifelink(
         {
             GainStageOutcome::Staged(staged) => accums.staged_gains.push(staged),
             GainStageOutcome::Done => {}
-            GainStageOutcome::Paused => return true,
+            GainStageOutcome::Paused(pause) => return Some(pause),
+            GainStageOutcome::GameOver => break,
         }
     }
-    false
+    None
 }
 
 /// CR 616.1 + CR 101.4 + CR 702.15e: the tail gain queue, one gain per
@@ -2465,8 +2599,13 @@ fn run_phase_c_legs(
         // player; an earlier-APNAP player's choice-capable gain (when the leg
         // can prompt) and that player's own gains are staged first.
         if let Some(rank) = survivor_player_rank(state, &legs[index]) {
-            if stage_earlier_apnap_lifelink(state, legs, index, rank, accums, events) {
-                return PhaseCRunOutcome::PausedOnGain { index };
+            if let Some(pause) =
+                stage_earlier_apnap_lifelink(state, legs, index, rank, accums, events)
+            {
+                return PhaseCRunOutcome::PausedOnGain { index, pause };
+            }
+            if state.game_end.is_some() {
+                break;
             }
         }
         let leg = &legs[index];
@@ -2664,7 +2803,7 @@ fn complete_combat_phase_c_remnant(
             record.staged_gains.append(&mut accums.staged_gains);
             RemnantOutcome::Complete
         }
-        PhaseCRunOutcome::PausedOnGain { index } => RemnantOutcome::Repaused {
+        PhaseCRunOutcome::PausedOnGain { index, pause } => RemnantOutcome::Repaused {
             remnant: PendingCombatPhaseCRemnant {
                 remaining: remaining[index..].to_vec(),
                 lifelink_by_source: accums.lifelink_by_source,
@@ -2672,7 +2811,7 @@ fn complete_combat_phase_c_remnant(
                 source_incarnations: accums.source_incarnations,
                 staged_gains: accums.staged_gains,
             },
-            on_gain: true,
+            on_gain: pause == GainStagePause::ReplacementChoice,
         },
         PhaseCRunOutcome::PausedOnReplacement { index } => RemnantOutcome::Repaused {
             remnant: PendingCombatPhaseCRemnant {
@@ -3008,7 +3147,9 @@ fn apply_combat_damage_survivors(
         // exactly like the loss pause (the paused leg's post-counter work
         // rides its combat-flagged counter stash).
         PhaseCRunOutcome::PausedOnCounter { index } => Some((index + 1, false)),
-        PhaseCRunOutcome::PausedOnGain { index } => Some((index, true)),
+        PhaseCRunOutcome::PausedOnGain { index, pause } => {
+            Some((index, pause == GainStagePause::ReplacementChoice))
+        }
     };
     if let Some((park_from, on_gain)) = park {
         // CR 510.2 + CR 616.1: a leg's result (or a gain staged ahead of a
@@ -3068,6 +3209,11 @@ fn apply_combat_damage_survivors(
 /// NOTHING. The rest of the batch is parked here so the resume can finish it;
 /// dropping it loses 100% of that source's gain, not a portion, plus every
 /// later source in the batch.
+///
+/// Two more choices park the batch here, and the same resume finishes it:
+/// a gain's substitute that asks a choice of its own (CR 614.6 + CR 616.2),
+/// and a Phase D rider that asks one (CR 615.5 + CR 608.2d). Neither is
+/// answered in the player's place.
 fn drain_combat_lifelink(
     state: &mut GameState,
     mut record: PendingCombatLifelink,
@@ -3079,23 +3225,26 @@ fn drain_combat_lifelink(
         let Some(gain) = record.remaining.pop_front() else {
             break;
         };
-        // CR 616.1: the gaining player must choose which replacement applies
-        // first. Nothing was staged for this source, and it is deliberately
-        // NOT re-queued into `remaining` (see `stage_combat_lifelink_gain`).
-        let outcome = stage_combat_lifelink_gain(state, gain, &mut record.batch_events);
-        if let GainStageOutcome::Staged(staged) = outcome {
-            record.staged_gains.push(staged);
+        match stage_combat_lifelink_gain(state, gain, &mut record.batch_events) {
+            GainStageOutcome::Staged(staged) => record.staged_gains.push(staged),
+            GainStageOutcome::Done => {}
+            GainStageOutcome::Paused(pause) => {
+                record.awaiting_staged_gain = pause == GainStagePause::ReplacementChoice;
+                let waiting_for = state.waiting_for.clone();
+                let events = record.batch_events.clone();
+                state.pending_combat_lifelink = Some(Box::new(record));
+                return CombatDamageBatch::Paused {
+                    events,
+                    waiting_for: Box::new(waiting_for),
+                };
+            }
+            GainStageOutcome::GameOver => break,
         }
-        if outcome == GainStageOutcome::Paused {
-            record.awaiting_staged_gain = true;
-            let waiting_for = state.waiting_for.clone();
-            let events = record.batch_events.clone();
-            state.pending_combat_lifelink = Some(Box::new(record));
-            return CombatDamageBatch::Paused {
-                events,
-                waiting_for: Box::new(waiting_for),
-            };
-        }
+    }
+    if state.game_end.is_some() {
+        // Damage already dealt still belongs in the event log.
+        record.batch_events.append(&mut record.damage_to_players);
+        return CombatDamageBatch::Complete(record.batch_events);
     }
     // CR 101.4 + CR 702.15b: every choice of the batch is made; the staged
     // gains now happen simultaneously, settled in stage order before the
@@ -3123,21 +3272,68 @@ fn drain_combat_lifelink(
     }
     // CR 510.2: the per-player aggregate, emitted after the gains exactly as it
     // is on a batch that never paused. It records damage already dealt in Phase
-    // C, before any gain could end the game, so it is kept on a terminal batch.
+    // C. The terminal path above also retains damage already dealt.
     record.batch_events.append(&mut record.damage_to_players);
     // CR 615.5 + CR 615.13: Phase D fires once per shield, and only here — after
     // the last gain, so no rider continuation can ever run while a CR 616.1
     // prompt is open, and after nothing else can stamp `last_effect_count`.
-    // Fire-all: combat keeps its standing shape (see the `stop_on_fresh_choice`
-    // contract on `fire_batch_prevention_riders`).
     // CR 104.1: a gain that ended the game ends the batch; no rider runs after it.
     if state.game_end.is_none() {
-        let _ = fire_batch_prevention_riders(
-            state,
-            &record.prevention_tally,
-            &mut record.batch_events,
-            false,
-        );
+        let prevention_tally = std::mem::take(&mut record.prevention_tally);
+        // CR 101.4 + CR 616.1: rank whole shields by who can be asked,
+        // preserving registry and recipient order for ties.
+        let rank = apnap_ranker(state);
+        let mut groups: Vec<_> = prevention_tally.chunk_by(|a, b| a.key == b.key).collect();
+        groups.sort_by_cached_key(|group| {
+            if matches!(group[0].key, AppliedReplacementKey::Protection { .. }) {
+                return usize::MAX;
+            }
+            let rid = group[0].key.as_replacement_id();
+            let Some(def) = aggregate_prevention_definition(state, rid) else {
+                return usize::MAX;
+            };
+            let Some(rider) = state.replacement_rider(def) else {
+                return usize::MAX;
+            };
+            // A rider whose chooser the scan cannot name keeps its own
+            // controller's rank, as before the scan existed.
+            match crate::game::resolution_prompt::prevention_rider_choice_rank(
+                state,
+                rider,
+                group.iter().map(|entry| entry.amount).sum(),
+                def.damage_source_filter
+                    .as_ref()
+                    .and_then(shield_specific_source),
+                &rank,
+            ) {
+                usize::MAX => rank(rider.controller),
+                chooser_rank => chooser_rank,
+            }
+        });
+        let prevention_tally: Vec<_> = groups.into_iter().flatten().cloned().collect();
+        // CR 608.2c + CR 608.2d: a rider that asks its player a choice (Channel
+        // Harm's "you may have Channel Harm deal that much damage") stops Phase D:
+        // the later shields wait beneath the prompt as the unpublished remainder,
+        // and the answer's resume fires them (`resume_combat_damage_replacements`,
+        // whose `replacement` is `None` here, re-enters this drain with nothing
+        // else owed).
+        if let BatchRiderDrainOutcome::Paused { published_entries } =
+            fire_batch_prevention_riders(state, &prevention_tally, &mut record.batch_events)
+        {
+            if state.game_end.is_none() {
+                record.prevention_tally = prevention_tally
+                    .into_iter()
+                    .skip(published_entries)
+                    .collect();
+                let waiting_for = state.waiting_for.clone();
+                let events = record.batch_events.clone();
+                state.pending_combat_lifelink = Some(Box::new(record));
+                return CombatDamageBatch::Paused {
+                    events,
+                    waiting_for: Box::new(waiting_for),
+                };
+            }
+        }
     }
     CombatDamageBatch::Complete(record.batch_events)
 }
@@ -3200,6 +3396,22 @@ pub(crate) enum BatchRiderDrainOutcome {
     Paused { published_entries: usize },
 }
 
+fn aggregate_prevention_definition(
+    state: &GameState,
+    rid: ReplacementId,
+) -> Option<&crate::types::ability::ReplacementDefinition> {
+    // Floating shields have no host permanent and use the sentinel ObjectId(0).
+    if rid.source == ObjectId(0) {
+        rid.index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get(i))
+    } else {
+        state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
+    }
+}
+
 /// CR 615.5 + CR 615.13: After a simultaneous damage batch (combat or
 /// noncombat), fire each `Prevention::All` shield's `runtime_execute` rider
 /// exactly once against the aggregate prevented amount.
@@ -3219,16 +3431,14 @@ pub(crate) enum BatchRiderDrainOutcome {
 /// "for each 1 damage prevented this way") resolves against the whole batch
 /// total.
 ///
-/// `stop_on_fresh_choice` (Matt C2, the noncombat batch's Phase D): stop after
-/// the first rider that leaves its prompt standing and report it, so later
-/// groups do not execute ahead of the pending prompt; the batch parks the
-/// unpublished remainder. Combat passes `false` and settles every rider pause
-/// in the batch (`replacement::drain_combat_damage_rider`).
+/// CR 615.5 + CR 608.2c (Matt C2): the drain stops after the first rider that
+/// leaves its prompt standing and reports it, so later groups do not execute
+/// ahead of the pending prompt; both callers (the combat batch and the
+/// noncombat two-phase batch) park the unpublished remainder beneath it.
 pub(crate) fn fire_batch_prevention_riders(
     state: &mut GameState,
     prevention_tally: &[PreventedDamageEntry],
     events: &mut Vec<GameEvent>,
-    stop_on_fresh_choice: bool,
 ) -> BatchRiderDrainOutcome {
     // CR 615.13 + CR 120.3: the tally arrives sorted with each shield's entries
     // contiguous, so one chunk IS one prevention application over the CR 510.2
@@ -3242,8 +3452,7 @@ pub(crate) fn fire_batch_prevention_riders(
     // must read for its "that many" to be right.
     let mut published_entries = 0usize;
     for group in prevention_tally.chunk_by(|a, b| a.key == b.key) {
-        // CR 104.1: a rider that ended the game (New Way Forward's damage meeting an empty
-        // Nefarious Lich graveyard) ends the batch; no later shield's rider runs.
+        // CR 104.1: a rider that ended the game ends the batch.
         if state.game_end.is_some() {
             break;
         }
@@ -3271,20 +3480,7 @@ pub(crate) fn fire_batch_prevention_riders(
             continue;
         }
 
-        // Pending (resolution-created) shields are stored in
-        // `pending_damage_replacements` under the sentinel ObjectId(0) because
-        // they have no host permanent; object-hosted shields are found in the
-        // host's `replacement_definitions`.
-        let repl_def = if rid.source == ObjectId(0) {
-            rid.index_as_usize()
-                .and_then(|i| state.pending_damage_replacements.get(i))
-        } else {
-            state
-                .objects
-                .get(&rid.source)
-                .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
-        };
-        let Some(repl_def) = repl_def else {
+        let Some(repl_def) = aggregate_prevention_definition(state, rid) else {
             continue;
         };
 
@@ -3303,8 +3499,8 @@ pub(crate) fn fire_batch_prevention_riders(
                         | crate::types::ability::PreventionAmount::AllBut(_)
                 }
             );
-        // CR 615.5 + CR 609.7: A rider referencing the prevented damage's source
-        // ("that source's controller" — New Way Forward) resolves
+        // CR 609.7: A rider referencing the prevented damage's source
+        // ("that source's controller" — Deflecting Palm) resolves
         // `PostReplacementSourceController` against the drain's event source. The
         // per-event `execute` path receives it from the Prevented-arm stash; the
         // aggregate path derives it here from the shield's resolved single-object
@@ -3344,25 +3540,30 @@ pub(crate) fn fire_batch_prevention_riders(
         state.install_ready_continuation(
             crate::types::ability::PostReplacementContinuation::Resolved(Box::new(runtime)),
         );
-        if let Some(source) = event_source {
-            if let Some(drain) = state
-                .active_post_replacement_drains_mut()
-                .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
-            {
+        // CR 615.5 + CR 614.6: the rider's "that much" is the amount this application
+        // prevented, latched on its drain as a per-event prevention latches it
+        // (`replacement::replaced_event_amount`), so a rider that asks a choice first
+        // (Channel Harm's "may") still reads it when the answer comes in a later action,
+        // after `last_effect_count` has been cleared.
+        if let Some(drain) = state
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+        {
+            drain.event_amount = u32::try_from(total_prevented).ok();
+            if let Some(source) = event_source {
                 drain.event_source = Some(source);
             }
         }
-        // CR 510.2: in fire-all mode (combat Phase D) every pause the rider
-        // raises is settled, as the per-portion drain does.
-        if !stop_on_fresh_choice {
-            replacement::drain_combat_damage_rider(state, events);
-            continue;
-        }
-        replacement::drain_damage_rider(state, events);
-        // CR 608.2c (Matt C2): in stop mode a rider that left its prompt standing
-        // ends the drain here — later groups must not execute ahead of it.
-        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-            return BatchRiderDrainOutcome::Paused { published_entries };
+        // CR 608.2c (Matt C2): a rider that left its prompt standing ends the
+        // drain here — later groups must not execute ahead of it. The pause is
+        // read from the drain's own result, never from `state.waiting_for`: at
+        // combat Phase D that still holds the caller's earlier wait (an
+        // `AssignCombatDamage` answer, a blocker declaration), not a rider's.
+        match replacement::drain_damage_rider(state, events) {
+            replacement::DamageRiderDrain::Completed => {}
+            replacement::DamageRiderDrain::Paused { .. } => {
+                return BatchRiderDrainOutcome::Paused { published_entries };
+            }
         }
     }
     BatchRiderDrainOutcome::Completed
@@ -3751,14 +3952,10 @@ mod tests {
         accums.lifelink_by_source.push((ObjectId(10), P0, 1));
         let mut events = Vec::new();
         let rank2 = crate::game::topology::apnap_team_rank(state, PlayerId(2));
-        assert!(stage_earlier_apnap_lifelink(
-            state,
-            &mut legs,
-            0,
-            rank2,
-            &mut accums,
-            &mut events
-        ));
+        assert!(
+            stage_earlier_apnap_lifelink(state, &mut legs, 0, rank2, &mut accums, &mut events)
+                .is_some()
+        );
         assert_eq!(
             paused_gain(state),
             Some((P0, 3)),
@@ -3792,14 +3989,10 @@ mod tests {
         let mut accums = empty_accums();
         let mut events = Vec::new();
         let rank2 = crate::game::topology::apnap_team_rank(state, PlayerId(2));
-        assert!(!stage_earlier_apnap_lifelink(
-            state,
-            &mut legs,
-            0,
-            rank2,
-            &mut accums,
-            &mut events
-        ));
+        assert!(
+            stage_earlier_apnap_lifelink(state, &mut legs, 0, rank2, &mut accums, &mut events)
+                .is_none()
+        );
         assert_eq!(paused_gain(state), None, "(b)");
         assert_eq!(legs[1].lifelink_controller, Some(P0));
         assert_eq!(legs[2].lifelink_controller, Some(P0));
@@ -3832,7 +4025,7 @@ mod tests {
             let rank2 = crate::game::topology::apnap_team_rank(state, PlayerId(2));
             let paused =
                 stage_earlier_apnap_lifelink(state, &mut legs, 0, rank2, &mut accums, &mut events);
-            assert_eq!(paused, !eliminated, "(d) eliminated={eliminated}");
+            assert_eq!(paused.is_some(), !eliminated, "(d) eliminated={eliminated}");
             assert_eq!(
                 legs[1].lifelink_controller,
                 (eliminated).then_some(P1),
@@ -3891,7 +4084,7 @@ mod tests {
                 &mut accums,
                 &mut events,
             );
-            assert_eq!(paused, expect_settled, "(c) leg at P{leg_player}");
+            assert_eq!(paused.is_some(), expect_settled, "(c) leg at P{leg_player}");
             assert_eq!(
                 paused_gain(&state),
                 expect_settled.then_some((PlayerId(mate), 2)),
@@ -3934,14 +4127,10 @@ mod tests {
         let mut accums = empty_accums();
         let mut events = Vec::new();
         let rank1 = crate::game::topology::apnap_team_rank(state, P1);
-        assert!(!stage_earlier_apnap_lifelink(
-            state,
-            &mut legs,
-            0,
-            rank1,
-            &mut accums,
-            &mut events
-        ));
+        assert!(
+            stage_earlier_apnap_lifelink(state, &mut legs, 0, rank1, &mut accums, &mut events)
+                .is_none()
+        );
         assert_eq!(
             accums.staged_gains,
             vec![PendingLifelinkGain {
@@ -4038,7 +4227,7 @@ mod tests {
         let mut events = Vec::new();
         let outcome = run_phase_c_legs(&mut state, &mut legs, &mut accums, &mut events);
         assert!(
-            matches!(outcome, PhaseCRunOutcome::PausedOnGain { index: 0 }),
+            matches!(outcome, PhaseCRunOutcome::PausedOnGain { index: 0, .. }),
             "(a) staged gain pause before the leg"
         );
         assert_eq!(paused_gain(&state), Some((PlayerId(mate), 2)), "(a)");
@@ -4053,7 +4242,7 @@ mod tests {
         let mut events = Vec::new();
         let outcome = run_phase_c_legs(&mut state, &mut legs, &mut accums, &mut events);
         assert!(
-            matches!(outcome, PhaseCRunOutcome::PausedOnGain { index: 0 }),
+            matches!(outcome, PhaseCRunOutcome::PausedOnGain { index: 0, .. }),
             "(b) the equal-rank gain is staged before the leg"
         );
         assert_eq!(paused_gain(&state), Some((PlayerId(mate), 2)), "(b)");

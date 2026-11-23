@@ -22008,6 +22008,16 @@ fn resolve_context_player(
     ability.controller
 }
 
+/// CR 101.4 + CR 608.2d: the player an optional rider's "may" would ask, read
+/// without asking. Combat damage's Phase D uses it only to order simultaneous
+/// rider choices in APNAP order; it opens no window.
+pub(crate) fn optional_rider_chooser(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<PlayerId> {
+    optional_prompt_player(state, ability)
+}
+
 /// CR 608.2d: Determine which player ANNOUNCES the choice — receives the "may"
 /// prompt — for an optional effect. Most go to the caster. Subject-anchored
 /// optional effects — "its controller may search their library" (Assassin's
