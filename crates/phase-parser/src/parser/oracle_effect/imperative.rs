@@ -2233,7 +2233,8 @@ pub(super) fn parse_targeted_action_ast(
         // CR 701.9a + CR 608.2c: "discards all <filter> cards" discards every card in the
         // discarding player's hand that matches the filter. The count is the census of
         // those cards in that player's hand (`ZoneCardCount`, scoped to the discarding
-        // player by the resolver), so the forced branch moves exactly the matching cards
+        // player by the resolver and read once when the discard is applied, CR 608.2h),
+        // so the forced branch moves exactly the matching cards
         // and a hand with none requires zero. "all other …" is relative to cards chosen
         // earlier in the resolution, not to the source, so it fails closed.
         if let Ok((rest, _)) =

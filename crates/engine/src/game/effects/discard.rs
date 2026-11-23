@@ -873,8 +873,9 @@ pub(crate) fn optional_discard_is_infeasible(state: &GameState, ability: &Resolv
     }
 }
 
-/// CR 608.2c + CR 701.9a: the number of cards this discard requires of
-/// `discard_player`, evaluated with that player bound as "they", the same
+/// CR 608.2c + CR 608.2h + CR 701.9a: the number of cards this discard requires
+/// of `discard_player`, read once when the discard is applied (CR 608.2h) and
+/// evaluated with that player bound as "they", the same
 /// binding [`discard_filter_scope`] gives the card filter. "Target player
 /// reveals their hand and discards all nonland cards" counts the nonland cards
 /// in the DISCARDING player's hand, not the caster's; the controller is

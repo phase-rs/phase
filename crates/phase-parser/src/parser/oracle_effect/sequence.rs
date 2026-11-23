@@ -2323,9 +2323,10 @@ fn starts_anaphoric_subject(remainder_lower: &str) -> bool {
 /// new subject ("… and you choose a nonland card from it") stays fused for the
 /// reveal's own continuation grammar.
 ///
-/// CR 608.2c: inside an "if/when …, " prefix clause the conjunct belongs to that
-/// clause's body, which the conditional handler re-splits; splitting it here
-/// orphans it from the body's gate and subject (Cabal Therapist), mirroring the
+/// CR 608.2c + CR 603.12: inside an "if/when …, " prefix clause the conjunct
+/// belongs to that clause's body (for "when you do," the reflexive trigger's
+/// effect), which the conditional handler re-splits; splitting it here orphans
+/// it from the body's gate and subject (Cabal Therapist), mirroring the
 /// prefix-clause rule in `split_comma_clause_boundary`.
 fn reveal_hand_continues_with_conjugated_verb(before_lower: &str, remainder_trimmed: &str) -> bool {
     if starts_prefix_clause(before_lower.trim_start()) {
