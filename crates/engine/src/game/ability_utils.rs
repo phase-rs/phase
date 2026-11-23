@@ -6529,8 +6529,10 @@ fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
 }
 
 /// CR 508.5 + CR 508.5a + CR 603.3d: a filter whose evaluation asks
-/// `combat::defending_player_cr508_5` for the attacked-player anaphor needs the
-/// resolving ability's `trigger_source`, because that authority's binding rule is
+/// `combat::defending_player_cr508_5` for the attacked-player anaphor, or whose
+/// `FilterProp::OtherThanTriggerObject` compares against the event subject,
+/// needs the resolving trigger context. The former needs the ability's
+/// `trigger_source`, because that authority's binding rule is
 /// `trigger_source.and_then(|_| detection.or(state.current_trigger_event))` — with
 /// no `trigger_source` no attack event is bound (`with_bound_attack_event` passes
 /// `None`), which skips the attack-entry tiers entirely and leaves only `resolve_defending_player`. That
@@ -6546,17 +6548,20 @@ fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
 /// Routing these filters to `find_legal_targets_for_ability`
 /// (`FilterContext::from_ability`) supplies the `trigger_source` that
 /// `set_trigger_source_recursive` already put on every instantiated triggered
-/// ability, making SLOT-BUILD agree with the CR 608.2b re-validation door
+/// ability; its state-aware context bridge also binds the current event object
+/// for `OtherThanTriggerObject`. This makes SLOT-BUILD agree with the CR 608.2b
+/// re-validation door
 /// (`targeting::validate_targets_for_ability`), which has always used
 /// `from_ability`. The disagreement between those two doors is what made this
 /// failure silent.
 ///
-/// SCOPE — exactly the refs that consume `trigger_source`, and no others.
+/// SCOPE — exactly the refs that consume trigger context, and no others.
 /// `filter::source_controller_ref_player` special-cases three refs:
 /// `DefendingPlayer` (reads `trigger_source`), `SourceChosenPlayer` (reads the
 /// source), and `EnchantedPlayer` (reads `source.attached_to`); everything else
-/// routes to `controller_ref_player`. Only `DefendingPlayer` needs the ability
-/// context, so only `DefendingPlayer` is matched here — leaving the existing
+/// routes to `controller_ref_player`. Only `DefendingPlayer` and
+/// `OtherThanTriggerObject` need the ability context, so only those values are
+/// matched here — leaving the existing
 /// corpus producers of `Attacking { defender: Some(You | Opponent |
 /// SourceChosenPlayer | EnchantedPlayer) }` on their existing door, unchanged.
 ///
@@ -6597,10 +6602,10 @@ fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
 /// `DifferentNameFrom`, `CanEnchant`) — each of which would keep the bare
 /// `find_legal_targets` door and reproduce the CR 603.3d removal above.
 ///
-/// What remains local is a pure LEAF-VALUE test ("is this prop the
-/// defending-player anaphor?"), including the two prop-level combinators
-/// (`AnyOf` / `Not`) that can wrap it. Its `_ => false` is a value verdict on a
-/// prop that carries no `defender` axis, not a containment claim about nesting.
+/// What remains local is a pure LEAF-VALUE test ("does this prop consume trigger
+/// context?"), including the two prop-level combinators (`AnyOf` / `Not`) that
+/// can wrap it. Its `_ => false` is a value verdict on a prop that carries no
+/// trigger-context axis, not a containment claim about nesting.
 fn filter_needs_trigger_source(filter: &TargetFilter) -> bool {
     fn prop_needs(prop: &FilterProp) -> bool {
         match prop {
@@ -6609,7 +6614,11 @@ fn filter_needs_trigger_source(filter: &TargetFilter) -> bool {
             }
             | FilterProp::AttackedThisTurn {
                 defender: Some(ControllerRef::DefendingPlayer),
-            } => true,
+            }
+            // CR 603.4 + CR 400.7: "other" in a triggered target clause is
+            // relative to the event object, so enumeration must carry the
+            // current trigger event into the filter context.
+            | FilterProp::OtherThanTriggerObject => true,
             FilterProp::AnyOf { props } => props.iter().any(prop_needs),
             FilterProp::Not { prop } => prop_needs(prop),
             _ => false,
@@ -15053,10 +15062,12 @@ mod tests {
     /// `combat::defending_player_cr508_5`, whose binding rule requires a
     /// `trigger_source` to consult the attack entries at all.
     #[test]
-    fn filter_needs_trigger_source_routes_only_the_defending_player_anaphor() {
-        // Positive: the new value, bare and under every recursive shape.
+    fn filter_needs_trigger_source_routes_only_trigger_context_values() {
+        // Positive: both trigger-context values, bare and under every recursive shape.
         let bare = typed_with(vec![attacking(ControllerRef::DefendingPlayer)]);
+        let other_than_trigger_object = typed_with(vec![FilterProp::OtherThanTriggerObject]);
         assert!(filter_needs_trigger_source(&bare));
+        assert!(filter_needs_trigger_source(&other_than_trigger_object));
         assert!(filter_needs_trigger_source(&TargetFilter::Or {
             filters: vec![typed_with(vec![]), bare.clone()],
         }));
@@ -15065,6 +15076,9 @@ mod tests {
         }));
         assert!(filter_needs_trigger_source(&TargetFilter::Not {
             filter: Box::new(bare.clone()),
+        }));
+        assert!(filter_needs_trigger_source(&TargetFilter::Not {
+            filter: Box::new(other_than_trigger_object.clone()),
         }));
         assert!(filter_needs_trigger_source(&typed_with(vec![
             FilterProp::AnyOf {

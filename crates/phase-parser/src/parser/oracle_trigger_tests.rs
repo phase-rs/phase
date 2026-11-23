@@ -3971,6 +3971,88 @@ fn parse_printed_card(
     parse_oracle_text(text, name, &[], &owned(types), &owned(subtypes)).triggers
 }
 
+fn assert_trigger_relative_pt_source(
+    name: &str,
+    oracle: &str,
+    stat: PtStat,
+    comparator: Comparator,
+) {
+    let triggers = parse_printed_card(oracle, name, &["Creature"], &[]);
+    let trigger = triggers
+        .iter()
+        .find(|trigger| {
+            matches!(
+                trigger.mode,
+                TriggerMode::ChangesZone | TriggerMode::Attacks
+            )
+        })
+        .unwrap_or_else(|| panic!("{name}: expected relative-P/T trigger"));
+    let expected = |prop: &FilterProp| {
+        matches!(
+            prop,
+            FilterProp::PtComparison {
+                stat: actual_stat,
+                scope: PtValueScope::Current,
+                comparator: actual_comparator,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject,
+                    }
+                } | QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::CostPaidObject,
+                    }
+                },
+            } if *actual_stat == stat && *actual_comparator == comparator
+        )
+    };
+    let mut target_filters =
+        trigger_effects(trigger)
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::ChangeZone { target, .. }
+                | Effect::GainControl { target, .. }
+                | Effect::GiveControl { target, .. }
+                | Effect::SetTapState { target, .. } => Some(target),
+                _ => None,
+            });
+    assert!(
+        target_filters.any(|target| filter_contains_filter_prop(&target, &expected)),
+        "{name}: expected target filter bound to CostPaidObject, got {:?}",
+        trigger_effects(trigger)
+    );
+    let mut target_filters =
+        trigger_effects(trigger)
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::ChangeZone { target, .. }
+                | Effect::GainControl { target, .. }
+                | Effect::GiveControl { target, .. }
+                | Effect::SetTapState { target, .. } => Some(target),
+                _ => None,
+            });
+    assert!(
+        target_filters.any(|target| {
+            filter_contains_filter_prop(&target, &|prop| {
+                *prop == FilterProp::OtherThanTriggerObject
+            }) && !filter_contains_filter_prop(&target, &|prop| *prop == FilterProp::Another)
+        }),
+        "{name}: expected 'another' to bind to the trigger object, got {:?}",
+        trigger_effects(trigger)
+    );
+    assert_no_unimplemented(trigger.execute.as_deref().expect("trigger effect"));
+}
+
+#[test]
+fn relative_pt_trigger_filters_bind_trigger_event_source() {
+    assert_trigger_relative_pt_source(
+        "Colfenor, the Last Yew",
+        "Whenever Colfenor or another creature you control dies, return up to one other target creature card with lesser toughness from your graveyard to your hand.",
+        PtStat::Toughness,
+        Comparator::LT,
+    );
+}
+
 /// Every effect the trigger reaches, its delayed payloads and modes included.
 fn trigger_effects(trigger: &TriggerDefinition) -> Vec<Effect> {
     let mut effects = Vec::new();

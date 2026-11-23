@@ -7,12 +7,60 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     DepartedStackSpell, GameState, StackEntry, StackEntryKind, TriggerSourceContext,
 };
-use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
+use crate::types::identifiers::{
+    ObjectId, ObjectIncarnationRef, TrackedSetId, TriggeringObjectRef,
+};
 use crate::types::keywords::{HexproofFilter, Keyword};
 use crate::types::player::PlayerId;
 use crate::types::resolution::CapturedDeclarationPayload;
 use crate::types::zones::Zone;
 use std::collections::HashSet;
+
+/// CR 603.4 + CR 400.7: bind the event object while enumerating targets for a
+/// triggered ability. Target filters use the existing
+/// `FilterProp::OtherThanTriggerObject` marker for trigger-relative "another";
+/// this context bridge makes its identity predicate answer the event object
+/// during both initial target selection and resolution-time rechecks, while
+/// preserving the ability source as the separate `source_id` authority.
+fn ability_target_filter_context<'a>(
+    state: &GameState,
+    ability: &'a ResolvedAbility,
+) -> super::filter::FilterContext<'a> {
+    ability_target_filter_context_with_controller(state, ability, ability.controller)
+}
+
+fn ability_target_filter_context_with_controller<'a>(
+    state: &GameState,
+    ability: &'a ResolvedAbility,
+    controller: PlayerId,
+) -> super::filter::FilterContext<'a> {
+    let context = super::filter::FilterContext::from_ability_with_controller(ability, controller);
+    let Some(event) = state.current_trigger_event.as_ref() else {
+        return context;
+    };
+    let Some(object_id) = extract_source_from_event(event) else {
+        return context;
+    };
+    // CR 400.7: a departing zone-change subject is represented by the same
+    // storage object in its destination zone, but its incarnation is advanced
+    // by the move. The event proves identity by its object id for this
+    // exclusion; only a battlefield entrant has a live incarnation that can be
+    // compared directly during target enumeration.
+    let incarnation = match event {
+        GameEvent::ZoneChanged {
+            to: Zone::Battlefield,
+            record,
+            ..
+        } => record.entered_incarnation,
+        GameEvent::ZoneChanged { .. } => None,
+        _ => event_context_incarnation(&TargetFilter::TriggeringSource, event, object_id)
+            .map(|reference| reference.incarnation),
+    };
+    context.with_triggering_object(TriggeringObjectRef {
+        object_id,
+        incarnation,
+    })
+}
 
 /// Find legal targets using a typed TargetFilter (CR 115.2 + CR 702.16b).
 ///
@@ -45,7 +93,7 @@ pub fn find_legal_targets_for_ability(
     filter: &TargetFilter,
     ability: &ResolvedAbility,
 ) -> Vec<TargetRef> {
-    let target_ctx = super::filter::FilterContext::from_ability(ability);
+    let target_ctx = ability_target_filter_context(state, ability);
     find_legal_targets_with_context(
         state,
         filter,
@@ -60,7 +108,7 @@ pub(crate) fn has_legal_target_for_ability(
     filter: &TargetFilter,
     ability: &ResolvedAbility,
 ) -> bool {
-    let target_ctx = super::filter::FilterContext::from_ability(ability);
+    let target_ctx = ability_target_filter_context(state, ability);
     has_legal_target_with_context(
         state,
         filter,
@@ -77,7 +125,7 @@ pub(crate) fn find_legal_targets_for_ability_with_controller(
     source_controller: PlayerId,
 ) -> Vec<TargetRef> {
     let target_ctx =
-        super::filter::FilterContext::from_ability_with_controller(ability, source_controller);
+        ability_target_filter_context_with_controller(state, ability, source_controller);
     find_legal_targets_with_context(
         state,
         filter,
@@ -100,7 +148,7 @@ pub(crate) fn find_legal_targets_for_ability_with_view(
     view: &[Option<DeclaredSlotBinding>],
 ) -> Vec<TargetRef> {
     let target_ctx =
-        super::filter::FilterContext::from_ability_with_controller(ability, source_controller)
+        ability_target_filter_context_with_controller(state, ability, source_controller)
             .with_declared_slot_view(view);
     find_legal_targets_with_context(
         state,

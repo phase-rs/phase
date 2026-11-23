@@ -396,7 +396,6 @@ face = [
   { key = "codie, vociferous codex", class = "wrong_duration", clauses = ["When you next cast a spell this turn,", "exile cards from the top of your library until you exile an instant or sorcery card with lesser mana value.", "Put each other card exiled this way on the bottom of your library in a random order."] },
   { key = "cogwork librarian", class = "missing_effect", clauses = ["Draft this card face up.", "As you draft a card, you may draft an additional card from that booster pack.", "If you do, put this card into that booster pack."] },
   { key = "coils of the medusa", class = "dropped_qualifier", clauses = ["Sacrifice this Aura: Destroy all non-Wall creatures blocking enchanted creature."] },
-  { key = "colfenor, the last yew", class = "dropped_qualifier", clauses = ["Whenever Colfenor or another creature you control dies, return up to one other target creature card with lesser toughness from your graveyard to your hand."] },
   { key = "collected conjuring", class = "dropped_qualifier", clauses = ["Put the exiled cards not cast this way on the bottom of your library in a random order."] },
   { key = "comet storm", class = "wrong_count", clauses = ["then choose another target for each time this spell was kicked.", "Comet Storm deals X damage to each of them."] },
   { key = "commander mustard", class = "extra_effect", clauses = ["Vigilance"] },

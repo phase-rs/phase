@@ -1589,12 +1589,13 @@ pub struct FilterContext<'a> {
     /// trigger whose intervening-`if` is being evaluated — the referent of
     /// "another" in a trigger-anaphoric filter ("another creature you control",
     /// where "another" means "other than the creature that just entered", not
-    /// "other than the ability source"). Bound only inside
-    /// `matches_zone_change_event_object_filter`, which is the one place holding
-    /// the `GameEvent::ZoneChanged` both CR 603.4 legs are handed; `None`
-    /// everywhere else, where `FilterProp::OtherThanTriggerObject` keeps its
-    /// transparent pass-through and the `ObjectCount` / `PropertyAggregate`
-    /// resolvers apply the exclusion at the set level instead.
+    /// "other than the ability source"). Bound inside
+    /// `matches_zone_change_event_object_filter` for trigger condition checks
+    /// and by triggered-ability target enumeration while the current event is
+    /// pushed; `None` everywhere else, where
+    /// `FilterProp::OtherThanTriggerObject` keeps its transparent pass-through
+    /// and the `ObjectCount` / `PropertyAggregate` resolvers apply the
+    /// exclusion at the set level instead.
     ///
     /// CR 400.7: carried as a `TriggeringObjectRef` (id + the incarnation the
     /// event proves) rather than a bare `ObjectId`, so a leave-and-re-enter at
