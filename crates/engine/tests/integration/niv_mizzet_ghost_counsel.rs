@@ -251,7 +251,16 @@ fn niv_mizzet_cant_afford_auto_declines_draws_nothing() {
                     .any(|e| e.id != nourish && e.id != bolt);
                 let nourish_on_stack = runner.state().stack.iter().any(|e| e.id == nourish);
                 if player == P1 && !nourish_on_stack && !bolt_cast {
-                    runner.cast(bolt).target_player(P0).resolve();
+                    // Stop at the optional decision: the outer loop below is
+                    // the only code that may observe an OptionalEffectChoice,
+                    // so a wrongly offered prompt trips prompt_offered instead
+                    // of being silently declined by the driver's default.
+                    runner
+                        .cast(bolt)
+                        .target_player(P0)
+                        .commit()
+                        .stop_at_optional()
+                        .resolve();
                     bolt_cast = true;
                 } else {
                     runner.act(GameAction::PassPriority).expect("pass");
