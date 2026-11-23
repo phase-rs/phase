@@ -486,16 +486,21 @@ fn vorinclex(scenario: &mut GameScenario) -> ObjectId {
         .id()
 }
 
-fn tap_land(runner: &mut GameRunner, land: ObjectId) -> ActionResult {
+fn land_tap_action(runner: &GameRunner, land: ObjectId) -> GameAction {
     let (_, _, grouped) = engine::ai_support::legal_actions_full(runner.state());
-    let tap = grouped
+    grouped
         .get(&land)
         .into_iter()
         .flatten()
         .find(|action| matches!(action, GameAction::TapLandForMana { .. }))
         .cloned()
-        .expect("the land can tap for mana");
-    runner.act(tap).expect("tap the land for mana")
+        .expect("the land can tap for mana")
+}
+
+fn tap_land(runner: &mut GameRunner, land: ObjectId) -> ActionResult {
+    runner
+        .act(land_tap_action(runner, land))
+        .expect("tap the land for mana")
 }
 
 fn assert_undo_unavailable(runner: &mut GameRunner, land: ObjectId) {
@@ -543,16 +548,78 @@ fn tyvar_dryad_arbor_tap_cannot_be_undone_after_the_granted_trigger_fires() {
     }
 }
 
-fn manabarbs_board() -> (GameScenario, ObjectId, ObjectId) {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let barbs = scenario
+fn add_ashaya(scenario: &mut GameScenario) {
+    scenario.add_creature_from_oracle(
+        P0,
+        "Ashaya, Soul of the Wild",
+        0,
+        0,
+        "Ashaya's power and toughness are each equal to the number of lands you control.\nNontoken creatures you control are Forest lands in addition to their other types. (They're still affected by summoning sickness.)",
+    );
+}
+
+/// Grizzly Bears has no mana ability of its own, so under Ashaya its only one is the
+/// intrinsic ability of the Forest type it gained (CR 305.6). The layer pass installs
+/// that ability as an indexed one, so the tap takes the ordinary land-ability route.
+fn grizzly_bears(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .id()
+}
+
+fn tap_ashaya_creature_for_its_intrinsic_forest_mana(runner: &mut GameRunner, creature: ObjectId) {
+    // The scenario seeds permanents without evaluating layers; the engine does that
+    // before it offers actions, and Ashaya's land type is a layer effect.
+    engine::game::layers::flush_layers(runner.state_mut());
+    let tap = land_tap_action(runner, creature);
+    assert!(
+        matches!(
+            &tap,
+            GameAction::TapLandForMana { selection }
+                if selection.source.object_id == creature && selection.ability_index.is_some()
+        ),
+        "the creature land taps through its installed Forest ability, got {tap:?}"
+    );
+    let result = runner
+        .act(tap)
+        .expect("tap the creature land for its Forest mana");
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        GameEvent::TappedForMana { player_id, source_id, produced, .. }
+            if *player_id == P0 && *source_id == creature && produced.as_slice() == [ManaType::Green]
+    )));
+    assert!(runner.state().objects[&creature].tapped);
+}
+
+#[test]
+fn tyvar_ashaya_creature_land_tap_cannot_be_undone() {
+    let (mut scenario, _) = tyvar_board(Phase::PreCombatMain);
+    add_ashaya(&mut scenario);
+    let bears = grizzly_bears(&mut scenario);
+    let mut runner = scenario.build();
+
+    tap_ashaya_creature_for_its_intrinsic_forest_mana(&mut runner, bears);
+    assert_top_trigger(&runner, bears);
+    assert_undo_unavailable(&mut runner, bears);
+    resolve_only_trigger(&mut runner, bears, 1);
+    assert!(runner.state().objects[&bears].tapped);
+}
+
+fn add_manabarbs(scenario: &mut GameScenario) -> ObjectId {
+    scenario
         .add_enchantment_from_oracle(
             P1,
             "Manabarbs",
             "Whenever a player taps a land for mana, this enchantment deals 1 damage to that player.",
         )
-        .id();
+        .id()
+}
+
+fn manabarbs_board() -> (GameScenario, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let barbs = add_manabarbs(&mut scenario);
     // A printed Forest has only its intrinsic ability, exercising the tap path
     // that records undo before collecting the resolution's observers.
     let db = crate::support::shared_card_db().expect("integration card fixture");
@@ -569,6 +636,29 @@ fn assert_manabarbs_trigger(runner: &GameRunner, barbs: ObjectId, forest: Object
             ..
         }) if *source_id == barbs && *mana_source == forest
     ));
+}
+
+#[test]
+fn manabarbs_ashaya_creature_land_tap_cannot_be_undone() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let barbs = add_manabarbs(&mut scenario);
+    add_ashaya(&mut scenario);
+    let bears = grizzly_bears(&mut scenario);
+    let mut runner = scenario.build();
+
+    tap_ashaya_creature_for_its_intrinsic_forest_mana(&mut runner, bears);
+    assert_manabarbs_trigger(&runner, barbs, bears);
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_undo_unavailable(&mut runner, bears);
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().players[0].life, 19);
+    assert!(runner.state().objects[&bears].tapped);
 }
 
 #[test]
@@ -876,13 +966,7 @@ fn off_announces_vorinclex_to_tyvar_without_a_second_caged_sun_firing() {
     ] {
         let (mut scenario, _) = tyvar_board(Phase::PreCombatMain);
         let vorinclex = vorinclex(&mut scenario);
-        scenario.add_creature_from_oracle(
-            P0,
-            "Ashaya, Soul of the Wild",
-            0,
-            0,
-            "Ashaya's power and toughness are each equal to the number of lands you control.\nNontoken creatures you control are Forest lands in addition to their other types. (They're still affected by summoning sickness.)",
-        );
+        add_ashaya(&mut scenario);
         let sun = scenario
             .add_artifact_from_oracle(
                 P0,

@@ -30,7 +30,7 @@ use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::{
     inject_controller_you, parse_life_total_comparator, parse_spell_history_filter,
 };
-use super::oracle_nom::duration::{parse_cast_snapshot_suffix, parse_self_reference_subject};
+use super::oracle_nom::duration::parse_cast_snapshot_suffix;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
@@ -2028,19 +2028,8 @@ pub(crate) fn parse_event_context_quantity_with_context(
     {
         return Some(expr);
     }
-    // CR 106.4 + CR 608.2i: Read the amount this source produced from the
-    // mana ability resolution that triggered the effect.
-    if all_consuming((
-        tag::<_, _, OracleError<'_>>("the amount of mana "),
-        parse_self_reference_subject,
-        tag(" produced"),
-    ))
-    .parse(lower)
-    .is_ok()
-    {
-        return Some(QuantityExpr::Ref {
-            qty: QuantityRef::EventContextAmount,
-        });
+    if let Ok((_, qty)) = nom_quantity::parse_event_context_mana_produced_by_self(lower) {
+        return Some(QuantityExpr::Ref { qty });
     }
     // CR 120.1 + CR 603.2c + CR 608.2c: "opponents dealt damage this way" in
     // trigger-context effects counts the damaged opponents, not the numeric
