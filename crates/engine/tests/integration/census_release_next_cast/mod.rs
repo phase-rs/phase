@@ -17,7 +17,7 @@
 
 use engine::database::CardDatabase;
 use engine::game::combat::AttackTarget;
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, OptionalPolicy, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{ChoiceType, Effect, TargetRef};
 use engine::types::actions::GameAction;
@@ -56,10 +56,11 @@ enum Ask {
     /// "You may choose new targets for the copy": move the target to `to` (CR 707.10c).
     Retarget { actor: PlayerId, to: TargetRef },
     /// An optional instruction ("you may remove two oil counters"): accept or decline.
+    /// `Stop` is rejected — a listed prompt must be answered to finish the witness.
     Optional {
         actor: PlayerId,
         source: ObjectId,
-        accept: bool,
+        policy: OptionalPolicy,
     },
     /// "Choose a card name" (CR 201.4).
     Name { actor: PlayerId, pick: &'static str },
@@ -150,7 +151,7 @@ impl Ask {
                 Ask::Optional {
                     actor,
                     source,
-                    accept,
+                    policy,
                 },
                 WaitingFor::OptionalEffectChoice {
                     player, source_id, ..
@@ -161,6 +162,13 @@ impl Ask {
                     *source_id, source,
                     "the optional instruction belongs to {source:?}"
                 );
+                let accept = match policy {
+                    OptionalPolicy::Accept => true,
+                    OptionalPolicy::Decline => false,
+                    OptionalPolicy::Stop => {
+                        panic!("optional prompt for {source:?} must be answered by the script")
+                    }
+                };
                 GameAction::DecideOptionalEffect { accept }
             }
             (
@@ -771,7 +779,7 @@ fn howl_of_the_horde_with_raid_copies_twice() {
 
 /// Mercurial Spelldancer (combat damage, "you may remove two oil counters. If you do, ..."): attack,
 /// answer the optional prompt, and return to an idle second main phase.
-fn spelldancer_attack(accept: bool) -> (GameRunner, ObjectId, Vec<ObjectId>) {
+fn spelldancer_attack(policy: OptionalPolicy) -> (GameRunner, ObjectId, Vec<ObjectId>) {
     let mut s = main_phase();
     let dancer = card(&mut s, "Mercurial Spelldancer", Zone::Battlefield);
     s.with_counter(dancer, CounterType::Generic("oil".to_string()), 2);
@@ -789,7 +797,7 @@ fn spelldancer_attack(accept: bool) -> (GameRunner, ObjectId, Vec<ObjectId>) {
         vec![Ask::Optional {
             actor: P0,
             source: dancer,
-            accept,
+            policy,
         }],
     );
     (r, dancer, spells)
@@ -798,7 +806,7 @@ fn spelldancer_attack(accept: bool) -> (GameRunner, ObjectId, Vec<ObjectId>) {
 /// CR 603.7a: paying the two oil counters creates the delayed copy of the next instant or sorcery.
 #[test]
 fn mercurial_spelldancer_pays_two_oil_for_a_delayed_copy() {
-    let (mut r, dancer, spells) = spelldancer_attack(true);
+    let (mut r, dancer, spells) = spelldancer_attack(OptionalPolicy::Accept);
     assert_eq!(
         counters(&r, dancer, CounterType::Generic("oil".to_string())),
         0
@@ -817,7 +825,7 @@ fn mercurial_spelldancer_pays_two_oil_for_a_delayed_copy() {
 /// "If you do": declining the payment creates no delayed trigger.
 #[test]
 fn mercurial_spelldancer_declined_makes_no_delayed_copy() {
-    let (mut r, dancer, spells) = spelldancer_attack(false);
+    let (mut r, dancer, spells) = spelldancer_attack(OptionalPolicy::Decline);
     assert_eq!(
         counters(&r, dancer, CounterType::Generic("oil".to_string())),
         2
@@ -1088,6 +1096,11 @@ fn the_clone_saga_chapter_two_copies_a_creature_spell_nonlegendary() {
 
 /// A Saga chapter whose rider adds counters to the next creature spell: only the first of two
 /// Grizzly Bears gets them.
+///
+/// Kumano Faces Kakkazan, Summon: Fenrir and Yuna, Grand Summoner keep their `wrong_duration`
+/// census rows: the pending counter rider is keyed by `ObjectId` and survives a zone change, so a
+/// creature that is Remanded and recast gets the counter (CR 400.7 says the recast object is new).
+/// These witnesses cover the first entry only; the recast case is the retained gap.
 fn counter_rider_saga(name: &str, expected: u32) {
     let (mut s, saga) = saga_board(name);
     let first = card(&mut s, "Grizzly Bears", Zone::Hand);
@@ -1338,7 +1351,7 @@ fn najal_attack_trigger_creates_a_delayed_copy_of_the_next_spell() {
         vec![Ask::Optional {
             actor: P0,
             source: najal,
-            accept: true,
+            policy: OptionalPolicy::Accept,
         }],
     );
     assert_eq!(delayed(&r), 1, "paying {{2}} created the delayed copy");
@@ -1443,7 +1456,7 @@ fn summon_brynhildr_chapter_one_exiles_a_card_playable_the_same_turn() {
         vec![Ask::Optional {
             actor: P0,
             source: saga,
-            accept: true,
+            policy: OptionalPolicy::Accept,
         }],
     );
     assert_eq!(zone(&r, land), Zone::Exile, "chapter I exiled the top card");
