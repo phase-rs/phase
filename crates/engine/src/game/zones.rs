@@ -264,6 +264,7 @@ pub(super) fn capture_exit_lki(
         intensity: obj.intensity,
         // CR 701.3d: the caller captures these before any attachment sever.
         attachments,
+        produceable_mana_types: Vec::new(),
     };
     state.lki_cache.insert(object_id, lki.clone());
     state

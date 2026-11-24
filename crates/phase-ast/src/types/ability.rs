@@ -3889,6 +3889,10 @@ pub enum ManaProduction {
     /// Per CR 106.7 the union ignores cost-payability of the surveyed lands'
     /// mana abilities — only the resulting *type set* matters. CR 106.5 applies
     /// when the union is empty (e.g. no matching lands → no mana).
+    /// `land_filter` may also be the cost referent `TargetFilter::CostPaidObject`
+    /// ("the sacrificed land could produce" — Squandered Resources, CR 608.2k),
+    /// read from the referent's LKI (`LKISnapshot::produceable_mana_types`,
+    /// CR 608.2h) rather than a battlefield census.
     AnyTypeProduceableBy {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
@@ -3940,10 +3944,16 @@ pub enum ManaProduction {
     /// variant is deliberately NOT parameterized: no mana ability reads either.
     DistinctColorsAmongPermanents { filter: TargetFilter },
     /// CR 106.1 + CR 109.1: Produce N mana of one chosen color from the distinct
-    /// colors present among permanents matching `filter`. Mox Amber class:
-    /// "{T}: Add one mana of any color among legendary creatures and
-    /// planeswalkers you control." Colors resolve dynamically at activation
-    /// time; CR 106.5 applies when no matching permanent is colored.
+    /// colors present among the objects matching `filter`: permanents, unless
+    /// `filter` names another zone through `FilterProp::InZone`, as
+    /// `effects::mana::distinct_colors_among_permanents` reads it. Mox Amber
+    /// class: "{T}: Add one mana of any color among legendary creatures and
+    /// planeswalkers you control." CR 105.4 + CR 608.2d: "Choose a color of
+    /// <objects>. Add one mana of that color." lowers here too, because that
+    /// choice is made while this production resolves, from the colors of the
+    /// objects it names (Meteor Crater: "a permanent you control"; Corrupted
+    /// Grafstone: "a card in your graveyard"). Colors resolve dynamically at
+    /// activation time; CR 106.5 applies when no matching object is colored.
     AnyOneColorAmongPermanents {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
@@ -12520,10 +12530,9 @@ pub enum ObjectScope {
     EventSource,
     /// CR 608.2k: The specific untargeted object previously referred to by
     /// this ability's cost OR trigger condition. Resolved (first match wins)
-    /// via `ResolvedAbility.cost_paid_object` → trigger-event source →
-    /// `effect_context_object`. Subsumes the former `EventContextSource*`
-    /// trio (CR 117.1 + CR 400.7j cost referent and CR 603.2 trigger
-    /// referent are the two enumerated members of CR 608.2k's single clause).
+    /// via `ResolvedAbility.cost_paid_object`, then the same-resolution effect
+    /// object, then the trigger-event source. Where-X references to a trigger's
+    /// object use `EventSource` directly.
     CostPaidObject,
     /// CR 608.2k: A deferred anaphoric **pronoun** ("it" / "its") whose object
     /// referent is bound at parse time. The parser rebinds this to a concrete
@@ -19107,6 +19116,10 @@ impl StaticCondition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ParsedCondition {
+    /// CR 602.5: an activation restriction testing the source itself.
+    SourceMatchesFilter {
+        filter: TargetFilter,
+    },
     SourceInZone {
         zone: Zone,
     },
@@ -22817,6 +22830,13 @@ impl TryFrom<ContinuousModification> for PerpetualGrantModification {
         match modification {
             ContinuousModification::AddKeyword { keyword } => Ok(Self::AddKeyword { keyword }),
             ContinuousModification::AddStaticMode { mode } => Ok(Self::AddStaticMode { mode }),
+            ContinuousModification::GrantStaticAbility { definition }
+                if definition.has_legacy_static_mode_shape() =>
+            {
+                Ok(Self::AddStaticMode {
+                    mode: definition.mode,
+                })
+            }
             // Fail-closed: a `GrantAbility` whose nested tree contains
             // `Effect::Unimplemented` did not actually parse -- the quoted body
             // fell through to the parser's honest "couldn't classify this" stub
@@ -30559,6 +30579,29 @@ pub enum VoteVisibility {
 }
 
 impl TargetFilter {
+    /// CR 702.62b: exile, suspend, and at least one time counter on this card.
+    pub fn suspended_card(owner: Option<ControllerRef>) -> TargetFilter {
+        let mut properties = vec![
+            // CR 400.1: in the exile zone.
+            FilterProp::InZone { zone: Zone::Exile },
+            // CR 702.62b: has suspend.
+            FilterProp::HasKeywordKind {
+                value: KeywordKind::Suspend,
+            },
+            // CR 702.62b: bears at least one time counter.
+            FilterProp::Counters {
+                counters: CounterMatch::OfType(CounterType::Time),
+                comparator: Comparator::GE,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        ];
+        if let Some(o) = owner {
+            // CR 108.3: owned by the given player reference.
+            properties.push(FilterProp::Owned { controller: o });
+        }
+        TargetFilter::Typed(TypedFilter::card().properties(properties))
+    }
+
     /// CR 608.2c + CR 110.1: the members of a reveal's published set that are
     /// permanents — "those creature cards" / "those permanents" after "Put those …
     /// cards onto the battlefield". The reveal publishes every card it revealed
@@ -31818,6 +31861,23 @@ impl Effect {
                     ..
                 }
         )
+    }
+
+    /// CR 608.2c + CR 115.6: whether this is a counter (CR 122.1) or
+    /// life-total (CR 119.3) instruction that names no target. The shared
+    /// shape authority for the instructions an activated mana ability performs
+    /// in written order before its production (`inline_mana_preamble`: Empowered
+    /// Autogenerator's "Put a charge counter on this artifact.") and for the
+    /// earlier instructions the CR 106.7 reader performs on a scratch state
+    /// before a later mana amount.
+    pub fn is_decision_free_state_instruction(&self) -> bool {
+        matches!(
+            self,
+            Effect::PutCounter { .. }
+                | Effect::RemoveCounter { .. }
+                | Effect::GainLife { .. }
+                | Effect::LoseLife { .. }
+        ) && extract_target_filter_from_effect(self).is_none()
     }
 
     /// CR 608.2c: true for the structural "repeat this process" directive
@@ -34588,7 +34648,9 @@ impl Effect {
     pub fn publishes_created_referent(&self) -> bool {
         crate::types::ability_visit::visit_effect_scoped(
             self,
-            crate::types::ability_visit::ResolutionScope::OwnResolutionOnly,
+            crate::types::ability_visit::WalkScope::descending(
+                crate::types::ability_visit::ResolutionScope::OwnResolutionOnly,
+            ),
             &mut |effect| {
                 if effect.created_referent_publication().is_some() {
                     ControlFlow::Break(())
@@ -37778,18 +37840,10 @@ pub fn inline_mana_preamble(ability_def: &AbilityDefinition) -> Option<&AbilityD
         if matches!(node.effect.as_ref(), Effect::Mana { .. }) {
             return preceding.then_some(node);
         }
-        let choice_free = matches!(
-            node.effect.as_ref(),
-            Effect::PutCounter { .. }
-                | Effect::RemoveCounter { .. }
-                | Effect::GainLife { .. }
-                | Effect::LoseLife { .. }
-        );
-        if !choice_free
+        if !node.effect.is_decision_free_state_instruction()
             || node.condition.is_some()
             || node.optional
             || node.multi_target.is_some()
-            || extract_target_filter_from_effect(&node.effect).is_some()
         {
             return None;
         }
@@ -39095,6 +39149,31 @@ impl AbilityDefinition {
                 .condition
                 .as_ref()
                 .is_some_and(AbilityCondition::is_optional_effect_performed)
+    }
+
+    /// CR 602.2a + CR 608.2c: whether any node of this printed ability reads
+    /// its per-turn `tally` ([`AbilityCondition::reads_ability_use_count`]).
+    ///
+    /// The whole definition tree is walked, not just `condition`: the gated
+    /// clause sits on whichever chain node carries it (Dragon Whelp's
+    /// `SequentialSibling` holding `CreateDelayedTrigger`, Soulbright Seeker's
+    /// mana sub), and a modal ability's modes are ways it resolves.
+    pub fn reads_ability_use_count(&self, tally: AbilityUseTally) -> bool {
+        self.condition
+            .as_ref()
+            .is_some_and(|condition| condition.reads_ability_use_count(tally))
+            || self
+                .sub_ability
+                .as_deref()
+                .is_some_and(|sub| sub.reads_ability_use_count(tally))
+            || self
+                .else_ability
+                .as_deref()
+                .is_some_and(|other| other.reads_ability_use_count(tally))
+            || self
+                .mode_abilities
+                .iter()
+                .any(|mode| mode.reads_ability_use_count(tally))
     }
 }
 
@@ -40461,6 +40540,33 @@ impl AbilityCondition {
             AbilityCondition::Not { condition }
                 if condition.is_optional_effect_performed()
         )
+    }
+
+    /// CR 602.2a + CR 608.2c: whether this condition reads its own ability's
+    /// per-turn `tally` (`AbilityUseCountThisTurn`), through `And` / `Or` /
+    /// `Not` / `ConditionInstead`.
+    ///
+    /// Two readers rely on it. The loop firewall (`analysis::resource`) retains
+    /// a count any condition reads. The CR 106.7 walker (`game::could_produce`)
+    /// projects the use ledgers through one hypothetical resolution only for an
+    /// ability that reads one. Every other condition answers `false`, the
+    /// fail-closed direction for both: a missed reader keeps the firewall's
+    /// count and leaves the walker reading the gate both ways (the live
+    /// ledger), never deciding it against a ledger that was not projected.
+    pub fn reads_ability_use_count(&self, tally: AbilityUseTally) -> bool {
+        match self {
+            AbilityCondition::AbilityUseCountThisTurn { tally: read, .. } => *read == tally,
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                conditions
+                    .iter()
+                    .any(|condition| condition.reads_ability_use_count(tally))
+            }
+            AbilityCondition::Not { condition }
+            | AbilityCondition::ConditionInstead { inner: condition } => {
+                condition.reads_ability_use_count(tally)
+            }
+            _ => false,
+        }
     }
 
     /// Default `min_count` for `AdditionalCostPaid` is 1 (any single payment).
@@ -43405,6 +43511,19 @@ pub struct StaticDefinition {
     /// actor. Serde-defaulted: historical defs are all object-wide.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_actor: Option<ControllerRef>,
+    /// CR 611.2 + CR 611.2c + CR 613.1f: provenance of this definition — one of
+    /// the object's abilities, or a rule effect stored on it. See
+    /// [`DefinitionOrigin`].
+    ///
+    /// A transient `AddStaticMode` stamps `Resolution` in layer 6.
+    /// `GrantStaticAbility` keeps the inner definition's origin for transient
+    /// grants and forces `Characteristic` otherwise. Printed and quoted
+    /// definitions keep the default. Parsed rule effects carried by
+    /// `GrantStaticAbility` declare their origin with
+    /// [`Self::resolution_installed`]. Origin participates in equality
+    /// so graft deduplication preserves resolution-installed definitions.
+    #[serde(default, skip_serializing_if = "DefinitionOrigin::is_characteristic")]
+    pub origin: DefinitionOrigin,
 }
 
 /// CR 702.16n / CR 702.16p: Which attachments a protection-granting continuous
@@ -43481,6 +43600,15 @@ pub struct BoardWideCostModifier<'a> {
 }
 
 impl StaticDefinition {
+    /// Whether the historical quoted-static lowering could carry this definition
+    /// as a standalone mode. Perpetual conversion uses this exact shape. Other
+    /// consumers must check their own mode and scope eligibility.
+    pub fn has_legacy_static_mode_shape(&self) -> bool {
+        self.affected == Some(TargetFilter::SelfRef)
+            && self.condition.is_none()
+            && self.modifications.is_empty()
+    }
+
     /// CR 601.2f: view this static as a board-wide cost modifier, or `None` when
     /// it is not one.
     ///
@@ -43592,7 +43720,15 @@ impl StaticDefinition {
             room_door: None,
             granting_object: None,
             bound_actor: None,
+            origin: DefinitionOrigin::Characteristic,
         }
+    }
+
+    /// CR 611.2 + CR 613.1f: is this a rule effect stored on the object rather
+    /// than one of its abilities? Kept by ability removal (`RemoveAllAbilities`
+    /// in `layers.rs`) and ignored by `object_has_no_abilities`.
+    pub fn is_resolution_installed(&self) -> bool {
+        self.origin == DefinitionOrigin::Resolution
     }
 
     pub fn continuous() -> Self {
@@ -43603,6 +43739,14 @@ impl StaticDefinition {
     /// (see the `room_door` field doc). Mirrors `TriggerDefinition::room_door`.
     pub fn room_door(mut self, door: crate::types::object_data::RoomDoor) -> Self {
         self.room_door = Some(door);
+        self
+    }
+
+    /// CR 611.2 + CR 611.2c: Mark a rule effect hosted by a resolving effect
+    /// through `GrantStaticAbility`. Quoted abilities use the characteristic
+    /// origin (CR 113.10).
+    pub fn resolution_installed(mut self) -> Self {
+        self.origin = DefinitionOrigin::Resolution;
         self
     }
 
@@ -44070,36 +44214,41 @@ impl ReplacementChoiceAuthority {
     }
 }
 
-/// CR 611.2c vs CR 613.1: where a `ReplacementDefinition` on an object came from.
+/// CR 611.2c vs CR 613.1: where an object-hosted static or replacement definition
+/// came from.
 ///
 /// CR 613.1 determines the values of an object's CHARACTERISTICS, starting from
-/// the printed card — so the layer engine reseeds `replacement_definitions` from
-/// `base_replacement_definitions` every pass. CR 611.2c settles that a prevention
-/// shield is not one of those characteristics; its example says so outright:
-/// "An effect that reads 'Prevent all damage creatures would deal this turn'
-/// doesn't modify any object's characteristics, so it's modifying the rules of
-/// the game."
+/// the printed card, so the layer engine rebuilds `static_definitions` and
+/// `replacement_definitions` from their base lists every pass. CR 611.2c settles
+/// that a rule effect is not one of those characteristics; its example says so
+/// outright: "An effect that reads 'Prevent all damage creatures would deal this
+/// turn' doesn't modify any object's characteristics, so it's modifying the rules
+/// of the game."
 ///
-/// A continuous effect created by the RESOLUTION of a spell or ability (CR 611.2a)
-/// is merely STORED on a host object so the replacement pipeline can find it. It
-/// lasts as long as the ability stated (CR 611.2a) and ends when it is used up or
-/// its duration expires (CR 615.3) — not at the next layer pass.
+/// An object-hosted rule effect — a prevention shield or restriction created by
+/// the RESOLUTION of a spell or ability (CR 611.2a), or an untap prohibition
+/// created by exert (CR 701.43a) — is merely STORED on its host so the
+/// replacement pipeline or the relevant rules check can find it. It is not one of
+/// the object's abilities, so an ability-removing effect (CR 613.1f) leaves it in
+/// place. A quoted ability granted by resolution (CR 113.10) is an ability, not
+/// one of these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum ReplacementOrigin {
-    /// A printed/copiable characteristic (CR 613.1), or a per-pass static
-    /// derivation. Reset away and re-derived by every layer pass.
+pub enum DefinitionOrigin {
+    /// A printed or copiable characteristic (CR 613.1), or an ability derived
+    /// during the layer pass. Reset away and re-derived by every layer pass.
     #[default]
     Characteristic,
-    /// A continuous effect created by resolution (CR 611.2a). Survives the
-    /// CR 613.1 reset; removed only by an expiry prune or a zone change.
+    /// A rule effect created by resolution (CR 611.2) or a game action such as
+    /// exert (CR 701.43a). It is stored on an object without becoming one of
+    /// that object's abilities (CR 611.2c + CR 613.1f).
     Resolution,
 }
 
-impl ReplacementOrigin {
+impl DefinitionOrigin {
     /// `skip_serializing_if` predicate: the default origin emits no key, so every
-    /// pre-existing serialized `ReplacementDefinition` is byte-identical.
+    /// pre-existing serialized definition keeps its original shape.
     pub fn is_characteristic(&self) -> bool {
-        matches!(self, ReplacementOrigin::Characteristic)
+        matches!(self, DefinitionOrigin::Characteristic)
     }
 }
 
@@ -44417,13 +44566,14 @@ pub struct ReplacementDefinition {
     pub source_object: Option<ObjectId>,
     /// CR 611.2a + CR 611.2c + CR 613.1: provenance of this definition — a printed
     /// characteristic (or per-pass derived grant) versus a continuous effect
-    /// created by the resolution of a spell or ability. See [`ReplacementOrigin`].
+    /// created by the resolution of a spell or ability. See [`DefinitionOrigin`].
     ///
     /// Stamped ONLY by `GameObject::install_resolution_replacement`, which is the
     /// single authority for resolution-time object installs; every parser/printed
     /// construction leaves the `Characteristic` default. Read by
     /// `game_object::reseed_replacements_carrying_resolution_effects` (the CR 613.1
     /// carry-over) and `layers::settle_resolution_replacements_to_tail`.
+    /// A carried prevention shield lasts until it is used up or expires (CR 615.3).
     ///
     /// `origin` participates in the derived `PartialEq`, and that is LOAD-BEARING.
     /// `layers.rs` dedups both per-pass derivation sites by whole-definition
@@ -44440,8 +44590,8 @@ pub struct ReplacementDefinition {
     /// `carried_resolution_def_does_not_suppress_an_identical_derived_grant`
     /// (`layers.rs`) pins it anyway. `source_object` (directly above) joins
     /// `PartialEq` on exactly the same terms.
-    #[serde(default, skip_serializing_if = "ReplacementOrigin::is_characteristic")]
-    pub origin: ReplacementOrigin,
+    #[serde(default, skip_serializing_if = "DefinitionOrigin::is_characteristic")]
+    pub origin: DefinitionOrigin,
     /// CR 614.1a: For `AddCounter` replacements, whether `valid_player` scopes by
     /// the counter *recipient* (default — prevention/affected-controller doublers)
     /// or by the *actor* putting the counters (Vorinclex/Halving Season, per the
@@ -44570,7 +44720,7 @@ impl ReplacementDefinition {
             enters_under: None,
             source_controller: None,
             source_object: None,
-            origin: ReplacementOrigin::Characteristic,
+            origin: DefinitionOrigin::Characteristic,
             counter_replacement_subject: CounterReplacementSubject::Recipient,
             granting_object: None,
             entry_payment_max: None,
@@ -44694,7 +44844,7 @@ impl ReplacementDefinition {
     /// derived grant)? Such a definition is carried across the CR 613.1 layer
     /// reset by `game_object::reseed_replacements_carrying_resolution_effects`.
     pub fn is_resolution_installed(&self) -> bool {
-        self.origin == ReplacementOrigin::Resolution
+        self.origin == DefinitionOrigin::Resolution
     }
 
     pub fn combat_scope(mut self, scope: CombatDamageScope) -> Self {
@@ -46239,6 +46389,35 @@ mod tests {
         assert_eq!(reparsed, current);
     }
 
+    #[test]
+    fn characteristic_static_omits_origin_from_json() {
+        let plain = StaticDefinition::new(StaticMode::CantBlock);
+        let mut stamped = plain.clone();
+        stamped.origin = DefinitionOrigin::Resolution;
+
+        let plain_json = serde_json::to_value(&plain).expect("serializes");
+        let stamped_json = serde_json::to_value(&stamped).expect("serializes");
+        assert!(plain_json.get("origin").is_none());
+        assert_eq!(stamped_json["origin"], "Resolution");
+    }
+
+    #[test]
+    fn static_origin_defaults_and_round_trips() {
+        let mut stamped = StaticDefinition::new(StaticMode::CantBlock);
+        stamped.origin = DefinitionOrigin::Resolution;
+        let mut json = serde_json::to_value(&stamped).expect("serializes");
+        let round_tripped: StaticDefinition =
+            serde_json::from_value(json.clone()).expect("deserializes");
+        assert_eq!(round_tripped, stamped);
+        assert!(round_tripped.is_resolution_installed());
+
+        json.as_object_mut()
+            .expect("static definition object")
+            .remove("origin");
+        let legacy: StaticDefinition = serde_json::from_value(json).expect("deserializes");
+        assert_eq!(legacy.origin, DefinitionOrigin::Characteristic);
+    }
+
     /// Issue #8485: `origin` and `source_object` are additive and wire-compatible.
     ///
     /// Both carry `#[serde(default, skip_serializing_if = ..)]`, so a plain printed
@@ -46261,13 +46440,13 @@ mod tests {
 
         // An old payload with neither key loads as Characteristic / None.
         let loaded: ReplacementDefinition = serde_json::from_str(&json).expect("deserializes");
-        assert_eq!(loaded.origin, ReplacementOrigin::Characteristic);
+        assert_eq!(loaded.origin, DefinitionOrigin::Characteristic);
         assert_eq!(loaded.source_object, None);
         assert!(!loaded.is_resolution_installed());
 
         // A Resolution def with an anchor round-trips faithfully.
         let mut stamped = plain.clone();
-        stamped.origin = ReplacementOrigin::Resolution;
+        stamped.origin = DefinitionOrigin::Resolution;
         stamped.source_object = Some(ObjectId(42));
         let round_tripped: ReplacementDefinition =
             serde_json::from_str(&serde_json::to_string(&stamped).expect("serializes"))
@@ -50137,6 +50316,7 @@ mod tests {
     #[test]
     fn static_definition_roundtrip() {
         let static_def = StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::Continuous,
             affected: Some(
                 TypedFilter::creature()
@@ -50720,6 +50900,7 @@ mod tests {
     fn effect_generic_effect_typed_roundtrip() {
         let effect = Effect::GenericEffect {
             static_abilities: vec![StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::Continuous,
                 affected: Some(TargetFilter::SelfRef),
                 modifications: vec![ContinuousModification::AddPower { value: 3 }],
@@ -54533,6 +54714,46 @@ mod spellbook_selection_serde_tests {
             err.to_string().contains("duplicate field"),
             "expected a duplicate-field error, got {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod quoted_static_perpetual_conversion_tests {
+    use super::*;
+
+    #[test]
+    fn perpetual_static_conversion_preserves_the_historical_guard() {
+        let base = StaticDefinition::new(StaticMode::CantBlock)
+            .affected(TargetFilter::SelfRef)
+            .active_zones(vec![Zone::Graveyard]);
+        let grant = |definition| ContinuousModification::GrantStaticAbility {
+            definition: Box::new(definition),
+        };
+        let bare = ContinuousModification::AddStaticMode {
+            mode: StaticMode::CantBlock,
+        };
+        let expected = PerpetualGrantModification::AddStaticMode {
+            mode: StaticMode::CantBlock,
+        };
+        assert_eq!(
+            PerpetualGrantModification::try_from(grant(base.clone())),
+            Ok(expected.clone())
+        );
+        assert_eq!(PerpetualGrantModification::try_from(bare), Ok(expected));
+        for definition in [
+            base.clone().affected(TargetFilter::ParentTarget),
+            StaticDefinition {
+                condition: Some(StaticCondition::DuringYourTurn),
+                ..base.clone()
+            },
+            base.modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+        ] {
+            let input = grant(definition);
+            assert_eq!(
+                PerpetualGrantModification::try_from(input.clone()),
+                Err(input)
+            );
+        }
     }
 }
 

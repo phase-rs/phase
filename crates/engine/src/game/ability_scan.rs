@@ -4846,7 +4846,8 @@ fn scan_parsed_condition(x: &ParsedCondition, mode: ScanMode) -> Axes<'_> {
         }
         ParsedCondition::IsOpponentsTurn => Axes::NONE,
         // CR 601.2c: the targets the spell being cast has chosen.
-        ParsedCondition::SpellTargetsFilter { filter } => {
+        ParsedCondition::SourceMatchesFilter { filter }
+        | ParsedCondition::SpellTargetsFilter { filter } => {
             scan_target_filter(filter, FilterReadContext::SnapshotOrEvent, mode)
         }
         ParsedCondition::And { conditions } | ParsedCondition::Or { conditions } => conditions
@@ -8789,6 +8790,7 @@ fn scan_resolved_continuous_static(
         protection_does_not_remove: _,
         room_door: _,
         granting_object: _,
+        origin: _,
     } = sd;
     let attack_restriction = matches!(
         static_mode,

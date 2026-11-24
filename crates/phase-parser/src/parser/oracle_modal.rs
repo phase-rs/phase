@@ -1987,6 +1987,7 @@ fn lower_as_enters_anchor_word_modal(
             room_door: None,
             granting_object: None,
             bound_actor: None,
+            origin: crate::types::ability::DefinitionOrigin::Characteristic,
         };
         result.statics.push(placeholder);
     }

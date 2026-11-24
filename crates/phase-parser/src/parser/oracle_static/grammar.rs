@@ -1793,19 +1793,9 @@ pub(crate) fn parse_quoted_rule_static_modifications(
         return None;
     }
 
-    // CR 113.3d + CR 604.1: A quoted static ability is granted to the recipient
-    // verbatim. If `parse_static_line_multi` produces nothing, the inner text
-    // isn't a recognized static — fall through to the spell-like `GrantAbility`
-    // path. Otherwise, emit one `ContinuousModification` per inner static:
-    //   - `affected == Some(SelfRef)` with no condition / no layered modifications
-    //     stays on the existing `AddStaticMode` path (the trivial recipient-anchored
-    //     case — e.g. "can't be blocked", "must attack each combat").
-    //   - Everything else (non-SelfRef scope, conditional, or carrying layered
-    //     P/T / keyword modifications — e.g. Dancer's Chakrams' inner clause
-    //     "Other commanders you control get +2/+2 and have lifelink") emits
-    //     `GrantStaticAbility` so the inner static's scope, condition, and
-    //     modifications are preserved verbatim on the recipient (CR 611.2c +
-    //     CR 613.1f).
+    // CR 113.10 + CR 113.3d: Grant each parsed static ability in order and
+    // preserve its full definition, including its functioning zones and scope.
+    // Unrecognized static text falls through to the other quote classifiers.
     //
     // Trailing punctuation: the host clause leaves the inner text bookended
     // by a list comma or period (e.g. `..., "Other commanders you control get
@@ -1818,19 +1808,8 @@ pub(crate) fn parse_quoted_rule_static_modifications(
     }
     let modifications: Vec<_> = defs
         .into_iter()
-        .map(|definition| {
-            if definition.affected == Some(TargetFilter::SelfRef)
-                && definition.condition.is_none()
-                && definition.modifications.is_empty()
-            {
-                ContinuousModification::AddStaticMode {
-                    mode: definition.mode,
-                }
-            } else {
-                ContinuousModification::GrantStaticAbility {
-                    definition: Box::new(definition),
-                }
-            }
+        .map(|definition| ContinuousModification::GrantStaticAbility {
+            definition: Box::new(definition),
         })
         .collect();
     Some(modifications)

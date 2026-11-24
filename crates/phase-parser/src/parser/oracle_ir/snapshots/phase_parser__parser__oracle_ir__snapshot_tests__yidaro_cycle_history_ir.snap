@@ -108,7 +108,8 @@ expression: "&ir"
               "origin": null,
               "destination": null,
               "trigger_zones": [
-                "Graveyard"
+                "Graveyard",
+                "Exile"
               ],
               "phase": null,
               "optional": false,

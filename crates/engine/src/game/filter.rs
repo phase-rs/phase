@@ -22,7 +22,7 @@ use crate::types::ability::{
     filter_contains, filter_grammar_any, filter_prop_grammar_any, player_filter_grammar_any,
     quantity_expr_grammar_any, quantity_ref_grammar_any, rewrite_filter_prop, rewrite_filter_props,
     rewrite_player_filter_props, rewrite_quantity_expr_filter_props, AbilityCondition,
-    AttachmentReferent, AttackerBlockStatus, BlockPairDirection, CardTypeSetSource,
+    AttachmentKind, AttachmentReferent, AttackerBlockStatus, BlockPairDirection, CardTypeSetSource,
     CastManaSpentMetric, ChoiceValue, ChosenAttribute, CombatRelation, CombatRelationSubject,
     ContinuousModification, ControllerRef, CountScope, CrewRelation, FilterGrammarNode, FilterProp,
     Parity, ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef,
@@ -34,7 +34,8 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
 use crate::types::events::EventObjectSnapshot;
 use crate::types::game_state::{
-    AttackDeclarationRecord, CounterAddedRecord, DamageEventKey, DamageRecord, GameState,
+    battlefield_departure_source_context_from_record, AttackDeclarationRecord,
+    BattlefieldDepartureSourceContext, CounterAddedRecord, DamageEventKey, DamageRecord, GameState,
     LKISnapshot, SpellCastRecord, StackEntryKind, TriggerSourceContext, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TriggeringObjectRef};
@@ -10336,6 +10337,7 @@ impl<'a> SourceContext<'a> {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
             trigger_source: None,
@@ -10573,6 +10575,7 @@ fn source_context_from_filter<'a>(
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             });
         (
@@ -12037,17 +12040,14 @@ fn matches_filter_prop(
         FilterProp::Modified => {
             let has_counter = obj.counters.values().any(|&n| n > 0);
             let has_qualifying_attachment = phased_in_attachments(state, obj).any(|att| {
-                let is_equipment = att.card_types.subtypes.iter().any(|s| s == "Equipment");
-                if is_equipment {
-                    // CR 301.5: Equipment attachment alone is sufficient — no
-                    // controller constraint (a creature equipped by anyone's
-                    // Equipment is modified).
-                    return true;
-                }
-                let is_aura = att.card_types.subtypes.iter().any(|s| s == "Aura");
-                // CR 303.4: Aura counts only if controlled by the permanent's
-                // controller.
-                is_aura && att.controller == obj.controller
+                let kind = if att.card_types.subtypes.iter().any(|s| s == "Equipment") {
+                    AttachmentKind::Equipment
+                } else if att.card_types.subtypes.iter().any(|s| s == "Aura") {
+                    AttachmentKind::Aura
+                } else {
+                    return false;
+                };
+                attachment_modifies_permanent(&kind, att.controller, obj.controller)
             });
             has_counter || has_qualifying_attachment
         }
@@ -12478,7 +12478,10 @@ pub(crate) fn object_has_no_abilities(obj: &GameObject) -> bool {
         && obj.abilities.is_empty()
         && obj.trigger_definitions.is_empty()
         && obj.replacement_definitions.is_empty()
-        && obj.static_definitions.is_empty()
+        // CR 109.3 + CR 611.2c: Installed rule effects do not count as abilities.
+        && obj.static_definitions.iter_all().all(
+            crate::types::ability::StaticDefinition::is_resolution_installed,
+        )
 }
 
 /// CR 201.2a: objects with a common name have the same name. The Oracle parser
@@ -12526,18 +12529,18 @@ pub(crate) fn spell_has_chosen_name(spell: &GameObject, fused: bool, chosen: &st
 
 /// CR 603.10: Evaluate a `FilterProp` against a zone-change event snapshot.
 ///
-/// Properties fall into four groups:
+/// Properties fall into five groups:
 /// 1. **Snapshot-derivable.** Read directly from the captured record — P/T, colors, CMC,
-///    keywords, supertypes, types, owner/controller, name.
+///    keywords, supertypes, types, owner/controller, name, and departure-time
+///    modification (`Modified`).
 /// 2. **Source/event relational.** Compare the record against the source object or its
 ///    chosen attributes — `Another`, `Owned`, `IsChosenCreatureType`, `Named`,
 ///    `SharesQuality` (`None` and direct-`ParentTarget` references only).
 /// 3. **Combat snapshot state.** Attacking/blocking/unblocked predicates read
 ///    `ZoneChangeRecord::combat_status`, because leaving a zone removes the
 ///    object from live combat.
-/// 4. **Dynamic battlefield state.** Inherently requires the live object (tapped,
-///    counters, attached-to). A zone-change subject has already left its public
-///    zone, so these are semantically not applicable and return `false`.
+/// 4. **Exit-time LKI cache.** `Counters`, `Tapped`, and `Untapped` read the
+///    cached state for the record's object ID.
 /// 5. **Not-yet-supported.** Could plausibly be snapshotted or cross-referenced but
 ///    are not currently required. Returning `false` is a known conservative gap.
 fn zone_change_record_matches_property(
@@ -12988,6 +12991,29 @@ fn zone_change_record_matches_property(
                     .contains(&record.object_id)
         }
 
+        // CR 700.9 + CR 603.10a: The attachment check reads `record.attachments`,
+        // which `zones::capture_attachment_snapshot` fills per moved object.
+        // Attachments that left earlier in the same batch are missing here,
+        // as they are for `EnchantedBy` and `EquippedBy`.
+        // An attachment that is both an Aura and an Equipment is recorded with one kind.
+        FilterProp::Modified => {
+            // The context authority also rejects records from zones other than the battlefield.
+            let has_counter = match battlefield_departure_source_context_from_record(record) {
+                BattlefieldDepartureSourceContext::Present(context) => {
+                    context.lki.counters.values().any(|&count| count > 0)
+                }
+                BattlefieldDepartureSourceContext::Absent => false,
+                BattlefieldDepartureSourceContext::Malformed => return false,
+            };
+            has_counter
+                || record.attachments.iter().any(|attachment| {
+                    attachment_modifies_permanent(
+                        &attachment.kind,
+                        attachment.controller,
+                        record.controller,
+                    )
+                })
+        }
         // CR 603.10a + CR 704.5n: the departure record captures the attachment
         // relation at the instant before the zone change, so an "equipped" /
         // "enchanted" look-back reads THAT snapshot — the live object has already
@@ -13081,9 +13107,6 @@ fn zone_change_record_matches_property(
         // CR 701.15b/c: goad is not snapshotted onto the zone-change record
         // (unlike Suspected's `record.is_suspected`). Fail closed.
         | FilterProp::Goaded
-        // CR 700.9: Modified is a live-battlefield predicate (counters +
-        // attachments) — a zone-change snapshot cannot represent it.
-        | FilterProp::Modified
         | FilterProp::DifferentNameFrom { .. }
         // CR 109.1: identity-exclusion is a live-battlefield predicate; a
         // zone-change snapshot cannot represent it. Fail closed.
@@ -13148,6 +13171,19 @@ pub(crate) fn phased_in_attachments<'a>(
         .iter()
         .filter_map(|id| state.objects.get(id))
         .filter(|att| !att.is_phased_out())
+}
+
+/// CR 700.9: Equipment qualifies under any controller (CR 301.5).
+/// An Aura qualifies only under the attached permanent's controller (CR 303.4).
+fn attachment_modifies_permanent(
+    kind: &AttachmentKind,
+    attachment_controller: PlayerId,
+    permanent_controller: PlayerId,
+) -> bool {
+    match kind {
+        AttachmentKind::Equipment => true,
+        AttachmentKind::Aura => attachment_controller == permanent_controller,
+    }
 }
 
 fn attachment_controller_matches(
@@ -13573,6 +13609,7 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         });
     SourceContext {
@@ -17865,6 +17902,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );
@@ -22518,6 +22556,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
             incarnation: departed.objects[&gone].incarnation,
@@ -26128,6 +26167,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         };
         let filter =
@@ -26178,6 +26218,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         };
         let entrant = ObjectId(700);
@@ -26318,6 +26359,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         };
         let filter =
@@ -26466,6 +26508,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         };
 
@@ -26806,6 +26849,97 @@ mod tests {
             PlayerId(0),
             &[],
         ));
+    }
+
+    #[test]
+    fn modified_look_back_reads_the_departure_record() {
+        use crate::types::counter::CounterType;
+
+        let mut state = setup();
+        let id = add_creature(&mut state, PlayerId(0), "Grizzly Bears");
+        let equipment = AttachmentSnapshot {
+            object_id: ObjectId(100),
+            identity: None,
+            controller: PlayerId(1),
+            kind: AttachmentKind::Equipment,
+        };
+        let from_hand = ZoneChangeRecord {
+            attachments: vec![equipment.clone()],
+            ..ZoneChangeRecord::test_minimal(id, Some(Zone::Hand), Zone::Graveyard)
+        };
+        let absent = ZoneChangeRecord::test_minimal(id, Some(Zone::Battlefield), Zone::Graveyard);
+        let empty = ZoneChangeRecord {
+            trigger_source_context: state.objects[&id]
+                .snapshot_for_zone_change(id, Some(Zone::Battlefield), Zone::Graveyard)
+                .trigger_source_context,
+            ..absent.clone()
+        };
+        let mut counted = empty.clone();
+        counted
+            .trigger_source_context
+            .as_mut()
+            .unwrap()
+            .lki
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        let malformed = ZoneChangeRecord {
+            object_id: ObjectId(101),
+            ..counted.clone()
+        };
+        let malformed_equipped = ZoneChangeRecord {
+            object_id: malformed.object_id,
+            attachments: vec![equipment],
+            ..empty.clone()
+        };
+        let mut mismatches = Vec::new();
+        // CR 700.9 + CR 603.10a: Read the modification of the departing permanent
+        // from its own record, even if a later departure has overwritten the cache.
+        for (case, record, cached, expected) in [
+            ("a: from hand", &from_hand, &empty, false),
+            ("b: record has counters", &counted, &empty, true),
+            ("c: only cache has counters", &empty, &counted, false),
+            ("d: absent context", &absent, &counted, false),
+            (
+                "e: malformed context with counters",
+                &malformed,
+                &empty,
+                false,
+            ),
+            (
+                "f: malformed context with Equipment",
+                &malformed_equipped,
+                &empty,
+                false,
+            ),
+        ] {
+            state.lki_cache.insert(
+                record.object_id,
+                cached.trigger_source_context().unwrap().lki.clone(),
+            );
+            let source_ctx = source_context_from_filter(
+                &state,
+                id,
+                Some(PlayerId(0)),
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            let actual = zone_change_record_matches_property(
+                &FilterProp::Modified,
+                &state,
+                record,
+                &source_ctx,
+            );
+            if actual != expected {
+                mismatches.push(case);
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "mismatched Modified cases: {mismatches:?}"
+        );
     }
 
     /// CR 111.1: `FilterProp::Token` on a zone-change snapshot must read the
@@ -27463,6 +27597,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         };
         let land_lki = LKISnapshot {
@@ -27486,6 +27621,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         };
 
@@ -27604,6 +27740,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         };
         let filter = TargetFilter::Typed(
@@ -27749,6 +27886,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );
@@ -27822,6 +27960,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );
@@ -30617,6 +30756,7 @@ mod entry_projection_tests {
         let record = |proposed: ProposedEvent| PendingReplacement {
             settled_damage_guards: Vec::new(),
             proposed,
+            token_substitute: None,
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
@@ -31270,6 +31410,7 @@ mod attached_set_host_filter_tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            produceable_mana_types: Vec::new(),
             intensity: 0,
         }
     }
@@ -31481,6 +31622,7 @@ mod attached_set_host_filter_tests {
                     controller: PlayerId(1),
                     kind: crate::types::ability::AttachmentKind::Aura,
                 }],
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );

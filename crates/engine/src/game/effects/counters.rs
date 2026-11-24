@@ -640,7 +640,29 @@ fn ready_copy_entry_completion(
     }
 }
 
+/// CR 608.2f + CR 614.5 (F1): append `events` to a paused simultaneous
+/// multi-seat token clause's reunited span. Early-returns unless the clause
+/// record is installed; callers pass the slice that belongs to the clause
+/// (the installing action passes its clause window, later actions pass whole
+/// buffers). Consumers dedup the overlapping feeds.
+pub(crate) fn feed_simultaneous_token_clause(state: &mut GameState, events: &[GameEvent]) {
+    let Some(record) = state.pending_simultaneous_token_clause.as_mut() else {
+        return;
+    };
+    record.accumulated.extend(events.iter().cloned());
+}
+
+/// CR 608.2f + CR 614.5 (F1): entry/exit feeds around the counter drain so a
+/// paused token clause captures each seat's committed entry events however the
+/// drain exits — stash+return, merge+return, incomplete-remaining return,
+/// while-exhaustion falloff, or a no-active-frame call.
 pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    feed_simultaneous_token_clause(state, events);
+    drain_pending_counter_additions_inner(state, events);
+    feed_simultaneous_token_clause(state, events);
+}
+
+fn drain_pending_counter_additions_inner(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // Leave a ready fallible action resident without cloning or re-parking it.
     while let Some(mut queue) = state
         .active_counter_additions()
@@ -7160,6 +7182,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );
