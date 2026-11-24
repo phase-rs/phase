@@ -18743,6 +18743,59 @@ fn counter_linked_exile_play_permission_tinybones_clause() {
     );
 }
 
+/// CR 122.1 (F5-two-Counters hostile): a filter carrying two `Counters`
+/// props declines the counter-linked arm — the pool key must be exactly one
+/// matcher. The fold leg pins expressibility (stash + time props, empty
+/// remainder) so the decline legs cannot pass vacuously through a parse
+/// failure.
+#[test]
+fn counter_linked_exile_play_permission_rejects_two_counter_props() {
+    use crate::parser::oracle_target::parse_type_phrase_folding;
+    // Expressibility: the grammar yields both counter props with no remainder.
+    let (filter, rest) = parse_type_phrase_folding(
+        "cards you don't own with stash counters on them with time counters on them",
+    );
+    assert!(rest.trim().is_empty(), "unexpected remainder: {rest:?}");
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected a Typed filter, got {filter:?}");
+    };
+    let counter_props: Vec<_> = typed
+        .properties
+        .iter()
+        .filter_map(|prop| match prop {
+            FilterProp::Counters { counters, .. } => Some(counters),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        counter_props,
+        vec![
+            &CounterMatch::OfType(CounterType::Generic("stash".to_string())),
+            &CounterMatch::OfType(CounterType::Time),
+        ],
+        "expected stash + time counter props, got {:?}",
+        typed.properties
+    );
+    // The counter-linked arm declines: two pool keys is no pool key — neither
+    // the constructor nor full dispatch takes it.
+    let text = "During your turn, you may play cards you don't own with stash counters on them with time counters on them from exile.";
+    let lower = text.to_lowercase();
+    assert!(
+        try_parse_counter_linked_exile_play_permission(text, &lower).is_none(),
+        "the counter-linked constructor must decline a two-counter filter"
+    );
+    assert!(
+        parse_static_line(text).is_none_or(|def| !matches!(
+            def.mode,
+            StaticMode::ExileCastPermission {
+                pool: ExileCardPool::CounterLinked { .. },
+                ..
+            }
+        )),
+        "a two-counter filter must not take the counter-linked arm"
+    );
+}
+
 /// The exact permission Tibalt, Cosmic Impostor's emblem (and Rogue Class
 /// level 3) grants: play cards exiled with the source, any time, paying normal
 /// costs, with mana spendable as though it were mana of any color.

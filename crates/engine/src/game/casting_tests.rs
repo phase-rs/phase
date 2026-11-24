@@ -47753,6 +47753,208 @@ fn exile_permission_pools_empty_short_circuits_counter_linked_scope() {
     assert!(exile_objects_castable_by_permission(&state, player).is_empty());
 }
 
+/// CR 406.2 + CR 122.1 + CR 400.7 (S1-card-exit):
+/// `exile_permission_pools_cannot_offer` fires exactly when no pool scope can
+/// offer the candidate: the per-turn map and the live-link store are both
+/// empty and the candidate itself is counterless. In particular the
+/// C1-elsewhere shape — a live successor-LKI entry plus counters on a
+/// *different* exiled card — still cannot offer the counterless candidate
+/// (pins the dropped LKI conjunct: a successor-LKI bare read is not an offer,
+/// CR 400.7), while a counter on the candidate, a non-empty per-turn map, or a
+/// non-empty link store each defeat the exit.
+#[test]
+fn exile_permission_pools_cannot_offer_card_scoped_exit() {
+    use crate::game::exile_links::exiled_card_snapshot;
+    use crate::types::game_state::LinkedExileLki;
+
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let candidate = add_exiled_card(&mut state, player, "Candidate Bear");
+
+    // Empty + counterless: nothing can offer the candidate.
+    assert!(exile_permission_pools_cannot_offer(&state, candidate));
+
+    // C1-elsewhere shape: a post-flicker battlefield source (live incarnation
+    // 1, links pruned) with a successor-admitting LKI pile for the candidate,
+    // plus a stash counter on a *different* exiled card. The exit still fires.
+    let card_id = crate::types::identifiers::CardId(state.next_object_id);
+    let source = create_object(
+        &mut state,
+        card_id,
+        player,
+        "Flickered Source".to_string(),
+        Zone::Battlefield,
+    );
+    state.objects.get_mut(&source).unwrap().incarnation = 1;
+    let elsewhere = add_exiled_card(&mut state, player, "Elsewhere Bear");
+    state
+        .objects
+        .get_mut(&elsewhere)
+        .unwrap()
+        .counters
+        .insert(CounterType::Generic("stash".to_string()), 1);
+    let snapshot = exiled_card_snapshot(&state, candidate).expect("candidate live in exile");
+    state
+        .linked_exile_lki
+        .entry(source)
+        .or_default()
+        .push(LinkedExileLki {
+            departed: 0,
+            successor: 1,
+            snapshot: vec![snapshot],
+        });
+    assert!(
+        exile_permission_pools_cannot_offer(&state, candidate),
+        "C1-elsewhere (LKI-nonempty, counters elsewhere, counterless candidate) must not defeat the card-scoped exit"
+    );
+
+    // A counter on the candidate defeats the exit (a CounterLinked pool may
+    // now contain it); removing it re-arms the exit.
+    state
+        .objects
+        .get_mut(&candidate)
+        .unwrap()
+        .counters
+        .insert(CounterType::Generic("stash".to_string()), 1);
+    assert!(!exile_permission_pools_cannot_offer(&state, candidate));
+    state
+        .objects
+        .get_mut(&candidate)
+        .unwrap()
+        .counters
+        .remove(&CounterType::Generic("stash".to_string()));
+    assert!(exile_permission_pools_cannot_offer(&state, candidate));
+
+    // A non-empty per-turn map defeats the exit; clearing it re-arms the exit.
+    state
+        .cards_exiled_with_source_this_turn
+        .insert(source, vec![candidate]);
+    assert!(!exile_permission_pools_cannot_offer(&state, candidate));
+    state.cards_exiled_with_source_this_turn.clear();
+    assert!(exile_permission_pools_cannot_offer(&state, candidate));
+
+    // A non-empty live-link store defeats the exit.
+    link_exiled_to_source(&mut state, candidate, source);
+    assert!(!exile_permission_pools_cannot_offer(&state, candidate));
+}
+
+/// CR 400.7 + CR 607.2a + CR 406.2 (S1-C1-elsewhere): a flickered Persistent
+/// source — live incarnation back on the battlefield, live links pruned,
+/// successor-admitting LKI pile — with an empty per-turn map, a counterless
+/// candidate, and a stash counter on a *different* exiled card. Admission
+/// refuses the candidate (the card-scoped exit fires: the successor bare read
+/// is over-admission per the `LinkedExileLki::admits` doc) while discovery
+/// still offers it through the untouched exile-wide exit + scan (preserved tip
+/// over-admission, characterized here, degrading gracefully via prepare-time
+/// re-derivation). Printed reachability: a Prosper/Tibalt-class flickered
+/// Persistent source plus a flicker effect; the fixture constructs the
+/// post-flicker state directly.
+#[test]
+fn persistent_permission_c1_elsewhere_admission_refuses_while_discovery_offers() {
+    use crate::game::exile_links::exiled_card_snapshot;
+    use crate::types::game_state::LinkedExileLki;
+
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let source_id = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Flickered Matrix",
+        TargetFilter::Any,
+        CastFrequency::Unlimited,
+        CardPlayMode::Play,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::Persistent,
+        ExileCastTiming::YourTurnOnly,
+    );
+    // Hostile: a second Persistent source with an empty pile — per-source
+    // `pool_contains` must not let it authorize the candidate.
+    let _other_source_id = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Other Matrix",
+        TargetFilter::Any,
+        CastFrequency::Unlimited,
+        CardPlayMode::Play,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::Persistent,
+        ExileCastTiming::YourTurnOnly,
+    );
+    // Post-flicker incarnation: entered at 0, departed at 0, back at 1 with
+    // its live links pruned (re-entry prune).
+    state.objects.get_mut(&source_id).unwrap().incarnation = 1;
+    let candidate = add_exiled_card(&mut state, player, "Candidate Bear");
+    // Counters on a *different* exiled card keep discovery's exile-wide exit
+    // open while the candidate stays counterless.
+    let elsewhere = add_exiled_card(&mut state, player, "Elsewhere Bear");
+    state
+        .objects
+        .get_mut(&elsewhere)
+        .unwrap()
+        .counters
+        .insert(CounterType::Generic("stash".to_string()), 1);
+    // Successor-LKI pile, mirroring `record_linked_exile_departure`'s
+    // successor entry: admits the live incarnation; snapshot live in exile.
+    let snapshot = exiled_card_snapshot(&state, candidate).expect("candidate live in exile");
+    state
+        .linked_exile_lki
+        .entry(source_id)
+        .or_default()
+        .push(LinkedExileLki {
+            departed: 0,
+            successor: 1,
+            snapshot: vec![snapshot],
+        });
+
+    // Leg A: admission refuses (prep-identical seam —
+    // `exile_cast_permission_source` delegates to matching, the exact call
+    // `casting_candidates` makes at prepare time).
+    assert!(
+        exile_cast_permission_source(&state, player, candidate).is_none(),
+        "C1-elsewhere admission must refuse the counterless candidate"
+    );
+
+    // Leg B: discovery still offers the candidate, through the flickered
+    // source only — the positive reach-guard proving the successor-LKI pile
+    // is live and matchable, so leg A cannot pass vacuously.
+    let offered: Vec<_> = exile_objects_castable_by_permission(&state, player)
+        .into_iter()
+        .filter(|(id, _, _)| *id == candidate)
+        .collect();
+    assert_eq!(
+        offered.len(),
+        1,
+        "discovery must offer the candidate exactly once, got {:?}",
+        offered
+    );
+    assert_eq!(
+        offered[0].1, source_id,
+        "the offering source must be the flickered source, not the empty-pile hostile"
+    );
+
+    // Leg C: the surface union still includes the candidate.
+    assert!(
+        spell_objects_available_to_cast(&state, player).contains(&candidate),
+        "the surfaced castable list must include the discovery-offered candidate"
+    );
+
+    // Leg D (departed-only guard): the same setup with the LKI admitting only
+    // a departed incarnation — admission refuses AND discovery is empty,
+    // proving legs A–C came from successor-LKI matching.
+    {
+        let entry = &mut state.linked_exile_lki.get_mut(&source_id).unwrap()[0];
+        entry.successor = entry.departed;
+    }
+    assert!(
+        exile_cast_permission_source(&state, player, candidate).is_none(),
+        "departed-only LKI must still refuse admission"
+    );
+    assert!(
+        exile_objects_castable_by_permission(&state, player).is_empty(),
+        "departed-only LKI must empty discovery"
+    );
+}
+
 /// CR 601.2a + CR 113.6b + CR 118.9: With Maralen on the battlefield, the
 /// per-turn exile pool, and a card matching the static's affected filter,
 /// `spell_objects_available_to_cast` must surface the exiled card.
