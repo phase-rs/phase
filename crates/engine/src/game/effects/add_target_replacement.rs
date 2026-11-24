@@ -1,9 +1,7 @@
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::quantity::{quantity_ref_object_scope, resolve_quantity_with_targets};
 use crate::game::replacement::EventModifiers;
-use crate::game::targeting::{
-    resolve_event_context_target, triggering_spell, triggering_spell_identity, TriggeringSpell,
-};
+use crate::game::targeting::{triggering_spell, triggering_spell_identity, TriggeringSpell};
 use crate::types::ability::{
     expiry_from_duration, host_gate_enforceable, quantity_ref_recipient_read,
     replacement_install_is_refused, AbilityDefinition, CastManaObjectScope, DamageTargetFilter,
@@ -649,7 +647,7 @@ fn replacement_targets(
             .collect();
     }
 
-    resolve_event_context_target(state, target, ability.source_id)
+    crate::game::targeting::affected_event_context_target(state, ability, target)
         .into_iter()
         .collect()
 }

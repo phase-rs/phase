@@ -2656,18 +2656,57 @@ pub fn with_viewer_actions(
 /// it has no failure mode, so that path is never constructed. CLAUDE.md also
 /// puts logic in the engine and keeps the transport a serialization boundary.
 ///
-/// The value is generous by design: the read-out covers ONE seat across five
-/// zones, so a real board produces tens of entries, not thousands.
+/// The value is generous by design: the read-out covers one acting seat, so a real board produces tens of entries, not thousands.
 pub const MAX_ACTIVATION_BLOCK_TOTAL: usize = 1_000;
 
+/// CR 113.6b + CR 108.4a: ordinary activations can function in a player's
+/// hand or on a public source whose text permits this player to activate it.
+fn off_battlefield_activation_sources(
+    state: &GameState,
+    player: PlayerId,
+) -> impl Iterator<Item = ObjectId> + '_ {
+    let graveyards = state
+        .players
+        .iter()
+        .filter(|seat| state.zone_storage_seat(Zone::Graveyard, seat.id) == seat.id)
+        .flat_map(|seat| state.graveyard_of(seat.id));
+    state.players[player.0 as usize]
+        .hand
+        .iter()
+        .chain(graveyards)
+        .chain(&state.exile)
+        .copied()
+        .filter(move |id| {
+            state.objects.get(id).is_some_and(|obj| {
+                obj.controller_or_owner() == player
+                    || casting::object_permits_non_controller_activation(state, player, obj)
+            })
+        })
+}
+
+/// CR 113.6b + CR 605.1a: resolve the origin and actor of each non-mana
+/// definition before probing its costs. Library Plot is restricted to the
+/// separately authorized ability on the top card.
+fn ordinary_activation_indices(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    required_activation_zone: Option<Zone>,
+) -> impl Iterator<Item = usize> + '_ {
+    casting::activated_ability_definitions(state, source)
+        .into_iter()
+        .filter_map(move |(index, def)| {
+            (def.kind == AbilityKind::Activated
+                && required_activation_zone.is_none_or(|zone| def.activation_zone == Some(zone))
+                && !mana_abilities::is_mana_ability(&def)
+                && casting::activation_source_and_activator_are_structurally_eligible(
+                    state, player, source, &def,
+                ))
+            .then_some(index)
+        })
+}
+
 /// CR 118.3: collect one object's unaffordable non-mana activated abilities.
-///
-/// Mirrors the per-object filter shape of the five enforcement loops in
-/// `candidates.rs::priority_actions_with_probe` — `AbilityKind::Activated`, the
-/// per-zone `activation_zone` filter, and `!is_mana_ability` — so the read-out's
-/// population is a subset of the population the enforcement gate decides. The
-/// two traversals are parallel by construction (see `activation_block_reasons`);
-/// only the loop structure is duplicated, never the authority.
 fn collect_activation_block_reasons_for_object(
     state: &GameState,
     player: PlayerId,
@@ -2678,25 +2717,9 @@ fn collect_activation_block_reasons_for_object(
     out: &mut HashMap<ObjectId, Vec<AbilityBlockEntry>>,
 ) {
     let mut entries: Vec<AbilityBlockEntry> = Vec::new();
-    for (ability_index, ability_def) in casting::activated_ability_definitions(state, obj_id) {
-        if ability_def.kind != AbilityKind::Activated {
-            continue;
-        }
-        if let Some(zone) = required_activation_zone {
-            if ability_def.activation_zone != Some(zone) {
-                continue;
-            }
-        }
-        // CR 605.1a: mana abilities are a different class decided by a different
-        // authority (`mana_abilities::can_activate_mana_ability_now`), which
-        // shares no code with the activation gate. Excluding them is what keeps
-        // the read-out's population a strict subset of the population
-        // `casting::activation_verdict` decides, so the two authorities are
-        // never asked the same question and cannot disagree. Byte-identical to
-        // the `!is_mana_ability` conjunct at all five enforcement sites.
-        if mana_abilities::is_mana_ability(&ability_def) {
-            continue;
-        }
+    for ability_index in
+        ordinary_activation_indices(state, player, obj_id, required_activation_zone)
+    {
         *examined += 1;
         if let Some(reason) =
             casting::activation_cost_block_reason(state, player, obj_id, ability_index, gates)
@@ -2738,15 +2761,8 @@ fn collect_activation_block_reasons_for_object(
 /// priority, so an explanation of why you cannot activate one is only
 /// actionable in that window. The gate is the rule, not an optimisation.
 ///
-/// Scoped to the acting player across the same five zones and behind the same
-/// player-scoping / `!is_mana_ability` filters as the enforcement sites in
-/// `candidates.rs`, so an entry can only ever describe an object the viewer
-/// controls. Battlefield and command-zone scans scope by `obj.controller`; the
-/// owner-keyed hand and graveyard scans scope by `obj.owner` (CR 108.4 +
-/// CR 108.4a — a card that is not a permanent or spell has no controller). The
-/// two files MUST agree: this read-out and the offered action set partition one
-/// ability space, so a scope that differs between them yields a blocked row for
-/// an ability that is never offered.
+/// The source and activator gates are shared with the offered actions. The
+/// hand stays private; graveyard and exile sources can authorize another seat.
 ///
 /// Bounded by [`MAX_ACTIVATION_BLOCK_TOTAL`]. Returns a map, never a `Result`.
 pub fn activation_block_reasons(state: &GameState) -> HashMap<ObjectId, Vec<AbilityBlockEntry>> {
@@ -2775,25 +2791,17 @@ pub fn activation_block_reasons(state: &GameState) -> HashMap<ObjectId, Vec<Abil
         state
     };
 
-    // Hoisted once, exactly as `candidates.rs::priority_actions_with_probe`
-    // hoists it for the five enforcement loops.
+    // Share one restriction snapshot across the read-out.
     let gates = restrictions::ActivationRestrictionStaticGates::compute(state);
     let mut blocked: HashMap<ObjectId, Vec<AbilityBlockEntry>> = HashMap::new();
     let mut examined = 0usize;
 
-    // The same five zones, with the same filters, as the five enforcement sites
-    // in `candidates.rs::priority_actions_with_probe`. A comment there names
-    // this traversal; sharing one traversal between them would touch the AI
-    // search hot path and is deliberately out of scope.
-
-    // CR 602.2: "Only an object's controller (or its owner, if it doesn't have a
-    // controller) can activate its activated ability unless the object
-    // specifically says otherwise." Battlefield, therefore controller-scoped,
-    // with no `activation_zone` filter
-    // (the gate itself checks `obj.zone != required_zone`).
+    // CR 602.2: controllers and explicitly permitted activators can act.
     for &obj_id in &state.battlefield {
         if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player {
+            if obj.controller == player
+                || casting::object_permits_non_controller_activation(state, player, obj)
+            {
                 collect_activation_block_reasons_for_object(
                     state,
                     player,
@@ -2828,50 +2836,21 @@ pub fn activation_block_reasons(state: &GameState) -> HashMap<ObjectId, Vec<Abil
         }
     }
 
-    // CR 602.1: hand-activated abilities (Cycling per CR 702.29a, etc.).
-    // CR 108.4 + CR 108.4a: a card in a hand is neither a permanent nor a spell,
-    // so it has no controller and the owner stands in. Mirrors the hand loop in
-    // `candidates.rs`.
-    for &obj_id in &state.players[player.0 as usize].hand {
-        if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.owner == player {
-                collect_activation_block_reasons_for_object(
-                    state,
-                    player,
-                    &gates,
-                    obj_id,
-                    Some(Zone::Hand),
-                    &mut examined,
-                    &mut blocked,
-                );
-            }
-        }
-    }
-
-    // CR 113.6b + CR 602.2: graveyard-activated abilities.
-    // CR 108.4 + CR 108.4a: same owner fallback as the hand loop above, and
-    // CR 404.1 puts a card into its OWNER's graveyard. Mirrors the graveyard
-    // loop in `candidates.rs`.
-    for &obj_id in state.graveyard_of(player) {
-        if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.owner == player {
-                collect_activation_block_reasons_for_object(
-                    state,
-                    player,
-                    &gates,
-                    obj_id,
-                    Some(Zone::Graveyard),
-                    &mut examined,
-                    &mut blocked,
-                );
-            }
-        }
+    for obj_id in off_battlefield_activation_sources(state, player) {
+        collect_activation_block_reasons_for_object(
+            state,
+            player,
+            &gates,
+            obj_id,
+            None,
+            &mut examined,
+            &mut blocked,
+        );
     }
 
     // CR 702.170b: the plot special action on the top card of this player's own
     // library. Player-scoped BY CONSTRUCTION (it is the top of that player's
-    // library), not by an `obj.controller` filter — the same shape the fifth
-    // enforcement site has.
+    // library), not by an `obj.controller` filter — as in the offer path.
     if let Some((top_id, _src_id)) = casting::top_of_library_plot_source(state, player) {
         collect_activation_block_reasons_for_object(
             state,
