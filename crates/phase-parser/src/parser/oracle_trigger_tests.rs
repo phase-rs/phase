@@ -7890,7 +7890,9 @@ fn trigger_pantlaza_etb_discover_x_is_entering_creature_toughness() {
                 matches!(
                     mana_value_limit,
                     QuantityExpr::Ref {
-                        qty: crate::types::ability::QuantityRef::Toughness { .. }
+                        qty: crate::types::ability::QuantityRef::Toughness {
+                            scope: crate::types::ability::ObjectScope::EventSource,
+                        }
                     }
                 ),
                 "discover X must bind to the entering creature's toughness, \
@@ -15761,6 +15763,134 @@ fn trigger_one_or_more_enchanted_creatures_attack_killian() {
             );
         }
         other => panic!("expected Typed filter, got {other:?}"),
+    }
+}
+
+// SHAPE: CR 702.29c + CR 113.6k give the self-cycle leg both supported discard destinations.
+#[test]
+fn self_cycle_trigger_heads_function_in_graveyard_and_exile() {
+    let assert_self_cycle = |def: &TriggerDefinition| {
+        assert_eq!(def.mode, TriggerMode::Cycled);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(def.trigger_zones, [Zone::Graveyard, Zone::Exile]);
+    };
+    for (name, text) in [
+        (
+            "Titanoth Rex",
+            "When you cycle this card, put a trample counter on target creature you control.",
+        ),
+        (
+            "Shark Typhoon",
+            "When you cycle this card, create an X/X blue Shark creature token with flying.",
+        ),
+    ] {
+        let defs = parse_trigger_lines(text, name);
+        assert_eq!(defs.len(), 1, "{name}");
+        assert_self_cycle(&defs[0]);
+    }
+
+    let defs = parse_trigger_lines(
+        "When you cycle this card, you may pay {X}. If you do, create X 1/1 white Soldier creature tokens.",
+        "Decree of Justice",
+    );
+    assert_eq!(defs.len(), 1);
+    assert_self_cycle(&defs[0]);
+    // CR 603.5: The payment is optional.
+    assert!(defs[0].optional);
+
+    let defs = parse_trigger_lines(
+        "When you cycle Radiant Smite, if you weren't the starting player, you gain 2 life.",
+        "Radiant Smite",
+    );
+    assert_eq!(defs.len(), 1);
+    assert_self_cycle(&defs[0]);
+    // CR 603.4 + CR 103.1: The intervening condition checks who started the game.
+    assert_eq!(
+        defs[0].condition,
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::WasStartingPlayer {
+                controller: ControllerRef::You
+            }),
+        }),
+    );
+
+    let defs = parse_trigger_lines(
+        "When you cycle this card and when this creature dies, you may have it deal 1 damage to any target.",
+        "Jund Sojourners",
+    );
+    assert_eq!(defs.len(), 2);
+    assert_self_cycle(&defs[0]);
+    // CR 700.4: The dies leg still observes a battlefield-to-graveyard move.
+    assert_eq!(defs[1].mode, TriggerMode::ChangesZone);
+    assert_eq!(defs[1].origin, Some(Zone::Battlefield));
+    assert_eq!(defs[1].destination, Some(Zone::Graveyard));
+    assert_eq!(defs[1].trigger_zones, [Zone::Graveyard]);
+
+    let defs = parse_trigger_lines(
+        r#"When you cast or cycle Warped Tusker, create a 0/1 colorless Eldrazi Spawn creature token with "Sacrifice this token: Add {C}.""#,
+        "Warped Tusker",
+    );
+    assert_eq!(defs.len(), 2);
+    // CR 601.2i: The cast leg observes the source becoming cast on the stack.
+    assert_eq!(defs[0].mode, TriggerMode::SpellCast);
+    assert_eq!(defs[0].valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(defs[0].trigger_zones, [Zone::Stack]);
+    assert_self_cycle(&defs[1]);
+
+    let another = Some(TargetFilter::Typed(
+        TypedFilter::default().properties(vec![FilterProp::Another]),
+    ));
+    let defs = parse_trigger_lines(
+        "Whenever you cycle this card or cycle another card while this enchantment is on the battlefield, you may exile target creature. If you do, return that card to the battlefield under its owner's control at the beginning of the next end step.",
+        "Astral Drift",
+    );
+    assert_eq!(defs.len(), 2);
+    assert_self_cycle(&defs[0]);
+    // CR 113.6b + CR 603.2: The observer checks its stated zone at the event.
+    assert_eq!(defs[1].mode, TriggerMode::Cycled);
+    assert_eq!(defs[1].valid_card, another);
+    assert_eq!(defs[1].trigger_zones, [Zone::Battlefield]);
+    assert_eq!(
+        defs[1].condition,
+        Some(TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::SourceInZone {
+                zone: Zone::Battlefield
+            }),
+        }),
+    );
+
+    // CR 113.6: The standalone observer abilities still function from the battlefield.
+    for (name, text, mode, valid_card) in [
+        ("Drannith Stinger", "Whenever you cycle another card, this creature deals 1 damage to each opponent.", TriggerMode::Cycled, another),
+        ("Drake Haven", "Whenever you cycle or discard a card, you may pay {1}. If you do, create a 2/2 blue Drake creature token with flying.", TriggerMode::CycledOrDiscarded, None),
+        ("Astral Slide", "Whenever a player cycles a card, you may exile target creature. If you do, return that card to the battlefield under its owner's control at the beginning of the next end step.", TriggerMode::Cycled, None),
+    ] {
+        let defs = parse_trigger_lines(text, name);
+        assert_eq!(defs.len(), 1, "{name}");
+        assert_eq!(defs[0].mode, mode, "{name}");
+        assert_eq!(defs[0].valid_card, valid_card, "{name}");
+        assert_eq!(defs[0].trigger_zones, [Zone::Battlefield], "{name}");
+    }
+}
+
+// SHAPE: CR 701.9a + CR 614.6 + CR 113.6k give both self-discard arms the same zones.
+#[test]
+fn self_discard_trigger_heads_function_in_graveyard_and_exile() {
+    use crate::types::ability::TriggerConstraint;
+
+    for (name, text, constraint) in [
+        (
+            "Guerrilla Tactics",
+            "When a spell or ability an opponent controls causes you to discard this card, it deals 4 damage to any target.",
+            Some(TriggerConstraint::EventSourceControlledBy { controller: ControllerRef::Opponent }),
+        ),
+        ("Titanbones, Towering Heart", "When you discard this card, you gain 3 life.", None),
+    ] {
+        let def = parse_trigger_line(text, name);
+        assert_eq!(def.mode, TriggerMode::Discarded, "{name}");
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{name}");
+        assert_eq!(def.constraint, constraint, "{name}");
+        assert_eq!(def.trigger_zones, [Zone::Graveyard, Zone::Exile], "{name}");
     }
 }
 
