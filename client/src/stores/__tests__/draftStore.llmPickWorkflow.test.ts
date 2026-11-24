@@ -918,7 +918,7 @@ describe("LLM seats on a local FIFO draft", () => {
       llmOutcome: {
         seat: 1,
         used: false,
-        error: replies ? "LLM selection refused: stale draft prompt" : "the LLM drafter returned no reply",
+        error: replies ? "LLM returned no completion text" : "the LLM drafter returned no reply",
       },
     }));
 
