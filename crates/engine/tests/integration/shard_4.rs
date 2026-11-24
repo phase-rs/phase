@@ -522,6 +522,7 @@ mod parser_oracle_trigger;
 mod parser_oracle_vote;
 mod parser_velocity_sprint_1_runtime;
 mod partner_family_keyword_remainder;
+mod path_of_discovery_explore;
 mod payment_continuation;
 mod payment_surplus_certificate;
 mod peer_into_the_abyss;

@@ -29999,6 +29999,40 @@ fn resolve_chain_body(
     // This allows sub-abilities like "its controller gains life" to access the object
     // targeted by the parent (e.g. the exiled creature in Swords to Plowshares).
     if let Some(ref sub) = ability.sub_ability {
+        // CR 608.2c + CR 608.2k (issue #8361): the parent instruction resolved
+        // against its event-context hydration (the `hydrate_event_context_targets`
+        // copy at effect dispatch), so the hand-off below must read the same
+        // object referents. Without this, a slot-less event-bound head
+        // (`TargetOnly { TriggeringSource }`, Path of Discovery) hands its child
+        // the original empty target list while the parent itself acted on the
+        // event subject — and the child falls back to the ability source (Path
+        // received the explore counter instead of the entering creature; the
+        // same seam strands Assaultron Dominator's counter branches).
+        // Objects only: player referents stay on their dedicated role
+        // channels. A bare player reader (`LoseLife { target: None }`) treats
+        // an inherited player as ANNOUNCED (`primary_announced_player`) — true
+        // for stack-time chosen targets, false for an event-bound recipient
+        // (Kain: the damaged player is the `GiveControl` recipient, not a
+        // choice; inheriting it misroutes "lose that much life" to them).
+        // Context-role players resolve via state slots that deliberately
+        // ignore inherited targets (`resolve_player_for_context_ref`), so no
+        // player child needs the hydrated copy.
+        // `sub` stays bound to the original: the nested attach-host stamp is
+        // the parent zone-entry layer's product (consumed via
+        // `forward_result_attach_host_targets` during the parent's own
+        // ChangeZone resolution), and the hand-off's rebind path binds hosts
+        // through the hydrated producer targets instead.
+        let hydrated_parent = hydrate_event_context_targets(state, ability);
+        let hydrated: &ResolvedAbility = hydrated_parent.as_ref();
+        let ability: &ResolvedAbility = if hydrated
+            .targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Object(_)))
+        {
+            hydrated
+        } else {
+            ability
+        };
         // CR 608.2c: a cast parent's typed metadata riders (enters-with-counter,
         // gains-modifications) are consumed, not resolved. Splice the metadata
         // run out of the walk so the generic tail below resolves the next
