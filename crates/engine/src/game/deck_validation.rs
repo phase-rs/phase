@@ -266,8 +266,8 @@ pub fn infer_commander(db: &CardDatabase, main: &[CommanderInferenceRow]) -> Opt
     }
 
     // Import heuristic: pick the first single copy accepted by the broad
-    // Commander picker. Standalone eligibility under CR 903.3 and CR 702.124k
-    // is checked separately by deck validation.
+    // Commander picker. This can promote a lone Background, which requires a
+    // second commander with choose a Background under CR 702.124k.
     positive_rows.find_map(|row| {
         let key = canonical_deck_count_key(db, &row.name);
         let face = db.get_face_by_name(&row.name)?;

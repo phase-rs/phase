@@ -550,6 +550,33 @@ describe("useDeckBuilder — counted Commander inference", () => {
     expect(saved?.commander).toBeUndefined();
   });
 
+  it("commits the latest Load when the earlier inference resolves first", async () => {
+    const plainsName = "Loaded Plains";
+    const forestName = "Loaded Forest";
+    const forest = [{ name: "Forest", count: 60 }];
+    localStorage.setItem(STORAGE_KEY_PREFIX + plainsName, JSON.stringify(unmarked));
+    localStorage.setItem(STORAGE_KEY_PREFIX + forestName, JSON.stringify({ main: forest, sideboard: [] }));
+    const { result } = openBuilder();
+    const plainsAnswer = deferred<string | null>();
+    const forestAnswer = deferred<string | null>();
+    inference.mockReturnValueOnce(plainsAnswer.promise).mockReturnValueOnce(forestAnswer.promise);
+
+    const plainsLoad = result.current.handleLoad(plainsName);
+    const forestLoad = result.current.handleLoad(forestName);
+    expect(inference.mock.calls).toEqual([[plains], [forest]]);
+
+    await act(async () => {
+      plainsAnswer.resolve(null);
+      expect(await plainsLoad).toBe(false);
+    });
+    await act(async () => {
+      forestAnswer.resolve(null);
+      expect(await forestLoad).toBe(true);
+    });
+    expect(result.current.deck.main).toEqual(forest);
+    expect(result.current.deckName).toBe(forestName);
+  });
+
   it("discards a stale inference answer and commits a current Load", async () => {
     const name = "Unmarked Commander";
     const commander = "Isamaru, Hound of Konda";

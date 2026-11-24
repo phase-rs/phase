@@ -147,6 +147,8 @@ export function useDeckBuilder({
   }, []);
   // Bumped whenever the editor switches to another deck: a Load, or a Clone that opens its copy.
   const deckIdentityRevision = useRef(0);
+  // Bumped whenever a Load starts so a newer selection supersedes an in-flight Load.
+  const loadGeneration = useRef(0);
   interface EditorCapture {
     identity: number;
     edit: number;
@@ -691,7 +693,8 @@ export function useDeckBuilder({
   // Load ignore it; resolveSaveConflict's "load" case uses it to tell a genuine load from a bail
   // so it knows whether to continue a pending action.
   const handleLoad = useCallback(async (name: string): Promise<boolean> => {
-    // Captured before the resolveCommander await below: a newer Load/Clone (reloaded) or any edit
+    const generation = ++loadGeneration.current;
+    // Captured before the resolveCommander await below: a committed Load/Clone (reloaded) or any edit
     // that marks the deck dirty, including an Import (edited), must win over this Load.
     const captured = captureEditor();
     const parsed = loadSavedDeck(name);
@@ -704,7 +707,9 @@ export function useDeckBuilder({
       const [deckId, deckEntry] = found;
       const resolved = await resolveCommander(preconDeckEntryToParsedDeck(deckEntry));
       const changedAfterPrecon = editorChangedSince(captured);
-      if (changedAfterPrecon.reloaded || changedAfterPrecon.edited) return false;
+      if (generation !== loadGeneration.current || changedAfterPrecon.reloaded || changedAfterPrecon.edited) {
+        return false;
+      }
       applyDeckToEditor(resolved);
       setActiveSurface("deck");
       deckIdentityRevision.current += 1;
@@ -725,7 +730,7 @@ export function useDeckBuilder({
     try {
       const resolved = await resolveCommander(parsed);
       const changedAfterLoad = editorChangedSince(captured);
-      if (changedAfterLoad.reloaded || changedAfterLoad.edited) {
+      if (generation !== loadGeneration.current || changedAfterLoad.reloaded || changedAfterLoad.edited) {
         return false;
       }
       const savedFormat = persisted.format
