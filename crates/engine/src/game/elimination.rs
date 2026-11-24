@@ -2328,62 +2328,22 @@ fn do_eliminate(
                 .expect("eliminated search batch must own the active frame");
         }
     }
-    // CR 800.4a + CR 121.6b + CR 614.17c: under a parked draw unless payment
-    // that outlives this departure, the choice the leaver was asked is their
-    // own draw inside the payer's draw sequence (a substitute: Notion Thief's
-    // "you draw a card"). It is kept for the concession's action boundary,
-    // which settles it through the replacement authority as a draw that can no
-    // longer happen (`engine::reconcile_parked_unless_payment_after_departure`):
-    // the sequences above it resume, so the payer's own remaining draws
-    // (Thought Reflection's second card) are not abandoned with the leaver's.
-    let settles_with_parked_payment = leaving_is_latched_chooser
-        && super::engine_payment_choices::departed_draw_settles_with_parked_payment(
-            state,
-            leaving_set,
-        );
     // CR 800.4b + CR 800.4d + CR 608.2f: prune the parked token-creation
     // event's departed batches for every leaving player — not only the
     // latched chooser, so no later prompt is ever raised for a departed
-    // owner — before the abandonment below. On `Survives` the pruned record
-    // stands for the departure-boundary repair, with unrelated pending
-    // drains kept untouched; on `NoSurvivor` the whole prompt is abandoned
-    // with its companions, the paused clause, and an empty created referent.
-    // Any other parked event is untouched by the prune and keeps today's
-    // behavior below.
-    let mut token_park_survives = false;
+    // owner. On `Survives` the pruned record stands for the
+    // departure-boundary repair (and for `settle_replacement_after_departure`,
+    // which cedes token-creation parks to that repair); on `NoSurvivor` the
+    // whole prompt is abandoned with its companions, the paused clause, and
+    // an empty created referent. Any other parked event is untouched by the
+    // prune: the settle dispatcher below owns its reconsult-or-abandon
+    // decision, so nothing is abandoned here.
     if let Some(pending) = state.pending_replacement.as_mut() {
-        match super::replacement::prune_departed_token_batches(pending, leaving_set) {
-            super::replacement::TokenPruneOutcome::NoSurvivor => {
-                super::replacement::abandon_survivorless_token_park(state, leaving_set);
-            }
-            super::replacement::TokenPruneOutcome::Survives => {
-                token_park_survives = true;
-            }
-            super::replacement::TokenPruneOutcome::NotATokenEvent => {}
-        }
-    }
-    if state.pending_replacement.is_some()
-        && leaving_is_latched_chooser
-        && !settles_with_parked_payment
-        && !token_park_survives
-        // CR 800.4a + CR 616.1f: a combat-damage leg's choice is not abandoned
-        // with its chooser: the damaged permanent may survive the departure (a
-        // Control Magic host returns to its owner), so the event is lifted back
-        // into the parked batch and re-proposed to whoever now owes it.
-        && !super::replacement::lift_departed_combat_leg_choice(state)
-    {
-        state.pending_replacement = None;
-        // CR 800.4a: a paused frameless single-card discard belongs to the
-        // abandoned choice of the leaving player; left behind it would go stale.
-        state.pending_single_discard = None;
-        state.replacement_may_cost_paused = false;
-        // CR 121.6b: under a surviving parked draw payment the abandoned
-        // choice sat inside a substitute for one of the payer's draws, so only
-        // the leaver's part of the draw authority goes with it.
-        if super::engine_payment_choices::draw_payment_is_parked(state) {
-            super::replacement::abandon_departed_substitute_continuation(state, leaving_set);
-        } else {
-            super::replacement::abandon_post_replacement_continuation(state);
+        if matches!(
+            super::replacement::prune_departed_token_batches(pending, leaving_set),
+            super::replacement::TokenPruneOutcome::NoSurvivor
+        ) {
+            super::replacement::abandon_survivorless_token_park(state, leaving_set);
         }
     }
 
