@@ -1,0 +1,330 @@
+---
+source: crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 14,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Trample, haste"
+      },
+      "node": {
+        "Keyword": "Trample"
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 14,
+          "precision": "Exact",
+          "ordinal_within_span": 1
+        },
+        "fragment": "Trample, haste"
+      },
+      "node": {
+        "Keyword": "Haste"
+      }
+    },
+    {
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 15,
+          "end_byte": 29,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Cycling {1}{R}"
+      },
+      "node": {
+        "Keyword": {
+          "Cycling": {
+            "type": "Mana",
+            "data": {
+              "type": "Cost",
+              "shards": [
+                "Red"
+              ],
+              "generic": 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "source": {
+        "id": {
+          "item": 3,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 2,
+          "last_line": 2,
+          "start_byte": 30,
+          "end_byte": 275,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "When you cycle this card, shuffle it into your library from your graveyard. If you've cycled a card named Yidaro, Wandering Monster four or more times this game, put it onto the battlefield from your graveyard instead. (Do this before you draw.)"
+      },
+      "node": {
+        "Trigger": {
+          "Parsed": {
+            "condition": "Cycled",
+            "partial_def": {
+              "mode": "Cycled",
+              "execute": null,
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "origin": null,
+              "destination": null,
+              "trigger_zones": [
+                "Graveyard"
+              ],
+              "phase": null,
+              "optional": false,
+              "damage_kind": "Any",
+              "secondary": false,
+              "valid_target": null,
+              "valid_source": null,
+              "description": null,
+              "constraint": null,
+              "condition": null,
+              "batched": false
+            },
+            "body": {
+              "EffectChain": {
+                "clauses": [
+                  {
+                    "id": 0,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 1
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 0,
+                        "end_byte": 48,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 0
+                      },
+                      "fragment": "shuffle it into your library from your graveyard"
+                    },
+                    "disposition": {
+                      "Emit": {
+                        "followup": null,
+                        "intrinsic": null
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "ChangeZone",
+                        "origin": null,
+                        "destination": "Library",
+                        "target": {
+                          "type": "SelfRef"
+                        },
+                        "owner_library": false,
+                        "library_shuffle": {
+                          "type": "TerminalShuffle"
+                        },
+                        "enter_transformed": false,
+                        "enter_tapped": false,
+                        "enters_attacking": false
+                      },
+                      "duration": null,
+                      "sub_ability": {
+                        "kind": "Spell",
+                        "effect": {
+                          "type": "Shuffle",
+                          "target": {
+                            "type": "Controller"
+                          }
+                        },
+                        "cost": null,
+                        "sub_ability": null,
+                        "duration": null,
+                        "description": null,
+                        "target_prompt": null,
+                        "condition": null,
+                        "optional_targeting": false,
+                        "optional": false,
+                        "forward_result": false
+                      },
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": "Sentence",
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  },
+                  {
+                    "id": 1,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 2
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 50,
+                        "end_byte": 191,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 1
+                      },
+                      "fragment": "If you've cycled a card named Yidaro, Wandering Monster four or more times this game, put it onto the battlefield from your graveyard instead"
+                    },
+                    "disposition": {
+                      "ReplaceMeaning": {
+                        "kind": {
+                          "Instead": {
+                            "kind": "Spell",
+                            "effect": {
+                              "type": "ChangeZone",
+                              "origin": "Graveyard",
+                              "destination": "Battlefield",
+                              "target": {
+                                "type": "SelfRef"
+                              },
+                              "owner_library": false,
+                              "enter_transformed": false,
+                              "enter_tapped": false,
+                              "enters_attacking": false
+                            },
+                            "cost": null,
+                            "sub_ability": null,
+                            "duration": null,
+                            "description": null,
+                            "target_prompt": null,
+                            "condition": {
+                              "type": "ConditionInstead",
+                              "inner": {
+                                "type": "QuantityCheck",
+                                "lhs": {
+                                  "type": "Ref",
+                                  "qty": {
+                                    "type": "CardsCycled",
+                                    "scope": "Controller",
+                                    "window": "ThisGame",
+                                    "name": "yidaro, wandering monster"
+                                  }
+                                },
+                                "comparator": "GE",
+                                "rhs": {
+                                  "type": "Fixed",
+                                  "value": 4
+                                }
+                              }
+                            },
+                            "optional_targeting": false,
+                            "optional": false,
+                            "target_choice_timing": "Resolution",
+                            "forward_result": false
+                          }
+                        }
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "Unimplemented",
+                        "name": "instead_clause_placeholder",
+                        "description": null
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": null,
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  }
+                ],
+                "kind": "Spell",
+                "continuation_kind": null,
+                "player_scope_rewrite": "Apply",
+                "chain_rounding": null,
+                "actor": null,
+                "in_trigger": true,
+                "repeat_until": null
+              }
+            },
+            "modifiers": {
+              "optional": false,
+              "unless_pay": null,
+              "intervening_if": null,
+              "trigger_subject": {
+                "type": "Controller"
+              },
+              "first_time_limit": null,
+              "constraint": null,
+              "has_up_to": false,
+              "effect_lower": "shuffle it into your library from your graveyard. if you've cycled a card named yidaro, wandering monster four or more times this game, put it onto the battlefield from your graveyard instead.",
+              "relative_player_scope": null
+            },
+            "source_text": "When you cycle this card, shuffle it into your library from your graveyard. If you've cycled a card named Yidaro, Wandering Monster four or more times this game, put it onto the battlefield from your graveyard instead.",
+            "die_results": []
+          }
+        }
+      }
+    }
+  ],
+  "source_text": "Trample, haste\nCycling {1}{R}\nWhen you cycle this card, shuffle it into your library from your graveyard. If you've cycled a card named Yidaro, Wandering Monster four or more times this game, put it onto the battlefield from your graveyard instead. (Do this before you draw.)",
+  "card_name": "Yidaro, Wandering Monster"
+}

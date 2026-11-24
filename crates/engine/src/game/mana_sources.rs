@@ -1186,7 +1186,7 @@ pub(crate) fn preflight_tap_land_action(
     if !matches!(action, GameAction::TapLandForMana { .. }) {
         return Ok(());
     }
-    super::engine_payment_choices::refuse_mana_at_draw_only_payment(state)?;
+    super::engine_payment_choices::refuse_mana_where_none_is_asked(state)?;
     let waiting_player = match &state.waiting_for {
         WaitingFor::Priority { player }
         | WaitingFor::ManaPayment { player, .. }
@@ -1322,19 +1322,17 @@ pub(crate) fn activate_mana_source_option_with_output(
         // produced by their own TapsForMana abilities after this single source
         // event. Producing the combination here would add those bonuses twice.
         let produced = vec![option.mana_type];
-        for mana_type in &produced {
-            mana_payment::produce_mana_with_attributes(
-                state,
-                option.object_id,
-                *mana_type,
-                player,
-                true,
-                &option.restrictions,
-                &[],
-                None,
-                events,
-            );
-        }
+        let deposited = mana_payment::produce_mana_with_attributes(
+            state,
+            option.object_id,
+            option.mana_type,
+            player,
+            true,
+            &option.restrictions,
+            &[],
+            None,
+            events,
+        );
         events.push(GameEvent::TappedForMana {
             player_id: player,
             source_id: option.object_id,
@@ -1345,6 +1343,10 @@ pub(crate) fn activate_mana_source_option_with_output(
             player_id: player,
             source_id: option.object_id,
             produced: vec![option.mana_type],
+            // CR 614.1a: Use the post-replacement deposit count.
+            resolution: crate::types::events::ManaResolutionShare::WholeResolution {
+                total: u32::try_from(deposited.len()).unwrap_or(u32::MAX),
+            },
             trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
         });
         mana_abilities::resume_waiting_for(player, resume)
@@ -1380,9 +1382,17 @@ pub(crate) fn activate_mana_source_option_with_output_and_settle(
 /// `events` and whose boundary observation bound nothing
 /// (`ActivationObservers::Unbound`). An activation still paused mid-cost (a
 /// replacement choice) has not been observed yet, so it is never recorded;
-/// one an activation trigger observed (CR 603.10) queued an ability or spent
-/// a "triggers only once each turn" limit, which undo cannot reverse. Callers
-/// decide the penalty axis (`ManaSourcePenalty::is_undoable`) first.
+/// observing an activation (CR 603.10) can queue an ability or spend a
+/// "triggers only once each turn" limit, which undo cannot reverse.
+/// CR 605.4a + CR 608.2p: the same holds for an ordinary trigger that observed
+/// the tap's resolution, or the resolution of a triggered mana ability the tap
+/// set off (Vorinclex, Caged Sun), whose source is not the land. No tap is
+/// recorded while any ordinary observer of mana production is deferred: the
+/// record does not attribute such an observer to one tap, so within a payment
+/// a tap made after an observed one is not undoable either. A tap whose
+/// triggered mana abilities are still suspended on a choice is not recorded:
+/// their observers are collected only once the choice is answered.
+/// Callers decide the penalty axis (`ManaSourcePenalty::is_undoable`) first.
 pub(crate) fn record_undoable_mana_tap(
     state: &mut GameState,
     player: PlayerId,
@@ -1403,7 +1413,13 @@ pub(crate) fn record_undoable_mana_tap(
             } if *player_id == player && *activated == source_id
         )
     });
-    if !completed_unobserved {
+    if !completed_unobserved
+        || state.pending_triggered_mana_resume.is_some()
+        || state
+            .deferred_triggers
+            .iter()
+            .any(|context| context.observes_mana_production())
+    {
         return;
     }
     state
@@ -1974,6 +1990,28 @@ pub(crate) fn mana_source_option_has_drawback(
                 count_leaf_components(cost, &|leaf| !matches!(leaf, AbilityCost::Tap)) > 0
             })
         })
+}
+
+/// CR 605.1b + CR 605.3b: True when some `TapsForMana` triggered mana ability on
+/// the battlefield does more on resolution than add mana. Such an ability
+/// resolves inline whenever a permanent it matches is tapped for mana, so then
+/// even a source without a [`mana_source_option_has_drawback`] drawback can
+/// change more than the mana pool when tapped.
+pub(crate) fn taps_for_mana_trigger_has_non_mana_effect(state: &GameState) -> bool {
+    taps_for_mana_trigger_sources(state).iter().any(|id| {
+        state.objects.get(id).is_some_and(|obj| {
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition())
+                .filter(|trigger| trigger.mode == TriggerMode::TapsForMana)
+                .any(|trigger| {
+                    trigger.execute.as_deref().is_some_and(|execute| {
+                        !matches!(*execute.effect, Effect::Mana { .. })
+                            || mana_ability_penalty(execute) != ManaSourcePenalty::None
+                    })
+                })
+        })
+    })
 }
 
 /// CR 119.3 (life) / CR 120.3 (damage → life loss): The benefit twin of

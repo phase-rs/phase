@@ -3968,9 +3968,7 @@ fn token_creation_needs_choice(
     // can set a non-priority `waiting_for`, so taking it would be a real
     // token-batching change; it is left to its own change rather than smuggled
     // into this delegation.
-    let causes = replacement::proposed_event_prompt_cause(state, &proposed, registry);
-    causes.contains(replacement::ReplacementPromptCause::OptionalCandidate)
-        || causes.contains(replacement::ReplacementPromptCause::OrderingMaterial)
+    replacement::proposed_event_prompt_cause(state, &proposed, registry).may_open_player_choice()
 }
 
 /// CR 205: Extract the concrete `CoreType` set a `TypeFilter` counts, for the
@@ -4373,16 +4371,13 @@ fn try_resolve_copy_batch(
     let Some(owner) = resolve_token_owner(state, ability, &TargetFilter::Controller) else {
         return false;
     };
-    if token_creation_needs_choice(
+    !token_creation_needs_choice(
         state,
         &probe_spec,
         owner,
         crate::types::proposed_event::EtbTapState::from_seeded_tapped(false),
         1,
-    ) {
-        return false;
-    }
-    true
+    )
 }
 
 /// CR 306.5b + CR 614.1c + CR 707.2: `CopyTokenOf` seeds intrinsic counters
@@ -4724,9 +4719,9 @@ fn resolve_attach_host(
             .copied()
             .map(AttachTarget::Player),
         // Event-context hosts ("attached to the triggering creature") resolve the
-        // triggering event's subject via the shared event-context resolver.
+        // triggering event's subject through the event-referent identity gate (CR 400.7).
         AttachHostAuthority::EventContext => {
-            crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
+            crate::game::targeting::affected_event_context_target(state, ability, filter)
                 .map(target_ref_to_attach_target)
         }
         // The bare-pronoun host ("attached to it"). It normally reads the chosen
@@ -6497,7 +6492,7 @@ mod tests {
         assert_eq!(a.display_name, "Angel");
         assert!(a.keywords.contains(&Keyword::Flying));
         assert!(a.keywords.contains(&Keyword::Vigilance));
-        assert!(!a.subtypes.contains(&"Flying".to_string()));
+        assert!(!a.subtypes.iter().any(|i| i == "Flying"));
     }
 
     #[test]
@@ -7167,7 +7162,7 @@ mod tests {
         let obj = &state.objects[&state.battlefield[0]];
         assert_eq!(obj.name, "Treasure");
         assert!(obj.card_types.core_types.contains(&CoreType::Artifact));
-        assert!(obj.card_types.subtypes.contains(&"Treasure".to_string()));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Treasure"));
         assert_eq!(obj.power, None);
         assert_eq!(obj.toughness, None);
     }

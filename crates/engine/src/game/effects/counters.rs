@@ -2027,6 +2027,49 @@ pub fn resolve_add(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    let additions = resolved_counter_additions(state, ability);
+
+    let completion =
+        PendingEffectResolved::new(EffectKind::from(&ability.effect), ability.source_id);
+    for (index, addition) in additions.iter().enumerate() {
+        let PendingCounterAddition::Object {
+            object_id,
+            count,
+            counter_type,
+            ..
+        } = addition
+        else {
+            continue;
+        };
+        let event_start = events.len();
+        if !apply_object_counter_addition(state, addition.clone(), events) {
+            stash_pending_counter_additions(state, additions[index + 1..].to_vec(), completion);
+            return Ok(());
+        }
+        if *count > 0 {
+            emit_evolved_event_for_counter_addition(
+                ability,
+                events,
+                event_start,
+                *object_id,
+                counter_type,
+            );
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+        subject: None,
+    });
+
+    Ok(())
+}
+
+pub(crate) fn resolved_counter_additions(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<PendingCounterAddition> {
     let (counter_type, count) = match &ability.effect {
         Effect::PutCounter {
             counter_type,
@@ -2040,7 +2083,7 @@ pub fn resolve_add(
     };
 
     // CR 601.2d: If distribution was assigned at cast time, apply per-target counter counts.
-    let additions: Vec<PendingCounterAddition> = if let Some(distribution) = &ability.distribution {
+    if let Some(distribution) = &ability.distribution {
         distribution
             .iter()
             .filter_map(|(target, count)| {
@@ -2091,40 +2134,7 @@ pub fn resolve_add(
                 )
             })
             .collect()
-    };
-
-    let completion =
-        PendingEffectResolved::new(EffectKind::from(&ability.effect), ability.source_id);
-    for (index, addition) in additions.iter().cloned().enumerate() {
-        let PendingCounterAddition::Object {
-            object_id, count, ..
-        } = addition
-        else {
-            continue;
-        };
-        let event_start = events.len();
-        if !apply_object_counter_addition(state, addition, events) {
-            stash_pending_counter_additions(state, additions[index + 1..].to_vec(), completion);
-            return Ok(());
-        }
-        if count > 0 {
-            emit_evolved_event_for_counter_addition(
-                ability,
-                events,
-                event_start,
-                object_id,
-                &counter_type,
-            );
-        }
     }
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
-
-    Ok(())
 }
 
 fn emit_evolved_event_for_counter_addition(
@@ -2867,6 +2877,12 @@ pub(super) fn resolve_defined_or_targets(
         ) {
             return crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter);
         }
+        // CR 400.7 + CR 608.2k: an event subject binds only while it can be found.
+        if let Some(ids) =
+            crate::game::targeting::bound_event_referent_objects(state, ability, filter)
+        {
+            return ids;
+        }
         let event_targets =
             crate::game::targeting::resolve_event_context_targets(state, filter, ability.source_id);
         if !event_targets.is_empty() {
@@ -3319,11 +3335,21 @@ fn resolve_counter_transfer_sources(
         };
     }
 
-    if let Some(TargetRef::Object(id)) = crate::game::targeting::resolve_event_context_target(
-        state,
-        source_filter,
-        ability.source_id,
-    ) {
+    // CR 122.8 + CR 608.2h: putting "those counters" reads the departed object's
+    // information (The Ozolith); moving them (CR 122.5) acts on the source, so
+    // it must still be the object the event named.
+    let source = match mode {
+        // allow-raw-event-referent: CR 608.2h information read of the departed object's counters
+        CounterTransferMode::Put => crate::game::targeting::resolve_event_context_target(
+            state,
+            source_filter,
+            ability.source_id,
+        ),
+        CounterTransferMode::Move => {
+            crate::game::targeting::affected_event_context_target(state, ability, source_filter)
+        }
+    };
+    if let Some(TargetRef::Object(id)) = source {
         return vec![id];
     }
 
@@ -3368,11 +3394,15 @@ fn resolve_counter_transfer_destinations(
         .collect();
     }
 
-    if let Some(TargetRef::Object(id)) = crate::game::targeting::resolve_event_context_target(
-        state,
-        target_filter,
-        ability.source_id,
-    ) {
+    // CR 400.7 + CR 608.2k: an event-subject destination binds only while it can be found.
+    if let Some(ids) =
+        crate::game::targeting::bound_event_referent_objects(state, ability, target_filter)
+    {
+        return ids;
+    }
+    if let Some(TargetRef::Object(id)) =
+        crate::game::targeting::affected_event_context_target(state, ability, target_filter)
+    {
         return vec![id];
     }
 

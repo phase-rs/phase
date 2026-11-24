@@ -9,7 +9,9 @@ use super::card::PrintedCardRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
 use super::events::ManaTapState;
-use super::game_state::{CastOccurrence, LKISnapshot, MayTriggerOrigin, TriggerSourceContext};
+use super::game_state::{
+    CastOccurrence, CyclingOccurrence, LKISnapshot, MayTriggerOrigin, TriggerSourceContext,
+};
 use super::game_state_kinds::{DistributionUnit, TargetSelectionConstraint};
 use super::identifiers::{
     CardId, EpicEffectId, ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION,
@@ -1923,6 +1925,12 @@ pub struct ParkedDamageBatch {
     /// settle together when it ends (`elimination::settle_event_outcomes`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcomes: Option<EventOutcomes>,
+    /// CR 615.13 + CR 120.3: the batch's prevention so far, one entry per (shield, recipient),
+    /// in `sorted_prevention_entries` order. One prevention effect applying to simultaneous
+    /// damage is one application, so the batch publishes these once, after its damage, however
+    /// many pauses it spans.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prevention_tally: Vec<crate::types::game_state::PreventedDamageEntry>,
 }
 
 /// CR 104.3e + CR 104.3f + CR 104.4a: the effect-stated wins and losses of one simultaneous
@@ -1977,6 +1985,15 @@ pub struct SpellContext {
     /// ordinary ability-chain handoffs without widening every ability literal.
     #[serde(default, skip_serializing_if = "ExileConcealment::is_public")]
     pub face_down_in_exile: ExileConcealment,
+    /// CR 701.9a vs CR 118.12: why this node's discard happens. Node-local:
+    /// `apply_parent_chain_context` keeps a child's own cause, so a cost-paying
+    /// delivery node never makes a chained instruction's discard a cost. See
+    /// [`crate::types::game_state::DiscardCause`].
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::game_state::DiscardCause::is_effect"
+    )]
+    pub discard_cause: crate::types::game_state::DiscardCause,
     /// CR 201.5a: the granter stamped on the definition this ability was built from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granting_object: Option<ObjectIncarnationRef>,
@@ -2308,14 +2325,20 @@ pub struct SpellContext {
     /// `ResolvedAbility::record_prior_player_choice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_choice_member: Option<ObjectId>,
-    /// CR 603.2b + CR 102.1: the turn player a phase trigger bound its chain's `scoped_player` to
-    /// ("that player" anaphors to the player whose phase it is). Stamped only by
-    /// `ResolvedAbility::set_phase_turn_player_recursive`; cleared by every other binding
+    /// CR 603.2b + CR 102.1 / CR 506.2: the player a trigger itself bound its chain's
+    /// `scoped_player` to: the turn player for a phase trigger ("that player" anaphors to the
+    /// player whose phase it is), the attacking player for an attack trigger. Stamped only by
+    /// `ResolvedAbility::set_trigger_bound_player_recursive`; cleared by every other binding
     /// (`set_scoped_player_recursive`, the `player_scope` fan-out's seat binding). A node whose
-    /// `scoped_player` equals this is bound by its phase, not by an unfinished simultaneous
+    /// `scoped_player` equals this is bound by its trigger, not by an unfinished simultaneous
     /// player-scope leg (CR 101.4), which is the distinction `entry_observation_deferred` reads.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase_turn_player: Option<crate::types::player::PlayerId>,
+    /// Serialized as `phase_turn_player`, the key saved states already carry.
+    #[serde(
+        default,
+        rename = "phase_turn_player",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub trigger_bound_player: Option<crate::types::player::PlayerId>,
 }
 
 /// CR 608.2c + CR 608.2d: one entry of a per-object player assignment — the
@@ -2657,6 +2680,19 @@ pub enum KeywordAction {
         paid_creature_id: ObjectId,
         snapshot_power: i32,
     },
+}
+
+impl KeywordAction {
+    /// CR 115.1e + CR 702.6a: the targets chosen for this keyword action; only
+    /// equip targets (crew, saddle and station target nothing).
+    pub fn targets(&self) -> Vec<TargetRef> {
+        match self {
+            Self::Equip {
+                target_creature_id, ..
+            } => vec![TargetRef::Object(*target_creature_id)],
+            Self::Crew { .. } | Self::Saddle { .. } | Self::Station { .. } => Vec::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3397,6 +3433,9 @@ pub struct ResolvedAbility {
     /// resolving spell ability. Spell copies that were not cast carry `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_occurrence: Option<CastOccurrence>,
+    /// Coordinate of the completed cycling activation represented by this graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycling_occurrence: Option<CyclingOccurrence>,
     /// CR 400.7: Exact source incarnation captured for self-transform guards.
     /// The full `trigger_source` context remains the authority for all triggered
     /// source facts; this field preserves the source epoch for activated and
@@ -3437,19 +3476,25 @@ pub struct ResolvedAbility {
     /// deliberately separate from the parsed grammatical selector on `Effect`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_block_attacker: Option<ObjectIncarnationRef>,
-    /// CR 400.7 + CR 603.7c: Incarnation pins for the object referents in
-    /// `targets`, captured when a delayed triggered ability snapshotted its
-    /// `ParentTarget` referent at creation. A delayed ability that refers to a
-    /// particular object must not affect a later object that merely reuses the
-    /// same storage `ObjectId` — CR 603.7c: "if that object left that zone and
-    /// then returned, it's a new object and thus won't be affected."
+    /// CR 400.7 + CR 603.7c: keyed incarnation pins for an ability's object
+    /// referents. Two producers write them:
+    /// - a delayed triggered ability snapshots its `ParentTarget` referent at
+    ///   creation, so it doesn't affect a later object that merely reuses the
+    ///   same storage `ObjectId` (CR 603.7c: "if that object left that zone and
+    ///   then returned, it's a new object and thus won't be affected");
+    /// - a triggered ability's event-context referents (`TriggeringSource`,
+    ///   `EventTarget`, and the perpetual / attach `ParentTarget` roles) are
+    ///   pinned to the incarnation the trigger event recorded, at collection,
+    ///   push and assignment (`triggers::seed_event_referent_pins`), and judged
+    ///   by `targeting::event_referent_is_findable`. A damage recipient's pin is
+    ///   occurrence-exact. The resolution's own zone move re-pins its arrival
+    ///   onto later chain nodes (CR 400.7j).
     ///
-    /// Empty for every ability that is not a pinned `ParentTarget` delayed
-    /// trigger — including delayed triggers whose own condition names a ZONE
-    /// CHANGE OF THE REFERENT, in either direction (CR 400.7e; see
-    /// `condition_names_referent_zone_change`), where the referent is EXPECTED
-    /// to have moved and must still be affected. An id with no pin here
-    /// resolves unchanged, so the guard is inert outside the pinned path.
+    /// A delayed trigger whose own condition names a ZONE CHANGE OF THE
+    /// REFERENT, in either direction (CR 400.7e; see
+    /// `condition_names_referent_zone_change`), takes no pin: the referent is
+    /// EXPECTED to have moved and must still be affected. An id with no pin
+    /// here resolves unchanged; `LEGACY_INCARNATION` pins are ignored.
     ///
     /// Element-level pins are deliberately non-`Option` so an individual
     /// referent can never degrade to "always matches" (contrast
@@ -3459,8 +3504,8 @@ pub struct ResolvedAbility {
     /// CR 400.7 + CR 601.2c: the incarnation announced for each target
     /// OCCURRENCE, aligned position-for-position with `targets` (`None` for a
     /// player, or an occurrence nothing pinned). Empty means every occurrence
-    /// is unpinned. Separate from `target_incarnations`, whose keyed pins are
-    /// reserved for delayed-trigger referents. Written only through the
+    /// is unpinned. Separate from `target_incarnations`, whose keyed pins hold
+    /// delayed-trigger and event-context referents. Written only through the
     /// occurrence authority (`game::target_occurrences`), which moves targets
     /// and pins together.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -3636,6 +3681,10 @@ pub struct ResolvedAbility {
     /// CR 608.2c: Repeat this ability N times (from "for each [X], [effect]").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_for: Option<QuantityExpr>,
+    /// CR 608.2: the iteration relation of `repeat_for`, copied through from the
+    /// originating `AbilityDefinition`. See [`RepeatForTiming`].
+    #[serde(default, skip_serializing_if = "RepeatForTiming::is_sequential")]
+    pub repeat_timing: RepeatForTiming,
     /// Minimum legal announced value for X. Defaults to zero; set to one by
     /// "X can't be 0" annotations.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -3985,6 +4034,7 @@ impl PartialEq for ResolvedAbility {
             reads_return_result: a_reads_return_result,
             source_id: a_source_id,
             cast_occurrence: a_cast_occurrence,
+            cycling_occurrence: a_cycling_occurrence,
             source_incarnation: a_source_incarnation,
             announced_source_incarnation: a_announced_source_incarnation,
             trigger_source: a_trigger_source,
@@ -4025,6 +4075,7 @@ impl PartialEq for ResolvedAbility {
             modal_instruction_ordinal: a_modal_instruction_ordinal,
             detached_remainder: a_detached_remainder,
             repeat_for: a_repeat_for,
+            repeat_timing: a_repeat_timing,
             min_x_value: a_min_x_value,
             announced_x: a_announced_x,
             cant_be_copied: a_cant_be_copied,
@@ -4069,6 +4120,7 @@ impl PartialEq for ResolvedAbility {
             reads_return_result: b_reads_return_result,
             source_id: b_source_id,
             cast_occurrence: b_cast_occurrence,
+            cycling_occurrence: b_cycling_occurrence,
             source_incarnation: b_source_incarnation,
             announced_source_incarnation: b_announced_source_incarnation,
             trigger_source: b_trigger_source,
@@ -4108,6 +4160,7 @@ impl PartialEq for ResolvedAbility {
             modal_instruction_ordinal: b_modal_instruction_ordinal,
             detached_remainder: b_detached_remainder,
             repeat_for: b_repeat_for,
+            repeat_timing: b_repeat_timing,
             min_x_value: b_min_x_value,
             announced_x: b_announced_x,
             cant_be_copied: b_cant_be_copied,
@@ -4152,6 +4205,7 @@ impl PartialEq for ResolvedAbility {
             && a_reads_return_result == b_reads_return_result
             && a_source_id == b_source_id
             && a_cast_occurrence == b_cast_occurrence
+            && a_cycling_occurrence == b_cycling_occurrence
             && a_source_incarnation == b_source_incarnation
             && a_announced_source_incarnation == b_announced_source_incarnation
             && a_trigger_source == b_trigger_source
@@ -4190,6 +4244,7 @@ impl PartialEq for ResolvedAbility {
             && a_modal_instruction_ordinal == b_modal_instruction_ordinal
             && a_detached_remainder == b_detached_remainder
             && a_repeat_for == b_repeat_for
+            && a_repeat_timing == b_repeat_timing
             && a_min_x_value == b_min_x_value
             && a_announced_x == b_announced_x
             && a_cant_be_copied == b_cant_be_copied
@@ -4246,6 +4301,53 @@ pub fn keyed_target_pin_is_current(
     pins.iter()
         .find(|pin| pin.object_id == id)
         .is_none_or(|pin| pin.is_current(state))
+}
+
+/// CR 400.7e: true when `zone` is the public zone `record`'s move put the object
+/// in (`to`), the turn ledger entry at `record.turn_zone_change_index` is this
+/// very move (the same departing identity), and no later zone change of the same
+/// storage id has been recorded — except `in_flight_departure`, the departing
+/// incarnation of a move still being applied (an incarnation departs only once,
+/// so a record carrying it is that move, not an earlier one). The live object at
+/// that id is then the new object that move created. A trigger cannot find the
+/// new object in a hidden zone.
+pub(crate) fn zone_change_record_has_live_successor(
+    state: &crate::types::game_state::GameState,
+    record: &crate::types::game_state::ZoneChangeRecord,
+    to: Zone,
+    zone: Zone,
+    in_flight_departure: Option<u64>,
+) -> bool {
+    let Some(departing) = record
+        .trigger_source_context()
+        .map(|context| context.identity.reference)
+    else {
+        return false;
+    };
+    if zone != to || !zone.is_public() {
+        return false;
+    }
+    let Some(recorded_event) = state
+        .zone_changes_this_turn
+        .get(record.turn_zone_change_index)
+    else {
+        return false;
+    };
+    recorded_event
+        .trigger_source_context()
+        .is_some_and(|context| context.identity.reference == departing)
+        && state
+            .zone_changes_this_turn
+            .iter()
+            .skip(record.turn_zone_change_index + 1)
+            .all(|later| {
+                later.object_id != record.object_id
+                    || in_flight_departure.is_some_and(|departing| {
+                        later.trigger_source_context().is_some_and(|context| {
+                            context.identity.reference.incarnation == departing
+                        })
+                    })
+            })
 }
 
 impl ResolvedAbility {
@@ -4696,6 +4798,7 @@ impl ResolvedAbility {
             reads_return_result: None,
             source_id,
             cast_occurrence: None,
+            cycling_occurrence: None,
             controller,
             original_controller: None,
             scoped_player: None,
@@ -4718,6 +4821,7 @@ impl ResolvedAbility {
             modal_instruction_ordinal: None,
             detached_remainder: DetachedRemainder::NoProducer,
             repeat_for: None,
+            repeat_timing: RepeatForTiming::Sequential,
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
@@ -4864,7 +4968,25 @@ impl ResolvedAbility {
         }
     }
 
+    pub(crate) fn set_cycling_occurrence_recursive(&mut self, occurrence: CyclingOccurrence) {
+        self.cycling_occurrence = Some(occurrence);
+        for (_, child) in self.child_links_mut() {
+            child.set_cycling_occurrence_recursive(occurrence);
+        }
+    }
+
+    pub(crate) fn cycling_occurrence_matches_recursive(
+        &self,
+        occurrence: CyclingOccurrence,
+    ) -> bool {
+        self.cycling_occurrence == Some(occurrence)
+            && self
+                .child_links()
+                .all(|(_, child)| child.cycling_occurrence_matches_recursive(occurrence))
+    }
+
     pub(crate) fn normalize_cast_occurrence_for_loop_recursive(&mut self) {
+        self.cycling_occurrence = None;
         if let Some(occurrence) = self.cast_occurrence.as_mut() {
             occurrence.turn_journal_index = 0;
         }
@@ -4897,6 +5019,32 @@ impl ResolvedAbility {
         self.trigger_source = Some(source.clone());
         for (_, child) in self.child_links_mut() {
             child.set_trigger_source_recursive(source.clone());
+        }
+    }
+
+    /// CR 113.7a + CR 602.2a + CR 608.2h + CR 400.7: pin the activation-time
+    /// source identity over this entire ability chain WITHOUT building
+    /// triggered provenance. Each node keeps its announcement-epoch
+    /// incarnation in `announced_source_incarnation` (the epoch the source had
+    /// before any cost was paid, CR 601.2h). `source_incarnation` is left
+    /// alone so the stack-push boundary stamps the post-cost epoch (stack.rs),
+    /// and `trigger_source` is left alone so `trigger_source.is_some()`
+    /// proxies keep their pre-pin activated arm (the `ability_utils` carrier
+    /// contract: activated carriers supply only incarnation epochs, never a
+    /// trigger latch). Plot never stack-pushes, so its `source_incarnation`
+    /// remains `None` and the `is_none_or` fail-open holds. Unlike
+    /// [`Self::set_trigger_source_recursive`], this never writes `controller`
+    /// / `original_controller`: for an activated ability the controller is the
+    /// activating player (CR 602.2a), so every `Controller`-relative consumer
+    /// keeps the activator binding. An existing `announced_source_incarnation`
+    /// capture is never overwritten: the earliest announcement wins.
+    pub fn set_departure_pin_recursive(&mut self, source_id: ObjectId, incarnation: u64) {
+        self.source_id = source_id;
+        if self.announced_source_incarnation.is_none() {
+            self.announced_source_incarnation = Some(incarnation);
+        }
+        for (_, child) in self.child_links_mut() {
+            child.set_departure_pin_recursive(source_id, incarnation);
         }
     }
 
@@ -5422,9 +5570,10 @@ impl ResolvedAbility {
 
     /// CR 400.7 + CR 602.2a: Propagate the source incarnation captured at an
     /// activation's announcement — before any cost is paid — to this ability
-    /// and every continuation branch. Called only by
-    /// `casting::record_activation_announcement`; stack placement and trigger
-    /// creation never touch it.
+    /// and every continuation branch. Called by
+    /// `casting::record_activation_announcement` and by the activation-time
+    /// departure pin (`set_departure_pin_recursive`); stack placement and
+    /// trigger creation never touch it.
     pub fn set_announced_source_incarnation_recursive(&mut self, incarnation: Option<u64>) {
         self.announced_source_incarnation = incarnation;
         for (_, child) in self.child_links_mut() {
@@ -5757,35 +5906,10 @@ impl ResolvedAbility {
             || record.trigger_source_context().is_none_or(|event_source| {
                 event_source.identity.reference != source.identity.reference
             })
-            || zone != *to
-            || !zone.is_public()
         {
             return false;
         }
-
-        let Some(recorded_event) = state
-            .zone_changes_this_turn
-            .get(record.turn_zone_change_index)
-        else {
-            return false;
-        };
-        recorded_event
-            .trigger_source_context()
-            .is_some_and(|event_source| {
-                event_source.identity.reference == source.identity.reference
-            })
-            && state
-                .zone_changes_this_turn
-                .iter()
-                .skip(record.turn_zone_change_index + 1)
-                .all(|later| {
-                    later.object_id != self.source_id
-                        || in_flight_departure.is_some_and(|departing| {
-                            later.trigger_source_context().is_some_and(|context| {
-                                context.identity.reference.incarnation == departing
-                            })
-                        })
-                })
+        zone_change_record_has_live_successor(state, record, *to, zone, in_flight_departure)
     }
 
     /// CR 400.7e: True when an off-battlefield zone-match would mis-latch SelfRef
@@ -5840,13 +5964,11 @@ impl ResolvedAbility {
     /// 400.7j as well — and only that object, not what it becomes after moving
     /// again.
     ///
-    /// A forward-result continuation whose `source_id` was rebound by
-    /// `rebind_child_to_forwarded_objects` to an object its producer moved
-    /// keeps that rebound binding unchanged here; its trigger provenance still
-    /// names the original source, so the provenance check cannot judge it. This
-    /// preserves the existing forward-result binding and is not a rules claim:
-    /// a rebound child whose SelfRef prints the source's own name (General Leo
-    /// Cristophe) is mis-bound upstream, and that is a separate defect.
+    /// A legacy forwarded-recipient body may deliberately carry a rebound
+    /// `source_id` while its trigger provenance still names the creating source;
+    /// that separate binding is retained here. Primary source-naming SelfRef
+    /// instructions keep the original source in the forwarding handoff, so they
+    /// continue through the normal exact-source/successor proof below.
     pub fn self_ref_binding(
         &self,
         state: &crate::types::game_state::GameState,
@@ -6394,32 +6516,33 @@ impl ResolvedAbility {
     /// local ability chain. This intentionally does not change `controller`.
     pub fn set_scoped_player_recursive(&mut self, player: PlayerId) {
         self.scoped_player = Some(player);
-        self.context.phase_turn_player = None;
+        self.context.trigger_bound_player = None;
         for (_, child) in self.child_links_mut() {
             child.set_scoped_player_recursive(player);
         }
     }
 
-    /// CR 603.2b + CR 102.1: bind a phase trigger's chain to the turn player whose phase it is.
-    /// Resolves exactly as `set_scoped_player_recursive` does, and additionally records that the
-    /// binding is the phase's, not a `player_scope` seat leg's (`SpellContext::phase_turn_player`).
-    pub fn set_phase_turn_player_recursive(&mut self, player: PlayerId) {
+    /// CR 603.2b + CR 102.1 / CR 506.2: bind a trigger's chain to the player the trigger itself
+    /// names: the turn player whose phase it is, or the attacking player. Resolves exactly as
+    /// `set_scoped_player_recursive` does, and additionally records that the binding is the
+    /// trigger's, not a `player_scope` seat leg's (`SpellContext::trigger_bound_player`).
+    pub fn set_trigger_bound_player_recursive(&mut self, player: PlayerId) {
         self.scoped_player = Some(player);
-        self.context.phase_turn_player = Some(player);
+        self.context.trigger_bound_player = Some(player);
         for (_, child) in self.child_links_mut() {
-            child.set_phase_turn_player_recursive(player);
+            child.set_trigger_bound_player_recursive(player);
         }
     }
 
     /// CR 603.3c: carry `source`'s player binding onto this chain as the same kind of binding: a
-    /// phase trigger's turn-player binding stays one (`SpellContext::phase_turn_player`), any
-    /// other stays an instruction's.
+    /// trigger binding keeps its marker (`SpellContext::trigger_bound_player`), and an
+    /// instruction binding stays an instruction binding.
     pub fn carry_player_binding_recursive(&mut self, source: &ResolvedAbility) {
         let Some(player) = source.scoped_player else {
             return;
         };
-        if source.context.phase_turn_player == Some(player) {
-            self.set_phase_turn_player_recursive(player);
+        if source.context.trigger_bound_player == Some(player) {
+            self.set_trigger_bound_player_recursive(player);
         } else {
             self.set_scoped_player_recursive(player);
         }
@@ -6774,6 +6897,97 @@ mod tests {
     use crate::types::events::GameEvent;
     use crate::types::game_state::{DelayedTrigger, GameState, ZoneChangeRecord};
     use crate::types::zones::{EtbTapState, Zone};
+
+    /// Saved states carry the marker as `phase_turn_player`: the field's rename keeps that key,
+    /// and a state written without the key still decodes to no marker.
+    #[test]
+    fn trigger_bound_player_keeps_the_phase_turn_player_wire_key() {
+        let player = PlayerId(0);
+        let context = SpellContext {
+            trigger_bound_player: Some(player),
+            ..SpellContext::default()
+        };
+        let encoded = serde_json::to_value(context).unwrap();
+        assert_eq!(
+            encoded.get("phase_turn_player"),
+            Some(&serde_json::json!(player))
+        );
+        assert!(encoded.get("trigger_bound_player").is_none());
+        let mut legacy = serde_json::to_value(SpellContext::default()).unwrap();
+        assert!(legacy.get("phase_turn_player").is_none());
+        let absent: SpellContext = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(absent.trigger_bound_player, None);
+        legacy["phase_turn_player"] = serde_json::json!(player);
+        let present: SpellContext = serde_json::from_value(legacy).unwrap();
+        assert_eq!(present.trigger_bound_player, Some(player));
+    }
+
+    /// V12 — CR 400.7e: the zone-change record successor authority. The live
+    /// object at the record's id is the object that move created only while no
+    /// later zone change of that id is recorded, except the in-flight move named
+    /// by its departing incarnation, and only in a public zone.
+    #[test]
+    fn zone_change_record_successor_requires_no_later_move_of_that_id() {
+        use crate::game::zones::{create_object, move_to_zone};
+        use crate::types::identifiers::CardId;
+        use crate::types::player::PlayerId;
+
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+        let record = events
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id, record, ..
+                } if *object_id == id => Some(record.as_ref().clone()),
+                _ => None,
+            })
+            .expect("the death is recorded");
+
+        // (a) No later entry: the graveyard object is that move's successor.
+        assert!(zone_change_record_has_live_successor(
+            &state,
+            &record,
+            Zone::Graveyard,
+            Zone::Graveyard,
+            None
+        ));
+        // (d) A hidden zone never names the new object.
+        assert!(!zone_change_record_has_live_successor(
+            &state,
+            &record,
+            Zone::Library,
+            Zone::Library,
+            None
+        ));
+
+        let departing = state.objects[&id].incarnation;
+        move_to_zone(&mut state, id, Zone::Exile, &mut Vec::new());
+        // (b) A later same-id entry: no longer the successor.
+        assert!(!zone_change_record_has_live_successor(
+            &state,
+            &record,
+            Zone::Graveyard,
+            Zone::Graveyard,
+            None
+        ));
+        // (c) That later entry is the in-flight move named by its departing incarnation.
+        assert!(zone_change_record_has_live_successor(
+            &state,
+            &record,
+            Zone::Graveyard,
+            Zone::Graveyard,
+            Some(departing)
+        ));
+    }
 
     /// CR 607.1 + CR 607.5 + CR 613.1f: every trigger occurrence classifies
     /// exhaustively — printed and copied-value occurrences are characteristic

@@ -189,6 +189,39 @@ fn clear_exert_history_on_zone_change(
     }
 }
 
+/// CR 400.7 + CR 120.2a / CR 120.2b + CR 702.11b: the damage history a
+/// permanent accrued on the battlefield (the per-object `dealt_damage_kinds`
+/// latch and its `GameState::objects_that_dealt_damage` Any-set entry) belongs
+/// to the old object. `ObjectId` persists across the zone change, so both are
+/// retired on a battlefield departure (death/bounce/exile/flicker); otherwise
+/// a flickered "has hexproof as long as it hasn't dealt damage yet" creature
+/// would re-enter still treated as having dealt damage and never regain
+/// hexproof. Shared by `apply_zone_exit_cleanup` and
+/// `apply_resolved_zone_change`, so a replayed departure retires exactly what
+/// the live one did; on the live path the replay applier runs after the
+/// cleanup and this call is an idempotent no-op. The latch half delegates to
+/// `GameObject::retire_dealt_damage_kinds`, the single latch-reset definition.
+/// State only: no event, trigger, timestamp or incarnation allocation. Marks a
+/// full layer pass iff either store changed, since a layer condition reads them.
+fn retire_damage_history_on_zone_change(
+    state: &mut GameState,
+    object_id: ObjectId,
+    from: Zone,
+    _to: Zone,
+) {
+    if from != Zone::Battlefield {
+        return;
+    }
+    let any_retired = state.objects_that_dealt_damage.remove(&object_id);
+    let latch_retired = state
+        .objects
+        .get_mut(&object_id)
+        .is_some_and(GameObject::retire_dealt_damage_kinds);
+    if any_retired || latch_retired {
+        state.layers_dirty.mark_full();
+    }
+}
+
 /// CR 608.2h: preserve the departing incarnation before its characteristics
 /// are reset. A caller outside zone cleanup supplies the pre-move attachments.
 pub(super) fn capture_exit_lki(
@@ -384,6 +417,11 @@ pub(crate) fn apply_zone_exit_cleanup(
     // CR 722.3c: the prepare-face copy remains in exile only while its linked
     // permanent remains on the battlefield with the prepared designation.
     if from == Zone::Battlefield {
+        // CR 730.2a + CR 400.7: the departure event and LKI have both
+        // captured the merged permanent. Retire its copy effect and restore
+        // the surviving card's token identity before resetting the object.
+        super::merge::remove_merge_layer_effect(state, object_id);
+        super::merge::restore_pre_merge_tokenness_for_leave(state, object_id);
         crate::game::effects::prepare::remove_linked_prepared_copy_if_idle(state, object_id);
     }
 
@@ -709,6 +747,7 @@ pub(crate) fn apply_zone_exit_cleanup(
     }
 
     prune_object_bound_effects_on_exit(state, object_id, from, to);
+    retire_damage_history_on_zone_change(state, object_id, from, to);
 
     // Prune host-bound transient effects and clean up mana-tap tracking
     // when a permanent leaves the battlefield.
@@ -720,12 +759,6 @@ pub(crate) fn apply_zone_exit_cleanup(
         super::effects::remove_from_combat::remove_object_from_combat(state, object_id);
         super::pairing::break_pair(state, object_id);
         crate::game::layers::mark_layers_full(state);
-        // CR 400.7 + CR 702.11b: The "has dealt damage since entering" sticky flag
-        // belongs to the old object. ObjectId persists across this zone change, so
-        // clear it on a battlefield exit (death/bounce/exile/flicker) — otherwise a
-        // flickered "has hexproof if it hasn't dealt damage yet" creature would
-        // re-enter still treated as having dealt damage and never regain hexproof.
-        state.objects_that_dealt_damage.remove(&object_id);
         super::layers::prune_host_left_effects(state, object_id);
         // CR 611.2a + CR 400.7: `prune_host_left_effects` above covers only
         // `transient_continuous_effects`. A play/cast permission whose duration
@@ -1494,6 +1527,10 @@ pub fn apply_resolved_zone_change(
     // CR 400.7: the same object-bound grant lifetime as the live cleanup
     // (issue #8795), through the shared authority.
     prune_object_bound_effects_on_exit(state, command.object.object_id, command.from, command.to);
+    // CR 400.7: replay bypasses `apply_zone_exit_cleanup`, so it must retire
+    // the departed incarnation's damage history through the same shared
+    // authority, or a replayed blink leaves a stale latch and Any-set entry.
+    retire_damage_history_on_zone_change(state, command.object.object_id, command.from, command.to);
     if command.from == Zone::Battlefield && command.to != Zone::Battlefield {
         // CR 400.7 + CR 611.2a: replay bypasses the live battlefield host-left
         // replacement prune. Run the same authority before the object is
@@ -1630,7 +1667,7 @@ pub fn move_to_zone(
     to: Zone,
     events: &mut Vec<GameEvent>,
 ) {
-    move_to_zone_with_entry_flags(state, object_id, to, events, false, None);
+    move_to_zone_with_entry_flags(state, object_id, to, events, false, None, None);
 }
 
 /// CR 400.7: Move an object to a new zone. An object that moves to a new zone becomes a new object.
@@ -1677,6 +1714,7 @@ pub(crate) fn move_to_zone_with_entry_flags(
     events: &mut Vec<GameEvent>,
     enter_transformed: bool,
     receiver: Option<PlayerId>,
+    merged_departure: Option<ObjectIncarnationRef>,
 ) {
     // CR 111.8: A token that has left the battlefield can't move to another zone
     // or come back onto the battlefield — "if such a token would change zones, it
@@ -1793,7 +1831,7 @@ pub(crate) fn move_to_zone_with_entry_flags(
     // object completes its move. No-op for non-merged objects. Done here (while
     // the object is still on the battlefield with its `merged_components` intact,
     // before `apply_zone_exit_cleanup` clears them).
-    {
+    if merged_departure.is_none() {
         let leaving_battlefield = state
             .objects
             .get(&object_id)
@@ -1913,12 +1951,6 @@ pub(crate) fn move_to_zone_with_entry_flags(
     zone_change_record.sync_trigger_source_context();
 
     let severed_attachments = sever_battlefield_attachment_graph_on_exit(state, object_id);
-    // CR 730.2d + CR 111.7: for a merged permanent whose topmost component
-    // temporarily changed the survivor's token-ness, the ZoneChanged record above
-    // must retain the merged permanent's event-time token-ness. Restore the
-    // survivor only after that snapshot so the moved token component can cease to
-    // exist without corrupting leave-trigger filters.
-    super::merge::restore_pre_merge_tokenness_for_leave(state, object_id);
 
     // CR 608.2h: hand the LKI the PRE-SEVER attachment set captured above — the sever
     // has already emptied the live object's attachment list by this point.
@@ -2159,7 +2191,10 @@ pub(crate) fn move_to_zone_with_entry_flags(
     // — self-gated so routine library churn stays cheap when no such static is
     // live.
     if to == Zone::Library || from == Zone::Library {
-        crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+        crate::game::layers::mark_layers_full_if_dimension_read_live(
+            state,
+            crate::game::layers::LayerInvalidationDimension::TopOfLibrary,
+        );
     }
 
     // CR 702.145b: a daybound permanent entering at night enters transformed;
@@ -2334,7 +2369,10 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
 /// the same pass as the ones in `events`, so every co-entrant is read at one boundary — but not
 /// while another battlefield entry is still being made, when the boundary belongs to a chain run
 /// inside that entry and the held entrants' event is not complete.
-pub(crate) fn settle_battlefield_entry_observations(state: &mut GameState, events: &[GameEvent]) {
+pub(crate) fn settle_battlefield_entry_observations<'a>(
+    state: &mut GameState,
+    events: impl IntoIterator<Item = &'a GameEvent>,
+) {
     let parked_entry_keys: Vec<(u32, usize)> = state
         .parked_entry_events()
         .filter_map(|event| match event {
@@ -2349,30 +2387,33 @@ pub(crate) fn settle_battlefield_entry_observations(state: &mut GameState, event
     } else {
         &state.unsettled_entry_batch_events
     };
-    let pending: Vec<(usize, ObjectId, Option<u64>)> = held
-        .iter()
-        .chain(events.iter())
-        .filter_map(|event| match event {
-            GameEvent::ZoneChanged { to, record, .. } if *to == Zone::Battlefield => Some(record),
-            _ => None,
-        })
-        .filter(|record| {
-            record.recorded_turn_number == state.turn_number
-                && !state
-                    .battlefield_entry_observations
-                    .contains_key(&record.turn_zone_change_index)
+    // The entry's ledger key and entrant, read off the event alone so the held
+    // batch (borrowed from `state`) and the caller's events share one item type.
+    let entry_key = |event: &GameEvent| match event {
+        GameEvent::ZoneChanged {
+            to: Zone::Battlefield,
+            record,
+            ..
+        } => Some((
+            record.recorded_turn_number,
+            record.turn_zone_change_index,
+            record.object_id,
+            record.entered_incarnation,
+        )),
+        _ => None,
+    };
+    let mut entries: Vec<_> = held.iter().filter_map(entry_key).collect();
+    entries.extend(events.into_iter().filter_map(entry_key));
+    let pending: Vec<_> = entries
+        .into_iter()
+        .filter(|&(turn, index, _, _)| {
+            turn == state.turn_number
+                && state.battlefield_entry_observations.get(&index).is_none()
                 // CR 614.12a + CR 707.5: a parked mid-entry entry is matched by its ledger key,
                 // not by full event equality, so later record stamping cannot unpark it.
-                && !parked_entry_keys
-                    .contains(&(record.recorded_turn_number, record.turn_zone_change_index))
+                && !parked_entry_keys.contains(&(turn, index))
         })
-        .map(|record| {
-            (
-                record.turn_zone_change_index,
-                record.object_id,
-                record.entered_incarnation,
-            )
-        })
+        .map(|(_, index, object_id, entered_incarnation)| (index, object_id, entered_incarnation))
         .collect();
     if pending.is_empty() {
         return;
@@ -2392,6 +2433,19 @@ pub(crate) fn settle_battlefield_entry_observations(state: &mut GameState, event
             })
             .map(|obj| super::triggers::trigger_source_context_for_latch(state, obj));
         if let Some(observation) = observation {
+            // CR 611.3c: the ledger's type filters see the same entry-time
+            // characteristics as the trigger observation.
+            let entry_index = state
+                .battlefield_entry_zone_changes()
+                .position(|record| record.turn_zone_change_index == index);
+            if let Some(entry) = entry_index
+                .and_then(|index| state.battlefield_entries_this_turn.get_mut(index))
+                .filter(|entry| entry.object_id == object_id)
+            {
+                entry.core_types.clone_from(&observation.lki.card_types);
+                entry.subtypes.clone_from(&observation.lki.subtypes);
+                entry.supertypes.clone_from(&observation.lki.supertypes);
+            }
             state
                 .battlefield_entry_observations
                 .insert(index, observation);
@@ -3191,7 +3245,61 @@ pub(crate) fn settle_library_arrangement(
     // CR 401.5 + CR 611.3a: A library reorder can change its top card without
     // creating a ZoneChanged event, so invalidate the dependent static directly
     // (self-gated).
-    crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+    crate::game::layers::mark_layers_full_if_dimension_read_live(
+        state,
+        crate::game::layers::LayerInvalidationDimension::TopOfLibrary,
+    );
+}
+
+/// CR 401.4 + CR 401.7: the insertion index for one member of a private
+/// owner-arranged fixed-position group, after removing the current member.
+/// Top counts present lower ranks; Bottom subtracts present higher ranks from
+/// the post-removal length. Numbered groups anchor their contiguous block at
+/// the numbered slot, clamped against the length without any present members
+/// (CR 401.7), then offset by the present lower ranks.
+///
+/// `delivered_ranks` are the final-order ranks of this group's members that
+/// have already been delivered; `rank` is this member's final-order rank.
+pub(crate) fn arranged_library_slot(
+    library_len_after_current_removal: usize,
+    delivered_ranks: impl Iterator<Item = usize>,
+    rank: usize,
+    position: &crate::types::ability::LibraryPosition,
+) -> usize {
+    match position {
+        crate::types::ability::LibraryPosition::Top => {
+            delivered_ranks.filter(|other| *other < rank).count()
+        }
+        crate::types::ability::LibraryPosition::Bottom => library_len_after_current_removal
+            .saturating_sub(delivered_ranks.filter(|other| *other > rank).count()),
+        crate::types::ability::LibraryPosition::NthFromTop { n } => {
+            let (present, before) = delivered_ranks
+                .fold((0usize, 0usize), |(present, before), other| {
+                    (present + 1, before + usize::from(other < rank))
+                });
+            (n.saturating_sub(1) as usize)
+                .min(library_len_after_current_removal.saturating_sub(present))
+                + before
+        }
+        // CR 401.7: "just beneath the top X cards" is the fixed slot X
+        // (0-based index X) and shares the numbered-block insertion math.
+        crate::types::ability::LibraryPosition::BeneathTop { depth } => {
+            let crate::types::ability::QuantityExpr::Fixed { value } = depth else {
+                debug_assert!(false, "arranged BeneathTop needs a fixed depth");
+                return 0;
+            };
+            let (present, before) = delivered_ranks
+                .fold((0usize, 0usize), |(present, before), other| {
+                    (present + 1, before + usize::from(other < rank))
+                });
+            (*value as usize).min(library_len_after_current_removal.saturating_sub(present))
+                + before
+        }
+        crate::types::ability::LibraryPosition::RandomWithinTop { .. } => {
+            debug_assert!(false, "unsupported arranged library position");
+            0
+        }
+    }
 }
 
 /// Move an object to a specific position in its owner's library (top or bottom), emitting a ZoneChanged event.
@@ -3399,7 +3507,10 @@ pub fn move_to_library_at_index(
     // CR 401.5 + CR 611.3a: placing a card at library index 0 changes the top
     // card, so a `TopOfLibraryMatches` static must be re-evaluated. This path
     // bypasses `move_to_zone`, so it invalidates directly (self-gated).
-    crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+    crate::game::layers::mark_layers_full_if_dimension_read_live(
+        state,
+        crate::game::layers::LayerInvalidationDimension::TopOfLibrary,
+    );
 }
 
 /// Remove an ObjectId from the appropriate zone collection (CR 400.1).
@@ -3947,6 +4058,7 @@ mod tests {
 
     use super::*;
     use crate::game::game_object::CleaveFormState;
+    use crate::types::ability::LibraryPosition;
     use crate::types::ability::{
         ContinuousModification, ControllerRef, FilterProp, StaticCondition, StaticDefinition,
         TargetFilter, TypeFilter, TypedFilter,
@@ -5811,93 +5923,410 @@ mod tests {
         );
     }
 
-    /// CR 701.20d: an insertion shifts every card below it to a new library
-    /// position, so a revealed card the instruction did not name is reordered
-    /// too and stops being revealed (it becomes a new object). A card that keeps
-    /// its position was not reordered and keeps its reveal.
+    /// R4b S2 slot unit: `Top` counts already-delivered lower ranks, `Bottom`
+    /// subtracts already-delivered higher ranks from the post-removal length.
     #[test]
-    fn reorder_within_library_retires_every_revealed_card_whose_position_changed() {
-        let mut state = setup();
-        let first = create_object(
-            &mut state,
-            CardId(11),
-            PlayerId(0),
-            "First".to_string(),
-            Zone::Library,
-        );
-        let second = create_object(
-            &mut state,
-            CardId(12),
-            PlayerId(0),
-            "Second".to_string(),
-            Zone::Library,
-        );
-        let third = create_object(
-            &mut state,
-            CardId(13),
-            PlayerId(0),
-            "Third".to_string(),
-            Zone::Library,
+    fn arranged_library_slot_counts_delivered_ranks_at_the_anchored_end() {
+        assert_eq!(
+            arranged_library_slot(5, [2usize, 4].into_iter(), 3, &LibraryPosition::Top),
+            1
         );
         assert_eq!(
-            state.players[0].library.iter().copied().collect::<Vec<_>>(),
-            [first, second, third],
-            "top-to-bottom staging"
+            arranged_library_slot(5, [0usize, 1].into_iter(), 2, &LibraryPosition::Bottom),
+            5
         );
-
-        // A fully revealed library: every card's position is public.
-        state.revealed_cards.extend([first, second, third]);
-        let incarnations: Vec<u64> = [first, second, third]
-            .iter()
-            .map(|id| state.objects[id].incarnation)
-            .collect();
-
-        // The bottom card is inserted on top. `second` is not named by the
-        // instruction but shifts from index 1 to index 2.
-        reorder_within_library(&mut state, PlayerId(0), &[third], Some(0));
         assert_eq!(
-            state.players[0].library.iter().copied().collect::<Vec<_>>(),
-            [third, first, second]
+            arranged_library_slot(0, std::iter::empty(), 0, &LibraryPosition::Bottom),
+            0
         );
-        for ((id, label), incarnation_before) in [first, second, third]
-            .into_iter()
-            .zip(["First", "Second", "Third"])
-            .zip(incarnations)
-        {
-            assert!(
-                !state.revealed_cards.contains(&id),
-                "{label} changed position and must stop being revealed"
+    }
+
+    fn deliver_grouped(
+        state: &mut GameState,
+        final_order: &[ObjectId],
+        announcement: &[ObjectId],
+        position: &crate::types::ability::LibraryPosition,
+        owner: PlayerId,
+        events: &mut Vec<GameEvent>,
+    ) {
+        let mut delivered: Vec<usize> = Vec::new();
+        for id in announcement {
+            let rank = final_order
+                .iter()
+                .position(|entry| entry == id)
+                .expect("announcement member is in the final order");
+            let in_library = state
+                .objects
+                .get(id)
+                .is_some_and(|object| object.zone == Zone::Library)
+                && state.library_of(owner).contains(id);
+            let len_after_removal = state.library_of(owner).len() - usize::from(in_library);
+            let slot =
+                arranged_library_slot(len_after_removal, delivered.iter().copied(), rank, position);
+            move_to_library_at_index(state, *id, Some(slot), events);
+            delivered.push(rank);
+        }
+    }
+
+    /// CR 401.4 + CR 401.7: numbered groups keep the submitted block together,
+    /// clamping its base to the bottom of a short library.
+    #[test]
+    fn arranged_library_slot_numbered_block_clamps_without_splitting() {
+        for count in [3, 1, 0] {
+            let mut state = setup();
+            let sentinels: Vec<_> = (0..count)
+                .map(|index| {
+                    create_object(
+                        &mut state,
+                        CardId(index + 10),
+                        PlayerId(0),
+                        format!("L{index}"),
+                        Zone::Library,
+                    )
+                })
+                .collect();
+            state.players[0].library = sentinels.iter().copied().collect();
+            let a = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "A".into(),
+                Zone::Graveyard,
             );
-            assert!(
-                state.objects[&id].incarnation > incarnation_before,
-                "{label} changed position and must become a new object"
+            let b = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "B".into(),
+                Zone::Graveyard,
+            );
+            deliver_grouped(
+                &mut state,
+                &[b, a],
+                &[a, b],
+                &LibraryPosition::NthFromTop { n: 2 },
+                PlayerId(0),
+                &mut Vec::new(),
+            );
+            let mut expected = sentinels;
+            let base = expected.len().min(1);
+            expected.splice(base..base, [b, a]);
+            assert_eq!(
+                state
+                    .library_of(PlayerId(0))
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                expected,
+                "initial library length {count}"
             );
         }
+        // Present ranks need not be consecutive: a later rank may arrive first.
+        assert_eq!(
+            arranged_library_slot(
+                5,
+                [0, 2].into_iter(),
+                1,
+                &LibraryPosition::NthFromTop { n: 2 },
+            ),
+            2
+        );
+    }
 
-        // A singleton that keeps its position is not reordered: Calibrated Blast
-        // bottoming the only card of a 1-card library leaves it where it is.
+    /// CR 401.4 + CR 401.7: either submitted order controls the final numbered
+    /// block, including the identity order that same-depth insertion reverses.
+    #[test]
+    fn arranged_library_slot_numbered_block_follows_both_submitted_orders() {
+        for reverse in [false, true] {
+            for count in [3, 1, 0] {
+                let mut state = setup();
+                let sentinels: Vec<_> = (0..count)
+                    .map(|index| {
+                        create_object(
+                            &mut state,
+                            CardId(index + 10),
+                            PlayerId(0),
+                            format!("L{index}"),
+                            Zone::Library,
+                        )
+                    })
+                    .collect();
+                state.players[0].library = sentinels.iter().copied().collect();
+                let a = create_object(
+                    &mut state,
+                    CardId(1),
+                    PlayerId(0),
+                    "A".into(),
+                    Zone::Graveyard,
+                );
+                let b = create_object(
+                    &mut state,
+                    CardId(2),
+                    PlayerId(0),
+                    "B".into(),
+                    Zone::Graveyard,
+                );
+                let order = if reverse { [b, a] } else { [a, b] };
+                deliver_grouped(
+                    &mut state,
+                    &order,
+                    &[a, b],
+                    &LibraryPosition::NthFromTop { n: 2 },
+                    PlayerId(0),
+                    &mut Vec::new(),
+                );
+                let mut expected = sentinels;
+                let base = expected.len().min(1);
+                expected.splice(base..base, order);
+                assert_eq!(
+                    state
+                        .library_of(PlayerId(0))
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "initial library length {count}, reverse {reverse}"
+                );
+            }
+        }
+    }
+
+    /// CR 401.7: a singleton numbered group uses the ordinary clamped slot.
+    #[test]
+    fn arranged_library_slot_numbered_singleton_matches_ordinary_insertion() {
+        for count in [0, 1, 3] {
+            let mut state = setup();
+            let sentinels: Vec<_> = (0..count)
+                .map(|index| {
+                    create_object(
+                        &mut state,
+                        CardId(index + 10),
+                        PlayerId(0),
+                        format!("L{index}"),
+                        Zone::Library,
+                    )
+                })
+                .collect();
+            state.players[0].library = sentinels.into_iter().collect();
+            let card = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Singleton".into(),
+                Zone::Graveyard,
+            );
+            let mut ordinary = state.clone();
+            deliver_grouped(
+                &mut state,
+                &[card],
+                &[card],
+                &LibraryPosition::NthFromTop { n: 2 },
+                PlayerId(0),
+                &mut Vec::new(),
+            );
+            move_to_library_at_index(&mut ordinary, card, Some(1), &mut Vec::new());
+            assert_eq!(
+                state.library_of(PlayerId(0)),
+                ordinary.library_of(PlayerId(0))
+            );
+        }
+    }
+
+    /// R4b S2a (F1 control): a nonidentity Bottom permutation of three
+    /// library-origin cards reproduces the pre-R4b append-after-removal order,
+    /// emits no `ZoneChanged`, and never bumps an incarnation.
+    #[test]
+    fn arranged_bottom_slot_reproduces_library_origin_append_order() {
         let mut state = setup();
-        let only = create_object(
+        let sentinel = create_object(
             &mut state,
-            CardId(21),
+            CardId(1),
             PlayerId(0),
-            "Only".to_string(),
+            "Sentinel".to_string(),
             Zone::Library,
         );
-        state.revealed_cards.insert(only);
-        let incarnation_before = state.objects[&only].incarnation;
-        reorder_within_library(&mut state, PlayerId(0), &[only], None);
+        let c0 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "C0".into(),
+            Zone::Library,
+        );
+        let c1 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "C1".into(),
+            Zone::Library,
+        );
+        let c2 = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "C2".into(),
+            Zone::Library,
+        );
+        state.players[0].library = crate::im::vector![sentinel, c0, c1, c2];
+        let incarnation_before = state.objects[&c0].incarnation;
+        let epoch_before = state.library_knowledge_boundary_generation(PlayerId(0));
+
+        // Submitted permutation [C1, C2, C0]; announcement/request order
+        // [C2, C0, C1] is different, so a fixed-base formula would fail.
+        let mut events = Vec::new();
+        deliver_grouped(
+            &mut state,
+            &[c1, c2, c0],
+            &[c2, c0, c1],
+            &LibraryPosition::Bottom,
+            PlayerId(0),
+            &mut events,
+        );
+
         assert_eq!(
             state.players[0].library.iter().copied().collect::<Vec<_>>(),
-            [only]
+            [sentinel, c1, c2, c0],
+            "the submitted tail replaces the legacy block, with the sentinel at the same index"
+        );
+        assert!(events.is_empty(), "library reorders emit no ZoneChanged");
+        assert_eq!(
+            state.objects[&c0].incarnation, incarnation_before,
+            "a within-library reorder must not bump the incarnation"
         );
         assert!(
-            state.revealed_cards.contains(&only),
-            "a card that keeps its position is not reordered"
+            state.zone_changes_this_turn.is_empty(),
+            "a within-library reorder does not enter the zone-change ledger"
         );
         assert_eq!(
-            state.objects[&only].incarnation, incarnation_before,
-            "a card that keeps its position does not become a new object"
+            state.library_knowledge_boundary_generation(PlayerId(0)),
+            epoch_before + 3,
+            "one knowledge boundary generation per reinsertion"
+        );
+    }
+
+    /// R4b S2b (F1 control): a mixed cross-zone/library-origin Bottom group
+    /// reproduces the plan's replacement-origin trace and the request-origin
+    /// twin. Library-origin members emit no `ZoneChanged`; cross-zone members
+    /// emit exactly one each.
+    #[test]
+    fn arranged_bottom_slot_handles_mixed_cross_zone_and_library_origin_members() {
+        let mut state = setup();
+        let p = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P".into(),
+            Zone::Library,
+        );
+        let l2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "L2".into(),
+            Zone::Library,
+        );
+        let l1 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "L1".into(),
+            Zone::Library,
+        );
+        state.players[0].library = crate::im::vector![p, l2, l1];
+        let x0 = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "X0".into(),
+            Zone::Graveyard,
+        );
+        let x2 = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "X2".into(),
+            Zone::Graveyard,
+        );
+
+        let mut events = Vec::new();
+        deliver_grouped(
+            &mut state,
+            &[x0, l1, x2],
+            &[l1, x0, x2],
+            &LibraryPosition::Bottom,
+            PlayerId(0),
+            &mut events,
+        );
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [p, l2, x0, l1, x2],
+            "the mixed trace is the submitted tail"
+        );
+        let moved: Vec<ObjectId> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(moved, [x0, x2], "library-origin L1 emits no ZoneChanged");
+    }
+
+    /// R4b S2b request-origin twin: the derived (announcement) order equals the
+    /// pre-R4b append-after-removal result and needs no prompt.
+    #[test]
+    fn arranged_bottom_slot_reproduces_request_origin_announcement_order() {
+        let mut state = setup();
+        let p = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P".into(),
+            Zone::Library,
+        );
+        let l2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "L2".into(),
+            Zone::Library,
+        );
+        let l1 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "L1".into(),
+            Zone::Library,
+        );
+        state.players[0].library = crate::im::vector![p, l2, l1];
+        let x2 = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "X2".into(),
+            Zone::Graveyard,
+        );
+        let x0 = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "X0".into(),
+            Zone::Graveyard,
+        );
+
+        let announcement = [x2, l1, x0];
+        let mut events = Vec::new();
+        deliver_grouped(
+            &mut state,
+            &announcement,
+            &announcement,
+            &LibraryPosition::Bottom,
+            PlayerId(0),
+            &mut events,
+        );
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [p, l2, x2, l1, x0],
+            "a request-origin group keeps the legacy append-after-removal order"
         );
     }
 
@@ -6420,7 +6849,15 @@ mod tests {
         }
 
         let mut events = Vec::new();
-        move_to_zone_with_entry_flags(&mut state, id, Zone::Battlefield, &mut events, true, None);
+        move_to_zone_with_entry_flags(
+            &mut state,
+            id,
+            Zone::Battlefield,
+            &mut events,
+            true,
+            None,
+            None,
+        );
 
         assert_eq!(
             state.objects[&id].zone,
@@ -6530,7 +6967,15 @@ mod tests {
         // back_face intentionally left None (single-faced; the GameState default).
 
         let mut events = Vec::new();
-        move_to_zone_with_entry_flags(&mut state, id, Zone::Battlefield, &mut events, true, None);
+        move_to_zone_with_entry_flags(
+            &mut state,
+            id,
+            Zone::Battlefield,
+            &mut events,
+            true,
+            None,
+            None,
+        );
 
         assert_eq!(
             state.objects[&id].zone,
@@ -7257,6 +7702,119 @@ mod tests {
         assert_eq!(
             replayed.resolved_rules_journal, replay_journal_before,
             "applying a recorded transition must not allocate or journal fresh replay authority"
+        );
+    }
+
+    /// A live object in `zone` carrying both damage-kind latches and an
+    /// Any-set entry, plus the recorded command for its move to `to` (produced
+    /// by the ordinary resolve-and-apply path on a throwaway clone). Returns
+    /// the untouched pre-move state for replay.
+    fn damage_history_replay_fixture(
+        zone: Zone,
+        to: Zone,
+    ) -> (GameState, ObjectId, ResolvedZoneChangeCommand) {
+        let mut pre = setup();
+        let id = create_object(
+            &mut pre,
+            CardId(10_440),
+            PlayerId(0),
+            "Damage History Source".to_string(),
+            zone,
+        );
+        {
+            let object = pre.objects.get_mut(&id).unwrap();
+            assert!(object.dealt_damage_kinds.record(true));
+            assert!(object.dealt_damage_kinds.record(false));
+        }
+        pre.objects_that_dealt_damage.insert(id);
+        let mut recorder = pre.clone();
+        let record = crate::types::game_state::ZoneChangeRecord::test_minimal(id, Some(zone), to);
+        let command =
+            resolve_and_apply_zone_change(&mut recorder, id, zone, to, PlayerId(0), None, record)
+                .expect("the recorded transition resolves");
+        (pre, id, command)
+    }
+
+    /// CR 400.7: the replay applier retires damage history only on a
+    /// battlefield departure. A Graveyard -> Exile replay touches neither
+    /// store and schedules no layer pass; a Battlefield -> Graveyard replay
+    /// retires both stores and dirties layers (paired positive: the helper is
+    /// reached on the replay path).
+    #[test]
+    fn p2_replayed_zone_command_retires_damage_history_only_from_battlefield() {
+        use crate::types::ability::DamageKindFilter;
+        use crate::types::game_state::LayersDirty;
+
+        let (pre, id, command) = damage_history_replay_fixture(Zone::Graveyard, Zone::Exile);
+        let mut replayed = pre.clone();
+        replayed.layers_dirty = LayersDirty::Clean;
+        apply_resolved_zone_change(&mut replayed, &command).expect("Graveyard -> Exile replays");
+        assert_eq!(replayed.objects[&id].zone, Zone::Exile, "reach-guard");
+        assert_eq!(
+            replayed.objects[&id].dealt_damage_kinds, pre.objects[&id].dealt_damage_kinds,
+            "a non-battlefield move keeps the latch"
+        );
+        assert!(replayed.objects_that_dealt_damage.contains(&id));
+        assert!(
+            !replayed.layers_dirty.is_dirty(),
+            "a non-battlefield move schedules no damage-history layer pass"
+        );
+
+        let (pre, id, command) = damage_history_replay_fixture(Zone::Battlefield, Zone::Graveyard);
+        assert!(
+            pre.objects[&id]
+                .dealt_damage_kinds
+                .has(DamageKindFilter::CombatOnly)
+                && pre.objects[&id]
+                    .dealt_damage_kinds
+                    .has(DamageKindFilter::NoncombatOnly),
+            "reach-guard: both latches set before the departure"
+        );
+        let mut replayed = pre.clone();
+        replayed.layers_dirty = LayersDirty::Clean;
+        apply_resolved_zone_change(&mut replayed, &command)
+            .expect("Battlefield -> Graveyard replays");
+        assert_eq!(replayed.objects[&id].zone, Zone::Graveyard, "reach-guard");
+        assert!(replayed.objects[&id].dealt_damage_kinds.is_empty());
+        assert!(!replayed.objects_that_dealt_damage.contains(&id));
+        assert!(replayed.layers_dirty.is_dirty());
+    }
+
+    /// CR 400.7 + CR 120.2a / CR 120.2b: the shared retirement helper clears
+    /// both stores through the object's single latch-reset definition and
+    /// dirties layers; a second call (the live-then-replay arrangement) is a
+    /// no-op that schedules no layer pass.
+    #[test]
+    fn p3_retire_damage_history_clears_both_stores_and_is_idempotent() {
+        use crate::types::game_state::LayersDirty;
+
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(10_441),
+            PlayerId(0),
+            "Damage History Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&id).unwrap();
+            assert!(object.dealt_damage_kinds.record(true));
+            assert!(object.dealt_damage_kinds.record(false));
+        }
+        state.objects_that_dealt_damage.insert(id);
+        state.layers_dirty = LayersDirty::Clean;
+
+        retire_damage_history_on_zone_change(&mut state, id, Zone::Battlefield, Zone::Exile);
+        assert!(state.objects[&id].dealt_damage_kinds.is_empty());
+        assert!(!state.objects_that_dealt_damage.contains(&id));
+        assert!(state.layers_dirty.is_dirty());
+
+        state.layers_dirty = LayersDirty::Clean;
+        retire_damage_history_on_zone_change(&mut state, id, Zone::Battlefield, Zone::Exile);
+        assert!(state.objects[&id].dealt_damage_kinds.is_empty());
+        assert!(
+            !state.layers_dirty.is_dirty(),
+            "a second retirement changes nothing and schedules no layer pass"
         );
     }
 
@@ -8551,6 +9109,96 @@ mod capture_combat_status_tests {
         let no_combat = capture_combat_status(&state, a_player);
         assert!(!no_combat.attacking, "reach guard: combat is gone");
         assert_eq!(no_combat.attack_target, None);
+    }
+
+    /// CR 701.20d: an insertion shifts every card below it to a new library
+    /// position, so a revealed card the instruction did not name is reordered
+    /// too and stops being revealed (it becomes a new object). A card that keeps
+    /// its position was not reordered and keeps its reveal.
+    #[test]
+    fn reorder_within_library_retires_every_revealed_card_whose_position_changed() {
+        let mut state = GameState::new_two_player(42);
+        let first = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "First".to_string(),
+            Zone::Library,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Second".to_string(),
+            Zone::Library,
+        );
+        let third = create_object(
+            &mut state,
+            CardId(13),
+            PlayerId(0),
+            "Third".to_string(),
+            Zone::Library,
+        );
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [first, second, third],
+            "top-to-bottom staging"
+        );
+
+        // A fully revealed library: every card's position is public.
+        state.revealed_cards.extend([first, second, third]);
+        let incarnations: Vec<u64> = [first, second, third]
+            .iter()
+            .map(|id| state.objects[id].incarnation)
+            .collect();
+
+        // The bottom card is inserted on top. `second` is not named by the
+        // instruction but shifts from index 1 to index 2.
+        reorder_within_library(&mut state, PlayerId(0), &[third], Some(0));
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [third, first, second]
+        );
+        for ((id, label), incarnation_before) in [first, second, third]
+            .into_iter()
+            .zip(["First", "Second", "Third"])
+            .zip(incarnations)
+        {
+            assert!(
+                !state.revealed_cards.contains(&id),
+                "{label} changed position and must stop being revealed"
+            );
+            assert!(
+                state.objects[&id].incarnation > incarnation_before,
+                "{label} changed position and must become a new object"
+            );
+        }
+
+        // A singleton that keeps its position is not reordered: Calibrated Blast
+        // bottoming the only card of a 1-card library leaves it where it is.
+        let mut state = GameState::new_two_player(42);
+        let only = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Only".to_string(),
+            Zone::Library,
+        );
+        state.revealed_cards.insert(only);
+        let incarnation_before = state.objects[&only].incarnation;
+        reorder_within_library(&mut state, PlayerId(0), &[only], None);
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            [only]
+        );
+        assert!(
+            state.revealed_cards.contains(&only),
+            "a card that keeps its position is not reordered"
+        );
+        assert_eq!(
+            state.objects[&only].incarnation, incarnation_before,
+            "a card that keeps its position does not become a new object"
+        );
     }
 }
 

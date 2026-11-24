@@ -23,8 +23,8 @@
 # family=consumer  `apply_pending_post_replacement_effect(...)` or
 #                  `dispatch_pending_post_replacement_effect(...)` call
 #
-crates/engine/src/game/combat_damage.rs	fire_combat_prevention_riders	install	1
-crates/engine/src/game/combat_damage.rs	fire_combat_prevention_riders	resolved	1
+crates/engine/src/game/combat_damage.rs	fire_batch_prevention_riders	install	1
+crates/engine/src/game/combat_damage.rs	fire_batch_prevention_riders	resolved	1
 crates/engine/src/game/effects/attach.rs	deliver_attach	consumer	1
 crates/engine/src/game/effects/draw.rs	draw_through_replacement_with_applied	consumer	1
 crates/engine/src/game/effects/life.rs	drain_substitution_continuation	consumer	1
@@ -38,7 +38,8 @@ crates/engine/src/game/engine_replacement.rs	as_enters_roll_chain_mut	resolved	1
 crates/engine/src/game/engine_replacement.rs	as_enters_roll_chain_mut	template	1
 crates/engine/src/game/engine_replacement.rs	dispatch_pending_post_replacement_effect	resolved	1
 crates/engine/src/game/engine_replacement.rs	dispatch_pending_post_replacement_effect	template	1
-crates/engine/src/game/engine_replacement.rs	handle_replacement_choice_inner	consumer	2
+crates/engine/src/game/engine_replacement.rs	finish_replacement_execute_epilogue	consumer	1
+crates/engine/src/game/engine_replacement.rs	handle_replacement_choice_inner	consumer	1
 crates/engine/src/game/engine_replacement.rs	settle_liminal_token_entry_replacements	consumer	1
 crates/engine/src/game/planechase.rs	planeswalk_through_replacements	consumer	1
 crates/engine/src/game/replacement.rs	apply_single_replacement	resolved	1
@@ -46,9 +47,8 @@ crates/engine/src/game/replacement.rs	apply_single_replacement	stash	2
 crates/engine/src/game/replacement.rs	apply_single_replacement	template	5
 crates/engine/src/game/replacement.rs	continue_replacement_impl	template	1
 crates/engine/src/game/replacement.rs	drain_combat_damage_continuation	consumer	1
-crates/engine/src/game/replacement.rs	drain_combat_damage_rider	consumer	1
 crates/engine/src/game/replacement.rs	drain_damage_rider	consumer	1
-crates/engine/src/game/replacement.rs	stash_damage_substitute	stash	3
+crates/engine/src/game/replacement.rs	stash_damage_substitute	stash	2
 crates/engine/src/game/replacement.rs	token_entry_awaits_own_entry_settlement	resolved	1
 crates/engine/src/game/replacement.rs	token_entry_awaits_own_entry_settlement	template	1
 crates/engine/src/game/stack.rs	resolve_top	consumer	1

@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
+import { afterEach, vi } from "vitest";
 
 import common from "./i18n/locales/en/common.json";
 import menu from "./i18n/locales/en/menu.json";
@@ -89,3 +90,9 @@ if (typeof globalThis.localStorage?.setItem !== "function") {
   }
 }
 
+// uiStore's deferred hover clear reads `document`; cancel it before happy-dom tears the environment down.
+// Imported lazily: a setup-file import would load uiStore before test files' `vi.mock` registrations apply.
+afterEach(async () => {
+  const { useUiStore } = await vi.importActual<typeof import("./stores/uiStore")>("./stores/uiStore");
+  useUiStore.getState().dismissPreview();
+});

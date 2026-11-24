@@ -304,7 +304,7 @@ fn run_state_based_action_iterations(
             // CR 704.4 + CR 117.2e: the departure canceled the current pause of a
             // resolution that is still under way. Its remaining state-based
             // actions wait for that resolution to finish; the caller resumes it.
-            if resume == DepartureResume::ParkedZoneChangeTail {
+            if resume == DepartureResume::ResolutionTail {
                 return resume;
             }
         }
@@ -1052,18 +1052,17 @@ fn lethal_damage_candidates(state: &GameState, battlefield_snapshot: &[ObjectId]
         .filter(|id| {
             live_battlefield_object(state, id).is_some_and(|obj| {
                 obj.card_types.core_types.contains(&CoreType::Creature)
-                    && obj.toughness.is_some_and(|t| {
-                        t > 0
-                            && (
-                                // CR 704.5g: Normal lethal damage requires positive toughness and damage >= toughness.
-                                obj.damage_marked >= t as u32
-                                // CR 704.5h + CR 702.2b: any damage dealt by a deathtouch source, marked
-                                // (CR 120.3e) or as -1/-1 counters (CR 120.3d).
-                                || obj.dealt_deathtouch_damage
-                            )
-                    })
-                    // CR 702.12b: Indestructible creatures are not destroyed by lethal damage.
-                    && !obj.has_keyword(&crate::types::keywords::Keyword::Indestructible)
+                    // CR 704.5g + CR 704.5h + CR 702.12b: the lethal-damage authority, on the
+                    // live battlefield. Lethal damage may be measured against power (CR 613.11);
+                    // the toughness > 0 precondition stays toughness-based. Deathtouch damage was
+                    // dealt marked (CR 120.3e) or as -1/-1 counters (CR 120.3d).
+                    && crate::game::lethal_damage::is_destroyed_by_lethal_damage(
+                        state,
+                        obj,
+                        obj.damage_marked,
+                        obj.dealt_deathtouch_damage,
+                        &[],
+                    )
             })
         })
         .collect()
@@ -2465,11 +2464,7 @@ fn check_saga_sacrifice(
                     } if *object_id == *id
                 )
             });
-            if pending_lore_event {
-                return false;
-            }
-
-            true
+            !pending_lore_event
         })
         .collect();
 
@@ -4847,6 +4842,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
@@ -5028,6 +5024,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,

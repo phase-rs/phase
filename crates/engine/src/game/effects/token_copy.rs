@@ -229,10 +229,12 @@ pub fn resolve(
             // sub-ability cannot inherit the parent's targets via chain
             // propagation in `effects::mod.rs::resolve_ability_chain` (issue
             // #323 class).
-            crate::game::effects::resolved_effect_object_ids(
+            // CR 707.2 + CR 608.2h: the copy reads the referent's copiable values.
+            crate::game::effects::resolved_effect_object_ids_with(
                 state,
                 resolution_ability,
                 target_filter,
+                crate::game::targeting::ReferentRead::Inform,
             )
         };
         copy_source_ids
@@ -2864,7 +2866,8 @@ fn apply_token_modifications(
                 }
             }
             // Other layered-only modifications (CopyValues, ChangeController,
-            // etc.) are intentionally skipped — their "stamp at copy time"
+            // ChangeControllerToDesignation, etc.) are intentionally skipped —
+            // their "stamp at copy time"
             // interpretation is ambiguous, and a future except body needing
             // them should route through the BecomeCopy layered path instead.
             _ => {}
@@ -3689,24 +3692,19 @@ mod tests {
         assert_eq!(token.power, Some(4));
         assert_eq!(token.toughness, Some(4));
         assert_eq!(token.color, vec![ManaColor::Black]);
-        assert!(token.card_types.subtypes.contains(&"Zombie".to_string()));
-        assert!(!token.card_types.subtypes.contains(&"Human".to_string()));
-        assert!(!token.card_types.subtypes.contains(&"Soldier".to_string()));
+        assert!(token.card_types.subtypes.iter().any(|i| i == "Zombie"));
+        assert!(!token.card_types.subtypes.iter().any(|i| i == "Human"));
+        assert!(!token.card_types.subtypes.iter().any(|i| i == "Soldier"));
         assert_eq!(token.base_power, Some(4));
         assert_eq!(token.base_toughness, Some(4));
         assert_eq!(token.base_color, vec![ManaColor::Black]);
-        assert!(token
-            .base_card_types
-            .subtypes
-            .contains(&"Zombie".to_string()));
+        assert!(token.base_card_types.subtypes.iter().any(|i| i == "Zombie"));
+        assert!(!token.base_card_types.subtypes.iter().any(|i| i == "Human"));
         assert!(!token
             .base_card_types
             .subtypes
-            .contains(&"Human".to_string()));
-        assert!(!token
-            .base_card_types
-            .subtypes
-            .contains(&"Soldier".to_string()));
+            .iter()
+            .any(|i| i == "Soldier"));
     }
 
     /// CR 205.1a + CR 613.1d + CR 707.9d: Myrkul, Lord of Bones — "create a
@@ -3774,11 +3772,12 @@ mod tests {
             vec![CoreType::Enchantment]
         );
         // CR 205.1a: the "Equipment" artifact subtype is no longer correlated, so it drops.
-        assert!(!token.card_types.subtypes.contains(&"Equipment".to_string()));
+        assert!(!token.card_types.subtypes.iter().any(|i| i == "Equipment"));
         assert!(!token
             .base_card_types
             .subtypes
-            .contains(&"Equipment".to_string()));
+            .iter()
+            .any(|i| i == "Equipment"));
         // Supertypes are unaffected by a card-type replacement.
         assert!(token.card_types.supertypes.contains(&Supertype::Legendary));
         assert!(token
@@ -4101,7 +4100,7 @@ mod tests {
         assert_eq!(token.toughness, Some(1));
         assert_eq!(token.color, vec![ManaColor::Blue]);
         assert!(token.card_types.core_types.contains(&CoreType::Creature));
-        assert!(token.card_types.subtypes.contains(&"Snake".to_string()));
+        assert!(token.card_types.subtypes.iter().any(|i| i == "Snake"));
         assert!(token.is_token);
         assert!(token.zone == Zone::Battlefield);
         assert!(state.layers_dirty.is_dirty());
@@ -6029,7 +6028,7 @@ mod tests {
             token.card_types.core_types
         );
         assert!(
-            token.card_types.subtypes.contains(&"Construct".to_string()),
+            token.card_types.subtypes.iter().any(|i| i == "Construct"),
             "renamed copy token must be a Construct; got {:?}",
             token.card_types.subtypes
         );
@@ -6164,7 +6163,11 @@ mod tests {
         assert_eq!(token.toughness, Some(4));
         assert!(token.card_types.core_types.contains(&CoreType::Artifact));
         assert!(token.card_types.core_types.contains(&CoreType::Creature));
-        assert!(token.card_types.subtypes.contains(&"Construct".to_string()));
+        assert!(token
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Construct"));
     }
 
     /// CR 122.1 + CR 614.1c: AddCounterOnEnter with matching `if_type` places
@@ -6815,7 +6818,7 @@ mod tests {
         );
         // Name and types are still copied.
         assert_eq!(token.name, "Coruscation Mage");
-        assert!(token.card_types.subtypes.contains(&"Wizard".to_string()));
+        assert!(token.card_types.subtypes.iter().any(|i| i == "Wizard"));
         assert!(token.is_token);
         assert!(
             !token

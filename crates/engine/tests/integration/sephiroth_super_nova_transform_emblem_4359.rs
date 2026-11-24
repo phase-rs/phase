@@ -39,7 +39,7 @@
 //!
 //! WHAT THESE TESTS GUARD, AND WHAT THEY DO NOT. Sephiroth is loaded through
 //! `add_real_card` / `shared_card_db`, i.e. from the PRE-PARSED committed
-//! fixture (`tests/fixtures/integration_cards.json.gz`) — not by re-running the
+//! fixture (`tests/fixtures/integration_cards/`) — not by re-running the
 //! parser over the Oracle text. So these tests guard the FIXTURE plus the
 //! runtime path (emblem creation, CR 114 command-zone function, CR 603.3d
 //! per-fire targeting); they cannot fail on a source-only revert of
@@ -111,7 +111,7 @@ fn setup(db: &'static CardDatabase) -> (GameRunner, ObjectId, Vec<ObjectId>, Vec
             .any(|trigger| matches!(trigger.mode, TriggerMode::Transformed)),
         "stale fixture: Sephiroth's back face must carry a CR 701.27e \
          TriggerMode::Transformed trigger for the Super Nova line; \
-         regenerate crates/engine/tests/fixtures/integration_cards.json.gz"
+         regenerate crates/engine/tests/fixtures/integration_cards/"
     );
 
     (runner, seph, fodder, destroys)

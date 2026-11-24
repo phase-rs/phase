@@ -109,7 +109,7 @@ export function BetweenGamesSideboardModal({
   );
 
   const moveCard = useCallback(
-    (name: string, from: "main" | "sideboard") => {
+    ({ name }: DeckEntry, from: "main" | "sideboard") => {
       setDrafts((prev) => {
         if (from === "main") {
           const next = moveOne(prev.main, prev.side, name);

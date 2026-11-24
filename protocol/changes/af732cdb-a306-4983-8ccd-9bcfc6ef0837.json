@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "WaitingFor::WardSacrificeChoice and PendingCostMoveResume::WardSacrificePayment gain an optional trigger_event (the Ward trigger CR 603.7c event) so a shortfalling payment settles unpaid with 'that spell' context; a peer missing the field falls back to ambient trigger context"
+}

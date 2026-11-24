@@ -1773,12 +1773,20 @@ fn temporary_cant_be_blocked_source(
             .find(|effect| effect.id == *id)?;
         (effect.duration == Duration::UntilEndOfTurn
             && crate::game::layers::transient_effect_is_live(state, effect)
-            && matches!(
-                effect.modifications.get(*mod_index),
-                Some(ContinuousModification::AddStaticMode {
-                    mode: StaticMode::CantBeBlocked
-                })
-            ))
+            && {
+                let modification = effect.modifications.get(*mod_index);
+                matches!(
+                    modification,
+                    Some(ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantBeBlocked,
+                    })
+                ) || matches!(
+                    modification,
+                    Some(ContinuousModification::GrantStaticAbility { definition })
+                        if definition.has_legacy_static_mode_shape()
+                            && definition.mode == StaticMode::CantBeBlocked
+                )
+            })
         .then(|| {
             state
                 .objects
@@ -3400,7 +3408,7 @@ fn combat_damage_label(sub_step: CombatDamageSubStep) -> String {
 
 fn stack_entry_targets(state: &GameState, entry: &StackEntry) -> Vec<StackTargetDisplay> {
     let targets = match &entry.kind {
-        StackEntryKind::KeywordAction { action } => keyword_action_targets(action),
+        StackEntryKind::KeywordAction { action } => action.targets(),
         _ => effective_stack_ability(state, entry)
             .ability
             .map(|ability| {
@@ -3421,17 +3429,6 @@ fn stack_entry_targets(state: &GameState, entry: &StackEntry) -> Vec<StackTarget
             target,
         })
         .collect()
-}
-
-fn keyword_action_targets(action: &KeywordAction) -> Vec<TargetRef> {
-    match action {
-        KeywordAction::Equip {
-            target_creature_id, ..
-        } => vec![TargetRef::Object(*target_creature_id)],
-        KeywordAction::Crew { .. }
-        | KeywordAction::Saddle { .. }
-        | KeywordAction::Station { .. } => Vec::new(),
-    }
 }
 
 fn target_label(state: &GameState, target: &TargetRef) -> String {
@@ -3688,10 +3685,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn emblem_printing(collector: &str) -> SharedPrinting {
-        SharedPrinting::new(CardPrinting {
-            set_code: "owner".into(),
-            collector_number: collector.into(),
-        })
+        SharedPrinting::new(CardPrinting::owner("owner", collector))
     }
 
     /// A synthetic emblem row fixture. No printed emblem carries an activated ability or empty
@@ -8231,6 +8225,7 @@ mod tests {
             let obj = state.objects.get_mut(&omniscience).unwrap();
             obj.card_types.core_types.push(CoreType::Enchantment);
             obj.static_definitions = vec![StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::CastFromHandFree {
                     frequency: CastFrequency::Unlimited,
                     origin: CastFreeOrigin::Hand,
@@ -8251,6 +8246,7 @@ mod tests {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }]
             .into();
         }

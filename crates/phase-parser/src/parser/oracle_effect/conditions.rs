@@ -11,7 +11,7 @@ use nom::Parser;
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use super::super::oracle_nom::condition as nom_condition;
 use super::super::oracle_nom::condition::{
-    inject_controller_you, parse_cast_using_teamwork_phrase,
+    inject_controller_you, parse_cast_using_teamwork_phrase, parse_pair_attack_predicate,
     parse_scoped_player_opponent_and_has_condition, parse_spell_target_superlative_suffix,
     parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
     DamagedThisWayRecipient,
@@ -31,7 +31,9 @@ use super::sequence::parse_dig_from_among;
 use super::subject;
 use super::{parse_effect_clause_inner, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::ast::{parsed_clause, ContinuationAst};
-use crate::parser::oracle_ir::context::{SpellAnaphorBinding, TriggerZoneChangeProvenance};
+use crate::parser::oracle_ir::context::{
+    SpellAnaphorBinding, TriggerConditionScope, TriggerZoneChangeProvenance,
+};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
@@ -167,6 +169,15 @@ fn type_filter_references_subtype(filter: &TypeFilter) -> bool {
 pub(crate) fn split_leading_conditional(text: &str) -> Option<(String, String)> {
     let lower = text.to_lowercase();
     let prefix_rest = parse_leading_conditional_prefix(&lower)?;
+    if nom_condition::parse_named_cycling_head(prefix_rest).is_ok() {
+        let (comma, _) = nom_condition::parse_named_game_cycling_condition(prefix_rest).ok()?;
+        let comma = TextPair::new(text, &lower).original_remainder(comma)?;
+        let guard = text.strip_suffix(comma)?; // allow-noncombinator: split at the TextPair-mapped comma
+        let (body, _) = tag::<_, _, OracleError<'_>>(",").parse(comma).ok()?;
+        let body = body.trim();
+        return (!body.is_empty()).then(|| (guard.trim().to_owned(), body.to_owned()));
+    }
+
     let condition_start_idx = lower.len() - prefix_rest.len();
 
     let mut paren_depth = 0u32;
@@ -2093,7 +2104,7 @@ fn parse_its_a_card_type_gate_body<'a>(
         }
     }
     let type_word = type_str.rsplit(' ').next().unwrap_or(type_str);
-    let capitalized = format!("{}{}", &type_word[..1].to_uppercase(), &type_word[1..]);
+    let capitalized = format!("{}{}", type_word[..1].to_uppercase(), &type_word[1..]);
     // CR 608.2c: "permanent" is not a CoreType (it spans CR 110.1's permanent card
     // types). Build the condition via the existing parse_type_phrase_folding building block —
     // "permanent card" → TargetFilter::Typed(TypeFilter::Permanent) — and gate on it
@@ -3714,7 +3725,7 @@ pub(super) fn try_parse_type_setting(text: &str) -> Option<AbilityDefinition> {
         .ok()?;
 
     let type_name = type_name.trim();
-    let capitalized = format!("{}{}", &type_name[..1].to_uppercase(), &type_name[1..]);
+    let capitalized = format!("{}{}", type_name[..1].to_uppercase(), &type_name[1..]);
     CoreType::from_str(&capitalized).ok()?;
 
     let mut remove_types = Vec::new();
@@ -5319,16 +5330,29 @@ pub(super) fn strip_routed_suffix_conditional(
         return (general(cond), effect_text);
     }
 
-    if let Some((condition, route)) =
-        parse_triggering_spell_targets_filter_ability_condition(condition_core)
-            .map(|condition| (condition, LeadingConditionRoute::General))
-            .or_else(|| try_routed_nom_condition_as_ability_condition(condition_core, ctx))
-            .or_else(|| {
-                parse_condition_text_in(condition_core, ctx)
-                    .or_else(|| parse_control_count_as_ability_condition(condition_core))
-                    .map(|condition| (condition, LeadingConditionRoute::General))
-            })
+    // CR 603.7c + CR 603.7e + CR 400.7: a trailing condition on a delayed
+    // payload is checked against the delayed object's source and zone at the
+    // delayed trigger's fire/resolution boundary. The temporal suffix is the
+    // existing parser seam that proves this clause is such a payload; use the
+    // typed scope only while lowering its condition so ordinary trigger-body
+    // source-zone guards remain explicit gaps.
+    let previous_trigger_condition_scope = ctx.trigger_condition_scope;
+    if super::lower::strip_temporal_suffix(effect_prefix)
+        .1
+        .is_some()
     {
+        ctx.trigger_condition_scope = TriggerConditionScope::Delayed;
+    }
+    let condition_result = parse_triggering_spell_targets_filter_ability_condition(condition_core)
+        .map(|condition| (condition, LeadingConditionRoute::General))
+        .or_else(|| try_routed_nom_condition_as_ability_condition(condition_core, ctx))
+        .or_else(|| {
+            parse_condition_text_in(condition_core, ctx)
+                .or_else(|| parse_control_count_as_ability_condition(condition_core))
+                .map(|condition| (condition, LeadingConditionRoute::General))
+        });
+    ctx.trigger_condition_scope = previous_trigger_condition_scope;
+    if let Some((condition, route)) = condition_result {
         // CR 608.2c + CR 109.2: in an " or if " chain on a targeting effect, a
         // bare "it's a <type>" disjunct describes the effect's target, not a
         // revealed card (`RevealedHasCardType` would never see the target).
@@ -6101,7 +6125,9 @@ pub(super) fn reads_cast_time_snapshot(condition: &AbilityCondition) -> bool {
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::SourceLacksKeyword { .. }
-        | AbilityCondition::ScopedPlayerMatches { .. } => false,
+        | AbilityCondition::ScopedPlayerMatches { .. }
+        // Reads the turn-history attack ledger, not the spell's cast snapshot.
+        | AbilityCondition::PlayerAttackedPlayer { .. } => false,
     }
 }
 
@@ -6901,7 +6927,7 @@ fn build_instead_def(
         &effect_text,
         kind,
         parent_target_available,
-        ctx.effective_spell_anaphor_binding(),
+        ctx,
     );
     let mut result = super::instead_override_definition(
         instead_def,
@@ -7345,6 +7371,45 @@ fn opponent_poison_at_least_as_quantity_check(count: u32) -> AbilityCondition {
     }
 }
 
+/// CR 508.6 + CR 608.2c: endpoint map for the retrospective player-pair
+/// attack test, shared by the positive and negated bridge arms below. Each
+/// endpoint maps only where meaning is preserved exactly (see the arm doc);
+/// unmapped endpoints fail the whole condition to `None` so coverage stays
+/// honest instead of silently rebinding.
+fn player_attack_endpoint_to_scope(scope: &ControllerRef) -> Option<PlayerScope> {
+    match scope {
+        ControllerRef::You => Some(PlayerScope::Controller),
+        ControllerRef::TargetPlayer
+        | ControllerRef::TargetOpponent
+        | ControllerRef::ChosenPlayer { .. } => Some(PlayerScope::Target),
+        ControllerRef::SourceChosenPlayer => Some(PlayerScope::SourceChosenPlayer),
+        ControllerRef::DefendingPlayer => Some(PlayerScope::DefendingPlayer),
+        ControllerRef::ScopedPlayer => Some(PlayerScope::ScopedPlayer),
+        // No exact mapping: `Opponent` needs an aggregate the source lacks,
+        // the target/event-relative refs name no single endpoint, and
+        // `DeclaredPlayer`/`TriggeringPlayer`/`EnchantedPlayer`/`ActivePlayer`
+        // have no `PlayerScope` counterpart. Each fails the condition to
+        // `None` (listed explicitly so a new `ControllerRef` breaks the
+        // build here instead of silently rebinding).
+        //
+        // CR 508.6 + CR 608.2c (Matt M2): `SpecificPlayer` is refused here
+        // too, even though the names line up. `PlayerScope::SpecificPlayer`
+        // is duration-timing-only — never produced by the parser, carrying
+        // no value reading — and the condition authority rejects it before
+        // evaluation, so mapping it would bridge a matching ledger entry to
+        // a condition that still yields false (or true under `Not`).
+        ControllerRef::Opponent
+        | ControllerRef::ParentTargetController
+        | ControllerRef::EventTargetController
+        | ControllerRef::ParentTargetOwner
+        | ControllerRef::TriggeringPlayer
+        | ControllerRef::EnchantedPlayer
+        | ControllerRef::ActivePlayer
+        | ControllerRef::SpecificPlayer { .. }
+        | ControllerRef::DeclaredPlayer { .. } => None,
+    }
+}
+
 /// CR 122.1f + CR 109.5: Bridge `StaticCondition::PlayerIsPoisoned` to a
 /// `QuantityCheck` on the specific player's poison counter total (>= 1).
 /// The player scope carries the subject axis. Only scopes supported by
@@ -7422,6 +7487,51 @@ pub(crate) fn static_condition_to_ability_condition(
             Some(AbilityCondition::WasStartingPlayer {
                 controller: controller.clone(),
             })
+        }
+        // CR 508.6 + CR 608.2c: player-pair attack tests bridge
+        // endpoint-wise. Each endpoint maps only where meaning is
+        // preserved exactly: `You` reads the resolution controller;
+        // declared-target and chosen endpoints read the first
+        // `TargetRef::Player` (the V1 creation-time stamp carries the
+        // chosen player); `SourceChosenPlayer`, `DefendingPlayer`, and
+        // `ScopedPlayer` are scalar-identical on both axes. Aggregates
+        // (`Opponent`), event- and parent-relative anchors,
+        // `ActivePlayer`/`TriggeringPlayer`/`EnchantedPlayer`, and
+        // `SpecificPlayer` (Matt M2: its `PlayerScope` namesake is
+        // duration-timing-only and the condition authority rejects it,
+        // so mapping it would yield false despite a matching ledger)
+        // have no scalar counterpart -- lowering them would silently
+        // rebind (cf. `IsMonarch` below), so the whole condition stays
+        // unrepresented and coverage stays honest.
+        StaticCondition::PlayerAttackedPlayer { attacker, defender } => {
+            // CR 603.7a + CR 109.4 (Matt R7-F5): a `ChosenPlayer` endpoint
+            // resolves against the target delayed-trigger creation stamps —
+            // and ONLY there. Outside the matching stamped body (an immediate
+            // Choose→conditional has no stamp; ordinary choice completion
+            // writes only `chosen_players`) the `Target` mapping below would
+            // consult no player or an unrelated declared target, so the
+            // whole condition stays unrepresented and coverage stays honest.
+            // The index must match the stamp exactly: creation stamps only
+            // the temporal binding's player.
+            for endpoint in [attacker, defender] {
+                if let ControllerRef::ChosenPlayer { index } = endpoint {
+                    if ctx.stamped_delayed_chosen_player != Some(*index) {
+                        return None;
+                    }
+                }
+            }
+            match (
+                player_attack_endpoint_to_scope(attacker),
+                player_attack_endpoint_to_scope(defender),
+            ) {
+                (Some(attacker), Some(defender)) => {
+                    Some(AbilityCondition::PlayerAttackedPlayer {
+                        attacker,
+                        defender,
+                    })
+                }
+                _ => None,
+            }
         }
         // CR 702.185c: "a spell was warped this turn" — 1:1 bridge (same `variant`).
         StaticCondition::SpellCastWithVariantThisTurn { variant } => {
@@ -7754,7 +7864,7 @@ pub(crate) fn static_condition_to_ability_condition(
         // Layer-6 gate (the conditional hexproof grant) with no effect-resolution
         // (`AbilityCondition`) equivalent. `Not(SourceHasDealtDamage)` is handled by
         // the inner Not sub-match's `_ => None` arm above.
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         // CR 110.5b + CR 611.2b: `IsTapped { scope }` is a duration-only
         // target-relative tap condition (Zygon Infiltrator's copy duration), not
@@ -7782,6 +7892,114 @@ pub(crate) fn static_condition_to_ability_condition(
         // so there is no attacker whose latched record could answer. The anchor
         // is structurally unavailable here, not merely unused.
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::None => None,
+    }
+}
+
+/// CR 603.4 + CR 603.7c + CR 603.7e + CR 400.7: a delayed ability's
+/// source-zone intervening-if is checked when the delayed object is put on the
+/// stack and again as it resolves, against the source incarnation that created
+/// it. Keep this bridge scoped to delayed-trigger bodies; ordinary effect
+/// conditions must remain strict gaps when no effect-time equivalent exists.
+fn static_condition_to_delayed_ability_condition(
+    sc: &StaticCondition,
+    ctx: &mut ParseContext,
+) -> Option<AbilityCondition> {
+    if !matches!(ctx.trigger_condition_scope, TriggerConditionScope::Delayed) {
+        return None;
+    }
+
+    match sc {
+        StaticCondition::SourceInZone { zone } => Some(AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::InZone { zone: *zone }],
+                ..Default::default()
+            }),
+        }),
+        StaticCondition::Not { condition } => {
+            static_condition_to_delayed_ability_condition(condition, ctx).map(|condition| {
+                AbilityCondition::Not {
+                    condition: Box::new(condition),
+                }
+            })
+        }
+        StaticCondition::And { conditions } => Some(AbilityCondition::And {
+            conditions: conditions
+                .iter()
+                .map(|condition| static_condition_to_delayed_ability_condition(condition, ctx))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        StaticCondition::Or { conditions } => Some(AbilityCondition::Or {
+            conditions: conditions
+                .iter()
+                .map(|condition| static_condition_to_delayed_ability_condition(condition, ctx))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        // Only source-zone leaves and Boolean composition are admitted here.
+        // Every other leaf is explicit so a future StaticCondition variant
+        // forces a deliberate decision about delayed source-zone semantics.
+        StaticCondition::DevotionGE { .. }
+        | StaticCondition::IsPresent { .. }
+        | StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::QuantityComparison { .. }
+        | StaticCondition::QuantityQuality { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsMonarch { .. }
+        | StaticCondition::HasBoon { .. }
+        | StaticCondition::IsInitiative
+        | StaticCondition::NoMonarch
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::PlayerIsPoisoned { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::Unrecognized { .. }
+        | StaticCondition::DuringYourTurn
+        | StaticCondition::FirstCombatPhaseOfTurn
+        | StaticCondition::DuringOpponentsTurn
+        | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::SourceHasDealtDamage { .. }
+        | StaticCondition::SourceExertedThisTurn
+        | StaticCondition::WasCast { .. }
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::ControlsCommander { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::IsTapped { .. }
+        | StaticCondition::SourceIsFaceUp
+        | StaticCondition::SourceIsSaddled
+        | StaticCondition::SourceControllerEquals { .. }
+        | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsEnchanted
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceIsHarnessed
+        | StaticCondition::SourceAttachedToCreature
+        | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::TopOfLibraryMatches { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => None,
     }
 }
@@ -7880,6 +8098,29 @@ pub fn ability_condition_to_static_condition(ac: &AbilityCondition) -> Option<St
                 .collect::<Option<Vec<_>>>()?,
         }),
 
+        // CR 603.7c + CR 603.7e + CR 400.7: invert only the exact source-zone
+        // filter emitted for a delayed payload. A typed filter with any
+        // additional type, controller, or property axis remains an ordinary
+        // `SourceMatchesFilter` and is intentionally not generalized into
+        // `SourceInZone`.
+        AbilityCondition::SourceMatchesFilter {
+            filter:
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    properties,
+                }),
+        } if type_filters.is_empty()
+            && controller.is_none()
+            && properties.len() == 1
+            && matches!(properties.first(), Some(FilterProp::InZone { .. })) =>
+        {
+            let [FilterProp::InZone { zone }] = properties.as_slice() else {
+                unreachable!("guarded by the exact single InZone property check")
+            };
+            Some(StaticCondition::SourceInZone { zone: *zone })
+        }
+
         // Casting-context conditions — read `SpellContext` / cast history at
         // resolution time; no continuous-evaluation (`StaticCondition`)
         // equivalent.
@@ -7920,6 +8161,9 @@ pub fn ability_condition_to_static_condition(ac: &AbilityCondition) -> Option<St
         | AbilityCondition::CostPaidObjectMatchesFilter { .. }
         | AbilityCondition::ConditionInstead { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
+        // CR 508.6: retrospective player-pair test reads resolved targets;
+        // a resolution-flow guard with no continuous-effect form.
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::ScopedPlayerMatches { .. } => None,
         AbilityCondition::DiscardedCardMatchesFilter { .. } => None,
 
@@ -9144,11 +9388,42 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
         }
     }
 
+    // CR 508.6 + CR 608.2c: "they <attack-predicate>" with a
+    // Choose(Player|Opponent) antecedent — "they" is the chosen player
+    // (Faramir's verbatim consequent). The pronoun binds per-context, so the
+    // dispatcher matches it here under the chain's `relative_player_scope`
+    // gate — but the attack SHAPE is not re-matched as complete sentences:
+    // the shared nom predicate (`parse_pair_attack_predicate`, polarity via
+    // `parse_didnt` plus endpoint) parses it, and the contextual index binds
+    // below before the shared bridge maps it to the stamped target.
+    // Full-consumption match only; every other scope falls through to the
+    // generic path unchanged (nom deliberately has no "they" subject, so an
+    // early scopeless pass keeps failing here exactly as before, preserving
+    // the chain's scope-enrichment passes).
+    if let Some(ControllerRef::ChosenPlayer { index }) = ctx.relative_player_scope.as_ref() {
+        let mut they_attacked_you = all_consuming((
+            tag::<_, _, OracleError<'_>>("they"),
+            parse_pair_attack_predicate,
+        ));
+        if they_attacked_you.parse(lower.as_str()).is_ok() {
+            let static_cond = StaticCondition::Not {
+                condition: Box::new(StaticCondition::PlayerAttackedPlayer {
+                    attacker: ControllerRef::ChosenPlayer { index: *index },
+                    defender: ControllerRef::You,
+                }),
+            };
+            if let Some(bridged) = static_condition_to_ability_condition(&static_cond, ctx) {
+                return Some(bridged);
+            }
+        }
+    }
+
     let (rest, condition) = parse_inner_condition(&lower).ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
-    static_condition_to_ability_condition(&condition, ctx)
+    static_condition_to_delayed_ability_condition(&condition, ctx)
+        .or_else(|| static_condition_to_ability_condition(&condition, ctx))
 }
 
 /// CR 109.4 + CR 109.5 + CR 608.2c: Consume the anaphoric control predicate
@@ -11021,6 +11296,181 @@ mod tests {
             strip_suffix_conditional(original, &mut ParseContext::default());
         assert_eq!(condition, None);
         assert_eq!(remainder, original);
+    }
+
+    /// CR 603.4 + CR 603.7c + CR 603.7e + CR 400.7: the source-zone bridge is
+    /// deliberately exact and scoped to delayed bodies. The delayed intervening-if
+    /// path recovers the trigger-layer zone condition while ordinary effect
+    /// lowering remains an explicit gap. Recursive negation remains intact.
+    #[test]
+    fn source_in_zone_bridge_inverse_and_delayed_trigger_shape() {
+        for zone in [
+            Zone::Battlefield,
+            Zone::Graveyard,
+            Zone::Exile,
+            Zone::Hand,
+            Zone::Library,
+            Zone::Command,
+        ] {
+            let static_condition = StaticCondition::SourceInZone { zone };
+            let expected_filter = TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::InZone { zone }],
+                ..Default::default()
+            });
+            let ability_condition = AbilityCondition::SourceMatchesFilter {
+                filter: expected_filter.clone(),
+            };
+            assert_eq!(
+                static_condition_to_ability_condition(
+                    &static_condition,
+                    &mut ParseContext::default()
+                ),
+                None,
+                "ordinary source-zone guards remain explicit gaps for {zone:?}"
+            );
+            let mut delayed_ctx = ParseContext {
+                trigger_condition_scope: TriggerConditionScope::Delayed,
+                ..Default::default()
+            };
+            assert_eq!(
+                static_condition_to_delayed_ability_condition(&static_condition, &mut delayed_ctx),
+                Some(ability_condition.clone()),
+                "delayed source-zone bridge for {zone:?}"
+            );
+            assert_eq!(
+                ability_condition_to_static_condition(&ability_condition),
+                Some(static_condition.clone()),
+                "exact source-zone inverse for {zone:?}"
+            );
+            assert_eq!(
+                crate::parser::oracle_trigger::static_condition_to_trigger_condition(
+                    &static_condition
+                ),
+                Some(crate::types::ability::TriggerCondition::SourceInZone { zone }),
+                "delayed_intervening_if must recover TriggerCondition::SourceInZone for {zone:?}"
+            );
+
+            let negated_static = StaticCondition::Not {
+                condition: Box::new(static_condition.clone()),
+            };
+            let negated_ability = AbilityCondition::Not {
+                condition: Box::new(ability_condition.clone()),
+            };
+            assert_eq!(
+                static_condition_to_ability_condition(
+                    &negated_static,
+                    &mut ParseContext::default()
+                ),
+                None,
+                "ordinary negated source-zone guards remain explicit gaps for {zone:?}"
+            );
+            let mut delayed_ctx = ParseContext {
+                trigger_condition_scope: TriggerConditionScope::Delayed,
+                ..Default::default()
+            };
+            assert_eq!(
+                static_condition_to_delayed_ability_condition(&negated_static, &mut delayed_ctx),
+                Some(negated_ability.clone()),
+                "delayed negated source-zone bridge for {zone:?}"
+            );
+            assert_eq!(
+                ability_condition_to_static_condition(&negated_ability),
+                Some(negated_static.clone()),
+                "negated source-zone inverse for {zone:?}"
+            );
+            assert_eq!(
+                crate::parser::oracle_trigger::static_condition_to_trigger_condition(
+                    &negated_static
+                ),
+                Some(crate::types::ability::TriggerCondition::Not {
+                    condition: Box::new(crate::types::ability::TriggerCondition::SourceInZone {
+                        zone,
+                    }),
+                }),
+                "negated delayed intervening-if trigger for {zone:?}"
+            );
+        }
+
+        let broader = AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    },
+                    FilterProp::Token,
+                ],
+                ..Default::default()
+            }),
+        };
+        assert_eq!(
+            ability_condition_to_static_condition(&broader),
+            None,
+            "an extra property must not generalize through SourceInZone"
+        );
+    }
+
+    /// CR 603.7c + CR 603.7e + CR 400.7: delayed source-zone lowering is
+    /// fail-closed when a recursive boolean also contains a static-only
+    /// predicate with no effect-resolution equivalent.
+    #[test]
+    fn delayed_source_zone_mixed_condition_fails_closed() {
+        let source_in_zone = StaticCondition::SourceInZone {
+            zone: Zone::Battlefield,
+        };
+        let static_only = StaticCondition::SourceEnteredThisTurn;
+        let mut delayed_ctx = ParseContext {
+            trigger_condition_scope: TriggerConditionScope::Delayed,
+            ..Default::default()
+        };
+
+        let source_filter = AbilityCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }],
+                ..Default::default()
+            }),
+        };
+        let nested_source_zone = StaticCondition::Or {
+            conditions: vec![
+                source_in_zone.clone(),
+                StaticCondition::Not {
+                    condition: Box::new(source_in_zone.clone()),
+                },
+            ],
+        };
+        assert_eq!(
+            static_condition_to_delayed_ability_condition(&nested_source_zone, &mut delayed_ctx),
+            Some(AbilityCondition::Or {
+                conditions: vec![
+                    source_filter.clone(),
+                    AbilityCondition::Not {
+                        condition: Box::new(source_filter.clone()),
+                    },
+                ],
+            }),
+            "delayed source-zone boolean trees should recurse through Not/Or"
+        );
+
+        for condition in [
+            StaticCondition::And {
+                conditions: vec![source_in_zone.clone(), static_only.clone()],
+            },
+            StaticCondition::Or {
+                conditions: vec![source_in_zone.clone(), static_only.clone()],
+            },
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::And {
+                    conditions: vec![source_in_zone.clone(), static_only.clone()],
+                }),
+            },
+        ] {
+            assert_eq!(
+                static_condition_to_delayed_ability_condition(&condition, &mut delayed_ctx),
+                None,
+                "mixed delayed source-zone conditions must not partially lower: {condition:?}"
+            );
+        }
     }
 
     #[test]
@@ -18012,6 +18462,79 @@ mod tests {
         assert_eq!(colors, ManaColor::ALL.to_vec());
     }
 
+    /// CR 508.6 + CR 608.2c (Matt M2): the `SpecificPlayer` attack endpoint
+    /// is refused by the initial-verb bridge on either side.
+    /// `PlayerScope::SpecificPlayer` is duration-timing-only and the
+    /// condition authority rejects it, so mapping the endpoint would bridge
+    /// a matching ledger entry to a condition that still yields false (or
+    /// true under `Not`). CR 603.7a + CR 109.4 (Matt R7-F5): the
+    /// `ChosenPlayer` endpoint bridges only with the matching stamped
+    /// delayed context (creation stamps the temporal binding's player);
+    /// without it — or with a mismatched index — it stays unrepresented.
+    /// The declared-target positive still bridges to `Target`/`Controller`;
+    /// evaluation cells live in `player_attacked_player_predicate_matrix`.
+    #[test]
+    fn initial_verb_bridge_refuses_specific_player_attack_endpoint() {
+        use crate::types::player::PlayerId;
+
+        let p1 = PlayerId(1);
+        for (attacker, defender) in [
+            (ControllerRef::SpecificPlayer { id: p1 }, ControllerRef::You),
+            (ControllerRef::You, ControllerRef::SpecificPlayer { id: p1 }),
+        ] {
+            let sc = StaticCondition::PlayerAttackedPlayer { attacker, defender };
+            assert_eq!(
+                static_condition_to_ability_condition(&sc, &mut ParseContext::default()),
+                None
+            );
+        }
+        // CR 603.7a + CR 109.4 (Matt R7-F5): a `ChosenPlayer` endpoint
+        // resolves only against the target delayed-trigger creation stamps,
+        // so without the stamped context the bridge refuses it (the
+        // immediate Choose→conditional misfire). A non-matching index is
+        // refused too — creation stamps only the temporal binding's player.
+        // With the matching stamp the mapping keeps working (Faramir's path).
+        let sc = StaticCondition::PlayerAttackedPlayer {
+            attacker: ControllerRef::ChosenPlayer { index: 0 },
+            defender: ControllerRef::You,
+        };
+        assert_eq!(
+            static_condition_to_ability_condition(&sc, &mut ParseContext::default()),
+            None,
+            "a ChosenPlayer attack endpoint without the stamped delayed \
+             context must stay unrepresented, not silently bind Target"
+        );
+        let mismatched = StaticCondition::PlayerAttackedPlayer {
+            attacker: ControllerRef::ChosenPlayer { index: 1 },
+            defender: ControllerRef::You,
+        };
+        assert_eq!(
+            static_condition_to_ability_condition(
+                &mismatched,
+                &mut ParseContext {
+                    stamped_delayed_chosen_player: Some(0),
+                    ..ParseContext::default()
+                },
+            ),
+            None,
+            "a non-matching stamp index must also stay unrepresented"
+        );
+        assert_eq!(
+            static_condition_to_ability_condition(
+                &sc,
+                &mut ParseContext {
+                    stamped_delayed_chosen_player: Some(0),
+                    ..ParseContext::default()
+                },
+            ),
+            Some(AbilityCondition::PlayerAttackedPlayer {
+                attacker: PlayerScope::Target,
+                defender: PlayerScope::Controller,
+            }),
+            "a ChosenPlayer attack endpoint with the matching stamp must keep bridging"
+        );
+    }
+
     /// CR 614.1c + CR 614.12 (V-L6): only a single-core-type, unqualified,
     /// affirmative "if it's a <type>" gate converts to the entry-this-way gate.
     #[test]
@@ -18708,5 +19231,51 @@ mod referent_owner_tests {
             writers[0].contains("fn referent_condition"), // allow-noncombinator: source-reading test instrument, not Oracle parsing
             "the single writer must be referent_condition, found {writers:?}"
         );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn named_cycling_split_commits_at_the_first_structural_suffix() {
+    use crate::types::ability::CyclingHistoryWindow;
+
+    // No printed card has these adversarial shapes. Yidaro, Wandering Monster
+    // is the nearest printed case.
+    let body = "counter nine or more times this game, then draw a card.";
+    for name in ["Yidaro, Wandering Monster", "Yidaro,   Wandering Monster"] {
+        let guard = format!("If you've cycled a card named {name} four or more times this game");
+        let text = format!("{guard},  {body}  ");
+        let (actual_guard, actual_body) =
+            split_leading_conditional(&text).expect("named game guard");
+        assert_eq!(actual_guard, guard);
+        assert_eq!(actual_body, body);
+        let lower = actual_guard.to_lowercase();
+        let (rest, condition) =
+            nom_condition::parse_inner_condition(parse_leading_conditional_prefix(&lower).unwrap())
+                .unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(
+            condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CardsCycled {
+                        scope: crate::types::ability::CountScope::Controller,
+                        window: CyclingHistoryWindow::ThisGame,
+                        name: Some("yidaro, wandering monster".into()),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            }
+        );
+    }
+    for suffix in [
+        "four or more times this turn",
+        "four or fewer times this game",
+        "four or more times this game during your turn",
+    ] {
+        let text =
+            format!("If you've cycled a card named Yidaro, Wandering Monster {suffix}, {body}");
+        assert_eq!(split_leading_conditional(&text), None, "{text}");
     }
 }

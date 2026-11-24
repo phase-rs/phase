@@ -1470,6 +1470,25 @@ pub fn choose_entry_attack_target_or_enter(
     }
 }
 
+/// CR 509.1g + CR 509.1h: Record both directions of a block edge.
+/// The caller handles the attacker's sticky blocked flag and any events.
+pub(crate) fn record_block_edge(
+    combat: &mut CombatState,
+    blocker_id: ObjectId,
+    attacker_id: ObjectId,
+) {
+    combat
+        .blocker_to_attacker
+        .entry(blocker_id)
+        .or_default()
+        .push(attacker_id);
+    combat
+        .blocker_assignments
+        .entry(attacker_id)
+        .or_default()
+        .push(blocker_id);
+}
+
 /// CR 509.4 + CR 506.3e + CR 509.1g + CR 509.1h: Put a permanent onto the
 /// battlefield as a blocking creature for `attacker_id`. Used by effects that
 /// create or place a creature already "blocking that creature" (Mirror Match's
@@ -1526,16 +1545,7 @@ pub fn place_blocking(
     let expected_attacker_blocked = info.blocked;
     info.blocked = true;
     // CR 509.1g: the creature becomes a blocking creature for the chosen attacker.
-    combat
-        .blocker_to_attacker
-        .entry(blocker_id)
-        .or_default()
-        .push(attacker_id);
-    combat
-        .blocker_assignments
-        .entry(attacker_id)
-        .or_default()
-        .push(blocker_id);
+    record_block_edge(combat, blocker_id, attacker_id);
     // CR 509.4: put onto the battlefield blocking, this creature is "blocking" but
     // never "blocked", so neither the per-turn blocked set nor the block history
     // records it. Declaration is the only writer of those ledgers.
@@ -1732,16 +1742,7 @@ pub fn apply_resolved_combat_membership(
             // CR 509.1h then CR 509.1g: the same writes the live authority
             // performed, in the same order.
             info.blocked = true;
-            combat
-                .blocker_to_attacker
-                .entry(object_id)
-                .or_default()
-                .push(*resulting_attacker);
-            combat
-                .blocker_assignments
-                .entry(*resulting_attacker)
-                .or_default()
-                .push(object_id);
+            record_block_edge(combat, object_id, *resulting_attacker);
         }
         ResolvedCombatMembershipEdit::MarkBlocked => {
             let combat = state
@@ -4939,7 +4940,7 @@ impl ResolvedRequiredDefender {
     fn members(&self) -> std::iter::Copied<std::slice::Iter<'_, AttackTarget>> {
         match self {
             Self::Fixed(defender) => std::slice::from_ref(defender).iter().copied(),
-            Self::Matching(defenders) => defenders.as_slice().iter().copied(),
+            Self::Matching(defenders) => defenders.iter().copied(),
         }
     }
 
@@ -5786,6 +5787,11 @@ fn attack_passes_temporary_prohibition(
                 crate::types::ability::ProhibitedActivity::Attack {
                     defended,
                     protected_player,
+                    // MECHANICAL: the scope-selection field is parser→resolver
+                    // metadata consumed solely by `add_restriction` at creation;
+                    // enforcement reads only the snapshotted player. No behavior
+                    // change.
+                    protected_scope: _,
                 },
             ..
         } = restriction
@@ -7265,6 +7271,30 @@ pub(super) fn commit_attack_declaration(
         .iter()
         .map(|a| a.defending_player)
         .collect();
+    // CR 508.6: Record DIRECT player attacks into the uncollapsed ledger —
+    // `AttackTarget::Player(p)` entries only, keyed by each creature's
+    // controller (the CR 508.6 "first player"). Planeswalker/battle targets
+    // record nothing here (no CR 508.5 collapse), so retrospective
+    // "attacked you" predicates read exactly what the Faramir ruling
+    // (2023-06-16) requires. Mirrors the collapsed sibling populated from
+    // `players_attacked_this_step` via `record_attackers_declared` below.
+    let direct_player_attacks: Vec<(PlayerId, PlayerId)> = attacks
+        .iter()
+        .filter_map(|(object_id, target)| match target {
+            AttackTarget::Player(defender) => state
+                .objects
+                .get(object_id)
+                .map(|obj| (obj.controller, *defender)),
+            _ => None,
+        })
+        .collect();
+    for (attacker, defender) in direct_player_attacks {
+        state
+            .attacked_players_directly_this_turn
+            .entry(attacker)
+            .or_default()
+            .insert(defender);
+    }
     // CR 508.1k + CR 506.4 + CR 613.1f: A chosen creature becomes attacking and
     // stays attacking until removed from combat or the combat phase ends. Marking
     // layers dirty forces Layer 6 ability-adding effects (CR 613.1f) with
@@ -12161,7 +12191,7 @@ mod tests {
                     }
                     ',' if depth == 1 => {
                         args.push(current.trim().to_string());
-                        current = String::new();
+                        current.clear();
                     }
                     _ => current.push(c),
                 }

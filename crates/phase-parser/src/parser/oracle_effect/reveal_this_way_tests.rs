@@ -296,7 +296,7 @@ fn zone_change_reflexive_with_a_where_x_referent_lowers_to_the_creation_gate() {
         .unwrap()
     );
     assert_eq!(
-        pumps[0]["power"]["value"]["qty"]["scope"]["type"], "Demonstrative",
+        pumps[0]["power"]["value"]["inner"]["qty"]["scope"]["type"], "Demonstrative",
         "the where-X reads the exiled card"
     );
 }
@@ -321,7 +321,7 @@ fn where_x_definition_referent_does_not_rebind_an_explicit_recipient() {
         .unwrap()
     );
     assert_eq!(
-        pumps[0]["power"]["value"]["qty"]["scope"]["type"], "Demonstrative",
+        pumps[0]["power"]["value"]["inner"]["qty"]["scope"]["type"], "Demonstrative",
         "the where-X still binds the exiled card"
     );
 }

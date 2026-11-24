@@ -3396,9 +3396,9 @@ mod tests {
         let view = filter_for_player(&session, 0);
         assert!(!view.seats[0].is_bot);
         assert!(view.seats[0].connected);
-        for i in 1..8 {
-            assert!(view.seats[i].is_bot);
-            assert!(view.seats[i].connected); // bots always connected
+        for seat in view.seats.iter().take(8).skip(1) {
+            assert!(seat.is_bot);
+            assert!(seat.connected); // bots always connected
         }
     }
 

@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 
 import type { ScryfallCard } from "../../services/scryfall";
-import type { DeckEntry } from "../../services/deckParser";
+import { countDeckEntriesByName, type DeckEntry } from "../../services/deckParser";
 import type { DeckSizeRule } from "../../adapter/types";
 import {
   getCombinedColorIdentity,
@@ -55,12 +55,12 @@ function commandersNotInDeck(
 
 function hasCommanderCopyAvailable(
   composition: CommanderDeckComposition,
-  entry: DeckEntry,
+  count: number,
   selectedCount: number,
 ): boolean {
   switch (composition) {
     case "commanders-inside":
-      return selectedCount < entry.count;
+      return selectedCount < count;
     case "commanders-outside":
       return selectedCount === 0;
   }
@@ -144,15 +144,15 @@ export function CommanderPanel({
 
   // Cards in deck that could become a commander. The handler decides whether
   // clicking adds (free slot or partner pair) or swaps (replaces existing).
-  const eligibleCommanders = deck
-    .filter((entry) => {
-      if (!isCommanderEligible(entry.name)) return false;
+  const eligibleCommanders = [...countDeckEntriesByName(deck)]
+    .filter(([name, count]) => {
+      if (!isCommanderEligible(name)) return false;
       // CR 903.13f(2): Commander Draft may use any number of same-name cards
       // from the pool, so inside-deck designations consume copies, not names.
-      const selectedCount = commanders.filter((name) => name === entry.name).length;
-      return hasCommanderCopyAvailable(deckComposition, entry, selectedCount);
+      const selectedCount = commanders.filter((commander) => commander === name).length;
+      return hasCommanderCopyAvailable(deckComposition, count, selectedCount);
     })
-    .map((e) => e.name);
+    .map(([name]) => name);
 
   return (
     <div className="space-y-3">

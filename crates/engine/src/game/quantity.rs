@@ -1163,6 +1163,7 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         iteration_kind_binding: _,
         sibling_condition: _,
         instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the CR 101.4 admission authority (`simultaneous_unless::admits`)
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on
         // every tree that pipeline produces — which is every tree a runtime walker
@@ -1171,6 +1172,7 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         // intact, and no runtime path reaches such a tree. See
         // `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        linked_exile_return: _,
         face_down_in_exile: _,
         granting_object: _,
         // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
@@ -1303,6 +1305,7 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
         iteration_kind_binding: _,
         sibling_condition: _,
         instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the CR 101.4 admission authority (`simultaneous_unless::admits`)
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on
         // every tree that pipeline produces — which is every tree a runtime walker
@@ -1310,6 +1313,7 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
         // field: `parse_effect_chain` outside the pipeline leaves marks intact, and
         // no runtime path reaches such a tree. See `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        linked_exile_return: _,
         face_down_in_exile: _,
         granting_object: _,
         // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
@@ -1818,6 +1822,8 @@ pub fn static_definition_is_cast_stable_for_pre_cast(definition: &StaticDefiniti
         protection_does_not_remove: None,
         room_door: None,
         granting_object: None,
+        bound_actor: None,
+        origin: _,
     } = definition
     else {
         // This is intentionally a positive proof over every direct static
@@ -2527,6 +2533,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -2624,6 +2631,8 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // Scalar designation payload: no quantity to resolve.
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -2692,7 +2701,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -2717,6 +2726,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => false,
     }
@@ -2874,6 +2884,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -3182,6 +3193,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         // characteristics.
         | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         // CR 701.16a: sacrifice-time characteristics.
         | QuantityRef::SacrificedThisTurn { .. }
@@ -3488,6 +3500,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -4715,17 +4728,43 @@ fn target_filter_matches_population_semantics(
     }
 }
 
+/// CR 608.2c: bind a tracked-set id, the `TrackedSetId(0)` sentinel through the
+/// chain -> latest ladder (`targeting::resolve_tracked_set_id`). The one binder
+/// for the id-level readers below.
+fn bound_tracked_set_id(
+    state: &GameState,
+    id: crate::types::identifiers::TrackedSetId,
+) -> Option<crate::types::identifiers::TrackedSetId> {
+    if id.0 == 0 {
+        crate::game::targeting::resolve_tracked_set_id(state)
+    } else {
+        Some(id)
+    }
+}
+
+/// CR 730.3: the raw members of a tracked set: the population of every count,
+/// aggregate and per-permanent reader. A merged permanent that left the
+/// battlefield is one permanent, so its components are not counted. Object
+/// finders read [`tracked_set_found_object_ids`].
 pub(crate) fn tracked_set_object_ids(
     state: &GameState,
     id: crate::types::identifiers::TrackedSetId,
 ) -> Vec<ObjectId> {
-    let resolved = if id.0 == 0 {
-        crate::game::targeting::resolve_tracked_set_id(state)
-    } else {
-        Some(id)
-    };
-    resolved
+    bound_tracked_set_id(state, id)
         .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+        .unwrap_or_default()
+}
+
+/// CR 730.3c: the objects a finder over a tracked set finds: the members, then
+/// the components of a merged member that `reader` may find
+/// (`merge::tracked_set_found_objects`, under its D7 gate). Never a count.
+pub(crate) fn tracked_set_found_object_ids(
+    state: &GameState,
+    id: crate::types::identifiers::TrackedSetId,
+    reader: Option<&ResolvedAbility>,
+) -> Vec<ObjectId> {
+    bound_tracked_set_id(state, id)
+        .map(|id| crate::game::merge::tracked_set_found_objects(state, id, reader, None))
         .unwrap_or_default()
 }
 
@@ -6468,7 +6507,7 @@ fn resolve_ref(
             window: TurnWindow::LastTurn,
         } => match filter {
             None => usize_to_i32_saturating(
-                last_turn_scoped_players(state, scope, ctx, controller)
+                history_scoped_players(state, scope, ctx, controller)
                     .map(|p| p.spells_cast_last_turn as usize)
                     .sum(),
             ),
@@ -6922,6 +6961,35 @@ fn resolve_ref(
                     .map(u32_to_i32_saturating)
                     .unwrap_or(0)
             })
+        }
+        QuantityRef::CardsCycled {
+            scope,
+            window,
+            name,
+        } => {
+            // CR 602.2b + CR 601.2h + CR 601.2i: The ledger records paid activations
+            // at placement. CR 608.2h: Evaluate membership using the current turn.
+            // CR 109.5: In an ability, "you" uses its bound controller.
+            usize_to_i32_saturating(
+                history_scoped_players(state, scope, ctx, controller)
+                    .filter_map(|player| state.cycles_completed_this_game_by_player.get(&player.id))
+                    .flatten()
+                    .filter(|record| {
+                        let in_window = match window {
+                            crate::types::ability::CyclingHistoryWindow::ThisTurn => {
+                                record.turn == state.turn_number
+                            }
+                            crate::types::ability::CyclingHistoryWindow::ThisGame => true,
+                        };
+                        // CR 201.2 + CR 201.2a: Compare the recorded English name.
+                        in_window
+                            && name.as_deref().is_none_or(|name| {
+                                !name.is_empty()
+                                    && crate::game::filter::card_names_match(&record.name, name)
+                            })
+                    })
+                    .count(),
+            )
         }
         // CR 601.2i: Number of spells that became cast this game by the scoped
         // players, optionally filtered by spell characteristics.
@@ -7406,10 +7474,10 @@ fn scoped_players<'a>(
     scoped_players_matching(state, scope, ctx, controller, false)
 }
 
-/// CR 800.4i: `scoped_players` for a turn-history read that "can find actions
+/// CR 800.4i: `scoped_players` for an action-history read that "can find actions
 /// that were taken by a player who has left the game". Same scope selection,
 /// but the `All` / `Opponents` populations keep a departed player's record.
-fn last_turn_scoped_players<'a>(
+fn history_scoped_players<'a>(
     state: &'a GameState,
     scope: &'a CountScope,
     ctx: QuantityContext,
@@ -9103,7 +9171,7 @@ where
         // up to one other target creature" clause's own target, which may
         // still be alive if the destroy was replaced or prevented) is rebound
         // the same way, via `try_parse_amass`'s
-        // `rebind_cost_paid_object_pt_to_target` call. `CostPaidObject` stays
+        // `rebind_pt_scope_to_target` call. `CostPaidObject` stays
         // the specific cost/trigger/effect-context object (Greater Good,
         // sacrifice-cost and trigger-event power refs depend on this).
         ObjectScope::CostPaidObject => ability
@@ -9657,7 +9725,7 @@ fn resolve_object_mana_value(
 /// `PlayerId`, when one exists. Aggregate scopes (`Opponent`, `AllPlayers`)
 /// have no single-player interpretation and yield `None`. Used to resolve the
 /// `exclude` anchor of `PlayerScope::AllPlayers { exclude }`.
-fn resolve_single_player_scope(
+pub(crate) fn resolve_single_player_scope(
     state: &GameState,
     scope: &PlayerScope,
     controller: PlayerId,

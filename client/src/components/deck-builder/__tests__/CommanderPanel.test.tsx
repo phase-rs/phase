@@ -21,7 +21,10 @@ describe("CommanderPanel", () => {
   it("keeps a backed duplicate candidate available only for commanders-inside composition", () => {
     const name = "The Prismatic Piper";
     const sharedProps = {
-      deck: [{ name, count: 2 }],
+      deck: [
+        { name, count: 1, sourcePrinting: { setCode: "cmm", collectorNumber: "695" } },
+        { name, count: 1, sourcePrinting: { setCode: "cmr", collectorNumber: "7" } },
+      ],
       cardDataCache: new Map([[name, makeLegendaryCreature(name)]]),
       deckSizeRule: { type: "Minimum" as const, data: 60 },
       isCommanderEligible: () => true,

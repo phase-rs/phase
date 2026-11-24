@@ -617,6 +617,12 @@ fn runtime_granted_top_of_library_plot_abilities(
     )]
 }
 
+/// CR 406.3a: a face-down card in exile has no printed characteristics.
+/// Abilities granted independently to that object retain their own provenance.
+fn printed_activation_is_hidden(obj: &GameObject, ability: &AbilityDefinition) -> bool {
+    obj.zone == Zone::Exile && obj.face_down && ability.granting_object.is_none()
+}
+
 pub fn activated_ability_definitions(
     state: &GameState,
     source_id: ObjectId,
@@ -625,8 +631,13 @@ pub fn activated_ability_definitions(
         return Vec::new();
     };
     let printed_len = obj.abilities.len();
-    let mut abilities: Vec<(usize, AbilityDefinition)> =
-        obj.abilities.iter().cloned().enumerate().collect();
+    let mut abilities: Vec<(usize, AbilityDefinition)> = obj
+        .abilities
+        .iter()
+        .enumerate()
+        .filter(|(_, ability)| !printed_activation_is_hidden(obj, ability))
+        .map(|(index, ability)| (index, ability.clone()))
+        .collect();
     abilities.extend(
         runtime_granted_cycling_abilities(state, source_id)
             .into_iter()
@@ -657,6 +668,9 @@ pub(crate) fn activation_ability_definition(
 ) -> Option<AbilityDefinition> {
     let obj = state.objects.get(&source_id)?;
     let mut ability = if let Some(ability) = obj.abilities.get(ability_index) {
+        if printed_activation_is_hidden(obj, ability) {
+            return None;
+        }
         ability.clone()
     } else {
         let offset = ability_index.checked_sub(obj.abilities.len())?;
@@ -1355,14 +1369,16 @@ fn is_blocked_by_cant_cast_spells_for(
 /// CR 305.1 + CR 116.2a: Check if any `PlayLands` restriction prevents `player`
 /// from playing `land_obj` as a land. Filter-scoped sibling of
 /// `is_blocked_by_cant_cast_spells_for` — a land play is not a cast, so this
-/// reads the land's own `GameObject` directly through the generic per-object
-/// filter evaluator (`filter::matches_target_filter`) rather than a spell-record
-/// projection.
+/// reads the land's own `GameObject` through the generic per-object filter
+/// evaluator (`filter::matches_target_filter`) rather than a spell-record
+/// projection. CR 712.12: a spell//land modal card is read as the land back face
+/// it would be played as (`engine::land_face_played`), evaluated once per call.
 pub(crate) fn is_blocked_by_cant_play_lands(
     state: &GameState,
     player: PlayerId,
     land_obj: &GameObject,
 ) -> bool {
+    let played_face = std::cell::OnceCell::new();
     state.restrictions.iter().any(|restriction| {
         let GameRestriction::ProhibitActivity {
             source,
@@ -1385,11 +1401,8 @@ pub(crate) fn is_blocked_by_cant_play_lands(
 
         player_affected
             && match land_filter {
-                Some(filter) => super::filter::matches_target_filter(
-                    state,
-                    land_obj.id,
-                    filter,
-                    &super::filter::FilterContext {
+                Some(filter) => {
+                    let ctx = super::filter::FilterContext {
                         source_id: *source,
                         source_controller,
                         ability: None,
@@ -1404,8 +1417,20 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                         declared_slot_view: None,
                         granting_object: None,
                         pre_entry_battlefield: None,
-                    },
-                ),
+                    };
+                    // CR 712.12 + CR 101.2: a spell//land modal card is played
+                    // as its land back face, so the prohibition is read on that
+                    // face. One face-evaluation path for discovery and for the
+                    // submitted play; the real object is not mutated.
+                    match played_face.get_or_init(|| super::engine::land_face_played(land_obj)) {
+                        Some(face) => super::filter::matches_target_filter_on_object(
+                            state, face, filter, &ctx,
+                        ),
+                        None => {
+                            super::filter::matches_target_filter(state, land_obj.id, filter, &ctx)
+                        }
+                    }
+                }
                 None => true,
             }
     })
@@ -5409,12 +5434,14 @@ pub(crate) fn single_use_play_from_exile_group(
 /// iterate `state.exile` alone, which silently did nothing for a grant whose pool
 /// is any other zone: Locke, Treasure Hunter's batch is MILLED, so its siblings
 /// sit in graveyards and kept a permission this call had just declared spent.
-/// Membership in the set is what the permission is scoped by — `single_use_group`
-/// is a `TrackedSetId`, not a zone — so the tracked set is the authority here.
-/// The exile zone is still swept as well, because a grant whose set is absent
-/// from `tracked_object_sets` (a deserialized state, a legacy grant) would
-/// otherwise lose the sweep it has today; the union can only strip permissions
-/// carrying this exact group, so the extra leg cannot over-reach.
+/// The sweep reads the grant's own population: every object carrying this
+/// group's single-use `PlayFromExile`, wherever it is. That population includes
+/// the CR 730.3c components the grant found outside the set and outside exile,
+/// and it subsumes the former set and exile legs, a deserialized or legacy grant
+/// included. It can strip only permissions carrying this exact group. It does
+/// not re-derive the population through the gated tracked-set authority,
+/// because a cast-time read of a carried group id is never the chain rung
+/// (CR 601.2a + CR 611.2a).
 ///
 /// `exile_play_single_use_consumed` is the belt to this sweep's braces — the
 /// eligibility gate in `play_from_exile_permission_source_at_index` consults it
@@ -5423,26 +5450,25 @@ pub(crate) fn single_use_play_from_exile_group(
 /// including the AI's legal-action surface.
 pub(crate) fn consume_single_use_play_from_exile(state: &mut GameState, group: TrackedSetId) {
     state.exile_play_single_use_consumed.insert(group);
-    let scoped: Vec<ObjectId> = state
-        .tracked_object_sets
-        .get(&group)
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .chain(state.exile.iter().cloned())
+    let spent = |permission: &crate::types::ability::CastingPermission| {
+        matches!(
+            permission,
+            crate::types::ability::CastingPermission::PlayFromExile {
+                single_use_group,
+                single_use: true,
+                ..
+            } if *single_use_group == Some(group)
+        )
+    };
+    let carriers: Vec<ObjectId> = state
+        .objects
+        .iter()
+        .filter(|(_, obj)| obj.casting_permissions.iter().any(spent))
+        .map(|(id, _)| *id)
         .collect();
-    for obj_id in scoped {
+    for obj_id in carriers {
         if let Some(obj) = state.objects.get_mut(&obj_id) {
-            obj.casting_permissions.retain(|p| {
-                !matches!(
-                    p,
-                    crate::types::ability::CastingPermission::PlayFromExile {
-                        single_use_group,
-                        single_use: true,
-                        ..
-                    } if *single_use_group == Some(group)
-                )
-            });
+            obj.casting_permissions.retain(|p| !spent(p));
         }
     }
 }
@@ -6749,12 +6775,15 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        // Reads source-object ledgers via layer-controller endpoints, never
+        // the ability holder: fail closed like its last-turn analog.
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -7894,11 +7923,25 @@ pub(super) fn exile_land_play_authorization(
     land_id: ObjectId,
 ) -> Option<ExileLandPlayAuthorization> {
     let obj = state.objects.get(&land_id)?;
-    if !obj
+    // CR 712.8a: outside the battlefield and stack the card has only its front
+    // face's characteristics, so a spell//land modal card in exile is not a land
+    // card by itself. CR 712.12 nonetheless lets a player who plays it do so as
+    // a land by choosing its land face, which the shared play-land election
+    // (`handle_play_land`'s `modal_land_face_election_available` branch) then
+    // elects. The permission is read unchanged below (play mode, grantee,
+    // `card_filter` on the stored front face, frequency), so a Cast-mode grant
+    // still refuses the land face and only a Play-mode grant that authorizes the
+    // card (Light Up the Stage's "play those cards") reaches it. Exile only:
+    // `graveyard_lands_playable_by_permission` discovers graveyard lands by
+    // their front face and the gate must not admit what discovery never offers.
+    let front_is_land = obj
         .card_types
         .core_types
-        .contains(&crate::types::card_type::CoreType::Land)
-    {
+        .contains(&crate::types::card_type::CoreType::Land);
+    let modal_land_face_open = obj.zone == Zone::Exile
+        && !obj.cast_face_committed
+        && super::engine::modal_land_face_election_available(obj);
+    if !front_is_land && !modal_land_face_open {
         return None;
     }
     if let Some((casting_permission_index, source, frequency)) =
@@ -11509,23 +11552,6 @@ struct CollectedCostModifiers {
 }
 
 impl CollectedCostModifiers {
-    fn collect(
-        state: &GameState,
-        caster: PlayerId,
-        pending: &PendingCast,
-        ctx: &CostFinalizeContext,
-    ) -> Self {
-        Self::collect_for(
-            state,
-            caster,
-            pending.object_id,
-            Some(&pending.ability),
-            Some(pending.casting_variant),
-            pending.casting_permission_index,
-            ctx,
-        )
-    }
-
     /// `ability` is `None` for the pure-preview, pre-target callers: with no
     /// chosen targets there is no target-dependent pass to collect, and those
     /// callers run it separately once targets exist.
@@ -11539,24 +11565,36 @@ impl CollectedCostModifiers {
         casting_permission_index: Option<CastingPermissionIndex>,
         ctx: &CostFinalizeContext,
     ) -> Self {
+        Self::collect_on_view(
+            &SpellCostView::for_variant(state, caster, object_id, casting_variant),
+            ability,
+            casting_permission_index,
+            ctx,
+        )
+    }
+
+    fn collect_on_view(
+        view: &SpellCostView<'_>,
+        ability: Option<&ResolvedAbility>,
+        casting_permission_index: Option<CastingPermissionIndex>,
+        ctx: &CostFinalizeContext,
+    ) -> Self {
+        let SpellCostView {
+            state,
+            caster,
+            spell_id: object_id,
+            casting_variant,
+            ..
+        } = *view;
         // CR 601.2f: collect self-spell statics ("This spell costs {N} less ...")
         // and battlefield statics together so all increases apply before any
         // reductions across both passes.
-        let mut non_floor = collect_self_spell_cost_modifiers(
-            state,
-            caster,
-            object_id,
-            SpellCostTargets::Unchosen,
-            false,
-            casting_variant,
-        );
+        let mut non_floor =
+            collect_self_spell_cost_modifiers(view, SpellCostTargets::Unchosen, false);
         non_floor.extend(collect_battlefield_cost_modifiers(
-            state,
-            caster,
-            object_id,
+            view,
             SpellCostTargets::Unchosen,
             false,
-            casting_variant,
         ));
         // CR 601.2f (#8942): the ELECTED casting permission's own "spells cast
         // this way cost {N} more/less to cast" rider joins the SAME collection as
@@ -11578,12 +11616,7 @@ impl CollectedCostModifiers {
         non_floor.extend(ctx.extra.iter().cloned());
 
         let target_dependent = ability.map_or_else(Vec::new, |ability| {
-            collect_target_dependent_cost_modifiers(
-                state,
-                caster,
-                object_id,
-                SpellCostTargets::Chosen(ability),
-            )
+            collect_target_dependent_cost_modifiers(view, SpellCostTargets::Chosen(ability))
         });
 
         // CR 702.102b: derive the pre-payment fused hint from the casting variant
@@ -11645,37 +11678,19 @@ struct CollectedCostFloors {
 }
 
 impl CollectedCostFloors {
-    fn collect(state: &GameState, caster: PlayerId, pending: &PendingCast) -> Self {
+    fn collect(view: &SpellCostView<'_>, ability: &ResolvedAbility) -> Self {
         Self {
-            target_independent: collect_cost_floors(
-                state,
-                caster,
-                pending.object_id,
-                None,
-                false,
-                false,
-            ),
-            target_dependent: collect_cost_floors(
-                state,
-                caster,
-                pending.object_id,
-                Some(&pending.ability),
-                true,
-                false,
-            ),
+            target_independent: collect_cost_floors(view, None, false),
+            target_dependent: collect_cost_floors(view, Some(ability), true),
         }
     }
 
     /// CR 601.2f: the floors that do not read the chosen targets, with an empty
     /// target-dependent half for [`Self::with_target_dependent`] to fill per
     /// candidate target assignment.
-    fn collect_target_independent(
-        state: &GameState,
-        caster: PlayerId,
-        object_id: ObjectId,
-    ) -> Self {
+    fn collect_target_independent(view: &SpellCostView<'_>) -> Self {
         Self {
-            target_independent: collect_cost_floors(state, caster, object_id, None, false, false),
+            target_independent: collect_cost_floors(view, None, false),
             target_dependent: Vec::new(),
         }
     }
@@ -11706,16 +11721,6 @@ struct CollectedCastCosts {
 }
 
 impl CollectedCastCosts {
-    /// Seed the cache with an already-collected modifier set. This is the
-    /// analyzer's entry point: every permutation after the first performs zero
-    /// board walks.
-    fn with_modifiers(modifiers: CollectedCostModifiers) -> Self {
-        Self {
-            modifiers: OnceCell::from(modifiers),
-            floors: OnceCell::new(),
-        }
-    }
-
     /// Seed both halves, so the recompute performs no board walk of its own.
     fn seeded(modifiers: CollectedCostModifiers, floors: CollectedCostFloors) -> Self {
         Self {
@@ -11726,23 +11731,23 @@ impl CollectedCastCosts {
 
     fn modifiers(
         &self,
-        state: &GameState,
-        caster: PlayerId,
+        view: &SpellCostView<'_>,
         pending: &PendingCast,
         ctx: &CostFinalizeContext,
     ) -> &CollectedCostModifiers {
-        self.modifiers
-            .get_or_init(|| CollectedCostModifiers::collect(state, caster, pending, ctx))
+        self.modifiers.get_or_init(|| {
+            CollectedCostModifiers::collect_on_view(
+                view,
+                Some(&pending.ability),
+                pending.casting_permission_index,
+                ctx,
+            )
+        })
     }
 
-    fn floors(
-        &self,
-        state: &GameState,
-        caster: PlayerId,
-        pending: &PendingCast,
-    ) -> &CollectedCostFloors {
+    fn floors(&self, view: &SpellCostView<'_>, ability: &ResolvedAbility) -> &CollectedCostFloors {
         self.floors
-            .get_or_init(|| CollectedCostFloors::collect(state, caster, pending))
+            .get_or_init(|| CollectedCostFloors::collect(view, ability))
     }
 }
 
@@ -12078,8 +12083,15 @@ fn analyze_cost_reduction_order(
         return empty(Vec::new());
     }
 
-    let modifiers = CollectedCostModifiers::collect(state, player, pending, ctx);
-    let reductions = order_relevant_reductions(&modifiers);
+    let view = SpellCostView::for_variant(
+        state,
+        player,
+        pending.object_id,
+        Some(pending.casting_variant),
+    );
+    let collected = CollectedCastCosts::default();
+    let modifiers = collected.modifiers(&view, pending, ctx);
+    let reductions = order_relevant_reductions(modifiers);
 
     // CR 601.2b: which hybrid symbols this cast announces, measured against the
     // reductions that were actually snapshotted.
@@ -12108,11 +12120,8 @@ fn analyze_cost_reduction_order(
     let provenances: Vec<ReductionProvenance> =
         reductions.iter().map(|entry| entry.provenance).collect();
 
-    // The collected board inputs are identical for every candidate — only the
-    // announcement and the ORDER differ — so they are hoisted out of the loop.
-    // Each iteration below re-runs only the arithmetic.
-    let collected = CollectedCastCosts::with_modifiers(modifiers);
-
+    // The collected board inputs are identical for every candidate. The
+    // snapshot serves each iteration as it varies the order and announcement.
     let locked_for = |order: &[usize], announcement: &[ManaCostShard]| {
         let candidate_ctx = CostFinalizeContext {
             extra: ctx.extra.clone(),
@@ -12122,8 +12131,7 @@ fn analyze_cost_reduction_order(
             }),
         };
         recompute_pending_mana_total_using(
-            state,
-            player,
+            &view,
             pending,
             pending.ability.chosen_x,
             &candidate_ctx,
@@ -12742,9 +12750,7 @@ pub(super) fn apply_target_dependent_cost_modifiers(
         ability,
         mana_cost,
         &collect_target_dependent_cost_modifiers(
-            state,
-            player,
-            object_id,
+            &SpellCostView::for_variant(state, player, object_id, None),
             SpellCostTargets::Chosen(ability),
         ),
         None,
@@ -12787,21 +12793,11 @@ fn apply_target_dependent_cost_modifiers_using(
 /// CR 601.2f: Collect the cost modifiers whose `spell_filter` reads the chosen
 /// targets — self-spell statics then battlefield statics, in that order.
 fn collect_target_dependent_cost_modifiers(
-    state: &GameState,
-    player: PlayerId,
-    object_id: ObjectId,
+    view: &SpellCostView<'_>,
     targets: SpellCostTargets<'_>,
 ) -> Vec<CostModification> {
-    let mut collected =
-        collect_self_spell_cost_modifiers(state, player, object_id, targets, true, None);
-    collected.extend(collect_battlefield_cost_modifiers(
-        state, player, object_id, targets, true,
-        // CR 702.102b: this target-dependent pass runs after finalization sets the
-        // `fused_split_spell` marker, so the marker (OR-gated inside
-        // `spell_cast_record_for`) already yields the combined projection — no
-        // pre-payment variant hint is needed or available here.
-        None,
-    ));
+    let mut collected = collect_self_spell_cost_modifiers(view, targets, true);
+    collected.extend(collect_battlefield_cost_modifiers(view, targets, true));
     collected
 }
 
@@ -12842,22 +12838,19 @@ pub(crate) fn compute_spend_only_on_x_generic_count(
     }
 
     let casting_variant = Some(pending.casting_variant);
-
-    let mut collected = collect_self_spell_cost_modifiers(
+    let view = SpellCostView::for_variant(
         state,
         pending.ability.controller,
         pending.object_id,
-        SpellCostTargets::Chosen(&pending.ability),
-        false,
         casting_variant,
     );
+
+    let mut collected =
+        collect_self_spell_cost_modifiers(&view, SpellCostTargets::Chosen(&pending.ability), false);
     collected.extend(collect_battlefield_cost_modifiers(
-        state,
-        pending.ability.controller,
-        pending.object_id,
+        &view,
         SpellCostTargets::Chosen(&pending.ability),
         false,
-        casting_variant,
     ));
     // CR 601.2f: the elected permission's rider belongs to the SAME collection
     // here as in `apply_non_floor_cost_modifiers`, so this projection measures
@@ -13043,8 +13036,12 @@ pub(super) fn recompute_pending_mana_total_with(
     ctx: &CostFinalizeContext,
 ) -> ManaCost {
     recompute_pending_mana_total_using(
-        state,
-        player,
+        &SpellCostView::for_variant(
+            state,
+            player,
+            pending.object_id,
+            Some(pending.casting_variant),
+        ),
         pending,
         x,
         ctx,
@@ -13060,8 +13057,7 @@ pub(super) fn recompute_pending_mana_total_with(
 /// walk. [`analyze_cost_reduction_order`] passes a cache pre-seeded with the
 /// modifier set instead, which is what makes its `n!` loop pure arithmetic.
 fn recompute_pending_mana_total_using(
-    state: &GameState,
-    player: PlayerId,
+    view: &SpellCostView<'_>,
     pending: &PendingCast,
     x: Option<u32>,
     ctx: &CostFinalizeContext,
@@ -13073,7 +13069,7 @@ fn recompute_pending_mana_total_using(
             cost.concretize_x(x);
         }
         if !casting_costs::cost_has_x(&cost) {
-            let floors = collected.floors(state, player, pending);
+            let floors = collected.floors(view, &pending.ability);
             apply_cost_floors(&mut cost, &floors.target_independent);
             apply_cost_floors(&mut cost, &floors.target_dependent);
         }
@@ -13100,7 +13096,7 @@ fn recompute_pending_mana_total_using(
         };
         cost = super::restrictions::add_mana_cost(&cost, &addition);
     }
-    let modifiers = collected.modifiers(state, player, pending, ctx);
+    let modifiers = collected.modifiers(view, pending, ctx);
     // CR 601.2b: the nonhybrid equivalent is announced BEFORE the total cost is
     // determined (CR 601.2f), so the reductions below see the announced pips.
     // Re-derived from the same inputs the analyzer enumerated over, and skipped
@@ -13113,7 +13109,7 @@ fn recompute_pending_mana_total_using(
     }
     apply_non_floor_cost_modifiers_using(&mut cost, modifiers, ctx.election());
     apply_target_dependent_cost_modifiers_using(
-        state,
+        view.state,
         pending.object_id,
         &pending.ability,
         &mut cost,
@@ -13121,7 +13117,7 @@ fn recompute_pending_mana_total_using(
         ctx.election(),
     );
     if !casting_costs::cost_has_x(&cost) {
-        let floors = collected.floors(state, player, pending);
+        let floors = collected.floors(view, &pending.ability);
         apply_cost_floors(&mut cost, &floors.target_independent);
         apply_cost_floors(&mut cost, &floors.target_dependent);
     }
@@ -13659,12 +13655,9 @@ fn apply_self_spell_cost_modifiers(
     mana_cost: &mut ManaCost,
 ) {
     let collected = collect_self_spell_cost_modifiers(
-        state,
-        caster,
-        spell_id,
+        &SpellCostView::for_variant(state, caster, spell_id, None),
         SpellCostTargets::Unchosen,
         false,
-        None,
     );
     apply_cost_modifications_in_order(mana_cost, &collected);
 }
@@ -13678,12 +13671,9 @@ pub(super) fn apply_self_spell_cost_modifiers_with_selected_targets(
     mana_cost: &mut ManaCost,
 ) {
     let collected = collect_self_spell_cost_modifiers(
-        state,
-        caster,
-        spell_id,
+        &SpellCostView::for_variant(state, caster, spell_id, None),
         SpellCostTargets::Chosen(ability),
         true,
-        None,
     );
     apply_cost_modifications_in_order(mana_cost, &collected);
 }
@@ -13773,21 +13763,19 @@ fn self_spell_cost_condition_matches(
 }
 
 fn collect_self_spell_cost_modifiers(
-    state: &GameState,
-    caster: PlayerId,
-    spell_id: ObjectId,
+    view: &SpellCostView<'_>,
     targets: SpellCostTargets<'_>,
     target_sensitive_only: bool,
-    casting_variant: Option<CastingVariant>,
 ) -> Vec<CostModification> {
+    let SpellCostView {
+        state,
+        caster,
+        spell_id,
+        ..
+    } = *view;
     let Some(spell_obj) = state.objects.get(&spell_id) else {
         return Vec::new();
     };
-
-    // CR 202.3d + CR 702.102b: a pre-payment `CastingVariant::Fuse` cast presents
-    // the COMBINED characteristics of both halves to a self-spell `ModifyCost`
-    // static's `spell_filter`. The `fused_split_spell` marker is not yet set here.
-    let fused = casting_variant == Some(CastingVariant::Fuse);
 
     let mut collected = Vec::new();
 
@@ -13797,53 +13785,27 @@ fn collect_self_spell_cost_modifiers(
     // pipeline: layers pre-compute battlefield characteristics, not cast-time
     // cost deltas on cards in hand.
     for (ordinal, def) in spell_obj.static_definitions.iter_all().enumerate() {
-        if !self_spell_cost_modifier_applies_before_targets(
-            state,
-            caster,
-            spell_id,
-            def,
-            casting_variant,
-        ) {
+        if !self_spell_cost_modifier_applies_on_view(view, def, targets, target_sensitive_only) {
             continue;
         }
 
-        let (amount, spell_filter, dynamic_count, is_raise, reach) = match &def.mode {
+        let (amount, dynamic_count, is_raise, reach) = match &def.mode {
             StaticMode::ModifyCost {
                 mode: CostModifyMode::Reduce,
                 amount,
-                spell_filter,
                 dynamic_count,
                 reach,
-            } => (amount, spell_filter, dynamic_count, false, *reach),
+                ..
+            } => (amount, dynamic_count, false, *reach),
             StaticMode::ModifyCost {
                 mode: CostModifyMode::Raise,
                 amount,
-                spell_filter,
                 dynamic_count,
                 reach,
-            } => (amount, spell_filter, dynamic_count, true, *reach),
+                ..
+            } => (amount, dynamic_count, true, *reach),
             _ => continue,
         };
-
-        if !spell_cost_filter_admits(
-            state,
-            caster,
-            spell_id,
-            spell_filter.as_ref(),
-            spell_id,
-            fused,
-            targets,
-            target_sensitive_only,
-        ) {
-            continue;
-        }
-
-        // CR 604.1: Evaluate any trailing condition ("if you control a Wizard").
-        if let Some(ref cond) = def.condition {
-            if !self_spell_cost_condition_matches(state, cond, caster, spell_id, casting_variant) {
-                continue;
-            }
-        }
 
         // CR 601.2f: Resolve the dynamic multiplier (e.g., "for each instant or
         // sorcery card in your graveyard"). Static amount with no multiplier = 1.
@@ -13888,38 +13850,108 @@ enum SpellCostTargets<'a> {
     Any,
 }
 
+fn cost_filter_reads_targets(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.iter().any(|property| {
+            matches!(
+                property,
+                FilterProp::Targets { .. } | FilterProp::TargetsOnly { .. }
+            )
+        }),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(cost_filter_reads_targets)
+        }
+        TargetFilter::Not { filter } => cost_filter_reads_targets(filter),
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
 /// CR 601.2f: whether a cost modifier with `spell_filter`, printed on
 /// `source_id`, applies to the spell under `targets`. With
 /// `target_sensitive_only` only filters that read the chosen targets qualify.
-#[allow(clippy::too_many_arguments)]
 fn spell_cost_filter_admits(
-    state: &GameState,
-    caster: PlayerId,
-    spell_id: ObjectId,
+    view: &SpellCostView<'_>,
     spell_filter: Option<&TargetFilter>,
     source_id: ObjectId,
-    fused: bool,
     targets: SpellCostTargets<'_>,
     target_sensitive_only: bool,
 ) -> bool {
     let Some(filter) = spell_filter else {
         return !target_sensitive_only;
     };
-    let analysis =
-        analyze_cost_filter_before_targets_for(state, caster, spell_id, filter, source_id, fused);
-    if target_sensitive_only && !analysis.is_target_dependent() {
+    if target_sensitive_only && !cost_filter_reads_targets(filter) {
+        return false;
+    }
+    let analysis = analyze_cost_filter_on_view(view, filter, source_id);
+    if !analysis.is_relevant() || (target_sensitive_only && !analysis.is_target_dependent()) {
         return false;
     }
     match targets {
         SpellCostTargets::Unchosen => {
-            !analysis.is_target_dependent()
-                && spell_matches_cost_filter_for(state, caster, spell_id, filter, source_id, fused)
+            !analysis.is_target_dependent() && view.matches(filter, source_id)
         }
-        SpellCostTargets::Chosen(ability) => spell_matches_cost_filter_with_selected_targets_for(
-            state, caster, spell_id, filter, source_id, ability, fused,
-        ),
+        SpellCostTargets::Chosen(ability) => {
+            selected_cost_targets_match_on_view(view, filter, source_id, ability)
+        }
         // The non-target part of the filter already matched in the analysis.
-        SpellCostTargets::Any => analysis.is_relevant(),
+        SpellCostTargets::Any => true,
     }
 }
 
@@ -13959,6 +13991,32 @@ fn analyze_cost_filter_before_targets_for(
     source_id: ObjectId,
     fused: bool,
 ) -> PreTargetCostFilterAnalysis {
+    analyze_cost_filter_on_view(
+        &SpellCostView::new(state, caster, spell_id, fused),
+        filter,
+        source_id,
+    )
+}
+
+fn analyze_cost_filter_on_view(
+    view: &SpellCostView<'_>,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+) -> PreTargetCostFilterAnalysis {
+    analyze_cost_filter_on_view_with_projection(
+        view,
+        filter,
+        source_id,
+        super::filter::filter_reads_pt(filter),
+    )
+}
+
+fn analyze_cost_filter_on_view_with_projection(
+    view: &SpellCostView<'_>,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    project_pt: bool,
+) -> PreTargetCostFilterAnalysis {
     match filter {
         TargetFilter::Typed(typed) => {
             let has_target_property = typed.properties.iter().any(|property| {
@@ -13983,7 +14041,7 @@ fn analyze_cost_filter_before_targets_for(
                 controller: typed.controller.clone(),
                 properties: non_target_properties,
             });
-            if !spell_matches_cost_filter_for(state, caster, spell_id, &base, source_id, fused) {
+            if !view.matches_with_projection(&base, source_id, project_pt) {
                 PreTargetCostFilterAnalysis::Irrelevant
             } else if has_target_property {
                 PreTargetCostFilterAnalysis::TargetDependent
@@ -13994,9 +14052,8 @@ fn analyze_cost_filter_before_targets_for(
         TargetFilter::Or { filters } => filters.iter().fold(
             PreTargetCostFilterAnalysis::Irrelevant,
             |combined, inner| {
-                let next = analyze_cost_filter_before_targets_for(
-                    state, caster, spell_id, inner, source_id, fused,
-                );
+                let next =
+                    analyze_cost_filter_on_view_with_projection(view, inner, source_id, project_pt);
                 match (combined, next) {
                     (PreTargetCostFilterAnalysis::TargetIndependentRelevant, _)
                     | (_, PreTargetCostFilterAnalysis::TargetIndependentRelevant) => {
@@ -14013,9 +14070,8 @@ fn analyze_cost_filter_before_targets_for(
         TargetFilter::And { filters } => filters.iter().fold(
             PreTargetCostFilterAnalysis::TargetIndependentRelevant,
             |combined, inner| {
-                let next = analyze_cost_filter_before_targets_for(
-                    state, caster, spell_id, inner, source_id, fused,
-                );
+                let next =
+                    analyze_cost_filter_on_view_with_projection(view, inner, source_id, project_pt);
                 match (combined, next) {
                     (PreTargetCostFilterAnalysis::Irrelevant, _)
                     | (_, PreTargetCostFilterAnalysis::Irrelevant) => {
@@ -14029,12 +14085,12 @@ fn analyze_cost_filter_before_targets_for(
                 }
             },
         ),
-        TargetFilter::Not { filter } => analyze_cost_filter_before_targets_for(
-            state, caster, spell_id, filter, source_id, fused,
-        )
-        .negate(),
+        TargetFilter::Not { filter } => {
+            analyze_cost_filter_on_view_with_projection(view, filter, source_id, project_pt)
+                .negate()
+        }
         _ => {
-            if spell_matches_cost_filter_for(state, caster, spell_id, filter, source_id, fused) {
+            if view.matches_with_projection(filter, source_id, project_pt) {
                 PreTargetCostFilterAnalysis::TargetIndependentRelevant
             } else {
                 PreTargetCostFilterAnalysis::Irrelevant
@@ -14045,13 +14101,19 @@ fn analyze_cost_filter_before_targets_for(
 
 /// CR 113.6 + CR 604.1 + CR 601.2f: A self cost modifier can affect the pending
 /// spell only from its declared zone and while its non-target gates hold.
-fn self_spell_cost_modifier_applies_before_targets(
-    state: &GameState,
-    caster: PlayerId,
-    spell_id: ObjectId,
+fn self_spell_cost_modifier_applies_on_view(
+    view: &SpellCostView<'_>,
     definition: &StaticDefinition,
-    casting_variant: Option<CastingVariant>,
+    targets: SpellCostTargets<'_>,
+    target_sensitive_only: bool,
 ) -> bool {
+    let SpellCostView {
+        state,
+        caster,
+        spell_id,
+        casting_variant,
+        ..
+    } = *view;
     let Some(spell) = state.objects.get(&spell_id) else {
         return false;
     };
@@ -14069,16 +14131,15 @@ fn self_spell_cost_modifier_applies_before_targets(
     else {
         return false;
     };
-    let fused = casting_variant == Some(CastingVariant::Fuse);
-    if spell_filter.as_ref().is_some_and(|filter| {
-        !analyze_cost_filter_before_targets_for(state, caster, spell_id, filter, spell_id, fused)
-            .is_relevant()
-    }) {
-        return false;
-    }
     definition.condition.as_ref().is_none_or(|condition| {
         self_spell_cost_condition_matches(state, condition, caster, spell_id, casting_variant)
-    })
+    }) && spell_cost_filter_admits(
+        view,
+        spell_filter.as_ref(),
+        spell_id,
+        targets,
+        target_sensitive_only,
+    )
 }
 
 fn target_ref_matches_cost_filter(
@@ -14156,25 +14217,37 @@ fn spell_matches_cost_filter_with_selected_targets(
     source_id: ObjectId,
     ability: &ResolvedAbility,
 ) -> bool {
-    spell_matches_cost_filter_with_selected_targets_for(
-        state, caster, spell_id, filter, source_id, ability, false,
+    selected_cost_targets_match_on_view(
+        &SpellCostView::new(state, caster, spell_id, false),
+        filter,
+        source_id,
+        ability,
     )
 }
 
-/// Fuse-aware sibling of [`spell_matches_cost_filter_with_selected_targets`]. See
-/// [`spell_matches_cost_filter_for`] for the `fused` projection rationale. Only
-/// the spell-characteristic sub-filter (`base`) is fuse-projected; the
-/// target-referencing props resolve against the chosen targets, not the spell.
-#[allow(clippy::too_many_arguments)]
-fn spell_matches_cost_filter_with_selected_targets_for(
-    state: &GameState,
-    caster: PlayerId,
-    spell_id: ObjectId,
+fn selected_cost_targets_match_on_view(
+    view: &SpellCostView<'_>,
     filter: &TargetFilter,
     source_id: ObjectId,
     ability: &ResolvedAbility,
-    fused: bool,
 ) -> bool {
+    selected_cost_targets_match_on_view_with_projection(
+        view,
+        filter,
+        source_id,
+        ability,
+        super::filter::filter_reads_pt(filter),
+    )
+}
+
+fn selected_cost_targets_match_on_view_with_projection(
+    view: &SpellCostView<'_>,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    ability: &ResolvedAbility,
+    project_pt: bool,
+) -> bool {
+    let state = view.state;
     let Some(source_controller) = state.objects.get(&source_id).map(|obj| obj.controller) else {
         return false;
     };
@@ -14198,7 +14271,7 @@ fn spell_matches_cost_filter_with_selected_targets_for(
                 controller: tf.controller.clone(),
                 properties: non_target_props,
             });
-            if !spell_matches_cost_filter_for(state, caster, spell_id, &base, source_id, fused) {
+            if !view.matches_with_projection(&base, source_id, project_pt) {
                 return false;
             }
 
@@ -14227,21 +14300,21 @@ fn spell_matches_cost_filter_with_selected_targets_for(
             })
         }
         TargetFilter::Or { filters } => filters.iter().any(|inner| {
-            spell_matches_cost_filter_with_selected_targets_for(
-                state, caster, spell_id, inner, source_id, ability, fused,
+            selected_cost_targets_match_on_view_with_projection(
+                view, inner, source_id, ability, project_pt,
             )
         }),
         TargetFilter::And { filters } => filters.iter().all(|inner| {
-            spell_matches_cost_filter_with_selected_targets_for(
-                state, caster, spell_id, inner, source_id, ability, fused,
+            selected_cost_targets_match_on_view_with_projection(
+                view, inner, source_id, ability, project_pt,
             )
         }),
         TargetFilter::Not { filter: inner } => {
-            !spell_matches_cost_filter_with_selected_targets_for(
-                state, caster, spell_id, inner, source_id, ability, fused,
+            !selected_cost_targets_match_on_view_with_projection(
+                view, inner, source_id, ability, project_pt,
             )
         }
-        _ => spell_matches_cost_filter_for(state, caster, spell_id, filter, source_id, fused),
+        _ => view.matches_with_projection(filter, source_id, project_pt),
     }
 }
 
@@ -14269,12 +14342,9 @@ fn apply_battlefield_cost_modifiers(
     mana_cost: &mut ManaCost,
 ) {
     let collected = collect_battlefield_cost_modifiers(
-        state,
-        caster,
-        spell_id,
+        &SpellCostView::for_variant(state, caster, spell_id, None),
         SpellCostTargets::Unchosen,
         false,
-        None,
     );
     apply_cost_modifications_in_order(mana_cost, &collected);
 }
@@ -14288,12 +14358,9 @@ pub(super) fn apply_battlefield_cost_modifiers_with_selected_targets(
     mana_cost: &mut ManaCost,
 ) {
     let collected = collect_battlefield_cost_modifiers(
-        state,
-        caster,
-        spell_id,
+        &SpellCostView::for_variant(state, caster, spell_id, None),
         SpellCostTargets::Chosen(ability),
         true,
-        None,
     );
     apply_cost_modifications_in_order(mana_cost, &collected);
 }
@@ -14352,15 +14419,19 @@ fn evaluate_cost_mod_static_condition(
 /// CR 113.6b + CR 604.1 + CR 601.2f: Apply the production zone, caster,
 /// condition, and non-target spell gates before treating a battlefield cost
 /// modifier as relevant to target selection.
-fn battlefield_cost_modifier_applies_before_targets(
-    state: &GameState,
-    caster: PlayerId,
-    spell_id: ObjectId,
+fn battlefield_cost_modifier_applies_on_view(
+    view: &SpellCostView<'_>,
     source: &GameObject,
     definition: &StaticDefinition,
-    fused: bool,
-    casting_variant: Option<CastingVariant>,
+    targets: SpellCostTargets<'_>,
+    target_sensitive_only: bool,
 ) -> bool {
+    let SpellCostView {
+        state,
+        caster,
+        casting_variant,
+        ..
+    } = *view;
     let Some(modifier) = definition.board_wide_cost_modifier() else {
         return false;
     };
@@ -14386,10 +14457,13 @@ fn battlefield_cost_modifier_applies_before_targets(
     }) {
         return false;
     }
-    modifier.spell_filter.is_none_or(|filter| {
-        analyze_cost_filter_before_targets_for(state, caster, spell_id, filter, source.id, fused)
-            .is_relevant()
-    })
+    spell_cost_filter_admits(
+        view,
+        modifier.spell_filter,
+        source.id,
+        targets,
+        target_sensitive_only,
+    )
 }
 
 /// CR 604.1: presence gate for transient (duration-scoped) `ModifyCost`
@@ -14425,18 +14499,17 @@ fn transient_grant_display_name(state: &GameState, tce: &TransientContinuousEffe
 }
 
 fn collect_battlefield_cost_modifiers(
-    state: &GameState,
-    caster: PlayerId,
-    spell_id: ObjectId,
+    view: &SpellCostView<'_>,
     targets: SpellCostTargets<'_>,
     target_sensitive_only: bool,
-    casting_variant: Option<CastingVariant>,
 ) -> Vec<CostModification> {
-    // CR 202.3d + CR 702.102b: a pre-payment `CastingVariant::Fuse` cast presents
-    // the COMBINED characteristics of both halves to a `ModifyCost` static's
-    // `spell_filter`. The `fused_split_spell` marker is not yet set at this seam.
-    let fused = casting_variant == Some(CastingVariant::Fuse);
-
+    let SpellCostView {
+        state,
+        caster,
+        spell_id,
+        casting_variant,
+        ..
+    } = *view;
     // CR 702.26b + CR 114.4 + CR 113.6b: Functioning gate (phased-out /
     // command-zone with Eminence-style opt-in) owned by
     // `game_functioning_statics`. We deliberately use the non-condition-
@@ -14490,14 +14563,12 @@ fn collect_battlefield_cost_modifiers(
         let source_controller = src_obj.controller;
 
         {
-            if !battlefield_cost_modifier_applies_before_targets(
-                state,
-                caster,
-                spell_id,
+            if !battlefield_cost_modifier_applies_on_view(
+                view,
                 src_obj,
                 def,
-                fused,
-                casting_variant,
+                targets,
+                target_sensitive_only,
             ) {
                 continue;
             }
@@ -14514,27 +14585,13 @@ fn collect_battlefield_cost_modifiers(
             let BoardWideCostModifier {
                 mode,
                 amount,
-                spell_filter,
+                spell_filter: _,
                 dynamic_count,
                 caster_scope: _,
                 condition: _,
                 reach,
             } = modifier;
             let is_raise = matches!(mode, CostModifyMode::Raise);
-
-            // CR 601.2f: Check spell type filter — does the spell match?
-            if !spell_cost_filter_admits(
-                state,
-                caster,
-                spell_id,
-                spell_filter,
-                bf_id,
-                fused,
-                targets,
-                target_sensitive_only,
-            ) {
-                continue;
-            }
 
             // CR 601.2f: Calculate the modification amount.
             let base_amount = amount.clone();
@@ -14666,12 +14723,9 @@ fn collect_battlefield_cost_modifiers(
                 // the grantor. So "you" resolves to the right player either
                 // way, with no stale-source dependency.
                 if !spell_cost_filter_admits(
-                    state,
-                    caster,
-                    spell_id,
+                    view,
                     spell_filter,
                     spell_id,
-                    fused,
                     targets,
                     target_sensitive_only,
                 ) {
@@ -14954,14 +15008,14 @@ pub(super) fn apply_cost_floor_with_selected_targets(
 
 /// CR 601.2f: A cost floor is relevant before target selection only after its
 /// production source, caster, condition, and non-target spell gates hold.
-fn battlefield_cost_floor_applies_before_targets(
-    state: &GameState,
-    caster: PlayerId,
-    spell_id: ObjectId,
+fn battlefield_cost_floor_applies_on_view(
+    view: &SpellCostView<'_>,
     source: &GameObject,
     definition: &StaticDefinition,
-    fused: bool,
+    targets: SpellCostTargets<'_>,
+    target_sensitive_only: bool,
 ) -> bool {
+    let SpellCostView { state, caster, .. } = *view;
     let StaticMode::ModifyCost {
         mode: CostModifyMode::Minimum,
         spell_filter,
@@ -14990,10 +15044,13 @@ fn battlefield_cost_floor_applies_before_targets(
     }) {
         return false;
     }
-    spell_filter.as_ref().is_none_or(|filter| {
-        analyze_cost_filter_before_targets_for(state, caster, spell_id, filter, source.id, fused)
-            .is_relevant()
-    })
+    spell_cost_filter_admits(
+        view,
+        spell_filter.as_ref(),
+        source.id,
+        targets,
+        target_sensitive_only,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -15007,12 +15064,9 @@ fn apply_cost_floor_inner(
     fused: bool,
 ) {
     let floors = collect_cost_floors(
-        state,
-        caster,
-        spell_id,
+        &SpellCostView::new(state, caster, spell_id, fused),
         selected_ability,
         target_sensitive_only,
-        fused,
     );
     apply_cost_floors(mana_cost, &floors);
 }
@@ -15026,13 +15080,12 @@ fn apply_cost_floor_inner(
 /// [`analyze_cost_reduction_order`] collect the floors once and re-apply them to
 /// every candidate order without re-walking `battlefield_functioning_statics`.
 fn collect_cost_floors(
-    state: &GameState,
-    caster: PlayerId,
-    spell_id: ObjectId,
+    view: &SpellCostView<'_>,
     selected_ability: Option<&ResolvedAbility>,
     target_sensitive_only: bool,
-    fused: bool,
 ) -> Vec<u32> {
+    let state = view.state;
+    let targets = selected_ability.map_or(SpellCostTargets::Unchosen, SpellCostTargets::Chosen);
     let mut floors = Vec::new();
     // CR 604.1: O(1) presence gate — no ModifyCost static means no cost floor to apply.
     if !static_kind_present(state, StaticModeKind::ModifyCost) {
@@ -15041,53 +15094,19 @@ fn collect_cost_floors(
     crate::game::perf_counters::record_static_full_scan();
     // CR 702.26b + CR 604.1: Functioning gate owned by `battlefield_functioning_statics`.
     for (bf_obj, def) in super::functioning_abilities::battlefield_functioning_statics(state) {
-        let bf_id = bf_obj.id;
-
-        if !battlefield_cost_floor_applies_before_targets(
-            state, caster, spell_id, bf_obj, def, fused,
+        if !battlefield_cost_floor_applies_on_view(
+            view,
+            bf_obj,
+            def,
+            targets,
+            target_sensitive_only,
         ) {
             continue;
         }
 
-        let StaticMode::ModifyCost {
-            mode: CostModifyMode::Minimum,
-            ref amount,
-            ref spell_filter,
-            ..
-        } = def.mode
-        else {
+        let StaticMode::ModifyCost { ref amount, .. } = def.mode else {
             continue;
         };
-
-        let filter_analysis = spell_filter.as_ref().map_or(
-            PreTargetCostFilterAnalysis::TargetIndependentRelevant,
-            |filter| {
-                analyze_cost_filter_before_targets_for(
-                    state, caster, spell_id, filter, bf_id, fused,
-                )
-            },
-        );
-        if target_sensitive_only && !filter_analysis.is_target_dependent() {
-            continue;
-        }
-        if selected_ability.is_none() && filter_analysis.is_target_dependent() {
-            continue;
-        }
-
-        // CR 601.2f: Spell-type filter narrows which spells are floored.
-        if let Some(ref filter) = spell_filter {
-            let matches = if let Some(ability) = selected_ability {
-                spell_matches_cost_filter_with_selected_targets_for(
-                    state, caster, spell_id, filter, bf_id, ability, fused,
-                )
-            } else {
-                spell_matches_cost_filter_for(state, caster, spell_id, filter, bf_id, fused)
-            };
-            if !matches {
-                continue;
-            }
-        }
-
         let floor = amount.mana_value();
         if floor == 0 {
             continue;
@@ -15156,52 +15175,559 @@ fn spell_matches_cost_filter_for(
     source_id: ObjectId,
     fused: bool,
 ) -> bool {
-    let Some(spell_obj) = state.objects.get(&spell_id) else {
-        return false;
-    };
-    if !state.objects.contains_key(&source_id) {
-        return false;
-    }
-    // CR 611.2f: the spell as cast, with its graveyard grant's type rider.
-    let with_rider = graveyard_rider_spell_projection(state, spell_id, spell_obj);
-    let spell_obj = with_rider.as_ref().unwrap_or(spell_obj);
+    SpellCostView::new(state, caster, spell_id, fused).matches(filter, source_id)
+}
 
-    match filter {
-        TargetFilter::Typed(_) => super::filter::spell_object_matches_filter_from_state_for(
+struct SpellCostView<'a> {
+    state: &'a GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    casting_variant: Option<CastingVariant>,
+    proposed: OnceCell<Option<(Box<GameState>, Zone)>>,
+    origin_characteristics_stable: OnceCell<bool>,
+}
+
+impl<'a> SpellCostView<'a> {
+    fn new(state: &'a GameState, caster: PlayerId, spell_id: ObjectId, fused: bool) -> Self {
+        Self::for_variant(
             state,
-            spell_obj,
-            spell_obj.zone,
             caster,
-            filter,
-            source_id,
-            &state.all_creature_types,
-            fused,
-        ),
-        TargetFilter::Or { filters } => filters.iter().any(|inner| {
-            spell_matches_cost_filter_for(state, caster, spell_id, inner, source_id, fused)
-        }),
-        TargetFilter::And { filters } => filters.iter().all(|inner| {
-            spell_matches_cost_filter_for(state, caster, spell_id, inner, source_id, fused)
-        }),
-        TargetFilter::Not { filter: inner } => {
-            !spell_matches_cost_filter_for(state, caster, spell_id, inner, source_id, fused)
+            spell_id,
+            fused.then_some(CastingVariant::Fuse),
+        )
+    }
+
+    fn for_variant(
+        state: &'a GameState,
+        caster: PlayerId,
+        spell_id: ObjectId,
+        casting_variant: Option<CastingVariant>,
+    ) -> Self {
+        Self {
+            state,
+            caster,
+            spell_id,
+            casting_variant,
+            proposed: OnceCell::new(),
+            origin_characteristics_stable: OnceCell::new(),
         }
-        // CR 201.2: "spells with the chosen name" (Disruptor Flute).
-        TargetFilter::HasChosenName => {
-            let Some(source_obj) = state.objects.get(&source_id) else {
+    }
+
+    fn matches(&self, filter: &TargetFilter, source_id: ObjectId) -> bool {
+        self.matches_with_projection(filter, source_id, super::filter::filter_reads_pt(filter))
+    }
+
+    fn can_read_origin_pt(&self, object: &GameObject, filter: &TargetFilter) -> bool {
+        fn fixed_pt_gate(prop: &FilterProp) -> bool {
+            match prop {
+                FilterProp::PtComparison {
+                    value: QuantityExpr::Fixed { .. },
+                    ..
+                }
+                | FilterProp::ToughnessGTPower
+                | FilterProp::PowerExceedsBase => true,
+                FilterProp::Not { prop } => fixed_pt_gate(prop),
+                FilterProp::AnyOf { props } => props.iter().all(fixed_pt_gate),
+                // A dynamic threshold can change when the spell leaves its
+                // origin, and every other property keeps the projection.
+                FilterProp::PtComparison { .. }
+                | FilterProp::Token
+                | FilterProp::NonToken
+                | FilterProp::RepresentedByCard
+                | FilterProp::ControllerChoseLabel { .. }
+                | FilterProp::ControllerMatches { .. }
+                | FilterProp::WasPlayed
+                | FilterProp::CastThisTurn { .. }
+                | FilterProp::Attacking { .. }
+                | FilterProp::Blocking
+                | FilterProp::BlockingSource
+                | FilterProp::CombatRelation { .. }
+                | FilterProp::BlockStatus { .. }
+                | FilterProp::AttackingAlone
+                | FilterProp::BlockingAlone
+                | FilterProp::Tapped
+                | FilterProp::Untapped
+                | FilterProp::IsSaddled
+                | FilterProp::SaddledSource
+                | FilterProp::CrewedThisTurn { .. }
+                | FilterProp::ConvokedSource
+                | FilterProp::ProtectorMatches { .. }
+                | FilterProp::HasHasteOrControlledSinceTurnBegan
+                | FilterProp::WithKeyword { .. }
+                | FilterProp::HasKeywordKind { .. }
+                | FilterProp::WithoutKeyword { .. }
+                | FilterProp::WithoutKeywordKind { .. }
+                | FilterProp::CanEnchant { .. }
+                | FilterProp::Counters { .. }
+                | FilterProp::Cmc { .. }
+                | FilterProp::ManaValueParity { .. }
+                | FilterProp::ManaCostIn { .. }
+                | FilterProp::InZone { .. }
+                | FilterProp::Owned { .. }
+                | FilterProp::Foretold
+                | FilterProp::HasAdventure
+                | FilterProp::EnchantedBy
+                | FilterProp::EquippedBy
+                | FilterProp::AttachedTo { .. }
+                | FilterProp::HasAttachment { .. }
+                | FilterProp::HasAnyAttachmentOf { .. }
+                | FilterProp::Another
+                | FilterProp::Unpaired
+                | FilterProp::OtherThanTriggerObject
+                | FilterProp::HasColor { .. }
+                | FilterProp::PowerGTSource
+                | FilterProp::ColorCount { .. }
+                | FilterProp::ManaSymbolCount { .. }
+                | FilterProp::HasSupertype { .. }
+                | FilterProp::IsChosenCreatureType
+                | FilterProp::MostPrevalentCreatureTypeIn { .. }
+                | FilterProp::IsChosenColor
+                | FilterProp::IsChosenCardType
+                | FilterProp::MatchesLastChosenCardPredicate
+                | FilterProp::HasSingleTarget
+                | FilterProp::Modal
+                | FilterProp::PrepareSpell
+                | FilterProp::NotColor { .. }
+                | FilterProp::NotSupertype { .. }
+                | FilterProp::Suspected
+                | FilterProp::Renowned
+                | FilterProp::Goaded
+                | FilterProp::Prepared
+                | FilterProp::InTrackedSet { .. }
+                | FilterProp::Modified
+                | FilterProp::Historic
+                | FilterProp::NotHistoric
+                | FilterProp::DifferentNameFrom { .. }
+                | FilterProp::DistinctFrom { .. }
+                | FilterProp::InAnyZone { .. }
+                | FilterProp::SharesQuality { .. }
+                | FilterProp::WasDealtDamageThisTurn
+                | FilterProp::DealtDamageThisTurn { .. }
+                | FilterProp::EnteredThisTurn
+                | FilterProp::ControlledContinuouslySinceTurnBegan
+                | FilterProp::ZoneChangedThisTurn { .. }
+                | FilterProp::AttackedThisTurn { .. }
+                | FilterProp::BlockedThisTurn
+                | FilterProp::FoughtThisTurn
+                | FilterProp::AttackedOrBlockedThisTurn
+                | FilterProp::CountersPutOnThisTurn { .. }
+                | FilterProp::FaceDown
+                | FilterProp::Transformed
+                | FilterProp::TargetsOnly { .. }
+                | FilterProp::Targets { .. }
+                | FilterProp::CouldBeTargetedByTriggeringSpell
+                | FilterProp::HasXInManaCost
+                | FilterProp::HasXInActivationCost
+                | FilterProp::WasKicked
+                | FilterProp::HasManaAbility
+                | FilterProp::HasNoAbilities
+                | FilterProp::Named { .. }
+                | FilterProp::SameName
+                | FilterProp::SameNameAsParentTarget
+                | FilterProp::SameNameAsExiledBySource
+                | FilterProp::NameMatchesAnyPermanent { .. }
+                | FilterProp::IsCommander
+                | FilterProp::SharesCreatureTypeWithCommander
+                | FilterProp::Other { .. } => false,
+            }
+        }
+
+        matches!(self.casting_variant, None | Some(CastingVariant::Normal))
+            && !matches!(object.zone, Zone::Battlefield | Zone::Stack)
+            && object.back_face.is_none()
+            && !object.face_down
+            && object.stickers.is_empty()
+            && object.counters.is_empty()
+            && matches!(filter, TargetFilter::Typed(typed) if typed.properties.iter().all(fixed_pt_gate))
+            && *self.origin_characteristics_stable.get_or_init(|| {
+                !super::layers::cast_may_change_layer_characteristics(self.state, object)
+            })
+    }
+
+    fn matches_with_projection(
+        &self,
+        filter: &TargetFilter,
+        source_id: ObjectId,
+        project_pt: bool,
+    ) -> bool {
+        let Self {
+            state,
+            caster,
+            spell_id,
+            casting_variant,
+            ..
+        } = *self;
+        let Some(object) = state.objects.get(&spell_id) else {
+            return false;
+        };
+        if !state.objects.contains_key(&source_id) {
+            return false;
+        }
+        // Reject a mismatched spell type or caster scope without cloning state.
+        if let (true, TargetFilter::Typed(typed)) = (project_pt, filter) {
+            let head = TargetFilter::Typed(TypedFilter {
+                type_filters: typed.type_filters.clone(),
+                controller: typed.controller.clone(),
+                properties: Vec::new(),
+            });
+            let with_rider = graveyard_rider_spell_projection(state, spell_id, object);
+            if !self.matches_cost_filter_on_view(
+                state,
+                with_rider.as_ref().unwrap_or(object),
+                object.zone,
+                &head,
+                source_id,
+                false,
+            ) {
+                return false;
+            }
+        }
+        let read_origin_pt = project_pt && self.can_read_origin_pt(object, filter);
+        let (view, origin) = if project_pt && !read_origin_pt {
+            let Some((projected, origin)) = self
+                .proposed
+                .get_or_init(|| project_spell_on_stack(state, caster, spell_id, casting_variant))
+                .as_ref()
+            else {
                 return false;
             };
-            cant_cast_filter_matches_for(state, spell_obj, filter, source_obj, caster, fused, None)
+            (projected.as_ref(), *origin)
+        } else {
+            (state, object.zone)
+        };
+        let Some(object) = view.objects.get(&spell_id) else {
+            return false;
+        };
+        let with_rider = graveyard_rider_spell_projection(state, spell_id, object);
+        let object = with_rider.as_ref().unwrap_or(object);
+        self.matches_cost_filter_on_view(view, object, origin, filter, source_id, project_pt)
+    }
+
+    fn matches_cost_filter_on_view(
+        &self,
+        state: &GameState,
+        spell_obj: &GameObject,
+        origin: Zone,
+        filter: &TargetFilter,
+        source_id: ObjectId,
+        read_pt: bool,
+    ) -> bool {
+        let caster = self.caster;
+        let fused = self.casting_variant == Some(CastingVariant::Fuse);
+        match filter {
+            TargetFilter::Typed(_) => super::filter::spell_object_matches_filter_with_view(
+                state,
+                spell_obj,
+                origin,
+                caster,
+                filter,
+                source_id,
+                &state.all_creature_types,
+                fused,
+                None,
+                (read_pt && super::filter::filter_reads_pt(filter)).then_some(spell_obj),
+            ),
+            TargetFilter::Or { filters } => filters.iter().any(|inner| {
+                self.matches_cost_filter_on_view(
+                    state, spell_obj, origin, inner, source_id, read_pt,
+                )
+            }),
+            TargetFilter::And { filters } => filters.iter().all(|inner| {
+                self.matches_cost_filter_on_view(
+                    state, spell_obj, origin, inner, source_id, read_pt,
+                )
+            }),
+            TargetFilter::Not { filter: inner } => !self
+                .matches_cost_filter_on_view(state, spell_obj, origin, inner, source_id, read_pt),
+            // CR 201.2: "spells with the chosen name" (Disruptor Flute).
+            TargetFilter::HasChosenName => {
+                let Some(source_obj) = state.objects.get(&source_id) else {
+                    return false;
+                };
+                cant_cast_filter_matches_for(
+                    state, spell_obj, filter, source_obj, caster, fused, None,
+                )
+            }
+            TargetFilter::Named { .. } => {
+                let Some(source_obj) = state.objects.get(&source_id) else {
+                    return false;
+                };
+                cant_cast_filter_matches_for(
+                    state, spell_obj, filter, source_obj, caster, fused, None,
+                )
+            }
+            // CR 601.2f: Apply only cost modifications whose spell filter matches.
+            // Fail-closed: unrecognized filter shapes do not universally reduce costs.
+            _ => false,
         }
-        TargetFilter::Named { .. } => {
-            let Some(source_obj) = state.objects.get(&source_id) else {
-                return false;
-            };
-            cant_cast_filter_matches_for(state, spell_obj, filter, source_obj, caster, fused, None)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SPELL_COST_PROJECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// CR 601.2a + CR 601.2f: Read characteristics from a detached state in which
+/// the proposed spell has left its origin and is controlled by its caster.
+fn project_spell_on_stack(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    casting_variant: Option<CastingVariant>,
+) -> Option<(Box<GameState>, Zone)> {
+    let object = state.objects.get(&spell_id)?;
+    let origin = if object.zone == Zone::Stack {
+        spell_cast_origin_zone(state, object)
+    } else {
+        object.zone
+    };
+    #[cfg(test)]
+    SPELL_COST_PROJECTIONS.with(|count| count.set(count.get() + 1));
+    let mut projected = Box::new(state.clone());
+    let mut events = Vec::new();
+    if !projected.stack.iter().any(|entry| entry.id == spell_id) {
+        stack::push_to_stack(
+            &mut projected,
+            StackEntry {
+                id: spell_id,
+                source_id: spell_id,
+                controller: caster,
+                kind: StackEntryKind::Spell {
+                    card_id: object.card_id,
+                    ability: None,
+                    casting_variant: casting_variant.unwrap_or_default(),
+                    actual_mana_spent: 0,
+                },
+            },
+            &mut events,
+        );
+    }
+    debug_assert!({
+        let mut entries = projected.stack.iter().filter(|entry| entry.id == spell_id);
+        entries.next().is_some_and(|entry| {
+            entry.controller == caster && matches!(entry.kind, StackEntryKind::Spell { .. })
+        }) && entries.next().is_none()
+    });
+    if object.zone != Zone::Stack
+        && !matches!(
+            zone_pipeline::move_object(
+                &mut projected,
+                ZoneMoveRequest::casting_to_stack(spell_id, spell_id, caster),
+                &mut events,
+            ),
+            ZoneMoveResult::Done
+        )
+    {
+        return None;
+    }
+    super::layers::mark_layers_full(&mut projected);
+    super::layers::flush_layers(&mut projected);
+    Some((projected, origin))
+}
+
+#[cfg(test)]
+mod spell_pt_projection_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+
+    #[test]
+    fn cost_snapshot_only_projects_when_a_matching_reducer_reads_spell_pt() {
+        use crate::parser::oracle_static::parse_static_line;
+
+        const GORECLAW_REDUCER: &str =
+            "Creature spells you cast with power 4 or greater cost {2} less to cast.";
+
+        fn snapshot(
+            state: &GameState,
+            spell: ObjectId,
+            targets: Vec<TargetRef>,
+        ) -> CollectedCostModifiers {
+            let ability = ResolvedAbility::new(Effect::NoOp, targets, spell, P0);
+            CollectedCostModifiers::collect_for(
+                state,
+                P0,
+                spell,
+                Some(&ability),
+                None,
+                None,
+                &CostFinalizeContext::PREVIEW,
+            )
         }
-        // CR 601.2e: Cost modifications only apply when the filter explicitly matches.
-        // Fail-closed: unrecognized filter shapes do not universally reduce costs.
-        _ => false,
+
+        let mut scenario = GameScenario::new();
+        let creature = scenario
+            .add_creature_to_hand(P0, "Rumbling Baloth", 4, 4)
+            .id();
+        scenario.add_creature_from_oracle(
+            P0,
+            "Non-P/T reducer",
+            2,
+            2,
+            "Creature spells you cast cost {1} less to cast.",
+        );
+        let runner = scenario.build();
+        SPELL_COST_PROJECTIONS.with(|count| count.set(0));
+        assert_eq!(
+            snapshot(runner.state(), creature, vec![]).non_floor.len(),
+            1
+        );
+        assert_eq!(SPELL_COST_PROJECTIONS.with(std::cell::Cell::get), 0);
+
+        let mut scenario = GameScenario::new();
+        scenario.add_creature_from_oracle(
+            P0,
+            "Goreclaw, Terror of Qal Sisma",
+            4,
+            3,
+            GORECLAW_REDUCER,
+        );
+        let sorcery = scenario.add_spell_to_hand(P0, "Sorcery", false).id();
+        let creature = scenario
+            .add_creature_to_hand(P0, "Rumbling Baloth", 4, 4)
+            .id();
+        let runner = scenario.build();
+        let state = runner.state();
+        SPELL_COST_PROJECTIONS.with(|count| count.set(0));
+        assert!(snapshot(state, sorcery, vec![]).non_floor.is_empty());
+        assert!(collect_target_dependent_cost_modifiers(
+            &SpellCostView::for_variant(state, P0, creature, None),
+            SpellCostTargets::Any,
+        )
+        .is_empty());
+        assert_eq!(snapshot(state, creature, vec![]).non_floor.len(), 1);
+        assert_eq!(SPELL_COST_PROJECTIONS.with(std::cell::Cell::get), 0);
+
+        let mut scenario = GameScenario::new();
+        scenario
+            .add_creature_from_oracle(P0, "Goreclaw, Terror of Qal Sisma", 4, 3, GORECLAW_REDUCER)
+            .with_static_definition(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::StackSpell)
+                    .modifications(vec![ContinuousModification::AddPower { value: -1 }]),
+            );
+        let creature = scenario
+            .add_creature_to_hand(P0, "Rumbling Baloth", 4, 4)
+            .id();
+        let runner = scenario.build();
+        SPELL_COST_PROJECTIONS.with(|count| count.set(0));
+        assert!(snapshot(runner.state(), creature, vec![])
+            .non_floor
+            .is_empty());
+        assert_eq!(SPELL_COST_PROJECTIONS.with(std::cell::Cell::get), 1);
+
+        let mut scenario = GameScenario::new();
+        let self_reducer = parse_static_line(GORECLAW_REDUCER)
+            .expect("parsed power gate")
+            .affected(TargetFilter::SelfRef)
+            .active_zones(vec![Zone::Hand, Zone::Stack]);
+        let mut targeted_reducer = self_reducer.clone().active_zones(vec![Zone::Battlefield]);
+        targeted_reducer.affected = None;
+        let StaticMode::ModifyCost { spell_filter, .. } = &mut targeted_reducer.mode else {
+            panic!("cost reducer");
+        };
+        *spell_filter = Some(TargetFilter::And {
+            filters: vec![
+                spell_filter.take().expect("power gate"),
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::Targets {
+                        filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                    },
+                ])),
+            ],
+        });
+        // Exercise self, battlefield and target-dependent reads in one snapshot.
+        let target = scenario
+            .add_creature_from_oracle(P0, "Goreclaw, Terror of Qal Sisma", 4, 3, GORECLAW_REDUCER)
+            .with_static_definition(targeted_reducer)
+            .id();
+        for _ in 0..4 {
+            scenario
+                .add_land_to_hand(P0, "Forest")
+                .from_oracle_text("({T}: Add {G}.)");
+        }
+        let creature = scenario
+            .add_creature_to_hand_from_oracle(
+                P0,
+                "Maro",
+                0,
+                0,
+                "Maro's power and toughness are each equal to the number of cards in your hand.",
+            )
+            .with_static_definition(self_reducer)
+            .id();
+        let runner = scenario.build();
+        SPELL_COST_PROJECTIONS.with(|count| count.set(0));
+        let modifiers = snapshot(runner.state(), creature, vec![TargetRef::Object(target)]);
+        assert_eq!(modifiers.non_floor.len(), 2);
+        assert_eq!(modifiers.target_dependent.len(), 1);
+        assert_eq!(SPELL_COST_PROJECTIONS.with(std::cell::Cell::get), 1);
+    }
+
+    #[test]
+    fn projected_spell_moves_out_of_hand_and_reuses_live_announcement() {
+        let mut scenario = GameScenario::new();
+        let spell = scenario
+            .add_creature_to_hand_from_oracle(
+                P0,
+                "Maro",
+                0,
+                0,
+                "Maro's power and toughness are each equal to the number of cards in your hand.",
+            )
+            .id();
+        scenario
+            .add_land_to_hand(P0, "Forest")
+            .from_oracle_text("({T}: Add {G}.)");
+        let runner = scenario.build();
+        let mut state = runner.state().clone();
+        let (mut unannounced, origin) = project_spell_on_stack(&state, P0, spell, None).unwrap();
+        assert_eq!(origin, Zone::Hand);
+        assert!(state.players[0].hand.contains(&spell));
+        assert!(!unannounced.players[0].hand.contains(&spell));
+        assert_eq!(unannounced.objects[&spell].power, Some(1));
+        assert_eq!(
+            unannounced
+                .stack
+                .iter()
+                .filter(|entry| entry.id == spell)
+                .count(),
+            1
+        );
+
+        // An actual announcement carries its controller and casting metadata
+        // even while the underlying card is still physically in its origin.
+        let mut announcement = unannounced.stack.back().unwrap().clone();
+        announcement.controller = P1;
+        if let StackEntryKind::Spell {
+            casting_variant, ..
+        } = &mut announcement.kind
+        {
+            *casting_variant = CastingVariant::Normal;
+        }
+        state.stack.push_back(announcement);
+        unannounced.resolving_stack_entry = unannounced.stack.pop_back();
+        super::super::layers::mark_layers_full(&mut unannounced);
+        super::super::layers::flush_layers(&mut unannounced);
+        assert_eq!(unannounced.objects[&spell].power, Some(1));
+        let (announced, origin) = project_spell_on_stack(&state, P1, spell, None).unwrap();
+        assert_eq!(origin, Zone::Hand);
+        assert_eq!(announced.objects[&spell].controller, P1);
+        assert_eq!(
+            announced
+                .stack
+                .iter()
+                .filter(|entry| entry.id == spell)
+                .count(),
+            1
+        );
+        assert!(matches!(
+            announced.stack.back().unwrap().kind,
+            StackEntryKind::Spell {
+                casting_variant: CastingVariant::Normal,
+                ..
+            }
+        ));
     }
 }
 
@@ -23102,6 +23628,12 @@ fn target_dependent_reduction_makes_payable(
         );
         // One priced cast per reduction set (with and without the Defiler
         // payment), its target-independent modifiers collected once.
+        let view = SpellCostView::for_variant(
+            flushed,
+            player,
+            prepared.object_id,
+            Some(prepared.casting_variant),
+        );
         let collect_cast = |accept_defiler: bool| {
             let mut pending = PendingCast::new(
                 prepared.object_id,
@@ -23118,12 +23650,9 @@ fn target_dependent_reduction_makes_payable(
                     .extend(defiler.as_ref().map(|(entry, _)| entry.clone()));
             }
             let ctx = CostFinalizeContext::from_pending(&pending);
-            let modifiers = CollectedCostModifiers::collect_for(
-                flushed,
-                player,
-                pending.object_id,
+            let modifiers = CollectedCostModifiers::collect_on_view(
+                &view,
                 None,
-                Some(pending.casting_variant),
                 pending.casting_permission_index,
                 &ctx,
             );
@@ -23131,8 +23660,7 @@ fn target_dependent_reduction_makes_payable(
         };
         let plain_cast = collect_cast(false);
         let defiler_cast = defiler.is_some().then(|| collect_cast(true));
-        let floors =
-            CollectedCostFloors::collect_target_independent(flushed, player, prepared.object_id);
+        let floors = CollectedCostFloors::collect_target_independent(&view);
         let price = |(pending, ctx, modifiers): &(
             PendingCast,
             CostFinalizeContext,
@@ -23146,7 +23674,7 @@ fn target_dependent_reduction_makes_payable(
                 modifiers.with_target_dependent(target_dependent.0.clone()),
                 floors.with_target_dependent(target_dependent.1.clone()),
             );
-            recompute_pending_mana_total_using(flushed, player, &pending, Some(0), ctx, &collected)
+            recompute_pending_mana_total_using(&view, &pending, Some(0), ctx, &collected)
         };
         let payable_on = |state: &GameState, cost: &ManaCost| {
             can_feasibly_pay_harmonize_mana_cost_with_probe(
@@ -23171,15 +23699,10 @@ fn target_dependent_reduction_makes_payable(
         // reduction never raises a total, a raise or floor never lowers one).
         // If even that is unpayable, every assignment is, however many exist.
         let best_case = (
-            collect_target_dependent_cost_modifiers(
-                flushed,
-                player,
-                prepared.object_id,
-                SpellCostTargets::Any,
-            )
-            .into_iter()
-            .filter(|modification| !modification.is_raise)
-            .collect(),
+            collect_target_dependent_cost_modifiers(&view, SpellCostTargets::Any)
+                .into_iter()
+                .filter(|modification| !modification.is_raise)
+                .collect(),
             Vec::new(),
         );
         if !payable(&price(&plain_cast, &resolved, &best_case))
@@ -23218,20 +23741,8 @@ fn target_dependent_reduction_makes_payable(
             // CR 601.2f: the modifiers and floors that read this assignment's
             // targets, shared by both reduction sets.
             let target_dependent = (
-                collect_target_dependent_cost_modifiers(
-                    flushed,
-                    player,
-                    prepared.object_id,
-                    SpellCostTargets::Chosen(&chosen),
-                ),
-                collect_cost_floors(
-                    flushed,
-                    player,
-                    prepared.object_id,
-                    Some(&chosen),
-                    true,
-                    false,
-                ),
+                collect_target_dependent_cost_modifiers(&view, SpellCostTargets::Chosen(&chosen)),
+                collect_cost_floors(&view, Some(&chosen), true),
             );
             let priced = price(&plain_cast, &chosen, &target_dependent);
             // CR 601.2f: an accepted Defiler reduction stacks with the
@@ -23247,7 +23758,7 @@ fn target_dependent_reduction_makes_payable(
             {
                 continue;
             }
-            if payable(&priced) || with_defiler.as_ref().is_some_and(&defiler_payable) {
+            if payable(&priced) || with_defiler.as_ref().is_some_and(defiler_payable) {
                 return true;
             }
             checked.push((priced, with_defiler));
@@ -23327,17 +23838,7 @@ fn target_dependent_cost_reduction_present(
     prepared: &PreparedSpellCast,
 ) -> bool {
     let spell_id = prepared.object_id;
-    let casting_variant = Some(prepared.casting_variant);
-    let fused = prepared.casting_variant == CastingVariant::Fuse;
-    let reduces_by_targets = |mode: &CostModifyMode, filter: Option<&TargetFilter>, source| {
-        matches!(mode, CostModifyMode::Reduce)
-            && filter.is_some_and(|filter| {
-                analyze_cost_filter_before_targets_for(
-                    state, player, spell_id, filter, source, fused,
-                )
-                .is_target_dependent()
-            })
-    };
+    let view = SpellCostView::for_variant(state, player, spell_id, Some(prepared.casting_variant));
 
     let Some(spell) = state.objects.get(&spell_id) else {
         return false;
@@ -23346,14 +23847,13 @@ fn target_dependent_cost_reduction_present(
     if spell.static_definitions.iter_all().any(|definition| {
         matches!(
             &definition.mode,
-            StaticMode::ModifyCost { mode, spell_filter, .. }
-                if reduces_by_targets(mode, spell_filter.as_ref(), spell_id)
-        ) && self_spell_cost_modifier_applies_before_targets(
-            state,
-            player,
-            spell_id,
+            StaticMode::ModifyCost { mode, .. }
+                if *mode == CostModifyMode::Reduce
+        ) && self_spell_cost_modifier_applies_on_view(
+            &view,
             definition,
-            casting_variant,
+            SpellCostTargets::Any,
+            true,
         )
     }) {
         return true;
@@ -23367,31 +23867,30 @@ fn target_dependent_cost_reduction_present(
             |(source, definition)| {
                 definition
                     .board_wide_cost_modifier()
-                    .is_some_and(|modifier| {
-                        reduces_by_targets(&modifier.mode, modifier.spell_filter, source.id)
-                    })
-                    && battlefield_cost_modifier_applies_before_targets(
-                        state,
-                        player,
-                        spell_id,
+                    .is_some_and(|modifier| modifier.mode == CostModifyMode::Reduce)
+                    && battlefield_cost_modifier_applies_on_view(
+                        &view,
                         source,
                         definition,
-                        fused,
-                        casting_variant,
+                        SpellCostTargets::Any,
+                        true,
                     )
             },
         ))
         || (has_transient
             && state.transient_continuous_effects.iter().any(|tce| {
                 tce.modifications.iter().any(|modification| {
-                    matches!(
-                        modification,
-                        ContinuousModification::GrantStaticAbility { definition }
-                            if definition.board_wide_cost_modifier().is_some_and(|modifier| {
-                                reduces_by_targets(&modifier.mode, modifier.spell_filter, spell_id)
-                            })
-                    )
-                })
+            matches!(
+                modification,
+                ContinuousModification::GrantStaticAbility { definition }
+                    if definition.board_wide_cost_modifier().is_some_and(|modifier| {
+                        modifier.mode == CostModifyMode::Reduce
+                            && spell_cost_filter_admits(
+                                &view, modifier.spell_filter, spell_id, SpellCostTargets::Any, true,
+                            )
+                    })
+            )
+        })
             }))
 }
 
@@ -23887,31 +24386,15 @@ pub(crate) fn pending_mana_obligation_is_stable_before_targets(
     let Some(spell) = state.objects.get(&pending.object_id) else {
         return false;
     };
+    let view = SpellCostView::for_variant(
+        state,
+        player,
+        pending.object_id,
+        Some(pending.casting_variant),
+    );
     if spell.strive_cost.is_some()
         || spell.static_definitions.iter_all().any(|definition| {
-            let StaticMode::ModifyCost {
-                spell_filter: Some(filter),
-                ..
-            } = &definition.mode
-            else {
-                return false;
-            };
-            analyze_cost_filter_before_targets_for(
-                state,
-                player,
-                pending.object_id,
-                filter,
-                pending.object_id,
-                fused,
-            )
-            .is_target_dependent()
-                && self_spell_cost_modifier_applies_before_targets(
-                    state,
-                    player,
-                    pending.object_id,
-                    definition,
-                    Some(pending.casting_variant),
-                )
+            self_spell_cost_modifier_applies_on_view(&view, definition, SpellCostTargets::Any, true)
         })
     {
         return false;
@@ -23929,59 +24412,35 @@ pub(crate) fn pending_mana_obligation_is_stable_before_targets(
     }
 
     !super::functioning_abilities::game_functioning_statics(state).any(|(source, definition)| {
-        let payment_axis_unstable = match &definition.mode {
+        match &definition.mode {
             StaticMode::ModifyCost {
-                spell_filter: Some(filter),
+                mode: CostModifyMode::Minimum,
                 ..
-            } => analyze_cost_filter_before_targets_for(
-                state,
-                player,
-                pending.object_id,
-                filter,
-                source.id,
-                fused,
-            )
-            .is_target_dependent(),
-            StaticMode::ImposeAdditionalCost {
-                spell_filter: Some(filter),
-                ..
-            } => analyze_cost_filter_before_targets_for(
-                state,
-                player,
-                pending.object_id,
-                filter,
-                source.id,
-                false,
-            )
-            .is_relevant(),
-            StaticMode::ImposeAdditionalCost {
-                spell_filter: None, ..
-            } => true,
+            } => battlefield_cost_floor_applies_on_view(
+                &view,
+                source,
+                definition,
+                SpellCostTargets::Any,
+                true,
+            ),
+            StaticMode::ModifyCost { .. } => battlefield_cost_modifier_applies_on_view(
+                &view,
+                source,
+                definition,
+                SpellCostTargets::Any,
+                true,
+            ),
+            StaticMode::ImposeAdditionalCost { .. } => {
+                imposed_additional_cost_applies_before_targets(
+                    state,
+                    player,
+                    pending.object_id,
+                    source,
+                    definition,
+                )
+            }
             _ => false,
-        };
-        payment_axis_unstable
-            && (battlefield_cost_modifier_applies_before_targets(
-                state,
-                player,
-                pending.object_id,
-                source,
-                definition,
-                fused,
-                Some(pending.casting_variant),
-            ) || battlefield_cost_floor_applies_before_targets(
-                state,
-                player,
-                pending.object_id,
-                source,
-                definition,
-                fused,
-            ) || imposed_additional_cost_applies_before_targets(
-                state,
-                player,
-                pending.object_id,
-                source,
-                definition,
-            ))
+        }
     })
 }
 
@@ -25398,6 +25857,183 @@ fn effect_payment_permissions(
     let mana_spend_permission =
         player_mana_spend_permission_for_optional_spell(simulated, player, None);
     super::static_abilities::build_cost_permission_context(simulated, player, mana_spend_permission)
+}
+
+/// CR 608.2g: One way the payer may fund a resolution-time effect mana
+/// payment. "If an effect gives a player the option to pay mana, they may
+/// activate mana abilities before taking that action" — a permission that does
+/// not depend on a shortfall, so the automatic planner's own choice of sources
+/// is one legal funding among several, never the whole funding space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EffectManaFunding {
+    /// The automatic planner funds the payment from the pool and the sources
+    /// it prefers.
+    Planned,
+    /// The payer first activates this permanent's mana ability — even when the
+    /// pool already covers the payment or the planner would prefer another
+    /// source — and the planner funds what is left.
+    ActivatingFirst(ObjectId),
+}
+
+/// The most [`EffectManaFunding::ActivatingFirst`] fundings
+/// [`effect_mana_funding_candidates`] admits. A search over more is
+/// [`EffectManaFundingCandidates::exhausted`] and decides nothing.
+pub const EFFECT_MANA_FUNDING_PROBE_BUDGET: usize = 16;
+
+/// The fundings a resolution-time effect mana payment is judged under.
+pub(crate) struct EffectManaFundingCandidates {
+    /// The planner's own funding first, then at most
+    /// [`EFFECT_MANA_FUNDING_PROBE_BUDGET`] activations, in the planner's
+    /// preference order.
+    pub fundings: Vec<EffectManaFunding>,
+    /// More permanents could fund the payment than the budget admits, so a
+    /// search that finds no funding performable has not shown that none is.
+    pub exhausted: bool,
+}
+
+/// CR 608.2g + CR 605.3a: The fundings a resolution-time effect mana payment
+/// is judged under: the planner's own, then one per permanent whose mana
+/// ability the payer may activate first and whose activation can do more than
+/// add mana ([`super::casting_costs::auto_tap_sources_beyond_mana`]). Tapping
+/// any other source first leaves the same state as the planner's funding apart
+/// from the mana pool, so it decides nothing the planner's funding does not.
+/// The modeled space is at most one activation beyond the planner's choice,
+/// and at most [`EFFECT_MANA_FUNDING_PROBE_BUDGET`] such activations.
+pub(super) fn effect_mana_funding_candidates(
+    state: &GameState,
+    payer: PlayerId,
+) -> EffectManaFundingCandidates {
+    let sources = super::casting_costs::auto_tap_sources_beyond_mana(state, payer);
+    let exhausted = sources.len() > EFFECT_MANA_FUNDING_PROBE_BUDGET;
+    let fundings = std::iter::once(EffectManaFunding::Planned)
+        .chain(
+            sources
+                .into_iter()
+                .take(EFFECT_MANA_FUNDING_PROBE_BUDGET)
+                .map(EffectManaFunding::ActivatingFirst),
+        )
+        .collect();
+    EffectManaFundingCandidates {
+        fundings,
+        exhausted,
+    }
+}
+
+/// What one [`EffectManaFunding`] of a resolution-time effect mana payment
+/// leaves, as [`effect_mana_funding_probe`] simulates it.
+pub(crate) enum EffectManaFundingProbe {
+    /// The funding pays the cost; the state the effect's later instructions
+    /// then resolve in.
+    Funded(Box<GameState>),
+    /// CR 118.3: the funding leaves the cost unpaid.
+    Unpayable,
+    /// CR 605.3b + CR 616.1: a mana ability the funding activates paused for
+    /// a choice, so what the funding leaves is not decided.
+    Undecided,
+}
+
+/// CR 608.2g + CR 605.3a + CR 605.3b + CR 614.6: The state a resolution-time
+/// effect's later instructions resolve in once its `PayCost { Mana }` head's
+/// cost has been funded by `funding`, judged by the live payment's own funding
+/// pipeline: [`activate_mana_source_first`] for an
+/// [`EffectManaFunding::ActivatingFirst`] activation, then the effect-context
+/// auto-tap pass, with every activated mana ability resolved immediately
+/// (CR 605.3b). Mana abilities activated to pay for an effect resolve inline,
+/// so events their own resolution produces (Pristine Talisman's "You gain 1
+/// life") meet the standing replacement pipeline and a replacement can rewrite
+/// what the outer effect's later instructions read (Nefarious Lich: "If you
+/// would gain life, draw that many cards instead." adds the drawn cards to the
+/// hand during the outer resolution — Conspiracy Theorist's conjoined "discard
+/// a card" is then payable from that draw). The cost itself is judged by
+/// [`can_pay_effect_mana_cost_after_auto_tap`] in the state the
+/// first activation leaves.
+pub(super) fn effect_mana_funding_probe(
+    state: &GameState,
+    payer: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    funding: EffectManaFunding,
+) -> EffectManaFundingProbe {
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_effect_mana_funding_probe();
+    let mut simulated = effect_payment_probe_state(state);
+    let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
+    if let EffectManaFunding::ActivatingFirst(mana_source) = funding {
+        if !activate_mana_source_first(
+            &mut simulated,
+            payer,
+            source_id,
+            mana_source,
+            &mut tap_events,
+        ) {
+            return EffectManaFundingProbe::Undecided;
+        }
+    }
+    // CR 118.12: the head of a resolving effect pays through the
+    // `EffectPayCost` root, which can surface a paused source's choice.
+    if !can_pay_effect_mana_cost_after_auto_tap(
+        &simulated,
+        payer,
+        source_id,
+        cost,
+        PausedManaPayment::Resumable,
+    ) {
+        return EffectManaFundingProbe::Unpayable;
+    }
+    if run_effect_auto_tap_pass(&mut simulated, payer, source_id, cost, &mut tap_events) {
+        return EffectManaFundingProbe::Undecided;
+    }
+    EffectManaFundingProbe::Funded(Box::new(simulated))
+}
+
+/// CR 608.2g + CR 605.3a + CR 605.3b + CR 605.4a: The payer activates
+/// `mana_source`'s mana ability before a resolution-time effect payment, the
+/// [`EffectManaFunding::ActivatingFirst`] step shared by the probe
+/// ([`effect_mana_funding_probe`]) and the live payment, so both fund the same
+/// way. The effect-context planner is restricted to `mana_source` and asked
+/// for one generic unit beyond what the pool floats, so its already-funded
+/// fast path (CR 106.4) cannot skip the activation the payer chose. The
+/// activation resolves immediately (CR 605.3b), along with its coupled
+/// triggered mana abilities (CR 605.4a).
+///
+/// Returns `false` when the activation paused for a choice (CR 605.3b + CR
+/// 616.1) or left the waiting state changed; probes treat that funding as
+/// undecided, and the live payment never selects such a funding.
+pub(super) fn activate_mana_source_first(
+    state: &mut GameState,
+    payer: PlayerId,
+    source_id: ObjectId,
+    mana_source: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    super::layers::flush_layers(state);
+    let waiting_before = state.waiting_for.clone();
+    let events_before = events.len();
+    let others: HashSet<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| *id != mana_source)
+        .collect();
+    let demand = crate::types::mana::ManaCost::Cost {
+        shards: Vec::new(),
+        generic: effect_payment_pool_total(state, payer).saturating_add(1),
+    };
+    let effect_ctx = PaymentContext::Effect;
+    super::casting_costs::auto_tap_mana_sources_with_context_excluding(
+        state,
+        payer,
+        &demand,
+        events,
+        Some(source_id),
+        Some(&effect_ctx),
+        &others,
+    );
+    if mana_ability_cost_payment_is_paused(state) {
+        return false;
+    }
+    super::triggers::resolve_tap_mana_triggers_inline(state, events, events_before);
+    state.waiting_for == waiting_before
 }
 
 /// CR 118.1 + CR 605.3a + CR 605.4a + CR 106.12b: The mana a resolution-time
@@ -27982,6 +28618,144 @@ pub(super) fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> 
     }
 }
 
+/// CR 702.6a + CR 702.29a: the keyword an `AlternativeKeywordCost` static can
+/// replace the cost of, for an activated ability carrying `tag`.
+fn alternative_keyword_kind(tag: AbilityTag) -> Option<KeywordKind> {
+    match tag {
+        AbilityTag::Equip => Some(KeywordKind::Equip),
+        AbilityTag::Cycling => Some(KeywordKind::Cycling),
+        AbilityTag::Boast
+        | AbilityTag::Evolve
+        | AbilityTag::Exhaust
+        | AbilityTag::Outlast
+        | AbilityTag::Backup
+        | AbilityTag::PowerUp
+        | AbilityTag::Augment => None,
+    }
+}
+
+/// Every ability tag [`alternative_keyword_kind`] maps, for the inverse lookup.
+const ALTERNATIVE_KEYWORD_TAGS: [AbilityTag; 2] = [AbilityTag::Equip, AbilityTag::Cycling];
+
+/// CR 602.2b + CR 118.9: An active keyword-cost static adds an alternative
+/// activation-cost branch before the shared cost lock. Its condition is already
+/// applied by `battlefield_active_statics`; the source filter and first-use
+/// frequency are evaluated against the activated ability and its controller.
+fn activation_cost_with_alternative_keyword_costs(
+    state: &GameState,
+    ability: &AbilityDefinition,
+    player: PlayerId,
+    source_id: ObjectId,
+    base_cost: AbilityCost,
+) -> AbilityCost {
+    use crate::types::statics::CastFrequency;
+
+    let Some((ability_tag, keyword)) = ability
+        .ability_tag
+        .and_then(|tag| alternative_keyword_kind(tag).map(|keyword| (tag, keyword)))
+    else {
+        return base_cost;
+    };
+
+    let mut alternatives = Vec::new();
+    for (static_source, definition) in
+        super::functioning_abilities::battlefield_active_statics(state)
+    {
+        if static_source.controller != player {
+            continue;
+        }
+        let StaticMode::AlternativeKeywordCost {
+            keyword: granted_keyword,
+            cost,
+            frequency,
+        } = &definition.mode
+        else {
+            continue;
+        };
+        if *granted_keyword != keyword {
+            continue;
+        }
+        let context =
+            super::filter::FilterContext::from_source_with_controller(static_source.id, player);
+        if definition.affected.as_ref().is_some_and(|filter| {
+            !super::filter::matches_target_filter(state, source_id, filter, &context)
+        }) {
+            continue;
+        }
+        let frequency_available = match frequency.unwrap_or(CastFrequency::Unlimited) {
+            CastFrequency::Unlimited => true,
+            // CR 611.3a: "the first <keyword> ability you activate each turn" is
+            // a fact about the turn's activation journal, read through the
+            // shared first-activation authority so loop detection keeps the
+            // same row.
+            CastFrequency::OncePerTurn => !earlier_activation_this_turn_qualified(
+                state,
+                ability_tag.keyword_str(),
+                ActivationExemption::None,
+                // CR 109.5: "you activate" — only the static controller's own
+                // earlier activations consume the once-per-turn option.
+                Some(&PlayerFilter::Controller),
+                definition.affected.as_ref(),
+                None,
+                static_source.id,
+                player,
+                &context,
+            ),
+            CastFrequency::OncePerTurnPerPermanentType => false,
+        };
+        if frequency_available && !alternatives.contains(cost) {
+            alternatives.push(cost.clone());
+        }
+    }
+
+    if alternatives.is_empty() {
+        return base_cost;
+    }
+    // Normalize first so legacy card-data equip disjunctions are already a
+    // `OneOf` when the alternatives are appended to them.
+    let base_cost = activation_cost_for_affordability(base_cost, Some(ability_tag));
+
+    // CR 702.29a: "Cycling [cost]" means "[cost], Discard this card: Draw a
+    // card." An alternative cost replaces only the cycling cost; discarding the
+    // card remains part of the activation cost. Equip's whole activation cost is
+    // the equip cost (CR 702.6a), so it is substituted whole.
+    let (keyword_cost, retained_legs) = match (keyword, base_cost) {
+        (KeywordKind::Cycling, AbilityCost::Composite { costs }) => {
+            let (retained, rest): (Vec<_>, Vec<_>) = costs.into_iter().partition(|leg| {
+                matches!(
+                    leg,
+                    AbilityCost::Discard {
+                        self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
+                        ..
+                    }
+                )
+            });
+            match rest.len() {
+                0 => (AbilityCost::Composite { costs: retained }, Vec::new()),
+                1 => (rest.into_iter().next().expect("one leg"), retained),
+                _ => (AbilityCost::Composite { costs: rest }, retained),
+            }
+        }
+        (_, base_cost) => (base_cost, Vec::new()),
+    };
+    let folded = match keyword_cost {
+        AbilityCost::OneOf { mut costs } => {
+            costs.extend(alternatives);
+            AbilityCost::OneOf { costs }
+        }
+        keyword_cost => AbilityCost::OneOf {
+            costs: std::iter::once(keyword_cost).chain(alternatives).collect(),
+        },
+    };
+    if retained_legs.is_empty() {
+        folded
+    } else {
+        AbilityCost::Composite {
+            costs: std::iter::once(folded).chain(retained_legs).collect(),
+        }
+    }
+}
+
 /// CR 601.2h + CR 602.2b: Filter disjunctive activation-cost branches through the
 /// same affordability authority used by `can_activate_ability_now` and
 /// `handle_activate_ability`, each judged inside its `enclosing` total cost and
@@ -29143,9 +29917,14 @@ fn may_sacrifice_for_cost(
     // only requires paying the morph cost, so a face-down permanent matching the
     // cost's filter may pay it with itself unless the cost says "another", which
     // the filter carries.
-    // CR 701.21a: A permanent with "can't be sacrificed" cannot be sacrificed
-    // for any cost regardless of payment scope (e.g. Assault Suit).
-    if super::static_abilities::object_has_static_other(state, id, "CantBeSacrificed") {
+    // CR 109.5 + CR 701.21a: the only object-level bar check. An
+    // installer-bound bar (Call for Aid binds its caster) excludes the
+    // object for that actor alone; an unbound bar (printed or granted
+    // "can't be sacrificed", e.g. Assault Suit) excludes it for every
+    // actor, regardless of payment scope. Same authority as execution
+    // (`object_cant_be_sacrificed_by`); no actor-blind check may run
+    // before it or later controllers stay barred.
+    if super::static_abilities::object_cant_be_sacrificed_by(state, player, id) {
         return false;
     }
     matches!(scope, Some(super::costs::PaymentScope::TurnFaceUp { .. }))
@@ -29960,6 +30739,12 @@ fn manual_activation_life_retry_possible(
         .any(|route| activation_cost_pays_life(route, life_colors))
 }
 
+/// CR 702.61a: split second bars non-mana activations while the spell is on the stack.
+fn split_second_prevents_activation(state: &GameState, ability: &AbilityDefinition) -> bool {
+    super::keywords::stack_has_split_second(state)
+        && !super::mana_abilities::is_mana_ability(ability)
+}
+
 /// CR 602.5 + CR 118.3: the one activation-legality evaluation, shared by
 /// enforcement (`ActivationQuery::Legality`) and the display read-out
 /// (`ActivationQuery::BlockReason`). See [`ActivationQuery`] for what the two
@@ -29983,6 +30768,15 @@ pub(crate) fn activation_verdict(
     else {
         return ActivationVerdict::Illegal;
     };
+    if let Some(base_cost) = ability_def.cost.take() {
+        ability_def.cost = Some(activation_cost_with_alternative_keyword_costs(
+            state,
+            &ability_def,
+            player,
+            source_id,
+            base_cost,
+        ));
+    }
     if !matches!(
         activation_structural_eligibility(state, player, source_id, &ability_def),
         ActivationStructuralEligibility::Eligible
@@ -29990,11 +30784,7 @@ pub(crate) fn activation_verdict(
         return ActivationVerdict::Illegal;
     }
 
-    // CR 702.61a + CR 702.61b: While a spell with split second is on the stack,
-    // players can't activate abilities that aren't mana abilities.
-    if super::keywords::stack_has_split_second(state)
-        && !super::mana_abilities::is_mana_ability(&ability_def)
-    {
+    if split_second_prevents_activation(state, &ability_def) {
         return ActivationVerdict::Illegal;
     }
 
@@ -31526,6 +32316,12 @@ fn activate_with_cost_carrier(
         }
     }
 
+    if split_second_prevents_activation(state, &ability_def) {
+        return Err(EngineError::ActionNotAllowed(
+            "Split second prevents activating a non-mana ability".into(),
+        ));
+    }
+
     // CR 702.170b + CR 116.2k + CR 602.1c: Plot is a SPECIAL ACTION, not the
     // activation of an ability. CR 602.5/603.2a prohibitions ("can't activate
     // abilities") are typed to activated abilities only, so none of the three gates
@@ -31586,6 +32382,13 @@ fn activate_with_cost_carrier(
             Some(snapshot)
         }
         None => ability_def.cost.clone().map(|base_cost| {
+            let base_cost = activation_cost_with_alternative_keyword_costs(
+                state,
+                &ability_def,
+                player,
+                source_id,
+                base_cost,
+            );
             let modifiers = collect_activation_cost_modifiers(
                 state,
                 &ability_def,
@@ -32022,6 +32825,22 @@ fn activate_with_cost_carrier(
     // `else_ability`, and other typed fields survive into resolution
     // (issue #310 — same root cause as the spell-cast path).
     let mut resolved = build_resolved_from_def(&ability_def, source_id, player);
+    // CR 113.7a + CR 602.2a + CR 608.2h + CR 400.7: pin the activation-time
+    // source identity (id + announcement incarnation) over the whole chain.
+    // This deliberately does NOT build a `TriggerSourceContext`: activated
+    // carriers supply only their incarnation epochs — pre-cost
+    // `announced_source_incarnation` (here) and post-cost `source_incarnation`
+    // (stamped at the stack-push boundary, stack.rs) — never `trigger_source`
+    // (the `ability_utils` carrier contract). The damage authority reads the
+    // pinned incarnation when the source has departed (CR 608.2h); every
+    // `trigger_source.is_some()` proxy keeps its pre-pin activated arm.
+    // `source_incarnation` is left `None` here so the stack push stamps the
+    // post-cost epoch; plot never pushes, so it stays `None` there and the
+    // `is_none_or` fail-open holds.
+    if let Some(source) = state.objects.get(&source_id) {
+        let incarnation = source.incarnation;
+        resolved.set_departure_pin_recursive(source_id, incarnation);
+    }
     // CR 602.2b -> CR 601.2b: activating an ability follows the spell-announcement rules
     // 601.2b-i identically, so a text-defined, announce-locked X ("where X is <count> as
     // you activate this ability") is measured HERE — at announcement, before targets are
@@ -33021,6 +33840,12 @@ pub(crate) fn record_activated_ability_placed(
     };
     let announced_zone = record.source_zone;
     let activation_cost = record.activation_cost.clone();
+    // CR 602.2a + CR 702.29a + CR 702.29f: Keep the announced cycling tag
+    // even when the discard takes the source out of the zone of its grant.
+    let ability_tag = record.ability_tag;
+    // CR 201.2: Use the English card name bound before the discard cost.
+    let cycle = (ability_tag == Some(AbilityTag::Cycling))
+        .then(|| (record.activator, record.source_lki.name.clone()));
     // CR 602.2a + CR 602.5b: the announced activation consumes its own key,
     // read off the placed entry's ability — never re-derived from
     // `(source_id, ability_index)`. Re-deriving post-payment would mis-record
@@ -33069,14 +33894,31 @@ pub(crate) fn record_activated_ability_placed(
         announced_zone,
         events,
     );
-    // CR 702.142b: Emit additional event when a boast ability is activated.
-    super::casting_targets::emit_keyword_ability_event_if_tagged(
-        state,
-        source_id,
-        ability_index,
-        player,
-        events,
-    );
+    // CR 602.2b + CR 601.2h + CR 601.2i: Publish after payment at engine stack
+    // placement. CR 702.29c + CR 702.29e + CR 702.29f: The discard cost of
+    // either cycling or typecycling makes this the activator's cycled card.
+    if let Some((activator, name)) = cycle {
+        let record = crate::types::game_state::CyclingRecord {
+            name,
+            turn: state.turn_number,
+        };
+        let occurrence =
+            super::ledger::record_completed_cycle(state, activator, record, placed_entry);
+        super::stack::finalize_completed_cycle(state, placed_entry, occurrence);
+        events.push(GameEvent::Cycled {
+            player_id: player,
+            object_id: source_id,
+        });
+    } else {
+        // CR 702.142b + CR 702.177a: Publish other keyword activations.
+        super::casting_targets::emit_keyword_ability_event_if_tagged(
+            state,
+            source_id,
+            ability_index,
+            player,
+            events,
+        );
+    }
 }
 
 /// CR 602.2 + CR 601.2c: capture an activation's journal facts while they are
@@ -33989,6 +34831,9 @@ impl TargetRead {
 fn parsed_condition_reads_targets(condition: &ParsedCondition, read: TargetRead) -> bool {
     match condition {
         // CR 115.1: the condition is ABOUT the chosen targets.
+        ParsedCondition::SourceMatchesFilter { filter } => {
+            target_filter_reads_chosen_target(filter, read)
+        }
         ParsedCondition::SpellTargetsFilter { .. } => read.includes_bindable(),
         ParsedCondition::QuantityComparison { lhs, rhs, .. } => {
             quantity_expr_reads_target_object(lhs, read)
@@ -34224,6 +35069,7 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::ChosenNumber
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::DungeonsCompleted
         | QuantityRef::CostXPaid
         | QuantityRef::KickerCount
@@ -36482,16 +37328,45 @@ pub(crate) fn cost_observable_activation_journal(
                           affected: Option<&TargetFilter>,
                           static_source_id: ObjectId,
                           static_controller: PlayerId| {
-        let StaticMode::ReduceAbilityCost {
-            keyword,
-            exemption,
-            activator,
-            targets,
-            frequency: Some(CastFrequency::OncePerTurn),
-            ..
-        } = reduce_mode
-        else {
-            return;
+        // The gates each kind of modifier reads off a journal row, the same
+        // ones its pricing path passes to `first_qualifying_activation_this_turn`.
+        let (keyword, exemption, activator, targets) = match reduce_mode {
+            StaticMode::ReduceAbilityCost {
+                keyword,
+                exemption,
+                activator,
+                targets,
+                frequency: Some(CastFrequency::OncePerTurn),
+                ..
+            } => (
+                keyword.as_str(),
+                *exemption,
+                activator.as_ref(),
+                targets.as_ref(),
+            ),
+            // CR 118.9 + CR 611.3a + CR 109.5: "the first <keyword> ability you
+            // activate each turn" (Bruenor Battlehammer, Gavi, Kíli): only the
+            // static controller's own activations count (`Controller` gate,
+            // matching the pricing path) and no target gate applies.
+            StaticMode::AlternativeKeywordCost {
+                keyword,
+                frequency: Some(CastFrequency::OncePerTurn),
+                ..
+            } => {
+                let Some(tag) = ALTERNATIVE_KEYWORD_TAGS
+                    .into_iter()
+                    .find(|tag| alternative_keyword_kind(*tag) == Some(*keyword))
+                else {
+                    return;
+                };
+                (
+                    tag.keyword_str(),
+                    ActivationExemption::None,
+                    Some(&PlayerFilter::Controller),
+                    None,
+                )
+            }
+            _ => return,
         };
         let ctx = super::filter::FilterContext::from_source_with_controller(
             static_source_id,
@@ -36500,10 +37375,10 @@ pub(crate) fn cost_observable_activation_journal(
         if let Some(row) = first_qualifying_activation_this_turn(
             state,
             keyword,
-            *exemption,
-            activator.as_ref(),
+            exemption,
+            activator,
             affected,
-            targets.as_ref(),
+            targets,
             static_source_id,
             static_controller,
             &ctx,
@@ -36558,12 +37433,17 @@ pub(crate) fn cost_observable_activation_journal(
     journal
 }
 
-/// CR 611.3a: a "first activated ability … each turn" cost modifier, the one
-/// kind of modifier that reads the turn's activation journal.
+/// CR 611.3a: a "first activated ability … each turn" cost modifier, the kinds
+/// of modifier that read the turn's activation journal: a once-per-turn
+/// `ReduceAbilityCost` (Training Grounds-style discounts) and a once-per-turn
+/// `AlternativeKeywordCost` ("the first equip ability you activate each turn").
 fn is_first_activation_modifier(mode: &StaticMode) -> bool {
     matches!(
         mode,
         StaticMode::ReduceAbilityCost {
+            frequency: Some(CastFrequency::OncePerTurn),
+            ..
+        } | StaticMode::AlternativeKeywordCost {
             frequency: Some(CastFrequency::OncePerTurn),
             ..
         }
@@ -37469,7 +38349,9 @@ fn is_blocked_by_cant_be_cast_with(
 /// per-property matcher here.
 /// `fused` requests the COMBINED-characteristics projection (CR 702.102b) for a
 /// pre-payment fused split spell; payment-time callers pass `false` and rely on
-/// the `fused_split_spell` marker OR-gate inside `spell_cast_record_for`.
+/// the `fused_split_spell` marker OR-gate inside `spell_cast_record_for`. The
+/// `HasChosenName` arm reads only the caller's `fused` hint (never the persisted
+/// marker, which can be stale).
 /// `announced_x: Some(x)` reads the spell's mana value with X announced as `x`
 /// (CR 202.3e); `None` reads the object as it currently presents itself.
 fn cant_cast_filter_matches_for(
@@ -37484,12 +38366,12 @@ fn cant_cast_filter_matches_for(
     use crate::types::ability::ChosenAttribute;
 
     match filter {
-        // CR 201.2: "spells with the chosen name" — the shared spell-filter path
-        // has no top-level chosen-name variant, so match the spell name against
-        // the source's chosen name here.
+        // CR 201.2a + CR 709.4a + CR 709.4d: "spells with the chosen name" —
+        // the shared spell-filter path has no top-level chosen-name variant,
+        // so match the spell's names against the source's chosen name here.
         TargetFilter::HasChosenName => source_obj.chosen_attributes.iter().any(|a| match a {
             ChosenAttribute::CardName(n) => {
-                crate::game::filter::card_names_match(n, &spell_obj.name)
+                crate::game::filter::spell_has_chosen_name(spell_obj, fused, n)
             }
             ChosenAttribute::Color(_)
             | ChosenAttribute::CreatureType(_)
@@ -39882,5 +40764,162 @@ mod selected_impulse_authority_tests {
             Some(CastingPermissionIndex(4)),
         ));
         assert!(!exile_cast_pays_printed_mana_cost(state, obj, P0, None));
+    }
+}
+
+#[cfg(test)]
+mod alternative_keyword_cost_journal_tests {
+    use super::cost_observable_activation_journal;
+    use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use crate::types::ability::AbilityTag;
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::{CastPaymentMode, WaitingFor};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::mana::{ManaType, ManaUnit};
+    use crate::types::phase::Phase;
+
+    const BRUENOR: &str = "Each creature you control gets +2/+0 for each Equipment attached to it.\nYou may pay {0} rather than pay the equip cost of the first equip ability you activate each turn.";
+    const LEONIN_SHIKARI: &str =
+        "You may activate equip abilities any time you could cast an instant.";
+    const VULSHOK_MORNINGSTAR: &str = "Equipped creature gets +2/+2.\nEquip {2} ({2}: Attach to target creature you control. Equip only as a sorcery.)";
+
+    /// P0 (the active player) with Bruenor Battlehammer (when `with_bruenor`)
+    /// and a Vulshok Morningstar; P1 with Leonin Shikari (instant-speed equip)
+    /// and its own Vulshok Morningstar.
+    fn build(with_bruenor: bool) -> (GameRunner, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        if with_bruenor {
+            scenario
+                .add_creature_from_oracle(P0, "Bruenor Battlehammer", 5, 3, BRUENOR)
+                .as_legendary()
+                .with_subtypes(vec!["Dwarf", "Warrior"]);
+        } else {
+            scenario.add_vanilla(P0, 5, 3);
+        }
+        let p0_equipment = scenario
+            .add_artifact_from_oracle(P0, "Vulshok Morningstar", VULSHOK_MORNINGSTAR)
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        scenario
+            .add_creature_from_oracle(P1, "Leonin Shikari", 1, 1, LEONIN_SHIKARI)
+            .with_subtypes(vec!["Cat", "Soldier"]);
+        let p1_equipment = scenario
+            .add_artifact_from_oracle(P1, "Vulshok Morningstar", VULSHOK_MORNINGSTAR)
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        let mut runner = scenario.build();
+        if !with_bruenor {
+            // No {0} alternative: P0 pays the ordinary {2}.
+            for _ in 0..2 {
+                runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+                    ManaType::Colorless,
+                    ObjectId(0),
+                    false,
+                    vec![],
+                ));
+            }
+        }
+        (runner, p0_equipment, p1_equipment)
+    }
+
+    fn activate_equip(runner: &mut GameRunner, equipment: ObjectId) {
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: equipment,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("equip activation is legal");
+    }
+
+    /// Runs both players' equip activations on P0's turn through the production
+    /// `ActivateAbility` path: P0's first (paying {0} when Bruenor offers it),
+    /// then P1's at instant speed (Leonin Shikari) paying the ordinary {2}.
+    fn both_players_equip(runner: &mut GameRunner, p0_equipment: ObjectId, p1_equipment: ObjectId) {
+        let result = runner
+            .act(GameAction::ActivateAbility {
+                source_id: p0_equipment,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("P0's equip activation is legal");
+        if let WaitingFor::ActivationCostOneOfChoice { .. } = result.waiting_for {
+            runner
+                .act(GameAction::ChooseActivationCostBranch { index: 0 })
+                .expect("the {0} branch is accepted");
+        }
+        runner.advance_until_stack_empty();
+
+        // CR 117.3d: P0 passes with an empty stack, so P1 receives priority and
+        // can equip at instant speed (Leonin Shikari).
+        runner
+            .act(GameAction::PassPriority)
+            .expect("P0 may pass priority");
+        assert_eq!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 },
+            "reach guard: P1 received priority"
+        );
+        for _ in 0..2 {
+            runner.state_mut().players[1].mana_pool.add(ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        activate_equip(runner, p1_equipment);
+        let journal = &runner.state().abilities_activated_this_turn_by_player;
+        assert_eq!(
+            journal.get(&P0).map(|rows| rows.len()),
+            Some(1),
+            "reach guard: P0's equip activation is journaled"
+        );
+        assert_eq!(
+            journal.get(&P1).map(|rows| rows.len()),
+            Some(1),
+            "reach guard: P1's equip activation is journaled"
+        );
+        assert_eq!(
+            journal[&P1][0].ability_tag,
+            Some(AbilityTag::Equip),
+            "the row comes from a real Equip ability"
+        );
+    }
+
+    /// CR 118.9 + CR 611.3a + CR 109.5 + CR 732.2a: Bruenor Battlehammer's "You
+    /// may pay {0} rather than pay the equip cost of the first equip ability you
+    /// activate each turn." reads the turn's activation journal, so loop
+    /// detection keeps each player's first equip row (judged per hypothetical
+    /// controller, CR 109.5) while a board with no such static strips them.
+    ///
+    /// Reverting the `AlternativeKeywordCost` arm of `is_first_activation_modifier`
+    /// / `cost_observable_activation_journal` empties the kept journal; dropping
+    /// the `Controller` activator gate lets P0's earlier row shadow P1's, so
+    /// P1's row is not kept for P1 as a hypothetical controller.
+    #[test]
+    fn once_per_turn_alternative_keyword_cost_keeps_each_controllers_first_equip_row() {
+        let (mut runner, p0_equipment, p1_equipment) = build(true);
+        both_players_equip(&mut runner, p0_equipment, p1_equipment);
+        let journal = cost_observable_activation_journal(runner.state());
+        assert_eq!(
+            journal.get(&P0).map(|rows| rows.len()),
+            Some(1),
+            "P0's first equip row is kept"
+        );
+        assert_eq!(
+            journal.get(&P1).map(|rows| rows.len()),
+            Some(1),
+            "P1's first equip row is kept for P1 as a hypothetical controller"
+        );
+
+        // Control: no first-activation modifier on the board, nothing is kept.
+        let (mut runner, p0_equipment, p1_equipment) = build(false);
+        both_players_equip(&mut runner, p0_equipment, p1_equipment);
+        assert!(
+            cost_observable_activation_journal(runner.state()).is_empty(),
+            "with no first-activation modifier on the board the rows are stripped"
+        );
     }
 }

@@ -8,7 +8,7 @@ use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::{alphanumeric1, space0, space1};
 use nom::combinator::{map, not, opt, value};
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::error::OracleResult;
@@ -299,6 +299,39 @@ pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
     Ok((rest, prop))
 }
 
+/// CR 202.3: Parse the numeric mana-value comparison tail after the shared
+/// `mana value ` / `converted mana cost ` head. This is deliberately limited to
+/// literal/X numeric grammar; contextual and superlative mana-value phrases
+/// remain owned by `oracle_target`.
+pub(crate) fn parse_mana_value_comparison_tail(input: &str) -> OracleResult<'_, FilterProp> {
+    if let Ok((after, values)) = parse_number_disjunction(input) {
+        let props = values
+            .into_iter()
+            .map(|value| FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value,
+            })
+            .collect();
+        return Ok((after, FilterProp::AnyOf { props }));
+    }
+
+    let (after_num_raw, value) = parse_quantity_expr_number(input)?;
+    let after_num = after_num_raw.trim_start();
+    let (after, (comparator, value)) = alt((
+        map(terminated(tag("or greater"), not(alphanumeric1)), {
+            let value = value.clone();
+            move |_| (Comparator::GE, value.clone())
+        }),
+        map(terminated(tag("or less"), not(alphanumeric1)), {
+            let value = value.clone();
+            move |_| (Comparator::LE, value.clone())
+        }),
+        map(not(tag("or")), move |_| (Comparator::EQ, value.clone())),
+    ))
+    .parse(after_num)?;
+    Ok((after, FilterProp::Cmc { comparator, value }))
+}
+
 /// CR 208.1 (power and toughness) + CR 202.3 (mana value): the HEAD of a
 /// postnominal superlative property qualifier — "with the `<superlative>`
 /// `<property>`".
@@ -329,8 +362,37 @@ pub(crate) fn parse_superlative_property_head(
 /// CR 208.1: Possessive phrase introducing a creature's *own* stat in a
 /// self-referential P/T comparison — "its", "their", or "that creature's".
 /// All refer to the candidate object itself, not the ability source.
-fn parse_pt_possessive(input: &str) -> OracleResult<'_, &str> {
+pub(crate) fn parse_pt_possessive(input: &str) -> OracleResult<'_, &str> {
     alt((tag("its "), tag("their "), tag("that creature's "))).parse(input)
+}
+
+/// Peel a trailing spell P/T qualifier from a cost-modifier subject.
+/// A recognized stat with an invalid comparison is an error.
+pub fn split_spell_pt_qualifier(
+    subject: &str,
+) -> Result<(&str, Option<FilterProp>), nom::Err<super::error::OracleError<'_>>> {
+    use super::primitives::split_once_on;
+    use nom::combinator::{all_consuming, eof, peek};
+
+    let Ok((_, (prefix, tail))) = split_once_on(subject, " with ") else {
+        return Ok((subject, None));
+    };
+    if peek((
+        opt(tag::<_, _, super::error::OracleError<'_>>("base ")),
+        alt((
+            tag("power"),
+            tag("toughness"),
+            tag("total power and toughness"),
+        )),
+        alt((space1, eof)),
+    ))
+    .parse(tail)
+    .is_err()
+    {
+        return Ok((subject, None));
+    }
+    let (_, prop) = all_consuming(parse_pt_comparison).parse(tail)?;
+    Ok((prefix, Some(prop)))
 }
 
 /// CR 208.1: "toughness greater than <poss> power" → [`FilterProp::ToughnessGTPower`]
@@ -1485,5 +1547,58 @@ mod tests {
                 i + 1
             );
         }
+    }
+
+    /// CR 202.3: the shared numeric mana-value tail covers threshold,
+    /// exact-value-list, and malformed-tail behavior without accepting a
+    /// partially parsed comparator.
+    #[test]
+    fn mana_value_comparison_tail_is_shared_and_fails_closed() {
+        let fixed = |value| QuantityExpr::Fixed { value };
+        assert_eq!(
+            parse_mana_value_comparison_tail("4 or greater, rest"),
+            Ok((
+                ", rest",
+                FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: fixed(4),
+                },
+            ))
+        );
+        assert_eq!(
+            parse_mana_value_comparison_tail("5 or less"),
+            Ok((
+                "",
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: fixed(5),
+                },
+            ))
+        );
+        assert_eq!(
+            parse_mana_value_comparison_tail("4, 5, or 6, rest"),
+            Ok((
+                ", rest",
+                FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: fixed(4),
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: fixed(5),
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: fixed(6),
+                        },
+                    ],
+                },
+            ))
+        );
+        assert!(parse_mana_value_comparison_tail("4 or blue").is_err());
+        assert!(parse_mana_value_comparison_tail("4 or").is_err());
+        assert!(parse_mana_value_comparison_tail("4 or greaterish").is_err());
     }
 }

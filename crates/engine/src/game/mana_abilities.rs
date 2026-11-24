@@ -863,7 +863,7 @@ fn replacement_prompt_signature(state: &GameState) -> Option<(String, Vec<String
             state
                 .objects
                 .get(&rid.source)
-                .and_then(|obj| obj.replacement_definitions.get(rid.index))
+                .and_then(|obj| obj.replacement_definitions.get_by_rid(*rid))
                 .map_or_else(|| format!("{rid:?}"), |def| format!("{def:?}"))
         })
         .collect();
@@ -1052,6 +1052,7 @@ fn produce_mana_from_bound_ability(
     );
     let mut produced_for_tap_event = Vec::new();
     let mut produced_for_ability_events = Vec::new();
+    let mut total = 0_u32;
     for recipient in recipients {
         let mut scoped = resolved_for_quantity.clone();
         scoped.set_original_controller_recursive(player);
@@ -1133,11 +1134,9 @@ fn produce_mana_from_bound_ability(
         // resolution. Its payload is the full aggregate produced by the
         // ability, including scoped recipients that exclude the activator.
         produced_for_tap_event.extend(produced_mana.iter().copied());
-        if !produced_mana.is_empty() {
-            produced_for_ability_events.push((recipient, produced_mana.clone()));
-        }
         for &mana_type in &produced_mana {
-            mana_payment::produce_mana_with_attributes_from_source_quality(
+            // CR 614.1a: Count the units deposited after mana replacements.
+            let deposited = mana_payment::produce_mana_with_attributes_from_source_quality(
                 state,
                 source_id,
                 mana_type,
@@ -1149,6 +1148,10 @@ fn produce_mana_from_bound_ability(
                 expiry,
                 events,
             );
+            total = total.saturating_add(u32::try_from(deposited.len()).unwrap_or(u32::MAX));
+        }
+        if !produced_mana.is_empty() {
+            produced_for_ability_events.push((recipient, produced_mana));
         }
     }
 
@@ -1173,15 +1176,24 @@ fn produce_mana_from_bound_ability(
         }
     }
 
-    // CR 605.1b: Emit one aggregate event per receiving player for every
-    // mana-ability resolution, including abilities without a tap cost. Its
-    // output vector lets triggered mana abilities inspect each player's share
-    // of a multi-recipient resolution exactly once.
-    for (recipient, produced) in produced_for_ability_events {
+    // CR 605.2 + CR 608.2p: This is still a mana ability, and its resolution
+    // can trigger an ability even when no mana was added.
+    if produced_for_ability_events.is_empty() {
+        produced_for_ability_events.push((player, Vec::new()));
+    }
+    // CR 603.2c + CR 605.1b: The first event represents the whole resolution.
+    // Each event still exposes the base production for its own recipient.
+    let resolution_event_index = events.len();
+    for (index, (recipient, produced)) in produced_for_ability_events.into_iter().enumerate() {
         events.push(GameEvent::ManaAbilityProduced {
             player_id: recipient,
             source_id,
             produced,
+            resolution: if index == 0 {
+                crate::types::events::ManaResolutionShare::WholeResolution { total }
+            } else {
+                crate::types::events::ManaResolutionShare::RecipientOnly
+            },
             trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
         });
     }
@@ -1204,6 +1216,8 @@ fn produce_mana_from_bound_ability(
     // effect chain (e.g. painlands' "This land deals 1 damage to you.")
     // resolves that chain inline — mana abilities don't use the stack, so
     // the sub-ability runs as part of the same atomic resolution.
+    let producer = state.active_rules_execution_node;
+    let produced_before_tail = state.resolved_rules_journal.produced_mana().len();
     // CR 106.12b: it is still this ability resolving, so it carries the
     // activation's tap state.
     resolve_mana_ability_sub_chain(
@@ -1212,6 +1226,25 @@ fn produce_mana_from_bound_ability(
         ManaTapState::from_tap(tapped),
         events,
     );
+
+    // CR 608.2c + CR 608.2p: A later instruction can add mana in the same
+    // resolution (Black Mana Battery). Count successful deposits made by
+    // this activation's journal node, excluding any nested activations.
+    let tail_deposits = state.resolved_rules_journal.produced_mana();
+    if let Some(producer) = producer.filter(|_| tail_deposits.len() > produced_before_tail) {
+        let count = tail_deposits
+            .skip(produced_before_tail)
+            .iter()
+            .filter(|record| record.producer == producer && record.unit.source_id == source_id)
+            .count();
+        if let Some(GameEvent::ManaAbilityProduced {
+            resolution: crate::types::events::ManaResolutionShare::WholeResolution { total },
+            ..
+        }) = events.get_mut(resolution_event_index)
+        {
+            *total = total.saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
+        }
+    }
 }
 
 /// CR 605.3b + CR 602.2a: Build the transient ability for a mana ability's
@@ -3870,6 +3903,13 @@ fn pay_selected_mana_ability_sacrifice_cost(
             events,
         )? {
             sacrifice::SacrificeOutcome::Complete => {}
+            // CR 118.3: a mid-payment bar fails the cost instead of recording
+            // an unsacrificed permanent as paid.
+            sacrifice::SacrificeOutcome::Prohibited => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                ));
+            }
             sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                 pause_mana_ability_cost_payment(
                     state,
@@ -3962,6 +4002,10 @@ fn pay_mana_ability_cost_component(
                 state,
                 pending.player,
                 pending.source_id,
+            ) || super::static_abilities::object_cant_be_sacrificed_by(
+                state,
+                pending.player,
+                pending.source_id,
             ) {
                 return Err(EngineError::ActionNotAllowed(
                     "Cannot sacrifice this permanent as a cost".to_string(),
@@ -3970,6 +4014,11 @@ fn pay_mana_ability_cost_component(
             match sacrifice::sacrifice_permanent(state, pending.source_id, pending.player, events)?
             {
                 sacrifice::SacrificeOutcome::Complete => Ok(ManaAbilityPaymentProgress::Complete),
+                // CR 118.3: a mid-payment bar fails the cost, mirroring the
+                // pre-check above.
+                sacrifice::SacrificeOutcome::Prohibited => Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                )),
                 sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                     pause_mana_ability_cost_payment(
                         state,
@@ -5531,19 +5580,26 @@ where
                     "This permanent is already committed to a spell sacrifice cost".to_string(),
                 ));
             }
-            if super::static_abilities::player_cant_sacrifice_as_cost(state, player, source_id) {
+            if super::static_abilities::player_cant_sacrifice_as_cost(state, player, source_id)
+                || super::static_abilities::object_cant_be_sacrificed_by(state, player, source_id)
+            {
                 return Err(EngineError::ActionNotAllowed(
                     "Cannot sacrifice this permanent as a cost".to_string(),
                 ));
             }
-            if matches!(
-                sacrifice::sacrifice_permanent(state, source_id, player, events)?,
-                sacrifice::SacrificeOutcome::NeedsReplacementChoice(_)
-            ) {
-                return Err(EngineError::InvalidAction(
-                    "Mana ability sacrifice replacement pause must be owned by the activation cursor"
-                        .to_string(),
-                ));
+            match sacrifice::sacrifice_permanent(state, source_id, player, events)? {
+                sacrifice::SacrificeOutcome::Complete => {}
+                sacrifice::SacrificeOutcome::Prohibited => {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot sacrifice this permanent as a cost".to_string(),
+                    ));
+                }
+                sacrifice::SacrificeOutcome::NeedsReplacementChoice(_) => {
+                    return Err(EngineError::InvalidAction(
+                        "Mana ability sacrifice replacement pause must be owned by the activation cursor"
+                            .to_string(),
+                    ));
+                }
             }
         }
         // CR 117.1 + CR 118.3 + CR 605.3b: Non-self sacrifice-from-battlefield
@@ -6908,7 +6964,9 @@ fn sacrifice_selected_permanent_for_mana_cost(
             "Selected permanent does not match the sacrifice cost filter".to_string(),
         ));
     }
-    if super::static_abilities::player_cant_sacrifice_as_cost(state, player, chosen_id) {
+    if super::static_abilities::player_cant_sacrifice_as_cost(state, player, chosen_id)
+        || super::static_abilities::object_cant_be_sacrificed_by(state, player, chosen_id)
+    {
         return Err(EngineError::ActionNotAllowed(
             "Selected permanent cannot be sacrificed as a cost".to_string(),
         ));
@@ -7309,6 +7367,7 @@ mod tests {
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_incarnation: None,
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
