@@ -34,7 +34,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastingVariant, GameState, WaitingFor};
+use engine::types::game_state::{CastingVariant, GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -339,10 +339,22 @@ fn tinybones_refuses_off_turn_unstashed_and_own_cards() {
     assert_eq!(zone(&runner, positive), Zone::Graveyard);
 
     // Off-turn leg: P1's turn, P0 holding priority. Instant timing holds, so
-    // only the YourTurnOnly gate refuses.
+    // only the YourTurnOnly gate refuses. Production priority passing to P1's
+    // turn (mirrors `burden_of_proof.rs`): Tinybones can attack, so the
+    // DeclareAttackers window opens and must be passed explicitly — a bare
+    // `advance_to_end_step` stalls there and the turn never passes.
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[])
+        .expect("declaring no attackers is legal");
     runner.advance_to_end_step();
     runner.advance_to_phase(Phase::PreCombatMain);
     assert_eq!(runner.state().active_player, P1, "reach-guard: P1's turn");
+    assert_eq!(
+        runner.state().phase,
+        Phase::PreCombatMain,
+        "reach-guard: P1's main phase"
+    );
     grant_priority(&mut runner, P0);
     assert!(
         !spell_objects_available_to_cast(runner.state(), P0).contains(&off_turn),
@@ -388,10 +400,18 @@ fn stage_lara_class_grant(runner: &mut GameRunner, id: ObjectId) {
 
 /// V-cast-spell (elected-authority hostile, CR 118.14): a stashed card covered
 /// by BOTH a concession-free object grant (Lara class) and Tinybones's static
-/// pays {1}{B} from green-only mana when the `ExilePermission` path is
-/// elected — the payment reads the elected static's concession, not a rescan.
-/// The no-Tinybones runner proves the two authorities differ (the object path
-/// alone cannot pay off-color), so the forced election is discriminating.
+/// commits through the static path — the stack entry carries
+/// `CastingVariant::ExilePermission { tinybones, Unlimited }`, so payment reads
+/// the elected static's concession, not a rescan. No `CastingVariantChoice` is
+/// forced: object grants are not cast candidates, so the engine never prompts
+/// between the two authorities and the election is observed on the committed
+/// spell instead. Funding is exact on-color {1}{B} (pool drained exactly):
+/// off-color funding cannot drive this overlap because the variant-blind
+/// pre-announcement feasibility check prices the static option under the
+/// grant's concession-free terms and drops it before election — the sibling
+/// payment test proves the concession's off-color breadth through the
+/// sole-authority route. The no-Tinybones runner below proves the authorities
+/// differ (the object path alone cannot pay off-color).
 #[test]
 fn tinybones_elected_static_authority_pays_under_its_concession() {
     let mut scenario = GameScenario::new();
@@ -409,14 +429,28 @@ fn tinybones_elected_static_authority_pays_under_its_concession() {
         spell_objects_available_to_cast(runner.state(), P0).contains(&contested),
         "reach-guard: the contested card is authorized"
     );
-    add_mana(&mut runner, P0, ManaType::Green, 2);
-    runner
-        .cast(contested)
-        .casting_variant(CastingVariant::ExilePermission {
-            source: tinybones,
-            frequency: CastFrequency::Unlimited,
-        })
-        .resolve();
+    // Exact on-color {1}{B}: payable under either authority's terms, so the
+    // static option survives feasibility and the natural single-candidate
+    // pre-election commits it.
+    add_mana(&mut runner, P0, ManaType::Colorless, 1);
+    add_mana(&mut runner, P0, ManaType::Black, 1);
+    let commit = runner.cast(contested).commit();
+    assert!(
+        matches!(
+            commit
+                .state()
+                .stack
+                .iter()
+                .find(|entry| entry.id == contested)
+                .map(|entry| &entry.kind),
+            Some(StackEntryKind::Spell {
+                casting_variant: CastingVariant::ExilePermission { source, frequency },
+                ..
+            }) if *source == tinybones && *frequency == CastFrequency::Unlimited
+        ),
+        "the overlapping cast must commit through the static ExilePermission path"
+    );
+    commit.resolve();
     assert_eq!(
         zone(&runner, contested),
         Zone::Graveyard,
@@ -539,9 +573,16 @@ fn tinybones_grants_no_flash_timing_to_stashed_spells() {
     runner.cast(instant).resolve();
     assert_eq!(zone(&runner, instant), Zone::Graveyard);
 
-    // Empty stack: the same sorcery casts at sorcery timing.
-    runner.pass_both_players();
+    // Empty stack: the same sorcery casts at sorcery timing. The instant's
+    // `.resolve()` already drained the filler too (`drive_resolution` breaks at
+    // the first empty-stack Priority window), so no passes are needed — passing
+    // twice with an empty stack would leave the main phase.
     assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        runner.state().phase,
+        Phase::PreCombatMain,
+        "reach-guard: still in the main phase for sorcery timing"
+    );
     runner.cast(sorcery).resolve();
     assert_eq!(zone(&runner, sorcery), Zone::Graveyard);
     assert_priority_empty_stack(&runner);
