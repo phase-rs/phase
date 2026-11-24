@@ -18,7 +18,9 @@ use crate::types::ability::{
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::card_type::CoreType;
-use crate::types::events::{GameEvent, ManaTapState, TriggeredAbilityOrigin};
+use crate::types::events::{
+    GameEvent, ManaAbilityTriggerState, ManaTapState, TriggeredAbilityOrigin,
+};
 use crate::types::game_state::{
     AutoMayChoice, CollectedTriggerContextBatch, DamageRecord, DelayedTrigger,
     DepartingOwnerAfterAuthority, DistributionUnit, GameState, LatchedBatchedTrigger,
@@ -476,6 +478,23 @@ fn trigger_firing_is_unknown(firing: &TriggerFiring) -> bool {
 pub type DeferredTrigger = PendingTriggerContext;
 
 impl PendingTriggerContext {
+    /// CR 608.2p: whether this trigger was bound to a mana ability's resolution
+    /// or to the mana it added.
+    pub(super) fn observes_mana_production(&self) -> bool {
+        self.pending
+            .trigger_event
+            .iter()
+            .chain(&self.trigger_events)
+            .any(|event| {
+                matches!(
+                    event,
+                    GameEvent::TappedForMana { .. }
+                        | GameEvent::ManaAbilityProduced { .. }
+                        | GameEvent::ManaAdded { .. }
+                )
+            })
+    }
+
     pub fn single(pending: PendingTrigger) -> Self {
         let trigger_events = pending.trigger_event.iter().cloned().collect();
         // CR 603.2d: reflexive/delayed triggers (including GotchaSaid) are not
@@ -1563,10 +1582,12 @@ fn matching_batched_trigger_events(
     matcher: TriggerMatcher,
     active_suppress_triggers: &[ActiveSuppressTriggerStatic],
     conditions: FiringConditions<'_>,
+    ability: &ResolvedAbility,
 ) -> Vec<(usize, GameEvent)> {
     event_batch
         .iter()
         .enumerate()
+        .filter(|(_, candidate)| mana_production_admits_trigger(candidate, ability))
         .filter(|(_, candidate)| {
             candidate_passes_batched_filters(
                 state,
@@ -2375,6 +2396,21 @@ impl FiringGroup {
     }
 }
 
+/// CR 605.1b + CR 608.2p: With loop detection off, triggered mana production
+/// is announced to ordinary observers. Reject mana triggers before occurrence
+/// accounting, doubling, inline resolution, or delayed one-shot consumption.
+fn mana_production_admits_trigger(event: &GameEvent, ability: &ResolvedAbility) -> bool {
+    let GameEvent::ManaAbilityProduced { trigger_state, .. } = event else {
+        return true;
+    };
+    match trigger_state {
+        ManaAbilityTriggerState::Pending | ManaAbilityTriggerState::InlineResolved => true,
+        ManaAbilityTriggerState::ObserversOnly => {
+            !super::mana_abilities::is_triggered_mana_ability(ability, Some(event))
+        }
+    }
+}
+
 /// CR 603.2c + CR 603.4: the firings one admitted event produces for one
 /// trigger. The single authority shared by printed triggers
 /// (`collect_matching_triggers_inner`) and multi-fire delayed triggers
@@ -2413,6 +2449,9 @@ fn trigger_firing_groups(
     conditions: FiringConditions<'_>,
     ability: &ResolvedAbility,
 ) -> Vec<FiringGroup> {
+    if !mana_production_admits_trigger(event, ability) {
+        return Vec::new();
+    }
     let step_players = phase_firing_players(state, event, trig_def, source_context, ability);
     // CR 508.5 + CR 603.4: Attacks triggers with intervening-if clauses read
     // the defending player from each expanded attack event; the batch-level
@@ -2523,6 +2562,7 @@ fn trigger_firing_groups(
             matcher,
             active_suppress_triggers,
             conditions,
+            ability,
         );
         if members.is_empty() {
             Vec::new()
@@ -5778,7 +5818,9 @@ pub(super) fn inline_tap_mana_trigger_abilities(
                 Some(&definition_ref),
             );
             ability.ability_index = Some(active.live_index);
-            if super::mana_abilities::is_triggered_mana_ability(&ability, Some(tap_event)) {
+            if mana_production_admits_trigger(tap_event, &ability)
+                && super::mana_abilities::is_triggered_mana_ability(&ability, Some(tap_event))
+            {
                 coupled.push((definition_ref, ability));
             }
         }
@@ -5802,7 +5844,7 @@ fn inline_mana_trigger_already_resolved(
             ..
         } => Some(source_id),
         GameEvent::ManaAbilityProduced {
-            trigger_state: crate::types::events::ManaAbilityTriggerState::InlineResolved,
+            trigger_state: ManaAbilityTriggerState::InlineResolved,
             ..
         } => None,
         _ => return false,
@@ -5886,7 +5928,7 @@ pub(super) fn resolve_tap_mana_triggers_inline(
             ) => ev.clone(),
             Some(
                 ev @ GameEvent::ManaAbilityProduced {
-                    trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
+                    trigger_state: ManaAbilityTriggerState::Pending,
                     ..
                 },
             ) => ev.clone(),
@@ -5983,8 +6025,12 @@ pub(super) fn resolve_tap_mana_triggers_inline(
                 *tap_state = ManaTapState::FromTapTriggersResolved;
             }
         }
-        if let GameEvent::ManaAbilityProduced { trigger_state, .. } = ev {
-            *trigger_state = crate::types::events::ManaAbilityTriggerState::InlineResolved;
+        if let GameEvent::ManaAbilityProduced {
+            trigger_state: trigger_state @ ManaAbilityTriggerState::Pending,
+            ..
+        } = ev
+        {
+            *trigger_state = ManaAbilityTriggerState::InlineResolved;
         }
     }
 
@@ -19564,7 +19610,7 @@ fn stamp_boon_trigger_batch(
         or_trigger,
         events,
         state,
-        trigger.ability.trigger_source.as_ref(),
+        &trigger.ability,
         scan,
     );
     trigger.ability.context.boon_trigger_batch_objects = matches
@@ -20001,7 +20047,7 @@ fn collect_matching_delayed_triggers_with(
                 or_trigger,
                 events,
                 state,
-                delayed.ability.trigger_source.as_ref(),
+                &delayed.ability,
                 scan,
             )
             .pop(),
@@ -20011,7 +20057,7 @@ fn collect_matching_delayed_triggers_with(
                 state,
                 delayed.source_id,
                 delayed.controller,
-                delayed.ability.trigger_source.as_ref(),
+                &delayed.ability,
                 scan,
             )
             .map(|(event_index, trigger_event)| (event_index, trigger_event, 0)),
@@ -20125,7 +20171,7 @@ fn collect_matching_delayed_triggers_with(
             state,
             synth.source_id,
             synth.controller,
-            synth.ability.trigger_source.as_ref(),
+            &synth.ability,
             scan,
         ) {
             if scope.accepts(&trigger_event) {
@@ -20301,7 +20347,7 @@ fn terminalize_unmatched_reflexives_for_closed_batch(
             state,
             delayed.source_id,
             delayed.controller,
-            delayed.ability.trigger_source.as_ref(),
+            &delayed.ability,
             AsEntersRollScan::Held,
         )
         .is_some()
@@ -20690,11 +20736,12 @@ fn delayed_trigger_event_with_index(
     state: &GameState,
     source_id: ObjectId,
     controller: PlayerId,
-    source_context: Option<&TriggerSourceContext>,
+    ability: &ResolvedAbility,
     scan: AsEntersRollScan,
 ) -> Option<(usize, GameEvent)> {
     use crate::types::ability::DelayedTriggerCondition;
 
+    let source_context = ability.trigger_source.as_ref();
     match condition {
         // CR 603.7b: An `AtNextPhase` delayed trigger fires once, the next time
         // its `PhaseChanged` event occurs (e.g. Flickerwisp's "at the beginning
@@ -20868,7 +20915,10 @@ fn delayed_trigger_event_with_index(
                     .iter()
                     .enumerate()
                     .filter(|(_, e)| !scan.withholds(state, e))
-                    .find(|(_, event)| matcher(event, trigger, source_context, state))
+                    .find(|(_, event)| {
+                        mana_production_admits_trigger(event, ability)
+                            && matcher(event, trigger, source_context, state)
+                    })
                     .map(|(idx, event)| (idx, event.clone()))
             } else {
                 None
@@ -20888,7 +20938,7 @@ fn delayed_trigger_event_with_index(
             or_trigger,
             events,
             state,
-            source_context,
+            ability,
             scan,
         )
         .pop()
@@ -20916,17 +20966,17 @@ fn delayed_when_next_event_matches(
     or_trigger: &Option<Box<TriggerDefinition>>,
     events: &[GameEvent],
     state: &GameState,
-    source_context: Option<&TriggerSourceContext>,
+    ability: &ResolvedAbility,
     scan: AsEntersRollScan,
 ) -> Vec<(usize, GameEvent, usize)> {
-    let Some(source_context) = source_context else {
+    let Some(source_context) = ability.trigger_source.as_ref() else {
         return Vec::new();
     };
     let alternatives = std::iter::once(trigger).chain(or_trigger.iter().map(|b| b.as_ref()));
     events
         .iter()
         .enumerate()
-        .filter(|(_, e)| !scan.withholds(state, e))
+        .filter(|(_, e)| !scan.withholds(state, e) && mana_production_admits_trigger(e, ability))
         .filter_map(|(idx, event)| {
             for (alternative, t) in alternatives.clone().enumerate() {
                 if let Some(matcher) = super::trigger_matchers::trigger_matcher(t.mode.clone()) {

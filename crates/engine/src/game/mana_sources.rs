@@ -1321,19 +1321,17 @@ pub(crate) fn activate_mana_source_option_with_output(
         // produced by their own TapsForMana abilities after this single source
         // event. Producing the combination here would add those bonuses twice.
         let produced = vec![option.mana_type];
-        for mana_type in &produced {
-            mana_payment::produce_mana_with_attributes(
-                state,
-                option.object_id,
-                *mana_type,
-                player,
-                true,
-                &option.restrictions,
-                &[],
-                None,
-                events,
-            );
-        }
+        let deposited = mana_payment::produce_mana_with_attributes(
+            state,
+            option.object_id,
+            option.mana_type,
+            player,
+            true,
+            &option.restrictions,
+            &[],
+            None,
+            events,
+        );
         events.push(GameEvent::TappedForMana {
             player_id: player,
             source_id: option.object_id,
@@ -1344,6 +1342,10 @@ pub(crate) fn activate_mana_source_option_with_output(
             player_id: player,
             source_id: option.object_id,
             produced: vec![option.mana_type],
+            // CR 614.1a: Use the post-replacement deposit count.
+            resolution: crate::types::events::ManaResolutionShare::WholeResolution {
+                total: u32::try_from(deposited.len()).unwrap_or(u32::MAX),
+            },
             trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
         });
         mana_abilities::resume_waiting_for(player, resume)
@@ -1379,9 +1381,17 @@ pub(crate) fn activate_mana_source_option_with_output_and_settle(
 /// `events` and whose boundary observation bound nothing
 /// (`ActivationObservers::Unbound`). An activation still paused mid-cost (a
 /// replacement choice) has not been observed yet, so it is never recorded;
-/// one an activation trigger observed (CR 603.10) queued an ability or spent
-/// a "triggers only once each turn" limit, which undo cannot reverse. Callers
-/// decide the penalty axis (`ManaSourcePenalty::is_undoable`) first.
+/// observing an activation (CR 603.10) can queue an ability or spend a
+/// "triggers only once each turn" limit, which undo cannot reverse.
+/// CR 605.4a + CR 608.2p: the same holds for an ordinary trigger that observed
+/// the tap's resolution, or the resolution of a triggered mana ability the tap
+/// set off (Vorinclex, Caged Sun), whose source is not the land. No tap is
+/// recorded while any ordinary observer of mana production is deferred: the
+/// record does not attribute such an observer to one tap, so within a payment
+/// a tap made after an observed one is not undoable either. A tap whose
+/// triggered mana abilities are still suspended on a choice is not recorded:
+/// their observers are collected only once the choice is answered.
+/// Callers decide the penalty axis (`ManaSourcePenalty::is_undoable`) first.
 pub(crate) fn record_undoable_mana_tap(
     state: &mut GameState,
     player: PlayerId,
@@ -1402,7 +1412,13 @@ pub(crate) fn record_undoable_mana_tap(
             } if *player_id == player && *activated == source_id
         )
     });
-    if !completed_unobserved {
+    if !completed_unobserved
+        || state.pending_triggered_mana_resume.is_some()
+        || state
+            .deferred_triggers
+            .iter()
+            .any(|context| context.observes_mana_production())
+    {
         return;
     }
     state
