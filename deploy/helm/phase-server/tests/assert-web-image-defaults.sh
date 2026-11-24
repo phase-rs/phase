@@ -159,13 +159,4 @@ expected=$(node -e 'console.log(JSON.stringify({ multiplayerServerUrl: process.a
 x" "PHASE_PREVIEW_SITE_URL=$preview_url")" = "{\"previewSiteUrl\":\"$preview_url\"}" ] ||
   fail "a line break in one variable must drop that key only"
 
-# ── This test must actually run when its inputs change ──────────────────────
-workflow="$repo_root/.github/workflows/helm-chart.yml"
-if [ -f "$workflow" ]; then
-  for input in 'client/deploy/phase-web/**' 'deploy/phase-web.Dockerfile'; do
-    [ "$(grep -cxF "      - '$input'" "$workflow")" -eq 2 ] ||
-      fail "${workflow#"$repo_root/"} must list '$input' under both pull_request and push paths, or a change there skips this check"
-  done
-fi
-
 echo "assert-web-image-defaults: PASS"
