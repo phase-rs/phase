@@ -1829,7 +1829,7 @@ fn one_shots_consumed(state: &GameState) -> Vec<bool> {
 /// answer it so the one at floating index `first` applies first. Floating
 /// definitions all display the `ObjectId(0)` sentinel as their source, so the
 /// offered candidates are read from the parked replacement record.
-fn answer_floating_ordering_putting_first(runner: &mut GameRunner, actor: PlayerId, first: usize) {
+fn answer_floating_ordering_putting_first(runner: &mut GameRunner, actor: PlayerId, first: u64) {
     let WaitingFor::ReplacementChoice {
         player,
         candidates: summaries,
@@ -1859,7 +1859,7 @@ fn answer_floating_ordering_putting_first(runner: &mut GameRunner, actor: Player
         candidates.iter().all(|rid| rid.source == ObjectId(0)),
         "{actor:?} must be offered only floating candidates: {candidates:?}"
     );
-    let mut indices: Vec<usize> = candidates.iter().map(|rid| rid.index).collect();
+    let mut indices: Vec<u64> = candidates.iter().map(|rid| rid.index).collect();
     indices.sort_unstable();
     assert_eq!(
         indices,

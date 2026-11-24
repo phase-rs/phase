@@ -12,9 +12,9 @@ use crate::types::ability::{
     DamageTargetFilter, DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect,
     EffectScope, EntryAttackDestination, ManaSpendPermission, PermissionGrantee, PlayerFilter,
     PostReplacementContinuation, PreventionAmount, PreventionFormula, QuantityExpr,
-    QuantityModification, RedirectionLifetime, ReplacementChoiceAuthority, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, ResolvedAbility, RoundingMode, ShieldKind,
-    SplitDamagePortion, TapStateChange, TargetFilter, TargetRef,
+    QuantityModification, QuantityRef, RedirectionLifetime, ReplacementChoiceAuthority,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, ResolvedAbility, RoundingMode,
+    ShieldKind, SplitDamagePortion, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::actions::ReplacementAutoChoice;
 use crate::types::card_type::CoreType;
@@ -2474,7 +2474,8 @@ pub(crate) fn replacement_is_optional(state: &GameState, rid: ReplacementId) -> 
 /// state. The pipeline's own candidate scan skips consumed entries, except one this simultaneous event already used on another batch (`consumed_one_shot_still_applies`).
 pub(crate) fn replacement_is_whole_event_entry_copy(state: &GameState, rid: ReplacementId) -> bool {
     let definition = if rid.source == ObjectId(0) {
-        state.pending_damage_replacements.get(rid.index)
+        rid.index_as_usize()
+            .and_then(|i| state.pending_damage_replacements.get(i))
     } else {
         replacement_definition_for_id(state, rid)
     };
@@ -10412,6 +10413,7 @@ fn liminal_entry_replacement_candidates<'a>(
     event: &'a ProposedEvent,
     registry: &'a IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     entry_board: Option<&'a GameState>,
+    spent_by_event: &'a [ReplacementId],
 ) -> impl Iterator<Item = ReplacementId> + 'a {
     liminal_entry_ref(event)
         .and_then(|source| {
@@ -10434,6 +10436,7 @@ fn liminal_entry_replacement_candidates<'a>(
                 registry,
                 rid,
                 entry_board,
+                spent_by_event,
             )
         })
 }
@@ -10473,6 +10476,7 @@ fn legacy_object_replacement_candidates_on_entry_board(
         event,
         registry,
         entry_board,
+        spent_by_event,
     ));
     candidates
 }
@@ -10539,6 +10543,7 @@ fn indexed_object_replacement_candidates_from_index_on_entry_board(
         event,
         registry,
         entry_board,
+        spent_by_event,
     ));
 
     candidates
@@ -14663,8 +14668,8 @@ fn keep_creating_instruction_entry(orig: &TokenSpec, sub: &mut impl SubstituteEn
 
 /// CR 614.6: rewrite one covered `CreateToken` view of the event with an
 /// accepted token substitute, keeping the view's `owner`, `count` ("that
-/// many"), `enter_tapped`, `appended` and `applied`. `Nothing` drops the view
-/// (`Prevented`, dropped per batch on a compound).
+/// many"), `enter_tapped`, `appended`, `redirected_to` and `applied`.
+/// `Nothing` drops the view (`Prevented`, dropped per batch on a compound).
 #[allow(clippy::result_large_err)]
 fn substitute_token_batch(
     view: ProposedEvent,
@@ -14676,6 +14681,7 @@ fn substitute_token_batch(
         enter_tapped,
         count,
         appended,
+        redirected_to,
         applied,
         ..
     } = view
@@ -14697,6 +14703,7 @@ fn substitute_token_batch(
                 enter_tapped,
                 count,
                 appended,
+                redirected_to,
                 applied,
             })
         }
@@ -14719,6 +14726,7 @@ fn substitute_token_batch(
                 enter_tapped,
                 count,
                 appended,
+                redirected_to,
                 applied,
             })
         }
@@ -25918,6 +25926,7 @@ mod tests {
                 applied: HashSet::new(),
             },
             source_incarnation: None,
+            token_substitute: None,
             sacrifice_provenance: None,
             candidates: qualities.map(protection_replacement_id).to_vec(),
             search_found_candidates: Vec::new(),
@@ -28444,6 +28453,7 @@ mod tests {
                 enter_with_counters: Vec::new(),
                 kind: crate::types::game_state::LiminalEntryKind::Token,
                 replacement_applied: HashSet::new(),
+                copy_settlement: None,
             },
         );
         let rid = ReplacementId {
@@ -31840,6 +31850,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             count: 2,
             appended: Vec::new(),
+            redirected_to: None,
             applied: HashSet::from([marker]),
         };
 
@@ -31959,6 +31970,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             count: 2,
             appended: Vec::new(),
+            redirected_to: None,
             applied: HashSet::new(),
         };
         let mut sub = test_token_spec(PlayerId(0), CoreType::Creature);

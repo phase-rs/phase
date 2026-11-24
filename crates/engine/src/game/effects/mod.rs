@@ -26904,6 +26904,7 @@ fn try_resolve_simultaneous_token_fan_out(
             copy: None,
             enter_tapped,
             count,
+            redirected_to: None,
             applied,
         });
     }
@@ -26914,6 +26915,7 @@ fn try_resolve_simultaneous_token_fan_out(
         enter_tapped,
         count,
         appended,
+        redirected_to: None,
         applied,
     };
 
