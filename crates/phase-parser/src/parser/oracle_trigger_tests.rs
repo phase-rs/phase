@@ -36033,6 +36033,50 @@ fn non_attack_player_trigger_does_not_emit_target_player() {
     }
 }
 
+// SHAPE: CR 608.2k binds the untargeted recipient to the damage dealer.
+#[test]
+fn aveline_that_many_counters_bind_the_triggering_creature() {
+    for text in [
+        "Whenever a creature you control with deathtouch deals combat damage to a player, put that many +1/+1 counters on that creature.",
+        "Whenever a creature you control deals combat damage to a player, put that many +1/+1 counters on that creature.",
+    ] {
+        assert_event_amount_counter_target(text, "Aveline de Grandpré", TargetFilter::TriggeringSource);
+    }
+}
+
+#[test]
+fn westgate_regent_that_many_counters_bind_self() {
+    assert_event_amount_counter_target(
+        "Whenever this creature deals combat damage to a player, put that many +1/+1 counters on it.",
+        "Westgate Regent",
+        TargetFilter::SelfRef,
+    );
+}
+
+#[test]
+fn hercules_that_many_counters_bind_self() {
+    assert_event_amount_counter_target(
+        "Whenever Hercules is dealt damage for the first time each turn, put that many +1/+1 counters on him. (He must survive the damage to get the counters.)",
+        "Hercules, Olympian Hero",
+        TargetFilter::SelfRef,
+    );
+}
+
+fn assert_event_amount_counter_target(text: &str, name: &str, target: TargetFilter) {
+    let trigger = parse_trigger_line(text, name);
+    assert_eq!(
+        *trigger.execute.expect("counter placement").effect,
+        Effect::PutCounter {
+            counter_type: crate::types::counter::CounterType::Plus1Plus1,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            },
+            target,
+        },
+        "{name}: {text}"
+    );
+}
+
 /// CR 107.3a + CR 601.2f: Wan Shi Tong's ETB trigger pays `{X}` at cast
 /// and must put X +1/+1 counters on himself. Verify the pronoun "him"
 /// routes through `resolve_it_pronoun` → `SelfRef` (not `ParentTarget`),
