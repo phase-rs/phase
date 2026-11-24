@@ -399,7 +399,7 @@ const RANGERS_OF_ITHILIEN: &str = "Vigilance\nWhen this creature enters, gain co
 const DEFLECTING_SWAT: &str = "If you control a commander, you may cast this spell without paying its mana cost.\nYou may choose new targets for target spell or ability.";
 const STRIONIC_RESONATOR: &str = "{2}, {T}: Copy target triggered ability you control. You may choose new targets for the copy. (A triggered ability uses the words \"when,\" \"whenever,\" or \"at.\")";
 const VEDALKEN_ORRERY: &str = "You may cast spells as though they had flash.";
-const RENATA: &str = "Each other creature you control enters the battlefield with an additional +1/+1 counter on it.";
+const RENATA: &str = "Renata's power is equal to your devotion to green. (Each {G} in the mana costs of permanents you control counts toward your devotion to green.)\nEach other creature you control enters with an additional +1/+1 counter on it.";
 
 struct RangersRetargetBoard {
     runner: GameRunner,
@@ -435,7 +435,7 @@ fn rangers_retarget_board(response: &str) -> RangersRetargetBoard {
     // to cast the second printed Rangers while the first trigger remains on the stack.
     scenario.add_artifact_from_oracle(P0, "Vedalken Orrery", VEDALKEN_ORRERY);
     let renata = scenario
-        .add_creature_to_hand_from_oracle(P0, "Renata, Called to the Hunt", 3, 3, RENATA)
+        .add_creature_to_hand_from_oracle(P0, "Renata, Called to the Hunt", 0, 3, RENATA)
         .with_mana_cost(ManaCost::zero())
         .id();
     let swat = (response == "swat").then(|| {
