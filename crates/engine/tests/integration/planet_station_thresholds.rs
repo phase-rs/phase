@@ -1,7 +1,6 @@
 use engine::ai_support::legal_actions_full;
 use engine::game::casting::can_cast_object_now;
 use engine::game::keywords::has_keyword;
-use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
@@ -420,7 +419,9 @@ fn hearthhull_drain_survives_counter_removal_in_response() {
 
 #[test]
 fn seriema_continuation_grants_indestructible_only_to_other_tapped_legendary_creatures() {
-    for counters in [6, 7] {
+    const FROST_BREATH: &str = "Tap up to two target creatures. Those creatures don't untap during their controller's next untap step.";
+
+    for (starting_counters, counters) in [(4, 6), (5, 7)] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let ship = scenario.add_creature(P0, SERIEMA, 5, 5)
@@ -429,7 +430,7 @@ fn seriema_continuation_grants_indestructible_only_to_other_tapped_legendary_cre
             .with_subtypes(vec!["Spacecraft"])
             .from_oracle_text_with_keywords(&["Station"], "When The Seriema enters, search your library for a legendary creature card, reveal it, put it into your hand, then shuffle.\nStation (Tap another creature you control: Put charge counters equal to its power on this Spacecraft. Station only as a sorcery. It's an artifact creature at 7+.)\n7+ | Flying\nOther tapped legendary creatures you control have indestructible.")
             .id();
-        scenario.with_counter(ship, charge(), counters);
+        scenario.with_counter(ship, charge(), starting_counters);
         let tapped = scenario
             .add_creature(P0, "Isamaru, Hound of Konda", 2, 2)
             .as_legendary()
@@ -448,12 +449,67 @@ fn seriema_continuation_grants_indestructible_only_to_other_tapped_legendary_cre
             .as_legendary()
             .with_subtypes(vec!["Dog"])
             .id();
+        let mut add_frost_breath = || {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, "Frost Breath", true, FROST_BREATH)
+                .with_mana_cost(parse_mtgjson_mana_cost("{2}{U}"))
+                .id()
+        };
+        let frost_breath = add_frost_breath();
+        let ship_frost_breath = (counters == 7).then(add_frost_breath);
+        let mana_count = if ship_frost_breath.is_some() { 6 } else { 3 };
+        fund(&mut scenario, ship, &[ManaType::Blue; 6][..mana_count]);
+
         let mut runner = scenario.build();
-        for id in [ship, tapped, ordinary, opponent] {
-            runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
+        runner
+            .act(GameAction::ActivateStation {
+                spacecraft_id: ship,
+                creature_id: None,
+            })
+            .unwrap();
+        let WaitingFor::StationTarget {
+            player,
+            spacecraft_id,
+            eligible_creatures,
+        } = &runner.state().waiting_for
+        else {
+            panic!("expected station selection");
+        };
+        assert_eq!((*player, *spacecraft_id), (P0, ship));
+        assert!(eligible_creatures.contains(&tapped));
+        runner
+            .act(GameAction::ActivateStation {
+                spacecraft_id: ship,
+                creature_id: Some(tapped),
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_priority(&runner);
+        assert_eq!(runner.state().objects[&ship].counters[&charge()], counters);
+        assert_eq!(
+            runner.state().objects[&ship]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            counters == 7
+        );
+        assert!(runner.state().objects[&tapped].tapped);
+
+        runner
+            .cast(frost_breath)
+            .target_objects(&[ordinary, opponent])
+            .resolve();
+        assert_priority(&runner);
+        if let Some(spell) = ship_frost_breath {
+            runner.cast(spell).target_object(ship).resolve();
+            assert_priority(&runner);
         }
-        runner.state_mut().layers_dirty.mark_full();
-        evaluate_layers(runner.state_mut());
+        for id in [tapped, ordinary, opponent] {
+            assert!(runner.state().objects[&id].tapped);
+        }
+        assert_eq!(runner.state().objects[&ship].tapped, counters == 7);
+        assert!(!runner.state().objects[&untapped].tapped);
+
         let indestructible =
             |id| has_keyword(&runner.state().objects[&id], &Keyword::Indestructible);
         // CR 721.2a: the continuation's grant belongs to the 7+ striation.
