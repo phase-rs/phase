@@ -47682,6 +47682,77 @@ fn add_exiled_card(state: &mut GameState, player: PlayerId, name: &str) -> Objec
     object_id
 }
 
+/// CR 113.6b + CR 406.6 + CR 406.2 (V-fast-exit): `exile_permission_pools_empty`
+/// preserves the short-circuit for every pool scope. A live `CounterLinked`
+/// source (Tinybones shape) is present for every leg, so an empty offer proves
+/// the exit — not a missing source — decided: exile holding a counterless card
+/// offers nothing, while the same card with a stash counter is offered, and
+/// removing the counter empties the offer again (live read, no latch).
+#[test]
+fn exile_permission_pools_empty_short_circuits_counter_linked_scope() {
+    use crate::types::counter::CounterMatch;
+
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let source = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Tinybones",
+        TargetFilter::Any,
+        CastFrequency::Unlimited,
+        CardPlayMode::Play,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::CounterLinked {
+            matcher: CounterMatch::OfType(CounterType::Generic("stash".to_string())),
+        },
+        ExileCastTiming::YourTurnOnly,
+    );
+    // Reach-guard: the source is live and functioning before any offer is read.
+    assert_eq!(exile_permission_sources(&state, player).len(), 1);
+
+    // Empty exile: the predicate holds and discovery offers nothing.
+    assert!(exile_permission_pools_empty(&state));
+    assert!(exile_objects_castable_by_permission(&state, player).is_empty());
+
+    // Non-empty exile WITHOUT counters: still empty (the counter clause).
+    let exiled = add_exiled_card(&mut state, player, "Exiled Bear");
+    assert!(exile_permission_pools_empty(&state));
+    assert!(exile_objects_castable_by_permission(&state, player).is_empty());
+    assert!(
+        !spell_objects_available_to_cast(&state, player).contains(&exiled),
+        "a counterless exiled card must not be offered"
+    );
+
+    // Positive guard: the same card WITH a stash counter is offered.
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .counters
+        .insert(CounterType::Generic("stash".to_string()), 1);
+    assert!(!exile_permission_pools_empty(&state));
+    assert!(
+        exile_objects_castable_by_permission(&state, player)
+            .iter()
+            .any(|(id, src, _)| *id == exiled && *src == source),
+        "the stashed card must be offered through the live source"
+    );
+    assert!(
+        spell_objects_available_to_cast(&state, player).contains(&exiled),
+        "the stashed card must surface on the castable list"
+    );
+
+    // Removing the counter exits the pool on the next read (CR 611.3a).
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .counters
+        .remove(&CounterType::Generic("stash".to_string()));
+    assert!(exile_permission_pools_empty(&state));
+    assert!(exile_objects_castable_by_permission(&state, player).is_empty());
+}
+
 /// CR 601.2a + CR 113.6b + CR 118.9: With Maralen on the battlefield, the
 /// per-turn exile pool, and a card matching the static's affected filter,
 /// `spell_objects_available_to_cast` must surface the exiled card.

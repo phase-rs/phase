@@ -17412,8 +17412,36 @@ fn neighbouring_cast_permissions_keep_their_parse() {
         "Tinybones, Bauble Burglar",
         &[],
     );
-    assert!(tinybones.statics.is_empty());
-    assert_eq!(unimplemented_names(&tinybones), ["unknown"]);
+    // CR 406.2 + CR 122.1 (V-parse-full): full Oracle dispatch routes the
+    // counter-linked static to the new arm — exactly one static carrying the
+    // stash pool + any-TYPE concession, zero gaps, and the discard trigger
+    // still present.
+    assert_eq!(tinybones.statics.len(), 1);
+    assert_eq!(
+        tinybones.statics[0].mode,
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::CounterLinked {
+                matcher: CounterMatch::OfType(CounterType::Generic("stash".to_string())),
+            },
+            timing: ExileCastTiming::YourTurnOnly,
+            mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor),
+            grants_flash: false,
+            extra_cost: None,
+            enters_with_counter: None,
+            grantee: crate::types::statics::ExileCastGrantee::SourceController,
+        },
+        "Tinybones's static must be the counter-linked permission, got {:?}",
+        tinybones.statics[0].mode
+    );
+    assert!(unimplemented_names(&tinybones).is_empty());
+    assert_eq!(
+        tinybones.triggers.len(),
+        1,
+        "the discard trigger must still be present"
+    );
 
     let serra = parse_creature_card(
         "Flying\nOnce during each of your turns, you may play a land from your graveyard or cast a permanent spell with mana value 3 or less from your graveyard. If you do, it gains \"When this permanent is put into a graveyard from the battlefield, exile it and you gain 2 life.\"",
@@ -18571,6 +18599,147 @@ fn persistent_exile_cast_permission_azula_flash_and_any_mana() {
             .any(|parsed_def| parsed_def.mode == def.mode),
         "full Oracle dispatch must route Azula's line to the flash+any-mana static, got {:?}",
         parsed.statics
+    );
+}
+
+/// CR 406.2 + CR 122.1 + CR 611.3a + CR 108.3 + CR 109.5 (V-parse-clause):
+/// Tinybones, Bauble Burglar's counter-linked static lowers to an unlimited
+/// your-turn-only Play permission over the stash-counter pool with the
+/// any-TYPE spend concession, and the affected filter carries both the
+/// don't-own ownership prop and the stash counter prop.
+#[test]
+fn counter_linked_exile_play_permission_tinybones_clause() {
+    let text = "During your turn, you may play cards you don't own with stash counters on them from exile, and mana of any type can be spent to cast those spells.";
+    let def = parse_static_line(text).expect("Tinybones static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            // CR 305.1: "play cards" covers lands (played) and spells (cast).
+            play_mode: CardPlayMode::Play,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::CounterLinked {
+                matcher: CounterMatch::OfType(CounterType::Generic("stash".to_string())),
+            },
+            timing: ExileCastTiming::YourTurnOnly,
+            // CR 118.14 + CR 106.1b: "mana of any type can be spent".
+            mana_spend_permission: Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor),
+            grants_flash: false,
+            extra_cost: None,
+            enters_with_counter: None,
+            grantee: crate::types::statics::ExileCastGrantee::SourceController,
+        },
+        "expected counter-linked your-turn Play permission, got {:?}",
+        def.mode
+    );
+    // Affected: `Typed{Card, [Owned{Opponent}, Counters{stash GE 1}]}` — the
+    // ownership prop (CR 108.3 + CR 109.5) and the counter prop (CR 122.1)
+    // that doubles as the pool key.
+    let TargetFilter::Typed(typed) = def.affected.as_ref().expect("affected filter present") else {
+        panic!("expected a Typed affected filter, got {:?}", def.affected);
+    };
+    assert_eq!(typed.type_filters, vec![TypeFilter::Card]);
+    assert_eq!(typed.controller, None);
+    assert_eq!(typed.properties.len(), 2);
+    assert!(
+        typed.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::Opponent,
+        }),
+        "affected must carry the don't-own prop, got {:?}",
+        typed.properties
+    );
+    assert!(
+        typed.properties.contains(&FilterProp::Counters {
+            counters: CounterMatch::OfType(CounterType::Generic("stash".to_string())),
+            comparator: Comparator::GE,
+            count: QuantityExpr::Fixed { value: 1 },
+        }),
+        "affected must carry the stash counter prop, got {:?}",
+        typed.properties
+    );
+
+    // Cast-verb sibling: "you may cast …" lowers to Cast mode (no mana rider
+    // here, so no concession).
+    let cast_text =
+        "During your turn, you may cast cards you don't own with stash counters on them from exile.";
+    let cast_def = parse_static_line(cast_text).expect("cast-verb sibling must parse");
+    assert!(
+        matches!(
+            cast_def.mode,
+            StaticMode::ExileCastPermission {
+                play_mode: CardPlayMode::Cast,
+                pool: ExileCardPool::CounterLinked { .. },
+                timing: ExileCastTiming::YourTurnOnly,
+                mana_spend_permission: None,
+                ..
+            }
+        ),
+        "expected a concession-free counter-linked Cast permission, got {:?}",
+        cast_def.mode
+    );
+
+    // Missing counter: no `Counters` prop means no pool key, so the line
+    // declines instead of widening to an unkeyed pool.
+    assert!(
+        parse_static_line("During your turn, you may play cards you don't own from exile.")
+            .is_none(),
+        "a counterless exile-play line must not take the counter-linked arm"
+    );
+
+    // Missing ownership (class shape): parses with an ownership-free filter —
+    // the pool key is the counter prop alone.
+    let ownership_free = parse_static_line(
+        "During your turn, you may play cards with stash counters on them from exile.",
+    )
+    .expect("the ownership-free counter shape must parse");
+    assert!(
+        matches!(
+            ownership_free.mode,
+            StaticMode::ExileCastPermission {
+                pool: ExileCardPool::CounterLinked { .. },
+                ..
+            }
+        ),
+        "expected a counter-linked pool, got {:?}",
+        ownership_free.mode
+    );
+    let TargetFilter::Typed(ownership_free_typed) = ownership_free
+        .affected
+        .as_ref()
+        .expect("affected filter present")
+    else {
+        panic!(
+            "expected a Typed affected filter, got {:?}",
+            ownership_free.affected
+        );
+    };
+    assert!(
+        !ownership_free_typed
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::Owned { .. })),
+        "the ownership-free shape must not gain an ownership prop, got {:?}",
+        ownership_free_typed.properties
+    );
+
+    // Constructor strictness (B3a): Evelyn's once-per-turn provenance-gated
+    // line declines — the mandatory "you may " head fails on the "Once each
+    // turn, " prefix.
+    let evelyn = "Once each turn, you may play a card from exile with a collection counter on it if it was exiled by an ability you controlled, and you may spend mana as though it were mana of any color to cast it.";
+    let evelyn_lower = evelyn.to_lowercase();
+    assert!(
+        try_parse_counter_linked_exile_play_permission(evelyn, &evelyn_lower).is_none(),
+        "Evelyn's provenance-gated line must never take the source-agnostic arm"
+    );
+
+    // Constructor strictness (B3a): the "each player" subject has no
+    // counter-class evidence and declines.
+    let each_player =
+        "During your turn, each player may play cards with stash counters on them from exile.";
+    let each_player_lower = each_player.to_lowercase();
+    assert!(
+        try_parse_counter_linked_exile_play_permission(each_player, &each_player_lower).is_none(),
+        "the EachPlayer subject must decline the counter-linked arm"
     );
 }
 

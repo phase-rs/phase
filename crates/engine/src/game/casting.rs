@@ -5921,7 +5921,9 @@ fn grant_digest(definition: &StaticDefinition) -> Option<crate::types::game_stat
 /// grant a cast-from-exile permission to `player`?" scan so the caller can
 /// (a) walk the per-turn rolling exile pool keyed on `source_id`, and (b)
 /// stamp the per-source frequency slot at cast finalization.
-#[derive(Clone, Copy)]
+/// Clone-only (not `Copy`): the `pool` field's `CounterLinked` payload is
+/// Clone-only, so the struct cannot be `Copy`.
+#[derive(Clone)]
 struct ExilePermissionSource<'a> {
     source_id: ObjectId,
     filter: &'a TargetFilter,
@@ -5937,8 +5939,8 @@ struct ExilePermissionSource<'a> {
     /// `Cast` sources and the land-play path can admit lands for `Play` sources.
     play_mode: CardPlayMode,
     /// CR 113.6b + CR 406.6: Which exile-link pool the source draws from —
-    /// `ThisTurn` (per-turn rolling list) or `Persistent` (lifetime
-    /// `exile_links`).
+    /// `ThisTurn` (per-turn rolling list), `Persistent` (lifetime
+    /// `exile_links`), or `CounterLinked` (counter-keyed, source-agnostic).
     pool: ExileCardPool,
     /// CR 117.1c: When the permission functions — `AnyTime` or `YourTurnOnly`.
     timing: ExileCastTiming,
@@ -5952,7 +5954,7 @@ struct ExilePermissionSource<'a> {
     /// CR 118.9 + CR 601.2f: Optional non-mana cost rider on the exile-cast
     /// static (Valgavoth alternative pay-life; Dawnhand additional
     /// remove-counters). Borrowed from the static definition so the source struct
-    /// stays `Copy`.
+    /// stays cheap to clone.
     extra_cost: &'a Option<crate::types::statics::CastExtraCost>,
     /// CR 406.6 + CR 607.2b: The player whose exiles are the only eligible pool
     /// cards (matched against `GameObject::exiled_by`) — `Some` for an "each
@@ -5961,12 +5963,33 @@ struct ExilePermissionSource<'a> {
     own_exiles_of: Option<PlayerId>,
 }
 
+/// CR 113.6b + CR 406.6 + CR 406.2: Hot-path fast-exit predicate for every
+/// `ExileCastPermission` reader (cast discovery, cast admission ×2, land
+/// authorization). True only when NO pool scope can offer a card: both tracked
+/// pools (`ThisTurn`, `Persistent`) are empty AND no exiled card carries any
+/// counters. The counter clause is sound for every `CounterLinked` matcher
+/// (`OfType` and `Any` alike): `count_in` sums the card's counter map, so zero
+/// counters anywhere means every counter-keyed pool is empty. The tracked-pool
+/// emptiness is checked first so the common nothing-exiled board exits on two
+/// `is_empty` reads without scanning exile.
+fn exile_permission_pools_empty(state: &GameState) -> bool {
+    state.cards_exiled_with_source_this_turn.is_empty()
+        && state.exile_links.is_empty()
+        && !state.exile.iter().any(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| !obj.counters.is_empty())
+        })
+}
+
 /// CR 113.6b + CR 406.6: The set of exiled object ids this source's permission
 /// may currently draw from, per its pool scope. `ThisTurn` reads the per-turn
 /// rolling list; `Persistent` reads the lifetime `exile_links` set (the same
-/// source-keyed set that backs `TargetFilter::ExiledBySource`).
+/// source-keyed set that backs `TargetFilter::ExiledBySource`); `CounterLinked`
+/// scans live `state.exile` for cards the matcher counts (no link record).
 fn exile_permission_pool(state: &GameState, source: &ExilePermissionSource<'_>) -> Vec<ObjectId> {
-    let mut pool = match source.pool {
+    let mut pool = match &source.pool {
         ExileCardPool::ThisTurn => state
             .cards_exiled_with_source_this_turn
             .get(&source.source_id)
@@ -5979,6 +6002,22 @@ fn exile_permission_pool(state: &GameState, source: &ExilePermissionSource<'_>) 
                 .map(|entry| entry.exiled_id)
                 .collect()
         }
+        // CR 406.2 + CR 122.1 + CR 611.3a: counter-keyed, source-agnostic pool
+        // — every exiled card carrying a counter the matcher counts (Tinybones,
+        // Bauble Burglar: stash counters). The pool reads live `state.exile`,
+        // so zone exit prunes by construction: a card that left exile is not
+        // scanned, and a removed counter exits on the next read (CR 611.3a).
+        ExileCardPool::CounterLinked { matcher } => state
+            .exile
+            .iter()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(*id)
+                    .is_some_and(|obj| matcher.count_in(&obj.counters) > 0)
+            })
+            .copied()
+            .collect(),
     };
     // CR 406.6 + CR 607.2b: An "each player … cards they exiled with ~" grant
     // admits only the source-linked cards this player exiled — the recorded
@@ -6046,7 +6085,11 @@ fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePer
                     frequency,
                     play_mode,
                     cost,
-                    pool,
+                    // CR 406.2: the pool is Clone-only (`CounterLinked`
+                    // carries a `CounterMatch`), so bind by ref and clone into
+                    // the source struct — the pool cannot move out of the
+                    // borrowed definition.
+                    ref pool,
                     timing,
                     mana_spend_permission,
                     grants_flash,
@@ -6078,7 +6121,7 @@ fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePer
                             frequency,
                             cost,
                             play_mode,
-                            pool,
+                            pool: pool.clone(),
                             timing,
                             mana_spend_permission,
                             grants_flash,
@@ -6107,14 +6150,13 @@ fn exile_objects_castable_by_permission(
     player: PlayerId,
 ) -> Vec<(ObjectId, ObjectId, CastFrequency)> {
     // Hot-path fast exit: this runs once per legal-actions computation (and so
-    // once per AI-search node). When no card is tracked in either exile pool, no
-    // `ExileCastPermission` static can offer a card — short-circuit before
-    // `exile_permission_sources` scans the whole battlefield. The `ThisTurn`
-    // (Maralen) shape reads `cards_exiled_with_source_this_turn`; the
-    // `Persistent` (The Matrix of Time) shape reads `exile_links`. With both
-    // empty there is nothing to offer, matching the ~100% of board states with
-    // no exile-cast permanent in play.
-    if state.cards_exiled_with_source_this_turn.is_empty() && state.exile_links.is_empty() {
+    // once per AI-search node). When no pool scope can offer a card — the
+    // `ThisTurn` (Maralen) tracked list and the `Persistent` (The Matrix of
+    // Time) `exile_links` both empty, and no exiled card carrying a counter
+    // for a `CounterLinked` (Tinybones) scope — short-circuit before
+    // `exile_permission_sources` scans the whole battlefield. Matches the ~100%
+    // of board states with no exile-cast permanent in play.
+    if exile_permission_pools_empty(state) {
         return Vec::new();
     }
     let mut results = Vec::new();
@@ -6225,9 +6267,9 @@ fn exile_cast_permission_source_matching(
         return None;
     }
     // Same empty-pool fast exit as `exile_objects_castable_by_permission`: with
-    // both exile pools empty no static can authorize the cast, so skip the
-    // battlefield scan in `exile_permission_sources`.
-    if state.cards_exiled_with_source_this_turn.is_empty() && state.exile_links.is_empty() {
+    // no pool scope able to offer a card no static can authorize the cast, so
+    // skip the battlefield scan in `exile_permission_sources`.
+    if exile_permission_pools_empty(state) {
         return None;
     }
     let sources = exile_permission_sources(state, player);
@@ -6284,7 +6326,8 @@ fn exile_cast_permission_source_full(
     if !exile_object_can_enter_cast_path(obj) {
         return None;
     }
-    if state.cards_exiled_with_source_this_turn.is_empty() && state.exile_links.is_empty() {
+    // Same empty-pool fast exit as the sibling admission scans.
+    if exile_permission_pools_empty(state) {
         return None;
     }
     let sources = exile_permission_sources(state, player);
@@ -7879,7 +7922,8 @@ fn exile_land_playable_by_static_permission(
     player: PlayerId,
     land_id: ObjectId,
 ) -> Option<(ObjectId, CastFrequency)> {
-    if state.cards_exiled_with_source_this_turn.is_empty() && state.exile_links.is_empty() {
+    // Same empty-pool fast exit as the cast-side scans.
+    if exile_permission_pools_empty(state) {
         return None;
     }
     let sources = exile_permission_sources(state, player);
