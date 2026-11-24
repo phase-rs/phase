@@ -25,7 +25,7 @@
 //!
 //! The fix threads a same-chain "prior RevealHand producer" signal
 //! (`ParseContext::chain_prior_hand_reveal_target`, mirroring the existing
-//! `chain_has_prior_exile_producer` precedent for the singular "the exiled
+//! `chain_prior_publishers` precedent for the singular "the exiled
 //! card" anaphor) so the plural anaphor binds to the REVEALED PLAYER'S HAND
 //! instead when no exile occurred in the chain. The runtime hand-cast
 //! resolver (`open_private_zone_cast_selection` in

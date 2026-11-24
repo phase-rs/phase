@@ -16,9 +16,9 @@ use engine::game::planechase::PlanarDieFace;
 use engine::game::printed_cards::apply_card_face_to_object;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ChoiceValue,
-    ChooseOneOfKind, ChosenAttribute, ContinuousModification, ControllerRef, Duration, Effect,
-    ManaProduction, PlayerFilter, QuantityExpr, ReplacementDefinition, StaticDefinition,
+    is_mana_ability, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChoiceType,
+    ChoiceValue, ChooseOneOfKind, ChosenAttribute, ContinuousModification, ControllerRef, Duration,
+    Effect, ManaProduction, PlayerFilter, QuantityExpr, ReplacementDefinition, StaticDefinition,
     TargetFilter, TargetSelectionMode,
 };
 use engine::types::actions::GameAction;
@@ -1898,48 +1898,163 @@ fn fixed_color_sources_still_pay() {
     }
 }
 
-/// CR 105.1 + CR 106.5: "Choose a color of a permanent you control / of a card
-/// in your graveyard" restricts the color domain to game state the engine does
-/// not model. The clause stays unsupported, so neither card is a mana source
-/// that could pay any color. The unrestricted "Choose a color. Add one mana of
-/// that color." on the same board is the control: it pays the {R} spell.
-#[test]
-fn color_of_a_game_object_choice_stays_unsupported() {
-    const PLAIN_CHOOSER: &str = "{T}: Choose a color. Add one mana of that color.";
-    for (name, oracle, supported) in [
-        ("Meteor Crater", METEOR_CRATER, false),
-        ("Corrupted Grafstone", CORRUPTED_GRAFSTONE, false),
-        ("Plain Color Chooser", PLAIN_CHOOSER, true),
-    ] {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        let source = scenario.add_artifact_from_oracle(P0, name, oracle).id();
-        scenario
-            .add_creature(P0, "Red Permanent", 1, 1)
-            .with_mana_cost(cost(vec![ManaCostShard::Red], 0));
-        scenario.with_graveyard(P0, &["Graveyard Card"]);
-        let spell = add_instant(&mut scenario, cost(vec![ManaCostShard::Red], 0));
-        let runner = scenario.build();
+const LIGHTNING_BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
 
-        assert!(
-            !runner.state().objects[&source].tapped,
-            "{name}: the source is untapped, so only its ability decides"
-        );
-        let ability = runner.state().objects[&source]
-            .abilities
-            .last()
-            .expect("the tap ability parses")
-            .clone();
-        assert_eq!(
-            !matches!(&*ability.effect, Effect::Unimplemented { .. }),
-            supported,
-            "{name}: unexpected support for the color choice, got {:?}",
-            ability.effect
-        );
-        assert_eq!(
-            priority_facts(&runner, spell).0,
-            supported,
-            "{name}: the {{R}} spell is offered only from the unrestricted chooser"
-        );
-    }
+/// Lightning Bolt ({R}) in P0's hand beside the mana source `stage` adds, with
+/// whatever `stage` puts around it. Returns the runner, the source and the
+/// Bolt, with the source checked untapped so only its ability decides.
+fn bolt_board(
+    stage: impl FnOnce(&mut GameScenario) -> ObjectId,
+) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, LIGHTNING_BOLT)
+        .with_mana_cost(cost(vec![ManaCostShard::Red], 0))
+        .id();
+    let source = stage(&mut scenario);
+    let runner = scenario.build();
+    assert!(
+        !runner.state().objects[&source].tapped,
+        "reach: the source is untapped, so only its ability decides"
+    );
+    (runner, source, bolt)
+}
+
+/// Reach guard for a "Choose a color of <objects>" source: its printed ability
+/// is one mana ability over the objects its filter matches in `zone` (the
+/// battlefield when `None`).
+fn assert_choice_among_objects(runner: &GameRunner, source: ObjectId, zone: Option<Zone>) {
+    let ability = &runner.state().objects[&source].abilities[0];
+    let produced = produced_of(runner, source, 0);
+    assert!(
+        ability.kind == AbilityKind::Activated
+            && is_mana_ability(ability)
+            && matches!(
+                &produced,
+                ManaProduction::AnyOneColorAmongPermanents { filter, .. }
+                    if filter.extract_in_zone() == zone
+            ),
+        "reach: the printed ability is one mana ability over the objects it names, got \
+         {produced:?}"
+    );
+}
+
+/// CR 105.4 + CR 106.5 + CR 608.2d: Meteor Crater ("{T}: Choose a color of a
+/// permanent you control. Add one mana of that color.") and Corrupted Grafstone
+/// ("{T}: Choose a color of a card in your graveyard. Add one mana of that
+/// color.") choose as the ability resolves, from the colors of the objects they
+/// name, so each pays for Lightning Bolt exactly when a red object of its own
+/// is there; Astral Cornucopia's unrestricted "Choose a color." is the control.
+#[test]
+fn color_of_a_game_object_choice_reads_that_objects_colors() {
+    // (a) Meteor Crater beside P0's own Gray Ogre: red is a color of a
+    // permanent P0 controls.
+    let (mut runner, crater, bolt) = bolt_board(|scenario| {
+        scenario
+            .add_creature(P0, "Gray Ogre", 2, 2)
+            .with_mana_cost(cost(vec![ManaCostShard::Red], 2));
+        scenario
+            .add_land_from_oracle(P0, "Meteor Crater", METEOR_CRATER)
+            .id()
+    });
+    assert!(
+        priority_facts(&runner, bolt).0,
+        "(a) Meteor Crater beside P0's Gray Ogre pays for Lightning Bolt"
+    );
+    assert_choice_among_objects(&runner, crater, None);
+    let outcome = runner.cast(bolt).target_player(P1).resolve();
+    outcome.assert_life_delta(P1, -3);
+    assert_eq!(
+        outcome.zone_of(bolt),
+        Zone::Graveyard,
+        "(a) Lightning Bolt resolved"
+    );
+    assert!(
+        outcome.state().objects[&crater].tapped,
+        "(a) Meteor Crater paid for Lightning Bolt"
+    );
+
+    // (b) Meteor Crater beside only P1's Gray Ogre: no permanent P0 controls is
+    // red. Paired positive: (a).
+    let (runner, crater, bolt) = bolt_board(|scenario| {
+        scenario
+            .add_creature(P1, "Gray Ogre", 2, 2)
+            .with_mana_cost(cost(vec![ManaCostShard::Red], 2));
+        scenario
+            .add_land_from_oracle(P0, "Meteor Crater", METEOR_CRATER)
+            .id()
+    });
+    assert!(
+        !priority_facts(&runner, bolt).0,
+        "(b) an opponent's red permanent gives Meteor Crater no color"
+    );
+    assert_choice_among_objects(&runner, crater, None);
+
+    // (c) Corrupted Grafstone over a colorless Memnite in P0's graveyard: the
+    // Grafstone ruling, "Colorless cards have no color, so you can't add {C}
+    // this way." Paired positive: (d).
+    let (runner, grafstone, bolt) = bolt_board(|scenario| {
+        scenario
+            .add_creature_to_graveyard(P0, "Memnite", 1, 1)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Construct"])
+            .with_mana_cost(cost(vec![], 0));
+        scenario
+            .add_artifact_from_oracle(P0, "Corrupted Grafstone", CORRUPTED_GRAFSTONE)
+            .id()
+    });
+    assert!(
+        !priority_facts(&runner, bolt).0,
+        "(c) a colorless card in P0's graveyard gives the Grafstone no color"
+    );
+    assert_choice_among_objects(&runner, grafstone, Some(Zone::Graveyard));
+
+    // (d) Corrupted Grafstone over a Gray Ogre in P0's graveyard.
+    let (mut runner, grafstone, bolt) = bolt_board(|scenario| {
+        scenario
+            .add_creature_to_graveyard(P0, "Gray Ogre", 2, 2)
+            .with_mana_cost(cost(vec![ManaCostShard::Red], 2));
+        scenario
+            .add_artifact_from_oracle(P0, "Corrupted Grafstone", CORRUPTED_GRAFSTONE)
+            .id()
+    });
+    assert!(
+        priority_facts(&runner, bolt).0,
+        "(d) a red card in P0's graveyard pays for Lightning Bolt"
+    );
+    assert_choice_among_objects(&runner, grafstone, Some(Zone::Graveyard));
+    let outcome = runner.cast(bolt).target_player(P1).resolve();
+    outcome.assert_life_delta(P1, -3);
+    assert_eq!(
+        outcome.zone_of(bolt),
+        Zone::Graveyard,
+        "(d) Lightning Bolt resolved"
+    );
+    assert!(
+        outcome.state().objects[&grafstone].tapped,
+        "(d) the Grafstone paid for Lightning Bolt"
+    );
+
+    // (e) The control: Astral Cornucopia's unrestricted "Choose a color." with
+    // one charge counter.
+    let (mut runner, astral, bolt) = bolt_board(|scenario| {
+        let astral = scenario
+            .add_artifact_from_oracle(P0, "Astral Cornucopia", ASTRAL)
+            .id();
+        scenario.with_counter(astral, charge(), 1);
+        astral
+    });
+    assert!(
+        priority_facts(&runner, bolt).0,
+        "(e) Astral Cornucopia pays for Lightning Bolt"
+    );
+    assert_astral_reach(&runner, astral);
+    let outcome = runner.cast(bolt).target_player(P1).resolve();
+    outcome.assert_life_delta(P1, -3);
+    assert_eq!(
+        outcome.zone_of(bolt),
+        Zone::Graveyard,
+        "(e) Lightning Bolt resolved"
+    );
 }

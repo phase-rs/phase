@@ -3019,6 +3019,7 @@ struct SunRun {
 }
 
 impl SunRun {
+    /// Counts production announcements, including those for ordinary observers only.
     fn produced_by(&self, name: &str) -> usize {
         let objects = &self.runner.state().objects;
         self.events
@@ -3215,7 +3216,7 @@ fn two_caged_suns_end_the_game_once() {
 
 /// CR 605.1b: a Caged Sun that is not a land, or whose color the Forest does not add, does not
 /// retrigger itself, and an Aura's triggered mana ability is not a land's ability; each adds one
-/// mana. Only where loop detection samples is a triggered mana ability's production an event.
+/// mana. Both modes announce that production.
 #[test]
 fn one_extra_mana_without_a_self_retrigger() {
     let no_toph = SunBoard {
@@ -3266,17 +3267,9 @@ fn one_extra_mana_without_a_self_retrigger() {
                 (green, blue, total),
                 "{leg}"
             );
-            match (mode.samples(), producer) {
-                (true, Some(producer)) => {
-                    assert_eq!(run.produced_by(producer), 1, "{leg}: {producer}")
-                }
-                (true, None) => assert_eq!(run.produced_by("Caged Sun"), 0, "{leg}"),
-                (false, _) => assert_eq!(
-                    ["Caged Sun", "Fertile Ground", "Utopia Sprawl"]
-                        .map(|name| run.produced_by(name)),
-                    [0; 3],
-                    "{leg}"
-                ),
+            match producer {
+                Some(producer) => assert_eq!(run.produced_by(producer), 1, "{leg}: {producer}"),
+                None => assert_eq!(run.produced_by("Caged Sun"), 0, "{leg}"),
             }
         }
     }
@@ -3284,7 +3277,7 @@ fn one_extra_mana_without_a_self_retrigger() {
 
 /// CR 605.1b: under Toph, Gauntlet of Power is a land and a token Caged Sun is not, so the Sun
 /// adds one mana for the Forest's ability and one for Gauntlet's, and its own triggers nothing.
-/// Off forgoes the production event, so the Sun misses Gauntlet's ability.
+/// Off announces Gauntlet's production for ordinary observers only, so the Sun adds mana once.
 #[test]
 fn a_token_caged_sun_under_toph_adds_once_per_land_ability() {
     let board = SunBoard {
@@ -3294,7 +3287,7 @@ fn a_token_caged_sun_under_toph_adds_once_per_land_ability() {
     };
     for (mode, green, gauntlet, sun) in [
         (LoopDetectionMode::Interactive, 4, 1, 2),
-        (LoopDetectionMode::Off, 3, 0, 0),
+        (LoopDetectionMode::Off, 3, 1, 1),
     ] {
         let Some(run) = drive_suns(board, mode, SunRoute::TapForest) else {
             return;

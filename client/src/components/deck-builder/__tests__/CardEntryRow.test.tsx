@@ -16,13 +16,13 @@ describe("CardEntryRow", () => {
     expect(screen.getByText("3x")).toBeInTheDocument();
   });
 
-  it("fires onMove with (name, section) when the arrow button is clicked", () => {
+  it("fires onMove with (entry, section) when the arrow button is clicked", () => {
     const onMove = vi.fn();
     render(
       <CardEntryRow entry={entry} section="main" onMove={onMove} onRemove={vi.fn()} />,
     );
     fireEvent.click(screen.getByRole("button", { name: /move one lightning bolt to sideboard/i }));
-    expect(onMove).toHaveBeenCalledWith("Lightning Bolt", "main");
+    expect(onMove).toHaveBeenCalledWith(entry, "main");
   });
 
   it("forwards a row's selected printing to the hover preview", () => {
@@ -53,7 +53,7 @@ describe("CardEntryRow", () => {
       <CardEntryRow entry={entry} section="sideboard" onMove={onMove} onRemove={vi.fn()} />,
     );
     fireEvent.click(screen.getByRole("button", { name: /move one lightning bolt to main deck/i }));
-    expect(onMove).toHaveBeenCalledWith("Lightning Bolt", "sideboard");
+    expect(onMove).toHaveBeenCalledWith(entry, "sideboard");
   });
 
   it("renders a labelled move button naming the destination when moveTargetLabel is given", () => {
@@ -72,16 +72,16 @@ describe("CardEntryRow", () => {
     const button = screen.getByRole("button", { name: /move one lightning bolt to maybeboard/i });
     expect(button).toHaveTextContent("Maybeboard");
     fireEvent.click(button);
-    expect(onMove).toHaveBeenCalledWith("Lightning Bolt", "main");
+    expect(onMove).toHaveBeenCalledWith(entry, "main");
   });
 
-  it("fires onRemove with (name, section) when the remove button is clicked", () => {
+  it("fires onRemove with (entry, section) when the remove button is clicked", () => {
     const onRemove = vi.fn();
     render(
       <CardEntryRow entry={entry} section="main" onMove={vi.fn()} onRemove={onRemove} />,
     );
     fireEvent.click(screen.getByRole("button", { name: /remove one lightning bolt/i }));
-    expect(onRemove).toHaveBeenCalledWith("Lightning Bolt", "main");
+    expect(onRemove).toHaveBeenCalledWith(entry, "main");
   });
 
   it("omits the remove button when onRemove is not provided (partition-only mode)", () => {
@@ -95,7 +95,7 @@ describe("CardEntryRow", () => {
     ).toBeInTheDocument();
   });
 
-  it("fires onIncrement with (name, section) when the add button is clicked", () => {
+  it("fires onIncrement with (entry, section) when the add button is clicked", () => {
     const onIncrement = vi.fn();
     render(
       <CardEntryRow
@@ -107,7 +107,7 @@ describe("CardEntryRow", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /add one lightning bolt/i }));
-    expect(onIncrement).toHaveBeenCalledWith("Lightning Bolt", "sideboard");
+    expect(onIncrement).toHaveBeenCalledWith(entry, "sideboard");
   });
 
   // CR 100.2a: the ceiling is engine-resolved; the row only reflects it.

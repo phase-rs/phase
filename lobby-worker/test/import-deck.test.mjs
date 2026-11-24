@@ -368,3 +368,27 @@ test("ALLOWED_ORIGINS: matching origin echoed; non-matching falls back to first 
   );
   assert.equal(fallback.headers.get("Access-Control-Allow-Origin"), "https://phase-rs.dev");
 });
+
+test("Moxfield: emits separate lines for two printings of one card", async () => {
+  mockUpstream({
+    name: "Forests",
+    mainboard: {
+      a: { quantity: 4, card: { name: "Forest", set: "one", cn: "276" } },
+      b: { quantity: 3, card: { name: "Forest", set: "dmu", cn: "277" } },
+    },
+  });
+  const response = await call("https://moxfield.com/decks/forests");
+  assert.equal(await response.text(), "Name: Forests\n[Main]\n4 Forest (ONE) 276\n3 Forest (DMU) 277\n");
+});
+
+test("Archidekt: emits separate lines for two printings of one card", async () => {
+  mockUpstream({
+    name: "Forests",
+    cards: [
+      { quantity: 4, card: { oracleCard: { name: "Forest" }, edition: { editioncode: "one" }, collectorNumber: "276" } },
+      { quantity: 3, card: { oracleCard: { name: "Forest" }, edition: { editioncode: "dmu" }, collectorNumber: "277" } },
+    ],
+  });
+  const response = await call("https://archidekt.com/decks/123/forests");
+  assert.equal(await response.text(), "Name: Forests\n[Main]\n4 Forest (ONE) 276\n3 Forest (DMU) 277\n");
+});

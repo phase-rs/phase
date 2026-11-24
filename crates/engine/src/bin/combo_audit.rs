@@ -124,25 +124,15 @@ fn strip_count(line: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::File;
-    use std::io::BufReader;
-
-    use flate2::read::GzDecoder;
-
     use super::*;
 
     #[test]
     fn report_assembly_smoke_covers_the_corpus() {
-        let fixture =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/integration_cards.json.gz");
-        if !fixture.exists() {
+        if !engine::database::integration_fixture::exists() {
             eprintln!("skipping: committed integration card fixture is unavailable");
             return;
         }
-        let decoder = GzDecoder::new(BufReader::new(
-            File::open(fixture).expect("fixture should open"),
-        ));
-        let db = CardDatabase::from_export_reader(decoder).expect("fixture should load");
+        let db = CardDatabase::from_integration_fixture().expect("fixture should load");
         let report = pair_audit_report(&db, None, &[]);
         assert_eq!(
             report.corpus_total,

@@ -4,9 +4,9 @@
 //! Data, not logic. 100 non-token cards plus 200 predefined Human Soldier tokens
 //! = a 300-card library, matching the page's stated count exactly.
 //!
-//! Coverage: all 30 distinct card names resolve against the card DB. Two 1-copy
-//! cards carry partial parse gaps (Yidaro, Wandering Monster and Zilortha,
-//! Strength Incarnate); at one copy each out of 300 they are not build-gating.
+//! Coverage: all 30 distinct card names resolve against the card DB. One 1-copy
+//! card carries a partial parse gap (Yidaro, Wandering Monster); at one copy out
+//! of 300 it is not build-gating.
 //! The bulk token is a single vanilla body at `fidelity = Full`.
 //!
 //! Wave rule: the community default from hordemagic.com's basic rules — "Waves

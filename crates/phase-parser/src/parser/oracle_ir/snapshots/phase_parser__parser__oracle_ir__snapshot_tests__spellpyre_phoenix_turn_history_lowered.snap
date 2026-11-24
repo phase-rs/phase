@@ -1,0 +1,154 @@
+---
+source: crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "ChangeZone",
+          "origin": "Graveyard",
+          "destination": "Hand",
+          "target": {
+            "type": "Or",
+            "filters": [
+              {
+                "type": "Typed",
+                "type_filters": [
+                  "Instant"
+                ],
+                "controller": null,
+                "properties": [
+                  {
+                    "type": "InZone",
+                    "zone": "Graveyard"
+                  },
+                  {
+                    "type": "Owned",
+                    "controller": "You"
+                  }
+                ]
+              },
+              {
+                "type": "Typed",
+                "type_filters": [
+                  "Sorcery"
+                ],
+                "controller": null,
+                "properties": [
+                  {
+                    "type": "InZone",
+                    "zone": "Graveyard"
+                  },
+                  {
+                    "type": "Owned",
+                    "controller": "You"
+                  }
+                ]
+              }
+            ]
+          },
+          "owner_library": false,
+          "enter_transformed": false,
+          "enter_tapped": false,
+          "enters_attacking": false
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": true,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": null,
+      "destination": "Battlefield",
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": true,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "When ~ enters, you may return target instant or sorcery card with a cycling ability from your graveyard to your hand.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    },
+    {
+      "mode": "Phase",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "ChangeZone",
+          "origin": "Graveyard",
+          "destination": "Hand",
+          "target": {
+            "type": "SelfRef"
+          },
+          "owner_library": false,
+          "enter_transformed": false,
+          "enter_tapped": false,
+          "enters_attacking": false
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "target_choice_timing": "Resolution",
+        "forward_result": false
+      },
+      "valid_card": null,
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "phase": "End",
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "At the beginning of each end step, if you cycled two or more cards this turn, return this card from your graveyard to your hand.",
+      "constraint": null,
+      "condition": {
+        "type": "QuantityComparison",
+        "lhs": {
+          "type": "Ref",
+          "qty": {
+            "type": "CardsCycled",
+            "scope": "Controller",
+            "window": "ThisTurn"
+          }
+        },
+        "comparator": "GE",
+        "rhs": {
+          "type": "Fixed",
+          "value": 2
+        }
+      },
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": [
+    "Flying"
+  ]
+}

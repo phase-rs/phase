@@ -1600,7 +1600,8 @@ mod post_load_creators {
     use engine::types::events::GameEvent;
     use engine::types::game_state::{
         CastPaymentMode, CompanionChoiceSource, CompanionDeclaration, CompanionRevealChoice,
-        OutsideGameCardUse, OutsideGameChoiceSource, PersistedGameState, WaitingFor,
+        OutsideGameCardUse, OutsideGameChoiceEntry, OutsideGameChoiceSource, PersistedGameState,
+        WaitingFor,
     };
     use engine::types::identifiers::ObjectId;
     use engine::types::mana::{ManaType, ManaUnit};
@@ -1941,6 +1942,49 @@ mod post_load_creators {
         available: u32,
         expected_printing: &str,
     ) -> (ObjectId, ObjectId, Vec<GameEvent>) {
+        let (fetched, wish, events) = resolve_living_wish(
+            runner,
+            OutsideGameSelection::Sideboard { sideboard_index: 0 },
+            |choices| {
+                // CR 702.139a + CR 400.11: the sideboard entry (`available` copies) and the
+                // revealed, not-yet-used companion (one card outside the game) are the ONLY
+                // sources offered, in that order. An extra or missing source fails here.
+                assert!(
+                    matches!(
+                        choices,
+                        [sideboard, companion]
+                            if sideboard.count == available
+                                && sideboard.name == LURRUS
+                                && matches!(
+                                    &sideboard.source,
+                                    OutsideGameChoiceSource::Sideboard { sideboard_index: 0, .. }
+                                )
+                                && companion.count == 1
+                                && companion.name == LURRUS
+                                && matches!(
+                                    &companion.source,
+                                    OutsideGameChoiceSource::Companion { card } if card.name == LURRUS
+                                )
+                    ),
+                    "{choices:?}"
+                );
+            },
+        );
+        let object = &runner.state().objects[&fetched];
+        assert_eq!(object.name, LURRUS);
+        assert_eq!(
+            object.printed_ref.as_ref().expect("printed ref").oracle_id,
+            LURRUS_ORACLE_ID
+        );
+        assert_fresh_printing(runner, fetched, Some(expected_printing));
+        (fetched, wish, events)
+    }
+
+    fn resolve_living_wish(
+        runner: &mut GameRunner,
+        selection: OutsideGameSelection,
+        assert_choices: impl FnOnce(&[OutsideGameChoiceEntry]),
+    ) -> (ObjectId, ObjectId, Vec<GameEvent>) {
         add_pool_mana(runner, &[ManaType::Green, ManaType::Colorless]);
         let before = hand(runner, P0);
         let wish = before
@@ -1980,41 +2024,18 @@ mod post_load_creators {
         };
         assert_eq!(*player, P0);
         assert!(*reveal);
-        // CR 702.139a + CR 400.11: the sideboard entry (`available` copies) and the
-        // revealed, not-yet-used companion (one card outside the game) are the ONLY
-        // sources offered, in that order. An extra or missing source fails here.
-        assert!(
-            matches!(
-                choices.as_slice(),
-                [sideboard, companion]
-                    if sideboard.count == available
-                        && sideboard.name == LURRUS
-                        && matches!(
-                            &sideboard.source,
-                            OutsideGameChoiceSource::Sideboard { sideboard_index: 0, .. }
-                        )
-                        && companion.count == 1
-                        && companion.name == LURRUS
-                        && matches!(
-                            &companion.source,
-                            OutsideGameChoiceSource::Companion { card } if card.name == LURRUS
-                        )
-            ),
-            "{choices:?}"
-        );
+        assert_choices(choices);
         let result = runner
             .act(GameAction::ChooseOutsideGameCards {
-                selections: vec![OutsideGameSelection::Sideboard { sideboard_index: 0 }],
+                selections: vec![selection],
             })
             .expect("the sideboard copy is brought in");
         let fetched = only_new(&before, &hand(runner, P0));
-        let object = &runner.state().objects[&fetched];
-        assert_eq!(object.name, LURRUS);
-        assert_eq!(
-            object.printed_ref.as_ref().expect("printed ref").oracle_id,
-            LURRUS_ORACLE_ID
+        assert!(runner.state().stack.is_empty());
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0)
         );
-        assert_fresh_printing(runner, fetched, Some(expected_printing));
+        assert_eq!(runner.state().objects[&wish].zone, Zone::Exile);
         (fetched, wish, result.events)
     }
 
@@ -2463,6 +2484,22 @@ mod post_load_creators {
 
     /// Chooses to play first as `chooser`, asserting it is `chooser`'s prompt.
     fn choose_play(runner: &mut GameRunner, chooser: PlayerId) {
+        choose_play_draw(
+            runner,
+            chooser,
+            GameAction::ChoosePlayDraw { play_first: true },
+        );
+    }
+
+    fn choose_draw(runner: &mut GameRunner, chooser: PlayerId) {
+        choose_play_draw(
+            runner,
+            chooser,
+            GameAction::ChoosePlayDraw { play_first: false },
+        );
+    }
+
+    fn choose_play_draw(runner: &mut GameRunner, chooser: PlayerId, action: GameAction) {
         assert!(
             matches!(
                 &runner.state().waiting_for,
@@ -2472,8 +2509,8 @@ mod post_load_creators {
             runner.state().waiting_for
         );
         runner
-            .act(GameAction::ChoosePlayDraw { play_first: true })
-            .expect("the chooser plays first");
+            .act(action)
+            .expect("the chooser selects who plays first");
         assert!(runner.state().match_phase == MatchPhase::InGame);
     }
 
@@ -2810,87 +2847,598 @@ mod post_load_creators {
         }));
     }
 
-    #[test]
-    fn sideboard_swaps_clamp_printings_in_game_two_and_restore_them_in_game_three() {
-        let db = database();
+    const GYRUDA: &str = "Gyruda, Doom of Depths";
+    const WISH: &str = "Living Wish";
+    const LIMITED_OPPONENT: [(&str, u32); 1] = [("Forest", 40)];
+
+    fn printing_match(player: PlayerDeckList) -> GameRunner {
+        let fixture = crate::support::shared_card_db().expect("committed integration database");
+        let mut cards: serde_json::Map<_, _> = ["Forest", "Island", "Plains", LURRUS, GYRUDA]
+            .into_iter()
+            .map(|name| {
+                let face = fixture.get_face_by_name(name).expect("fixture face");
+                (name.to_lowercase(), serde_json::to_value(face).unwrap())
+            })
+            .collect();
+        cards.insert(
+            WISH.to_lowercase(),
+            serde_json::to_value(living_wish_face()).unwrap(),
+        );
+        let db = CardDatabase::from_json_str(&serde_json::Value::Object(cards).to_string())
+            .expect("match fixture database");
         let list = DeckList {
-            player: PlayerDeckList {
-                main_deck: names(&[("Forest", 16), ("Island", 4)]),
-                sideboard: names(&[("Island", 4)]),
-                printings: vec![
-                    choice(DeckSection::MainDeck, "Forest", 10, "f-a"),
-                    choice(DeckSection::MainDeck, "Forest", 6, "f-b"),
-                    choice(DeckSection::MainDeck, "Island", 4, "i-main"),
-                    choice(DeckSection::Sideboard, "Island", 4, "i-side"),
-                ],
-                ..Default::default()
-            },
+            player,
             opponent: PlayerDeckList {
-                main_deck: names(&[("Forest", 20)]),
+                main_deck: names(&LIMITED_OPPONENT.map(|(name, count)| (name, count as usize))),
                 ..Default::default()
             },
             ..Default::default()
         };
-        let mut state = GameState::new(FormatConfig::standard(), 2, 4910);
+        let mut state = GameState::new(FormatConfig::limited(), 2, 4910);
         state.match_config.match_type = MatchType::Bo3;
         load_and_hydrate_decks(
             &mut state,
             &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
             Some(&db),
         );
-        start(&mut state);
-        let mut runner = GameRunner::from_state(state);
+        let result = start_game_with_starting_player(&mut state, P0);
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::MulliganDecision { .. } | WaitingFor::CompanionReveal { player: P0, .. }
+        ));
+        assert_eq!(engine::game::match_flow::game_on_board(&state), 1);
+        GameRunner::from_state(state)
+    }
 
-        // Game one: the rows' own multiset; P1 has no rows and no record.
-        assert!(runner.state().deck_pools[1].printings.get().is_none());
+    fn game_two(runner: &mut GameRunner, main: &[(&str, u32)], sideboard: &[(&str, u32)]) {
+        submit(runner, P0, main, sideboard);
+        submit(runner, P1, &LIMITED_OPPONENT, &[]);
+        choose_draw(runner, P1);
+        assert_eq!(engine::game::match_flow::game_on_board(runner.state()), 2);
+    }
+
+    fn assert_exact_stamp(runner: &GameRunner, id: ObjectId, expected: Option<&CardPrinting>) {
+        let object = &runner.state().objects[&id];
         assert_eq!(
-            printings_of(runner.state(), P0),
-            tally(&[(Some("f-a"), 10), (Some("f-b"), 6), (Some("i-main"), 4)])
+            object.printing.get().as_deref(),
+            expected,
+            "{} printing",
+            object.name
         );
-        assert_eq!(printings_of(runner.state(), P1), tally(&[(None, 20)]));
-        let first = record_of(runner.state(), P0);
+        assert_eq!(
+            object.base_printing.get().as_deref(),
+            expected,
+            "{} base printing",
+            object.name
+        );
+    }
 
-        // Game two: four Forests move to the sideboard and four Islands come in.
+    // CR 400.11a + CR 400.11b: offer the ordinary sideboard copy, then create it in hand.
+    fn wish_for(
+        runner: &mut GameRunner,
+        name: &str,
+        count: u32,
+        expected: Option<CardPrinting>,
+    ) -> ObjectId {
+        if !hand(runner, P0)
+            .iter()
+            .any(|id| runner.state().objects[id].name == WISH)
+        {
+            let wish = runner.state().players[0]
+                .library
+                .iter()
+                .copied()
+                .find(|id| runner.state().objects[id].name == WISH)
+                .expect("an already-loaded Living Wish is in the library");
+            engine::game::zones::move_to_zone(
+                runner.state_mut(),
+                wish,
+                Zone::Hand,
+                &mut Vec::new(),
+            );
+        }
+        let expected_oracle = runner.state().deck_pools[0].current_sideboard[0]
+            .card
+            .scryfall_oracle_id
+            .clone()
+            .expect("fixture identity");
+        let (id, _, _) = resolve_living_wish(
+            runner,
+            OutsideGameSelection::Sideboard { sideboard_index: 0 },
+            |choices| {
+                let [choice] = choices else {
+                    panic!("expected one offer, got {choices:?}")
+                };
+                assert_eq!(choice.count, count);
+                assert_eq!(choice.name, name);
+                assert!(
+                    matches!(&choice.source, OutsideGameChoiceSource::Sideboard { sideboard_index: 0, card } if card.scryfall_oracle_id.as_ref() == Some(&expected_oracle))
+                );
+            },
+        );
+        let object = &runner.state().objects[&id];
+        assert_eq!(object.owner, P0);
+        assert_eq!(object.zone, Zone::Hand);
+        assert_eq!(object.name, name);
+        assert_eq!(
+            object
+                .printed_ref
+                .as_ref()
+                .expect("printed identity")
+                .oracle_id,
+            expected_oracle
+        );
+        assert_exact_stamp(runner, id, expected.as_ref());
+        id
+    }
+
+    #[test]
+    fn ordered_forest_fetch_conserves_split_rows_and_rules_projection() {
+        let run = |rows| {
+            let mut runner = printing_match(PlayerDeckList {
+                main_deck: names(&[("Forest", 7), ("Island", 31), (WISH, 2)]),
+                sideboard: names(&[("Forest", 1), ("Island", 1)]),
+                printings: match rows {
+                    OwnerRows::Chosen => vec![
+                        art_row(DeckSection::MainDeck, "Forest", 4, "ONE", "276"),
+                        art_row(DeckSection::MainDeck, "Forest", 3, "DMU", "277"),
+                        art_row(DeckSection::Sideboard, "Forest", 1, "ONE", "276"),
+                    ],
+                    OwnerRows::Omitted => Vec::new(),
+                },
+                ..Default::default()
+            });
+            concede(&mut runner, P1);
+            if rows == OwnerRows::Chosen {
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::BetweenGamesSideboard { player: P0, .. }
+                ));
+                let own = filter_state_for_viewer(runner.state(), P0);
+                let other = filter_state_for_viewer(runner.state(), P1);
+                assert!(!own.deck_pools[0].current_main.is_empty());
+                assert!(!own.deck_pools[0].current_sideboard.is_empty());
+                assert!(own.deck_pools[0].printings.get().is_some());
+                assert_private_pool(&other);
+            }
+            game_two(
+                &mut runner,
+                &[("Forest", 6), ("Island", 32), (WISH, 2)],
+                &[("Forest", 2)],
+            );
+            let one = CardPrinting::owner("ONE", "276");
+            let dmu = CardPrinting::owner("DMU", "277");
+            if rows == OwnerRows::Chosen {
+                assert_deck_art(
+                    runner.state(),
+                    P0,
+                    "Forest",
+                    &[(Some(one.clone()), 4), (Some(dmu.clone()), 2)],
+                );
+            }
+            play_to_main(&mut runner);
+            if rows == OwnerRows::Chosen {
+                let concealed = runner
+                    .state()
+                    .objects
+                    .values()
+                    .find(|object| object.owner == P0 && object.name == "Forest")
+                    .expect("a concealed owner-printed Forest")
+                    .id;
+                assert!(runner.state().objects[&concealed].printing.get().is_some());
+                let other = filter_state_for_viewer(runner.state(), P1);
+                assert_private_pool(&other);
+                let object = &other.objects[&concealed];
+                assert_ne!(object.name, "Forest");
+                assert!(object.printing.get().is_none());
+                assert!(object.base_printing.get().is_none());
+            }
+            let first = wish_for(
+                &mut runner,
+                "Forest",
+                2,
+                (rows == OwnerRows::Chosen).then_some(one),
+            );
+            let persisted =
+                serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+            let mut restored = GameRunner::from_state(
+                serde_json::from_value::<PersistedGameState>(persisted)
+                    .unwrap()
+                    .into_game_state()
+                    .expect("restore is valid"),
+            );
+            let expected = (rows == OwnerRows::Chosen).then_some(dmu);
+            let restored_second = wish_for(&mut restored, "Forest", 1, expected.clone());
+            let second = wish_for(&mut runner, "Forest", 1, expected);
+            assert_eq!(restored_second, second);
+            (runner, [first, second])
+        };
+        let (with, with_ids) = run(OwnerRows::Chosen);
+        let (without, without_ids) = run(OwnerRows::Omitted);
+        assert_eq!(with_ids, without_ids);
+        assert_eq!(
+            rules_projection(with.state()).unwrap(),
+            rules_projection(without.state()).unwrap()
+        );
+        assert_ne!(
+            serde_json::to_value(with.state()).unwrap(),
+            serde_json::to_value(without.state()).unwrap()
+        );
+    }
+
+    fn assert_private_pool(view: &GameState) {
+        let pool = &view.deck_pools[0];
+        assert!(pool.current_main.is_empty());
+        assert!(pool.current_sideboard.is_empty());
+        assert!(pool.registered_main.is_empty());
+        assert!(pool.registered_sideboard.is_empty());
+        assert!(pool.printings.get().is_none());
+    }
+
+    #[test]
+    fn sideboard_swaps_clamp_printings_in_game_two_and_restore_them_in_game_three() {
+        let original_main = [("Forest", 16), ("Island", 4), (WISH, 2), ("Plains", 18)];
+        let original_side = [("Island", 4)];
+        let rows = vec![
+            choice(DeckSection::MainDeck, "Forest", 10, "f-a"),
+            choice(DeckSection::MainDeck, "Forest", 6, "f-b"),
+            choice(DeckSection::MainDeck, "Island", 4, "i-main"),
+            choice(DeckSection::Sideboard, "Island", 1, "i-side-a"),
+            choice(DeckSection::Sideboard, "Island", 3, "i-side-b"),
+        ];
+        let mut runner = printing_match(PlayerDeckList {
+            main_deck: names(&original_main.map(|(name, count)| (name, count as usize))),
+            sideboard: names(&original_side.map(|(name, count)| (name, count as usize))),
+            printings: rows.clone(),
+            ..Default::default()
+        });
+        let first = record_of(runner.state(), P0);
+        let original = |state: &GameState| {
+            assert_deck_art(
+                state,
+                P0,
+                "Forest",
+                &[
+                    (Some(CardPrinting::owner("f-a", "1")), 10),
+                    (Some(CardPrinting::owner("f-b", "1")), 6),
+                ],
+            );
+            assert_deck_art(
+                state,
+                P0,
+                "Island",
+                &[(Some(CardPrinting::owner("i-main", "1")), 4)],
+            );
+            assert!(state.deck_pools[1].printings.get().is_none());
+        };
+        let record = |state: &GameState| {
+            let current = record_of(state, P0);
+            assert!(Arc::ptr_eq(&current, &first));
+            assert_eq!(current.rows(), rows);
+        };
+        original(runner.state());
+        record(runner.state());
+
         concede(&mut runner, P1);
-        submit(
+        game_two(
             &mut runner,
-            P0,
-            &[("Forest", 12), ("Island", 8)],
+            &[("Forest", 12), ("Island", 8), (WISH, 2), ("Plains", 18)],
             &[("Forest", 4)],
         );
-        submit(&mut runner, P1, &[("Forest", 20)], &[]);
-        choose_play(&mut runner, P1);
-        assert_eq!(runner.state().game_number, 2);
-        // Main-deck Forest budget 12 clamps `f-b` to 2; main-deck Island budget 8 holds the
-        // 4 `i-main` and 4 unmarked; the sideboard Island row has no Island left to bind.
-        assert_eq!(
-            printings_of(runner.state(), P0),
-            tally(&[
-                (Some("f-a"), 10),
-                (Some("f-b"), 2),
-                (Some("i-main"), 4),
-                (None, 4)
-            ])
-        );
-        assert_eq!(printings_of(runner.state(), P1), tally(&[(None, 20)]));
-        assert!(Arc::ptr_eq(&record_of(runner.state(), P0), &first));
-
-        // Game three: the original lists return, and the carried record rebinds in full.
-        concede(&mut runner, P0);
-        submit(
-            &mut runner,
+        assert_deck_art(
+            runner.state(),
             P0,
-            &[("Forest", 16), ("Island", 4)],
-            &[("Island", 4)],
+            "Forest",
+            &[
+                (Some(CardPrinting::owner("f-a", "1")), 10),
+                (Some(CardPrinting::owner("f-b", "1")), 2),
+            ],
         );
-        submit(&mut runner, P1, &[("Forest", 20)], &[]);
+        assert_deck_art(
+            runner.state(),
+            P0,
+            "Island",
+            &[
+                (Some(CardPrinting::owner("i-main", "1")), 4),
+                (Some(CardPrinting::owner("i-side-a", "1")), 1),
+                (Some(CardPrinting::owner("i-side-b", "1")), 3),
+            ],
+        );
+        record(runner.state());
+        play_to_main(&mut runner);
+        wish_for(
+            &mut runner,
+            "Forest",
+            4,
+            Some(CardPrinting::owner("f-b", "1")),
+        );
+
+        concede(&mut runner, P0);
+        submit(&mut runner, P0, &original_main, &original_side);
+        submit(&mut runner, P1, &LIMITED_OPPONENT, &[]);
         choose_play(&mut runner, P0);
-        assert_eq!(runner.state().game_number, 3);
-        assert_eq!(
-            printings_of(runner.state(), P0),
-            tally(&[(Some("f-a"), 10), (Some("f-b"), 6), (Some("i-main"), 4)])
+        assert_eq!(engine::game::match_flow::game_on_board(runner.state()), 3);
+        original(runner.state());
+        record(runner.state());
+        play_to_main(&mut runner);
+        wish_for(
+            &mut runner,
+            "Island",
+            4,
+            Some(CardPrinting::owner("i-side-a", "1")),
         );
-        assert!(Arc::ptr_eq(&record_of(runner.state(), P0), &first));
+        wish_for(
+            &mut runner,
+            "Island",
+            3,
+            Some(CardPrinting::owner("i-side-b", "1")),
+        );
+    }
+
+    fn decline_companion(runner: &mut GameRunner) {
+        runner
+            .act(GameAction::DeclareCompanion {
+                choice: CompanionDeclaration::Decline,
+            })
+            .expect("decline the companion offer");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::MulliganDecision { .. }
+        ));
+    }
+
+    fn named_object(runner: &GameRunner, name: &str) -> ObjectId {
+        let mut objects = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| object.owner == P0 && object.name == name);
+        let id = objects.next().expect("the main copy exists").id;
+        assert!(objects.next().is_none());
+        id
+    }
+
+    fn assert_companion_to_hand(runner: &mut GameRunner, name: &str, expected: &str) {
+        let oracle = runner.state().players[0]
+            .companion
+            .as_ref()
+            .expect("revealed companion")
+            .card
+            .card
+            .scryfall_oracle_id
+            .clone()
+            .expect("fixture identity");
+        let id = companion_to_hand(runner);
+        let object = &runner.state().objects[&id];
+        assert_eq!(object.name, name);
+        assert_eq!(object.owner, P0);
+        assert_eq!(object.zone, Zone::Hand);
+        assert_eq!(
+            object
+                .printed_ref
+                .as_ref()
+                .expect("printed identity")
+                .oracle_id,
+            oracle
+        );
+        assert_exact_stamp(runner, id, Some(&CardPrinting::owner(expected, "1")));
+    }
+
+    fn gyruda_printing_match(sideboard_count: usize) -> GameRunner {
+        printing_match(PlayerDeckList {
+            main_deck: names(&[("Forest", 38), (WISH, 2)]),
+            sideboard: names(&[(GYRUDA, sideboard_count)]),
+            companion: names(&[(GYRUDA, 1)]),
+            printings: vec![
+                choice(DeckSection::Sideboard, GYRUDA, 1, "g-side-a"),
+                choice(DeckSection::Sideboard, GYRUDA, 1, "g-side-b"),
+                choice(DeckSection::Companion, GYRUDA, 1, "g-slot"),
+            ],
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn limited_designation_netting_carries_gyruda_before_reveal_or_decline() {
+        let mut runner = gyruda_printing_match(3);
+        let dedicated = offer(GYRUDA, CompanionChoiceSource::Dedicated);
+        assert_eq!(
+            runner.state().deck_pools[0].registered_sideboard[0].count,
+            2
+        );
+        assert_offer(&runner, P0, std::slice::from_ref(&dedicated));
+        reveal(&mut runner, dedicated.clone());
+        concede(&mut runner, P1);
+        game_two(
+            &mut runner,
+            &[("Forest", 38), (WISH, 2), (GYRUDA, 1)],
+            &[(GYRUDA, 2)],
+        );
+
+        // CR 100.4b + CR 702.139a: one copy supplies dedicated capacity.
+        let pool = &runner.state().deck_pools[0];
+        assert_eq!(
+            pool.registered_main
+                .iter()
+                .find(|entry| entry.card.name == GYRUDA)
+                .unwrap()
+                .count,
+            1
+        );
+        assert_eq!(pool.registered_sideboard[0].count, 1);
+        assert_eq!(pool.registered_companion[0].count, 1);
+        assert_offer(&runner, P0, std::slice::from_ref(&dedicated));
+        let mut declined = GameRunner::from_state(runner.state().clone());
+        reveal(&mut runner, dedicated);
+        decline_companion(&mut declined);
+        assert_eq!(
+            declined.state().deck_pools[0].registered_sideboard[0].count,
+            1
+        );
+        assert_eq!(declined.state().deck_pools[0].current_sideboard[0].count, 2);
+        assert!(declined.state().deck_pools[0].current_companion.is_empty());
+        for branch in [&runner, &declined] {
+            assert_exact_stamp(
+                branch,
+                named_object(branch, GYRUDA),
+                Some(&CardPrinting::owner("g-side-b", "1")),
+            );
+        }
+        play_to_main(&mut runner);
+        assert_companion_to_hand(&mut runner, GYRUDA, "g-slot");
+        wish_for(
+            &mut runner,
+            GYRUDA,
+            1,
+            Some(CardPrinting::owner("g-side-a", "1")),
+        );
+        play_to_main(&mut declined);
+        wish_for(
+            &mut declined,
+            GYRUDA,
+            2,
+            Some(CardPrinting::owner("g-side-a", "1")),
+        );
+        wish_for(&mut declined, GYRUDA, 1, None);
+    }
+
+    #[test]
+    fn limited_declined_designation_uses_unabsorbed_printing_across_restore() {
+        let mut runner = gyruda_printing_match(2);
+        let dedicated = offer(GYRUDA, CompanionChoiceSource::Dedicated);
+        assert_offer(&runner, P0, std::slice::from_ref(&dedicated));
+        reveal(&mut runner, dedicated.clone());
+        concede(&mut runner, P1);
+        game_two(&mut runner, &[("Forest", 38), (WISH, 2)], &[(GYRUDA, 2)]);
+
+        let pool = &runner.state().deck_pools[0];
+        assert!(pool
+            .registered_main
+            .iter()
+            .all(|entry| entry.card.name != GYRUDA));
+        // CR 100.4b + CR 702.139a: the dedicated copy rejoins the ordinary pool on decline.
+        assert_eq!(pool.registered_sideboard[0].count, 1);
+        assert_eq!(pool.registered_companion[0].count, 1);
+        assert_offer(&runner, P0, std::slice::from_ref(&dedicated));
+        decline_companion(&mut runner);
+        assert_eq!(
+            runner.state().deck_pools[0].registered_sideboard[0].count,
+            1
+        );
+        assert_eq!(runner.state().deck_pools[0].current_sideboard[0].count, 2);
+        assert!(runner.state().deck_pools[0].current_companion.is_empty());
+        play_to_main(&mut runner);
+        let first_printing = CardPrinting::owner("g-side-a", "1");
+        let first = wish_for(&mut runner, GYRUDA, 2, Some(first_printing.clone()));
+
+        let mut restored = restore_runner(runner.state().clone());
+        for branch in [&mut runner, &mut restored] {
+            assert_exact_stamp(branch, first, Some(&first_printing));
+            wish_for(
+                branch,
+                GYRUDA,
+                1,
+                Some(CardPrinting::owner("g-side-b", "1")),
+            );
+        }
+    }
+
+    #[test]
+    fn carried_lurrus_reveal_latches_first_printing_and_wish_takes_second() {
+        let mut runner = printing_match(PlayerDeckList {
+            main_deck: names(&[("Forest", 39), (WISH, 1), (LURRUS, 2)]),
+            printings: vec![
+                choice(DeckSection::MainDeck, LURRUS, 1, "l-reveal"),
+                choice(DeckSection::MainDeck, LURRUS, 1, "l-fetch"),
+            ],
+            ..Default::default()
+        });
+        concede(&mut runner, P1);
+        game_two(&mut runner, &[("Forest", 39), (WISH, 1)], &[(LURRUS, 2)]);
+        let choice = offer(LURRUS, CompanionChoiceSource::Sideboard { index: 0 });
+        assert_offer(&runner, P0, std::slice::from_ref(&choice));
+        reveal(&mut runner, choice);
+        let revealed = runner.state().players[0]
+            .companion
+            .as_ref()
+            .expect("the offer was revealed");
+        assert_eq!(
+            revealed.printing.get().as_deref(),
+            Some(&CardPrinting::owner("l-reveal", "1"))
+        );
+        assert_eq!(runner.state().deck_pools[0].current_sideboard[0].count, 1);
+        play_to_main(&mut runner);
+        assert_companion_to_hand(&mut runner, LURRUS, "l-reveal");
+        wish_for(
+            &mut runner,
+            LURRUS,
+            1,
+            Some(CardPrinting::owner("l-fetch", "1")),
+        );
+    }
+
+    #[test]
+    fn continuation_fetch_after_restore_advances_saved_ordinal_without_restamping_main() {
+        let mut runner = printing_match(PlayerDeckList {
+            main_deck: names(&[("Forest", 38), (WISH, 2)]),
+            sideboard: names(&[(LURRUS, 3)]),
+            printings: ["old-a", "old-b", "old-c"]
+                .into_iter()
+                .map(|tag| choice(DeckSection::Sideboard, LURRUS, 1, tag))
+                .collect(),
+            ..Default::default()
+        });
+        assert_offer(
+            &runner,
+            P0,
+            &[offer(LURRUS, CompanionChoiceSource::Sideboard { index: 0 })],
+        );
+        decline_companion(&mut runner);
+        concede(&mut runner, P1);
+        game_two(
+            &mut runner,
+            &[("Forest", 38), (WISH, 2), (LURRUS, 1)],
+            &[(LURRUS, 2)],
+        );
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::MulliganDecision { .. }
+        ));
+        let main = named_object(&runner, LURRUS);
+        let main_printing = CardPrinting::owner("old-c", "1");
+        assert_exact_stamp(&runner, main, Some(&main_printing));
+        play_to_main(&mut runner);
+        let first = wish_for(
+            &mut runner,
+            LURRUS,
+            2,
+            Some(CardPrinting::owner("old-a", "1")),
+        );
+        let mut restored = restore_runner(runner.state().clone());
+        let mut old = runner.state().clone();
+        let object = old.objects.get_mut(&main).expect("the game-two main copy");
+        object.printing = DisplayOnly::default();
+        object.base_printing = DisplayOnly::default();
+        let mut old = restore_runner(old);
+        for (branch, expected) in [
+            (&mut runner, Some(&main_printing)),
+            (&mut restored, Some(&main_printing)),
+            (&mut old, None),
+        ] {
+            assert_exact_stamp(branch, first, Some(&CardPrinting::owner("old-a", "1")));
+            wish_for(branch, LURRUS, 1, Some(CardPrinting::owner("old-b", "1")));
+            assert_exact_stamp(branch, main, expected);
+        }
+    }
+
+    fn restore_runner(state: GameState) -> GameRunner {
+        let persisted = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
+        GameRunner::from_state(
+            serde_json::from_value::<PersistedGameState>(persisted)
+                .unwrap()
+                .into_game_state()
+                .expect("restore is valid"),
+        )
     }
 
     #[test]
@@ -2965,8 +3513,9 @@ mod post_load_creators {
             P0,
             "Island",
             &[
-                (Some(automatic("m21", "263")), 4),
-                (Some(automatic("m21", "264")), 4),
+                (Some(CardPrinting::owner("sideboard", "1")), 4),
+                (Some(automatic("m21", "263")), 2),
+                (Some(automatic("m21", "264")), 2),
             ],
         );
         assert!(Arc::ptr_eq(&record, &record_of(runner.state(), P0)));

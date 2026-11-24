@@ -70,10 +70,7 @@ async fn produce_native_large_spectator_full() {
     let destination = Path::new("../../target/state-codec-fixtures/large-spectator-full");
     std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
     std::fs::create_dir(destination).expect("generated fixture directory must not already exist");
-    let db = CardDatabase::from_export_reader(flate2::read::GzDecoder::new(
-        &include_bytes!("../../engine/tests/fixtures/integration_cards.json.gz")[..],
-    ))
-    .unwrap();
+    let db = CardDatabase::from_integration_fixture().unwrap();
     assert!(!db
         .get_face_by_name("Llanowar Elves")
         .unwrap()

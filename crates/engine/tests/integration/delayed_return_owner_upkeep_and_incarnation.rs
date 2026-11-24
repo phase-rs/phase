@@ -57,7 +57,6 @@ use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::resolution::ResolutionFrame;
 use engine::types::zones::Zone;
 
 const PHYTOTITAN: &str = "When this creature dies, return it to the battlefield tapped under its owner's control at the beginning of their next upkeep.";
@@ -618,6 +617,92 @@ fn phytotitan_put_back_into_graveyard_before_its_trigger_resolves_is_not_returne
 
 // ------------------------------------------------------------ non-self subject
 
+/// G2′ shape: a phase-delayed payload that reads only a player from the dead
+/// creature. No printed card has it (the export's 90 phase-delayed payloads
+/// under zone-change triggers include none), so the text is parsed like a card's.
+const OWNER_DRAWS_LATER: &str = "Whenever another nontoken creature you control dies, its owner draws a card at the beginning of the next end step.";
+
+/// P0 controls the observer and a Grizzly Bears that P1 owns; P0 Shocks the
+/// Bears. With `put_back`, P0 puts the dead Bears back into P1's graveyard (a
+/// new object, CR 400.7) before the observer's trigger resolves. Returns the
+/// cards each player drew at the end step.
+fn owner_draws_later(put_back: bool) -> (usize, usize) {
+    let (mut runner, _, spells, bears) = board(Phase::PreCombatMain, |scenario| {
+        scenario.add_creature_from_oracle(P0, "Observer", 1, 1, OWNER_DRAWS_LATER);
+        scenario
+            .add_creature(P1, "Grizzly Bears", 2, 2)
+            .controlled_by(P0)
+            .id()
+    });
+    cast_and_resolve_only(&mut runner, spells.p0_shock, TargetRef::Object(bears));
+    if put_back {
+        round_trip_through_library(&mut runner, bears, spells.p0_revival, spells.p0_scour, true);
+    }
+    runner.advance_until_stack_empty();
+    let delayed = only_delayed(&runner);
+    assert!(
+        format!("{:?}", delayed.ability.effect).contains("ParentTargetOwner"),
+        "reach-guard: the payload reads its owner: {:?}",
+        delayed.ability.effect
+    );
+    let hands = |r: &GameRunner| {
+        (
+            r.state().players[0].hand.len(),
+            r.state().players[1].hand.len(),
+        )
+    };
+    let before = hands(&runner);
+    through_end_step(&mut runner);
+    assert!(runner.state().delayed_triggers.is_empty(), "it fired");
+    let after = hands(&runner);
+    (after.0 - before.0, after.1 - before.1)
+}
+
+/// E1: the owner of the dead Bears draws (CR 108.3).
+#[test]
+fn owner_draws_later_control() {
+    assert_eq!(owner_draws_later(false), (0, 1));
+}
+
+/// E2: CR 608.2h: the Bears left the graveyard, so its owner is its last known
+/// information; that player still draws.
+#[test]
+fn owner_draws_later_after_the_creature_is_put_back() {
+    assert_eq!(owner_draws_later(true), (0, 1));
+}
+
+/// E3: stolen and put back before its trigger resolves: "their" is still the
+/// owner, read from the departed object (CR 108.3, CR 608.2h); nothing returns.
+#[test]
+fn phytotitan_stolen_put_back_waits_for_owners_upkeep_and_returns_nothing() {
+    let (mut runner, phytotitan, spells, ()) = board(Phase::PreCombatMain, |_| ());
+    to_main_of(&mut runner, P1);
+    cast_and_resolve_all(
+        &mut runner,
+        spells.p1_treason,
+        TargetRef::Object(phytotitan),
+    );
+    cast_and_resolve_only(&mut runner, spells.p1_shock, TargetRef::Object(phytotitan));
+    round_trip_through_library(
+        &mut runner,
+        phytotitan,
+        spells.p1_revival,
+        spells.p1_scour,
+        true,
+    );
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(
+            only_delayed(&runner).condition,
+            DelayedTriggerCondition::AtNextPhaseForPlayer { player, .. } if player == P0
+        ),
+        "\"their\" is the owner"
+    );
+    through_next_upkeep_of(&mut runner, P0);
+    assert!(runner.state().delayed_triggers.is_empty(), "it fired");
+    assert_eq!(zone(&runner, phytotitan), Zone::Graveyard);
+}
+
 fn avacyn_board() -> (GameRunner, ObjectId, Spells) {
     let (runner, _phytotitan, spells, bears) = board(Phase::PreCombatMain, |scenario| {
         scenario.add_creature_from_oracle(
@@ -798,21 +883,6 @@ fn merged_phytotitan_survivor_put_back_before_its_trigger_still_returns_its_comp
     assert!(runner.state().delayed_triggers.is_empty());
 }
 
-/// The members the parked `ChangeZone` iteration has not processed yet.
-fn parked_remaining(runner: &GameRunner) -> Vec<ObjectId> {
-    runner
-        .state()
-        .resolution_stack
-        .iter()
-        .filter_map(|frame| match frame {
-            ResolutionFrame::ChangeZone(frame) => frame.pending.as_ref(),
-            _ => None,
-        })
-        .last()
-        .map(|pending| pending.remaining.iter().map(|m| m.object_id).collect())
-        .unwrap_or_default()
-}
-
 /// CR 616.1e: answer a two-way entry tap-state ordering offered to P0.
 fn answer_tap_state_ordering(runner: &mut GameRunner, answer: &str) {
     let index = match &runner.state().waiting_for {
@@ -838,8 +908,9 @@ fn answer_tap_state_ordering(runner: &mut GameRunner, answer: &str) {
         .expect("answer the tap-state ordering");
 }
 
-/// M4 — a merged return through a CR 616.1 ordering pause keeps the other
-/// member pending and resumes it after the answer.
+/// M4 — a merged return stages both members' entries together; P0 holds both
+/// CR 616.1 tap-state orderings at once, picks which to make first (CR 101.4c),
+/// and the other member's ordering follows after the answer.
 fn merged_return_resumes_through_replacement_ordering(answer: &str) {
     let (mut runner, phytotitan, gemrazer, spells) = merged_board(|scenario| {
         scenario.add_creature_from_oracle(
@@ -855,22 +926,30 @@ fn merged_return_resumes_through_replacement_ordering(answer: &str) {
     only_delayed(&runner);
 
     let start = runner.state().turn_number;
-    drive_until(&mut runner, "the return's ordering prompt", |r| {
+    drive_until(&mut runner, "the return's decision-order prompt", |r| {
         (r.state().active_player == P0 && r.state().turn_number > start)
-            && matches!(r.state().waiting_for, WaitingFor::ReplacementChoice { .. })
+            && matches!(
+                r.state().waiting_for,
+                WaitingFor::ReplacementDecisionOrder { .. }
+            )
     });
-    let pending = parked_remaining(&runner);
-    assert_eq!(
-        pending.len(),
-        1,
-        "the other member waits in the parked iteration: {pending:?}"
-    );
-    assert!(
-        pending.contains(&phytotitan) || pending.contains(&gemrazer),
-        "{pending:?}"
-    );
+    let first = match &runner.state().waiting_for {
+        WaitingFor::ReplacementDecisionOrder { player, objects } => {
+            assert_eq!(*player, P0, "the entrants' controller orders (CR 616.1)");
+            assert_eq!(objects.len(), 2, "both members' decisions: {objects:?}");
+            assert!(
+                objects.contains(&phytotitan) && objects.contains(&gemrazer),
+                "{objects:?}"
+            );
+            objects[0]
+        }
+        other => panic!("expected the CR 101.4c decision order, got {other:?}"),
+    };
+    runner
+        .act(GameAction::SelectCards { cards: vec![first] })
+        .expect("P0 makes the first member's decision first");
     answer_tap_state_ordering(&mut runner, answer);
-    // Reach-guard: the resumed member meets its own ordering.
+    // Reach-guard: the other member meets its own ordering.
     answer_tap_state_ordering(&mut runner, answer);
     runner.advance_until_stack_empty();
 

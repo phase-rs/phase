@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "AttackersDeclaredCountSubject gains CurrentCombat (Kytheon's 'attacked this combat' count), which can appear in a serialized triggered stack condition"
+}

@@ -10,19 +10,19 @@ use crate::parser::oracle_ir::effect_chain::PlayerScopeRewrite;
 use crate::parser::test_support::assert_no_unimplemented;
 use crate::types::ability::filter_contains_filter_prop;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    AggregateFunction, AttackSubject, BounceSelection, CardSelectionMode, CardTypeSetSource,
-    CastingPermission, ChooseOneOfKind, CoinFlipRun, CombatHistoryScope, Comparator,
-    ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission, CountScope,
-    CounterTransferMode, DamageAmountScope, DamageAmountThreshold, DamageChannel,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
+    ActivationRestriction, AggregateFunction, AttackSubject, BounceSelection, CardSelectionMode,
+    CardTypeSetSource, CastingPermission, ChooseOneOfKind, CoinFlipRun, CombatHistoryScope,
+    Comparator, ContinuousModification, ControllerRef, CopyChooseScope, CopyRetargetPermission,
+    CountScope, CounterTransferMode, DamageAmountScope, DamageAmountThreshold, DamageChannel,
     DamageModification, DamageSource, DelayedTriggerCondition, DiscardSelfScope, Duration, Effect,
     EffectScope, FilterProp, ManaContribution, ManaProduction, ManaSpendPermission, ModalChoice,
     ObjectProperty, ObjectScope, PerPlayerScope, PerpetualGrantModification, PerpetualModification,
     PlayerFilter, PlayerRelation, PlayerScope, PropertyAggregate, PtStat, PtValue, PtValueScope,
-    QuantityExpr, QuantityRef, RoundingMode, SeatDirection, SharedQuality, SiblingCondition,
-    SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition,
-    TurnJournalKind, TypeFilter, TypedFilter, XModification, ZoneChoiceCandidateSource,
-    ZoneChoiceChooser, ZoneOwner, ZoneRef,
+    QuantityExpr, QuantityRef, RepeatForTiming, RoundingMode, SeatDirection, SharedQuality,
+    SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition,
+    TriggerDefinition, TurnJournalKind, TypeFilter, TypedFilter, XModification,
+    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner, ZoneRef,
 };
 use crate::types::ability::{
     IllegalTargetsDisposition, NumberQuality, Parity, SpentColor, StaticCondition, StaticDefinition,
@@ -2806,6 +2806,100 @@ fn intervening_if_source_attacked_this_turn_populates_condition() {
     );
     assert_eq!(taigam.condition, expected);
     assert!(taigam.execute.is_some());
+}
+
+#[test]
+fn kytheon_end_of_combat_parses_condition_and_transformed_return() {
+    let trigger = parse_trigger_line(
+        "At end of combat, if Kytheon and at least two other creatures attacked this combat, exile Kytheon, then return him to the battlefield transformed under his owner's control.",
+        "Kytheon, Hero of Akros",
+    );
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert_eq!(trigger.phase, Some(Phase::EndCombat));
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::And {
+            conditions: vec![
+                TriggerCondition::SourceAttackedThisCombat,
+                TriggerCondition::AttackersDeclaredCount {
+                    subject: AttackersDeclaredCountSubject::CurrentCombat {
+                        exclude_source: SourceExclusion::Exclude,
+                    },
+                    comparator: Comparator::GE,
+                    count: 2,
+                },
+            ],
+        })
+    );
+    let exile = trigger.execute.as_deref().expect("exile instruction");
+    assert!(matches!(
+        exile.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    ));
+    // CR 608.2c: "him" is the card the exile instruction just moved.
+    let return_ability = exile.sub_ability.as_deref().expect("return instruction");
+    assert!(matches!(
+        return_ability.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            target: TargetFilter::ParentTarget,
+            enter_transformed: true,
+            enters_under: None,
+            ..
+        }
+    ));
+}
+
+// Synthetic grammar test: no printed card puts this combat count in a
+// sentence-local "Then if" clause. The nearest printed card is Kytheon, Hero
+// of Akros, whose "if" directly follows the trigger condition, so CR 603.4
+// makes it an intervening-if gate there.
+#[test]
+fn sentence_local_combat_count_does_not_gate_the_trigger() {
+    let trigger = parse_trigger_line(
+        "At end of combat, draw a card. Then if Kytheon and at least two other creatures attacked this combat, draw a card.",
+        "Kytheon, Hero of Akros",
+    );
+    assert_eq!(trigger.condition, None);
+    assert!(matches!(
+        trigger
+            .execute
+            .as_deref()
+            .map(|ability| ability.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+}
+
+#[test]
+fn fearless_swashbuckler_keeps_typed_attack_event_counts() {
+    let trigger = parse_trigger_line(
+        "Whenever you attack, if a Pirate and a Vehicle attacked this combat, draw three cards, then discard two cards.",
+        "Fearless Swashbuckler",
+    );
+    let Some(TriggerCondition::And { conditions }) = trigger.condition else {
+        panic!("expected separate Pirate and Vehicle predicates");
+    };
+    assert_eq!(conditions.len(), 2);
+    for (condition, noun) in conditions.iter().zip(["pirate", "vehicle"]) {
+        let (remainder, filter) = parse_type_phrase_nom(noun).expect("typed noun");
+        assert!(remainder.is_empty());
+        assert_ne!(filter, TargetFilter::Any);
+        assert_eq!(
+            condition,
+            &TriggerCondition::AttackersDeclaredCount {
+                subject: AttackersDeclaredCountSubject::Controller {
+                    scope: ControllerRef::You,
+                    filter: Some(filter),
+                },
+                comparator: Comparator::GE,
+                count: 1,
+            }
+        );
+    }
 }
 
 #[test]
@@ -7796,7 +7890,9 @@ fn trigger_pantlaza_etb_discover_x_is_entering_creature_toughness() {
                 matches!(
                     mana_value_limit,
                     QuantityExpr::Ref {
-                        qty: crate::types::ability::QuantityRef::Toughness { .. }
+                        qty: crate::types::ability::QuantityRef::Toughness {
+                            scope: crate::types::ability::ObjectScope::EventSource,
+                        }
                     }
                 ),
                 "discover X must bind to the entering creature's toughness, \
@@ -8709,6 +8805,225 @@ fn trigger_you_gain_life_pridemate_scopes_to_controller() {
     );
     assert_eq!(def.mode, TriggerMode::LifeGained);
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+}
+
+/// SHAPE: the full card lowers its counter, loyalty costs, token, and emblem.
+#[test]
+fn walker_short_counter_ajani_resolute() {
+    let parsed = parse_oracle_text(
+        "Whenever you gain life, put a loyalty counter on Ajani.\n[0]: You gain 1 life.\n[−4]: Create a 2/2 white Cat Soldier creature token named Ajani's Pridemate with \"Whenever you gain life, put a +1/+1 counter on this token.\"\n[−10]: You get an emblem with \"Creatures you control get +2/+2.\"",
+        "Ajani Resolute",
+        &[],
+        &["Legendary".into(), "Planeswalker".into()],
+        &["Ajani".into()],
+    );
+    let [life_gain] = parsed.triggers.as_slice() else {
+        panic!("expected one printed trigger, got {:?}", parsed.triggers);
+    };
+    // CR 109.5 + CR 119.9: one mandatory trigger for each controller life gain.
+    assert_eq!(life_gain.mode, TriggerMode::LifeGained);
+    assert_eq!(life_gain.valid_target, Some(TargetFilter::Controller));
+    assert!(!life_gain.optional);
+    assert_eq!(life_gain.condition, None);
+    assert_eq!(life_gain.constraint, None);
+    assert_eq!(life_gain.life_amount, None);
+    let execute = life_gain.execute.as_deref().expect("life-gain effect");
+    // CR 201.5c: the bare shortened name refers to Ajani Resolute itself.
+    assert_eq!(
+        *execute.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Loyalty,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }
+    );
+    assert!(!has_unimplemented(execute));
+
+    let [zero, minus_four, minus_ten] = parsed.abilities.as_slice() else {
+        panic!(
+            "expected three loyalty abilities, got {:?}",
+            parsed.abilities
+        );
+    };
+    // CR 606.4: all three loyalty costs retain their printed amounts.
+    for (ability, amount) in [(zero, 0), (minus_four, -4), (minus_ten, -10)] {
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert_eq!(ability.cost, Some(AbilityCost::Loyalty { amount }));
+        assert!(!has_unimplemented(ability));
+    }
+    assert_eq!(
+        *zero.effect,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        }
+    );
+    let Effect::Token {
+        name,
+        power: PtValue::Fixed(2),
+        toughness: PtValue::Fixed(2),
+        types,
+        colors,
+        count: QuantityExpr::Fixed { value: 1 },
+        static_abilities,
+        ..
+    } = minus_four.effect.as_ref()
+    else {
+        panic!("expected one 2/2 Pridemate, got {:?}", minus_four.effect);
+    };
+    // CR 111.3: the creation effect defines the token's name and ability.
+    assert_eq!(name, "Ajani's Pridemate");
+    assert_eq!(types, &["Creature", "Cat", "Soldier"]);
+    assert_eq!(colors, &[ManaColor::White]);
+    let [token_static] = static_abilities.as_slice() else {
+        panic!("expected one token ability, got {static_abilities:?}");
+    };
+    assert_eq!(token_static.affected, Some(TargetFilter::SelfRef));
+    let [ContinuousModification::GrantTrigger { trigger }] = token_static.modifications.as_slice()
+    else {
+        panic!("expected the token's life-gain trigger, got {token_static:?}");
+    };
+    assert_eq!(trigger.mode, TriggerMode::LifeGained);
+    assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
+    let token_execute = trigger.execute.as_deref().expect("token trigger effect");
+    assert_eq!(
+        *token_execute.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }
+    );
+    assert!(!has_unimplemented(token_execute));
+
+    let Effect::CreateEmblem { statics, triggers } = minus_ten.effect.as_ref() else {
+        panic!("expected an emblem, got {:?}", minus_ten.effect);
+    };
+    assert!(triggers.is_empty());
+    let [buff] = statics.as_slice() else {
+        panic!("expected one emblem static, got {statics:?}");
+    };
+    // CR 114.4: the creature buff functions from the command zone.
+    assert_eq!(buff.active_zones, [Zone::Command]);
+    assert_eq!(buff.mode, StaticMode::Continuous);
+    assert_eq!(
+        buff.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::default()
+                .with_type(TypeFilter::Creature)
+                .controller(ControllerRef::You),
+        ))
+    );
+    assert_eq!(
+        buff.modifications,
+        [
+            ContinuousModification::AddPower { value: 2 },
+            ContinuousModification::AddToughness { value: 2 },
+        ]
+    );
+}
+
+/// SHAPE: the selected graveyard card and the counter's source stay distinct.
+#[test]
+fn walker_short_counter_liliana_the_repentant() {
+    let parsed = parse_oracle_text(
+        "Whenever another creature or planeswalker you control enters, mill two cards.\nExhaust — {5}{B}: Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on Liliana. Activate only as a sorcery. (Activate each exhaust ability only once.)",
+        "Liliana the Repentant",
+        &[],
+        &["Legendary".into(), "Creature".into()],
+        &["Human".into(), "Warlock".into()],
+    );
+    let [mill] = parsed.triggers.as_slice() else {
+        panic!("expected one printed trigger, got {:?}", parsed.triggers);
+    };
+    // CR 603.6a + CR 701.17a: the entering permanent triggers two cards milled.
+    assert_eq!(mill.mode, TriggerMode::ChangesZone);
+    assert_eq!(mill.destination, Some(Zone::Battlefield));
+    assert_eq!(
+        mill.valid_card,
+        Some(TargetFilter::Or {
+            filters: [TypeFilter::Creature, TypeFilter::Planeswalker]
+                .into_iter()
+                .map(|ty| {
+                    TargetFilter::Typed(
+                        TypedFilter::new(ty)
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::Another]),
+                    )
+                })
+                .collect(),
+        })
+    );
+    let mill_execute = mill.execute.as_deref().expect("mill trigger effect");
+    assert!(matches!(
+        *mill_execute.effect,
+        Effect::Mill {
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+            ..
+        }
+    ));
+    assert!(!has_unimplemented(mill_execute));
+
+    let [exhaust] = parsed.abilities.as_slice() else {
+        panic!("expected one exhaust ability, got {:?}", parsed.abilities);
+    };
+    // CR 702.177a: the exhaust ability retains its once-only restriction and cost.
+    assert_eq!(exhaust.kind, AbilityKind::Activated);
+    assert_eq!(exhaust.ability_tag, Some(AbilityTag::Exhaust));
+    assert_eq!(
+        exhaust.cost,
+        Some(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                generic: 5,
+                shards: vec![ManaCostShard::Black],
+            },
+        })
+    );
+    assert_eq!(
+        exhaust.activation_restrictions,
+        [
+            ActivationRestriction::AsSorcery,
+            ActivationRestriction::OnlyOnce
+        ]
+    );
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Battlefield,
+        target: TargetFilter::Or { filters },
+        ..
+    } = exhaust.effect.as_ref()
+    else {
+        panic!(
+            "expected a chosen return from the graveyard, got {:?}",
+            exhaust.effect
+        );
+    };
+    assert_eq!(
+        *filters,
+        [TypeFilter::Creature, TypeFilter::Planeswalker].map(|ty| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![ty],
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }],
+            })
+        })
+    );
+    // CR 608.2c + CR 201.5c: the next instruction places the counter on Liliana.
+    let counter = exhaust.sub_ability.as_deref().expect("counter instruction");
+    assert_eq!(counter.sub_link, SubAbilityLink::SequentialSibling);
+    assert_eq!(
+        *counter.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        }
+    );
+    assert!(!has_unimplemented(exhaust));
 }
 
 // Negative test: "an opponent gains life" must remain opponent-scoped, not
@@ -15451,6 +15766,134 @@ fn trigger_one_or_more_enchanted_creatures_attack_killian() {
     }
 }
 
+// SHAPE: CR 702.29c + CR 113.6k give the self-cycle leg both supported discard destinations.
+#[test]
+fn self_cycle_trigger_heads_function_in_graveyard_and_exile() {
+    let assert_self_cycle = |def: &TriggerDefinition| {
+        assert_eq!(def.mode, TriggerMode::Cycled);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(def.trigger_zones, [Zone::Graveyard, Zone::Exile]);
+    };
+    for (name, text) in [
+        (
+            "Titanoth Rex",
+            "When you cycle this card, put a trample counter on target creature you control.",
+        ),
+        (
+            "Shark Typhoon",
+            "When you cycle this card, create an X/X blue Shark creature token with flying.",
+        ),
+    ] {
+        let defs = parse_trigger_lines(text, name);
+        assert_eq!(defs.len(), 1, "{name}");
+        assert_self_cycle(&defs[0]);
+    }
+
+    let defs = parse_trigger_lines(
+        "When you cycle this card, you may pay {X}. If you do, create X 1/1 white Soldier creature tokens.",
+        "Decree of Justice",
+    );
+    assert_eq!(defs.len(), 1);
+    assert_self_cycle(&defs[0]);
+    // CR 603.5: The payment is optional.
+    assert!(defs[0].optional);
+
+    let defs = parse_trigger_lines(
+        "When you cycle Radiant Smite, if you weren't the starting player, you gain 2 life.",
+        "Radiant Smite",
+    );
+    assert_eq!(defs.len(), 1);
+    assert_self_cycle(&defs[0]);
+    // CR 603.4 + CR 103.1: The intervening condition checks who started the game.
+    assert_eq!(
+        defs[0].condition,
+        Some(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::WasStartingPlayer {
+                controller: ControllerRef::You
+            }),
+        }),
+    );
+
+    let defs = parse_trigger_lines(
+        "When you cycle this card and when this creature dies, you may have it deal 1 damage to any target.",
+        "Jund Sojourners",
+    );
+    assert_eq!(defs.len(), 2);
+    assert_self_cycle(&defs[0]);
+    // CR 700.4: The dies leg still observes a battlefield-to-graveyard move.
+    assert_eq!(defs[1].mode, TriggerMode::ChangesZone);
+    assert_eq!(defs[1].origin, Some(Zone::Battlefield));
+    assert_eq!(defs[1].destination, Some(Zone::Graveyard));
+    assert_eq!(defs[1].trigger_zones, [Zone::Graveyard]);
+
+    let defs = parse_trigger_lines(
+        r#"When you cast or cycle Warped Tusker, create a 0/1 colorless Eldrazi Spawn creature token with "Sacrifice this token: Add {C}.""#,
+        "Warped Tusker",
+    );
+    assert_eq!(defs.len(), 2);
+    // CR 601.2i: The cast leg observes the source becoming cast on the stack.
+    assert_eq!(defs[0].mode, TriggerMode::SpellCast);
+    assert_eq!(defs[0].valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(defs[0].trigger_zones, [Zone::Stack]);
+    assert_self_cycle(&defs[1]);
+
+    let another = Some(TargetFilter::Typed(
+        TypedFilter::default().properties(vec![FilterProp::Another]),
+    ));
+    let defs = parse_trigger_lines(
+        "Whenever you cycle this card or cycle another card while this enchantment is on the battlefield, you may exile target creature. If you do, return that card to the battlefield under its owner's control at the beginning of the next end step.",
+        "Astral Drift",
+    );
+    assert_eq!(defs.len(), 2);
+    assert_self_cycle(&defs[0]);
+    // CR 113.6b + CR 603.2: The observer checks its stated zone at the event.
+    assert_eq!(defs[1].mode, TriggerMode::Cycled);
+    assert_eq!(defs[1].valid_card, another);
+    assert_eq!(defs[1].trigger_zones, [Zone::Battlefield]);
+    assert_eq!(
+        defs[1].condition,
+        Some(TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::SourceInZone {
+                zone: Zone::Battlefield
+            }),
+        }),
+    );
+
+    // CR 113.6: The standalone observer abilities still function from the battlefield.
+    for (name, text, mode, valid_card) in [
+        ("Drannith Stinger", "Whenever you cycle another card, this creature deals 1 damage to each opponent.", TriggerMode::Cycled, another),
+        ("Drake Haven", "Whenever you cycle or discard a card, you may pay {1}. If you do, create a 2/2 blue Drake creature token with flying.", TriggerMode::CycledOrDiscarded, None),
+        ("Astral Slide", "Whenever a player cycles a card, you may exile target creature. If you do, return that card to the battlefield under its owner's control at the beginning of the next end step.", TriggerMode::Cycled, None),
+    ] {
+        let defs = parse_trigger_lines(text, name);
+        assert_eq!(defs.len(), 1, "{name}");
+        assert_eq!(defs[0].mode, mode, "{name}");
+        assert_eq!(defs[0].valid_card, valid_card, "{name}");
+        assert_eq!(defs[0].trigger_zones, [Zone::Battlefield], "{name}");
+    }
+}
+
+// SHAPE: CR 701.9a + CR 614.6 + CR 113.6k give both self-discard arms the same zones.
+#[test]
+fn self_discard_trigger_heads_function_in_graveyard_and_exile() {
+    use crate::types::ability::TriggerConstraint;
+
+    for (name, text, constraint) in [
+        (
+            "Guerrilla Tactics",
+            "When a spell or ability an opponent controls causes you to discard this card, it deals 4 damage to any target.",
+            Some(TriggerConstraint::EventSourceControlledBy { controller: ControllerRef::Opponent }),
+        ),
+        ("Titanbones, Towering Heart", "When you discard this card, you gain 3 life.", None),
+    ] {
+        let def = parse_trigger_line(text, name);
+        assert_eq!(def.mode, TriggerMode::Discarded, "{name}");
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{name}");
+        assert_eq!(def.constraint, constraint, "{name}");
+        assert_eq!(def.trigger_zones, [Zone::Graveyard, Zone::Exile], "{name}");
+    }
+}
+
 #[test]
 fn trigger_cycle_this_card() {
     let def = parse_trigger_line(
@@ -16163,6 +16606,80 @@ fn trigger_you_tap_a_land_for_colorless_mana() {
             ..
         } if matches!(count, QuantityExpr::Fixed { value: 1 })
     ));
+}
+
+#[test]
+fn self_mana_ability_resolution_head() {
+    for keyword in ["when", "whenever"] {
+        for subject in ["~", "this creature"] {
+            let head = format!("{keyword} a mana ability of {subject} resolves");
+            let (mode, trigger) = try_parse_player_trigger(&head).expect("mana resolution head");
+            assert_eq!(mode, TriggerMode::ManaAbilityProduced);
+            assert_eq!(trigger.mode, mode);
+            assert_eq!(trigger.valid_card, None);
+            assert_eq!(trigger.valid_target, None);
+            assert_eq!(trigger.mana_ability_produced, None);
+            assert_eq!(
+                extract_trigger_subject_for_context(&head, &mut ParseContext::default()),
+                TargetFilter::SelfRef
+            );
+        }
+    }
+}
+
+#[test]
+fn self_mana_ability_resolution_head_requires_self_and_complete_input() {
+    assert!(parse_self_mana_ability_resolves_trigger("when a mana ability of ~ resolves").is_ok());
+    for head in [
+        "when a mana ability of a creature resolves",
+        "when a mana ability of ~ resolves unexpectedly",
+    ] {
+        assert!(
+            parse_self_mana_ability_resolves_trigger(head).is_err(),
+            "{head}"
+        );
+    }
+}
+
+#[test]
+fn tyvar_the_bellicose_parses_the_granted_mana_trigger() {
+    let oracle = concat!(
+        "Whenever one or more Elves you control attack, they gain deathtouch until end of turn.\n",
+        "Each creature you control has \"Whenever a mana ability of this creature resolves, ",
+        "put a number of +1/+1 counters on it equal to the amount of mana this creature produced. ",
+        "This ability triggers only once each turn.\""
+    );
+    let parsed = parse_oracle_text(
+        oracle,
+        "Tyvar the Bellicose",
+        &[],
+        &["Creature".into()],
+        &["Elf".into(), "Warrior".into()],
+    );
+    let [grant] = parsed.statics.as_slice() else {
+        panic!("expected Tyvar's static grant, got {:?}", parsed.statics);
+    };
+    let [ContinuousModification::GrantTrigger { trigger }] = grant.modifications.as_slice() else {
+        panic!("expected a granted trigger, got {grant:?}");
+    };
+    assert_eq!(trigger.mode, TriggerMode::ManaAbilityProduced);
+    assert_eq!(
+        trigger.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
+    let execute = trigger.execute.as_deref().expect("granted trigger effect");
+    assert_eq!(
+        *execute.effect,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            },
+            target: TargetFilter::SelfRef,
+        }
+    );
 }
 
 #[test]
@@ -17593,10 +18110,74 @@ fn trigger_nth_draw_second() {
     );
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthDrawThisTurn { n: 2 })
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 2,
+            comparator: crate::types::ability::Comparator::EQ,
+        })
     );
 }
 
+#[test]
+fn trigger_nth_draw_first_or_second_card() {
+    let def = parse_trigger_line(
+        "Whenever you draw your first or second card each turn, put an ingenuity counter on Lady Octopus.",
+        "Lady Octopus, Inspired Inventor",
+    );
+    assert_eq!(def.mode, TriggerMode::Drawn);
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ))
+    );
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 2,
+            comparator: crate::types::ability::Comparator::LE,
+        })
+    );
+    assert!(
+        matches!(
+            def.execute.as_ref().map(|execute| execute.effect.as_ref()),
+            Some(Effect::PutCounter { .. })
+        ),
+        "the draw trigger body must remain parsed: {def:?}"
+    );
+}
+
+// No printed card uses these wordings; they guard the building block's refusal arms.
+// A non-prefix ordinal list ("second or third", "first or third") must not be read as a
+// contiguous "N or earlier" prefix, so no `NthDrawThisTurn` constraint is produced.
+// Each negative is paired with the same-shaped, positive "first or second" reach guard.
+#[test]
+fn trigger_nth_draw_non_prefix_ordinal_lists_are_refused() {
+    for text in [
+        "Whenever you draw your second or third card each turn, put an ingenuity counter on Lady Octopus.",
+        "Whenever you draw your first or third card each turn, put an ingenuity counter on Lady Octopus.",
+    ] {
+        let reach_guard = parse_trigger_line(
+            "Whenever you draw your first or second card each turn, put an ingenuity counter on Lady Octopus.",
+            "Lady Octopus, Inspired Inventor",
+        );
+        assert_eq!(
+            reach_guard.constraint,
+            Some(TriggerConstraint::NthDrawThisTurn {
+                n: 2,
+                comparator: crate::types::ability::Comparator::LE,
+            }),
+            "reach guard: the same-shaped first-or-second line must produce LE 2"
+        );
+        let def = parse_trigger_line(text, "Lady Octopus, Inspired Inventor");
+        assert!(
+            !matches!(
+                def.constraint,
+                Some(TriggerConstraint::NthDrawThisTurn { .. })
+            ),
+            "{text:?} must not produce NthDrawThisTurn: {def:?}"
+        );
+    }
+}
 #[test]
 fn trigger_nth_draw_you_in_a_turn_phrasing() {
     // CR 603.2: "When you draw your Nth card in a turn" (Sneaky Snacker phrasing)
@@ -17614,7 +18195,10 @@ fn trigger_nth_draw_you_in_a_turn_phrasing() {
     );
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthDrawThisTurn { n: 3 })
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 3,
+            comparator: crate::types::ability::Comparator::EQ,
+        })
     );
 }
 
@@ -17633,7 +18217,10 @@ fn trigger_nth_draw_opponent_second() {
     );
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthDrawThisTurn { n: 2 })
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 2,
+            comparator: crate::types::ability::Comparator::EQ,
+        })
     );
 }
 
@@ -17647,7 +18234,10 @@ fn trigger_nth_draw_any_player() {
     assert_eq!(def.valid_target, None);
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthDrawThisTurn { n: 3 })
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 3,
+            comparator: crate::types::ability::Comparator::EQ,
+        })
     );
 }
 
@@ -17665,7 +18255,10 @@ fn trigger_nth_draw_any_player_during_their_turn() {
     assert_eq!(def.valid_target, None);
     assert_eq!(
         def.constraint,
-        Some(TriggerConstraint::NthDrawThisTurn { n: 2 })
+        Some(TriggerConstraint::NthDrawThisTurn {
+            n: 2,
+            comparator: crate::types::ability::Comparator::EQ,
+        })
     );
     assert_eq!(
         def.condition,
@@ -19776,6 +20369,46 @@ fn trigger_unless_they_pay_binds_to_that_player_damage_target() {
     );
 }
 
+/// Every node of an ability tree: the chain, the else branch, modes, and the
+/// payload of a delayed trigger.
+fn collect_definitions(root: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    fn walk<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a AbilityDefinition>) {
+        out.push(def);
+        for child in def.sub_ability.iter().chain(def.else_ability.iter()) {
+            walk(child, out);
+        }
+        for mode in &def.mode_abilities {
+            walk(mode, out);
+        }
+        if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+            walk(effect, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out
+}
+
+/// The nodes of a tree that carry a counted repeat.
+fn counted_definitions(root: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+    collect_definitions(root)
+        .into_iter()
+        .filter(|node| node.repeat_for.is_some())
+        .collect()
+}
+
+/// CR 608.2: a `SimultaneousInstances` timing never exists without its count
+/// at producer output.
+fn assert_repeat_timing_invariant(root: &AbilityDefinition) {
+    for node in collect_definitions(root) {
+        assert!(
+            node.repeat_timing != RepeatForTiming::SimultaneousInstances
+                || node.repeat_for.is_some(),
+            "SimultaneousInstances without a repeat_for count: {node:#?}"
+        );
+    }
+}
+
 /// Walk an `execute` chain and return the first node carrying `scope`, for
 /// asserting which clause a declined unless-hoist landed on.
 fn scoped_execute_node(def: &TriggerDefinition, scope: PlayerFilter) -> &AbilityDefinition {
@@ -19988,11 +20621,11 @@ fn trigger_unless_each_opponent_sacrifice_binds_scoped_player() {
     assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
 }
 
-/// CR 608.2f + CR 118.12a: Rottenmouth Viper's scoped clause is two links below
-/// the chain root, so a hoisted payer resolves against whatever stamped the
-/// root's `scoped_player` rather than against the fan-out's per-opponent seat.
+/// CR 608.2c + CR 608.2h + CR 608.2f + CR 118.12a: the counter is added before
+/// the repeat count is fixed, and each repeated instruction fans out to the
+/// opponents with its unless payer bound to the scoped player.
 #[test]
-fn trigger_scoped_unless_stays_on_the_scoped_clause_under_an_unimplemented_parent() {
+fn trigger_for_each_blight_counter_repeats_scoped_unless() {
     let def = parse_trigger_line(
             "Whenever this creature enters or attacks, put a blight counter on it. Then for each blight counter on it, each opponent loses 4 life unless that player sacrifices a nonland permanent of their choice or discards a card.",
             "Rottenmouth Viper",
@@ -20009,6 +20642,24 @@ fn trigger_scoped_unless_stays_on_the_scoped_clause_under_an_unimplemented_paren
         "the scoped clause should be the life loss, got {:?}",
         scoped.effect
     );
+    assert!(
+        matches!(
+            scoped.repeat_for.as_ref(),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: Some(CounterType::Generic(counter_type)),
+                }
+            }) if counter_type == "blight"
+        ),
+        "the scoped clause should repeat for Viper's blight counters: {scoped:#?}"
+    );
+    // CR 608.2c + CR 101.4: "Then for each blight counter on it, …" is a
+    // leading for-each prefix, so its iterations are instances of one
+    // instruction. Fails if the peel's stamp, its ClauseIr split, or the
+    // assembly transfer is reverted (each defaults to Sequential).
+    assert_eq!(scoped.repeat_timing, RepeatForTiming::SimultaneousInstances);
+    assert_repeat_timing_invariant(def.execute.as_deref().expect("execute"));
     let unless_pay = scoped
         .unless_pay
         .as_ref()
@@ -20028,6 +20679,7 @@ fn trigger_scoped_unless_stays_on_the_scoped_clause_under_an_unimplemented_paren
         "second branch should be Discard, got {:?}",
         costs[1]
     );
+    assert_no_unimplemented(def.execute.as_deref().expect("should have execute"));
 }
 
 /// CR 608.2f: Bellowing Mauler's `each player` subject is scope-bearing exactly
@@ -26033,6 +26685,134 @@ fn unmodeled_ward_discard_line_fails_closed_through_parse_oracle_text() {
 
 // --- CR 606.2: "Whenever you activate a loyalty ability of [pw]" ---
 
+#[test]
+fn way_of_the_mind_sculptor_parses_loyalty_removal_intervening_if() {
+    let face = parse_oracle_text(
+        "When Way of the Mind Sculptor enters, empower Jace 5. (Put five loyalty counters on a Jace token you control. If you don't control one, first create a blue Jace planeswalker token with \"[−1]: Surveil 1\" and \"[−3]: Draw a card.\")\nWhenever you activate a loyalty ability, if you removed two or more loyalty counters to activate it, draw a card.",
+        "Way of the Mind Sculptor",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let [enters, way] = face.triggers.as_slice() else {
+        panic!(
+            "expected both printed Way triggers, got {:?}",
+            face.triggers
+        );
+    };
+    assert_eq!(enters.mode, TriggerMode::ChangesZone);
+    assert!(matches!(
+        *enters.execute.as_ref().expect("empower body").effect,
+        Effect::EmpowerJace {
+            count: QuantityExpr::Fixed { value: 5 }
+        }
+    ));
+    assert_eq!(way.mode, TriggerMode::LoyaltyAbilityActivated);
+    assert_eq!(
+        way.condition,
+        Some(TriggerCondition::LoyaltyCountersRemovedAtLeast { minimum: 2 })
+    );
+    let body = way.execute.as_ref().expect("draw body");
+    assert!(matches!(
+        *body.effect,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    ));
+    assert!(
+        !face
+            .abilities
+            .iter()
+            .chain(
+                face.triggers
+                    .iter()
+                    .filter_map(|trigger| trigger.execute.as_deref())
+            )
+            .any(has_unimplemented),
+        "the complete Way face must contain zero Unimplemented effects"
+    );
+
+    let paradox = parse_trigger_line(
+        "Whenever you activate a loyalty ability, you gain 1 life. You may play an additional land this turn.",
+        "Way of the Paradox",
+    );
+    assert_eq!(paradox.condition, None);
+    assert!(paradox.execute.is_some());
+}
+
+// Synthetic grammar probe: no printed card carries a later `then if you removed
+// ... loyalty counters` clause. The nearest printed card is Way of the Mind
+// Sculptor, whose condition is the leading intervening-if "if you removed two
+// or more loyalty counters to activate it".
+#[test]
+fn loyalty_removal_condition_in_later_then_clause_is_not_hoisted() {
+    let later = parse_trigger_line(
+        "Whenever you activate a loyalty ability, draw a card, then if you removed two or more loyalty counters to activate it, draw a card.",
+        "Way of the Mind Sculptor",
+    );
+    assert_eq!(later.mode, TriggerMode::LoyaltyAbilityActivated);
+    assert_eq!(later.condition, None);
+    assert!(
+        later
+            .execute
+            .as_ref()
+            .and_then(|body| body.sub_ability.as_ref())
+            .is_some(),
+        "the later `then if` remains attached to the resolution effect chain"
+    );
+}
+
+#[test]
+fn loyalty_removal_threshold_requires_the_complete_loyalty_clause() {
+    use crate::types::ability_visit::{
+        granter_symbols, granter_symbols_mut, DefinitionNode, DefinitionNodeMut,
+    };
+
+    let digits = parse_trigger_line(
+        "Whenever you activate a loyalty ability, if you removed 4 or more loyalty counters to activate it, draw a card.",
+        "Way of the Mind Sculptor",
+    );
+    let expected = Some(TriggerCondition::LoyaltyCountersRemovedAtLeast { minimum: 4 });
+    assert_eq!(digits.condition, expected);
+    let at_least = parse_trigger_line(
+        "Whenever you activate a loyalty ability, if you removed at least four loyalty counters to activate it, draw a card.",
+        "Way of the Mind Sculptor",
+    );
+    assert_eq!(at_least.mode, TriggerMode::LoyaltyAbilityActivated);
+    assert_eq!(at_least.condition, expected);
+    assert!(matches!(
+        at_least.execute.as_deref().map(|body| body.effect.as_ref()),
+        Some(Effect::Draw { .. })
+    ));
+    let saved = serde_json::to_string(&digits).expect("serialize the alternate threshold");
+    let mut restored: TriggerDefinition = serde_json::from_str(&saved).expect("restore trigger");
+    assert_eq!(restored.condition, expected);
+    granter_symbols::node_fields(DefinitionNode::Trigger(&restored), &mut |_| {
+        panic!("the loyalty threshold has no granter symbol")
+    });
+    granter_symbols_mut::node_fields(DefinitionNodeMut::Trigger(&mut restored), &mut |_| {
+        panic!("the loyalty threshold has no symbol to rewrite")
+    });
+    assert_eq!(restored.condition, expected);
+
+    // Way is the only printed instance of this threshold in the pinned card census.
+    // These synthetic grammar probes each change one part of the printed condition.
+    for malformed in [
+        "Whenever you activate a loyalty ability, if you removed twelvish or more loyalty counters to activate it, draw a card.",
+        "Whenever you activate a loyalty ability, if you removed two or fewer loyalty counters to activate it, draw a card.",
+        "Whenever you activate a loyalty ability, if you removed two or more charge counters to activate it, draw a card.",
+        "Whenever you activate a loyalty ability, if you removed two or more loyalty counters to activate it somehow, draw a card.",
+    ] {
+        let parsed = parse_trigger_line(malformed, "Way of the Mind Sculptor");
+        assert_eq!(parsed.mode, TriggerMode::LoyaltyAbilityActivated);
+        assert!(
+            !matches!(parsed.condition, Some(TriggerCondition::LoyaltyCountersRemovedAtLeast { .. })),
+            "malformed or neighboring counter clause must not become the loyalty predicate: {malformed}"
+        );
+    }
+}
+
 /// CR 606.2: Ajani Unrelenting's unqualified form accepts every loyalty
 /// ability activated by the source controller, so it carries no card filter.
 #[test]
@@ -30783,7 +31563,10 @@ fn bridge_and_with_unmappable_returns_none() {
 fn bridge_unmappable_variants_return_none() {
     assert!(static_condition_to_trigger_condition(&StaticCondition::IsRingBearer).is_none());
     assert!(
-        static_condition_to_trigger_condition(&StaticCondition::SourceHasDealtDamage).is_none()
+        static_condition_to_trigger_condition(&StaticCondition::SourceHasDealtDamage {
+            kind: DamageKindFilter::Any
+        })
+        .is_none()
     );
 }
 
@@ -31168,11 +31951,7 @@ fn trigger_intervening_if_this_card_is_suspended() {
             )));
             assert!(conditions.iter().any(|condition| matches!(
                 condition,
-                TriggerCondition::HasCounters {
-                    counters: CounterMatch::OfType(CounterType::Time),
-                    minimum: 1,
-                    maximum: None,
-                }
+                TriggerCondition::SourceMatchesFilter { filter } if *filter == TargetFilter::suspended_card(None)
             )));
         }
         other => panic!("expected suspended And condition, got {other:?}"),
@@ -40395,9 +41174,9 @@ fn ogre_marauder_attack_trigger_carries_defending_player_unless_sacrifice() {
             .iter()
             .any(|s| s.modifications.iter().any(|m| matches!(
                 m,
-                ContinuousModification::AddStaticMode {
-                    mode: StaticMode::CantBeBlocked
-                }
+                ContinuousModification::GrantStaticAbility { definition }
+                    if definition.affected == Some(TargetFilter::SelfRef)
+                        && definition.mode == StaticMode::CantBeBlocked
             ))),
         "the grant must add StaticMode::CantBeBlocked, got {statics:?}"
     );
@@ -41733,6 +42512,13 @@ fn card_parking_hand_reveal_is_a_chosen_object_boundary_for_the_event_source_lif
     assert_eq!(choice.player_scope, Some(PlayerFilter::Opponent));
     let sub = choice.sub_ability.as_deref().expect("the exile consumer");
     assert_eq!(sub.duration, Some(Duration::UntilHostLeavesPlay));
+    // CR 608.2c: the "For each opponent," prefix is consumed by the per-opponent
+    // scope binding and its count cleared, so the exile consumer carries no
+    // repeat and no for-each timing is left behind without a count.
+    assert!(sub.repeat_for.is_none());
+    assert_eq!(sub.player_scope, Some(PlayerFilter::Opponent));
+    assert_eq!(sub.repeat_timing, RepeatForTiming::Sequential);
+    assert_repeat_timing_invariant(exec);
     match &*sub.effect {
         Effect::ChangeZone {
             destination,
@@ -46705,6 +47491,287 @@ fn or_split_carries_shared_adjunct_to_bare_leg() {
     }
 }
 
+/// CR 608.2c: "Then for each opponent, … that player's graveyard …"
+/// binds its anaphor to each iterated opponent. A count-only `PlayerCount`
+/// repeat cannot carry that binding, so The Weaver King's clause must keep
+/// failing closed, while Rottenmouth Viper's blight-counter repeat (a count
+/// that is not a player set) stays fully supported.
+#[test]
+fn then_for_each_opponent_with_that_player_anaphor_fails_closed() {
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let weaver = parse_oracle_text(
+        "Shadow (This creature can block or be blocked by only creatures with shadow.)\nWhenever The Weaver King deals combat damage to a player, they mill that many cards. Then for each opponent, put a creature card from that player's graveyard that was put there from their library this turn onto the battlefield under your control.",
+        "The Weaver King",
+        &[],
+        &owned(&["Creature"]),
+        &owned(&["Horror", "Wizard"]),
+    );
+    assert_eq!(weaver.triggers.len(), 1, "{:?}", weaver.triggers);
+    let execute = weaver.triggers[0].execute.as_deref().expect("execute");
+    assert!(
+        has_unimplemented(execute),
+        "the per-opponent graveyard clause must stay an honest gap: {execute:#?}"
+    );
+    // The fail-closed gap tree carries no for-each stamp anywhere.
+    assert!(
+        collect_definitions(execute)
+            .iter()
+            .all(|node| node.repeat_timing == RepeatForTiming::Sequential),
+        "no SimultaneousInstances in the gap tree: {execute:#?}"
+    );
+    assert_repeat_timing_invariant(execute);
+
+    let viper = parse_oracle_text(
+        "Whenever this creature enters or attacks, put a blight counter on it. Then for each blight counter on it, each opponent loses 4 life unless that player sacrifices a nonland permanent of their choice or discards a card.",
+        "Rottenmouth Viper",
+        &[],
+        &owned(&["Creature"]),
+        &owned(&["Elemental", "Snake"]),
+    );
+    assert_eq!(viper.triggers.len(), 1, "{:?}", viper.triggers);
+    assert!(!has_unimplemented(
+        viper.triggers[0].execute.as_deref().expect("execute")
+    ));
+    assert_repeat_timing_invariant(viper.triggers[0].execute.as_deref().expect("execute"));
+}
+
+fn owned_strings(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| s.to_string()).collect()
+}
+
+/// CR 608.2c + CR 101.4: Twisted Sewer-Witch's "Then for each Rat you control,
+/// create a Wicked Role token attached to that Rat." is a for-each prefix, so
+/// its member-iterated repeat carries `SimultaneousInstances`; the Rat token
+/// creation before it is its own, uncounted instruction.
+#[test]
+fn for_each_rat_you_control_member_repeat_is_simultaneous_instances() {
+    let witch = parse_oracle_text(
+        "When this creature enters, create a 1/1 black Rat creature token with \"This creature can't block.\" Then for each Rat you control, create a Wicked Role token attached to that Rat. (If you control another Role on it, put that one into the graveyard. Enchanted creature gets +1/+1. When this token is put into a graveyard, each opponent loses 1 life.)",
+        "Twisted Sewer-Witch",
+        &[],
+        &owned_strings(&["Creature"]),
+        &owned_strings(&["Human", "Warlock"]),
+    );
+    assert_eq!(witch.triggers.len(), 1, "{:?}", witch.triggers);
+    let execute = witch.triggers[0].execute.as_deref().expect("execute");
+    let counted = counted_definitions(execute);
+    assert_eq!(counted.len(), 1, "exactly one counted node: {execute:#?}");
+    // Reach guard: the counted node repeats once per Rat the controller controls.
+    assert!(
+        matches!(
+            counted[0].repeat_for.as_ref(),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                }
+            }) if tf.controller == Some(ControllerRef::You)
+        ),
+        "the counted node should repeat for the Rats you control: {:#?}",
+        counted[0].repeat_for
+    );
+    assert_eq!(
+        counted[0].repeat_timing,
+        RepeatForTiming::SimultaneousInstances
+    );
+    // The Rat creation is a separate, uncounted instruction.
+    assert!(execute.repeat_for.is_none());
+    assert_eq!(execute.repeat_timing, RepeatForTiming::Sequential);
+    assert_repeat_timing_invariant(execute);
+}
+
+/// CR 608.2c + CR 101.4: the population-prefix arm ("For each of those
+/// permanents, choose a different opponent.") stamps the same for-each timing.
+#[test]
+fn for_each_of_those_permanents_population_repeat_is_simultaneous_instances() {
+    let dack = parse_oracle_text(
+        "When Dack Fayden enters, reveal cards from the top of your library until you reveal X creature cards, where X is the number of opponents you have. Put those creature cards onto the battlefield, then shuffle. They're goaded for the rest of the game. For each of those permanents, choose a different opponent. Each opponent gains control of the permanent for which they were chosen.",
+        "Dack Fayden, Helping Hand",
+        &[],
+        &owned_strings(&["Creature"]),
+        &owned_strings(&["Human", "Advisor"]),
+    );
+    assert_eq!(dack.triggers.len(), 1, "{:?}", dack.triggers);
+    let execute = dack.triggers[0].execute.as_deref().expect("execute");
+    let nodes = collect_definitions(execute);
+    let choose = nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                &*node.effect,
+                Effect::Choose {
+                    choice_type: crate::types::ability::ChoiceType::Opponent { .. },
+                    ..
+                }
+            )
+        })
+        .unwrap_or_else(|| panic!("no Choose Opponent node: {execute:#?}"));
+    // Reach guard: the node carries the population count.
+    assert!(
+        matches!(
+            choose.repeat_for.as_ref(),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. }
+            })
+        ),
+        "the choose node should repeat per member of the population: {:#?}",
+        choose.repeat_for
+    );
+    assert_eq!(choose.repeat_timing, RepeatForTiming::SimultaneousInstances);
+    // Every uncounted node (the shuffle, the goad) stays Sequential.
+    for node in nodes.iter().filter(|node| node.repeat_for.is_none()) {
+        assert_eq!(node.repeat_timing, RepeatForTiming::Sequential);
+    }
+    assert_repeat_timing_invariant(execute);
+}
+
+/// CR 701.16a: "investigate" means "create a Clue token". "Investigate twice"
+/// is a counted repetition of that whole instruction, not a for-each instance
+/// set, so the parser models it as `Sequential`, like the counted repeats in
+/// Torment of Hailfire's ruling (2017-07-14). The suffix producer stays
+/// `Sequential` (a stamp at the merge would yield `SimultaneousInstances`).
+#[test]
+fn counted_investigate_suffix_repeats_are_sequential() {
+    let armed = parse_oracle_text(
+        "When this enchantment enters, investigate twice. (To investigate, create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")\nClues you control are Equipment in addition to their other types and have \"Equipped creature gets +2/+0\" and equip {2}.",
+        "Armed with Proof",
+        &[],
+        &owned_strings(&["Enchantment"]),
+        &[],
+    );
+    let execute = armed.triggers[0].execute.as_deref().expect("execute");
+    let counted = counted_definitions(execute);
+    assert_eq!(counted.len(), 1, "{execute:#?}");
+    assert_eq!(
+        counted[0].repeat_for,
+        Some(QuantityExpr::Fixed { value: 2 })
+    );
+    assert_eq!(counted[0].repeat_timing, RepeatForTiming::Sequential);
+    assert_repeat_timing_invariant(execute);
+
+    let confirm = parse_oracle_text(
+        "Counter target spell.\nInvestigate three times. (To investigate, create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")",
+        "Confirm Suspicions",
+        &[],
+        &owned_strings(&["Instant"]),
+        &[],
+    );
+    let counted: Vec<&AbilityDefinition> = confirm
+        .abilities
+        .iter()
+        .flat_map(counted_definitions)
+        .collect();
+    assert_eq!(counted.len(), 1, "{:#?}", confirm.abilities);
+    assert_eq!(
+        counted[0].repeat_for,
+        Some(QuantityExpr::Fixed { value: 3 })
+    );
+    assert_eq!(counted[0].repeat_timing, RepeatForTiming::Sequential);
+    for ability in &confirm.abilities {
+        assert_repeat_timing_invariant(ability);
+    }
+}
+
+/// CR 608.2c + CR 101.4: the targeted counter-kind peel
+/// (`try_parse_for_each_counter_kind_adjust_target`) bypasses the shared peel
+/// but stamps the same timing through the same authority (Dramatist's Puppet;
+/// Quarry Hauler has identical text).
+#[test]
+fn for_each_kind_of_counter_on_target_permanent_is_simultaneous_instances() {
+    let puppet = parse_trigger_line(
+        "When this creature enters, for each kind of counter on target permanent, put another counter of that kind on it or remove one from it.",
+        "Dramatist's Puppet",
+    );
+    let execute = puppet.execute.as_deref().expect("execute");
+    // The TargetOnly parent carries no count.
+    assert!(matches!(&*execute.effect, Effect::TargetOnly { .. }));
+    assert!(execute.repeat_for.is_none());
+    assert_eq!(execute.repeat_timing, RepeatForTiming::Sequential);
+    let choice = execute
+        .sub_ability
+        .as_deref()
+        .expect("the choice sub-ability");
+    // Reach guard: the counted node is the per-kind add-or-remove choice.
+    assert!(matches!(&*choice.effect, Effect::ChooseOneOf { .. }));
+    assert_eq!(
+        choice.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCounterKindsAmong {
+                filter: TargetFilter::ParentTarget,
+            },
+        })
+    );
+    assert_eq!(choice.repeat_timing, RepeatForTiming::SimultaneousInstances);
+    assert_repeat_timing_invariant(execute);
+}
+
+/// CR 608.2c + CR 101.4: the sibling of the targeted counter-kind peel through
+/// the generic arm (Bribe Taker). One grammar class carries one timing.
+#[test]
+fn for_each_kind_of_counter_on_permanents_you_control_is_simultaneous_instances() {
+    let taker = parse_trigger_line(
+        "When this creature enters, for each kind of counter on permanents you control, you may put your choice of a +1/+1 counter or a counter of that kind on this creature.",
+        "Bribe Taker",
+    );
+    let execute = taker.execute.as_deref().expect("execute");
+    assert!(matches!(&*execute.effect, Effect::ChooseOneOf { .. }));
+    assert!(execute.optional);
+    assert!(
+        matches!(
+            execute.repeat_for.as_ref(),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::DistinctCounterKindsAmong {
+                    filter: TargetFilter::Typed(tf),
+                }
+            }) if tf.controller == Some(ControllerRef::You)
+        ),
+        "the choice should repeat per counter kind among permanents you control: {:#?}",
+        execute.repeat_for
+    );
+    assert_eq!(
+        execute.repeat_timing,
+        RepeatForTiming::SimultaneousInstances
+    );
+    assert_eq!(counted_definitions(execute).len(), 1, "{execute:#?}");
+    assert_repeat_timing_invariant(execute);
+}
+
+/// CR 608.2c + CR 101.4: Tolarian Contempt's "for each opponent, choose up to
+/// one target creature they control ..." is a for-each prefix peel whose clause
+/// lowers to a bare `TargetOnly`, so the count and its `SimultaneousInstances`
+/// timing transfer to the def through the `TargetOnly` arm of the ClauseIr
+/// assembly (no sub-ability). The sibling arm that places the count on a
+/// `TargetOnly` clause's sub-ability has no printed-card row and is covered by
+/// the compiler only.
+#[test]
+fn for_each_opponent_choose_target_transfers_simultaneous_instances_on_target_only() {
+    let contempt = parse_trigger_line(
+        "At the beginning of your end step, for each opponent, choose up to one target creature they control with a rejection counter on it. That creature's owner puts it on their choice of the top or bottom of their library.",
+        "Tolarian Contempt",
+    );
+    let execute = contempt.execute.as_deref().expect("execute");
+    let counted = collect_definitions(execute)
+        .into_iter()
+        .find(|node| matches!(&*node.effect, Effect::TargetOnly { .. }))
+        .expect("a TargetOnly node");
+    // Reach guards: the TargetOnly node carries the opponent count and a
+    // "choose up to one" multi-target spec.
+    assert_eq!(
+        counted.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::Opponent,
+            },
+        }),
+        "{counted:#?}"
+    );
+    assert!(counted.multi_target.is_some(), "{counted:#?}");
+    assert_eq!(
+        counted.repeat_timing,
+        RepeatForTiming::SimultaneousInstances
+    );
+    assert_repeat_timing_invariant(execute);
+}
+
 /// CR 603.4 + CR 608.2h: The draw threshold gates the trigger, and the
 /// counter quantity reads the controller's draw count when it resolves.
 #[test]
@@ -46746,4 +47813,70 @@ fn proft_eidetic_memory_hoists_draw_gate_and_binds_counter_quantity() {
             }),
         }
     );
+}
+
+// CR 608.2c + CR 119.4 (issue #11294, SHAPE): Niv-Mizzet, Ghost Counsel's
+// "you may pay that much life" binds the payment to the triggering life-gain
+// amount; the "draw that many cards" continuation reads the same event amount.
+#[test]
+fn trigger_niv_mizzet_ghost_counsel_pay_that_much_life_shape() {
+    let def = parse_trigger_line(
+        "Whenever you gain life, you may pay that much life. If you do, draw that many cards.",
+        "Niv-Mizzet, Ghost Counsel",
+    );
+    assert_eq!(def.mode, TriggerMode::LifeGained);
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(execute.optional, "the pay clause is a 'you may'");
+    assert_eq!(
+        execute.effect.as_ref(),
+        &Effect::PayCost {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        }
+    );
+    let continuation = execute
+        .sub_ability
+        .as_deref()
+        .expect("If-you-do continuation");
+    assert_eq!(
+        continuation.effect.as_ref(),
+        &Effect::Draw {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            target: TargetFilter::Controller,
+        }
+    );
+    assert_no_unimplemented(execute);
+}
+
+// Issue #11295: Verrak, Warped Sengir's "pay that much life again" must stay
+// honestly Unimplemented until the paid-life condition + activation paid-life
+// binding land — the event-bound pay-life arm is full-consumption and declines
+// the "again" rider rather than dropping it.
+#[test]
+fn trigger_verrak_pay_that_much_life_again_stays_unimplemented() {
+    let def = parse_trigger_line(
+        "Whenever you activate an ability that isn't a mana ability, if life was paid to activate it, you may pay that much life again. If you do, copy that ability. You may choose new targets for the copy.",
+        "Verrak, Warped Sengir",
+    );
+    // Positive reach-guard: the trigger routed and the copy continuation built,
+    // so the pay clause below is genuinely reached, not skipped upstream.
+    assert_eq!(def.mode, TriggerMode::AbilityActivated);
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        execute.sub_ability.is_some(),
+        "copy continuation reached past the pay clause"
+    );
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::Unimplemented { name, description }
+            if name == "unparsed_verb_arguments"
+                && description.as_deref() == Some("pay that much life again")
+    ));
 }

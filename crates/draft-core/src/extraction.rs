@@ -270,7 +270,7 @@ fn extract_set_pool_indexed(
         .cards
         .iter()
         .filter(|c| {
-            c.booster_types.contains(&"play".to_string())
+            c.booster_types.iter().any(|i: &String| i == "play")
                 || uuids_in_sheets.contains(c.uuid.as_str())
         })
         .map(|c| LimitedCardPrint {

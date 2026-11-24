@@ -36,13 +36,13 @@ use crate::types::ability::{
     quantity_expr_uses_recipient, AbilityCost, AbilityDefinition, AbilityKind,
     ActivationRestriction, AttachmentReferent, AttackedYouScope, BasicLandType, CardTypeSetSource,
     CastingPermission, ChosenSubtypeKind, CommanderOwnership, ContinuousModification,
-    CopiableValues, Designation, Duration, Effect, FilterProp, ManaContribution, ManaProduction,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerGrantProducerKey, TriggerProducerOrigin, TypedFilter,
+    CopiableValues, DefinitionOrigin, Designation, Duration, Effect, FilterProp, ManaContribution,
+    ManaProduction, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
+    StaticDefinition, TargetFilter, TriggerGrantProducerKey, TriggerProducerOrigin, TypedFilter,
 };
 use crate::types::ability_visit::{
     each_granter_symbol, granter_symbols_mut, names_unbound_granter, own_fields_name_granter,
-    token_static_grants_to_itself, DefinitionNode, DefinitionNodeMut,
+    token_static_creator_grant, token_static_grants_to_itself, DefinitionNode, DefinitionNodeMut,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
@@ -164,8 +164,8 @@ fn filter_names_single_object(filter: &TargetFilter, source_id: ObjectId) -> Opt
 /// 2. it comes from a printed static definition (`def_index`), not a resolved
 ///    transient: CR 400.7 makes a source that changed zones a new object, so a
 ///    resolved effect must not write into it (CR 611.2c);
-/// 3. it is not a characteristic-defining ability: CDA application off the
-///    battlefield (CR 604.3) is a separate class and is not changed here;
+/// 3. for a characteristic-defining ability, it sets P/T and the source is a
+///    spell on the stack (CR 208.2a);
 /// 4. its layer is one the remote-recipient bookkeeping restores
 ///    (`layer_restored_on_remote_objects`), so what is written can be undone;
 ///    Layer 6 stays on demand (`off_zone_characteristics`);
@@ -182,12 +182,27 @@ fn declared_zone_self_static_candidates(
 ) -> Option<Vec<ObjectId>> {
     if effect.affected_filter != TargetFilter::SelfRef
         || effect.def_index.is_none()
-        || effect.characteristic_defining
         || !layer_restored_on_remote_objects(effect.layer)
     {
         return None;
     }
     let zone = state.objects.get(&effect.source_id)?.zone;
+    if effect.characteristic_defining {
+        return (zone == Zone::Stack
+            && effect.layer == Layer::CharDef
+            && state
+                .stack
+                .iter()
+                .chain(state.resolving_stack_entry.iter())
+                .any(|entry| {
+                    entry.id == effect.source_id
+                        && matches!(
+                            entry.kind,
+                            crate::types::game_state::StackEntryKind::Spell { .. }
+                        )
+                }))
+        .then(|| vec![effect.source_id]);
+    }
     if zone == Zone::Battlefield || !zone_cache.zone_contains(state, zone, effect.source_id) {
         return None;
     }
@@ -2347,7 +2362,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -2522,7 +2537,7 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -2658,7 +2673,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -3032,7 +3047,9 @@ fn evaluate_condition_inner(
         // CR 120.3 + CR 120.6 + CR 702.11b: True once the source has actually dealt
         // damage since entering the battlefield (sticky). The "hasn't dealt damage
         // yet" hexproof grant wraps this in `StaticCondition::Not`.
-        StaticCondition::SourceHasDealtDamage => eval_source_has_dealt_damage(state, source_id),
+        StaticCondition::SourceHasDealtDamage { kind } => {
+            eval_source_has_dealt_damage(state, source_id, *kind)
+        }
         // CR 601.2 + CR 611.3a: True when the source permanent was cast.
         StaticCondition::WasCast { zone } => state
             .objects
@@ -5025,6 +5042,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::TokensCreatedThisTurn { .. }
@@ -5422,6 +5440,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
@@ -5800,7 +5819,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -5935,7 +5954,7 @@ fn static_condition_reads_monarch(condition: &StaticCondition) -> bool {
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -9140,16 +9159,27 @@ pub(crate) fn stamp_static_granter(def: &mut StaticDefinition, granter: ObjectIn
 /// static that grants to the token itself carries the token's own quoted abilities, so
 /// its whole tree names the creator. Any other static binds only its own fields; its
 /// nested definitions are grants to other objects, left unbound until the token applies
-/// them at layer 6 (CR 613.1f) and `stamp_grant` binds them to the token. The parser
-/// refuses a token body whose references would land in the other frame.
+/// them at layer 6 (CR 613.1f) and `stamp_grant` binds them to the token, except a
+/// direct quoted-static grant in the creator's frame ([`token_static_creator_grant`]),
+/// which binds to the creator here. The parser refuses a token body whose references
+/// would land in the other frame.
 pub(crate) fn stamp_token_static_creator(
     def: &mut StaticDefinition,
     creator: ObjectIncarnationRef,
 ) {
     if token_static_grants_to_itself(def) {
         stamp_static_granter(def, creator);
-    } else if own_fields_name_granter(def) {
-        stamp_granter(creator)(DefinitionNodeMut::Static(def));
+    } else {
+        if own_fields_name_granter(def) {
+            stamp_granter(creator)(DefinitionNodeMut::Static(def));
+        }
+        for modification in &mut def.modifications {
+            if token_static_creator_grant(modification).is_some()
+                && grant_names_granter(modification)
+            {
+                stamp_grant(modification, creator);
+            }
+        }
     }
 }
 
@@ -11582,11 +11612,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::SetDynamicToughness { .. }
     );
 
-    if b_changes_pt && filter_references_pt_stat(&a.affected_filter) {
-        return true;
-    }
-
-    false
+    b_changes_pt && filter_references_pt_stat(&a.affected_filter)
 }
 
 /// Check if a TargetFilter references a card type (used for dependency ordering).
@@ -11685,12 +11711,16 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
 /// than the carrier's controller, so the graft has to snapshot
 /// `effect.controller` as the definition's anchor.
 ///
-/// Two member classes today:
+/// Three member classes today:
 /// - `MustBeBlockedByAll` / `MustBeBlocked` carrying a controller-relative
 ///   blocker filter (`ControllerRef::You`/`Opponent`/… — "your opponents", "you
 ///   control"). Grafted onto a TARGET permanent by a one-shot effect (You Look
 ///   Upon the Tarrasque), CR 109.5 would otherwise evaluate the filter relative
 ///   to the target's controller.
+/// - `BlockRestriction` carrying a controller-relative attacker filter ("can't
+///   block creatures you control"), grafted onto another player's creature by a
+///   resolving spell (Immortal Obligation). Both consumers read the anchor
+///   through `combat::blocker_filter_context`.
 /// - `MustAttackAwayFromSource`, whose avoided player is the granting effect's
 ///   controller (CR 701.15b).
 ///
@@ -11709,7 +11739,136 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
         // (Maximum Carnage chapter I), so re-deriving it from the carrier would
         // avoid the wrong player.
         StaticMode::MustAttackAwayFromSource => true,
-        _ => false,
+        // CR 109.5 + CR 509.1b + CR 608.2c: a "can't block <object>" whitelist
+        // grafted by a resolving spell onto another player's creature reads
+        // "you" as that spell's controller (Immortal Obligation: "can't block
+        // creatures you control").
+        StaticMode::BlockRestriction { filter } => target_filter_controller_is_relative(filter),
+        // Exhaustive: each new StaticMode must decide here whether its "you"
+        // refers to the installing player (CR 109.5).
+        StaticMode::Continuous
+        | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::LethalDamageDeterminedByPower
+        | StaticMode::CantAttack
+        | StaticMode::CantBlock
+        | StaticMode::CantAttackOrBlock
+        | StaticMode::AttackOnlyNeighbor
+        | StaticMode::CantBecomeSuspected
+        | StaticMode::MaxAttackersEachCombat { .. }
+        | StaticMode::MaxBlockersEachCombat { .. }
+        | StaticMode::CantBeTargeted { .. }
+        | StaticMode::CantBeCast { .. }
+        | StaticMode::CantBeActivated { .. }
+        | StaticMode::CantSearchLibrary { .. }
+        | StaticMode::RestrictLibrarySearchToTop { .. }
+        | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
+        | StaticMode::CantCauseSacrificeOrExile { .. }
+        | StaticMode::CantCauseForcedAction { .. }
+        | StaticMode::CastWithFlash
+        | StaticMode::GrantsExtraVote
+        | StaticMode::GrantsExtraVillainousChoice
+        | StaticMode::CastWithKeyword { .. }
+        | StaticMode::CastWithAlternativeCost { .. }
+        | StaticMode::AlternativeKeywordCost { .. }
+        | StaticMode::ModifyCost { .. }
+        | StaticMode::ImposeAdditionalCost { .. }
+        | StaticMode::ReduceAbilityCost { .. }
+        | StaticMode::ReduceActionCost { .. }
+        | StaticMode::ModifyActivationLimit { .. }
+        | StaticMode::ActivateAsInstant { .. }
+        | StaticMode::CantPayCost { .. }
+        | StaticMode::CantGainLife
+        | StaticMode::CantLoseLife
+        | StaticMode::PlayerProtection(..)
+        | StaticMode::MustAttack
+        | StaticMode::MustAttackDefender { .. }
+        | StaticMode::MustBlock
+        | StaticMode::MustBlockAttacker { .. }
+        | StaticMode::CantDraw { .. }
+        | StaticMode::DrawFromBottom { .. }
+        | StaticMode::DoubleTriggers { .. }
+        | StaticMode::IgnoreHexproof
+        | StaticMode::ExtraBlockers { .. }
+        | StaticMode::RevealTopOfLibrary { .. }
+        | StaticMode::RevealHand { .. }
+        | StaticMode::GraveyardCastPermission { .. }
+        | StaticMode::TopOfLibraryCastPermission { .. }
+        | StaticMode::TopOfLibraryHasPlot
+        | StaticMode::TopOfLibraryPlotPermission
+        | StaticMode::CastFromHandFree { .. }
+        | StaticMode::ExileCastPermission { .. }
+        | StaticMode::LinkedCollectionCounterPlayPermission
+        | StaticMode::CountersPersistAcrossZones { .. }
+        | StaticMode::CantBeCountered
+        | StaticMode::CantBeCopied
+        | StaticMode::CantEnterBattlefieldFrom
+        | StaticMode::CantCastFrom { .. }
+        | StaticMode::CantCastDuring { .. }
+        | StaticMode::CantActivateDuring { .. }
+        | StaticMode::PerTurnCastLimit { .. }
+        | StaticMode::PerTurnDrawLimit { .. }
+        | StaticMode::SuppressTriggers { .. }
+        | StaticMode::CantBeBlocked
+        | StaticMode::CantBeBlockedExceptBy { .. }
+        | StaticMode::CantBeBlockedBy { .. }
+        | StaticMode::CantBeBlockedByMoreThan { .. }
+        | StaticMode::CantBeBlockedUnlessAllBlock
+        | StaticMode::AttachmentRestriction { .. }
+        | StaticMode::Protection
+        | StaticMode::Indestructible
+        | StaticMode::CantBeDestroyed
+        | StaticMode::CantBeRegenerated
+        | StaticMode::FlashBack
+        | StaticMode::Shroud
+        | StaticMode::Hexproof
+        | StaticMode::Vigilance
+        | StaticMode::Menace
+        | StaticMode::Reach
+        | StaticMode::Flying
+        | StaticMode::Trample
+        | StaticMode::Deathtouch
+        | StaticMode::Lifelink
+        | StaticMode::CantTap
+        | StaticMode::CantUntap
+        | StaticMode::MustBeBlocked { by: None }
+        | StaticMode::MustBeBlockedByAll { blockers: None }
+        | StaticMode::Goaded
+        | StaticMode::CombatAlone { .. }
+        | StaticMode::CantCrew
+        | StaticMode::CantPhaseIn
+        | StaticMode::CrewContribution { .. }
+        | StaticMode::MayLookAtTopOfLibrary
+        | StaticMode::MayLookAtFaceDown
+        | StaticMode::CantBeTurnedFaceUp
+        | StaticMode::MayChooseNotToUntap
+        | StaticMode::AdditionalLandDrop { .. }
+        | StaticMode::EmblemStatic
+        | StaticMode::NoMaximumHandSize
+        | StaticMode::MaximumHandSize { .. }
+        | StaticMode::MayPlayAdditionalLand
+        | StaticMode::CantHaveKeyword { .. }
+        | StaticMode::CantWinTheGame
+        | StaticMode::CantLoseTheGame
+        | StaticMode::LegendRuleDoesntApply
+        | StaticMode::SpeedCanIncreaseBeyondFour
+        | StaticMode::DefilerCostReduction { .. }
+        | StaticMode::SkipStep { .. }
+        | StaticMode::SpendManaAsAnyColor { .. }
+        | StaticMode::PayLifeAsColoredMana { .. }
+        | StaticMode::StepEndUnspentMana { .. }
+        | StaticMode::UnspentManaLossCausesLifeLoss
+        | StaticMode::WinFirstCoinFlipSetEachTurn
+        | StaticMode::CanAttackWithDefender
+        | StaticMode::IgnoreLandwalkForBlocking { .. }
+        | StaticMode::CanActivateAbilitiesAsThoughHaste
+        | StaticMode::CanBlockShadow
+        | StaticMode::AssignNoCombatDamage
+        | StaticMode::UntapsDuringEachOtherPlayersUntapStep
+        | StaticMode::MaxUntapPerType { .. }
+        | StaticMode::EntersWithAdditionalCounters { .. }
+        | StaticMode::CountersCantBeRemoved { .. }
+        | StaticMode::CountsAsNamed { .. }
+        | StaticMode::Other(..) => false,
     }
 }
 
@@ -12353,21 +12512,71 @@ fn unstarted_effect_generator_is_suppressed(
 ///   `StackSpell`-filtered statics); `{keywords, controller}` reset. CR 112.2: this pass also
 ///   reseeds each stack object's controller from its `StackEntry` default.
 ///
-/// SCOPE OF THIS PREDICATE — it does NOT govern the keyword half only. Its single call site
-/// is `collect_scan_zones`' `TargetFilter::SpecificObject` arm, which picks the scan zone for
-/// EVERY identity-filtered continuous effect regardless of modification kind. That includes
-/// the `ContinuousModification::ChangeController` that `exchange_control::resolve` installs on
-/// a stolen spell, so `Zone::Stack`'s membership here is load-bearing for the CR 613.1b
-/// controller derivation and not merely for keyword grants. Narrowing this predicate would
-/// silently stop a stolen spell's control change from reaching its object.
+/// SCOPE OF THIS PREDICATE — it does NOT govern the keyword half only. It has two callers:
+/// `effects::effect::affected_object_ids`, which binds a resolution-time grant only to cards in
+/// the zones the pass does not own, and `collect_scan_zones`' `TargetFilter::SpecificObject`
+/// arm, which picks the scan zone for EVERY identity-filtered continuous effect regardless of
+/// modification kind. That includes the `ContinuousModification::ChangeController` that
+/// `exchange_control::resolve` installs on a stolen spell, so `Zone::Stack`'s membership here
+/// is load-bearing for the CR 613.1b controller derivation and not merely for keyword grants.
+/// Narrowing this predicate would silently stop a stolen spell's control change from reaching
+/// its object.
 ///
 /// Every OTHER zone (library, graveyard, exile) is owned by `off_zone_characteristics`, which
 /// computes keywords ON DEMAND from base + active effects and never materializes them.
 /// `keywords::object_has_effective_keyword_kind` is the reader that routes by exactly this
 /// split. Materializing into an off-zone object from here would install a second writer behind
 /// that authority's back.
-fn layer_pass_materializes_keywords(zone: Zone) -> bool {
+pub(crate) fn layer_pass_materializes_keywords(zone: Zone) -> bool {
     matches!(zone, Zone::Battlefield | Zone::Hand | Zone::Stack)
+}
+
+/// CR 208.1 + CR 208.2a + CR 611.3b: A normal spell can reuse its
+/// origin characteristics only if neither zone supplies a continuous change.
+/// Inspect declarations before their conditions: moving the card can change
+/// a condition's truth or start a static that functions on the stack.
+pub(super) fn cast_may_change_layer_characteristics(state: &GameState, spell: &GameObject) -> bool {
+    let can_change_source = |modification: &ContinuousModification| {
+        matches!(
+            modification,
+            ContinuousModification::CopyValues { .. }
+                | ContinuousModification::CopyChosen
+                | ContinuousModification::GrantStaticAbility { .. }
+                | ContinuousModification::ChangeController
+                | ContinuousModification::ChangeControllerToDesignation { .. }
+                | ContinuousModification::SubstituteTextWord { .. }
+        )
+    };
+    if !state.transient_continuous_effects.is_empty() {
+        return true;
+    }
+    state.objects.values().any(|source| {
+        source
+            .static_definitions
+            .as_slice()
+            .iter()
+            .chain(source.base_static_definitions.iter())
+            .any(|def| {
+                if def.mode != StaticMode::Continuous || def.modifications.is_empty() {
+                    return false;
+                }
+                if def.modifications.iter().any(can_change_source)
+                    || (source.id == spell.id
+                        && (def.characteristic_defining
+                            || def.active_zones.contains(&spell.zone)
+                            || def.active_zones.contains(&Zone::Stack)))
+                {
+                    return true;
+                }
+                let affected = static_affected_filter(def);
+                if *affected == TargetFilter::SelfRef {
+                    return false;
+                }
+                let mut zones = Vec::new();
+                collect_scan_zones(state, &affected, Some(spell.id), &mut zones);
+                zones.contains(&spell.zone) || zones.contains(&Zone::Stack)
+            })
+    })
 }
 
 /// CR 613.1: the layer system computes the characteristics of an OBJECT — not only of a
@@ -12376,7 +12585,7 @@ fn layer_pass_materializes_keywords(zone: Zone) -> bool {
 /// takes `state`: see [`collect_scan_zones`].
 fn continuous_effect_scan_zones(state: &GameState, filter: &TargetFilter) -> Vec<Zone> {
     let mut zones = Vec::new();
-    collect_scan_zones(state, filter, &mut zones);
+    collect_scan_zones(state, filter, None, &mut zones);
     if zones.is_empty() {
         zones.push(Zone::Battlefield);
     }
@@ -12393,13 +12602,19 @@ fn continuous_effect_scan_zones(state: &GameState, filter: &TargetFilter) -> Vec
 /// [`FilterProp::InAnyZone`] rather than collapsing it to the first zone. Stack
 /// filters retain their implicit `Zone::Stack` interpretation through
 /// [`TargetFilter::extract_in_zone`].
-/// `SpecificObject` resolves its recipient's actual zone from `state`.
-fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zone>) {
+/// `SpecificObject` resolves its recipient's zone from `state` or the proposed
+/// spell's destination.
+fn collect_scan_zones(
+    state: &GameState,
+    filter: &TargetFilter,
+    proposed_spell: Option<ObjectId>,
+    out: &mut Vec<Zone>,
+) {
     match filter {
         TargetFilter::Or { filters } => {
             for f in filters {
                 let mut branch_zones = Vec::new();
-                collect_scan_zones(state, f, &mut branch_zones);
+                collect_scan_zones(state, f, proposed_spell, &mut branch_zones);
                 if branch_zones.is_empty() {
                     branch_zones.push(Zone::Battlefield);
                 }
@@ -12412,10 +12627,10 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
         }
         TargetFilter::And { filters } => {
             for f in filters {
-                collect_scan_zones(state, f, out);
+                collect_scan_zones(state, f, proposed_spell, out);
             }
         }
-        TargetFilter::Not { filter } => collect_scan_zones(state, filter, out),
+        TargetFilter::Not { filter } => collect_scan_zones(state, filter, proposed_spell, out),
         // CR 613.1 + CR 611.2c: `SpecificObject` is the IDENTITY filter — it denotes exactly
         // one object, already bound at resolution time (CR 611.2c: "the set of objects it
         // affects is determined when that continuous effect begins"). It therefore carries no
@@ -12448,12 +12663,16 @@ fn collect_scan_zones(state: &GameState, filter: &TargetFilter, out: &mut Vec<Zo
         // An object that no longer exists likewise contributes no zone; the filter could not
         // match it anyway, so the effect is inert rather than misdirected.
         TargetFilter::SpecificObject { id } => {
-            if let Some(zone) = state
-                .objects
-                .get(id)
-                .map(|obj| obj.zone)
-                .filter(|zone| layer_pass_materializes_keywords(*zone))
-            {
+            let zone = if proposed_spell == Some(*id) {
+                Some(Zone::Stack)
+            } else {
+                state
+                    .objects
+                    .get(id)
+                    .map(|obj| obj.zone)
+                    .filter(|zone| layer_pass_materializes_keywords(*zone))
+            };
+            if let Some(zone) = zone {
                 if !out.contains(&zone) {
                     out.push(zone);
                 }
@@ -13315,13 +13534,17 @@ fn apply_continuous_effect_filtered(
                 obj.granted_abilities_from = Some(0);
                 obj.trigger_definitions.clear();
                 // CR 613.1f + CR 611.2c: Layer 6 removes the object's ABILITIES.
-                // A replacement created by the resolution of a spell or ability is
+                // A rule effect that a resolved spell or ability stored here as a
+                // replacement or static definition (`is_resolution_installed`) is
                 // not one of the object's abilities — and per CR 611.2c not one of
                 // its characteristics at all — so Humility does not end a
-                // prevention/regeneration shield already resolved onto this object.
+                // prevention/regeneration shield or a "can't block this turn"
+                // restriction already resolved onto this object. A granted quoted
+                // ability (CR 113.10) is an ability and is removed.
                 obj.replacement_definitions
                     .retain(|d| d.is_resolution_installed());
-                obj.static_definitions.clear();
+                obj.static_definitions
+                    .retain(|d| d.is_resolution_installed());
                 obj.clear_keywords();
                 abilities_suppressed.insert(id);
             }
@@ -13507,7 +13730,11 @@ fn apply_continuous_effect_filtered(
             // passes don't multiply the grant (mirrors the `GrantAbility` /
             // `GrantTrigger` / `AddStaticMode` idempotency invariant in this match).
             ContinuousModification::GrantStaticAbility { definition } => {
-                let granted = *definition.clone();
+                let mut granted = *definition.clone();
+                // CR 613.1f: A static ability's grant is subject to ability removal.
+                if effect.transient_id.is_none() {
+                    granted.origin = DefinitionOrigin::Characteristic;
+                }
                 if !obj.static_definitions.iter_all().any(|sd| sd == &granted) {
                     obj.static_definitions.push(granted);
                 }
@@ -13585,6 +13812,11 @@ fn apply_continuous_effect_filtered(
                 // silently drop the second caster's requirement. Full-def equality
                 // still collapses the same effect re-applied across layer passes
                 // (identical anchor), so no grant is multiplied.
+                // CR 611.2 + CR 611.2c: A transient rule effect grafted
+                // onto this object does not become one of its abilities.
+                if effect.transient_id.is_some() {
+                    def.origin = DefinitionOrigin::Resolution;
+                }
                 if !obj.static_definitions.iter_all().any(|sd| sd == &def) {
                     obj.static_definitions.push(def);
                 }
@@ -16539,14 +16771,16 @@ mod tests {
             state.objects[&land]
                 .card_types
                 .subtypes
-                .contains(&"Mountain".to_string()),
+                .iter()
+                .any(|i| i == "Mountain"),
             "reach-guard: CR 305.7 subtype replacement must have run"
         );
         assert!(
             !state.objects[&land]
                 .card_types
                 .subtypes
-                .contains(&"Desert".to_string()),
+                .iter()
+                .any(|i| i == "Desert"),
             "CR 205.3i: the old land subtype is replaced"
         );
 
@@ -16614,6 +16848,144 @@ mod tests {
         );
         assert!(live[0].is_resolution_installed());
         assert!(live[0].is_consumed, "runtime state survives Humility too");
+    }
+
+    fn install_test_static_modification(
+        state: &mut GameState,
+        recipient: ObjectId,
+        modification: ContinuousModification,
+        transient: bool,
+    ) {
+        let source = make_creature(state, "Static source", 2, 2, P0);
+        let affected = TargetFilter::SpecificObject { id: recipient };
+        if transient {
+            state.add_transient_continuous_effect(
+                source,
+                P0,
+                Duration::UntilEndOfTurn,
+                affected,
+                vec![modification],
+                None,
+            );
+        } else {
+            install_static_definition(
+                state,
+                source,
+                StaticDefinition::continuous()
+                    .affected(affected)
+                    .modifications(vec![modification]),
+            );
+        }
+        state.layers_dirty.mark_full();
+        evaluate_layers(state);
+    }
+
+    #[test]
+    fn transient_static_mode_is_resolution_installed() {
+        let mut state = setup();
+        let recipient = make_creature(&mut state, "Recipient", 2, 2, P0);
+        install_test_static_modification(
+            &mut state,
+            recipient,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBlock,
+            },
+            true,
+        );
+        // CR 611.2 + CR 611.2c: The graft represents a resolved rule effect.
+        let live = state.objects[&recipient].static_definitions.as_slice();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].mode, StaticMode::CantBlock);
+        assert_eq!(live[0].origin, DefinitionOrigin::Resolution);
+    }
+
+    #[test]
+    fn printed_static_mode_is_characteristic() {
+        let mut state = setup();
+        let recipient = make_creature(&mut state, "Recipient", 2, 2, P0);
+        install_test_static_modification(
+            &mut state,
+            recipient,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBlock,
+            },
+            false,
+        );
+        let live = state.objects[&recipient].static_definitions.as_slice();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].mode, StaticMode::CantBlock);
+        assert_eq!(live[0].origin, DefinitionOrigin::Characteristic);
+    }
+
+    // Synthetic fixture isolating the graft rules. The Promise of Loyalty
+    // integration tests exercise the resolution-origin grant through a real cast.
+    fn check_static_grant_removal(
+        inner_origin: DefinitionOrigin,
+        transient: bool,
+        expected_origin: DefinitionOrigin,
+        expected_after_removal: usize,
+    ) {
+        let mut state = setup();
+        let recipient = make_creature(&mut state, "Recipient", 2, 2, P0);
+        let mut definition =
+            StaticDefinition::new(StaticMode::CantBlock).affected(TargetFilter::SelfRef);
+        definition.origin = inner_origin;
+        install_test_static_modification(
+            &mut state,
+            recipient,
+            ContinuousModification::GrantStaticAbility {
+                definition: Box::new(definition),
+            },
+            transient,
+        );
+        let live = state.objects[&recipient].static_definitions.as_slice();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].mode, StaticMode::CantBlock);
+        assert_eq!(live[0].origin, expected_origin);
+
+        install_test_static_modification(
+            &mut state,
+            recipient,
+            ContinuousModification::RemoveAllAbilities,
+            true,
+        );
+        // CR 613.1f + CR 611.2c: A later ability removal leaves installed rule effects.
+        let live = state.objects[&recipient].static_definitions.as_slice();
+        assert_eq!(live.len(), expected_after_removal);
+        for definition in live {
+            assert_eq!(definition.mode, StaticMode::CantBlock);
+            assert_eq!(definition.origin, DefinitionOrigin::Resolution);
+        }
+    }
+
+    #[test]
+    fn printed_static_grant_cannot_install_resolution_origin() {
+        check_static_grant_removal(
+            DefinitionOrigin::Resolution,
+            false,
+            DefinitionOrigin::Characteristic,
+            0,
+        );
+    }
+
+    #[test]
+    fn transient_resolution_static_grant_survives_removal() {
+        check_static_grant_removal(
+            DefinitionOrigin::Resolution,
+            true,
+            DefinitionOrigin::Resolution,
+            1,
+        );
+    }
+
+    #[test]
+    fn transient_characteristic_static_grant_is_removed() {
+        check_static_grant_removal(
+            DefinitionOrigin::Characteristic,
+            true,
+            DefinitionOrigin::Characteristic,
+            0,
+        );
     }
 
     /// An activated ability whose effect draws `count` cards — distinct
@@ -21363,10 +21735,10 @@ mod tests {
         evaluate_layers(&mut state);
 
         let obj = state.objects.get(&shapeshifter).unwrap();
-        assert!(obj.card_types.subtypes.contains(&"Dragon".to_string()));
-        assert!(obj.card_types.subtypes.contains(&"Elf".to_string()));
-        assert!(obj.card_types.subtypes.contains(&"Human".to_string()));
-        assert!(obj.card_types.subtypes.contains(&"Wizard".to_string()));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Dragon"));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Elf"));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Human"));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Wizard"));
     }
 
     #[test]
@@ -21397,11 +21769,11 @@ mod tests {
         let obj = state.objects.get(&creature).unwrap();
         assert!(obj.has_keyword(&Keyword::Changeling));
         assert!(
-            obj.card_types.subtypes.contains(&"Beast".to_string()),
+            obj.card_types.subtypes.iter().any(|i| i == "Beast"),
             "Granted Changeling should add Beast via post-fixup"
         );
         assert!(
-            obj.card_types.subtypes.contains(&"Goblin".to_string()),
+            obj.card_types.subtypes.iter().any(|i| i == "Goblin"),
             "Granted Changeling should add Goblin via post-fixup"
         );
     }
@@ -21447,12 +21819,9 @@ mod tests {
 
         let obj = state.objects.get(&shapeshifter).unwrap();
         // All types from CDA + the explicit Shapeshifter subtype should be present
-        assert!(obj.card_types.subtypes.contains(&"Elf".to_string()));
-        assert!(obj.card_types.subtypes.contains(&"Sliver".to_string()));
-        assert!(obj
-            .card_types
-            .subtypes
-            .contains(&"Shapeshifter".to_string()));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Elf"));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Sliver"));
+        assert!(obj.card_types.subtypes.iter().any(|i| i == "Shapeshifter"));
     }
 
     #[test]
@@ -21494,7 +21863,7 @@ mod tests {
 
         let obj = state.objects.get(&land).unwrap();
         assert!(
-            obj.card_types.subtypes.contains(&"Forest".to_string()),
+            obj.card_types.subtypes.iter().any(|i| i == "Forest"),
             "Land should gain Forest subtype from chosen basic land type"
         );
     }
@@ -21574,13 +21943,11 @@ mod tests {
 
         let obj = state.objects.get(&mimic).unwrap();
         assert!(
-            obj.card_types.subtypes.contains(&"Elf".to_string()),
+            obj.card_types.subtypes.iter().any(|i| i == "Elf"),
             "Creature should gain Elf subtype from chosen creature type"
         );
         assert!(
-            obj.card_types
-                .subtypes
-                .contains(&"Shapeshifter".to_string()),
+            obj.card_types.subtypes.iter().any(|i| i == "Shapeshifter"),
             "Should retain original subtypes"
         );
     }
@@ -21643,12 +22010,12 @@ mod tests {
 
         let obj = state.objects.get(&goblin).unwrap();
         assert!(
-            obj.card_types.subtypes.contains(&"Zombie".to_string()),
+            obj.card_types.subtypes.iter().any(|i| i == "Zombie"),
             "Creature should gain the chosen Zombie subtype: {:?}",
             obj.card_types.subtypes
         );
         assert!(
-            !obj.card_types.subtypes.contains(&"Goblin".to_string()),
+            !obj.card_types.subtypes.iter().any(|i| i == "Goblin"),
             "SET form must wipe the original Goblin subtype: {:?}",
             obj.card_types.subtypes
         );
@@ -22450,7 +22817,7 @@ mod tests {
             "should still be Planeswalker"
         );
         assert!(
-            obj.card_types.subtypes.contains(&"Ninja".to_string()),
+            obj.card_types.subtypes.iter().any(|i| i == "Ninja"),
             "should have Ninja subtype"
         );
         assert!(
@@ -24852,7 +25219,7 @@ mod tests {
             }
             let host = &state.objects[&thranduil];
             assert_eq!(host.card_types.core_types, vec![CoreType::Land]);
-            assert!(host.card_types.subtypes.contains(&"Forest".to_string()));
+            assert!(host.card_types.subtypes.iter().any(|i| i == "Forest"));
             assert!(
                 host.static_definitions.is_empty(),
                 "CR 305.7: Song must remove Thranduil's printed static"
@@ -25333,11 +25700,11 @@ mod tests {
 
         let land = state.objects.get(&land_id).unwrap();
         assert!(
-            land.card_types.subtypes.contains(&"Mountain".to_string()),
+            land.card_types.subtypes.iter().any(|i| i == "Mountain"),
             "Land should have Mountain subtype"
         );
         assert!(
-            !land.card_types.subtypes.contains(&"Forest".to_string()),
+            !land.card_types.subtypes.iter().any(|i| i == "Forest"),
             "Land should no longer have Forest subtype"
         );
     }
@@ -26583,9 +26950,9 @@ mod tests {
             1,
             "CR 305.7: SetBasicLandType Mountain should grant the intrinsic red mana ability"
         );
-        assert!(land.card_types.subtypes.contains(&"Mountain".to_string()));
+        assert!(land.card_types.subtypes.iter().any(|i| i == "Mountain"));
         assert!(
-            !land.card_types.subtypes.contains(&"Desert".to_string()),
+            !land.card_types.subtypes.iter().any(|i| i == "Desert"),
             "CR 305.7: Old land subtypes should be removed"
         );
     }
@@ -26657,7 +27024,7 @@ mod tests {
 
         let creature = state.objects.get(&creature_id).unwrap();
         assert_eq!(creature.card_types.core_types, vec![CoreType::Land]);
-        assert!(creature.card_types.subtypes.contains(&"Forest".to_string()));
+        assert!(creature.card_types.subtypes.iter().any(|i| i == "Forest"));
         assert!(
             !creature
                 .abilities
@@ -26736,7 +27103,7 @@ mod tests {
 
         let creature = state.objects.get(&creature_id).unwrap();
         assert_eq!(creature.card_types.core_types, vec![CoreType::Land]);
-        assert!(creature.card_types.subtypes.contains(&"Forest".to_string()));
+        assert!(creature.card_types.subtypes.iter().any(|i| i == "Forest"));
         assert!(
             !creature
                 .abilities
@@ -26778,7 +27145,11 @@ mod tests {
 
         let host_obj = state.objects.get(&host).unwrap();
         assert_eq!(host_obj.card_types.core_types, vec![CoreType::Land]);
-        assert!(host_obj.card_types.subtypes.contains(&"Forest".to_string()));
+        assert!(host_obj
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Forest"));
         assert!(
             host_obj.trigger_definitions.is_empty(),
             "CR 305.7: printed triggers must be removed"
@@ -26856,11 +27227,11 @@ mod tests {
 
         let land = state.objects.get(&land_id).unwrap();
         assert!(
-            land.card_types.subtypes.contains(&"Island".to_string()),
+            land.card_types.subtypes.iter().any(|i| i == "Island"),
             "CR 305.7: enchanted land should gain the source's chosen Island subtype"
         );
         assert!(
-            !land.card_types.subtypes.contains(&"Swamp".to_string()),
+            !land.card_types.subtypes.iter().any(|i| i == "Swamp"),
             "CR 305.7: old land subtype should be removed"
         );
         assert!(
@@ -26929,15 +27300,15 @@ mod tests {
 
         let land = state.objects.get(&land_id).unwrap();
         assert!(
-            land.card_types.subtypes.contains(&"Mountain".to_string()),
+            land.card_types.subtypes.iter().any(|i| i == "Mountain"),
             "Should gain Mountain"
         );
         assert!(
-            land.card_types.subtypes.contains(&"Dryad".to_string()),
+            land.card_types.subtypes.iter().any(|i| i == "Dryad"),
             "CR 305.7: Creature subtypes must be preserved"
         );
         assert!(
-            !land.card_types.subtypes.contains(&"Forest".to_string()),
+            !land.card_types.subtypes.iter().any(|i| i == "Forest"),
             "Forest land subtype should be removed"
         );
         assert!(
@@ -26986,12 +27357,12 @@ mod tests {
 
         let land = state.objects.get(&land_id).unwrap();
         assert!(
-            land.card_types.subtypes.contains(&"Gate".to_string()),
+            land.card_types.subtypes.iter().any(|i| i == "Gate"),
             "Original subtype should be preserved (additive)"
         );
         for name in ["Plains", "Island", "Swamp", "Mountain", "Forest"] {
             assert!(
-                land.card_types.subtypes.contains(&name.to_string()),
+                land.card_types.subtypes.iter().any(|i| i == name),
                 "Missing basic land type: {name}"
             );
         }
@@ -27080,7 +27451,7 @@ mod tests {
         let land = state.objects.get(&land_with).unwrap();
         for name in ["Forest", "Island", "Desert", "Gate", "Locus"] {
             assert!(
-                land.card_types.subtypes.contains(&name.to_string()),
+                land.card_types.subtypes.iter().any(|i| i == name),
                 "Counter land missing land type: {name}"
             );
         }
@@ -27102,10 +27473,7 @@ mod tests {
         // Mutation check: objects WITHOUT the counter gain nothing.
         let bare_land = state.objects.get(&land_without).unwrap();
         assert!(
-            !bare_land
-                .card_types
-                .subtypes
-                .contains(&"Forest".to_string()),
+            !bare_land.card_types.subtypes.iter().any(|i| i == "Forest"),
             "Land without the counter must NOT gain land types"
         );
         assert!(
@@ -27117,7 +27485,8 @@ mod tests {
             !bare_creature
                 .card_types
                 .subtypes
-                .contains(&"Bear".to_string()),
+                .iter()
+                .any(|i| i == "Bear"),
             "Creature without the counter must NOT gain creature types"
         );
     }
@@ -31805,6 +32174,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );
@@ -37474,7 +37844,8 @@ mod declared_zone_self_static_tests {
             assert!(branch.objects[&alone]
                 .card_types
                 .subtypes
-                .contains(&"Elf".to_string()));
+                .iter()
+                .any(|i| i == "Elf"));
             assert!(branch.objects[&alone].has_keyword(&Keyword::Flying));
             assert!(!branch.remote_type_layer_recipients.contains(&alone));
         };
@@ -37484,7 +37855,8 @@ mod declared_zone_self_static_tests {
                 assert!(branch.objects[&id]
                     .card_types
                     .subtypes
-                    .contains(&"Goblin".to_string()));
+                    .iter()
+                    .any(|i| i == "Goblin"));
                 assert!(branch.remote_type_layer_recipients.contains(&id));
                 assert!(!branch.attribution[&id].by_layer.is_empty());
             }
@@ -37502,7 +37874,8 @@ mod declared_zone_self_static_tests {
                 assert!(!branch.objects[&id]
                     .card_types
                     .subtypes
-                    .contains(&"Goblin".to_string()));
+                    .iter()
+                    .any(|i| i == "Goblin"));
             }
             assert_eq!(pt_of(branch, coexist), (Some(1), Some(5)));
             assert_eq!(pt_of(branch, painted), (Some(2), Some(2)));

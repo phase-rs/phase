@@ -441,7 +441,7 @@ pub struct DeckPrintingRecord {
     /// The match's first-loaded payload's normalized rows, unchanged (round-trip names,
     /// original order); carried unclamped into later games by `load_next_game_decks`.
     rows: Vec<DeckPrinting>,
-    /// One entry per (section, face identity) the payload bound.
+    /// One entry per distinct (section, face identity, lookup key), in first-seen order.
     lookup_names: Vec<DeckFaceLookupName>,
 }
 
@@ -454,12 +454,50 @@ impl DeckPrintingRecord {
         &self.rows
     }
 
-    /// The round-trip name `section`'s rows use for `face`.
+    /// The first round-trip name the payload bound for `face` in `section`.
     pub fn lookup_name(&self, section: DeckSection, face: &CardFace) -> Option<&str> {
         self.lookup_names
             .iter()
             .find(|entry| entry.names(section, face))
             .map(|entry| entry.name.as_str())
+    }
+
+    /// The first key for `face` if no other face in `section` claims it, even as a later key.
+    /// A continuation uses only this key to select the face's registered row stream.
+    pub(crate) fn unambiguous_lookup_name(
+        &self,
+        section: DeckSection,
+        face: &CardFace,
+    ) -> Option<&str> {
+        let name = self.lookup_name(section, face)?;
+        // Hand-built resolved payloads can share a key across faces. Ingress cannot:
+        // round_trip_name depends only on the database and face.
+        let shared = self.lookup_names.iter().any(|entry| {
+            entry.section == section && entry.name == name && !entry.names(section, face)
+        });
+        (!shared).then_some(name)
+    }
+
+    /// `face`'s rows in `section`, in stream order. Both names are normalized round-trip
+    /// names (the row's by `normalize_deck_printings`, the binding's by `round_trip_name`),
+    /// never a raw face-name compare. Empty when the record binds no such face there.
+    pub(crate) fn rows_for(
+        &self,
+        section: DeckSection,
+        face: &CardFace,
+    ) -> impl Iterator<Item = &DeckPrinting> {
+        self.rows_named(section, self.lookup_name(section, face))
+    }
+
+    /// `section`'s rows under the normalized `name`, in stream order; none for `None`.
+    pub(crate) fn rows_named<'a>(
+        &'a self,
+        section: DeckSection,
+        name: Option<&'a str>,
+    ) -> impl Iterator<Item = &'a DeckPrinting> {
+        self.rows
+            .iter()
+            .filter(move |row| row.section == section && Some(row.name.as_str()) == name)
     }
 
     /// The printing of copy `ordinal` (0-based) of `face` in `section`, counting that face's
@@ -470,21 +508,15 @@ impl DeckPrintingRecord {
         face: &CardFace,
         ordinal: u32,
     ) -> Option<&CardPrinting> {
-        let name = self.lookup_name(section, face)?;
         let mut skip = ordinal;
-        // Both names are normalized round-trip names (the row's by `normalize_deck_printings`,
-        // the binding's by `round_trip_name`), never a raw face-name compare.
-        self.rows
-            .iter()
-            .filter(|row| row.section == section && row.name == name)
-            .find_map(|row| {
-                if skip < row.count {
-                    Some(&row.printing)
-                } else {
-                    skip -= row.count;
-                    None
-                }
-            })
+        self.rows_for(section, face).find_map(|row| {
+            if skip < row.count {
+                Some(&row.printing)
+            } else {
+                skip -= row.count;
+                None
+            }
+        })
     }
 }
 

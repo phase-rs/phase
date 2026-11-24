@@ -573,10 +573,27 @@ pub fn resolve(
         // set from drifting: CR 120.1 makes the subject the damage DEALER, so
         // snapshotting `TriggeringSource` for an `EventTarget` chain would
         // destroy the attacking creature instead of the one it damaged.
-        let (targets, pins) = snapshot_event_subject(state, anaphor, ability.source_id);
+        let (targets, pins) =
+            snapshot_event_subject(state, Some(ability), anaphor, ability.source_id);
         (targets, pins, Vec::new())
     } else if super::ability_refs_parent_target(&delayed_ability) {
         let mut targets = parent_target_snapshot(state, ability);
+        // CR 608.2h + CR 603.7c: the referent gate finds nothing once the
+        // creation event's subject has become a new object (CR 400.7), but the
+        // payload may still read information from it ("its owner draws a
+        // card"), which uses its last known information. Bind the subject;
+        // what may act on it is decided by the pins below.
+        let mut gate_rejected = None;
+        if targets.is_empty() {
+            if let Some(subject) = creation_subject.as_ref() {
+                targets = crate::game::targeting::admit_inferred_source_referents(
+                    state,
+                    ability,
+                    vec![TargetRef::Object(subject.id)],
+                );
+                gate_rejected = Some(subject);
+            }
+        }
         let pins_object_anaphor = super::ability_pins_object_anaphor(&delayed_ability)
             && !condition_expects_referent_move;
         // CR 603.7c + CR 400.7e: binding gate G. The creation-referent
@@ -622,7 +639,10 @@ pub fn resolve(
                             // the event made, or to its departed incarnation
                             // once that object has moved again. The source is
                             // decided by `admit_inferred_source_referents`.
-                            TargetRef::Object(id) => match bound_subject {
+                            TargetRef::Object(id) => match bound_subject.or(gate_rejected) {
+                                // CR 603.7c + CR 400.7: a subject the referent gate rejected
+                                // is pinned to its departed incarnation whatever the
+                                // condition, so no later firing affects the new object.
                                 Some(subject) if subject.id == *id && *id != ability.source_id => {
                                     Some(subject.arrival)
                                 }
@@ -872,7 +892,12 @@ pub fn resolve(
     // event-delayed triggers re-resolve their anaphors from the event that
     // actually fires them and must not be frozen here.
     if chain_names_event_subject {
-        bind_event_subject_nodes(&mut delayed_ability, state, ability.source_id);
+        bind_event_subject_nodes(
+            &mut delayed_ability,
+            state,
+            ability.source_id,
+            Some(ability),
+        );
     }
     // CR 603.7c: A delayed triggered ability that refers to information from
     // its creation event keeps that creation-time binding for later resolution.
@@ -1106,15 +1131,23 @@ fn root_payload_resumes_multi_object_move(effect: &Effect) -> bool {
 /// `DamageDealt` event moves nothing, so its recipient is pinnable.
 fn snapshot_event_subject(
     state: &GameState,
+    creating: Option<&ResolvedAbility>,
     anaphor: &TargetFilter,
     source_id: crate::types::identifiers::ObjectId,
 ) -> (
     Vec<TargetRef>,
     Vec<crate::types::identifiers::ObjectIncarnationRef>,
 ) {
-    let targets = crate::game::targeting::resolve_event_context_target(state, anaphor, source_id)
-        .map(|t| vec![t])
-        .unwrap_or_default();
+    // CR 400.7: the creating ability snapshots only a referent it can still find.
+    let targets = match creating {
+        Some(creating) => {
+            crate::game::targeting::affected_event_context_target(state, creating, anaphor)
+        }
+        // allow-raw-event-referent: no creating ability (unit-test binder); identity is pinned below
+        None => crate::game::targeting::resolve_event_context_target(state, anaphor, source_id),
+    }
+    .map(|t| vec![t])
+    .unwrap_or_default();
     let creation_event_moved_this_referent = matches!(anaphor, TargetFilter::TriggeringSource)
         && triggering_source_destination_zone(state).is_some();
     let pins = if creation_event_moved_this_referent {
@@ -1166,9 +1199,10 @@ fn bind_event_subject_nodes(
     ability: &mut ResolvedAbility,
     state: &GameState,
     source_id: crate::types::identifiers::ObjectId,
+    creating: Option<&ResolvedAbility>,
 ) {
     if let Some(node_anaphor) = super::effect_event_subject_anaphor(&ability.effect) {
-        let (targets, pins) = snapshot_event_subject(state, node_anaphor, source_id);
+        let (targets, pins) = snapshot_event_subject(state, creating, node_anaphor, source_id);
         if !targets.is_empty() {
             concretize_mass_population_event_subject(&mut ability.effect, &targets);
             ability.set_unpinned_targets(targets);
@@ -1176,7 +1210,7 @@ fn bind_event_subject_nodes(
         }
     }
     for (_, child) in ability.child_links_mut() {
-        bind_event_subject_nodes(child, state, source_id);
+        bind_event_subject_nodes(child, state, source_id, creating);
     }
 }
 
@@ -1318,16 +1352,16 @@ fn condition_uses_creation_time_provenance(condition: &DelayedTriggerCondition) 
 fn parent_target_snapshot(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetRef> {
     let referents =
         crate::game::targeting::parent_chain_referents(state, ability).unwrap_or_else(|| {
-            crate::game::targeting::resolve_event_context_target(
+            crate::game::targeting::affected_event_context_target(
                 state,
+                ability,
                 &TargetFilter::ParentTarget,
-                ability.source_id,
             )
             .or_else(|| {
-                crate::game::targeting::resolve_event_context_target(
+                crate::game::targeting::affected_event_context_target(
                     state,
+                    ability,
                     &TargetFilter::TriggeringSource,
-                    ability.source_id,
                 )
             })
             .map(|target| vec![target])
@@ -5809,7 +5843,9 @@ mod tests {
         }
 
         /// G3 — an event-delayed condition (nearest printed: Long River Lurker)
-        /// keeps today's live pin and gets no components.
+        /// gets no components. Its subject was put back before the creator
+        /// resolved, so it is pinned to its departed incarnation: a later
+        /// firing must not return the new object (CR 603.7c + CR 400.7).
         #[test]
         fn g3_event_delayed_condition_keeps_its_binding() {
             let mut fixture = fixture();
@@ -5823,7 +5859,8 @@ mod tests {
                 vec![],
             );
             assert_eq!(targets, vec![TargetRef::Object(fixture.subject)]);
-            assert_eq!(pins, vec![live(&fixture, fixture.subject)]);
+            assert_eq!(pins, vec![fixture.departed]);
+            assert!(!pins[0].is_current(&fixture.state));
         }
 
         /// G4 — a `Bounce` root (The Locust God shape) takes the arrival pin
@@ -6692,6 +6729,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );
@@ -8029,7 +8067,7 @@ mod attached_set_delayed_tests {
         );
 
         // (2) SNAPSHOTTED + (3) REBOUND by the one binder pass.
-        bind_event_subject_nodes(&mut ability, &state, attacker);
+        bind_event_subject_nodes(&mut ability, &state, attacker, None);
         assert!(
             ability.targets.contains(&TargetRef::Object(attacker)),
             "the creation snapshot records the event subject: {:?}",
@@ -8091,7 +8129,7 @@ mod attached_set_delayed_tests {
             super::super::effect_event_subject_anaphor(&ability.effect),
             None
         );
-        bind_event_subject_nodes(&mut ability, &state, attacker);
+        bind_event_subject_nodes(&mut ability, &state, attacker, None);
         assert!(ability.targets.is_empty());
     }
 

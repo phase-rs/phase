@@ -1,5 +1,6 @@
 // CR 604 / CR 613 - shared static parser grammar utilities.
 
+use super::anthem::PrintedSubject;
 use super::evasion::combine_conditions;
 use super::oracle_trigger::NthEventTimingKind;
 #[allow(unused_imports)]
@@ -776,9 +777,12 @@ pub(crate) fn parse_enchanted_equipped_predicate(
         // ("has deathtouch during your turn"). Strip it to DuringYourTurn, then
         // parse the bare keyword grant.
         let (head_predicate, turn_condition) = strip_suffix_turn_condition(head);
-        if let Some(mut primary) =
-            parse_continuous_gets_has(&head_predicate, affected.clone(), description)
-        {
+        if let Some(mut primary) = parse_continuous_gets_has(
+            &head_predicate,
+            affected.clone(),
+            description,
+            PrintedSubject::Other,
+        ) {
             // Recover the head's EFFECTIVE gating condition (CR 611.3a — the
             // companion must be the strict complement of whatever gates the head):
             //   (a) a trailing turn condition ("during your turn") stripped above
@@ -824,6 +828,7 @@ pub(crate) fn parse_enchanted_equipped_predicate(
                     continuous_tail.original,
                     affected.clone(),
                     description,
+                    PrintedSubject::Other,
                 ) {
                     // CR 611.3a + CR 613.1f: companion is the strict complement gate
                     // of the head's effective condition. Mutually exclusive so the
@@ -1242,9 +1247,12 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     if let Some((before_cond, after_cond)) = pred_tp.split_around_outside_quotes(" as long as ") {
         let continuous_text = before_cond.original;
         let condition_text = after_cond.original.trim().trim_end_matches('.');
-        if let Some(mut def) =
-            parse_continuous_gets_has(continuous_text, affected.clone(), description)
-        {
+        if let Some(mut def) = parse_continuous_gets_has(
+            continuous_text,
+            affected.clone(),
+            description,
+            PrintedSubject::Other,
+        ) {
             let condition = parse_attached_static_condition(condition_text).unwrap_or(
                 StaticCondition::Unrecognized {
                     text: condition_text.to_string(),
@@ -1282,9 +1290,12 @@ pub(crate) fn parse_enchanted_equipped_predicate(
         // attach any trailing `suffix_condition` (Heroic Defiance: "gets +3/+3
         // unless it shares a color with the most common color among all
         // permanents"), rather than parsing the whole predicate and dropping it.
-        if let Some(mut def) =
-            parse_continuous_gets_has(body_tp.original, affected.clone(), description)
-        {
+        if let Some(mut def) = parse_continuous_gets_has(
+            body_tp.original,
+            affected.clone(),
+            description,
+            PrintedSubject::Other,
+        ) {
             if let Some(condition) = &suffix_condition {
                 // Same enforcement-point bar as the evasion branches above: a
                 // CR 118.12a payment gate on a `Continuous` grant has no prompt
@@ -1782,19 +1793,9 @@ pub(crate) fn parse_quoted_rule_static_modifications(
         return None;
     }
 
-    // CR 113.3d + CR 604.1: A quoted static ability is granted to the recipient
-    // verbatim. If `parse_static_line_multi` produces nothing, the inner text
-    // isn't a recognized static — fall through to the spell-like `GrantAbility`
-    // path. Otherwise, emit one `ContinuousModification` per inner static:
-    //   - `affected == Some(SelfRef)` with no condition / no layered modifications
-    //     stays on the existing `AddStaticMode` path (the trivial recipient-anchored
-    //     case — e.g. "can't be blocked", "must attack each combat").
-    //   - Everything else (non-SelfRef scope, conditional, or carrying layered
-    //     P/T / keyword modifications — e.g. Dancer's Chakrams' inner clause
-    //     "Other commanders you control get +2/+2 and have lifelink") emits
-    //     `GrantStaticAbility` so the inner static's scope, condition, and
-    //     modifications are preserved verbatim on the recipient (CR 611.2c +
-    //     CR 613.1f).
+    // CR 113.10 + CR 113.3d: Grant each parsed static ability in order and
+    // preserve its full definition, including its functioning zones and scope.
+    // Unrecognized static text falls through to the other quote classifiers.
     //
     // Trailing punctuation: the host clause leaves the inner text bookended
     // by a list comma or period (e.g. `..., "Other commanders you control get
@@ -1807,19 +1808,8 @@ pub(crate) fn parse_quoted_rule_static_modifications(
     }
     let modifications: Vec<_> = defs
         .into_iter()
-        .map(|definition| {
-            if definition.affected == Some(TargetFilter::SelfRef)
-                && definition.condition.is_none()
-                && definition.modifications.is_empty()
-            {
-                ContinuousModification::AddStaticMode {
-                    mode: definition.mode,
-                }
-            } else {
-                ContinuousModification::GrantStaticAbility {
-                    definition: Box::new(definition),
-                }
-            }
+        .map(|definition| ContinuousModification::GrantStaticAbility {
+            definition: Box::new(definition),
         })
         .collect();
     Some(modifications)
@@ -3071,7 +3061,13 @@ mod tests {
         // no conjunct, so the peel declines.
         let blowgun = "has reach.";
         assert!(
-            parse_continuous_gets_has(blowgun, affected.clone(), blowgun).is_some(),
+            parse_continuous_gets_has(
+                blowgun,
+                affected.clone(),
+                blowgun,
+                super::PrintedSubject::Other
+            )
+            .is_some(),
             "reach guard: the tail is a live continuous tail"
         );
         assert!(split_trailing_restriction_conjunct(&TextPair::new(blowgun, blowgun)).is_none());

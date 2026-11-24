@@ -319,8 +319,8 @@ mod tests {
 
         let expired = mgr.check_expired();
         assert_eq!(expired.len(), 2);
-        assert!(expired.contains(&"GAME01".to_string()));
-        assert!(expired.contains(&"GAME02".to_string()));
+        assert!(expired.iter().any(|i| i == "GAME01"));
+        assert!(expired.iter().any(|i| i == "GAME02"));
     }
 
     #[test]
@@ -350,8 +350,8 @@ mod tests {
         let expired = mgr.check_expired();
 
         assert_eq!(expired.len(), 2, "one entry per game, got {expired:?}");
-        assert!(expired.contains(&"GAME01".to_string()));
-        assert!(expired.contains(&"GAME02".to_string()));
+        assert!(expired.iter().any(|i| i == "GAME01"));
+        assert!(expired.iter().any(|i| i == "GAME02"));
         // Collapsing the report must not collapse the records: the unreported
         // seats are what a later tick re-reports if this one cannot act.
         assert!(mgr.is_disconnected("GAME01", PlayerId(1)));

@@ -191,19 +191,19 @@ fn glasspool_mimic_copy_target_choice_does_not_survive_a_return_to_hand() {
     // copied Merfolk, missing both Shapeshifter and Rogue.
     let live_subtypes = &runner.state().objects[&mimic].card_types.subtypes;
     assert!(
-        live_subtypes.contains(&"Shapeshifter".to_string()),
+        live_subtypes.iter().any(|i| i == "Shapeshifter"),
         "expected Shapeshifter as its own subtype, got {live_subtypes:?}"
     );
     assert!(
-        live_subtypes.contains(&"Rogue".to_string()),
+        live_subtypes.iter().any(|i| i == "Rogue"),
         "expected Rogue as its own subtype, got {live_subtypes:?}"
     );
     assert!(
-        !live_subtypes.contains(&"Shapeshifter Rogue".to_string()),
+        !live_subtypes.iter().any(|i| i == "Shapeshifter Rogue"),
         "must not fabricate a single \"Shapeshifter Rogue\" subtype, got {live_subtypes:?}"
     );
     assert!(
-        live_subtypes.contains(&"Merfolk".to_string()),
+        live_subtypes.iter().any(|i| i == "Merfolk"),
         "CR 205.1b: the copy must retain the copied creature's own subtypes, got {live_subtypes:?}"
     );
 
