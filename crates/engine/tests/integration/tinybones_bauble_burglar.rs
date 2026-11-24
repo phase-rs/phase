@@ -398,22 +398,23 @@ fn stage_lara_class_grant(runner: &mut GameRunner, id: ObjectId) {
         });
 }
 
-/// V-cast-spell (elected-authority hostile, CR 118.14): a stashed card covered
-/// by BOTH a concession-free object grant (Lara class) and Tinybones's static
-/// commits through the static path — the stack entry carries
-/// `CastingVariant::ExilePermission { tinybones, Unlimited }`, so payment reads
-/// the elected static's concession, not a rescan. No `CastingVariantChoice` is
-/// forced: object grants are not cast candidates, so the engine never prompts
-/// between the two authorities and the election is observed on the committed
-/// spell instead. Funding is exact on-color {1}{B} (pool drained exactly):
-/// off-color funding cannot drive this overlap because the variant-blind
-/// pre-announcement feasibility check prices the static option under the
-/// grant's concession-free terms and drops it before election — the sibling
-/// payment test proves the concession's off-color breadth through the
-/// sole-authority route. The no-Tinybones runner below proves the authorities
-/// differ (the object path alone cannot pay off-color).
+/// V-cast-spell (elected-authority hostile): a stashed card covered by BOTH a
+/// concession-free object grant (Lara class) and Tinybones's static commits
+/// through the static path — the stack entry carries
+/// `CastingVariant::ExilePermission { tinybones, Unlimited }`. This test proves
+/// authority SELECTION only, plus ordinary payment of the on-color cost: the
+/// exact {1}{B} funding is payable under either authority's terms, so success
+/// cannot establish that payment consulted the static's concession. No
+/// `CastingVariantChoice` is forced: object grants are not cast candidates, so
+/// the engine never prompts between the two authorities and the election is
+/// observed on the committed spell instead. Off-color funding cannot drive this
+/// overlap because the variant-blind pre-announcement feasibility check prices
+/// the static option under the grant's concession-free terms and drops it
+/// before election — the sibling payment test proves the concession's off-color
+/// breadth through the sole-authority route. The no-Tinybones runner below
+/// proves the authorities differ (the object path alone cannot pay off-color).
 #[test]
-fn tinybones_elected_static_authority_pays_under_its_concession() {
+fn tinybones_elected_static_authority_selection_under_overlap() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let tinybones = scenario
@@ -454,7 +455,7 @@ fn tinybones_elected_static_authority_pays_under_its_concession() {
     assert_eq!(
         zone(&runner, contested),
         Zone::Graveyard,
-        "the ExilePermission election path must pay under its concession"
+        "the elected static path must complete ordinary payment of the on-color cost"
     );
     assert!(pool_is_empty(&runner, P0));
     assert_priority_empty_stack(&runner);
