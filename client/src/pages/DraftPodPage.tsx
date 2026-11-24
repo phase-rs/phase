@@ -140,7 +140,7 @@ function usePodErrorMessage(error: string | null): string | null {
           : error;
 }
 
-/** What a failed host recovery shows: its message, and whether a retry can succeed. */
+/** What a failed host recovery shows: its message, and whether it offers a retry. */
 function hostRecoveryFailurePresentation(kind: HostedPodRecoveryFailure["kind"]): {
   messageKey: "podError.incompatible" | "podError.unreadable" | "podError.connection";
   offersRetry: boolean;

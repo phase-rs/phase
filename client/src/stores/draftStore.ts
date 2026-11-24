@@ -1216,15 +1216,22 @@ async function resolveLocalFifoLlmSeat(
       break;
   }
   if (stale()) return;
+  // A seat whose call returned no reply has had its one game-log line, from
+  // the failed call or the unbuildable request, and the provider reported no
+  // usage for it.
+  const answered = entry.kind === "request" && reply !== null
+    ? {
+      reply: { fingerprint: entry.fingerprint, provider: profile.provider, status: reply.status, body: reply.body },
+      promptChars: entry.promptChars,
+    }
+    : null;
   let resolved: { view: DraftPlayerView; llmOutcome: LlmDraftOutcome };
   try {
     resolved = await withDraftEngineOperation((lease) => {
       if (stale()) throw new Error("Stale LLM drafter reply");
       return lease.localFifoResolveLlmPick(llm.owner, {
         promptId: entry.promptId,
-        reply: entry.kind === "request" && reply !== null
-          ? { fingerprint: entry.fingerprint, provider: profile.provider, status: reply.status, body: reply.body }
-          : null,
+        reply: answered?.reply ?? null,
       }, Date.now());
     });
   } catch (error) {
@@ -1238,8 +1245,11 @@ async function resolveLocalFifoLlmSeat(
   }
   if (stale()) return;
   const { view, llmOutcome } = resolved;
-  reportLlmDraftOutcomes([llmOutcome]);
-  recordLlmDraftSeatUsage(llmOutcome, entry.kind === "request" ? entry.promptChars : undefined);
+  // As in the barrier round, only a reply that came back is reported and counted.
+  if (answered !== null) {
+    reportLlmDraftOutcomes([llmOutcome]);
+    recordLlmDraftSeatUsage(llmOutcome, answered.promptChars);
+  }
   llm.inFlight.delete(entry.seat);
   llm.statuses.set(entry.seat, llmOutcome.used ? "ready" : "fallback");
   publishLocalFifoLlmStatuses(llm);

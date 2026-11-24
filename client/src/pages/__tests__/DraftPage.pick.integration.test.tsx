@@ -128,10 +128,10 @@ function fifoRecord(effects: FifoEffectOptions | null = null): FifoPlayerView {
 
 /**
  * Seat 0's view of a started local FIFO draft: a literal that passes the
- * client's FIFO wire check. Every answer keeps the started prompt, so the
- * page's interaction generation stays where the start put it.
+ * client's FIFO wire check. It keeps the started prompt unless `fifo` replaces
+ * part of the record, as the engine's answer to an accepted selection does.
  */
-function view({ pool = [], pack = [card("picked")], effects = null }: { pool?: DraftCardInstance[]; pack?: DraftCardInstance[]; effects?: FifoEffectOptions | null } = {}): DraftPlayerView {
+function view({ pool = [], pack = [card("picked")], effects = null, fifo = {} }: { pool?: DraftCardInstance[]; pack?: DraftCardInstance[]; effects?: FifoEffectOptions | null; fifo?: Partial<FifoPlayerView> } = {}): DraftPlayerView {
   return {
     status: "Drafting", kind: "Quick", launch_capability: "None", distribution: "PickAndPass", commanders_required: 0, pool, current_pack: pack, draft_effects: [],
     pool_groups: {
@@ -146,8 +146,17 @@ function view({ pool = [], pack = [card("picked")], effects = null }: { pool?: D
     timer_remaining_ms: null, standings: [], current_round: 0, next_pairing_round: 1, tournament_format: "Swiss",
     pod_policy: "Casual", pairings: [], match_config: { match_type: "Bo1" },
     flow: "FifoAsync",
-    fifo: fifoRecord(effects),
+    fifo: { ...fifoRecord(effects), ...fifo },
   } as DraftPlayerView;
+}
+
+/**
+ * The engine's answer to an accepted selection that empties seat 0's queue:
+ * the head pack passed on with no pack behind it, so draft-core clears the
+ * prompt, and the record holds no head and no prompt.
+ */
+function drained(pool: DraftCardInstance[]): DraftPlayerView {
+  return view({ pool, pack: [], fifo: { queue_count: 0, head: null, prompt_id: null } });
 }
 
 /** The selection the store sent the local FIFO runtime on its `call`th select. */
@@ -239,9 +248,18 @@ describe("DraftPage production pick integration", () => {
     expect(useDraftStore.getState()).toMatchObject({ pickInteractionLocked: true });
     expect(useDraftStore.getState().workspaceState?.placements.picked).toBeUndefined();
 
-    await act(async () => result.resolve(view({ pool: [card("picked")], pack: [] })));
+    await act(async () => result.resolve(drained([card("picked")])));
     await waitFor(() => expect(useDraftStore.getState().workspaceState?.placements.picked).toMatchObject({ zone: "sideboard", column: 0 }));
-    expect(document.querySelector('[data-instance-id="picked"][data-visual-state="leaving"]')).not.toBeNull();
+    // The engine cleared the prompt with the drained queue, and the pack
+    // surface cleared the departing card with it: the page announces the pick
+    // and waits for the next pack.
+    expect(useDraftStore.getState()).toMatchObject({
+      interactionGenerationCause: "accepted-selection", pickInteractionLocked: false, pendingPickIntent: null,
+    });
+    expect(await screen.findByText("Picked picked.")).toBeInTheDocument();
+    expect(screen.getByText("Waiting for next pack...")).toBeInTheDocument();
+    expect(document.querySelector('[data-instance-id="picked"]')).toBeNull();
+    expect(document.querySelector('[data-visual-state="failure-restored"]')).toBeNull();
   });
 
   it("settles_a_drag_whose_accepted_selection_advances_the_prompt_as_picked", async () => {
@@ -330,7 +348,7 @@ describe("DraftPage production pick integration", () => {
     expect(useDraftStore.getState().view).toBe(viewBefore);
     expect(useDraftStore.getState()).toMatchObject({ phase: "drafting", pickInteractionLocked: false, pendingPickIntent: null });
 
-    wasm.local_fifo_select.mockReturnValue(view({ pool: [card("picked")], pack: [] }));
+    wasm.local_fifo_select.mockReturnValue(drained([card("picked")]));
     const { source, target, release } = prepareDrag();
     dragToTarget(source, target);
     await waitFor(() => expect(wasm.local_fifo_select).toHaveBeenCalledOnce());
@@ -420,7 +438,7 @@ describe("DraftPage production pick integration", () => {
     await renderDraft();
     wasm.local_fifo_select.mockImplementation(() => {
       useDraftStore.getState().reset();
-      return view({ pool: [card("picked")], pack: [] });
+      return drained([card("picked")]);
     });
     const { source, target, release } = prepareDrag();
 
@@ -449,7 +467,7 @@ describe("DraftPage production pick integration", () => {
     expect(replacementGeneration).toBeGreaterThan(oldGeneration);
     expect(useDraftStore.getState()).toMatchObject({ workspaceState: null, pickInteractionLocked: false, pendingPickIntent: null });
 
-    await act(async () => oldResult.resolve(view({ pool: [card("picked")], pack: [] })));
+    await act(async () => oldResult.resolve(drained([card("picked")])));
     expect(release).toHaveBeenCalledTimes(1);
     expect(useDraftStore.getState()).toMatchObject({ interactionGeneration: replacementGeneration, pickInteractionLocked: false, pendingPickIntent: null });
     expect(useDraftStore.getState().workspaceState).toBeNull();

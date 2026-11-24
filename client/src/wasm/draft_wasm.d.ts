@@ -275,12 +275,12 @@ export function local_fifo_build_llm_requests(owner: number, endpoint_json: stri
  * `resolution_json`: `{ promptId, reply }`, with the prompt id the request
  * carried and `reply` the provider's `{ fingerprint, provider, status, body }`,
  * or `null` when no reply came back. It names no seat: the seat is the
- * prompt's, and a seat that is not an LLM seat holding a live prompt is
- * refused with no change. The engine alone decides whether the reply is used:
- * only on the seat's live prompt, against the pack the request was built
- * over, when it decodes to a selection the engine accepts. Otherwise the
- * engine bot drafts that seat's live head. Returns `{ view, llmOutcome }`:
- * seat 0's view and what happened to the reply.
+ * prompt's. A seat that is not an LLM seat holding a live prompt, or a prompt
+ * that is not that seat's live prompt, is refused with no change. The engine
+ * alone decides whether a reply to the live prompt is used: against the pack
+ * the request was built over, when it decodes to a selection the engine
+ * accepts. Otherwise the engine bot drafts that seat's live head. Returns
+ * `{ view, llmOutcome }`: seat 0's view and what happened to the reply.
  */
 export function local_fifo_resolve_llm_pick(owner: number, resolution_json: string, now_ms: bigint): any;
 
@@ -587,8 +587,8 @@ export interface InitOutput {
     readonly suggest_deck: () => [number, number, number];
     readonly suggest_lands: (a: number, b: number) => [number, number, number];
     readonly suggest_lands_for_seat: (a: number, b: number, c: number) => [number, number, number];
-    readonly init_panic_hook: () => void;
     readonly llmProviderCatalog: () => any;
+    readonly init_panic_hook: () => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;

@@ -3305,8 +3305,10 @@ fn import_local_fifo_session_inner(json: &str, difficulty: u8) -> Result<LocalFi
 // Under `LocalLlmDrafting::LlmSeats` the bot batch leaves each LLM seat's
 // choice head for that seat's own drafter. The caller builds the requests for
 // those heads in one call, runs each provider call with no engine call open,
-// and hands each reply back in a later call, where the engine binds it to the
-// seat's live head or falls back to the engine bot for that seat alone.
+// and hands each reply back in a later call. The engine refuses a reply to a
+// prompt that is no longer the seat's live prompt; otherwise it binds the
+// reply to the seat's live head or falls back to the engine bot for that seat
+// alone.
 
 /// One held head's LLM request, or why none could be built for it. Every held
 /// head is listed, so no head waits on a request that was never sent.
@@ -3498,12 +3500,12 @@ fn local_fifo_build_llm_requests_inner(
 /// `resolution_json`: `{ promptId, reply }`, with the prompt id the request
 /// carried and `reply` the provider's `{ fingerprint, provider, status, body }`,
 /// or `null` when no reply came back. It names no seat: the seat is the
-/// prompt's, and a seat that is not an LLM seat holding a live prompt is
-/// refused with no change. The engine alone decides whether the reply is used:
-/// only on the seat's live prompt, against the pack the request was built
-/// over, when it decodes to a selection the engine accepts. Otherwise the
-/// engine bot drafts that seat's live head. Returns `{ view, llmOutcome }`:
-/// seat 0's view and what happened to the reply.
+/// prompt's. A seat that is not an LLM seat holding a live prompt, or a prompt
+/// that is not that seat's live prompt, is refused with no change. The engine
+/// alone decides whether a reply to the live prompt is used: against the pack
+/// the request was built over, when it decodes to a selection the engine
+/// accepts. Otherwise the engine bot drafts that seat's live head. Returns
+/// `{ view, llmOutcome }`: seat 0's view and what happened to the reply.
 #[wasm_bindgen]
 pub fn local_fifo_resolve_llm_pick(
     owner: u32,
@@ -3541,6 +3543,15 @@ fn local_fifo_resolve_llm_pick_inner(
         let Some(live) = view.fifo.as_ref().and_then(|fifo| fifo.prompt_id.clone()) else {
             return Err(NOT_AN_LLM_HEAD.to_string());
         };
+        // The reply answers the prompt its request carried. A prompt that is
+        // no longer the seat's live prompt is refused with no change, as
+        // `local_fifo_select` and `local_fifo_auto_select` refuse one.
+        if resolution.prompt_id != live {
+            return Err(format!(
+                "LLM resolution refused: {}",
+                DraftError::StalePrompt
+            ));
+        }
         let usage = resolution.reply.as_ref().and_then(|reply| {
             phase_llm::token_usage(
                 phase_llm::LlmProvider::from_label(&reply.provider),
@@ -3608,11 +3619,11 @@ fn local_fifo_resolve_llm_pick_inner(
 }
 
 /// The selection an LLM seat's reply makes on that seat's live head, with the
-/// model's stated reason, or why it makes none: no reply, a reply for a prompt
-/// that is not live, or a reply that does not bind to the pack the request was
-/// built over. The burns follow the engine's published requirements by the
-/// same rule as the engine bot's ([`fifo_burns`]), and an LLM selection spends
-/// no draft-effect card.
+/// model's stated reason, or why it makes none: no reply, or a reply that does
+/// not bind to the pack the request was built over. The caller has already
+/// refused a resolution for any other prompt. The burns follow the engine's
+/// published requirements by the same rule as the engine bot's
+/// ([`fifo_burns`]), and an LLM selection spends no draft-effect card.
 fn local_llm_selection(
     view: &DraftPlayerView,
     live: &DraftPromptId,
@@ -3624,9 +3635,6 @@ fn local_llm_selection(
         .reply
         .as_ref()
         .ok_or_else(|| NO_LLM_REPLY.to_string())?;
-    if resolution.prompt_id != *live {
-        return Err(stale());
-    }
     let requirements = view.fifo.as_ref().ok_or_else(stale)?.requirements;
     let (pack, required) = match phase_llm::draft_decision::draft_pick_step(view) {
         phase_llm::draft_decision::DraftPickStep::Choice { pack, required } => (pack, required),
@@ -9705,8 +9713,12 @@ mod local_fifo_runtime_tests {
         reset();
     }
 
+    /// A resolution answers the prompt its request carried. One whose prompt is
+    /// not the seat's live prompt is refused with no change, as the human's
+    /// prompt-bound selections refuse a stale prompt, with or without a reply:
+    /// the engine bot does not draft the seat's live head in its place.
     #[test]
-    fn a_reply_for_a_prompt_that_is_not_live_falls_back_for_that_seat_only() {
+    fn a_resolution_for_a_prompt_that_is_not_live_is_refused_with_no_change() {
         reset();
         let local = start_llm(3, 0);
         let session = installed();
@@ -9715,47 +9727,89 @@ mod local_fifo_runtime_tests {
         let bot_choice = engine_bot_choice(&view, 1);
         let choice = option_other_than(&projected, &bot_choice);
         let fingerprint = phase_llm::pick_fingerprint(1, &projected);
-        // Reach: on the live projection this fingerprint and body decode to
-        // the model's card, so only the prompt can refuse the reply.
-        let decoded = phase_llm::select_picks_from_response(
-            1,
-            &projected,
-            1,
-            &fingerprint,
-            (None, DIFFICULTY.with(Cell::get)),
-            phase_llm::LlmReply {
-                provider: phase_llm::LlmProvider::from_label("OpenAiCompatible"),
-                status: 200,
-                body: &reply_choosing(choice),
+        let live = live_prompt(&view);
+        let not_live = [
+            DraftPromptId {
+                generation: live
+                    .generation
+                    .checked_sub(1)
+                    .expect("reach: the live prompt has an earlier generation"),
+                ..live.clone()
             },
+            DraftPromptId {
+                generation: live.generation + 1,
+                ..live.clone()
+            },
+            DraftPromptId {
+                session_id: DraftSessionId("local-another-session".to_string()),
+                ..live.clone()
+            },
+        ];
+
+        let before = guard_cells_snapshot();
+        for prompt in &not_live {
+            for sent in [Some(reply(&fingerprint, 200, reply_choosing(choice))), None] {
+                let label = format!("{prompt:?}, reply sent: {}", sent.is_some());
+                let error = local_fifo_resolve_llm_pick_inner(
+                    local.owner,
+                    &resolution_json(prompt, sent),
+                    2_000,
+                )
+                .expect_err(&label);
+                assert!(error.contains("stale draft prompt"), "{label}: {error}");
+                assert_eq!(guard_cells_snapshot(), before, "{label}");
+            }
+        }
+
+        // Paired positive: the same reply on the live prompt drafts the
+        // model's card, so only the prompt refused it above.
+        let (_, outcome) = local_fifo_resolve_llm_pick_inner(
+            local.owner,
+            &resolution_json(
+                &live,
+                Some(reply(&fingerprint, 200, reply_choosing(choice))),
+            ),
+            3_000,
         )
-        .expect("the reply decodes on the live projection");
+        .expect("the live prompt resolves");
+        assert!(outcome.used, "{:?}", outcome.error);
         assert_eq!(
-            decoded.card_instance_ids,
+            ids(&installed().pools[1]),
             vec![projected[choice].instance_id.clone()]
         );
+        reset();
+    }
 
-        let live = live_prompt(&view);
-        let not_live = DraftPromptId {
-            generation: live.generation + 1,
-            ..live
-        };
+    /// A reply to the live prompt that does not decode leaves that seat's
+    /// head to the engine bot, as a missing or refused reply does.
+    #[test]
+    fn an_undecodable_reply_to_the_live_prompt_falls_back() {
+        reset();
+        let local = start_llm(3, 0);
+        let session = installed();
+        let view = filter_for_player(&session, 1);
+        let bot_choice = engine_bot_choice(&view, 1);
+        let fingerprint = phase_llm::pick_fingerprint(1, &projected_head(&view));
         let payload = resolution_json(
-            &not_live,
-            Some(reply(&fingerprint, 200, reply_choosing(choice))),
+            &live_prompt(&view),
+            Some(reply(
+                &fingerprint,
+                200,
+                "not a chat completion".to_string(),
+            )),
         );
         let (_, outcome) = local_fifo_resolve_llm_pick_inner(local.owner, &payload, 2_000)
-            .expect("a reply for a prompt that is not live falls back");
+            .expect("an undecodable reply to the live prompt falls back");
         assert!(!outcome.used);
-        assert_eq!(
-            outcome.error,
-            Some(phase_llm::LlmError::StaleDecision.to_string())
+        let error = outcome.error.expect("the outcome says why");
+        assert_ne!(
+            error,
+            phase_llm::LlmError::StaleDecision.to_string(),
+            "reach: the reply binds to the live pack, so only its body fails"
         );
         let after = installed();
+        assert_eq!(steps(&after, 1), 1);
         assert_eq!(ids(&after.pools[1]), vec![bot_choice]);
-        for seat in 2..8 {
-            assert_eq!(steps(&after, seat), steps(&session, seat), "seat {seat}");
-        }
         reset();
     }
 

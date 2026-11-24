@@ -14,8 +14,8 @@ export default defineConfig({
   forbidOnly: Boolean(process.env.CI),
   retries: 0,
   workers: 1,
-  // The debug-profile engines are large and unoptimized; a slow runner needs
-  // room to fetch and compile them before the first draft view.
+  // The wasm-dev engines (opt-level 2, but no LTO or wasm-opt) are large; a slow
+  // runner needs room to fetch and compile them before the first draft view.
   timeout: 120_000,
   expect: { timeout: 15_000 },
   reporter: process.env.CI ? [["list"], ["github"]] : "list",

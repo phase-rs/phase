@@ -5,7 +5,12 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useConnectivityStore } from "../../stores/connectivityStore";
-import { DRAFT_OFFLINE_ERROR } from "../../stores/multiplayerDraftStore";
+import {
+  DRAFT_OFFLINE_ERROR,
+  DRAFT_RECOVERY_CONNECTION_ERROR,
+  DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
+  DRAFT_RECOVERY_UNREADABLE_ERROR,
+} from "../../stores/multiplayerDraftStore";
 
 const mocks = vi.hoisted(() => ({
   leave: vi.fn(async () => {}),
@@ -333,9 +338,9 @@ describe("DraftPodPage offline admission", () => {
   });
 
   const hostRecoveryKeys = [
-    ["podError.incompatible", "This draft is incompatible with your protocol version."],
-    ["podError.connection", "Connection Error"],
-    ["podError.unreadable", "This saved draft cannot be read, so it cannot be resumed."],
+    [DRAFT_RECOVERY_INCOMPATIBLE_ERROR, "This draft is incompatible with your protocol version."],
+    [DRAFT_RECOVERY_CONNECTION_ERROR, "Connection Error"],
+    [DRAFT_RECOVERY_UNREADABLE_ERROR, "This saved draft cannot be read, so it cannot be resumed."],
   ] as const;
 
   it.each(hostRecoveryKeys)("translates the stored %s key on the host form", (key, text) => {

@@ -885,6 +885,58 @@ describe("LLM seats on a local FIFO draft", () => {
     expect(gameLog()).not.toContain("Invalid LLM endpoint config");
   });
 
+  it.each([
+    {
+      seatOutcome: "a_call_that_failed",
+      head: () => seatRequest(1, 3),
+      replies: false,
+      line: "LLM drafter (seat 1) failed",
+      usage: { calls: 0, promptChars: 0 },
+    },
+    {
+      seatOutcome: "a_head_with_no_buildable_request",
+      head: () => unbuildable(1, 3),
+      replies: false,
+      line: "LLM drafter (seat 1) unavailable",
+      usage: { calls: 0, promptChars: 0 },
+    },
+    {
+      seatOutcome: "a_reply_the_engine_did_not_use",
+      head: () => seatRequest(1, 3),
+      replies: true,
+      line: "LLM drafter (seat 1) fell back to the engine bot",
+      usage: { calls: 1, promptChars: 1001 },
+    },
+  ])("logs_one_line_and_counts_only_a_returned_reply_for_$seatOutcome", async ({ head, replies, line, usage }) => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    if (replies) transport.executeLlmRequest.mockResolvedValue({ status: 200, body: "{}" });
+    else transport.executeLlmRequest.mockRejectedValue(new Error("network down"));
+    answerHeadsUntilResolved([head()]);
+    wasm.local_fifo_resolve_llm_pick.mockImplementation(() => ({
+      view: fifoView({ revision: nextRevision++ }),
+      llmOutcome: {
+        seat: 1,
+        used: false,
+        error: replies ? "LLM selection refused: stale draft prompt" : "the LLM drafter returned no reply",
+      },
+    }));
+
+    await resumeFifo();
+    await vi.waitFor(() => {
+      expect(useDraftStore.getState().llmDrafters).toEqual([{ seat: 1, state: "fallback" }]);
+    });
+
+    // Reach: the engine resolved the seat, with the reply only when one came back.
+    expect(wasm.local_fifo_resolve_llm_pick).toHaveBeenCalledOnce();
+    expect(resolution(0).reply === null).toBe(!replies);
+    const drafterLines = debugLogMock.debugLog.mock.calls
+      .map((call) => String(call[0]))
+      .filter((summary) => summary.startsWith("LLM drafter"));
+    expect(drafterLines).toEqual([line]);
+    expect(llmUsageTotals("draft")).toMatchObject(usage);
+  });
+
   it("cuts_a_drafters_call_loose_when_the_draft_is_replaced", async () => {
     const provider = hangProvider();
     answerHeadsUntilResolved([seatRequest(1, 3)]);
