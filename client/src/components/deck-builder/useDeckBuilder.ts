@@ -6,7 +6,7 @@ import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useAppNotificationStore } from "../../stores/appToastStore";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
 import { resolveCommander } from "../../services/commanderResolution";
-import { addOneCopy, countDeckEntriesByName, deckEntryKey, deduplicateEntries, expandParsedDeck, removeOneCopy } from "../../services/deckParser";
+import { addOneCopy, countDeckEntriesByName, deckEntryKey, deduplicateEntries, expandParsedDeck, removeOneCopy, repairParsedDeck } from "../../services/deckParser";
 import { evaluateDeckCompatibility, type DeckCompatibilityResult } from "../../services/deckCompatibility";
 import {
   STORAGE_KEY_PREFIX,
@@ -147,12 +147,6 @@ export function useDeckBuilder({
   }, []);
   // Bumped whenever the editor switches to another deck: a Load, or a Clone that opens its copy.
   const deckIdentityRevision = useRef(0);
-  // A pending Load yields to deck switches outside handleLoad.
-  const nonLoadIdentityRevision = useRef(0);
-  // Tickets preserve the order in which Load calls start.
-  const loadTickets = useRef(0);
-  // Only Loads whose targets exist can advance this ticket.
-  const latestProceedingLoad = useRef(0);
   interface EditorCapture {
     identity: number;
     edit: number;
@@ -558,7 +552,7 @@ export function useDeckBuilder({
     setComboDeclaration(next);
   }, [comboDeclaration, markDirty]);
 
-  const applyDeckToEditor = useCallback((next: ParsedDeck, targetFormat: GameFormat = format) => {
+  const projectDeckToEditor = useCallback((next: ParsedDeck, targetFormat: GameFormat) => {
     const projected = projectSignatureSpellForFormat(next, targetFormat);
     // This editor's companion slot is the commander family's (CommanderPanel).
     const targetHasDedicatedSlot =
@@ -577,8 +571,12 @@ export function useDeckBuilder({
       companion: companionInDedicatedSlot,
     });
     setCommanders(projected.commander ?? []);
-    if (projected.commander?.length && !isCommander) onFormatChange("Commander");
-  }, [format, isCommander, onFormatChange]);
+  }, []);
+
+  const applyDeckToEditor = useCallback((next: ParsedDeck) => {
+    projectDeckToEditor(next, format);
+    if (next.commander?.length && !isCommander) onFormatChange("Commander");
+  }, [projectDeckToEditor, format, isCommander, onFormatChange]);
 
   const handleImport = useCallback((imported: ParsedDeck) => {
     applyDeckToEditor(imported);
@@ -682,7 +680,6 @@ export function useDeckBuilder({
     const changed = editorChangedSince(captured);
     if (changed.reloaded || changed.edited) return;
     deckIdentityRevision.current += 1;
-    nonLoadIdentityRevision.current += 1;
     setDeckName(cloneName);
     setJustSaved(true);
     setDirty(false);
@@ -694,30 +691,47 @@ export function useDeckBuilder({
     return () => clearTimeout(timer);
   }, [justSaved]);
 
-  // Returns whether the load actually replaced the editor. Callers that only fire-and-forget a
-  // Load ignore it; resolveSaveConflict's "load" case uses it to tell a genuine load from a bail
-  // so it knows whether to continue a pending action.
+  const loadFormatRef = useRef({ format, onFormatChange });
+  loadFormatRef.current = { format, onFormatChange };
+
+  const inferLoadedCommander = useCallback((
+    parsed: ParsedDeck,
+    normalized: ParsedDeck,
+    explicitFormat?: GameFormat,
+  ) => {
+    const captured = captureEditor();
+    void resolveCommander(parsed).then((resolved) => {
+      if (normalized.commander?.length || !resolved.commander?.length) return;
+      const { reloaded, edited } = editorChangedSince(captured);
+      if (reloaded || edited) return;
+      const { onFormatChange } = loadFormatRef.current;
+      projectDeckToEditor(resolved, explicitFormat ?? "Commander");
+      if (!explicitFormat) onFormatChange("Commander");
+    }, () => {
+      // Inference is best-effort. The normalized deck is already open.
+    });
+  }, [captureEditor, editorChangedSince, projectDeckToEditor]);
+
+  // Returns whether this call replaced the editor. Save-conflict resolution uses
+  // that result to decide whether it can continue a pending action.
   const handleLoad = useCallback(async (name: string): Promise<boolean> => {
-    const ticket = ++loadTickets.current;
-    const identityAtStart = nonLoadIdentityRevision.current;
-    const editAtStart = editRevision.current;
-    // Tickets account for competing Loads. Edits and other deck switches independently veto this Load.
-    const canCommit = () =>
-      ticket === latestProceedingLoad.current &&
-      identityAtStart === nonLoadIdentityRevision.current &&
-      editAtStart === editRevision.current;
     const parsed = loadSavedDeck(name);
     const stored = captureSavedDeck(name);
     if (!parsed || stored.raw === null) {
       if (!name.startsWith(PRECON_PREFIX)) return false;
+      const captured = captureEditor();
       const decks = await loadPreconDeckMap();
       const found = Object.entries(decks ?? {}).find(([, entry]) => PRECON_PREFIX + `${entry.name} (${entry.code})` === name);
-      if (!found) return false;
-      latestProceedingLoad.current = Math.max(latestProceedingLoad.current, ticket);
+      const { reloaded, edited } = editorChangedSince(captured);
+      if (!found || reloaded || edited) return false;
       const [deckId, deckEntry] = found;
-      const resolved = await resolveCommander(preconDeckEntryToParsedDeck(deckEntry));
-      if (!canCommit()) return false;
-      applyDeckToEditor(resolved);
+      const parsedPrecon = preconDeckEntryToParsedDeck(deckEntry);
+      const normalized = repairParsedDeck(parsedPrecon);
+      const { format, onFormatChange } = loadFormatRef.current;
+      const targetFormat = normalized.commander?.length && !formatMetadata(format)?.default_config.command_zone
+        ? "Commander"
+        : format;
+      projectDeckToEditor(normalized, targetFormat);
       setActiveSurface("deck");
       deckIdentityRevision.current += 1;
       setDirty(false);
@@ -725,42 +739,32 @@ export function useDeckBuilder({
       savedDeckRef.current = null;
       setBracket(getPreconBracket(deckId) ?? null);
       setComboDeclaration(UNDECLARED_COMBO);
+      if (targetFormat !== format) onFormatChange(targetFormat);
+      inferLoadedCommander(parsedPrecon, normalized);
       return true;
     }
-    latestProceedingLoad.current = Math.max(latestProceedingLoad.current, ticket);
+
     const persisted = JSON.parse(stored.raw) as ParsedDeck & { format?: string };
-    // A rewrite that lands while resolveCommander runs is missed by the hook-level
-    // subscription, which follows savedDeckRef and not this Load.
-    let baseline: SavedDeckSnapshot = stored;
-    const stopAdopting = onSavedDeckRewritten((rewrite) => {
-      baseline = adoptSavedDeckRewrite(baseline, rewrite);
-    });
-    try {
-      const resolved = await resolveCommander(parsed);
-      if (!canCommit()) return false;
-      const savedFormat = persisted.format
-        ? DECK_CONSTRUCTION_FORMATS.find(
-            (metadata) => metadata.format.toLowerCase() === persisted.format!.toLowerCase(),
-          )?.format
-        : undefined;
-      applyDeckToEditor(resolved, savedFormat);
-      setActiveSurface("deck");
-      deckIdentityRevision.current += 1;
-      setDirty(false);
-      if (savedFormat) {
-        onFormatChange(savedFormat);
-      } else if (resolved.commander?.length) {
-        onFormatChange("Commander");
-      }
-      setDeckName(name);
-      savedDeckRef.current = baseline;
-    } finally {
-      stopAdopting();
-    }
+    const savedFormat = persisted.format
+      ? DECK_CONSTRUCTION_FORMATS.find(
+          (metadata) => metadata.format.toLowerCase() === persisted.format!.toLowerCase(),
+        )?.format
+      : undefined;
+    const normalized = repairParsedDeck(parsed);
+    const { format, onFormatChange } = loadFormatRef.current;
+    const targetFormat = savedFormat ?? (normalized.commander?.length ? "Commander" : format);
+    projectDeckToEditor(normalized, targetFormat);
+    setActiveSurface("deck");
+    deckIdentityRevision.current += 1;
+    setDirty(false);
+    setDeckName(name);
+    savedDeckRef.current = stored;
     setBracket(loadSavedDeckBracket(name));
     setComboDeclaration(loadSavedDeckComboDeclaration(name));
+    if (savedFormat || normalized.commander?.length) onFormatChange(targetFormat);
+    inferLoadedCommander(parsed, normalized, savedFormat);
     return true;
-  }, [applyDeckToEditor, onFormatChange]);
+  }, [captureEditor, editorChangedSince, inferLoadedCommander, projectDeckToEditor]);
 
   // Returns the "keepMine" save's outcome, `"loaded"` once "load" actually replaced the editor,
   // or undefined for "dismiss" or a "load" that bailed, so a caller that resolved a conflict

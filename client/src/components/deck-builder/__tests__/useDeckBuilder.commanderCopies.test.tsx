@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 
@@ -457,14 +458,14 @@ describe("useDeckBuilder — CR 903.3 designation accounting", () => {
   });
 });
 
-describe("useDeckBuilder — Load's rewrite-listener cleanup on rejection", () => {
+describe("useDeckBuilder — Load resolver rejection", () => {
   afterEach(() => {
     cleanup();
   });
 
-  it("removes the rewrite listener it added even when resolveCommander rejects", async () => {
+  it("keeps the loaded deck and only the editor rewrite subscription when the resolver rejects", async () => {
     localStorage.clear();
-    localStorage.setItem(`${STORAGE_KEY_PREFIX}D`, JSON.stringify({ main: [], sideboard: [] }));
+    localStorage.setItem(`${STORAGE_KEY_PREFIX}D`, JSON.stringify({ main: [{ name: "Forest", count: 60 }], sideboard: [] }));
     vi.mocked(resolveCommander).mockRejectedValueOnce(new Error("boom"));
 
     const addSpy = vi.spyOn(window, "addEventListener");
@@ -479,8 +480,12 @@ describe("useDeckBuilder — Load's rewrite-listener cleanup on rejection", () =
     );
 
     await act(async () => {
-      await expect(result.current.handleLoad("D")).rejects.toThrow("boom");
+      expect(await result.current.handleLoad("D")).toBe(true);
     });
+    expect(result.current.deckName).toBe("D");
+    expect(result.current.deck.main).toEqual([{ name: "Forest", count: 60 }]);
+    expect(result.current.commanders).toEqual([]);
+    expect(result.current.dirty).toBe(false);
     unmount();
 
     const rewriteAdds = addSpy.mock.calls.filter(([type]) => type === SAVED_DECK_REWRITTEN_EVENT).length;
@@ -491,9 +496,7 @@ describe("useDeckBuilder — Load's rewrite-listener cleanup on rejection", () =
     addSpy.mockRestore();
     removeSpy.mockRestore();
 
-    // The load-scoped listener registered around `resolveCommander` in `handleLoad` must be
-    // removed on the rejection path, not just the success path.
-    expect(rewriteAdds).toBeGreaterThan(0);
+    expect(rewriteAdds).toBe(1);
     expect(rewriteRemoves).toBe(rewriteAdds);
   });
 });
@@ -552,86 +555,72 @@ describe("useDeckBuilder — counted Commander inference", () => {
     expect(saved?.commander).toBeUndefined();
   });
 
-  it("commits the latest Load when the earlier inference resolves first", async () => {
-    const plainsName = "Loaded Plains";
-    const forestName = "Loaded Forest";
-    const forest = [{ name: "Forest", count: 60 }];
-    localStorage.setItem(STORAGE_KEY_PREFIX + plainsName, JSON.stringify(unmarked));
-    localStorage.setItem(STORAGE_KEY_PREFIX + forestName, JSON.stringify({ main: forest, sideboard: [] }));
+  const commander = "Isamaru, Hound of Konda";
+  const main = [{ name: commander, count: 1 }, { name: "Plains", count: 99 }];
+  const commanderDeck = { main, sideboard: [] };
+
+  it("opens the latest saved Load and ignores an older positive inference answer", async () => {
+    const olderName = "Unmarked Commander";
+    const newerName = "Loaded Plains";
+    localStorage.setItem(STORAGE_KEY_PREFIX + olderName, JSON.stringify(commanderDeck));
+    localStorage.setItem(STORAGE_KEY_PREFIX + newerName, JSON.stringify(unmarked));
     const { result } = openBuilder();
-    const plainsAnswer = deferred<string | null>();
-    const forestAnswer = deferred<string | null>();
-    inference.mockReturnValueOnce(plainsAnswer.promise).mockReturnValueOnce(forestAnswer.promise);
+    const olderAnswer = deferred<string | null>();
+    const newerAnswer = deferred<string | null>();
+    inference.mockReturnValueOnce(olderAnswer.promise).mockReturnValueOnce(newerAnswer.promise);
 
-    const plainsLoad = result.current.handleLoad(plainsName);
-    const forestLoad = result.current.handleLoad(forestName);
-    expect(inference.mock.calls).toEqual([[plains], [forest]]);
-
-    await act(async () => {
-      plainsAnswer.resolve(null);
-      expect(await plainsLoad).toBe(false);
-    });
-    await act(async () => {
-      forestAnswer.resolve(null);
-      expect(await forestLoad).toBe(true);
-    });
-    expect(result.current.deck.main).toEqual(forest);
-    expect(result.current.deckName).toBe(forestName);
-  });
-
-  it("keeps a valid Load pending when a missing saved deck is selected", async () => {
-    const name = "Loaded Plains";
-    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(unmarked));
-    const { result } = openBuilder();
-    const plainsAnswer = deferred<string | null>();
-    inference.mockReturnValueOnce(plainsAnswer.promise);
-
-    const plainsLoad = result.current.handleLoad(name);
-    expect(await result.current.handleLoad("Deleted Deck")).toBe(false);
-    expect(inference.mock.calls).toEqual([[plains]]);
-
-    await act(async () => {
-      plainsAnswer.resolve(null);
-      expect(await plainsLoad).toBe(true);
-    });
+    await act(async () => expect(await result.current.handleLoad(olderName)).toBe(true));
+    expect(result.current.deck.main).toEqual(main);
+    await act(async () => expect(await result.current.handleLoad(newerName)).toBe(true));
+    expect(inference.mock.calls).toEqual([[main], [plains]]);
+    expect(result.current.deckName).toBe(newerName);
     expect(result.current.deck.main).toEqual(plains);
-    expect(result.current.deckName).toBe(name);
-  });
 
-  it("keeps a valid Load pending when a missing precon-prefixed deck is selected", async () => {
-    const name = "Loaded Plains";
-    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(unmarked));
-    const { result } = openBuilder();
-    const plainsAnswer = deferred<string | null>();
-    inference.mockReturnValueOnce(plainsAnswer.promise);
-
-    const plainsLoad = result.current.handleLoad(name);
-    expect(await result.current.handleLoad("[Pre-built] My Test Deck")).toBe(false);
-    expect(loadPreconDeckMap).toHaveBeenCalledTimes(1);
-    expect(inference.mock.calls).toEqual([[plains]]);
-
-    await act(async () => {
-      plainsAnswer.resolve(null);
-      expect(await plainsLoad).toBe(true);
-    });
+    await act(async () => olderAnswer.resolve(commander));
     expect(result.current.deck.main).toEqual(plains);
-    expect(result.current.deckName).toBe(name);
+    expect(result.current.commanders).toEqual([]);
+    await act(async () => newerAnswer.resolve(null));
+    expect(result.current.deckName).toBe(newerName);
+    expect(result.current.deck.main).toEqual(plains);
+    expect(result.current.commanders).toEqual([]);
+    expect(result.current.dirty).toBe(false);
   });
+
+  it.each(["Deleted Deck", "[Pre-built] My Test Deck"])(
+    "keeps the open deck and its pending inference when selecting missing target %s",
+    async (missing) => {
+      const name = "Unmarked Commander";
+      localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(commanderDeck));
+      const { result } = openBuilder();
+      const answer = deferred<string | null>();
+      inference.mockReturnValueOnce(answer.promise);
+
+      await act(async () => expect(await result.current.handleLoad(name)).toBe(true));
+      expect(await result.current.handleLoad(missing)).toBe(false);
+      expect(loadPreconDeckMap).toHaveBeenCalledTimes(missing === "Deleted Deck" ? 0 : 1);
+      expect(inference.mock.calls).toEqual([[main]]);
+      expect(result.current.deckName).toBe(name);
+      expect(result.current.deck.main).toEqual(main);
+
+      await act(async () => answer.resolve(commander));
+      expect(result.current.deckName).toBe(name);
+      expect(result.current.deck.main).toEqual(main.slice(1));
+      expect(result.current.commanders).toEqual([commander]);
+    },
+  );
 
   it("keeps the newer saved Load when an older precon is found late", async () => {
     const name = "Loaded Plains";
     localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(unmarked));
     const { result } = openBuilder();
     const catalog = deferred<DeckMap>();
-    const plainsAnswer = deferred<string | null>();
     const forest = [{ name: "Forest", count: 60 }];
     vi.mocked(loadPreconDeckMap).mockReturnValueOnce(catalog.promise);
-    inference.mockReturnValueOnce(plainsAnswer.promise);
 
     const preconLoad = result.current.handleLoad("[Pre-built] Precon Forest (TST)");
     expect(loadPreconDeckMap).toHaveBeenCalledTimes(1);
-    const plainsLoad = result.current.handleLoad(name);
-    expect(inference.mock.calls).toEqual([[plains]]);
+    await act(async () => expect(await result.current.handleLoad(name)).toBe(true));
+    expect(result.current.deckName).toBe(name);
 
     await act(async () => {
       catalog.resolve({
@@ -639,101 +628,117 @@ describe("useDeckBuilder — counted Commander inference", () => {
       });
       expect(await preconLoad).toBe(false);
     });
-    expect(inference.mock.calls).toEqual([[plains], [forest]]);
-    await act(async () => {
-      plainsAnswer.resolve(null);
-      expect(await plainsLoad).toBe(true);
-    });
+    expect(inference.mock.calls).toEqual([[plains]]);
     expect(result.current.deck.main).toEqual(plains);
     expect(result.current.deckName).toBe(name);
   });
 
-  it("opens a newer precon found after an older saved Load commits", async () => {
+  it("opens a newer explicit Commander precon in Commander after a Standard Load", async () => {
     const name = "Loaded Plains";
     const preconName = "Precon Forest (TST)";
-    const forest = [{ name: "Forest", count: 60 }];
-    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(unmarked));
-    const { result } = openBuilder();
+    const forest = [{ name: "Forest", count: 99 }];
+    const commander = "Isamaru, Hound of Konda";
+    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify({ ...unmarked, format: "Standard" }));
+    const { result } = renderHook(() => {
+      const [format, onFormatChange] = useState<GameFormat>("Commander");
+      const builder = useDeckBuilder({ format, onFormatChange, searchFilters: {} as never });
+      return { ...builder, format };
+    });
     const plainsAnswer = deferred<string | null>();
     const catalog = deferred<DeckMap>();
     inference.mockReturnValueOnce(plainsAnswer.promise);
     vi.mocked(loadPreconDeckMap).mockReturnValueOnce(catalog.promise);
 
-    const plainsLoad = result.current.handleLoad(name);
-    const preconLoad = result.current.handleLoad(`[Pre-built] ${preconName}`);
-    expect(inference.mock.calls).toEqual([[plains]]);
-    expect(loadPreconDeckMap).toHaveBeenCalledTimes(1);
-
+    let preconLoad!: Promise<boolean>;
     await act(async () => {
+      const plainsLoad = result.current.handleLoad(name);
+      preconLoad = result.current.handleLoad(`[Pre-built] ${preconName}`);
+      expect(inference.mock.calls).toEqual([[plains]]);
+      expect(loadPreconDeckMap).toHaveBeenCalledTimes(1);
       plainsAnswer.resolve(null);
       expect(await plainsLoad).toBe(true);
     });
     expect(result.current.deckName).toBe(name);
     expect(result.current.deck.main).toEqual(plains);
+    expect(result.current.format).toBe("Standard");
 
-    let preconLoaded: boolean | undefined;
     await act(async () => {
       catalog.resolve({
-        forest: { name: "Precon Forest", code: "TST", type: "Commander Deck", coveragePct: 100, mainBoard: forest },
+        forest: {
+          name: "Precon Forest", code: "TST", type: "Commander Deck", coveragePct: 100,
+          mainBoard: forest, commander: [{ name: commander, count: 1 }],
+        },
       });
-      preconLoaded = await preconLoad;
+      expect(await preconLoad).toBe(true);
     });
-    expect(inference.mock.calls).toEqual([[plains], [forest]]);
-    expect(preconLoaded).toBe(true);
     expect(result.current.deckName).toBe(preconName);
     expect(result.current.deck.main).toEqual(forest);
+    expect(result.current.commanders).toEqual([commander]);
+    expect(result.current.format).toBe("Commander");
   });
 
-  it("keeps a Clone opened while a saved Load is pending", async () => {
-    const name = "Loaded Plains";
-    const source = { main: [{ name: "Forest", count: 2 }], sideboard: [] };
-    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(unmarked));
-    const { result } = openBuilder();
-    await act(async () => {
-      result.current.handleImport(source);
-      result.current.handleDeckNameChange("Source");
-    });
-    const plainsAnswer = deferred<string | null>();
-    inference.mockReturnValueOnce(plainsAnswer.promise);
-
-    const pending = result.current.handleLoad(name);
-    expect(inference.mock.calls).toEqual([[plains]]);
-    await act(async () => result.current.handleClone());
-    expect(result.current.deckName).toBe("Source copy");
-    expect(loadSavedDeck("Source copy")?.main).toEqual(source.main);
-
-    await act(async () => {
-      plainsAnswer.resolve(null);
-      expect(await pending).toBe(false);
-    });
-    expect(result.current.deckName).toBe("Source copy");
-    expect(result.current.deck.main).toEqual(source.main);
-  });
-
-  it("discards a stale inference answer and commits a current Load", async () => {
+  it("ignores a positive inference answer after Clone opens a copy", async () => {
     const name = "Unmarked Commander";
-    const commander = "Isamaru, Hound of Konda";
-    const main = [{ name: commander, count: 1 }, { name: "Plains", count: 99 }];
-    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify({ main, sideboard: [] }));
+    const clone = `${name} copy`;
+    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(commanderDeck));
     const { result } = openBuilder();
-    const waiting = deferred<string | null>();
-    inference.mockReturnValueOnce(waiting.promise);
-    const pending = result.current.handleLoad(name);
+    const answer = deferred<string | null>();
+    inference.mockReturnValueOnce(answer.promise);
+
+    await act(async () => expect(await result.current.handleLoad(name)).toBe(true));
     expect(inference.mock.calls).toEqual([[main]]);
+    await act(async () => result.current.handleClone());
+    expect(result.current.deckName).toBe(clone);
+    expect(loadSavedDeck(clone)?.main).toEqual(main);
+
+    await act(async () => answer.resolve(commander));
+    expect(result.current.deckName).toBe(clone);
+    expect(result.current.deck.main).toEqual(main);
+    expect(result.current.commanders).toEqual([]);
+  });
+
+  it("ignores a positive inference answer after an edit", async () => {
+    const name = "Unmarked Commander";
+    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(commanderDeck));
+    const { result } = openBuilder();
+    const answer = deferred<string | null>();
+    inference.mockReturnValueOnce(answer.promise);
+
+    await act(async () => expect(await result.current.handleLoad(name)).toBe(true));
+    expect(inference.mock.calls).toEqual([[main]]);
+    expect(result.current.deck.main).toEqual(main);
     const edit = { main: [{ name: "Forest", count: 2 }], sideboard: [] };
     await act(async () => result.current.handleImport(edit));
-    await act(async () => {
-      waiting.resolve(commander);
-      expect(await pending).toBe(false);
-    });
+    await act(async () => answer.resolve(commander));
+    expect(result.current.deckName).toBe(name);
     expect(result.current.deck.main).toEqual(edit.main);
     expect(result.current.commanders).toEqual([]);
+    expect(result.current.dirty).toBe(true);
+  });
 
-    inference.mockResolvedValueOnce(commander);
+  it("opens an unmarked 100-card deck immediately and later applies its inferred commander", async () => {
+    const name = "Unmarked Commander";
+    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(commanderDeck));
+    const { result } = renderHook(() => {
+      const [format, onFormatChange] = useState<GameFormat>("Standard");
+      const builder = useDeckBuilder({ format, onFormatChange, searchFilters: {} as never });
+      return { ...builder, format };
+    });
+    const answer = deferred<string | null>();
+    inference.mockReturnValueOnce(answer.promise);
+
     await act(async () => expect(await result.current.handleLoad(name)).toBe(true));
-    expect(inference.mock.calls).toEqual([[main], [main]]);
+    expect(inference.mock.calls).toEqual([[main]]);
     expect(result.current.deckName).toBe(name);
+    expect(result.current.deck.main).toEqual(main);
+    expect(result.current.commanders).toEqual([]);
+    expect(result.current.format).toBe("Standard");
+    expect(result.current.dirty).toBe(false);
+
+    await act(async () => answer.resolve(commander));
     expect(result.current.deck.main).toEqual(main.slice(1));
     expect(result.current.commanders).toEqual([commander]);
+    expect(result.current.format).toBe("Commander");
+    expect(result.current.dirty).toBe(false);
   });
 });

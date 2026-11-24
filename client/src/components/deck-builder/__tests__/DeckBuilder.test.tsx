@@ -2450,40 +2450,51 @@ describe("DeckBuilder", () => {
       expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(thirdWrite);
     });
 
-    it("Load saved version resolving Save & continue's own conflict, when a further edit wins the race, does not navigate and keeps that edit", async () => {
+    it("Load saved version resolving Save & continue's own conflict continues before inference and keeps a further edit", async () => {
       const user = userEvent.setup();
       mountP();
       const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
       await waitFor(() => expect(nameInput).toHaveValue("P"));
       await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
-      await withSavedDeckLibrary((txn) => writeSavedDeckData(txn, "P", otherTab));
+      const savedVersion = {
+        main: [{ name: "Mountain", count: 99 }, { name: "Zimone, Mystery Unraveler", count: 1 }],
+        sideboard: [],
+      };
+      await withSavedDeckLibrary((txn) => writeSavedDeckData(txn, "P", JSON.stringify(savedVersion)));
 
       await user.click(screen.getByRole("button", { name: /Menu/ }));
       await user.click(await screen.findByRole("button", { name: "Save & continue" }));
       await screen.findByRole("dialog", { name: CONFLICT });
       expect(navigateMock).not.toHaveBeenCalled();
 
-      let resolveLoad!: (deck: unknown) => void;
-      const held = new Promise((resolve) => {
+      let resolveLoad!: (deck: Awaited<ReturnType<typeof resolveCommander>>) => void;
+      const held = new Promise<Awaited<ReturnType<typeof resolveCommander>>>((resolve) => {
         resolveLoad = resolve;
       });
-      vi.mocked(resolveCommander).mockImplementationOnce(() => held as never);
+      vi.mocked(resolveCommander).mockImplementationOnce(() => held);
 
       await user.click(screen.getByRole("button", { name: "Load saved version" }));
-      await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalled());
+      await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(2));
+      expect(screen.getByText("99 Mountain")).toBeInTheDocument();
+      expect(screen.queryByText("3 Lightning Bolt")).not.toBeInTheDocument();
+      expect(navigateMock).toHaveBeenCalledExactlyOnceWith("/");
+      expect(screen.queryByRole("dialog", { name: "Unsaved changes" })).not.toBeInTheDocument();
 
-      // An edit lands while resolveCommander is still pending: it must win the race and keep
-      // "Load saved version" from replacing the editor or continuing the pending navigation.
-      await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
-
+      // The conflict Load has opened and continued navigation while inference is pending.
+      await user.click(screen.getByRole("button", { name: "remove-Mountain" }));
       await act(async () => {
-        resolveLoad({ main: [{ name: "Mountain", count: 60 }], sideboard: [] });
-        await Promise.resolve();
-        await Promise.resolve();
+        resolveLoad({
+          main: [{ name: "Mountain", count: 99 }],
+          sideboard: [],
+          commander: ["Zimone, Mystery Unraveler"],
+        });
+        await held;
       });
 
-      expect(navigateMock).not.toHaveBeenCalled();
-      expect(screen.getByText("2 Lightning Bolt")).toBeInTheDocument();
+      expect(navigateMock).toHaveBeenCalledExactlyOnceWith("/");
+      expect(screen.getByText("98 Mountain")).toBeInTheDocument();
+      expect(screen.getByText("1 Zimone, Mystery Unraveler")).toBeInTheDocument();
+      expect(screen.queryByText("Zimone, Mystery Unraveler", { exact: true })).not.toBeInTheDocument();
     });
 
     // A write that lands after the refusal but while the dialog is still open must not be lost:
@@ -2866,7 +2877,7 @@ describe("DeckBuilder", () => {
     expect(screen.queryByText("99 Island")).not.toBeInTheDocument();
   });
 
-  it("a precon Load that resolves after the user edits the current deck does not overwrite that edit", async () => {
+  it("precon Load inference that resolves after the user edits the opened deck does not overwrite that edit", async () => {
     const user = userEvent.setup();
     localStorage.setItem(
       STORAGE_KEY_PREFIX + "Deck A",
@@ -2878,9 +2889,8 @@ describe("DeckBuilder", () => {
         name: "Secrets of Strixhaven",
         type: "Commander",
         coveragePct: 100,
-        mainBoard: [{ name: "Island", count: 99 }],
+        mainBoard: [{ name: "Island", count: 99 }, { name: "Zimone, Mystery Unraveler", count: 1 }],
         sideBoard: [],
-        commander: [{ name: "Zimone, Mystery Unraveler", count: 1 }],
       },
     });
 
@@ -2898,11 +2908,11 @@ describe("DeckBuilder", () => {
     await waitFor(() => expect(nameInput).toHaveValue("Deck A"));
 
     // The initial Load already called resolveCommander once; hold only the call the precon Load makes.
-    let resolvePrecon!: (deck: unknown) => void;
-    const held = new Promise((resolve) => {
+    let resolvePrecon!: (deck: Awaited<ReturnType<typeof resolveCommander>>) => void;
+    const held = new Promise<Awaited<ReturnType<typeof resolveCommander>>>((resolve) => {
       resolvePrecon = resolve;
     });
-    vi.mocked(resolveCommander).mockImplementationOnce(() => held as never);
+    vi.mocked(resolveCommander).mockImplementationOnce(() => held);
 
     rerender(
       <DeckBuilder
@@ -2916,27 +2926,28 @@ describe("DeckBuilder", () => {
     );
     await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(2));
 
-    // The user edits the still-displayed Deck A while the precon Load awaits.
-    await user.click(await screen.findByRole("button", { name: "remove-Beta" }));
-    expect(screen.queryByText("1 Beta")).not.toBeInTheDocument();
-
-    // Let the precon Load's now-resolved promise, and any state updates it triggers, settle
-    // before asserting the edit was not discarded.
+    // The precon is already open while its commander inference is pending.
+    expect(nameInput).toHaveValue("Secrets of Strixhaven (SOS)");
+    expect(screen.getByText("99 Island")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "remove-Island" }));
     await act(async () => {
-      resolvePrecon({ main: [{ name: "Island", count: 99 }], sideboard: [] });
-      await Promise.resolve();
-      await Promise.resolve();
+      resolvePrecon({
+        main: [{ name: "Island", count: 99 }],
+        sideboard: [],
+        commander: ["Zimone, Mystery Unraveler"],
+      });
+      await held;
     });
-    expect(nameInput).toHaveValue("Deck A");
-    expect(screen.getByText("1 Alpha")).toBeInTheDocument();
-    expect(screen.queryByText("1 Beta")).not.toBeInTheDocument();
-    expect(screen.queryByText("99 Island")).not.toBeInTheDocument();
+    expect(nameInput).toHaveValue("Secrets of Strixhaven (SOS)");
+    expect(screen.getByText("98 Island")).toBeInTheDocument();
+    expect(screen.getByText("1 Zimone, Mystery Unraveler")).toBeInTheDocument();
+    expect(screen.queryByText("Zimone, Mystery Unraveler", { exact: true })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Menu/ }));
     expect(await screen.findByRole("button", { name: "Discard" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
   });
 
-  it("a Load that resolves after the user edits the current deck does not overwrite that edit", async () => {
+  it("saved-deck Load inference that resolves after the user edits the opened deck does not overwrite that edit", async () => {
     const user = userEvent.setup();
     localStorage.setItem(
       STORAGE_KEY_PREFIX + "Deck A",
@@ -2944,7 +2955,7 @@ describe("DeckBuilder", () => {
     );
     localStorage.setItem(
       STORAGE_KEY_PREFIX + "Deck B",
-      JSON.stringify({ main: [{ name: "Gamma", count: 1 }], sideboard: [], format: "Standard" }),
+      JSON.stringify({ main: [{ name: "Gamma", count: 1 }, { name: "Zimone, Mystery Unraveler", count: 1 }], sideboard: [], format: "Standard" }),
     );
 
     render(
@@ -2961,30 +2972,31 @@ describe("DeckBuilder", () => {
     await waitFor(() => expect(nameInput).toHaveValue("Deck A"));
 
     // The initial Load already called resolveCommander once; hold only the call Load B makes.
-    let resolveB!: (deck: unknown) => void;
-    const held = new Promise((resolve) => {
+    let resolveB!: (deck: Awaited<ReturnType<typeof resolveCommander>>) => void;
+    const held = new Promise<Awaited<ReturnType<typeof resolveCommander>>>((resolve) => {
       resolveB = resolve;
     });
-    vi.mocked(resolveCommander).mockImplementationOnce(() => held as never);
+    vi.mocked(resolveCommander).mockImplementationOnce(() => held);
 
     await user.click(screen.getByRole("button", { name: "Load deck..." }));
     await user.click(screen.getByRole("option", { name: "Deck B" }));
     await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(2));
 
-    // The user edits the still-displayed Deck A while Load B awaits.
-    await user.click(await screen.findByRole("button", { name: "remove-Beta" }));
-    expect(screen.queryByText("1 Beta")).not.toBeInTheDocument();
-
-    // Let Load B's now-resolved promise, and any state updates it triggers, settle
-    // before asserting the edit was not discarded.
+    // Deck B is already open while its commander inference is pending.
+    expect(nameInput).toHaveValue("Deck B");
+    await user.click(screen.getByRole("button", { name: "remove-Gamma" }));
     await act(async () => {
-      resolveB({ main: [{ name: "Gamma", count: 1 }], sideboard: [] });
-      await Promise.resolve();
-      await Promise.resolve();
+      resolveB({
+        main: [{ name: "Gamma", count: 1 }],
+        sideboard: [],
+        commander: ["Zimone, Mystery Unraveler"],
+      });
+      await held;
     });
-    expect(nameInput).toHaveValue("Deck A");
-    expect(screen.getByText("1 Alpha")).toBeInTheDocument();
+    expect(nameInput).toHaveValue("Deck B");
     expect(screen.queryByText("1 Gamma")).not.toBeInTheDocument();
+    expect(screen.getByText("1 Zimone, Mystery Unraveler")).toBeInTheDocument();
+    expect(screen.queryByText("Zimone, Mystery Unraveler", { exact: true })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Menu/ }));
     expect(await screen.findByRole("button", { name: "Discard" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
