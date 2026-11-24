@@ -22,15 +22,22 @@
 //!      representation.
 
 use super::oracle::{is_draft_matters_sentence, ParsedAbilities};
+use super::oracle_effect::become_copy_except::parse_except_body;
 use super::oracle_effect::gap_diagnosis::{swallowed_clause_gap, GuardWord, SwallowedAxis};
-use super::oracle_effect::player_lookback_relative_clause_owns_suffix;
+use super::oracle_effect::{
+    parse_copy_cast_head_connector, player_lookback_relative_clause_owns_suffix,
+};
+use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::{CascadeSlot, OracleDiagnostic};
 use super::oracle_ir::doc::OracleItemIr;
 use super::oracle_ir::feature::{
     audit_units, history_for_unit, scope_to_unit, AuditUnit, ItemIdTracks, OracleSemanticFeature,
 };
+use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::error::OracleError;
-use super::oracle_nom::primitives::{scan_contains, scan_preceded, split_sentence_units};
+use super::oracle_nom::primitives::{
+    parse_loyalty_symbol_delta, scan_contains, scan_preceded, split_sentence_units,
+};
 use super::oracle_nom::quantity::parse_using_mana_produced_by_head;
 use super::oracle_target::{
     parse_block_history_clause, parse_block_pairing_clause, restricting_block_pairings,
@@ -47,8 +54,9 @@ use crate::types::ability::{
     FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope, ParsedCondition,
     PerPlayerScope, PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition,
     ReplacementDefinition, ReplacementMode, RestrictionExpiry, SpellStackToGraveyardReplacement,
-    StaticCondition, StaticDefinition, TargetFilter, TieResolution, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, UnlessPayScaling, VoteSubject, VoteTally, ZoneOwner,
+    StaticCondition, StaticDefinition, TargetFilter, TargetReadOrigin, ThisWayCause, TieResolution,
+    TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, UnlessPayScaling,
+    VoteSubject, VoteTally, ZoneOwner,
 };
 use crate::types::ability::{CyclingHistoryWindow, TurnWindow};
 use crate::types::ability_visit::nodes::visit_ability_def as visit_ability_def_nodes;
@@ -57,6 +65,7 @@ use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
 };
 use crate::types::game_state_kinds::RetargetScope;
+use crate::types::identifiers::TrackedSetId;
 use crate::types::keywords::{Keyword, WardCost};
 use crate::types::mana::{ManaCost, ManaExpiry, ManaSpellGrant};
 use crate::types::replacements::ReplacementEvent;
@@ -64,11 +73,13 @@ use crate::types::statics::ActivationExemption;
 use crate::types::statics::{CastCostMode, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
+use crate::types::Supertype;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_until, take_while1},
     character::complete::{digit1, multispace0},
-    combinator::{eof, map, opt, value},
+    combinator::{all_consuming, eof, map, opt, peek, value},
+    sequence::{preceded, terminated},
     Parser,
 };
 use std::ops::ControlFlow;
@@ -250,7 +261,7 @@ pub(crate) fn check_swallowed_clauses(
         detect_condition_if(&cleaned, fragment, &evidence, &scoped, &mut found);
         detect_condition_unless(&cleaned, fragment, &evidence, &mut found);
         detect_condition_as_long_as(&cleaned, fragment, &evidence, &scoped, &mut found);
-        detect_duration_this_turn(&cleaned, fragment, &evidence, &mut found);
+        detect_duration_this_turn(&cleaned, fragment, &evidence, &scoped, &mut found);
         let history = history_for_unit(history, &unit, result, tracks);
         detect_combat_history_relation(&name_normalized, fragment, &history, &mut found);
         detect_combat_pairing_relation(&cleaned, fragment, &evidence, &mut found);
@@ -2792,6 +2803,94 @@ fn any_ability_has_apnap_ordering(parsed: &ParsedAbilities) -> bool {
 
 // ── Detector F: DynamicQty ──────────────────────────────────────────────
 
+/// CR 608.2c + CR 707.12a: the first instruction produces this resolution's
+/// exile set. The immediate consumer offers one optional free cast per member.
+fn copy_cast_exile_quantifier<'a>(cleaned: &'a str, parsed: &ParsedAbilities) -> Option<&'a str> {
+    let mut roots = unit_roots(parsed);
+    let producer = roots.next()?;
+    if roots.next().is_some()
+        || producer.condition.is_some()
+        || producer.optional
+        || producer.player_scope.is_some()
+        || producer.repeat_for.is_some()
+    {
+        return None;
+    }
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Exile,
+        target,
+        ..
+    } = &*producer.effect
+    else {
+        return None;
+    };
+    let consumer = producer.sub_ability.as_deref()?;
+    let Effect::CastCopyOfCard {
+        target: TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        },
+        cost,
+        count: None,
+    } = &*consumer.effect
+    else {
+        return None;
+    };
+    if *cost != ManaCost::zero()
+        || consumer.condition.is_some()
+        || consumer.optional
+        || consumer.repeat_for.is_some()
+        || consumer.player_scope.is_some()
+        || consumer.multi_target.is_some()
+    {
+        return None;
+    }
+    let mut sentences = split_sentence_units(cleaned).into_iter();
+    let source = sentences.next()?;
+    let rider = sentences.next()?;
+    let (source_target, _) = tag::<_, _, OracleError<'_>>("exile ").parse(source).ok()?;
+    let (parsed_target, rest) = super::oracle_target::parse_target(source_target);
+    if parsed_target != *target {
+        return None;
+    }
+    all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+        .parse(rest.trim())
+        .ok()?;
+    let (tail, population) = preceded(
+        tag::<_, _, OracleError<'_>>("for each "),
+        terminated(take_until(", "), tag(", ")),
+    )
+    .parse(rider)
+    .ok()?;
+    // The quantity grammar owns the result-set anaphor. A bare "card" adds
+    // no restriction to the cards sent to exile by this immediate producer.
+    let QuantityRef::FilteredTrackedSetSize {
+        filter,
+        caused_by: Some(ThisWayCause::Exiled),
+        destination: None,
+    } = super::oracle_quantity::parse_for_each_clause(population)?
+    else {
+        return None;
+    };
+    if !matches!(*filter, TargetFilter::Typed(ref typed)
+        if typed.type_filters == [TypeFilter::Card]
+            && typed.controller.is_none()
+            && typed.properties.is_empty())
+    {
+        return None;
+    }
+    let (cast, ()) = preceded(peek(tag("copy it")), parse_copy_cast_head_connector)
+        .parse(tail)
+        .ok()?;
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("you may cast the copy without paying its mana cost"),
+        opt(tag(".")),
+    ))
+    .parse(cast)
+    .ok()?;
+    Some(rider)
+}
+
 /// Dynamic-quantity marker phrases other than " twice " (which each caller
 /// handles per-site: the has_marker gate ORs it with its activation-limit
 /// guard; the *_is_only_dynamic_marker helpers treat it as the sole/second
@@ -3276,7 +3375,19 @@ fn detect_dynamic_qty(
     // CR 201.5: markers are read from the name-normalized text so a dynamic
     // word inside the card's own name is not rules text. The probes below and
     // the reported gap keep reading `cleaned`.
-    let markers = active_dynamic_markers(name_normalized.0, evidence);
+    let residual;
+    let marker_text = if let Some(rider) = copy_cast_exile_quantifier(name_normalized.0, scoped) {
+        let start = nom::Offset::offset(&name_normalized.0, &rider);
+        residual = format!(
+            "{} {}",
+            &name_normalized.0[..start],
+            &name_normalized.0[start + rider.len()..]
+        );
+        residual.as_str()
+    } else {
+        name_normalized.0
+    };
+    let markers = active_dynamic_markers(marker_text, evidence);
     if markers.is_empty() {
         return;
     }
@@ -4954,6 +5065,109 @@ fn distributed_x_cost_if_is_only_if_marker(stripped: &str, evidence: &UnitEviden
 
 // ── Detector G: Condition_If ────────────────────────────────────────────
 
+/// CR 707.9b + CR 707.9f: removing Legendary from the copy implements the
+/// original spell's legendary guard. Parse a single exception body directly
+/// because the compound exception parser skips unknown bodies.
+fn copied_spell_legendary_guard(sentence: &str, def: &AbilityDefinition) -> Option<()> {
+    let Effect::CopySpell {
+        target,
+        additional_modifications,
+        ..
+    } = &*def.effect
+    else {
+        return None;
+    };
+    let (body, target_text) = preceded(
+        (tag::<_, _, OracleError<'_>>("copy "), peek(tag("target "))),
+        terminated(take_until(", except "), tag(", except ")),
+    )
+    .parse(sentence)
+    .ok()?;
+    let (parsed_target, rest) = super::oracle_target::parse_target(target_text);
+    if !rest.trim().is_empty() || &parsed_target != target {
+        return None;
+    }
+    let (guard, modifications) = parse_except_body(body, "", &ParseContext::default())?;
+    if modifications
+        != [ContinuousModification::RemoveSupertype {
+            supertype: Supertype::Legendary,
+        }]
+        || modifications != *additional_modifications
+    {
+        return None;
+    }
+    all_consuming((
+        tag::<_, _, OracleError<'_>>(" if the spell is legendary"),
+        opt(tag(".")),
+    ))
+    .parse(guard)
+    .ok()?;
+    Some(())
+}
+
+/// CR 107.1b + CR 608.2c: the clamp implements the threshold on the player
+/// supplied by this instruction's single announcement.
+fn player_counter_difference_guard(sentence: &str, def: &AbilityDefinition) -> Option<()> {
+    let (clause, loyalty) = opt(terminated(parse_loyalty_symbol_delta, tag(": ")))
+        .parse(sentence)
+        .ok()?;
+    if loyalty.is_some_and(|amount| def.cost != Some(AbilityCost::Loyalty { amount })) {
+        return None;
+    }
+    let (kind, threshold, recipient) =
+        super::oracle_nom::player_counter_difference::try_parse(clause)?;
+    let Effect::GivePlayerCounter {
+        counter_kind,
+        count,
+        target,
+    } = &*def.effect
+    else {
+        return None;
+    };
+    let QuantityExpr::ClampMin { inner, minimum: 0 } = count else {
+        return None;
+    };
+    let QuantityExpr::Offset { inner, offset } = &**inner else {
+        return None;
+    };
+    let QuantityExpr::Multiply { factor: -1, inner } = &**inner else {
+        return None;
+    };
+    (*counter_kind == kind
+        && *offset == threshold
+        && *target == recipient
+        && def.target_reads == TargetReadOrigin::OwnAnnouncement
+        && def.multi_target.is_none()
+        && **inner
+            == QuantityExpr::Ref {
+                qty: QuantityRef::TargetControllerCounter { kind },
+            })
+    .then_some(())
+}
+
+fn strip_copy_or_counter_guard<'a>(cleaned: &'a str, parsed: &ParsedAbilities) -> &'a str {
+    let mut roots = unit_roots(parsed);
+    let Some(def) = roots.next() else {
+        return cleaned;
+    };
+    if roots.next().is_some() || def.condition.is_some() || def.player_scope.is_some() {
+        return cleaned;
+    }
+    let Some(sentence) = split_sentence_units(cleaned).into_iter().next() else {
+        return cleaned;
+    };
+    if copied_spell_legendary_guard(sentence, def).is_some()
+        || player_counter_difference_guard(sentence, def).is_some()
+    {
+        // The first sentence is a slice of the original unit. Keep the
+        // remainder verbatim so its condition markers still reach Detector G.
+        let end = nom::Offset::offset(&cleaned, &sentence) + sentence.len();
+        &cleaned[end..]
+    } else {
+        cleaned
+    }
+}
+
 /// CR 608.2c: "if [condition], [effect]" — conditional gate. Must be
 /// represented as a `condition` / `constraint` field on the parsed ability,
 /// or as an `unless_pay` / `unless_filter` for the inverse form.
@@ -5017,7 +5231,9 @@ fn detect_condition_if(
     //               mana-payment alternative is encoded as a replacement
     //               with `ReplacementMode::Optional { decline: Tap(SelfRef) }`,
     //               i.e., the decline branch IS the "if you don't" gate.
-    let stripped = strip_represented_excess_riders(cleaned, parsed);
+    let residual = strip_copy_or_counter_guard(cleaned, parsed);
+    let consumed_guard = residual.len() != cleaned.len();
+    let stripped = strip_represented_excess_riders(residual, parsed);
     let stripped = strip_cr_implicit_if_phrases(&stripped);
     // CR 614.1a: strip sentences that are structurally a *represented*
     // replacement antecedent ("if [subject] would [event], ... instead").
@@ -5188,7 +5404,11 @@ fn detect_condition_if(
     // not conditions. Also "if able" (CR 508.1d / CR 509.1c) —
     // must-attack/must-block riders, encoded as `MustAttack`/`MustBeBlocked`
     // static modes.
-    let has_marker = stripped.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
+    let leading_if_after_carrier = consumed_guard
+        && tag::<_, _, OracleError<'_>>("if ")
+            .parse(stripped.trim_start())
+            .is_ok();
+    let has_marker = (leading_if_after_carrier || stripped.contains(" if ")) // allow-noncombinator: swallow detector marker scan on classified text
         && !stripped.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
         && !stripped.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
     if !has_marker {
@@ -5906,14 +6126,49 @@ fn target_filter_has_per_object_condition_property(filter: &TargetFilter) -> boo
 
 // ── Detector J: Duration_ThisTurn ───────────────────────────────────────
 
+/// CR 701.43b + CR 508.1g: the source's prior exert gates its own optional
+/// attack payment. The linked trigger has a separate resolution condition.
+fn strip_attack_exert_gate<'a>(cleaned: &'a str, parsed: &ParsedAbilities) -> &'a str {
+    let [trigger] = parsed.triggers.as_slice() else {
+        return cleaned;
+    };
+    if trigger.mode != TriggerMode::Exerted
+        || trigger.valid_card != Some(TargetFilter::SelfRef)
+        || trigger.trigger_zones != [Zone::Battlefield]
+        || !parsed.abilities.is_empty()
+        || !parsed.replacements.is_empty()
+    {
+        return cleaned;
+    }
+    let gate = preceded(
+        tag("if "),
+        terminated(
+            parse_inner_condition,
+            tag(", you may exert it as it attacks."),
+        ),
+    )
+    .parse(cleaned.trim_start());
+    match gate {
+        Ok((rest, condition))
+            if matches!(&condition, StaticCondition::Not { condition } if **condition == StaticCondition::SourceExertedThisTurn)
+                && trigger.attack_cost_condition.as_ref() == Some(&condition) =>
+        {
+            rest
+        }
+        _ => cleaned,
+    }
+}
+
 /// CR 611.2a: "this turn" — temporal scope. Must produce a `Duration`
 /// slot on the parsed ability or a duration-bearing modification.
 fn detect_duration_this_turn(
     cleaned: &str,
     original: &str,
     evidence: &UnitEvidence,
+    parsed: &ParsedAbilities,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
+    let cleaned = strip_attack_exert_gate(cleaned, parsed);
     // allow-noncombinator: swallow detector marker scan on classified text
     if !cleaned.contains(" this turn") {
         return;
@@ -19438,6 +19693,272 @@ mod excess_rider_tests {
         for label in ["Replacement_Instead", "Condition_If"] {
             assert!(has_warning(&warnings, label), "{label}: {warnings:?}");
         }
+    }
+}
+
+/// Typed carriers the audit credits for one clause each (Combat Celebrant's negated
+/// attack-exert gate, Double Major's legendary copy exception, Vraska, Betrayal's Sting's
+/// poison-difference clamp, Mizzix's Mastery's exiled-this-way copy/cast) and the near-miss
+/// shapes that must keep warning.
+#[cfg(test)]
+mod typed_carrier_tests {
+    use super::*;
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::CountScope;
+    use crate::types::player::PlayerCounterKind;
+
+    const CELEBRANT: &str = "If this creature hasn't been exerted this turn, you may exert it as it attacks. When you do, untap all other creatures you control and after this phase, there is an additional combat phase. (An exerted creature won't untap during your next untap step.)";
+    const MAJOR: &str = "Copy target creature spell you control, except it isn't legendary if the spell is legendary. (A copy of a creature spell becomes a token.)";
+    const VRASKA: &str = "Compleated ({B/P} can be paid with {B} or 2 life. If life was paid, this planeswalker enters with two fewer loyalty counters.)\n[0]: You draw a card and lose 1 life. Proliferate.\n[−2]: Target creature becomes a Treasure artifact with \"{T}, Sacrifice this artifact: Add one mana of any color\" and loses all other card types and abilities.\n[−9]: If target player has fewer than nine poison counters, they get a number of poison counters equal to the difference.";
+    const MASTERY: &str = "Exile target card that's an instant or sorcery from your graveyard. For each card exiled this way, copy it, and you may cast the copy without paying its mana cost. Exile Mizzix's Mastery.\nOverload {5}{R}{R}{R} (You may cast this spell for its overload cost. If you do, change \"target\" in its text to \"each.\")";
+
+    fn parse(text: &str, name: &str, kind: &str, keywords: &[&str]) -> ParsedAbilities {
+        let parsed = parse_oracle_text(
+            text,
+            name,
+            &keywords.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+            &[kind.to_owned()],
+            &[],
+        );
+        assert!(!any_ability_has_unimplemented(&parsed), "{name}");
+        parsed
+    }
+
+    fn clean(text: &str) -> String {
+        strip_parens(&text.to_ascii_lowercase())
+    }
+
+    fn warned(warnings: &[OracleDiagnostic], label: &str) -> bool {
+        warnings.iter().any(|warning| {
+            matches!(warning, OracleDiagnostic::SwallowedClause { detector, .. } if detector == label)
+        })
+    }
+
+    fn condition_reports(text: &str, parsed: &ParsedAbilities) -> bool {
+        let mut warnings = Vec::new();
+        detect_condition_if(text, text, &UnitEvidence::of(parsed), parsed, &mut warnings);
+        warned(&warnings, "Condition_If")
+    }
+
+    fn duration_reports(text: &str, parsed: &ParsedAbilities) -> bool {
+        let mut warnings = Vec::new();
+        detect_duration_this_turn(text, text, &UnitEvidence::of(parsed), parsed, &mut warnings);
+        warned(&warnings, "Duration_ThisTurn")
+    }
+
+    fn dynamic_reports(text: &str, parsed: &ParsedAbilities) -> bool {
+        let mut warnings = Vec::new();
+        detect_dynamic_qty(
+            text,
+            NameNormalized(text),
+            text,
+            parsed,
+            &UnitEvidence::of(parsed),
+            &mut warnings,
+        );
+        warned(&warnings, "DynamicQty")
+    }
+
+    #[test]
+    fn celebrant_requires_the_negated_attack_payment_on_the_same_source() {
+        let parsed = parse(CELEBRANT, "Combat Celebrant", "Creature", &[]);
+        let text = clean(CELEBRANT);
+        assert!(parsed.triggers[0].attack_cost_condition.is_some());
+        assert_ne!(strip_attack_exert_gate(&text, &parsed), text);
+        assert!(!warned(&parsed.parse_warnings, "Duration_ThisTurn"));
+        assert!(!duration_reports(&text, &parsed));
+
+        let mut reflexive_only = parsed.clone();
+        let trigger = &mut reflexive_only.triggers[0];
+        trigger.attack_cost_condition = None;
+        trigger.condition = Some(TriggerCondition::SourceAttackedThisCombat);
+        assert_eq!(strip_attack_exert_gate(&text, &reflexive_only), text);
+        assert!(duration_reports(&text, &reflexive_only));
+
+        let mut positive = parsed.clone();
+        positive.triggers[0].attack_cost_condition = Some(StaticCondition::SourceExertedThisTurn);
+        assert!(duration_reports(&text.replace("hasn't", "has"), &positive));
+        assert!(duration_reports(
+            &text.replace("this creature", "that creature"),
+            &parsed
+        ));
+        assert!(duration_reports(
+            &text.replace("exert it", "exert another creature"),
+            &parsed
+        ));
+        assert!(duration_reports(
+            &format!("{text} creatures can't block this turn."),
+            &parsed
+        ));
+    }
+
+    #[test]
+    fn double_major_requires_the_original_spell_legendary_guard_and_copy_exception() {
+        let parsed = parse(MAJOR, "Double Major", "Instant", &[]);
+        let text = clean(MAJOR);
+        assert!(matches!(
+            &*parsed.abilities[0].effect,
+            Effect::CopySpell { .. }
+        ));
+        assert_ne!(strip_copy_or_counter_guard(&text, &parsed), text);
+        assert!(!warned(&parsed.parse_warnings, "Condition_If"));
+        for changed in [
+            text.replace("spell is legendary", "spell is red"),
+            text.replace("the spell is", "another spell is"),
+            text.replace("legendary if", "legendary and it has flying if"),
+            format!("{text} if you have seven cards in hand, draw a card."),
+        ] {
+            assert!(condition_reports(&changed, &parsed), "{changed}");
+        }
+        let mut unrelated = parsed.clone();
+        let Effect::CopySpell {
+            additional_modifications,
+            ..
+        } = &mut *unrelated.abilities[0].effect
+        else {
+            panic!("expected CopySpell");
+        };
+        additional_modifications.clear();
+        assert!(condition_reports(&text, &unrelated));
+    }
+
+    #[test]
+    fn vraska_requires_the_matching_counter_read_and_write_on_one_announced_player() {
+        let parsed = parse(
+            VRASKA,
+            "Vraska, Betrayal's Sting",
+            "Planeswalker",
+            &["Compleated"],
+        );
+        assert!(!warned(&parsed.parse_warnings, "Condition_If"));
+        let mut unit = parsed.clone();
+        unit.abilities
+            .retain(|def| matches!(&*def.effect, Effect::GivePlayerCounter { .. }));
+        assert_eq!(unit.abilities.len(), 1);
+        let text = clean(VRASKA.lines().last().unwrap());
+        assert_ne!(strip_copy_or_counter_guard(&text, &unit), text);
+        assert!(condition_reports(
+            &format!("{text} if you have seven cards in hand, draw a card."),
+            &unit
+        ));
+        for edit in [
+            |def: &mut AbilityDefinition| def.target_reads = TargetReadOrigin::ParentAnnouncement,
+            |def: &mut AbilityDefinition| {
+                let Effect::GivePlayerCounter { target, .. } = &mut *def.effect else {
+                    unreachable!()
+                };
+                *target = TargetFilter::SelfRef;
+            },
+            |def: &mut AbilityDefinition| {
+                let Effect::GivePlayerCounter { counter_kind, .. } = &mut *def.effect else {
+                    unreachable!()
+                };
+                *counter_kind = PlayerCounterKind::Rad;
+            },
+            |def: &mut AbilityDefinition| {
+                let Effect::GivePlayerCounter {
+                    count: QuantityExpr::ClampMin { minimum, .. },
+                    ..
+                } = &mut *def.effect
+                else {
+                    unreachable!()
+                };
+                *minimum = 1;
+            },
+            |def: &mut AbilityDefinition| {
+                let Effect::GivePlayerCounter {
+                    count: QuantityExpr::ClampMin { inner, .. },
+                    ..
+                } = &mut *def.effect
+                else {
+                    unreachable!()
+                };
+                **inner = QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::TargetControllerCounter {
+                            kind: PlayerCounterKind::Poison,
+                        },
+                    }),
+                    offset: -9,
+                };
+            },
+            |def: &mut AbilityDefinition| {
+                let Effect::GivePlayerCounter {
+                    count: QuantityExpr::ClampMin { inner, .. },
+                    ..
+                } = &mut *def.effect
+                else {
+                    unreachable!()
+                };
+                let QuantityExpr::Offset { inner, .. } = &mut **inner else {
+                    unreachable!()
+                };
+                let QuantityExpr::Multiply { inner, .. } = &mut **inner else {
+                    unreachable!()
+                };
+                **inner = QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCounter {
+                        kind: PlayerCounterKind::Poison,
+                        scope: CountScope::Controller,
+                    },
+                };
+            },
+        ] {
+            let mut changed = unit.clone();
+            edit(&mut changed.abilities[0]);
+            assert!(condition_reports(&text, &changed));
+        }
+        for changed in [
+            text.replace("target player", "you"),
+            text.replace("target player", "target permanent"),
+            text.replace("nine", "eight"),
+        ] {
+            assert!(condition_reports(&changed, &unit), "{changed}");
+        }
+    }
+
+    #[test]
+    fn mastery_requires_an_immediate_exile_producer_and_uncapped_optional_free_cast() {
+        let parsed = parse(MASTERY, "Mizzix's Mastery", "Sorcery", &["Overload"]);
+        let text = clean(MASTERY.lines().next().unwrap());
+        assert!(copy_cast_exile_quantifier(&text, &parsed).is_some());
+        assert!(!warned(&parsed.parse_warnings, "DynamicQty"));
+        for changed in [
+            text.replace("your graveyard", "your hand"),
+            text.replace("exile target", "return target"),
+            text.replace(" copy it,", " choose one, copy it,"),
+            text.replace("copy it", "copy it twice"),
+            text.replace("cast the copy", "cast up to one copy"),
+            text.replace("you may cast", "cast"),
+            text.replace(" without paying its mana cost", ""),
+            text.replace(
+                ". for each",
+                ". exile the top card of your library. for each",
+            ),
+        ] {
+            assert!(dynamic_reports(&changed, &parsed), "{changed}");
+        }
+        let mut wrong_set = parsed.clone();
+        let consumer = wrong_set.abilities[0]
+            .sub_ability
+            .as_deref_mut()
+            .expect("copy consumer");
+        let Effect::CastCopyOfCard { target, .. } = &mut *consumer.effect else {
+            unreachable!()
+        };
+        *target = TargetFilter::TrackedSet {
+            id: TrackedSetId(1),
+        };
+        assert!(dynamic_reports(&text, &wrong_set));
+    }
+
+    #[test]
+    fn mastery_carrier_leaves_a_sibling_for_each_reporting() {
+        let parsed = parse(MASTERY, "Mizzix's Mastery", "Sorcery", &["Overload"]);
+        let text = clean(MASTERY.lines().next().unwrap());
+        let text = format!("{text} for each creature you control, draw a card.");
+        assert!(copy_cast_exile_quantifier(&text, &parsed).is_some());
+        assert!(dynamic_reports(&text, &parsed));
     }
 }
 

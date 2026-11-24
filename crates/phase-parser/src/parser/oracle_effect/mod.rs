@@ -27279,7 +27279,7 @@ fn parse_bare_damage_continuation<'a>(
 /// Composed one `alt` per axis: the copy-object exiled-card anaphor, then the
 /// comma/bare `and` conjunction (CR 608.2c) that coordinates the cast tail. The
 /// returned remainder is the lowercase cast half.
-fn parse_copy_cast_head_connector(input: &str) -> OracleResult<'_, ()> {
+pub(super) fn parse_copy_cast_head_connector(input: &str) -> OracleResult<'_, ()> {
     let (input, _) = tag("copy ").parse(input)?;
     let (input, _) = alt((
         tag("those exiled cards"),
