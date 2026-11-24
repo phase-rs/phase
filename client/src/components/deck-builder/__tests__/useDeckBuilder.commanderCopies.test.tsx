@@ -6,6 +6,7 @@ import { CommanderPanel } from "../CommanderPanel";
 import type { DeckEntry } from "../../../services/deckParser";
 import type { ScryfallCard } from "../../../services/scryfall";
 import type { GameFormat } from "../../../adapter/types";
+import { loadPreconDeckMap, type DeckMap } from "../../../hooks/useDecks";
 import {
   evaluateDeckCompatibility,
   type DeckCompatibilityResult,
@@ -505,6 +506,7 @@ describe("useDeckBuilder — counted Commander inference", () => {
     await resetSavedDeckLibraryForTests();
     installFifoWebLocks();
     inference.mockReset().mockResolvedValue(null);
+    vi.mocked(loadPreconDeckMap).mockReset().mockResolvedValue({});
   });
 
   afterEach(() => {
@@ -588,6 +590,56 @@ describe("useDeckBuilder — counted Commander inference", () => {
     expect(await result.current.handleLoad("Deleted Deck")).toBe(false);
     expect(inference.mock.calls).toEqual([[plains]]);
 
+    await act(async () => {
+      plainsAnswer.resolve(null);
+      expect(await plainsLoad).toBe(true);
+    });
+    expect(result.current.deck.main).toEqual(plains);
+    expect(result.current.deckName).toBe(name);
+  });
+
+  it("keeps a valid Load pending when a missing precon-prefixed deck is selected", async () => {
+    const name = "Loaded Plains";
+    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(unmarked));
+    const { result } = openBuilder();
+    const plainsAnswer = deferred<string | null>();
+    inference.mockReturnValueOnce(plainsAnswer.promise);
+
+    const plainsLoad = result.current.handleLoad(name);
+    expect(await result.current.handleLoad("[Pre-built] My Test Deck")).toBe(false);
+    expect(loadPreconDeckMap).toHaveBeenCalledTimes(1);
+    expect(inference.mock.calls).toEqual([[plains]]);
+
+    await act(async () => {
+      plainsAnswer.resolve(null);
+      expect(await plainsLoad).toBe(true);
+    });
+    expect(result.current.deck.main).toEqual(plains);
+    expect(result.current.deckName).toBe(name);
+  });
+
+  it("keeps the newer saved Load when an older precon is found late", async () => {
+    const name = "Loaded Plains";
+    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(unmarked));
+    const { result } = openBuilder();
+    const catalog = deferred<DeckMap>();
+    const plainsAnswer = deferred<string | null>();
+    const forest = [{ name: "Forest", count: 60 }];
+    vi.mocked(loadPreconDeckMap).mockReturnValueOnce(catalog.promise);
+    inference.mockReturnValueOnce(plainsAnswer.promise);
+
+    const preconLoad = result.current.handleLoad("[Pre-built] Precon Forest (TST)");
+    expect(loadPreconDeckMap).toHaveBeenCalledTimes(1);
+    const plainsLoad = result.current.handleLoad(name);
+    expect(inference.mock.calls).toEqual([[plains]]);
+
+    await act(async () => {
+      catalog.resolve({
+        forest: { name: "Precon Forest", code: "TST", type: "Commander Deck", coveragePct: 100, mainBoard: forest },
+      });
+      expect(await preconLoad).toBe(false);
+    });
+    expect(inference.mock.calls).toEqual([[plains], [forest]]);
     await act(async () => {
       plainsAnswer.resolve(null);
       expect(await plainsLoad).toBe(true);

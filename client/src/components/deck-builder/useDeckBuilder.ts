@@ -147,8 +147,10 @@ export function useDeckBuilder({
   }, []);
   // Bumped whenever the editor switches to another deck: a Load, or a Clone that opens its copy.
   const deckIdentityRevision = useRef(0);
-  // Bumped when a saved deck has been found or a bundled precon lookup starts.
-  const loadGeneration = useRef(0);
+  // Tickets preserve the order in which Load calls start.
+  const loadTickets = useRef(0);
+  // Only Loads whose targets exist can advance this ticket.
+  const latestProceedingLoad = useRef(0);
   interface EditorCapture {
     identity: number;
     edit: number;
@@ -693,6 +695,7 @@ export function useDeckBuilder({
   // Load ignore it; resolveSaveConflict's "load" case uses it to tell a genuine load from a bail
   // so it knows whether to continue a pending action.
   const handleLoad = useCallback(async (name: string): Promise<boolean> => {
+    const ticket = ++loadTickets.current;
     // Captured before the resolveCommander await below: a committed Load/Clone (reloaded) or any edit
     // that marks the deck dirty, including an Import (edited), must win over this Load.
     const captured = captureEditor();
@@ -700,14 +703,14 @@ export function useDeckBuilder({
     const stored = captureSavedDeck(name);
     if (!parsed || stored.raw === null) {
       if (!name.startsWith(PRECON_PREFIX)) return false;
-      const generation = ++loadGeneration.current;
       const decks = await loadPreconDeckMap();
       const found = Object.entries(decks ?? {}).find(([, entry]) => PRECON_PREFIX + `${entry.name} (${entry.code})` === name);
       if (!found) return false;
+      latestProceedingLoad.current = Math.max(latestProceedingLoad.current, ticket);
       const [deckId, deckEntry] = found;
       const resolved = await resolveCommander(preconDeckEntryToParsedDeck(deckEntry));
       const changedAfterPrecon = editorChangedSince(captured);
-      if (generation !== loadGeneration.current || changedAfterPrecon.reloaded || changedAfterPrecon.edited) {
+      if (ticket !== latestProceedingLoad.current || changedAfterPrecon.reloaded || changedAfterPrecon.edited) {
         return false;
       }
       applyDeckToEditor(resolved);
@@ -720,7 +723,7 @@ export function useDeckBuilder({
       setComboDeclaration(UNDECLARED_COMBO);
       return true;
     }
-    const generation = ++loadGeneration.current;
+    latestProceedingLoad.current = Math.max(latestProceedingLoad.current, ticket);
     const persisted = JSON.parse(stored.raw) as ParsedDeck & { format?: string };
     // A rewrite that lands while resolveCommander runs is missed by the hook-level
     // subscription, which follows savedDeckRef and not this Load.
@@ -731,7 +734,7 @@ export function useDeckBuilder({
     try {
       const resolved = await resolveCommander(parsed);
       const changedAfterLoad = editorChangedSince(captured);
-      if (generation !== loadGeneration.current || changedAfterLoad.reloaded || changedAfterLoad.edited) {
+      if (ticket !== latestProceedingLoad.current || changedAfterLoad.reloaded || changedAfterLoad.edited) {
         return false;
       }
       const savedFormat = persisted.format
