@@ -5254,15 +5254,8 @@ fn resolve_each_player_portions(
                         comparator,
                         value,
                     } => {
-                        let threshold = crate::game::quantity::resolve_quantity_with_ctx(
-                            state,
-                            value,
-                            ability.controller,
-                            crate::game::quantity::QuantityContext {
-                                scoped_player: Some(p.id),
-                                granting_object: ability.context.granting_object,
-                                ..crate::game::quantity::QuantityContext::new(ability.source_id)
-                            },
+                        let threshold = crate::game::quantity::resolve_quantity_scoped_for_ability(
+                            state, value, ability, p.id,
                         );
                         crate::game::players::matches_relation(
                             state,

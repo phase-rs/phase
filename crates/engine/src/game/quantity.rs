@@ -4506,22 +4506,10 @@ pub(crate) fn resolve_quantity_scoped(
     )
 }
 
-/// Resolve a per-player `DamageEachPlayer` quantity that also references the
-/// resolving ability's object target(s) — e.g. Lady Loki, Agent of Chaos:
-/// "deals damage to each opponent equal to the difference between that spell's
-/// mana value and that nonland card's mana value", where "that nonland card"
-/// (`ObjectManaValue { scope: Target }`) is the exile-until hit injected into
-/// `ability.targets`.
-///
-/// This is the authoritative scoped resolver; [`resolve_quantity_scoped`] is the
-/// no-target wrapper that delegates here with an empty `targets` slice. It binds
-/// `scope_player` for `ControllerRef::ScopedPlayer` (per-recipient scope) and
-/// passes `targets` so the `ObjectManaValue { scope: Target }` leaf (and any
-/// other `Target`-scoped ref nested inside a `Difference`/`Sum`) reads the
-/// injected hit instead of resolving to 0.
-///
-/// CR 120.3: per-player damage scope. CR 202.3e: mana value of an object off the
-/// stack (X = 0). CR 608.2c: object referents follow the instruction order.
+/// Resolve a per-player quantity with an explicit target slice and no
+/// resolving ability, binding `scope_player` for `ControllerRef::ScopedPlayer`
+/// (CR 120.3: per-player damage scope) and passing `targets` so a
+/// `Target`-scoped leaf nested in a `Difference`/`Sum` reads its object.
 pub(crate) fn resolve_quantity_scoped_with_targets(
     state: &GameState,
     expr: &QuantityExpr,
@@ -4532,8 +4520,10 @@ pub(crate) fn resolve_quantity_scoped_with_targets(
     resolve_quantity_scoped_in(state, expr, source_id, scope_player, targets, None, None)
 }
 
-/// CR 400.7j: A per-player amount can also read a spell that a prior instruction
-/// of this ability moved. Carry the chain binding alongside the target list.
+/// Resolve a per-player quantity for a resolving ability: its original
+/// controller ("you", CR 109.5), targets, chosen X and chain bindings, so an
+/// object an earlier instruction moved reads as its new object (CR 400.7j —
+/// Lady Loki, Agent of Chaos's exiled spell, CR 202.3e off-stack X).
 pub(crate) fn resolve_quantity_scoped_for_ability(
     state: &GameState,
     expr: &QuantityExpr,
@@ -4562,40 +4552,32 @@ fn resolve_quantity_scoped_in(
 ) -> i32 {
     // CR 109.5: "you"/"your" in the quantity remain bound to the ability's
     // controller, not to the current DamageEachPlayer recipient.
-    let ability_controller = state
-        .objects
-        .get(&source_id)
-        .map(|obj| obj.controller)
-        .unwrap_or(scope_player);
+    let ability_controller = ability.map_or_else(
+        || {
+            state
+                .objects
+                .get(&source_id)
+                .map_or(scope_player, |obj| obj.controller)
+        },
+        |ability| ability.original_controller.unwrap_or(ability.controller),
+    );
 
     match expr {
         QuantityExpr::Fixed { value } => *value,
-        QuantityExpr::Ref { qty } => {
-            // CR 400.7j: the event mana-value read needs the chain's object
-            // binding. Other reads keep the per-player filter context.
-            let ability = ability.filter(|_| {
-                matches!(
-                    qty,
-                    QuantityRef::ObjectManaValue {
-                        scope: ObjectScope::EventSource
-                    }
-                )
-            });
-            resolve_ref(
-                state,
-                qty,
-                ability_controller,
-                QuantityContext {
-                    scoped_player: Some(scope_player),
-                    granting_object,
-                    ..QuantityContext::new(source_id)
-                },
-                targets,
-                None,
-                ability,
-                None,
-            )
-        }
+        QuantityExpr::Ref { qty } => resolve_ref(
+            state,
+            qty,
+            ability_controller,
+            QuantityContext {
+                scoped_player: Some(scope_player),
+                granting_object,
+                ..ability.map_or_else(|| QuantityContext::new(source_id), ability_quantity_context)
+            },
+            targets,
+            ability.and_then(|ability| ability.chosen_x),
+            ability,
+            None,
+        ),
         // Recurse into SELF so `targets` reach a `Target`-scoped leaf nested
         // inside a composite (e.g. the `right` operand of `Difference`).
         other => fold_compose(other, |inner| {
@@ -5239,17 +5221,15 @@ fn resolve_ref(
             a,
             a.original_controller.unwrap_or(a.controller),
         ),
-        None => {
-            let mut fc = trigger_source.as_ref().map_or_else(
+        None => trigger_source
+            .as_ref()
+            .map_or_else(
                 || FilterContext::from_source_with_controller(source_id, controller),
                 |source| FilterContext::from_trigger_source_with_controller(source, controller),
-            );
-            // CR 120.3: DamageEachPlayer binds ControllerRef::ScopedPlayer to
-            // the current recipient while ControllerRef::You stays on `controller`.
-            fc.scoped_iteration_player = ctx.scoped_player;
-            fc.with_granting_object(ctx.granting_object)
-        }
+            )
+            .with_granting_object(ctx.granting_object),
     };
+    filter_ctx.scoped_iteration_player = ctx.scoped_player;
     filter_ctx.recipient_id = ctx.recipient;
     filter_ctx.stack_trigger_context = ctx.stack_trigger_context;
     filter_ctx.ability_targets = ability_targets;
@@ -5829,6 +5809,7 @@ fn resolve_ref(
                     let mut scoped_ctx =
                         FilterContext::from_ability_with_controller(ability, scoped);
                     scoped_ctx.recipient_id = ctx.recipient;
+                    scoped_ctx.scoped_iteration_player = ctx.scoped_player;
                     scoped_ctx
                 })
             });
@@ -7432,7 +7413,12 @@ fn resolve_ref(
                         Some(ControllerRef::You) => snap.controller == controller,
                         Some(ControllerRef::Opponent) => snap.controller != controller,
                         Some(ControllerRef::ScopedPlayer) => {
-                            snap.controller == scoped_player_or_controller(ability, controller)
+                            snap.controller
+                                == scoped_player_or_controller(
+                                    ctx.scoped_player,
+                                    ability,
+                                    controller,
+                                )
                         }
                         // CR 109.4: TargetOpponent reads identically to TargetPlayer.
                         Some(ControllerRef::TargetPlayer | ControllerRef::TargetOpponent) => {
@@ -7513,11 +7499,12 @@ fn resolve_ref(
 }
 
 fn scoped_player_or_controller(
+    iteration_player: Option<PlayerId>,
     ability: Option<&ResolvedAbility>,
     controller: PlayerId,
 ) -> PlayerId {
-    ability
-        .and_then(|ability| ability.scoped_player)
+    iteration_player
+        .or_else(|| ability.and_then(|ability| ability.scoped_player))
         .unwrap_or(controller)
 }
 
@@ -7532,7 +7519,9 @@ fn damage_source_controller_matches(
     match expected {
         ControllerRef::You => actual == controller,
         ControllerRef::Opponent => actual != controller,
-        ControllerRef::ScopedPlayer => actual == scoped_player_or_controller(ability, controller),
+        ControllerRef::ScopedPlayer => {
+            actual == scoped_player_or_controller(ctx.scoped_player, ability, controller)
+        }
         // CR 109.4: TargetOpponent reads identically to TargetPlayer.
         ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => ability
             .and_then(|ability| {
@@ -18229,6 +18218,43 @@ mod tests {
         };
 
         assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 5);
+    }
+
+    #[test]
+    fn scoped_quantity_preserves_ability_and_overrides_inherited_player() {
+        let (state, source) = asymmetric_creature_board(3, 5);
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(1),
+        );
+        ability.original_controller = Some(PlayerId(0));
+        ability.scoped_player = Some(PlayerId(0));
+        ability.chosen_x = Some(4);
+
+        let count = |controller| QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(controller)),
+            },
+        };
+        let expr = QuantityExpr::Sum {
+            exprs: vec![
+                count(ControllerRef::You),
+                count(ControllerRef::ScopedPlayer),
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { name: "X".into() },
+                },
+            ],
+        };
+
+        assert_eq!(
+            resolve_quantity_scoped_for_ability(&state, &expr, &ability, PlayerId(1)),
+            3 + 5 + 4,
+        );
     }
 
     /// CR 109.4 + CR 115.1: runtime-seam companion to
