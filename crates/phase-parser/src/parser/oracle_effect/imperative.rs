@@ -2629,9 +2629,15 @@ pub(super) fn parse_targeted_action_ast(
         // the single authority in `mod.rs` (`target_span_dropped_this_way_anaphor`)
         // owns the bound-anaphor exemptions (payment amounts, reveal choices),
         // so this call site never duplicates the predicate.
-        if super::target_span_dropped_this_way_anaphor(target_text, &target) {
-            return None;
-        }
+        let (target, origin) = if let Ok((_, reader)) = super::graveyard_arrival_return_spec(lower)
+        {
+            (reader.noun, Some(reader.destination))
+        } else {
+            if super::target_span_dropped_this_way_anaphor(target_text, &target) {
+                return None;
+            }
+            (target, origin)
+        };
         // CR 607.2a: "the exiled card(s)" bound to the bare chain sentinel. Whether
         // it names only the cards the linked exile instruction exiled depends on the
         // return's own resolution chain (CR 608.2c), and that chain is fixed only on

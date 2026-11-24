@@ -2743,6 +2743,25 @@ impl ZoneChangeRecord {
         self.trigger_source_context.as_ref()
     }
 
+    /// CR 400.7j: The public-zone object created by this exact recorded move.
+    /// The departure supplies the pin when the destination has no entry stamp.
+    pub(crate) fn recorded_departure_successor(&self) -> Option<ObjectIncarnationRef> {
+        let identity = self.trigger_source_context()?.identity;
+        let departure = identity.reference;
+        if !self.departure.is_moved()
+            || !self.to_zone.is_public()
+            || self.from_zone != Some(identity.expected_zone)
+            || self.object_id != departure.object_id
+            || departure.incarnation == u64::MAX
+        {
+            return None;
+        }
+        Some(crate::game::merge::departure_successor(
+            departure.object_id,
+            departure.incarnation,
+        ))
+    }
+
     /// Records the identity an entry rebind installs on the destination object
     /// (CR 108.3 as a format modifies it); the departure snapshot is untouched.
     pub(crate) fn install_rebound_arrival(&mut self, owner: PlayerId) {
@@ -11043,6 +11062,8 @@ pub enum BatchCompletion {
     DestroyPopulationSettled {
         ability: Box<ResolvedAbility>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_return_result_producer: Option<(ReturnResultOccurrenceId, ReturnResultId)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         settled_destroyed: Option<Vec<ObjectId>>,
     },
     /// CR 608.2c + CR 614.1 + CR 603.10a: one admitted ChangeZone population
@@ -18868,6 +18889,13 @@ pub(crate) fn live_return_result_occurrences(
                 {
                     live.extend(tail.pending_return_result_producer.map(|(id, _)| id));
                 }
+                if let Some(BatchCompletion::DestroyPopulationSettled {
+                    pending_return_result_producer,
+                    ..
+                }) = &batch.completion
+                {
+                    live.extend(pending_return_result_producer.map(|(id, _)| id));
+                }
             }
             ResolutionFrame::RepeatFor(_)
             | ResolutionFrame::RepeatUntil(_)
@@ -19052,16 +19080,29 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
                         validate_parked_publisher(key, "ChangeZone population")?;
                     }
                 }
-                if matches!(
-                    &batch.completion,
-                    Some(BatchCompletion::DestroyPopulationSettled {
-                        settled_destroyed: Some(_),
-                        ..
-                    })
-                ) {
-                    return Err(
-                        "destroy population is prematurely settled in a parked batch".to_string(),
-                    );
+                if let Some(BatchCompletion::DestroyPopulationSettled {
+                    ability,
+                    pending_return_result_producer,
+                    settled_destroyed,
+                }) = &batch.completion
+                {
+                    if settled_destroyed.is_some() {
+                        return Err(
+                            "destroy population is prematurely settled in a parked batch"
+                                .to_string(),
+                        );
+                    }
+                    if pending_return_result_producer.map(|(_, result_id)| result_id)
+                        != ability.declares_return_result
+                    {
+                        return Err(
+                            "destroy population result publisher disagrees with its instruction"
+                                .to_string(),
+                        );
+                    }
+                    if let Some(key) = pending_return_result_producer {
+                        validate_parked_publisher(*key, "destroy population")?;
+                    }
                 }
             }
             ResolutionFrame::RepeatFor(_)
