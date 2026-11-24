@@ -21,7 +21,7 @@
 //!   3. Emits a warning ONLY when the marker is present and the AST has no
 //!      representation.
 
-use super::oracle::{is_draft_matters_sentence, ParsedAbilities};
+use super::oracle::{is_draft_matters_sentence, parse_attack_exert_header_parts, ParsedAbilities};
 use super::oracle_effect::become_copy_except::parse_except_body;
 use super::oracle_effect::gap_diagnosis::{swallowed_clause_gap, GuardWord, SwallowedAxis};
 use super::oracle_effect::{
@@ -33,7 +33,6 @@ use super::oracle_ir::doc::OracleItemIr;
 use super::oracle_ir::feature::{
     audit_units, history_for_unit, scope_to_unit, AuditUnit, ItemIdTracks, OracleSemanticFeature,
 };
-use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::error::OracleError;
 use super::oracle_nom::primitives::{
     parse_loyalty_symbol_delta, scan_contains, scan_preceded, split_sentence_units,
@@ -2839,6 +2838,7 @@ fn copy_cast_exile_quantifier<'a>(cleaned: &'a str, parsed: &ParsedAbilities) ->
     if *cost != ManaCost::zero()
         || consumer.condition.is_some()
         || consumer.optional
+        || consumer.unless_pay.is_some()
         || consumer.repeat_for.is_some()
         || consumer.player_scope.is_some()
         || consumer.multi_target.is_some()
@@ -5065,9 +5065,9 @@ fn distributed_x_cost_if_is_only_if_marker(stripped: &str, evidence: &UnitEviden
 
 // ── Detector G: Condition_If ────────────────────────────────────────────
 
-/// CR 707.9b + CR 707.9f: removing Legendary from the copy implements the
-/// original spell's legendary guard. Parse a single exception body directly
-/// because the compound exception parser skips unknown bodies.
+/// CR 707.9b: the copy modification removes Legendary. The printed guard
+/// checks whether the original spell is legendary. Parse a single exception
+/// body directly because the compound exception parser skips unknown bodies.
 fn copied_spell_legendary_guard(sentence: &str, def: &AbilityDefinition) -> Option<()> {
     let Effect::CopySpell {
         target,
@@ -6140,18 +6140,13 @@ fn strip_attack_exert_gate<'a>(cleaned: &'a str, parsed: &ParsedAbilities) -> &'
     {
         return cleaned;
     }
-    let gate = preceded(
-        tag("if "),
-        terminated(
-            parse_inner_condition,
-            tag(", you may exert it as it attacks."),
-        ),
-    )
-    .parse(cleaned.trim_start());
+    let gate = terminated(parse_attack_exert_header_parts, tag(".")).parse(cleaned.trim_start());
     match gate {
-        Ok((rest, condition))
-            if matches!(&condition, StaticCondition::Not { condition } if **condition == StaticCondition::SourceExertedThisTurn)
-                && trigger.attack_cost_condition.as_ref() == Some(&condition) =>
+        Ok((rest, header))
+            if header.exerted_object == "it"
+                && header.attacking_subject == header.exerted_object
+                && matches!(&header.condition, Some(StaticCondition::Not { condition }) if **condition == StaticCondition::SourceExertedThisTurn)
+                && trigger.attack_cost_condition == header.condition =>
         {
             rest
         }
@@ -19704,7 +19699,7 @@ mod excess_rider_tests {
 mod typed_carrier_tests {
     use super::*;
     use crate::parser::oracle::parse_oracle_text;
-    use crate::types::ability::CountScope;
+    use crate::types::ability::{CountScope, UnlessPayModifier};
     use crate::types::player::PlayerCounterKind;
 
     const CELEBRANT: &str = "If this creature hasn't been exerted this turn, you may exert it as it attacks. When you do, untap all other creatures you control and after this phase, there is an additional combat phase. (An exerted creature won't untap during your next untap step.)";
@@ -19784,6 +19779,10 @@ mod typed_carrier_tests {
         ));
         assert!(duration_reports(
             &text.replace("exert it", "exert another creature"),
+            &parsed
+        ));
+        assert!(duration_reports(
+            &text.replace("as it attacks", "as she attacks"),
             &parsed
         ));
         assert!(duration_reports(
@@ -19950,6 +19949,19 @@ mod typed_carrier_tests {
             id: TrackedSetId(1),
         };
         assert!(dynamic_reports(&text, &wrong_set));
+
+        let mut gated = parsed.clone();
+        let consumer = gated.abilities[0]
+            .sub_ability
+            .as_deref_mut()
+            .expect("copy consumer");
+        consumer.unless_pay = Some(UnlessPayModifier {
+            cost: AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            },
+            payer: TargetFilter::Controller,
+        });
+        assert!(dynamic_reports(&text, &gated));
     }
 
     #[test]

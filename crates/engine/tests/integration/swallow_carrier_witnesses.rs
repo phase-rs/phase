@@ -4,19 +4,22 @@
 //! the spell is legendary" copy exception, Vraska, Betrayal's Sting's "if target player has fewer
 //! than nine poison counters" difference, and Mizzix's Mastery's "for each card exiled this way,
 //! copy it" cast. Each card is the printed card loaded through `add_real_card` and driven through
-//! public `GameRunner` actions. The synthetic parts are setup only: seeded loyalty and poison
-//! counts, a mana pool, and an older unrelated tracked set that Mastery must not read. Each group
-//! has a control that fails if the carrier read the wrong object, player or set.
+//! public `GameRunner` actions. Bitterblade Warrior can exert again in the same turn, and
+//! Double Major preserves the name, power, toughness, and nonlegendary status of Grizzly Bears.
+//! Vraska adds poison only to the announced player and uses that player's team total in Two-Headed
+//! Giant, including at the zero floor. Mastery's empty overload publishes an empty set and leaves
+//! an older set intact, and its decline-all case completes without casting any copies.
 
 use engine::database::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::players::team_poison_total;
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::AbilityCost;
+use engine::types::ability::{AbilityCost, EffectKind};
 use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
@@ -242,12 +245,22 @@ fn vraska_reads_and_tops_up_the_announced_player() {
 }
 
 #[test]
-fn vraska_reads_the_target_teammates_poison_in_two_headed_giant() {
+fn vraska_clamps_at_zero_for_a_target_team_above_nine_poison() {
     let scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
     // CR 810.10a + CR 810.8d: target the head with zero of a live ten-poison team.
     assert_eq!(
         vraska(scenario, &[0, 0, 0, 10], PlayerId(2)),
         (10, vec![0, 0, 0, 10])
+    );
+}
+
+#[test]
+fn vraska_adds_the_team_poison_difference_to_the_targeted_head() {
+    let scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+    // CR 810.10a: read the team's six counters and put the difference on the targeted head.
+    assert_eq!(
+        vraska(scenario, &[0, 0, 0, 6], PlayerId(2)),
+        (6, vec![0, 0, 3, 6])
     );
 }
 
@@ -257,6 +270,7 @@ struct MasteryBoard {
     eligible: Vec<ObjectId>,
     opposing: ObjectId,
     stale: ObjectId,
+    stale_set: TrackedSetId,
 }
 
 fn mastery_board(names: &[&str]) -> MasteryBoard {
@@ -284,15 +298,16 @@ fn mastery_board(names: &[&str]) -> MasteryBoard {
         eligible,
         opposing,
         stale,
+        stale_set,
     }
 }
 
 impl MasteryBoard {
-    fn overload(&mut self) {
+    fn overload(&mut self) -> CastOutcome {
         self.runner
             .cast(self.mastery)
             .alternative_cast(AlternativeCastDecision::Alternative)
-            .resolve();
+            .resolve()
     }
 
     fn assert_offered(&self, expected: &[ObjectId]) {
@@ -362,7 +377,20 @@ fn mastery_ordinary_cast_copies_only_the_target() {
 #[test]
 fn mastery_empty_overload_never_reuses_an_older_exile_set() {
     let mut board = mastery_board(&[]);
-    board.overload();
+    let fresh_set = TrackedSetId(board.runner.state().next_tracked_set_id);
+    let outcome = board.overload();
+    assert!(outcome.events().iter().any(|event| matches!(
+        event,
+        GameEvent::EffectResolved {
+            kind: EffectKind::CastCopyOfCard,
+            source_id,
+            subject: None,
+        } if *source_id == board.mastery
+    )));
+    let state = board.runner.state();
+    assert_eq!(state.next_tracked_set_id, fresh_set.0 + 1);
+    assert!(state.tracked_object_sets[&fresh_set].is_empty());
+    assert_eq!(state.tracked_object_sets[&board.stale_set], [board.stale]);
     // CR 702.96a + CR 608.2c: the empty exile instruction supplies no copies.
     board.assert_finished(20, &[]);
 }
