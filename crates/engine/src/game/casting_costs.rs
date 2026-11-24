@@ -16332,9 +16332,10 @@ fn finalize_cast_with_phyrexian_choices_inner(
             expected_old_kind: Box::new(expected_old_kind),
             resulting_kind: Box::new(resulting_kind),
             expected_old_paid_facts: expected_old_paid_facts.map(Box::new),
-            resulting_paid_facts: Box::new(resulting_paid_facts),
+            resulting_paid_facts: Some(Box::new(resulting_paid_facts)),
             expected_old_cast_occurrence,
             resulting_cast_occurrence: Some(occurrence),
+            resulting_cycling_occurrence: None,
             cause,
         })
         .expect("resolved stack entry finalize must have a live journal cause");
@@ -18181,8 +18182,7 @@ fn auto_tap_mana_sources_inner(
                     })
                 });
                 // CR 605.3b + CR 605.3c: successful, unpaused resolution
-                // completes the activation even when its live amount is zero
-                // and no ManaAbilityProduced event is emitted.
+                // completes the activation even when its live amount is zero.
                 let completed = resolved.is_ok();
                 if completed {
                     completed_sources.insert(option.object_id);
@@ -18251,7 +18251,7 @@ fn auto_tap_mana_sources_inner(
                     activation_event,
                 )
                 .expect("intrinsic mana activation trigger collection cause must be live");
-                mana_payment::produce_mana(
+                let deposited = mana_payment::produce_mana(
                     state,
                     option.object_id,
                     option.mana_type,
@@ -18273,6 +18273,10 @@ fn auto_tap_mana_sources_inner(
                     player_id: player,
                     source_id: option.object_id,
                     produced: vec![option.mana_type],
+                    // CR 614.1a: Use the post-replacement deposit count.
+                    resolution: crate::types::events::ManaResolutionShare::WholeResolution {
+                        total: u32::try_from(deposited.len()).unwrap_or(u32::MAX),
+                    },
                     trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
                 });
             });

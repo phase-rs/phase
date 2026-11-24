@@ -84,6 +84,44 @@ fn doran_pumps_attacking_creature_by_pt_difference() {
     );
 }
 
+#[test]
+fn doran_pumps_each_attacking_creature_by_its_own_pt_difference() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    scenario
+        .add_creature_from_oracle(P0, "Doran, Besieged by Time", 0, 5, DORAN_PUMP)
+        .id();
+    let first_attacker = scenario.add_creature(P0, "Wall of Roots", 0, 4).id();
+    let second_attacker = scenario.add_creature(P0, "Hill Giant", 3, 1).id();
+
+    let mut runner = scenario.build();
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![
+                (first_attacker, AttackTarget::Player(P1)),
+                (second_attacker, AttackTarget::Player(P1)),
+            ],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+    runner.advance_until_stack_empty();
+
+    let first = &runner.state().objects[&first_attacker];
+    assert_eq!(
+        (first.power, first.toughness),
+        (Some(4), Some(8)),
+        "0/4 attacker should use its own X = |0-4|"
+    );
+    let second = &runner.state().objects[&second_attacker];
+    assert_eq!(
+        (second.power, second.toughness),
+        (Some(5), Some(3)),
+        "3/1 attacker should use its own X = |3-1|"
+    );
+}
+
 /// CR 509.1: a creature you control that *blocks* triggers the same +X/+X.
 /// Doran itself (0/5) blocks an opponent's attacker; X = |0 − 5| = 5 → 5/10.
 #[test]
@@ -141,6 +179,69 @@ fn doran_pumps_blocking_creature() {
         obj.toughness,
         Some(10),
         "0/5 blocker should be pumped to toughness 10 (X = |0-5|)"
+    );
+}
+
+#[test]
+fn doran_pumps_each_blocking_creature_by_its_own_pt_difference() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    scenario
+        .add_creature_from_oracle(P0, "Doran, Besieged by Time", 0, 5, DORAN_PUMP)
+        .id();
+    let first_blocker = scenario.add_creature(P0, "Wall of Roots", 0, 4).id();
+    let second_blocker = scenario.add_creature(P0, "Hill Giant", 3, 1).id();
+    let first_attacker = scenario.add_creature(P1, "Hostile Bear", 2, 2).id();
+    let second_attacker = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![
+                (first_attacker, AttackTarget::Player(P0)),
+                (second_attacker, AttackTarget::Player(P0)),
+            ],
+            bands: vec![],
+        })
+        .expect("P1 DeclareAttackers should succeed");
+    if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+        runner.pass_both_players();
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ),
+        "expected DeclareBlockers, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![
+                (first_blocker, first_attacker),
+                (second_blocker, second_attacker),
+            ],
+        })
+        .expect("P0 DeclareBlockers should succeed");
+    runner.advance_until_stack_empty();
+
+    let first = &runner.state().objects[&first_blocker];
+    assert_eq!(
+        (first.power, first.toughness),
+        (Some(4), Some(8)),
+        "0/4 blocker should use its own X = |0-4|"
+    );
+    let second = &runner.state().objects[&second_blocker];
+    assert_eq!(
+        (second.power, second.toughness),
+        (Some(5), Some(3)),
+        "3/1 blocker should use its own X = |3-1|"
     );
 }
 

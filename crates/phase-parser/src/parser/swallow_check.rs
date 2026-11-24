@@ -39,7 +39,6 @@ use super::oracle_target::{
 use super::oracle_trigger::parse_distributed_x_cost_condition;
 use super::oracle_vote::parse_one_threshold_clause;
 use super::swallow_evidence::UnitEvidence;
-use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastManaObjectScope,
     CastManaSpentMetric, CastingPermission, ChooseFromZoneConstraint, CoinFlipRun,
@@ -51,6 +50,7 @@ use crate::types::ability::{
     StaticCondition, StaticDefinition, TargetFilter, TieResolution, TriggerCondition,
     TriggerConstraint, TriggerDefinition, UnlessPayScaling, VoteSubject, VoteTally, ZoneOwner,
 };
+use crate::types::ability::{CyclingHistoryWindow, TurnWindow};
 use crate::types::ability_visit::nodes::visit_ability_def as visit_ability_def_nodes;
 use crate::types::ability_visit::DefinitionNode;
 use crate::types::ability_visit::{
@@ -6097,6 +6097,9 @@ fn detect_duration_this_turn(
                 ..
             } | QuantityRef::SpellsCast {
                 window: TurnWindow::ThisTurn,
+                ..
+            } | QuantityRef::CardsCycled {
+                window: CyclingHistoryWindow::ThisTurn,
                 ..
             } | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
                 | QuantityRef::EnteredThisTurn { .. }

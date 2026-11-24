@@ -14708,6 +14708,10 @@ fn extract_trigger_subject_for_context(
     ctx: &mut ParseContext,
 ) -> TargetFilter {
     let lower = condition_text.to_lowercase();
+    // CR 608.2k: "On it" refers to the source of this mana ability.
+    if parse_self_mana_ability_resolves_trigger(&lower).is_ok() {
+        return TargetFilter::SelfRef;
+    }
     let after_keyword = alt((
         value((), tag::<_, _, OracleError<'_>>("whenever ")),
         value((), tag("when ")),
@@ -15058,11 +15062,30 @@ fn parse_object_head_noun(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+fn parse_self_cycle_trigger_head(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        terminated(
+            preceded(
+                pair(alt((tag("when "), tag("whenever "))), tag("you cycle ")),
+                alt((tag("this card"), tag("~"))),
+            ),
+            eof,
+        ),
+    )
+    .parse(input)
+}
+
 fn trigger_object_pronoun_ref_for_condition(
     condition_text: &str,
     trigger_subject: &TargetFilter,
 ) -> Option<TargetFilter> {
     let lower = condition_text.to_lowercase();
+    // CR 608.2k + CR 702.29c: "it" refers to the card named by the cycle trigger.
+    if parse_self_cycle_trigger_head(&lower).is_ok() {
+        return Some(TargetFilter::SelfRef);
+    }
+
     let after_keyword = alt((
         value((), tag::<_, _, OracleError<'_>>("whenever ")),
         value((), tag("when ")),
@@ -16699,6 +16722,21 @@ fn parse_passive_taps_for_mana_line(i: &str) -> OracleResult<'_, String> {
     )
     .parse(rest)?;
     Ok((rest, subject.to_string()))
+}
+
+/// CR 608.2p + CR 106.12: Matches resolution of a source's mana ability,
+/// including a mana ability without a tap cost.
+fn parse_self_mana_ability_resolves_trigger(i: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        all_consuming((
+            alt((tag("whenever "), tag("when "))),
+            tag("a mana ability of "),
+            parse_self_reference_subject,
+            tag(" resolves"),
+        )),
+    )
+    .parse(i)
 }
 
 /// CR 605.1b: Recognizes the aggregate mana-ability condition whose produced
@@ -22196,6 +22234,12 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         }
     }
 
+    if parse_self_mana_ability_resolves_trigger(lower).is_ok() {
+        let mut def = make_base();
+        def.mode = TriggerMode::ManaAbilityProduced;
+        return Some((TriggerMode::ManaAbilityProduced, def));
+    }
+
     if parse_land_ability_adds_chosen_color(lower).is_ok() {
         let mut def = make_base();
         def.mode = TriggerMode::ManaAbilityProduced;
@@ -22825,9 +22869,8 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::SpellCast, def));
     }
 
-    // "when you cycle this card" / "when you cycle ~" — cycling self-trigger
-    // The card is in the graveyard by the time this trigger is checked.
-    if scan_contains(lower, "you cycle this card") || scan_contains(lower, "you cycle ~") {
+    // CR 702.29c: use the existing graveyard self-cycle delivery route.
+    if parse_self_cycle_trigger_head(lower).is_ok() {
         let mut def = make_base();
         def.mode = TriggerMode::Cycled;
         def.valid_card = Some(TargetFilter::SelfRef);

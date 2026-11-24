@@ -2532,6 +2532,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -2882,6 +2883,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -3190,6 +3192,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         // characteristics.
         | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         // CR 701.16a: sacrifice-time characteristics.
         | QuantityRef::SacrificedThisTurn { .. }
@@ -3496,6 +3499,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -6502,7 +6506,7 @@ fn resolve_ref(
             window: TurnWindow::LastTurn,
         } => match filter {
             None => usize_to_i32_saturating(
-                last_turn_scoped_players(state, scope, ctx, controller)
+                history_scoped_players(state, scope, ctx, controller)
                     .map(|p| p.spells_cast_last_turn as usize)
                     .sum(),
             ),
@@ -6956,6 +6960,35 @@ fn resolve_ref(
                     .map(u32_to_i32_saturating)
                     .unwrap_or(0)
             })
+        }
+        QuantityRef::CardsCycled {
+            scope,
+            window,
+            name,
+        } => {
+            // CR 602.2b + CR 601.2h + CR 601.2i: The ledger records paid activations
+            // at placement. CR 608.2h: Evaluate membership using the current turn.
+            // CR 109.5: In an ability, "you" uses its bound controller.
+            usize_to_i32_saturating(
+                history_scoped_players(state, scope, ctx, controller)
+                    .filter_map(|player| state.cycles_completed_this_game_by_player.get(&player.id))
+                    .flatten()
+                    .filter(|record| {
+                        let in_window = match window {
+                            crate::types::ability::CyclingHistoryWindow::ThisTurn => {
+                                record.turn == state.turn_number
+                            }
+                            crate::types::ability::CyclingHistoryWindow::ThisGame => true,
+                        };
+                        // CR 201.2 + CR 201.2a: Compare the recorded English name.
+                        in_window
+                            && name.as_deref().is_none_or(|name| {
+                                !name.is_empty()
+                                    && crate::game::filter::card_names_match(&record.name, name)
+                            })
+                    })
+                    .count(),
+            )
         }
         // CR 601.2i: Number of spells that became cast this game by the scoped
         // players, optionally filtered by spell characteristics.
@@ -7440,10 +7473,10 @@ fn scoped_players<'a>(
     scoped_players_matching(state, scope, ctx, controller, false)
 }
 
-/// CR 800.4i: `scoped_players` for a turn-history read that "can find actions
+/// CR 800.4i: `scoped_players` for an action-history read that "can find actions
 /// that were taken by a player who has left the game". Same scope selection,
 /// but the `All` / `Opponents` populations keep a departed player's record.
-fn last_turn_scoped_players<'a>(
+fn history_scoped_players<'a>(
     state: &'a GameState,
     scope: &'a CountScope,
     ctx: QuantityContext,

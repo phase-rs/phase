@@ -979,6 +979,7 @@ fn produce_mana_from_bound_ability(
     );
     let mut produced_for_tap_event = Vec::new();
     let mut produced_for_ability_events = Vec::new();
+    let mut total = 0_u32;
     for recipient in recipients {
         let mut scoped = resolved_for_quantity.clone();
         scoped.set_original_controller_recursive(player);
@@ -1060,11 +1061,9 @@ fn produce_mana_from_bound_ability(
         // resolution. Its payload is the full aggregate produced by the
         // ability, including scoped recipients that exclude the activator.
         produced_for_tap_event.extend(produced_mana.iter().copied());
-        if !produced_mana.is_empty() {
-            produced_for_ability_events.push((recipient, produced_mana.clone()));
-        }
         for &mana_type in &produced_mana {
-            mana_payment::produce_mana_with_attributes_from_source_quality(
+            // CR 614.1a: Count the units deposited after mana replacements.
+            let deposited = mana_payment::produce_mana_with_attributes_from_source_quality(
                 state,
                 source_id,
                 mana_type,
@@ -1076,6 +1075,10 @@ fn produce_mana_from_bound_ability(
                 expiry,
                 events,
             );
+            total = total.saturating_add(u32::try_from(deposited.len()).unwrap_or(u32::MAX));
+        }
+        if !produced_mana.is_empty() {
+            produced_for_ability_events.push((recipient, produced_mana));
         }
     }
 
@@ -1100,15 +1103,24 @@ fn produce_mana_from_bound_ability(
         }
     }
 
-    // CR 605.1b: Emit one aggregate event per receiving player for every
-    // mana-ability resolution, including abilities without a tap cost. Its
-    // output vector lets triggered mana abilities inspect each player's share
-    // of a multi-recipient resolution exactly once.
-    for (recipient, produced) in produced_for_ability_events {
+    // CR 605.2 + CR 608.2p: This is still a mana ability, and its resolution
+    // can trigger an ability even when no mana was added.
+    if produced_for_ability_events.is_empty() {
+        produced_for_ability_events.push((player, Vec::new()));
+    }
+    // CR 603.2c + CR 605.1b: The first event represents the whole resolution.
+    // Each event still exposes the base production for its own recipient.
+    let resolution_event_index = events.len();
+    for (index, (recipient, produced)) in produced_for_ability_events.into_iter().enumerate() {
         events.push(GameEvent::ManaAbilityProduced {
             player_id: recipient,
             source_id,
             produced,
+            resolution: if index == 0 {
+                crate::types::events::ManaResolutionShare::WholeResolution { total }
+            } else {
+                crate::types::events::ManaResolutionShare::RecipientOnly
+            },
             trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
         });
     }
@@ -1131,7 +1143,28 @@ fn produce_mana_from_bound_ability(
     // effect chain (e.g. painlands' "This land deals 1 damage to you.")
     // resolves that chain inline — mana abilities don't use the stack, so
     // the sub-ability runs as part of the same atomic resolution.
+    let producer = state.active_rules_execution_node;
+    let produced_before_tail = state.resolved_rules_journal.produced_mana().len();
     resolve_mana_ability_sub_chain(state, resolved_for_quantity, events);
+
+    // CR 608.2c + CR 608.2p: A later instruction can add mana in the same
+    // resolution (Black Mana Battery). Count successful deposits made by
+    // this activation's journal node, excluding any nested activations.
+    let tail_deposits = state.resolved_rules_journal.produced_mana();
+    if let Some(producer) = producer.filter(|_| tail_deposits.len() > produced_before_tail) {
+        let count = tail_deposits
+            .skip(produced_before_tail)
+            .iter()
+            .filter(|record| record.producer == producer && record.unit.source_id == source_id)
+            .count();
+        if let Some(GameEvent::ManaAbilityProduced {
+            resolution: crate::types::events::ManaResolutionShare::WholeResolution { total },
+            ..
+        }) = events.get_mut(resolution_event_index)
+        {
+            *total = total.saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
+        }
+    }
 }
 
 /// CR 605.3b + CR 602.2a: Build the transient ability for a mana ability's
