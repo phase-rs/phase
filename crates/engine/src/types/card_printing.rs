@@ -441,7 +441,7 @@ pub struct DeckPrintingRecord {
     /// The match's first-loaded payload's normalized rows, unchanged (round-trip names,
     /// original order); carried unclamped into later games by `load_next_game_decks`.
     rows: Vec<DeckPrinting>,
-    /// One entry per (section, face identity) the payload bound.
+    /// One entry per distinct (section, face identity, lookup key), in first-seen order.
     lookup_names: Vec<DeckFaceLookupName>,
 }
 
@@ -454,7 +454,7 @@ impl DeckPrintingRecord {
         &self.rows
     }
 
-    /// The round-trip name `section`'s rows use for `face`.
+    /// The first round-trip name the payload bound for `face` in `section`.
     pub fn lookup_name(&self, section: DeckSection, face: &CardFace) -> Option<&str> {
         self.lookup_names
             .iter()
@@ -462,8 +462,8 @@ impl DeckPrintingRecord {
             .map(|entry| entry.name.as_str())
     }
 
-    /// `lookup_name`, but only when no other face identity in `section` shares the key.
-    /// A continuation carries a section's rows under a key only if it identifies one face.
+    /// The first key for `face` if no other face in `section` claims it, even as a later key.
+    /// A continuation uses only this key to select the face's registered row stream.
     pub(crate) fn unambiguous_lookup_name(
         &self,
         section: DeckSection,

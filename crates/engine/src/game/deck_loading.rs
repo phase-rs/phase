@@ -2737,9 +2737,9 @@ fn assign_basic_land_art(copies: &mut [DeckCardCopy<'_>]) {
 /// normalized rows unchanged, plus the index-free form of its bindings. Needs no card
 /// database, so database-free loading retains the same record.
 ///
-/// Two entries with one face identity in one section always share a round-trip name
-/// (`round_trip_name` reads only the face and the database), so the first binding of a
-/// face identity names it.
+/// Deck ingress derives one round-trip name per face. Preserve each distinct key
+/// claim from resolved payloads in binding order so continuation allocation can
+/// detect shared keys, including claims after a face's first binding.
 fn retained_printing_record(
     deck: &PlayerDeckPayload,
 ) -> DisplayOnly<Option<Arc<DeckPrintingRecord>>> {
@@ -2754,7 +2754,7 @@ fn retained_printing_record(
             .card;
         if !lookup_names
             .iter()
-            .any(|known| known.names(binding.section, face))
+            .any(|known| known.name == binding.name && known.names(binding.section, face))
         {
             lookup_names.push(DeckFaceLookupName::of(
                 binding.section,
@@ -4766,7 +4766,7 @@ mod tests {
         assert_eq!(round_trip_name(&db, loser), "twin [loser]");
         let entry = |face: &CardFace, count| DeckEntry::from_resolved_face(&db, face, count);
         let mut original = PlayerDeckPayload {
-            main_deck: vec![entry(loser, 2)],
+            main_deck: vec![entry(loser, 1), entry(loser, 1)],
             sideboard: vec![entry(winner, 1)],
             printings: vec![
                 twin_row("twin [loser]", 1, "loser-first"),
@@ -4792,6 +4792,18 @@ mod tests {
         );
         assert_eq!(original.printings.len(), 3);
         assert_eq!(original.printings[2].count, 1);
+        let ingress_record = retained_printing_record(&original);
+        let expected_record = DeckPrintingRecord::new(
+            original.printings.clone(),
+            vec![
+                DeckFaceLookupName::of(DeckSection::MainDeck, loser, "twin [loser]".to_string()),
+                DeckFaceLookupName::of(DeckSection::Sideboard, winner, "Twin".to_string()),
+            ],
+        );
+        assert_eq!(
+            serde_json::to_vec(ingress_record.get().as_deref().expect("ingress record")).unwrap(),
+            serde_json::to_vec(&expected_record).unwrap()
+        );
 
         // A new match with an unannotated main copy still clamps sideboard ingress
         // to the local copy, even when the over-capacity suffix could fit in main.
@@ -4847,6 +4859,113 @@ mod tests {
                 (deck_face_identity(loser), Some(&last)),
             ]
         );
+    }
+
+    #[test]
+    fn playable_continuation_rejects_a_key_claimed_by_another_faces_second_binding() {
+        let [face_a, face_b] = ["Face A", "Face B"].map(|name| CardFace {
+            name: name.to_string(),
+            ..make_creature_face()
+        });
+        let entry = |face: &CardFace| DeckEntry {
+            card: face.clone(),
+            count: 1,
+        };
+        let [main, side] = PLAYABLE_PRINTING_SECTIONS;
+        let original = PlayerDeckPayload {
+            main_deck: vec![entry(&face_b), entry(&face_b), entry(&face_a)],
+            printings: vec![twin_row("x", 1, "shared-x")],
+            printing_entry_names: [(1, "y"), (0, "x"), (2, "x")]
+                .into_iter()
+                .map(|(entry_index, name)| DeckEntryLookupName {
+                    section: main,
+                    entry_index,
+                    name: name.to_string(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        validate_printing_bindings(&original);
+        let game_one = entry_copies(&original, main, None);
+        assert_eq!(game_one.len(), 3);
+        assert_eq!(
+            deck_face_identity(game_one[0].face),
+            deck_face_identity(&face_b)
+        );
+        assert_eq!(
+            game_one[0].printing.as_deref(),
+            Some(&CardPrinting::owner("shared-x", "1"))
+        );
+        assert!(game_one[1..].iter().all(|copy| copy.printing.is_none()));
+
+        let record = retained_printing_record(&original);
+        let retained = record.get().as_deref().expect("game one retains printings");
+        assert_eq!(retained.lookup_name(main, &face_b), Some("y"));
+        assert_eq!(retained.lookup_name(main, &face_a), Some("x"));
+        assert!(retained.printing_of(side, &face_a, 0).is_none());
+
+        let mut moved = PlayerDeckPayload {
+            main_deck: vec![entry(&face_b), entry(&face_b)],
+            sideboard: vec![entry(&face_a)],
+            ..Default::default()
+        };
+        let policy = FormatConfig::standard().sideboard_policy;
+        bind_continuation_printings(&mut moved, Some(retained), policy);
+        validate_printing_bindings(&moved);
+        let sideboard = entry_copies(&moved, side, None);
+        assert_eq!(sideboard.len(), 1);
+        assert_eq!(
+            deck_face_identity(sideboard[0].face),
+            deck_face_identity(&face_a)
+        );
+        let loader_stamp = sideboard[0].printing.as_deref();
+        let pool = PlayerDeckPool {
+            registered_main: Arc::new(moved.main_deck.clone()),
+            registered_sideboard: Arc::new(moved.sideboard.clone()),
+            current_sideboard: Arc::new(moved.sideboard.clone()),
+            printings: record.clone(),
+            ..Default::default()
+        };
+        let fetched = outside_game_copy_printing(&pool, &[], 2, side, &face_a);
+
+        // With no swap, base already bound x to A in main. The continuation now fails closed.
+        let mut unchanged = original.clone();
+        bind_continuation_printings(&mut unchanged, Some(retained), policy);
+        validate_printing_bindings(&unchanged);
+        let unchanged = entry_copies(&unchanged, main, None);
+        assert_eq!(unchanged.len(), 3);
+        assert_eq!(
+            deck_face_identity(unchanged[2].face),
+            deck_face_identity(&face_a)
+        );
+        assert_eq!(
+            (
+                loader_stamp,
+                fetched.as_deref(),
+                unchanged[2].printing.as_deref()
+            ),
+            (None, None, None),
+            "swapped loader, swapped game-two reader, unchanged loader"
+        );
+
+        let mut both_keys_have_rows = original;
+        both_keys_have_rows
+            .printings
+            .push(twin_row("y", 1, "unique-y"));
+        let y_printing = CardPrinting::owner("unique-y", "1");
+        for expected_first_copy in [Some(&y_printing), None] {
+            validate_printing_bindings(&both_keys_have_rows);
+            let record = retained_printing_record(&both_keys_have_rows);
+            let mut continuation = both_keys_have_rows.clone();
+            bind_continuation_printings(&mut continuation, record.get().as_deref(), policy);
+            validate_printing_bindings(&continuation);
+            let copies = entry_copies(&continuation, main, None);
+            let stamps: Vec<_> = copies.iter().map(|copy| copy.printing.as_deref()).collect();
+            assert_eq!(stamps, [expected_first_copy, None, None]);
+            // When x is B's first key, its ambiguity rules out that stream. B does
+            // not fall back to its later y claim, even though y has a usable row.
+            both_keys_have_rows.printing_entry_names.swap(0, 1);
+        }
     }
 
     #[test]
