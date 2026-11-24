@@ -2938,6 +2938,17 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             }
         }
     }
+    // CR 101.4 + CR 701.20a: player-scoped hand-reveal selections remain
+    // private until the APNAP carrier settles. Preserve the participant rows
+    // for protocol shape, but remove each selection's hidden identities and
+    // cardinality from viewers without access to that player's hand.
+    if let Some(pending) = filtered.pending_player_scope_reveal.as_mut() {
+        for (player, selected) in &mut pending.selections {
+            if !can_view_private_for_player(*player) {
+                selected.clear();
+            }
+        }
+    }
     if let Some(batch) = filtered.pending_search_found_batch.as_mut() {
         if !can_view_private_for_player(batch.searcher) {
             for identity in batch

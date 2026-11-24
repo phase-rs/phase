@@ -7894,6 +7894,36 @@ pub struct PendingDiscardFanOut {
     pub after_scope_needs_linked_exile: bool,
 }
 
+/// CR 101.4 + CR 701.20a: APNAP state for a player-scoped hand reveal whose
+/// selections stay private until every participating player has answered.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingPlayerScopeReveal {
+    pub source_id: ObjectId,
+    pub players: Vec<PlayerId>,
+    pub selections: Vec<(PlayerId, Vec<ObjectId>)>,
+}
+
+impl PendingPlayerScopeReveal {
+    pub fn new(source_id: ObjectId, players: Vec<PlayerId>) -> Self {
+        Self {
+            source_id,
+            players,
+            selections: Vec::new(),
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.players.iter().all(|player| {
+            self.selections
+                .iter()
+                .any(|(selected_player, _)| selected_player == player)
+        }) && self
+            .selections
+            .iter()
+            .all(|(player, _)| self.players.contains(player))
+    }
+}
+
 /// CR 101.4 + CR 701.23i: APNAP state for a self-library search instruction
 /// whose selected cards are delivered only after every searching player has
 /// made their private choice. The original spell's controller remains on
@@ -31254,6 +31284,11 @@ declare_game_state! {
     /// so the action phase cannot begin before every player has chosen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_scoped_library_search: Option<PendingScopedLibrarySearch>,
+    /// CR 101.4 + CR 701.20a: Pending private selections for a player-scoped
+    /// hand reveal. The selected cards are not published until every
+    /// participating player has selected or declined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_player_scope_reveal: Option<PendingPlayerScopeReveal>,
     /// Typed cleanup waiting for an ordinary search's leading ChangeZone to
     /// settle. The chain walker consumes it synchronously; the paused
     /// ChangeZone drain consumes the same value after its final member lands.
@@ -41319,6 +41354,7 @@ impl GameState {
             completed_hidden_search_audiences: Vec::new(),
             pending_search_found_batch: None,
             pending_die_roll_instruction: None,
+            pending_player_scope_reveal: None,
             may_trigger_auto_choices: Vec::new(),
             un_actions: Default::default(),
             replacement_auto_choices: Vec::new(),
@@ -45023,6 +45059,7 @@ impl GameState {
             // live in one.
             active_library_searches: _,
             pending_scoped_library_search: _,
+            pending_player_scope_reveal: _,
             pending_library_search_delivery: _,
             // Pin-bearing damage/discard pauses drain before Priority is restored;
             // see their existing classification in `_gamestate_partition_is_total`.
@@ -47118,6 +47155,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_exile_from_top_until: _,
         pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
+        pending_player_scope_reveal: _,
         pending_library_search_delivery: _,
         completed_hidden_search_audiences: _,
         pending_search_found_batch: _,
@@ -47655,6 +47693,7 @@ impl PartialEq for GameState {
             && self.pending_mass_library_order_choice
                 == other.pending_mass_library_order_choice
             && self.pending_scoped_library_search == other.pending_scoped_library_search
+            && self.pending_player_scope_reveal == other.pending_player_scope_reveal
             && self.pending_library_search_delivery == other.pending_library_search_delivery
             && self.completed_hidden_search_audiences
                 == other.completed_hidden_search_audiences
