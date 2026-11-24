@@ -46039,23 +46039,34 @@ fn resolve_difference_anaphor_in_effect(effect: &mut Effect, bound: Option<&Quan
     }
 }
 
-/// CR 608.2c: Once an independent ability has been assembled and its
-/// governing comparison had a chance to bind, reject an unbound life-loss
-/// anaphor. A nested Otherwise branch may still inherit a trigger comparison.
-pub(crate) fn reject_unbound_life_loss_difference(def: &mut AbilityDefinition) {
-    use crate::types::ability_visit::{nodes_mut, DefinitionNodeMut};
-    let _ = nodes_mut::visit_ability_def(def, &mut |node| {
-        let DefinitionNodeMut::Ability(def) = node else {
-            return std::ops::ControlFlow::Continue(());
-        };
-        if matches!(
-            def.effect.as_ref(),
-            Effect::LoseLife { amount, .. } if is_difference_anaphor_placeholder(amount)
-        ) {
-            *def.effect = Effect::unimplemented("lose", "life equal to the difference");
-        }
-        std::ops::ControlFlow::Continue(())
-    });
+/// CR 608.2c: An independent ability's governing comparison must supply the
+/// two operands before an anaphoric life-loss amount can be interpreted.
+pub(super) fn reject_unbound_life_loss_in_effect(effect: &mut Effect) -> std::ops::ControlFlow<()> {
+    if matches!(
+        effect,
+        Effect::LoseLife { amount, .. } if is_difference_anaphor_placeholder(amount)
+    ) {
+        *effect = Effect::unimplemented("lose", "life equal to the difference");
+    }
+    std::ops::ControlFlow::Continue(())
+}
+
+pub(crate) fn reject_unbound_life_loss_difference(parsed: &mut super::oracle::ParsedAbilities) {
+    use crate::types::ability_visit::effects_mut;
+
+    let mut reject = reject_unbound_life_loss_in_effect;
+    for ability in &mut parsed.abilities {
+        let _ = effects_mut::visit_ability_def(ability, &mut reject);
+    }
+    for trigger in &mut parsed.triggers {
+        let _ = effects_mut::visit_trigger(trigger, &mut reject);
+    }
+    for definition in &mut parsed.statics {
+        let _ = effects_mut::visit_static(definition, &mut reject);
+    }
+    for replacement in &mut parsed.replacements {
+        let _ = effects_mut::visit_replacement(replacement, &mut reject);
+    }
 }
 
 /// CR 608.2h: rebind an `EventContextAmount` "that many" / "that much" /

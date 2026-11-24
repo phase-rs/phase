@@ -22210,6 +22210,14 @@ fn trigger_condition_anchors_resolvable(
         None => {}
     }
     match condition {
+        TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
+            [lhs, rhs].into_iter().all(|expr| {
+                super::quantity::trigger_quantity_payment_is_known(state, expr, trigger_event)
+            })
+        }
+        TriggerCondition::QuantityQuality { quantity, .. } => {
+            super::quantity::trigger_quantity_payment_is_known(state, quantity, trigger_event)
+        }
         TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
             conditions.iter().all(|inner| {
                 trigger_condition_anchors_resolvable(
@@ -47057,45 +47065,48 @@ pub mod tests {
             ],
         };
 
-        let event = GameEvent::SpellCast {
+        let event = |cast_mana_spent| GameEvent::SpellCast {
             card_id: CardId(2),
             controller: PlayerId(0),
             object_id: spell,
             cast_mana_value: None,
-            cast_mana_spent: None,
+            cast_mana_spent,
             cast_incarnation: None,
         };
 
         // 2 mana spent: 2 > 3 false, 2 > 4 false — trigger does NOT fire.
-        state
-            .objects
-            .get_mut(&spell)
-            .unwrap()
-            .mana_spent_to_cast_amount = 2;
         assert!(
-            !check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(Some(2)))
+            ),
             "Increment must not fire when mana spent (2) <= both power (3) and toughness (4)"
         );
 
         // 4 mana spent: 4 > 3 true — trigger fires even though 4 > 4 is false.
-        state
-            .objects
-            .get_mut(&spell)
-            .unwrap()
-            .mana_spent_to_cast_amount = 4;
         assert!(
-            check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(Some(4)))
+            ),
             "Increment must fire when mana spent (4) > power (3), regardless of toughness"
         );
 
         // 5 mana spent: 5 > 3 and 5 > 4 — fires.
-        state
-            .objects
-            .get_mut(&spell)
-            .unwrap()
-            .mana_spent_to_cast_amount = 5;
         assert!(
-            check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(Some(5)))
+            ),
             "Increment must fire when mana spent (5) exceeds both power and toughness"
         );
 
@@ -47105,23 +47116,25 @@ pub mod tests {
             obj.power = Some(1);
             obj.toughness = Some(2);
         }
-        state
-            .objects
-            .get_mut(&spell)
-            .unwrap()
-            .mana_spent_to_cast_amount = 2;
         assert!(
-            check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(Some(2)))
+            ),
             "Topiary Lecturer: 2 mana spent > power (1) must fire Increment"
         );
 
-        state
-            .objects
-            .get_mut(&spell)
-            .unwrap()
-            .mana_spent_to_cast_amount = 1;
         assert!(
-            !check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(Some(1)))
+            ),
             "Topiary Lecturer: 1 mana spent must not exceed power (1) or toughness (2)"
         );
     }
@@ -47142,11 +47155,6 @@ pub mod tests {
             "Test Spell".to_string(),
             Zone::Stack,
         );
-        {
-            let obj = state.objects.get_mut(&spell).unwrap();
-            obj.mana_cost = ManaCost::generic(4);
-        }
-
         let condition = TriggerCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::ManaSpentToCast {
@@ -47161,33 +47169,56 @@ pub mod tests {
                 },
             },
         };
-        let event = GameEvent::SpellCast {
+        let event = |cast_mana_spent| GameEvent::SpellCast {
             card_id: CardId(2),
             controller: PlayerId(1),
             object_id: spell,
-            cast_mana_value: None,
-            cast_mana_spent: None,
+            cast_mana_value: Some(4),
+            cast_mana_spent,
             cast_incarnation: None,
         };
 
-        state
-            .objects
-            .get_mut(&spell)
-            .unwrap()
-            .mana_spent_to_cast_amount = 4;
         assert!(
-            !check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(Some(4)))
+            ),
             "spent 4 on mana value 4 must not satisfy a strict less-than condition"
         );
 
-        state
-            .objects
-            .get_mut(&spell)
-            .unwrap()
-            .mana_spent_to_cast_amount = 3;
         assert!(
-            check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(Some(3)))
+            ),
             "spent 3 on mana value 4 must satisfy a strict less-than condition"
+        );
+
+        assert!(
+            check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(Some(0)))
+            ),
+            "a recorded zero payment is less than the mana value"
+        );
+        assert!(
+            !check_trigger_condition(
+                &state,
+                &condition,
+                PlayerId(0),
+                Some(source),
+                Some(&event(None))
+            ),
+            "an unknown legacy payment cannot satisfy the comparison"
         );
     }
 

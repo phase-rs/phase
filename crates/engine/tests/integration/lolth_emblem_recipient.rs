@@ -1,13 +1,32 @@
 use crate::support::{assert_damage_dealt, shared_card_db};
 use engine::game::combat::AttackTarget;
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
-use engine::types::mana::ManaCost;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
+
+const LOLTH: &str = r#"Whenever a creature you control dies, put a loyalty counter on Lolth.
+[0]: You draw a card and you lose 1 life.
+[−3]: Create two 2/1 black Spider creature tokens with reach and menace.
+[−8]: You get an emblem with "Whenever an opponent is dealt combat damage by one or more creatures you control, if that player lost less than 8 life this turn, they lose life equal to the difference.""#;
+
+fn tap_lands(runner: &mut GameRunner, lands: &[ObjectId]) {
+    for &source_id in lands {
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("activate the basic land's mana ability");
+        assert!(runner.state().objects[&source_id].tapped);
+    }
+}
 
 // CR 606.3 + CR 606.4 + CR 510.2 + CR 603.4: Pay the printed ultimate's
 // loyalty cost, then exercise the emblem with a single combat damage recipient.
@@ -17,30 +36,23 @@ fn lolth_emblem_applies_only_the_damaged_opponents_shortfall() {
     for (prior_loss, final_life) in [(0, 12), (8, 9)] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
-        let lolth = scenario.add_real_card(P0, "Lolth, Spider Queen", Zone::Battlefield, db);
-        let victims = std::array::from_fn::<_, 4, _>(|_| {
-            scenario.add_creature(P0, "Doomed creature", 1, 1).id()
-        });
-        let sweep = scenario
-            .add_spell_to_hand_from_oracle(P0, "Test sweeper", false, "Destroy all creatures.")
-            .with_mana_cost(ManaCost::generic(0))
+        let lolth = scenario
+            .add_planeswalker_from_oracle(P0, "Lolth, Spider Queen", "Lolth", 4, LOLTH)
             .id();
-        let prior_loss_spell = scenario
-            .add_spell_to_hand_from_oracle(
-                P0,
-                "Test precombat life loss",
-                false,
-                "Target opponent loses 8 life.",
-            )
-            .with_mana_cost(ManaCost::generic(0))
-            .id();
-        let attacker = scenario
-            .add_creature_to_hand(P0, "Hasty attacker", 3, 3)
-            .haste()
-            .with_mana_cost(ManaCost::generic(0))
-            .id();
+        let victims = std::array::from_fn::<_, 4, _>(|_| scenario.add_vanilla(P0, 1, 1));
+        let sweep = scenario.add_real_card(P0, "Wrath of God", Zone::Hand, db);
+        let prior_loss_spell = scenario.add_real_card(P0, "Exsanguinate", Zone::Hand, db);
+        let attacker = scenario.add_real_card(P0, "Boggart Ram-Gang", Zone::Hand, db);
+        let plains =
+            std::array::from_fn::<_, 4, _>(|_| scenario.add_basic_land(P0, ManaColor::White));
+        let swamps: Vec<_> = (0..if prior_loss > 0 { 10 } else { 0 })
+            .map(|_| scenario.add_basic_land(P0, ManaColor::Black))
+            .collect();
+        let forests =
+            std::array::from_fn::<_, 3, _>(|_| scenario.add_basic_land(P0, ManaColor::Green));
         let mut runner = scenario.build();
         assert_eq!(runner.state().objects[&lolth].loyalty, Some(4));
+        tap_lands(&mut runner, &plains);
         runner.cast(sweep).resolve();
         for victim in victims {
             assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
@@ -57,9 +69,11 @@ fn lolth_emblem_applies_only_the_damaged_opponents_shortfall() {
         assert!(runner.state().stack.is_empty());
 
         if prior_loss > 0 {
-            runner.cast(prior_loss_spell).target_player(P1).resolve();
+            tap_lands(&mut runner, &swamps);
+            runner.cast(prior_loss_spell).x(prior_loss as u32).resolve();
         }
         assert_eq!(runner.life(P1), 20 - prior_loss);
+        tap_lands(&mut runner, &forests);
         runner.cast(attacker).resolve();
         assert_eq!(runner.state().objects[&attacker].zone, Zone::Battlefield);
         runner.advance_to_combat();
@@ -83,7 +97,7 @@ fn lolth_emblem_applies_only_the_damaged_opponents_shortfall() {
         assert_damage_dealt(&events, attacker, TargetRef::Player(P1), 3, true);
         assert_eq!(runner.state().phase, Phase::EndCombat);
         assert!(runner.state().stack.is_empty());
-        assert_eq!(runner.life(P0), 20);
+        assert_eq!(runner.life(P0), 20 + prior_loss);
         assert_eq!(runner.life(P1), final_life);
     }
 }

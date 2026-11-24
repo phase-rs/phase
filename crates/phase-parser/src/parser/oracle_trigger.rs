@@ -3344,7 +3344,10 @@ pub(crate) fn lower_trigger_ir_with_provenance(
             execute,
             difference_count.as_ref(),
         );
-        crate::parser::oracle_effect::reject_unbound_life_loss_difference(execute);
+        let _ = crate::types::ability_visit::effects_mut::visit_ability_def(
+            execute,
+            &mut crate::parser::oracle_effect::reject_unbound_life_loss_in_effect,
+        );
     }
 
     // CR 603.4: Intervening-if life-gain triggers check the gained-life

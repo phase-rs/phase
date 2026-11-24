@@ -4058,8 +4058,11 @@ fn resolve_event_scoped_ref(
                     metric,
                 },
         } => {
-            if let Some(spent) = total_mana_spent_for_cast_event(state, event, metric) {
-                return Some(spent);
+            if *metric == CastManaSpentMetric::Total && matches!(event, GameEvent::SpellCast { .. })
+            {
+                // The ordinary ref resolver reads the explicit detection
+                // override too, including inside composed quantities.
+                return None;
             }
             let id = crate::game::targeting::extract_source_from_event(event)?;
             // The source filter belongs to the listener, while the payment
@@ -4092,12 +4095,8 @@ fn resolve_event_scoped_ref(
 }
 
 /// CR 601.2h + CR 400.7: The total payment belongs to this cast occurrence.
-/// Legacy events may use the live stack object's stamp for an unambiguous cast.
-fn total_mana_spent_for_cast_event(
-    state: &GameState,
-    event: &GameEvent,
-    metric: &CastManaSpentMetric,
-) -> Option<i32> {
+/// Legacy events use the pinned live or departed spell's stamp when available.
+fn total_mana_spent_for_cast_event(state: &GameState, event: &GameEvent) -> Option<i32> {
     let GameEvent::SpellCast {
         cast_mana_spent,
         object_id,
@@ -4107,38 +4106,62 @@ fn total_mana_spent_for_cast_event(
     else {
         return None;
     };
-    if *metric != CastManaSpentMetric::Total {
-        return None;
-    }
     if let Some(amount) = cast_mana_spent {
         return Some(u32_to_i32_saturating(*amount));
     }
 
-    let pin = crate::game::targeting::triggering_spell_identity_for_event(state, event);
-    let repeated_cast = pin.is_none()
-        && state
-            .spells_cast_this_turn_by_player
-            .get(controller)
-            .is_some_and(|records| {
-                records
-                    .iter()
-                    .filter(|record| record.spell_object_id == Some(*object_id))
-                    .nth(1)
-                    .is_some()
-            });
-    let amount = state
-        .objects
-        .get(object_id)
-        .filter(|object| {
-            !repeated_cast
-                && object.zone == Zone::Stack
-                && pin.map_or_else(
-                    || object.cast_controller.unwrap_or(object.controller) == *controller,
-                    |pin| object.incarnation == pin.incarnation,
-                )
-        })
-        .map_or(0, |object| object.mana_spent_to_cast_amount);
-    Some(u32_to_i32_saturating(amount))
+    let pinned =
+        crate::game::targeting::triggering_spell_identity_for_event(state, event).is_some();
+    if !pinned {
+        // Without an incarnation, a departed candidate or a second cast makes
+        // the live object ambiguous. Require corroborating cast history.
+        let mut records =
+            state
+                .spells_cast_this_turn_by_player
+                .iter()
+                .flat_map(|(player, records)| {
+                    records.iter().filter_map(move |record| {
+                        (record.spell_object_id == Some(*object_id)).then_some(player)
+                    })
+                });
+        if records.next() != Some(controller)
+            || records.next().is_some()
+            || state
+                .departed_stack_spells
+                .get(object_id)
+                .is_some_and(|records| !records.is_empty())
+        {
+            return None;
+        }
+    }
+
+    let object = match crate::game::targeting::triggering_spell_for_event(state, event)? {
+        TriggeringSpell::OnStack(entry) => state.objects.get(&entry.id)?,
+        TriggeringSpell::Departed(record) => &record.object,
+        TriggeringSpell::Gone => return None,
+    };
+    (pinned || object.cast_controller.unwrap_or(object.controller) == *controller)
+        .then(|| u32_to_i32_saturating(object.mana_spent_to_cast_amount))
+}
+
+pub(crate) fn trigger_quantity_payment_is_known(
+    state: &GameState,
+    expr: &QuantityExpr,
+    event: Option<&GameEvent>,
+) -> bool {
+    let Some(event @ GameEvent::SpellCast { .. }) = event.or(state.current_trigger_event.as_ref())
+    else {
+        return true;
+    };
+    !expr.any_ref(&mut |qty| {
+        matches!(
+            qty,
+            QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::TriggeringSpell,
+                metric: CastManaSpentMetric::Total,
+            },
+        )
+    }) || total_mana_spent_for_cast_event(state, event).is_some()
 }
 
 pub(crate) fn resolve_mana_spent_to_cast_metric(
@@ -6437,13 +6460,20 @@ fn resolve_ref(
         // queries do not depend on the producing permanent still existing or
         // retaining the same type.
         QuantityRef::ManaSpentToCast { scope, metric } => {
-            if *scope == CastManaObjectScope::TriggeringSpell {
-                if let Some(spent) = state
-                    .current_trigger_event
-                    .as_ref()
-                    .and_then(|event| total_mana_spent_for_cast_event(state, event, metric))
-                {
-                    return spent;
+            if *scope == CastManaObjectScope::TriggeringSpell
+                && *metric == CastManaSpentMetric::Total
+            {
+                let cast_total = DETECTION_TRIGGER_EVENT.with(|slot| {
+                    let detection = slot.borrow();
+                    match detection.as_ref().or(state.current_trigger_event.as_ref()) {
+                        Some(event @ GameEvent::SpellCast { .. }) => {
+                            Some(total_mana_spent_for_cast_event(state, event).unwrap_or_default())
+                        }
+                        _ => None,
+                    }
+                });
+                if let Some(total) = cast_total {
+                    return total;
                 }
             }
             let cast_object = match scope {

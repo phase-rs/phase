@@ -5,16 +5,22 @@
 //! an automatic cast, and finalization (its own second ability reads the mana
 //! actually spent). Spells other than the real cards are labelled synthetics.
 
+use crate::support::shared_card_db;
 use engine::ai_support::legal_actions;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
+use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{
+    ManaColor::{self, Black, Blue, Red, White},
+    ManaCost, ManaCostShard, ManaType, ManaUnit,
+};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -366,9 +372,16 @@ fn choose_second_opponent(runner: &mut GameRunner) {
 #[test]
 fn the_second_ability_hits_the_announced_opponent_on_discounted_casts_only() {
     let mut scenario = three_player_board();
-    let demon = creature_spell(&mut scenario, P0, "Demon", vec!["Demon"], cost(2, 1));
-    let bear = creature_spell(&mut scenario, P0, "Bear", vec!["Bear"], cost(2, 1));
-    scenario.with_mana_pool(P0, pool(3, 2));
+    let db = shared_card_db().expect("printed card fixture");
+    let demon = scenario.add_real_card(P0, "Doom Whisperer", Zone::Hand, db);
+    let bear = scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::Black);
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
     let mut runner = scenario.build();
 
     let card_id = runner.state().objects[&demon].card_id;
@@ -380,6 +393,7 @@ fn the_second_ability_hits_the_announced_opponent_on_discounted_casts_only() {
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast the discounted Demon");
+    assert_eq!(runner.state().objects[&demon].mana_spent_to_cast_amount, 4);
     choose_second_opponent(&mut runner);
     assert_eq!(runner.state().stack.len(), 2);
     runner.advance_until_stack_empty();
@@ -391,6 +405,7 @@ fn the_second_ability_hits_the_announced_opponent_on_discounted_casts_only() {
     );
 
     drop(runner.cast(bear).commit());
+    assert_eq!(runner.state().objects[&bear].mana_spent_to_cast_amount, 2);
     assert_eq!(
         runner.state().stack.len(),
         1,
@@ -410,71 +425,129 @@ fn the_second_ability_hits_the_announced_opponent_on_discounted_casts_only() {
 // that same card has been cast again with different facts.
 #[test]
 fn countered_x_cast_keeps_its_original_difference_after_a_same_id_recast() {
-    for recast in [false, true] {
+    let db = shared_card_db().expect("printed card fixture");
+    for (recast, legacy_event) in [(true, true), (false, false), (false, true)] {
         let mut scenario = three_player_board();
-        let spell = scenario
-            .add_creature_to_hand(P0, "Flash Horror", 3, 3)
-            .with_subtypes(vec!["Horror"])
-            .flash()
-            .with_mana_cost(ManaCost::Cost {
-                shards: vec![ManaCostShard::X, ManaCostShard::Black],
-                generic: 0,
-            })
-            .id();
-        let counterspell = scenario
-            .add_spell_to_hand_from_oracle(P0, "Test counterspell", true, "Counter target spell.")
-            .with_mana_cost(ManaCost::generic(1))
-            .id();
-        let recover = scenario
-            .add_spell_to_hand_from_oracle(
-                P0,
-                "Recover Horror",
-                true,
-                "Return target creature card from your graveyard to your hand.",
-            )
-            .with_mana_cost(ManaCost::generic(1))
-            .id();
-        scenario.with_mana_pool(P0, pool(4, 2));
+        scenario.add_real_card(P0, "Leyline of Anticipation", Zone::Battlefield, db);
+        if recast {
+            // The extra cast-history tax makes the recast fail Cellarspawn's
+            // comparison, so reading the newer occurrence changes the outcome.
+            scenario.add_real_card(P0, "Damping Sphere", Zone::Battlefield, db);
+        }
+        let spell = scenario.add_real_card(P0, "Orcus, Prince of Undeath", Zone::Hand, db);
+        let counterspell = scenario.add_real_card(P1, "Counterspell", Zone::Hand, db);
+        let recast_counterspell = scenario.add_real_card(P1, "Counterspell", Zone::Hand, db);
+        let recover = scenario.add_real_card(P0, "Grim Harvest", Zone::Hand, db);
+        let mut lands_for = |player, colors: &[ManaColor]| {
+            colors
+                .iter()
+                .map(|&color| scenario.add_basic_land(player, color))
+                .collect::<Vec<_>>()
+        };
+        let first_mana = lands_for(P0, &[Black, Red, White, White, White, White]);
+        let counter_mana = lands_for(P1, &[Blue, Blue]);
+        let recast_counter_mana = lands_for(P1, &[Blue, Blue, Blue]);
+        let recover_mana = lands_for(P0, &[Black, White, White]);
+        let recast_mana = lands_for(P0, &[Black, Red, White, White, White]);
+        let tap_lands = |runner: &mut GameRunner, lands: &[ObjectId]| {
+            for &source_id in lands {
+                runner
+                    .act(GameAction::ActivateAbility {
+                        source_id,
+                        ability_index: 0,
+                        payment_mode: CastPaymentMode::Auto,
+                    })
+                    .expect("activate a basic land's mana ability");
+                assert!(runner.state().objects[&source_id].tapped);
+            }
+        };
+        let counter = |runner: &mut GameRunner, card, lands: &[ObjectId]| {
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass to the Counterspell player");
+            tap_lands(runner, lands);
+            drop(runner.cast(card).target_object(spell).commit());
+            runner.resolve_top();
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+        };
         let mut runner = scenario.build();
+        tap_lands(&mut runner, &first_mana);
         let original_incarnation = {
             let cast = runner.cast(spell).x(3).target_player(P2).commit();
             assert_eq!(cast.state().stack.len(), 2);
-            assert_eq!(cast.state().objects[&spell].spell_mana_value(), 4);
-            assert_eq!(cast.state().objects[&spell].mana_spent_to_cast_amount, 3);
+            assert_eq!(cast.state().objects[&spell].spell_mana_value(), 7);
+            assert_eq!(cast.state().objects[&spell].mana_spent_to_cast_amount, 6);
             cast.state().objects[&spell].incarnation
         };
 
-        drop(runner.cast(counterspell).target_object(spell).commit());
-        runner.resolve_top();
-        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
-        assert_eq!(
-            runner.state().stack.len(),
-            1,
-            "original trigger is still pending"
-        );
+        let original = runner
+            .state_mut()
+            .stack
+            .back_mut()
+            .expect("original trigger");
+        let original_trigger = original.id;
+        if legacy_event {
+            // Model a saved trigger from before SpellCast carried the payment
+            // and incarnation. Its ability still pins the first cast.
+            let pin = original
+                .ability()
+                .unwrap()
+                .context
+                .triggering_spell
+                .unwrap();
+            assert_eq!(
+                (pin.object_id, pin.incarnation),
+                (spell, original_incarnation)
+            );
+            let StackEntryKind::TriggeredAbility {
+                trigger_event:
+                    Some(GameEvent::SpellCast {
+                        cast_mana_spent,
+                        cast_incarnation,
+                        ..
+                    }),
+                ..
+            } = &mut original.kind
+            else {
+                panic!("expected the original cast trigger");
+            };
+            assert_eq!(cast_mana_spent.take(), Some(6));
+            assert_eq!(cast_incarnation.take(), Some(original_incarnation));
+        }
+
+        counter(&mut runner, counterspell, &counter_mana);
+        assert_eq!(runner.state().stack.len(), 1);
+        assert_eq!(runner.state().stack[0].id, original_trigger);
 
         if recast {
+            tap_lands(&mut runner, &recover_mana);
             drop(runner.cast(recover).target_object(spell).commit());
             runner.resolve_top();
             assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+            tap_lands(&mut runner, &recast_mana);
             drop(runner.cast(spell).x(0).commit());
-            let spell = &runner.state().objects[&spell];
-            assert_eq!(spell.zone, Zone::Stack);
-            assert_ne!(spell.incarnation, original_incarnation);
-            assert_eq!(spell.spell_mana_value(), 1);
-            assert_eq!(spell.mana_spent_to_cast_amount, 1);
+            let orcus = &runner.state().objects[&spell];
+            assert_eq!(orcus.zone, Zone::Stack);
+            assert_ne!(orcus.incarnation, original_incarnation);
+            assert_eq!(orcus.spell_mana_value(), 4);
+            assert_eq!(orcus.mana_spent_to_cast_amount, 5);
             assert_eq!(
                 runner.state().stack.len(),
                 2,
-                "recast paid its full mana value"
+                "the taxed recast creates no trigger"
             );
+            assert_eq!(runner.state().stack[0].id, original_trigger);
+
+            let recast_incarnation = orcus.incarnation;
+            counter(&mut runner, recast_counterspell, &recast_counter_mana);
+            let departed = &runner.state().departed_stack_spells[&spell];
+            assert!(departed.contains_key(&original_incarnation));
+            assert!(departed.contains_key(&recast_incarnation));
+            assert_eq!(runner.state().stack.len(), 1);
+            assert_eq!(runner.state().stack[0].id, original_trigger);
         }
 
-        assert_eq!(
-            runner.life(P2),
-            20,
-            "the original trigger has yet to resolve"
-        );
+        assert_eq!(runner.life(P2), 20, "the original trigger is still pending");
         runner.advance_until_stack_empty();
         assert!(runner.state().stack.is_empty());
         assert_eq!(
