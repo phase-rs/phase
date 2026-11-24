@@ -2338,6 +2338,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
 
   it("renders only the current workspace candidate answer and failure", async () => {
     const name = "Rograkh, Son of Rohgahh";
+    const other = { ...PRISMATIC_PIPER, instance_id: "piper" };
     const view = {
       ...COMMANDER_VIEW,
       min_deck_size: 1,
@@ -2345,6 +2346,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
         { ...PRISMATIC_PIPER, name, set_code: "cmr", collector_number: "197" },
         { ...SECOND_PRISMATIC_PIPER, name, set_code: "cmr", collector_number: "575" },
         { ...SECOND_PRISMATIC_PIPER, instance_id: "reserve", name, set_code: "sld", collector_number: "9996" },
+        other,
       ],
     };
     const pending: {
@@ -2361,6 +2363,7 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
         "cmd-4": { zone: "deck", row: 0, column: 0, order: 0 },
         "cmd-5": { zone: "deck", row: 0, column: 0, order: 1 },
         plains: { zone: "deck", row: 0, column: 0, order: 2 },
+        piper: { zone: "deck", row: 0, column: 0, order: 3 },
       },
       virtualBasics: [{ instanceId: "plains", name: "Plains" }],
     };
@@ -2377,35 +2380,44 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     }} showSuggestions={false} />;
     const { rerender } = render(renderBuilder(initial));
     expect(engineCandidates).toHaveBeenLastCalledWith(expect.objectContaining({
-      main_deck: [name, name, "Plains"], commander: [], selected_format: "CommanderDraft", draft_set_codes: ["CMM"],
+      main_deck: [name, name, other.name, "Plains"], commander: [], selected_format: "CommanderDraft", draft_set_codes: ["CMM"],
     }), "commanders-inside");
-    await act(async () => pending[0].resolve([name]));
+    await act(async () => pending[0].resolve([name, other.name]));
     fireEvent.click(await commanderPanelScope().findByRole("button", { name }));
-    expect(pending[1].request).toMatchObject({ main_deck: [name, name, "Plains"], commander: [name] });
+    expect(pending[1].request).toMatchObject({ main_deck: [name, name, other.name, "Plains"], commander: [name] });
     const oneCopy: DraftWorkspaceState = {
       ...initial, placements: { ...initial.placements, "cmd-5": { zone: "sideboard", row: 0, column: 0, order: 0 } },
     };
     rerender(renderBuilder(oneCopy));
-    expect(pending[2].request).toMatchObject({ main_deck: [name, "Plains"], commander: [name] });
+    const oneCopyRequest = { main_deck: [name, other.name, "Plains"], commander: [name] };
+    expect(pending[2].request).toMatchObject(oneCopyRequest);
     expect(commanderPanelScope().queryByRole("button", { name })).not.toBeInTheDocument();
     rerender(renderBuilder(initial));
     rerender(renderBuilder(oneCopy));
-    expect(pending[4].request).toMatchObject({ main_deck: [name, "Plains"], commander: [name] });
-    await act(async () => pending[4].resolve([]));
-    await act(async () => pending[1].resolve([name]));
-    await act(async () => pending[2].reject(new Error("stale")));
+    expect(pending[4].request).toMatchObject(oneCopyRequest);
     const unavailable = /Commander designation is unavailable/;
-    expect(screen.queryByText(unavailable)).not.toBeInTheDocument();
-    expect(commanderPanelScope().queryByRole("button", { name })).not.toBeInTheDocument();
+    const expectCurrentOffer = () => {
+      expect(commanderPanelScope().getByRole("button", { name: other.name })).toBeVisible();
+      expect(commanderPanelScope().queryByRole("button", { name })).not.toBeInTheDocument();
+      expect(screen.queryByText(unavailable)).not.toBeInTheDocument();
+    };
+    await act(async () => pending[4].resolve([other.name]));
+    expectCurrentOffer();
+    await act(async () => pending[1].resolve([name, other.name]));
+    expectCurrentOffer();
+    await act(async () => pending[2].reject(new Error("stale")));
+    expectCurrentOffer();
     await act(async () => pending[3].reject(new Error("also stale")));
-    expect(screen.queryByText(unavailable)).not.toBeInTheDocument();
+    expectCurrentOffer();
 
     rerender(renderBuilder(initial));
     await act(async () => pending[5].reject(new Error("current")));
-    expect(screen.getByText(unavailable)).toBeInTheDocument();
+    expect(screen.getByText(unavailable)).toBeVisible();
     rerender(renderBuilder(oneCopy));
-    await act(async () => pending[6].resolve([]));
-    expect(screen.queryByText(unavailable)).not.toBeInTheDocument();
+    expect(pending[6].request).toMatchObject(oneCopyRequest);
+    expect(commanderPanelScope().queryByRole("button", { name: other.name })).not.toBeInTheDocument();
+    await act(async () => pending[6].resolve([other.name]));
+    expectCurrentOffer();
     expect(commanderPanelScope().getAllByRole("button", { name: "Remove" })).toHaveLength(1);
   });
 

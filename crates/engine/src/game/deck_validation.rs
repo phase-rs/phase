@@ -4852,8 +4852,9 @@ fn summarize_cards(prefix: &str, cards: &BTreeSet<String>, max_names: usize) -> 
     format!("{prefix}: {}", listed.join(", "))
 }
 
-/// CR 903.3: Whether `face` can serve as `format`'s command-zone leader. The
-/// single authority behind both the per-card picker and `commander_candidates`.
+/// Returns the modeled per-card picker eligibility for `format`. Ordinary
+/// Commander uses CR 903.3. The per-card export and `commander_candidates`
+/// share this dispatch.
 pub fn is_card_commander_eligible_for_format(face: &CardFace, format: GameFormat) -> bool {
     // EXHAUSTIVE, deliberately: the `_ => false` this replaced is what made
     // `GameFormat::CommanderDraft` silently answer "no card can be your
@@ -4886,7 +4887,7 @@ pub fn is_card_commander_eligible_for_format(face: &CardFace, format: GameFormat
         // CR 903.3's commander eligibility test applies unchanged —
         // planar doesn't change eligibility.
         GameFormat::PlanechaseCommander => is_commander_eligible(face),
-        // Formats with no command zone: nothing can be designated.
+        // Formats without a commander designation: nothing can be designated.
         GameFormat::Standard
         | GameFormat::Pioneer
         | GameFormat::Modern
