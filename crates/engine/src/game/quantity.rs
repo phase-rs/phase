@@ -9744,7 +9744,7 @@ fn resolve_object_mana_value(
                 return mana_value;
             }
             if let Some(mana_value) =
-                object_lookback_event(state, ability)
+                object_lookback_event(state, ability, ctx.stack_trigger_context)
                     .as_ref()
                     .and_then(|event| {
                         // CR 400.7j + CR 608.2h: If an earlier instruction of this
