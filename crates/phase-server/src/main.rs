@@ -21198,8 +21198,8 @@ mod game_submission_tests {
         let (_url, server, _temp_dir, app) = spawn_full_mode_server_with_db(db).await;
         let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
             let tcode = "TOURNEY";
-            // Hosted play is Bo3, which requires a (non-empty) sideboard
-            // (CR 100.4a / CR 903.5e); basics are exempt from the copy limit.
+            // Supply a sideboard to satisfy the engine's current Bo3 admission policy.
+            // Basics are exempt from the copy limit.
             let forest = DeckData {
                 main_deck: vec!["Forest".to_string(); 60],
                 sideboard: vec!["Forest".to_string(); 15],
