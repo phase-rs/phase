@@ -16,6 +16,7 @@ import {
 } from "../workspace/workspacePlacement";
 import type { DraftWorkspaceState, DraftZone } from "../workspace/types";
 import type { DraftBoardPreferences } from "../workspace/workspacePreferences";
+import { addVirtualBasic } from "../workspace/workspaceProjection";
 
 function card(instanceId: string, name = "Shared Name"): DraftCardInstance {
   return {
@@ -394,6 +395,42 @@ describe("workspace placement", () => {
       ], 6);
       expect(pickFor(board, sendTo(board.state, "manalith", "sideboard"), "manalith", "deck")).toBe(5);
       expect(pickFor(board, sendTo(board.state, "satyr", "sideboard"), "satyr", "deck")).toBe(5);
+    });
+
+    it("returns a card to its merged column with added basics", () => {
+      const board = colorBoard([
+        ["pacifism", "white", "deck"], ["opt", "blue", "deck"], ["night", "black", "deck"],
+        ["shock", "red", "deck"], ["elves", "green", "deck"],
+        ["satyr", "multicolor", "deck"], ["manalith", "colorless", "deck"],
+      ], 6);
+      const { pool, poolGroups, preferences } = board;
+      const zonePreferences = { deck: preferences, sideboard: preferences };
+      const basic = { instanceId: "workspace-basic:plains", name: "Plains" };
+      const withBasic = addVirtualBasic(board.state, pool, basic);
+      const sorted = rebuildWorkspaceZone(withBasic, "deck", pool, poolGroups, preferences);
+      expect([column(sorted, "satyr"), column(sorted, "manalith"), column(sorted, basic.instanceId)])
+        .toEqual([5, 5, 5]);
+
+      const away = moveWorkspaceInstance(sorted, pool, poolGroups, zonePreferences, "satyr", {
+        zone: "sideboard", column: 0, beforeInstanceId: null,
+      });
+      expect(away.placements.satyr.zone).toBe("sideboard");
+      const satyr = pool.find(({ instance_id }) => instance_id === "satyr")!;
+      const returned = moveWorkspaceInstance(away, pool, poolGroups, zonePreferences, "satyr", {
+        zone: "deck",
+        ...resolveWorkspacePickPlacement(satyr, "deck", pool, poolGroups, away, preferences),
+        beforeInstanceId: null,
+      });
+      expect(returned.placements.satyr).toMatchObject({ zone: "deck", column: 5 });
+
+      const unclassified = card("drafted-island", "Island");
+      const expandedPool = [...pool, unclassified];
+      const reconciled = reconcileWorkspaceState(away, expandedPool);
+      const mixed = moveWorkspaceInstance(reconciled, expandedPool, poolGroups, zonePreferences, unclassified.instance_id, {
+        zone: "deck", column: 5, beforeInstanceId: null,
+      });
+      expect(column(mixed, unclassified.instance_id)).toBe(5);
+      expect(pickFor({ ...board, pool: expandedPool }, mixed, "satyr", "deck")).toBe(0);
     });
 
     it("clears only the recorded layout of the zone switched to mana value", () => {

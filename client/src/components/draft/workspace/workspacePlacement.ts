@@ -1140,8 +1140,13 @@ export function resolveWorkspaceSortColumn(
   const unsplit = (kinds: readonly DraftPoolGroupKind[]) => (
     kinds.every((kind) => groupColumns.get(kind)?.size === 1)
   );
-  const columnKinds = (column: WorkspaceBoardColumnModel): DraftPoolGroupKind[] | null => (
-    column.header.descriptors.some((descriptor) => descriptor.kind !== "engine-group")
+  const columnKinds = (
+    column: WorkspaceBoardColumnModel,
+    allowedSupplement?: "added-basics",
+  ): DraftPoolGroupKind[] | null => (
+    column.header.descriptors.some((descriptor) => (
+      descriptor.kind !== "engine-group" && descriptor.kind !== allowedSupplement
+    ))
       ? null
       : column.header.descriptors.flatMap((descriptor) => (
         descriptor.kind === "engine-group"
@@ -1177,14 +1182,13 @@ export function resolveWorkspaceSortColumn(
   ) {
     const home = layout.columns[groupKind];
     const homeColumn = home === undefined ? undefined : model.columns[home];
-    const homeOccupants = holding.find(({ column }) => column.column === home);
-    if (
-      home !== undefined
-      && homeColumn !== undefined
-      && (homeColumn.count === 0
-        || homeOccupants?.kinds.every((kind) => layout.columns[kind] === home) === true)
-    ) {
-      return home;
+    if (home !== undefined && homeColumn !== undefined) {
+      // A sort appends virtual basics to the last column alongside its assigned groups.
+      const allowedSupplement = home === model.columnCount - 1 ? "added-basics" : undefined;
+      const homeKinds = columnKinds(homeColumn, allowedSupplement);
+      if (homeColumn.count === 0 || homeKinds?.every((kind) => layout.columns[kind] === home)) {
+        return home;
+      }
     }
   }
 
