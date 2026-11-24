@@ -26,14 +26,15 @@ use crate::types::ability::{
     effect_introduces_per_iteration_referent, effect_introduces_per_player_object_referent,
     effect_parks_reveal_card_choice, filter_refs_parent_target, graveyard_destination_rider,
     is_graveyard_exile_rider_subability, AbilityCondition, AbilityCost, AbilityDefinition,
-    AbilityKind, AbilityUseTally, CardPlayMode, CardTypeSetSource, CastFromZoneDriver,
-    ChosenAttribute, ChosenTargetSlots, CommanderOwnership, ContinuousEffectOnset,
-    ContinuousModification, ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot,
-    CounterKindDomain, DetachedRemainder, Duration, EachDamageRecipient, Effect, EffectError,
-    EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, ExtraPhaseRecipient,
-    FilterProp, ForEachCategoryAction, ForwardedResultContext, LibraryShuffleMode, ManaProduction,
-    NameStickerSet, ObjectScope, ObjectSelectionCardinality, OpponentMayScope, PlayerFilter,
-    PlayerRelation, PlayerScope, PossessionAxis, PtValue, QuantityExpr, QuantityRef,
+    AbilityKind, AbilityUseTally, AggregateFunction, CardPlayMode, CardTypeSetSource,
+    CastFromZoneDriver, ChosenAttribute, ChosenTargetSlots, CommanderOwnership,
+    ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRetargetPermission,
+    CostPaidObjectSnapshot, CounterKindDomain, DetachedRemainder, Duration, EachDamageRecipient,
+    Effect, EffectError, EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope,
+    ExtraPhaseRecipient, FilterProp, ForEachCategoryAction, ForwardedResultContext,
+    LibraryShuffleMode, ManaProduction, NameStickerSet, ObjectProperty, ObjectScope,
+    ObjectSelectionCardinality, OpponentMayScope, PlayerFilter, PlayerRelation, PlayerScope,
+    PossessionAxis, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
     ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
     SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition,
     SpellContext, StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
@@ -16521,6 +16522,79 @@ fn resolution_choice_candidates(
         .collect()
 }
 
+/// CR 608.2d: the `CommanderManaValue` read a quantity expression carries,
+/// if any — the `(owner, zones)` population it names. Shared by the commander
+/// gate's find-walk and rewrite-walk so the two cannot drift: every read the
+/// gate parks for, the rewrite retargets, and no other read is touched.
+fn commander_mana_value_read(expr: &QuantityExpr) -> Option<(&ControllerRef, &Vec<Zone>)> {
+    match expr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::CommanderManaValue { owner, zones },
+        } => Some((owner, zones)),
+        _ => None,
+    }
+}
+
+/// CR 608.2d: the first `CommanderManaValue` read in this instruction's own
+/// quantities (this node only — the gate fires per instruction, like the
+/// recipient gate; the rewrite below covers the sub-chain).
+fn first_commander_mana_value_read(
+    ability: &ResolvedAbility,
+) -> Option<(ControllerRef, Vec<Zone>)> {
+    let mut found = None;
+    ability.effect.for_each_quantity_expr(&mut |expr| {
+        if found.is_none() {
+            if let Some((owner, zones)) = commander_mana_value_read(expr) {
+                found = Some((owner.clone(), zones.clone()));
+            }
+        }
+    });
+    found
+}
+
+/// CR 608.2d + CR 608.2c: retarget every same-`(owner, zones)`
+/// `CommanderManaValue` read across the node + sub-chain onto the
+/// cause-stamped choice set the commander's answer publishes —
+/// `PropertyAggregate(Max, ManaValue, TrackedSet{ChainSet, caused_by:
+/// Some(Chosen)})`. Whole-chain so head and sub read the one pick (Stinging
+/// Study draws AND loses the chosen X); same-`(owner, zones)` so an
+/// unrelated read keeps its own population; cause-stamped so a
+/// producing-head postlude unioning drawn members into the chain set cannot
+/// disturb the choice read. Returns false on constructor `Err` (fail-closed
+/// unreachable for this shape — the caller proceeds unparked).
+fn rewrite_commander_mana_value_reads(
+    ability: &mut ResolvedAbility,
+    owner: &ControllerRef,
+    zones: &[Zone],
+) -> bool {
+    let aggregate = match PropertyAggregate::new(
+        AggregateFunction::Max,
+        ObjectProperty::ManaValue,
+        CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: Some(ThisWayCause::Chosen),
+            filter: None,
+        },
+    ) {
+        Ok(aggregate) => aggregate,
+        Err(_) => return false,
+    };
+    let mut node = Some(ability);
+    while let Some(current) = node {
+        current.effect.for_each_quantity_expr_mut(&mut |expr| {
+            if let Some((read_owner, read_zones)) = commander_mana_value_read(expr) {
+                if read_owner == owner && read_zones == zones {
+                    *expr = QuantityExpr::Ref {
+                        qty: QuantityRef::PropertyAggregate(aggregate.clone()),
+                    };
+                }
+            }
+        });
+        node = current.sub_ability.as_deref_mut();
+    }
+    true
+}
+
 /// CR 608.2d: park `continuation` (the node the pick will be bound to) and
 /// prompt `ability`'s controller to choose exactly one of `cards`.
 fn park_resolution_object_choice(
@@ -29286,6 +29360,71 @@ fn resolve_chain_body(
                     trigger_event: state.current_trigger_event.clone(),
                 };
                 return Ok(ResolutionProgress::Waiting);
+            }
+        }
+    }
+
+    // CR 608.2d + CR 903.3e: a singular commander-mana-value read with
+    // several owned commanders is a choice the owner makes at THIS
+    // instruction's own resolution (partner choice at resolution — rulings
+    // F2#7/#9; ownership decides, control is irrelevant — rulings F2#10–12).
+    // Effect-agnostic (a quantity walk, mirroring the recipient gate's
+    // position but not its effect key): zero candidates resolve silently
+    // through the reader (0), a single candidate is forced without a prompt,
+    // and 2+ park this chain with a whole-chain same-(owner,zones) rewrite
+    // onto the cause-stamped choice set the answer publishes, so every read
+    // — head and sub-chain alike (Stinging Study draws AND loses the one
+    // chosen X) — sees the pick and nothing a producing-head postlude unions
+    // in later. The chooser is the candidates' owner (uniform, consistent
+    // with the reader by construction): the controller case parks through
+    // the shared helper, the defensive non-controller case inlines the same
+    // prompt shape mirroring the chosen-player gate.
+    if let Some((owner, zones)) = first_commander_mana_value_read(ability) {
+        let gate_ctx = filter::FilterContext::from_ability_with_controller(
+            ability,
+            ability.original_controller.unwrap_or(ability.controller),
+        );
+        let candidates = crate::game::quantity::commander_mana_value_candidates(
+            state, &gate_ctx, &owner, &zones,
+        );
+        match candidates.len() {
+            0 | 1 => {}
+            _ => {
+                let mut parked = ability.clone();
+                let rewritten = rewrite_commander_mana_value_reads(&mut parked, &owner, &zones);
+                // The C1 rewrite target admits unconditionally (probed); an
+                // `Err` is a logic bug — fail closed by proceeding unparked
+                // (first-by-id read) rather than parking behind a choice
+                // nothing reads.
+                debug_assert!(
+                    rewritten,
+                    "commander gate: the cause-stamped rewrite must admit"
+                );
+                if rewritten {
+                    let chooser = state
+                        .objects
+                        .get(&candidates[0])
+                        .map_or(ability.controller, |object| object.owner);
+                    if chooser == ability.controller {
+                        return Ok(park_resolution_object_choice(
+                            state, ability, parked, candidates,
+                        ));
+                    }
+                    state.park_ability_continuation(PendingContinuation::new(
+                        Box::new(parked),
+                        state,
+                    ));
+                    state.waiting_for = WaitingFor::ChooseFromZoneChoice {
+                        player: chooser,
+                        cards: candidates,
+                        count: 1,
+                        up_to: false,
+                        constraint: None,
+                        source_id: ability.source_id,
+                        reciprocal_role: None,
+                    };
+                    return Ok(ResolutionProgress::Waiting);
+                }
             }
         }
     }

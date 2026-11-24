@@ -47062,6 +47062,7 @@ fn you_will_know_true_suffering_full_oracle_parses_commander_mv_burn() {
                 QuantityExpr::Ref {
                     qty: QuantityRef::CommanderManaValue {
                         owner: ControllerRef::You,
+                        zones: Zone::ALL.to_vec(),
                     },
                 },
                 "amount must read the controller's commander"

@@ -2982,7 +2982,7 @@ pub(crate) fn return_all_to_zone_effect(
             ..
         } => Some(Zone::Exile),
         TargetFilter::TrackedSetFiltered {
-            caused_by: None | Some(ThisWayCause::OwnerLibraryShuffleSubject | ThisWayCause::Sacrificed | ThisWayCause::Destroyed | ThisWayCause::Milled | ThisWayCause::Discarded | ThisWayCause::Tapped | ThisWayCause::Returned | ThisWayCause::Bounced | ThisWayCause::PutIntoGraveyard | ThisWayCause::ControlGained),
+            caused_by: None | Some(ThisWayCause::OwnerLibraryShuffleSubject | ThisWayCause::Sacrificed | ThisWayCause::Destroyed | ThisWayCause::Milled | ThisWayCause::Discarded | ThisWayCause::Tapped | ThisWayCause::Returned | ThisWayCause::Bounced | ThisWayCause::PutIntoGraveyard | ThisWayCause::ControlGained | ThisWayCause::Chosen),
             ..
         }
         // Every other shape names a population the text's own origin governs.

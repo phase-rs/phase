@@ -6681,7 +6681,18 @@ pub(super) fn handle_resolution_choice(
                         && !effects::chain_takes_pick_by_target(&cont.chain)
                 });
             if continuation_consumes_tracked_set {
-                effects::publish_fresh_tracked_set(state, chosen.clone());
+                // CR 608.2d + CR 608.2c: stamp the pick with the choice cause
+                // so a cause-bound reader sees the chosen members and nothing
+                // a producing-head postlude unions into the chain set later
+                // (Stinging Study's drawn cards). Invisible to every existing
+                // consumer: `None` readers admit stamped members exactly as
+                // today, every `Some(C)` reader still excludes them, and only
+                // the commander gate's rewrite reads `Some(Chosen)`.
+                effects::publish_fresh_tracked_set_with_causes(
+                    state,
+                    chosen.clone(),
+                    Some(crate::types::ability::ThisWayCause::Chosen),
+                );
             }
             // CR 608.2c + CR 608.2d: A counter-kind choice first selects the
             // object whose counters define the legal kinds. Preserve that

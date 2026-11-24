@@ -35024,9 +35024,11 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
             player_filter_reads_chosen_target(filter, read)
         }
         QuantityRef::BasicLandTypeCount { controller }
-        | QuantityRef::CommanderManaValue { owner: controller } => {
-            controller_ref_reads_chosen_target(controller, read)
-        }
+        // The zones field does not affect chosen-target reading: only the
+        // owner axis is consulted.
+        | QuantityRef::CommanderManaValue {
+            owner: controller, ..
+        } => controller_ref_reads_chosen_target(controller, read),
         QuantityRef::AttachmentsOnLeavingObject { controller, .. } => controller
             .as_ref()
             .is_some_and(|x| controller_ref_reads_chosen_target(x, read)),

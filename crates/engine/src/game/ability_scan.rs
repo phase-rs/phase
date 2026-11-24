@@ -4141,7 +4141,10 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes<'_> {
         },
         QuantityRef::ColorsInCommandersColorIdentity => Axes::NONE,
         QuantityRef::CommanderCastFromCommandZoneCount => Axes::NONE,
-        QuantityRef::CommanderManaValue { owner, .. } => {
+        QuantityRef::CommanderManaValue { owner, zones: _ } => {
+            // CR 903.3d / CR 903.3e: the owner axis is the scanned
+            // `ControllerRef`; `zones` widens the census extent, not its axis
+            // kind, so it adds no scanned axis (`projected` stays false).
             let mut acc = Axes::NONE;
             acc = acc.or(scan_controller_ref(owner));
             acc

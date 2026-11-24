@@ -8646,6 +8646,12 @@ pub enum ThisWayCause {
     PutIntoGraveyard,
     /// CR 613.1b + CR 608.2c: the member's control changed to the recipient this way — only an actual controller change counts; a target the recipient already controlled is not "gained" (Coveted Falcon: "Draw a card for each one they gained control of this way.").
     ControlGained,
+    /// CR 608.2d + CR 608.2c: the member was chosen by an interactive
+    /// resolution choice. Stamped at the choice's answer-time publication so a
+    /// cause-bound read sees the pick and nothing a producing-head postlude
+    /// unions in later; names no zone transition, so no producing origin is
+    /// stamped and the member's characteristics stay live-read.
+    Chosen,
 }
 
 impl ThisWayCause {
@@ -8667,8 +8673,9 @@ impl ThisWayCause {
             ThisWayCause::Discarded => Some(Zone::Hand),
             // CR 701.26a: tapping is not a zone transition (see
             // `is_zone_transition`), so it determines no departed zone; a
-            // control change, like a tap, is not a zone transition either.
-            ThisWayCause::Tapped | ThisWayCause::ControlGained => None,
+            // control change, like a tap, is not a zone transition either —
+            // and neither is being chosen, which picks the member where it is.
+            ThisWayCause::Tapped | ThisWayCause::ControlGained | ThisWayCause::Chosen => None,
             ThisWayCause::Exiled
             | ThisWayCause::Returned
             | ThisWayCause::Bounced
@@ -8678,13 +8685,14 @@ impl ThisWayCause {
     }
 
     /// CR 400.7 + CR 701.26a: does the producing action move the member between
-    /// zones? Every cause but `Tapped` and `ControlGained` names a zone-moving
-    /// action; tapping turns a permanent sideways where it is, so a tapped
-    /// member's latest zone-change record is an earlier, unrelated transition and must never be
-    /// stamped as its producing origin.
+    /// zones? Every cause but `Tapped`, `ControlGained` and `Chosen` names a
+    /// zone-moving action; tapping turns a permanent sideways where it is, so
+    /// a tapped member's latest zone-change record is an earlier, unrelated
+    /// transition and must never be stamped as its producing origin — and
+    /// choosing, like tapping, picks the member where it is.
     pub fn is_zone_transition(self) -> bool {
         match self {
-            ThisWayCause::Tapped | ThisWayCause::ControlGained => false,
+            ThisWayCause::Tapped | ThisWayCause::ControlGained | ThisWayCause::Chosen => false,
             ThisWayCause::OwnerLibraryShuffleSubject
             | ThisWayCause::Discarded
             | ThisWayCause::Returned
@@ -13398,7 +13406,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         }
         QuantityRef::TargetZoneCardCount { scope, .. }
         | QuantityRef::BasicLandTypeCount { controller: scope }
-        | QuantityRef::CommanderManaValue { owner: scope } => {
+        | QuantityRef::CommanderManaValue { owner: scope, .. } => {
             controller_ref_is_selected_dependent(scope, false)
         }
         QuantityRef::AttachmentsOnLeavingObject { controller, .. } => controller
@@ -15220,11 +15228,20 @@ pub enum QuantityRef {
     /// as "copy it for each time you've cast your commander from the command
     /// zone this game."
     CommanderCastFromCommandZoneCount,
-    /// CR 903.3d: Mana value of a commander you own on the battlefield or in the command zone.
-    /// Used by Stinging Study's "X is the mana value of a commander you own on the battlefield
-    /// or in the command zone" pattern. The resolver selects the first matching commander
-    /// (any one if multiple exist) and returns its mana value.
-    CommanderManaValue { owner: ControllerRef },
+    /// CR 202.3 + CR 903.3d (zone-qualified) / CR 903.3e (possessive
+    /// all-zone): mana value of a commander the owner owns. Ownership, not
+    /// control, decides the population (control is irrelevant). `zones` is the
+    /// per-production population: the possessive production records every zone
+    /// (CR 903.3e — "your commander's mana value" finds the commander in all
+    /// zones), the zone-qualified production records its explicit zones
+    /// (CR 903.3d — Stinging Study's "on the battlefield or in the command
+    /// zone"). When several commanders are owned, the owner chooses one at
+    /// resolution (CR 608.2d); the sync reader takes the first by `ObjectId`.
+    CommanderManaValue {
+        owner: ControllerRef,
+        #[serde(default = "default_commander_mana_value_zones")]
+        zones: Vec<Zone>,
+    },
     /// CR 105.1 + CR 105.2: Number of distinct colors among the members of a
     /// [`CardTypeSetSource`] population.
     ///
@@ -30020,6 +30037,16 @@ where
 
 fn default_player_filter_controller() -> PlayerFilter {
     PlayerFilter::Controller
+}
+
+/// CR 903.3d: the legacy `CommanderManaValue` population — a commander the
+/// owner owns on the battlefield or in the command zone. Committed card data
+/// and in-flight saves written without the `zones` field decode to Stinging
+/// Study's explicit limit, so the field stays wire-compatible in both
+/// directions (old data loads via this default; old peers ignore the new
+/// key).
+fn default_commander_mana_value_zones() -> Vec<Zone> {
+    vec![Zone::Battlefield, Zone::Command]
 }
 
 fn default_quantity_one() -> QuantityExpr {
