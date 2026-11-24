@@ -12539,9 +12539,8 @@ pub(crate) fn spell_has_chosen_name(spell: &GameObject, fused: bool, chosen: &st
 /// 3. **Combat snapshot state.** Attacking/blocking/unblocked predicates read
 ///    `ZoneChangeRecord::combat_status`, because leaving a zone removes the
 ///    object from live combat.
-/// 4. **Dynamic battlefield state.** Inherently requires the live object (tapped,
-///    counters, attached-to). A zone-change subject has already left its public
-///    zone, so these are semantically not applicable and return `false`.
+/// 4. **Exit-time LKI cache.** `Counters`, `Tapped`, and `Untapped` read the
+///    cached state for the record's object ID.
 /// 5. **Not-yet-supported.** Could plausibly be snapshotted or cross-referenced but
 ///    are not currently required. Returning `false` is a known conservative gap.
 fn zone_change_record_matches_property(
@@ -12996,6 +12995,7 @@ fn zone_change_record_matches_property(
         // which `zones::capture_attachment_snapshot` fills per moved object.
         // Attachments that left earlier in the same batch are missing here,
         // as they are for `EnchantedBy` and `EquippedBy`.
+        // An attachment that is both an Aura and an Equipment is recorded with one kind.
         FilterProp::Modified => {
             // The context authority also rejects records from zones other than the battlefield.
             let has_counter = match battlefield_departure_source_context_from_record(record) {

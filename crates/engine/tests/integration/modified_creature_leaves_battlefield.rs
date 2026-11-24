@@ -1,11 +1,12 @@
 //! CR 700.9 + CR 603.10a: Single-permanent deaths and returns to hand use
 //! counters and qualifying attachments captured on departure.
 
-use engine::game::effects::attach::attach_to;
 use engine::game::scenario::{CastOutcome, GameScenario, P0, P1};
+use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -122,10 +123,33 @@ fn knotmaster_counters_after_murder(victim_controller: PlayerId) -> u32 {
         )
         .with_subtypes(vec!["Equipment"])
         .id();
+    let theft = scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Magnetic Theft",
+            true,
+            "Attach target Equipment to target creature. (Control of the Equipment doesn't change.)",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P1,
+        vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+    );
     let murder = add_murder(&mut scenario);
     let mut runner = scenario.build();
 
-    attach_to(runner.state_mut(), equipment, victim);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("pass priority to the Equipment's controller");
+    let outcome = runner
+        .cast(theft)
+        .target_objects(&[equipment, victim])
+        .resolve();
+    assert_resolved(&outcome);
     assert_attached(runner.state(), equipment, victim);
     assert_eq!(
         runner.state().objects[&victim].controller,
