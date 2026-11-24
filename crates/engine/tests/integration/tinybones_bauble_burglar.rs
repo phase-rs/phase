@@ -637,7 +637,7 @@ fn tinybones_grant_follows_the_current_controller() {
     assert!(
         runner.state().objects[&tinybones]
             .static_definitions
-            .iter()
+            .iter_all()
             .any(|def| matches!(def.mode, StaticMode::ExileCastPermission { .. })),
         "reach-guard: the opponent's Tinybones carries the permission"
     );
