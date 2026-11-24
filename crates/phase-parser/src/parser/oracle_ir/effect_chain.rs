@@ -428,10 +428,6 @@ fn is_zero(v: &u32) -> bool {
 // Boast, Exhaust, Forecast), each of which lists them in this order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum ShellStage {
-    /// CR 106.6: normalize an activated mana ability's `instead` alternative
-    /// into the additional-mana delta used by the existing mana authority.
-    /// Runs `oracle::normalize_activated_mana_instead_delta`.
-    NormalizeActivatedManaInstead,
     /// CR 601.2f: fold a trailing self-referential "this ability costs {X} less
     /// to activate" node out of the `sub_ability` chain into `cost_reduction`.
     /// Runs `oracle::extract_cost_reduction_from_chain`.

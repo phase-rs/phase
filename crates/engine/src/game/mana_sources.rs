@@ -13,13 +13,15 @@
 //! inline resolution — which is why any irreversible sub-effect (damage,
 //! life loss, sacrifice) disqualifies a source from UI-level undo.
 
+use std::borrow::Cow;
+
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{cost_has_component, ManaSpendRestriction};
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ControllerRef,
-    CostPaidObjectSnapshot, Effect, ManaProduction, PlayerFilter, QuantityExpr, ResolvedAbility,
-    SacrificeCost, SacrificeRequirement, TargetFilter, TriggerDefinition, TriggerDefinitionRef,
-    TypedFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
+    ControllerRef, CostPaidObjectSnapshot, Effect, ManaProduction, PlayerFilter, QuantityExpr,
+    ResolvedAbility, SacrificeCost, SacrificeRequirement, TargetFilter, TriggerDefinition,
+    TriggerDefinitionRef, TypedFilter,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
@@ -1051,10 +1053,8 @@ fn resolved_mana_ability_for_live_output(
     ability_def: &AbilityDefinition,
 ) -> ResolvedAbility {
     let ability = match &*ability_def.effect {
-        Effect::Mana { produced, .. } => {
-            largest_sizing_resolution(state, produced, ability_def, source_id, player)
-                .map(|(resolved, _)| resolved)
-        }
+        Effect::Mana { .. } => largest_sizing_resolution(state, ability_def, source_id, player)
+            .map(|(resolved, _)| resolved),
         _ => None,
     }
     .unwrap_or_else(|| {
@@ -1093,21 +1093,66 @@ fn sizing_resolutions(
         .collect()
 }
 
+pub(super) fn is_fixed_colorless_payment_swap(
+    base: &Effect,
+    replacement: &Effect,
+    condition: Option<&AbilityCondition>,
+) -> bool {
+    let fixed_colorless = |effect: &Effect| {
+        matches!(
+            effect,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { .. },
+                },
+                restrictions,
+                target: None,
+                ..
+            } if restrictions.is_empty()
+        )
+    };
+    matches!(condition, Some(AbilityCondition::ConditionInstead { .. }))
+        && fixed_colorless(base)
+        && fixed_colorless(replacement)
+}
+
+/// CR 601.2g + CR 614.15: Size an unrestricted fixed colorless source using
+/// the whole production selected by its self-replacement. Both branches use
+/// the same mana type, so selecting the amount requires no payment choice.
+fn fixed_colorless_payment_effect<'a>(
+    state: &GameState,
+    ability: &'a ResolvedAbility,
+) -> Cow<'a, Effect> {
+    if ability.sub_ability.as_ref().is_some_and(|sub| {
+        is_fixed_colorless_payment_swap(&ability.effect, &sub.effect, sub.condition.as_ref())
+    }) {
+        return Cow::Owned(
+            mana_abilities::apply_condition_instead_mana_swap(state, ability).effect,
+        );
+    }
+    Cow::Borrowed(&ability.effect)
+}
+
 /// The sizing resolution that adds the most mana, with that amount. An
 /// any-one-color amount that reads the color chosen for it is sized by its
 /// best color (`planned_gross_mana`).
 fn largest_sizing_resolution(
     state: &GameState,
-    produced: &ManaProduction,
     ability: &AbilityDefinition,
     object_id: ObjectId,
     controller: PlayerId,
 ) -> Option<(ResolvedAbility, u32)> {
     sizing_resolutions(state, ability, object_id, controller)
         .into_iter()
-        .map(|resolved| {
-            let gross = planned_gross_mana(produced, state, &resolved);
-            (resolved, gross)
+        .filter_map(|resolved| {
+            let gross = {
+                let effect = fixed_colorless_payment_effect(state, &resolved);
+                let Effect::Mana { produced, .. } = effect.as_ref() else {
+                    return None;
+                };
+                planned_gross_mana(produced, state, &resolved)
+            };
+            Some((resolved, gross))
         })
         .max_by_key(|(_, gross)| *gross)
 }
@@ -2598,10 +2643,9 @@ pub fn max_mana_yield(state: &GameState, object_id: ObjectId, controller: Player
             )
         })
         .filter_map(|(_, ability)| match &*ability.effect {
-            Effect::Mana { produced, .. } => {
-                let gross =
-                    largest_sizing_resolution(state, produced, ability, object_id, controller)
-                        .map_or(0, |(_, gross)| gross);
+            Effect::Mana { .. } => {
+                let gross = largest_sizing_resolution(state, ability, object_id, controller)
+                    .map_or(0, |(_, gross)| gross);
                 // CR 605.3b: Net the mana paid to activate this ability —
                 // gross output overstates what a filter land actually adds.
                 let activation_cost = mana_abilities::mana_sub_cost_of(&ability.cost)
@@ -3237,7 +3281,7 @@ fn usable_mana_ability_net(
             super::quantity::resolve_quantity_with_targets(state, count, &resolved).max(0) as u32
         }
     } else {
-        let sizing = largest_sizing_resolution(state, produced, ability, object_id, controller);
+        let sizing = largest_sizing_resolution(state, ability, object_id, controller);
         if capacity_use == CapacityUse::XCeiling
             && sizing.as_ref().is_some_and(|(resolved, _)| {
                 activation_amount_depends_on_color(state, produced, resolved)
@@ -3676,7 +3720,7 @@ fn activatable_mana_profiles_for_object(
         ) {
             continue;
         }
-        let Effect::Mana { produced, .. } = &*ability.effect else {
+        let Effect::Mana { .. } = &*ability.effect else {
             // CR 605.3a + CR 107.1c: a reveal-then-mana ability's production
             // follows its reveal, so it joins the shard profiles through the
             // same sizing as its capacity — else a colourless shard ({C}) is
@@ -3771,6 +3815,10 @@ fn activatable_mana_profiles_for_object(
         for kind in sizing_resolutions(state, ability, object_id, controller)
             .iter()
             .filter_map(|resolved| {
+                let effect = fixed_colorless_payment_effect(state, resolved);
+                let Effect::Mana { produced, .. } = effect.as_ref() else {
+                    return None;
+                };
                 profile_kind_from_production(
                     state, object_id, controller, ability, produced, resolved,
                 )
@@ -4641,6 +4689,10 @@ fn emit_source_rows(
         | ManaProduction::Mixed { .. } => {
             let resolved =
                 super::ability_utils::build_resolved_from_def(ability, object_id, controller);
+            let effect = fixed_colorless_payment_effect(state, &resolved);
+            let Effect::Mana { produced, .. } = effect.as_ref() else {
+                return Vec::new();
+            };
             let types =
                 super::effects::mana::resolve_mana_types_for_ability(produced, state, &resolved);
             if types.is_empty() {
@@ -4649,7 +4701,7 @@ fn emit_source_rows(
             vec![SourceRow {
                 mana_type: types[0],
                 atomic_combination: (types.len() > 1).then_some(types),
-                restrictions: concrete_restrictions.clone(),
+                restrictions: concrete_restrictions,
             }]
         }
         // CR 106.1 + CR 608.2d: an amount that reads the color chosen for this

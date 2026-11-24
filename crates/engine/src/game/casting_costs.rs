@@ -19434,6 +19434,18 @@ pub(crate) fn production_override_for_option(
     ability_def: &crate::types::ability::AbilityDefinition,
     option: &ManaSourceOption,
 ) -> Option<crate::types::game_state::ProductionOverride> {
+    // CR 605.3b + CR 614.15: resolve the self-replacement against the live
+    // state. An earlier activation can change the amount after planning.
+    if ability_def.sub_ability.as_ref().is_some_and(|sub| {
+        mana_sources::is_fixed_colorless_payment_swap(
+            &ability_def.effect,
+            &sub.effect,
+            sub.condition.as_ref(),
+        )
+    }) {
+        return None;
+    }
+
     // CR 106.3: a same-color bundle is only a planning estimate. Replay the
     // chosen color while the mana resolver evaluates the live output amount.
     if matches!(&*ability_def.effect, Effect::Mana { produced, .. }

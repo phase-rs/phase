@@ -128,7 +128,6 @@ expression: "&ir"
             },
             "description": "Sacrifice a land: Target creature you control gains shroud until end of turn.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]

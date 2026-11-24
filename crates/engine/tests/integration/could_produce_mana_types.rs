@@ -680,10 +680,8 @@ const SHAUN_AND_REBECCA_AGENTS: &str = "Vigilance\nWhen Shaun & Rebecca enters, 
 const MAGUS_OF_THE_VINEYARD: &str =
     "At the beginning of each player's first main phase, that player adds {G}{G}.";
 
-/// F3-1 (CR 106.12 + CR 106.12b): an assembled Urza's Mine adds {C}{C} by one
-/// {T} mana ability, so Contamination modifies that whole production, the
-/// "add {C}{C} instead" link included, and only {B} arrives. Control: without
-/// Contamination the same activation adds {C}{C}, so the link ran.
+/// CR 106.12 + CR 106.12b + CR 614.15: an assembled Urza's Mine selects {C}{C}
+/// as its whole tap production. Contamination governs the resulting mana type.
 #[test]
 fn tapping_assembled_urzas_mine_under_contamination_adds_only_black() {
     let (scenario, mine) = tron_scenario(true);
@@ -691,29 +689,28 @@ fn tapping_assembled_urzas_mine_under_contamination_adds_only_black() {
     assert_eq!(
         tap_for_mana(&mut runner, mine),
         Produced::Pool(vec![ManaType::Colorless, ManaType::Colorless]),
-        "control: the assembled Mine's gated link adds its second colorless mana"
+        "control: the assembled Mine selects its two-mana production"
     );
 
     let (mut scenario, mine) = tron_scenario(true);
     scenario.add_enchantment_from_oracle(P0, "Contamination", CONTAMINATION);
     let mut runner = scenario.build();
     let Produced::Pool(produced) = tap_for_mana(&mut runner, mine) else {
-        panic!("reach-guard: the Mine adds its mana without a type prompt");
+        panic!("the Mine produces mana without a type prompt");
     };
-    assert!(!produced.is_empty(), "reach-guard: the Mine added mana");
+    assert!(!produced.is_empty(), "the Mine produced mana");
     assert!(
         produced
             .iter()
             .all(|mana_type| *mana_type == ManaType::Black),
-        "CR 106.12b: every unit the Mine produced was tapped for mana, got {produced:?}"
+        "CR 106.12b: only black mana reaches the pool, got {produced:?}"
     );
 }
 
-/// F3-2 (CR 106.12 + CR 106.12b): Mana Reflection doubles every unit of an
-/// assembled Urza's Mine's {C}{C}, the "instead" link's included, so four {C}
-/// arrive. Disabled sibling: an unassembled Mine's single {C} doubles to two.
+/// CR 106.12 + CR 106.12b: Mana Reflection doubles the selected production
+/// of an assembled or unassembled Urza's Mine to four or two {C}.
 #[test]
-fn tapping_assembled_urzas_mine_under_mana_reflection_doubles_both_halves() {
+fn tapping_urzas_mine_under_mana_reflection_doubles_the_selected_production() {
     for (assembled, colorless) in [(false, 2), (true, 4)] {
         let (mut scenario, mine) = tron_scenario(assembled);
         scenario.add_enchantment_from_oracle(P0, "Mana Reflection", MANA_REFLECTION);
@@ -860,9 +857,8 @@ fn sacrificed_charged_autogenerator_under_contamination_offers_only_black() {
     );
 }
 
-/// F3-8 (CR 106.12a): Vorinclex, Voice of Hunger's echo triggers once per
-/// resolution of a mana ability that produced mana, however many of its links
-/// produce: an assembled Urza's Mine adds {C}{C} and the echo one {C}.
+/// CR 106.12a: Vorinclex, Voice of Hunger's echo triggers once per resolution
+/// of a tap mana ability. An assembled Urza's Mine adds {C}{C} and the echo adds {C}.
 #[test]
 fn vorinclex_echoes_an_assembled_urzas_mine_once() {
     let (mut scenario, mine) = tron_scenario(true);
@@ -888,19 +884,18 @@ fn vorinclex_echoes_an_assembled_urzas_mine_once() {
     );
 }
 
-/// F3-9 (CR 106.12b): under Contamination both halves of an assembled Urza's
-/// Mine's production are tapped for mana and come from the Mine, so undoing
-/// the manual tap refunds both. The refund itself is the engine's manual-tap
-/// undo, not a rule of the game (CR 605.3b: the ability resolved at once).
+/// CR 106.12b + CR 605.3b: Contamination modifies the Mine's tap production
+/// as the ability resolves. The engine's manual-tap undo refunds all mana
+/// deposited by that activation.
 #[test]
-fn untapping_an_assembled_urzas_mine_refunds_both_halves() {
+fn untapping_an_assembled_urzas_mine_refunds_the_whole_replacement() {
     let (mut scenario, mine) = tron_scenario(true);
     scenario.add_enchantment_from_oracle(P0, "Contamination", CONTAMINATION);
     let mut runner = scenario.build();
     let Produced::Pool(produced) = tap_for_mana(&mut runner, mine) else {
-        panic!("reach-guard: the Mine adds its mana without a type prompt");
+        panic!("the Mine produces mana without a type prompt");
     };
-    assert!(!produced.is_empty(), "reach-guard: the Mine added mana");
+    assert!(!produced.is_empty(), "the Mine produced mana");
     assert!(
         runner
             .state()
@@ -913,7 +908,10 @@ fn untapping_an_assembled_urzas_mine_refunds_both_halves() {
     runner
         .act(GameAction::UntapLandForMana { object_id: mine })
         .expect("undoing the Mine's manual tap");
-    assert!(pool(&runner, P0).is_empty(), "both halves were refunded");
+    assert!(
+        pool(&runner, P0).is_empty(),
+        "the Mine's replaced production was refunded"
+    );
     assert!(
         !runner.state().objects[&mine].tapped,
         "the Mine is untapped"
