@@ -12,5 +12,9 @@
 //     multiplayerServerUrl: "wss://your-host/ws",
 //     // Where a release build's "Try Preview" badge points (http or https).
 //     previewSiteUrl: "https://preview.your-host/",
+//     // Cloud sync against your own Supabase project (both or neither). Its
+//     // auth redirect allow-list must include this site's origin.
+//     supabaseUrl: "https://your-project.supabase.co",
+//     supabaseAnonKey: "sb_publishable_…",
 //   };
 window.__PHASE_CONFIG__ = {};
