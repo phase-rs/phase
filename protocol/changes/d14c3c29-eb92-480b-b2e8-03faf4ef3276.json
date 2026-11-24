@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Squandered Resources (PR #9597): LKISnapshot gains produceable_mana_types, the cost-paid referent's CR 106.7 could-produce set, and SpellContext gains mana_tap_state, the CR 106.12b tapped-for-mana context of a {T} mana ability's inline sub-chain. Both are serde-defaulted, so an older full-game or P2P peer silently drops them: a resumed Squandered resolution adds no mana and a paused sub-chain production escapes tapped-for-mana replacements. First contact must refuse the skew."
+}

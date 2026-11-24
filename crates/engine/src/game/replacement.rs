@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use crate::game::cost_payability::AbilityCostPayability;
@@ -41,7 +41,7 @@ use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, ProtectionReplac
 use crate::types::keywords::{
     MatchedProtectionQuality, ProtectionColorlessness, ProtectionPlayerScope,
 };
-use crate::types::mana::{ManaColor, StepEndManaAction, UnitDisposition};
+use crate::types::mana::{ManaColor, ManaType, ManaTypeSet, StepEndManaAction, UnitDisposition};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
     AppliedReplacementKey, BoundSearchFoundCandidate, BoundSearchFoundDisposition,
@@ -6799,6 +6799,341 @@ fn produce_mana_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameS
     matches!(event, ProposedEvent::ProduceMana { .. })
 }
 
+/// CR 614.1a: the `ManaModification` the replacement `rid` makes, if any. A
+/// parse-only definition (`mana_modification: None`) passes production through.
+fn produce_mana_modification(
+    state: &GameState,
+    rid: ReplacementId,
+) -> Option<crate::types::ability::ManaModification> {
+    state
+        .objects
+        .get(&rid.source)
+        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
+        .and_then(|def| def.mana_modification.clone())
+}
+
+/// CR 106.3 + CR 614.1a: the type and amount a production of `count` mana of
+/// `mana_type` becomes under `modification`. Shared by the runtime applier and
+/// the CR 106.7 order search, so the two cannot drift. The one-pass reading
+/// ([`produced_mana_types_applying_all`]) folds the same two modifications in
+/// closed form and must change with them.
+fn apply_mana_modification(
+    modification: Option<&crate::types::ability::ManaModification>,
+    mana_type: ManaType,
+    count: u32,
+) -> (ManaType, u32) {
+    use crate::types::ability::ManaModification;
+    match modification {
+        Some(ManaModification::ReplaceWith {
+            mana_type: replacement,
+        }) => (*replacement, count),
+        Some(ManaModification::Multiply { factor }) => (mana_type, count.saturating_mul(*factor)),
+        None => (mana_type, count),
+    }
+}
+
+/// CR 106.7 + CR 614.1a: could any replacement in the game apply to a mana
+/// production? A conservative superset of what [`find_applicable_replacements`]
+/// can return for a `ProposedEvent::ProduceMana`, read before any gate from the
+/// stores that lookup reads for such an event:
+///
+/// - the object-hosted definitions `functioning_abilities::active_replacements`
+///   yields — the scan `legacy_object_replacement_candidates` walks and the
+///   replacement index is rebuilt from — and the liminal projection
+///   `liminal_entry_ref` names for the event (none, for a mana production);
+/// - the live floating definitions in `pending_damage_replacements`;
+///
+/// each keyed by the `ReplacementEvent`s `replacement_event_keys_for_event`
+/// assigns a mana production. The lookup's remaining sources cannot offer a
+/// candidate here: each virtual candidate is gated on another event kind, and
+/// `pending_step_end_mana_handlers` answer only `EmptyManaPool`.
+///
+/// A mana production's keys and liminal entry depend on none of its source,
+/// player, type or tap state, so one scan answers for every production a
+/// CR 106.7 reading makes. When it answers no, each production yields its own
+/// type, and the per-production lookup can be skipped.
+pub(crate) fn produced_mana_may_be_replaced(state: &GameState) -> bool {
+    any_production_watching_replacement(state, |_| true)
+}
+
+/// Whether a definition in the stores [`produced_mana_may_be_replaced`]
+/// describes watches a mana production and satisfies `predicate`. The one scan
+/// of those stores, shared by every question asked of them.
+fn any_production_watching_replacement(
+    state: &GameState,
+    predicate: impl Fn(&ReplacementDefinition) -> bool,
+) -> bool {
+    // The event's fields select no key and no liminal entry (see
+    // `produced_mana_may_be_replaced`).
+    let production = ProposedEvent::produce_mana(ObjectId(0), PlayerId(0), ManaType::Colorless);
+    let keys = replacement_event_keys_for_event(&production);
+    let selected =
+        |repl_def: &ReplacementDefinition| keys.contains(&repl_def.event) && predicate(repl_def);
+
+    super::functioning_abilities::active_replacements(state)
+        .any(|(_, _, repl_def)| selected(repl_def))
+        || liminal_entry_ref(&production)
+            .and_then(|entry_ref| state.liminal_entries.get(&entry_ref))
+            .is_some_and(|entry| {
+                entry
+                    .object
+                    .projected()
+                    .replacement_definitions
+                    .iter_all()
+                    .any(selected)
+            })
+        || state
+            .pending_damage_replacements
+            .iter()
+            .any(|repl_def| !repl_def.is_consumed && selected(repl_def))
+}
+
+/// CR 106.7 + CR 614.1a + CR 616.1 + CR 616.1e + CR 616.1f: the mana types a
+/// production of `count` mana of `mana_type` by `source` for `player` would
+/// yield after the applicable `ProduceMana` replacements, applied in every
+/// possible order.
+///
+/// CR 106.7 asks for the types an ability would produce "taking into account
+/// any applicable replacement effects in any possible order". Read-only: no
+/// event is replaced, no state is mutated and no choice is offered.
+///
+/// Only a replacement's `condition` can read the production's type or amount,
+/// so only with a conditioned replacement in play can one replacement's
+/// applicability depend on another having applied. Without one, every order
+/// applies the same replacements, and the union has a closed form read in one
+/// candidate lookup ([`produced_mana_types_applying_all`]); every
+/// `ProduceMana` replacement the parser produces today is condition-free
+/// (Damping Sphere's, which reads the amount, does not parse yet). With one,
+/// the orders are searched ([`produced_mana_types_in_every_order`]). Both
+/// answers are exact:
+/// there is no work cap and no single-order fallback.
+pub(crate) fn hypothetical_produced_mana_types(
+    state: &GameState,
+    source: ObjectId,
+    player: PlayerId,
+    mana_type: ManaType,
+    count: u32,
+    tap_state: crate::types::events::ManaTapState,
+) -> ManaTypeSet {
+    let mut event = ProposedEvent::produce_mana_with_context(
+        source,
+        player,
+        mana_type,
+        tap_state.tapped_for_mana(),
+    );
+    if let ProposedEvent::ProduceMana {
+        count: event_count, ..
+    } = &mut event
+    {
+        *event_count = count;
+    }
+    if !any_production_watching_replacement(state, |repl_def| repl_def.condition.is_some()) {
+        return produced_mana_types_applying_all(state, &event, mana_type, count);
+    }
+    produced_mana_types_in_every_order(state, &event, &[], &mut HashMap::new())
+}
+
+/// CR 106.7 + CR 616.1e + CR 616.1f: the union over every order in one pass,
+/// valid when no replacement watching a mana production carries a `condition`.
+///
+/// Without a `condition`, a replacement's applicability to a production reads
+/// only its source (`valid_card`), its player, its tap state and whether that
+/// replacement has applied. No replacement changes the first three. So every
+/// replacement applicable at the start stays applicable until it is applied,
+/// a replacement not applicable at the start never becomes applicable, and
+/// every order applies exactly the starting candidates (CR 616.1f).
+///
+/// Across those orders the amount is the same: it is the product of the
+/// multipliers, and a rewrite keeps the amount. The type is the one named by
+/// the rewrite applied last, and any rewrite may be applied last (CR 616.1e).
+/// So the union is every rewrite's type, or the produced type when no rewrite
+/// applies; an amount of zero adds no mana. The work is one candidate lookup,
+/// however many replacements, and however many copies of each, are in play.
+/// `event` is the production of `count` mana of `mana_type`.
+fn produced_mana_types_applying_all(
+    state: &GameState,
+    event: &ProposedEvent,
+    mana_type: ManaType,
+    count: u32,
+) -> ManaTypeSet {
+    use crate::types::ability::ManaModification;
+
+    let mut amount = count;
+    let mut rewritten_types = ManaTypeSet::EMPTY;
+    for rid in find_applicable_replacements(state, event, replacement_registry()) {
+        match produce_mana_modification(state, rid) {
+            Some(ManaModification::ReplaceWith {
+                mana_type: rewritten,
+            }) => rewritten_types = rewritten_types.with(rewritten),
+            Some(ManaModification::Multiply { factor }) => {
+                amount = amount.saturating_mul(factor);
+            }
+            // A parse-only definition passes production through.
+            None => {}
+        }
+    }
+    // CR 106.7: a production of no mana gives no type the source could produce.
+    if amount == 0 {
+        return ManaTypeSet::EMPTY;
+    }
+    if rewritten_types.is_empty() {
+        return ManaTypeSet::of(mana_type);
+    }
+    rewritten_types
+}
+
+/// One state of the order search: the production's current type and amount
+/// and the replacements already applied to it, sorted so that two orders that
+/// applied the same set meet at the same key.
+type ManaOrderSearchState = (ManaType, u32, Vec<ReplacementId>);
+
+#[cfg(test)]
+thread_local! {
+    static PRODUCED_MANA_ORDER_STATES_EXPLORED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// The depth-first order exploration of [`hypothetical_produced_mana_types`],
+/// read when a replacement watching mana production carries a `condition`.
+/// `applied` lists the replacements already applied to `event`, sorted;
+/// `explored` holds the answer of every search state already explored.
+///
+/// Each step applies one of the candidates `find_applicable_replacements`
+/// returns (it already excludes ones applied to this event, applies each
+/// definition's `valid_card` filter and the CR 106.12b `TappedForMana` scope),
+/// marks it applied (CR 614.5: one opportunity each), and repeats (CR 616.1f)
+/// until none applies; any applicable one may be chosen (CR 616.1e).
+///
+/// Orders that reach the same search state (the same type and amount with the
+/// same replacements already applied) have the same continuations, so each
+/// state is explored once and its answer reused. Interchangeable candidates
+/// are applied once per step ([`order_class_representatives`]): copies of one
+/// condition-free replacement lead to the same continuation, so the search
+/// follows only the lowest-id copy, and the applied sets it reaches hold each
+/// class's lowest copies. The distinct states are then at most the types times
+/// the product, over the classes, of one more than the class's size: N copies
+/// of one replacement make N + 1 states, not 2^N.
+///
+/// `produce_mana_applier` is the registry's only `ProduceMana` handler and it
+/// never prevents production, so a positive count never becomes zero.
+/// Termination: each recursion applies one more distinct `ReplacementId`.
+fn produced_mana_types_in_every_order(
+    state: &GameState,
+    event: &ProposedEvent,
+    applied: &[ReplacementId],
+    explored: &mut HashMap<ManaOrderSearchState, ManaTypeSet>,
+) -> ManaTypeSet {
+    let ProposedEvent::ProduceMana {
+        mana_type, count, ..
+    } = event
+    else {
+        return ManaTypeSet::EMPTY;
+    };
+    let search_state = (*mana_type, *count, applied.to_vec());
+    if let Some(types) = explored.get(&search_state) {
+        return *types;
+    }
+    #[cfg(test)]
+    PRODUCED_MANA_ORDER_STATES_EXPLORED.with(|states| states.set(states.get() + 1));
+
+    let candidates = find_applicable_replacements(state, event, replacement_registry());
+    let types = if candidates.is_empty() {
+        // CR 106.7: a production of no mana gives no type the source could produce.
+        if *count == 0 {
+            ManaTypeSet::EMPTY
+        } else {
+            ManaTypeSet::of(*mana_type)
+        }
+    } else {
+        let mut types = ManaTypeSet::EMPTY;
+        for rid in order_class_representatives(state, candidates) {
+            let modification = produce_mana_modification(state, rid);
+            let (new_mana_type, new_count) =
+                apply_mana_modification(modification.as_ref(), *mana_type, *count);
+            let mut next = event.clone();
+            if let ProposedEvent::ProduceMana {
+                mana_type: next_mana_type,
+                count: next_count,
+                ..
+            } = &mut next
+            {
+                *next_mana_type = new_mana_type;
+                *next_count = new_count;
+            }
+            next.mark_applied(rid);
+            let mut next_applied = applied.to_vec();
+            next_applied.push(rid);
+            next_applied.sort_by_key(|applied_rid| (applied_rid.source, applied_rid.index));
+            types = types.union(produced_mana_types_in_every_order(
+                state,
+                &next,
+                &next_applied,
+                explored,
+            ));
+        }
+        types
+    };
+    explored.insert(search_state, types);
+    types
+}
+
+/// A class of interchangeable order-search candidates: the condition-free
+/// replacements that make one modification, or one replacement that cannot be
+/// shown interchangeable with any other.
+#[derive(PartialEq, Eq)]
+enum OrderClass {
+    Modification(Option<crate::types::ability::ManaModification>),
+    Own(ReplacementId),
+}
+
+/// CR 616.1e: the candidates the order search applies next. There is one per
+/// class of interchangeable replacements, and each class is represented by its
+/// lowest id.
+///
+/// Two condition-free candidates that make the same modification are
+/// interchangeable:
+/// - Applying either one yields the same type and amount.
+/// - Neither one's applicability can change as the production is rewritten.
+///   Only a `condition` can read the production's type or amount; the other
+///   gates read the production's source, player and tap state, which no
+///   replacement changes.
+///
+/// So both stay applicable until applied, and the continuation after applying
+/// one is the continuation after applying the other. Each of the following is
+/// its own class:
+/// - a candidate with a `condition`, since it may read the production;
+/// - a candidate whose definition no object hosts, since it can't be read here.
+fn order_class_representatives(
+    state: &GameState,
+    candidates: Vec<ReplacementId>,
+) -> Vec<ReplacementId> {
+    let rank = |rid: ReplacementId| (rid.source, rid.index);
+    let mut representatives: Vec<(OrderClass, ReplacementId)> = Vec::new();
+    for rid in candidates {
+        let definition = state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get_by_rid(rid));
+        let class = match definition {
+            Some(definition) if definition.condition.is_none() => {
+                OrderClass::Modification(definition.mana_modification.clone())
+            }
+            _ => OrderClass::Own(rid),
+        };
+        match representatives.iter_mut().find(|(seen, _)| *seen == class) {
+            Some((_, representative)) if rank(rid) < rank(*representative) => {
+                *representative = rid;
+            }
+            Some(_) => {}
+            None => representatives.push((class, rid)),
+        }
+    }
+    representatives
+        .into_iter()
+        .map(|(_, representative)| representative)
+        .collect()
+}
+
 /// CR 106.3 + CR 614.1a: Applies a `ManaModification` to a produced mana unit,
 /// replacing its type before it enters the player's mana pool.
 fn produce_mana_applier(
@@ -6807,12 +7142,7 @@ fn produce_mana_applier(
     state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
-    use crate::types::ability::ManaModification;
-    let modification = state
-        .objects
-        .get(&rid.source)
-        .and_then(|obj| obj.replacement_definitions.get_by_rid(rid))
-        .and_then(|def| def.mana_modification.clone());
+    let modification = produce_mana_modification(state, rid);
 
     if let ProposedEvent::ProduceMana {
         source_id,
@@ -6823,15 +7153,8 @@ fn produce_mana_applier(
         applied,
     } = event
     {
-        let (new_mana_type, new_count) = match modification {
-            Some(ManaModification::ReplaceWith {
-                mana_type: replacement,
-            }) => (replacement, count),
-            Some(ManaModification::Multiply { factor }) => {
-                (mana_type, count.saturating_mul(factor))
-            }
-            None => (mana_type, count),
-        };
+        let (new_mana_type, new_count) =
+            apply_mana_modification(modification.as_ref(), mana_type, count);
         ApplyResult::Modified(ProposedEvent::ProduceMana {
             source_id,
             player_id,
@@ -10614,6 +10937,12 @@ fn protection_quality_label_tail(quality: MatchedProtectionQuality) -> String {
     }
 }
 
+/// CR 614.1 + CR 616.1: every replacement that could apply to `event` now.
+///
+/// [`produced_mana_may_be_replaced`] and [`draw_instruction_may_be_replaced`]
+/// are supersets of this lookup for one event kind each; a new candidate source
+/// that can answer a mana production or a draw instruction must be read there
+/// too.
 pub fn find_applicable_replacements(
     state: &GameState,
     event: &ProposedEvent,
@@ -23007,6 +23336,434 @@ mod tests {
             sources(&opponent_draw(2, DrawEventStage::Individual)),
             vec![ObjectId(11)],
             "only the individual-draw replacement is consulted for an individual draw"
+        );
+    }
+
+    /// CR 106.7 + CR 614.1a: the once-per-solve precheck answers yes whenever the
+    /// full lookup would find a `ProduceMana` replacement for some production —
+    /// object-hosted on the battlefield, hosted by a command-zone emblem, or
+    /// floating — and no only when it would find none.
+    #[test]
+    fn produced_mana_may_be_replaced_covers_every_store_the_lookup_reads() {
+        use crate::types::ability::ManaModification;
+
+        let land = ObjectId(10);
+        let host = ObjectId(20);
+        let to_black = || {
+            ReplacementDefinition::new(ReplacementEvent::ProduceMana).mana_modification(
+                ManaModification::ReplaceWith {
+                    mana_type: ManaType::Black,
+                },
+            )
+        };
+        let hosting = |zone: Zone, definitions: Vec<ReplacementDefinition>| {
+            let mut state = test_state_with_object(host, zone, definitions);
+            let forest = GameObject::new(
+                land,
+                CardId(2),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.insert(land, forest);
+            state.battlefield.push_back(land);
+            state
+        };
+        // Whether the full lookup finds a candidate for any production the land
+        // could make — tapped for mana or not, of any type.
+        let lookup_finds_one = |state: &GameState| {
+            [false, true].into_iter().any(|tapped_for_mana| {
+                ManaType::ALL.into_iter().any(|mana_type| {
+                    let production = ProposedEvent::produce_mana_with_context(
+                        land,
+                        PlayerId(0),
+                        mana_type,
+                        tapped_for_mana,
+                    );
+                    !find_applicable_replacements(state, &production, replacement_registry())
+                        .is_empty()
+                })
+            })
+        };
+
+        let battlefield = hosting(Zone::Battlefield, vec![to_black()]);
+        let mut emblem = hosting(Zone::Command, vec![to_black()]);
+        emblem.objects.get_mut(&host).unwrap().is_emblem = true;
+        let mut floating = hosting(Zone::Battlefield, Vec::new());
+        floating.pending_damage_replacements.push(to_black());
+        for (store, state) in [
+            ("battlefield", &battlefield),
+            ("command-zone emblem", &emblem),
+            ("pending_damage_replacements", &floating),
+        ] {
+            assert!(
+                lookup_finds_one(state),
+                "reach-guard: the full lookup finds the {store} replacement"
+            );
+            assert!(
+                produced_mana_may_be_replaced(state),
+                "the precheck must keep the lookup for a {store} replacement"
+            );
+        }
+
+        let unrelated = hosting(Zone::Battlefield, vec![tap_self_moved_replacement()]);
+        let mut consumed = hosting(Zone::Battlefield, Vec::new());
+        consumed.pending_damage_replacements.push(to_black());
+        consumed.pending_damage_replacements[0].is_consumed = true;
+        for (board, state) in [
+            ("an unrelated replacement", &unrelated),
+            ("a consumed floating replacement", &consumed),
+        ] {
+            assert!(
+                !lookup_finds_one(state),
+                "reach-guard: the full lookup finds nothing with {board}"
+            );
+            assert!(
+                !produced_mana_may_be_replaced(state),
+                "with {board}, no production can be replaced"
+            );
+        }
+    }
+
+    /// A board of a Forest and one other object carrying `definitions`; returns
+    /// the state and the Forest.
+    fn forest_beside(definitions: Vec<ReplacementDefinition>) -> (GameState, ObjectId) {
+        let host = ObjectId(20);
+        let land = ObjectId(10);
+        let mut state = test_state_with_object(host, Zone::Battlefield, definitions);
+        let forest = GameObject::new(
+            land,
+            CardId(2),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(land, forest);
+        state.battlefield.push_back(land);
+        (state, land)
+    }
+
+    /// The read `hypothetical_produced_mana_types` makes of `count` Green mana
+    /// from `land` tapped for mana, with the order states it explored.
+    fn read_tapped_green(state: &GameState, land: ObjectId, count: u32) -> (ManaTypeSet, usize) {
+        PRODUCED_MANA_ORDER_STATES_EXPLORED.with(|explored| explored.set(0));
+        let types = hypothetical_produced_mana_types(
+            state,
+            land,
+            PlayerId(0),
+            ManaType::Green,
+            count,
+            crate::types::events::ManaTapState::FromTap,
+        );
+        (
+            types,
+            PRODUCED_MANA_ORDER_STATES_EXPLORED.with(|explored| explored.get()),
+        )
+    }
+
+    /// The order search's own answer for the same production, with its states.
+    fn search_tapped_green(state: &GameState, land: ObjectId, count: u32) -> (ManaTypeSet, usize) {
+        let mut tapped_green =
+            ProposedEvent::produce_mana_with_context(land, PlayerId(0), ManaType::Green, true);
+        if let ProposedEvent::ProduceMana {
+            count: event_count, ..
+        } = &mut tapped_green
+        {
+            *event_count = count;
+        }
+        PRODUCED_MANA_ORDER_STATES_EXPLORED.with(|explored| explored.set(0));
+        let types =
+            produced_mana_types_in_every_order(state, &tapped_green, &[], &mut HashMap::new());
+        (
+            types,
+            PRODUCED_MANA_ORDER_STATES_EXPLORED.with(|explored| explored.get()),
+        )
+    }
+
+    fn rewrite(mana_type: ManaType) -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::ProduceMana)
+            .mana_modification(crate::types::ability::ManaModification::ReplaceWith { mana_type })
+    }
+
+    fn multiply(factor: u32) -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::ProduceMana)
+            .mana_modification(crate::types::ability::ManaModification::Multiply { factor })
+    }
+
+    /// A definition whose `condition` always holds. Synthetic: no parsed
+    /// `ProduceMana` replacement carries a condition. The nearest printed card
+    /// is Damping Sphere ("If a land is tapped for two or more mana, it produces
+    /// {C} instead of any other type and amount."), whose replacement does not
+    /// parse yet.
+    fn conditioned(mut definition: ReplacementDefinition) -> ReplacementDefinition {
+        definition.condition = Some(crate::types::ability::ReplacementCondition::And {
+            conditions: Vec::new(),
+        });
+        definition
+    }
+
+    /// CR 106.7 + CR 616.1e + CR 616.1f: ten condition-free replacements that
+    /// all keep applying to one production, so 10! orders. The one-pass reading
+    /// explores no order state, and its answer is exactly the order search's:
+    /// the type the last-applied rewrite names, never the original Green. The
+    /// order search itself applies one copy per class per step (two of each
+    /// rewrite, four doublings), so it visits at most four types times
+    /// 3 * 3 * 3 * 5 applied sets, not the 2^10 sets of every copy. An amount of
+    /// zero adds no mana either way.
+    #[test]
+    fn condition_free_mana_replacements_are_read_in_one_pass() {
+        let (state, land) = forest_beside(vec![
+            rewrite(ManaType::Black),
+            rewrite(ManaType::Black),
+            rewrite(ManaType::Colorless),
+            rewrite(ManaType::Colorless),
+            rewrite(ManaType::Red),
+            rewrite(ManaType::Red),
+            multiply(2),
+            multiply(2),
+            multiply(2),
+            multiply(2),
+        ]);
+        let tapped_green =
+            ProposedEvent::produce_mana_with_context(land, PlayerId(0), ManaType::Green, true);
+        assert_eq!(
+            find_applicable_replacements(&state, &tapped_green, replacement_registry()).len(),
+            10,
+            "reach-guard: all ten replacements apply"
+        );
+
+        let expected = ManaTypeSet::of(ManaType::Black)
+            .with(ManaType::Colorless)
+            .with(ManaType::Red);
+        let (types, explored) = read_tapped_green(&state, land, 1);
+        assert_eq!(types, expected);
+        assert_eq!(explored, 0, "the one-pass reading explores no order state");
+        let (searched, searched_states) = search_tapped_green(&state, land, 1);
+        assert_eq!(
+            searched, expected,
+            "the order search reaches the same types"
+        );
+        assert!(
+            searched_states <= 4 * 3 * 3 * 3 * 5,
+            "the order search applies one copy per class per step: explored {searched_states}"
+        );
+
+        assert_eq!(read_tapped_green(&state, land, 0).0, ManaTypeSet::EMPTY);
+        assert_eq!(search_tapped_green(&state, land, 0).0, ManaTypeSet::EMPTY);
+    }
+
+    /// A printed card that carries a `ProduceMana` replacement, by its Oracle
+    /// text, and whether it is a creature (Nyxbloom Ancient) or an enchantment.
+    struct ReplacementCard {
+        name: &'static str,
+        oracle: &'static str,
+        creature: bool,
+    }
+
+    const MANA_REFLECTION: ReplacementCard = ReplacementCard {
+        name: "Mana Reflection",
+        oracle: "If you tap a permanent for mana, it produces twice as much of that mana instead.",
+        creature: false,
+    };
+    const NYXBLOOM_ANCIENT: ReplacementCard = ReplacementCard {
+        name: "Nyxbloom Ancient",
+        oracle: "Trample\nIf you tap a permanent for mana, it produces three times as much of \
+             that mana instead.",
+        creature: true,
+    };
+    const CONTAMINATION: ReplacementCard = ReplacementCard {
+        name: "Contamination",
+        oracle: "At the beginning of your upkeep, sacrifice this enchantment unless you \
+             sacrifice a creature.\nIf a land is tapped for mana, it produces {B} instead of \
+             any other type and amount.",
+        creature: false,
+    };
+    const RITUAL_OF_SUBDUAL: ReplacementCard = ReplacementCard {
+        name: "Ritual of Subdual",
+        oracle: "Cumulative upkeep {2}\nIf a land is tapped for mana, it produces colorless \
+             mana instead of any other type.",
+        creature: false,
+    };
+
+    /// A board of P0's copies of printed replacement cards, each with its own
+    /// count, a Forest and Reflecting Pool. Returns the runner, the Forest and
+    /// the Pool.
+    fn printed_replacement_board(
+        cards: &[(ReplacementCard, usize)],
+    ) -> (crate::game::scenario::GameRunner, ObjectId, ObjectId) {
+        const REFLECTING_POOL: &str =
+            "{T}: Add one mana of any type that a land you control could produce.";
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        for (card, copies) in cards {
+            for _ in 0..*copies {
+                if card.creature {
+                    scenario.add_creature_from_oracle(PlayerId(0), card.name, 5, 5, card.oracle);
+                } else {
+                    scenario.add_enchantment_from_oracle(PlayerId(0), card.name, card.oracle);
+                }
+            }
+        }
+        let forest = scenario.add_basic_land(PlayerId(0), crate::types::mana::ManaColor::Green);
+        let pool = scenario
+            .add_land_from_oracle(PlayerId(0), "Reflecting Pool", REFLECTING_POOL)
+            .id();
+        (scenario.build(), forest, pool)
+    }
+
+    /// CR 106.7 + CR 614.5 + CR 616.1f, with printed cards: ten Mana Reflections
+    /// (their effects are cumulative, per its ruling) on a Forest tapped for
+    /// mana. Alone they keep its type, Green, across all 10! orders; joined by
+    /// Contamination and Ritual of Subdual, whose order decides the type, the
+    /// answer is exactly {B} or {C}. The reading is one pass, and the order
+    /// search agrees: it follows one Reflection per step, eleven states, and
+    /// with the two rewrites at most five (applied rewrites, type) states per
+    /// applied count of Reflections.
+    #[test]
+    fn ten_mana_reflections_read_the_same_in_one_pass_and_in_the_order_search() {
+        let (runner, forest, _) = printed_replacement_board(&[(MANA_REFLECTION, 10)]);
+        let state = runner.state();
+        let tapped_green =
+            ProposedEvent::produce_mana_with_context(forest, PlayerId(0), ManaType::Green, true);
+        assert_eq!(
+            find_applicable_replacements(state, &tapped_green, replacement_registry()).len(),
+            10,
+            "reach-guard: every Mana Reflection applies"
+        );
+        let green = ManaTypeSet::of(ManaType::Green);
+        assert_eq!(read_tapped_green(state, forest, 1), (green, 0));
+        assert_eq!(search_tapped_green(state, forest, 1), (green, 10 + 1));
+
+        let (runner, forest, _) = printed_replacement_board(&[
+            (MANA_REFLECTION, 10),
+            (CONTAMINATION, 1),
+            (RITUAL_OF_SUBDUAL, 1),
+        ]);
+        let state = runner.state();
+        let tapped_green =
+            ProposedEvent::produce_mana_with_context(forest, PlayerId(0), ManaType::Green, true);
+        assert_eq!(
+            find_applicable_replacements(state, &tapped_green, replacement_registry()).len(),
+            12,
+            "reach-guard: all twelve replacements apply"
+        );
+        let black_or_colorless = ManaTypeSet::of(ManaType::Black).with(ManaType::Colorless);
+        assert_eq!(read_tapped_green(state, forest, 1), (black_or_colorless, 0));
+        let (searched, searched_states) = search_tapped_green(state, forest, 1);
+        assert_eq!(searched, black_or_colorless);
+        assert!(
+            searched_states <= (10 + 1) * 5,
+            "explored {searched_states} states for 12! orders"
+        );
+    }
+
+    /// CR 106.7 + CR 616.1e + CR 616.1f, on the read path a Reflecting Pool's
+    /// mana display takes (`display_land_mana_pips` to `types_for_clause` to
+    /// this authority), at the scale of a legal Legacy board: Doppelgang for
+    /// X = 29 copies each of Contamination, Ritual of Subdual, Mana Reflection
+    /// and Nyxbloom Ancient 29 times, so thirty of each. An order search would
+    /// face 31^4 applied sets per read even with one copy per class per step;
+    /// none of the 120 replacements carries a condition, so each production
+    /// is read in one candidate lookup with no order search. Whichever rewrite
+    /// applies last decides the type, so the Pool offers exactly {B} and {C}.
+    /// The mixed-order control keeps only the multipliers: the Pool offers the
+    /// Forest's Green.
+    #[test]
+    fn thirty_of_four_mana_replacements_keep_a_reflecting_pool_read_in_one_pass() {
+        use crate::types::mana::{ManaColor, ManaPip};
+
+        let (runner, forest, pool) =
+            printed_replacement_board(&[(MANA_REFLECTION, 30), (NYXBLOOM_ANCIENT, 30)]);
+        let state = runner.state();
+        let tapped_green =
+            ProposedEvent::produce_mana_with_context(forest, PlayerId(0), ManaType::Green, true);
+        assert_eq!(
+            find_applicable_replacements(state, &tapped_green, replacement_registry()).len(),
+            60,
+            "reach-guard: every Reflection and Nyxbloom Ancient applies"
+        );
+        PRODUCED_MANA_ORDER_STATES_EXPLORED.with(|explored| explored.set(0));
+        let pips = crate::game::mana_sources::display_land_mana_pips(state, pool, PlayerId(0));
+        assert_eq!(pips, vec![ManaPip::OneOfColors(vec![ManaColor::Green])]);
+        assert_eq!(
+            PRODUCED_MANA_ORDER_STATES_EXPLORED.with(|explored| explored.get()),
+            0
+        );
+
+        let (runner, forest, pool) = printed_replacement_board(&[
+            (CONTAMINATION, 30),
+            (RITUAL_OF_SUBDUAL, 30),
+            (MANA_REFLECTION, 30),
+            (NYXBLOOM_ANCIENT, 30),
+        ]);
+        let state = runner.state();
+        let tapped_green =
+            ProposedEvent::produce_mana_with_context(forest, PlayerId(0), ManaType::Green, true);
+        assert_eq!(
+            find_applicable_replacements(state, &tapped_green, replacement_registry()).len(),
+            120,
+            "reach-guard: all 120 replacements apply"
+        );
+        PRODUCED_MANA_ORDER_STATES_EXPLORED.with(|explored| explored.set(0));
+        let pips = crate::game::mana_sources::display_land_mana_pips(state, pool, PlayerId(0));
+        assert_eq!(
+            pips,
+            vec![
+                ManaPip::OneOfColors(vec![ManaColor::Black]),
+                ManaPip::Colorless
+            ]
+        );
+        assert_eq!(
+            PRODUCED_MANA_ORDER_STATES_EXPLORED.with(|explored| explored.get()),
+            0,
+            "condition-free replacements are read in one pass, with no order search"
+        );
+    }
+
+    /// CR 106.7 + CR 616.1f: a replacement with a `condition` may read the
+    /// production it sees, so it is never treated as interchangeable, even with
+    /// an identical copy, and its presence sends the reading to the order
+    /// search. Two identical condition-free rewrites are read in one pass, and
+    /// in the order search they are one class: the lower copy, then the other,
+    /// three states. The same two with a condition are two classes: each is
+    /// tried first, four states. Every answer is Black.
+    #[test]
+    fn a_conditioned_mana_replacement_is_its_own_order_class() {
+        let black = ManaTypeSet::of(ManaType::Black);
+
+        let (state, land) = forest_beside(vec![rewrite(ManaType::Black), rewrite(ManaType::Black)]);
+        assert_eq!(read_tapped_green(&state, land, 1), (black, 0));
+        assert_eq!(search_tapped_green(&state, land, 1), (black, 3));
+
+        let (state, land) = forest_beside(vec![
+            conditioned(rewrite(ManaType::Black)),
+            conditioned(rewrite(ManaType::Black)),
+        ]);
+        assert_eq!(read_tapped_green(&state, land, 1), (black, 4));
+    }
+
+    /// CR 106.7 + CR 616.1e + CR 616.1f: with one conditioned rewrite in play
+    /// the reading searches orders, and the thirty identical doublings beside
+    /// it still form one class: at most 31 applied counts of doublings, times
+    /// the two other classes applied or not, times the three types. Trying
+    /// every copy would face 2^32 applied sets. The answer is every rewrite's
+    /// type: whichever applies last decides it.
+    #[test]
+    fn a_conditioned_mana_replacement_keeps_identical_copies_collapsed() {
+        let mut definitions = vec![
+            conditioned(rewrite(ManaType::Black)),
+            rewrite(ManaType::Colorless),
+        ];
+        definitions.extend((0..30).map(|_| multiply(2)));
+        let (state, land) = forest_beside(definitions);
+
+        let (types, explored) = read_tapped_green(&state, land, 1);
+        assert_eq!(
+            types,
+            ManaTypeSet::of(ManaType::Black).with(ManaType::Colorless)
+        );
+        assert!(
+            (1..=31 * 2 * 2 * 3).contains(&explored),
+            "reach-guard: the reading searched orders; bounded: explored {explored}"
         );
     }
 

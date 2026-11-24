@@ -75903,6 +75903,208 @@ fn a_non_open_booster_sentence_is_not_swallowed() {
     );
 }
 
+/// SHAPE (CR 105.4 + CR 608.2d): Meteor Crater ("{T}: Choose a color of a
+/// permanent you control. Add one mana of that color.") and Corrupted
+/// Grafstone ("{T}: Choose a color of a card in your graveyard. Add one mana
+/// of that color.") choose their color while the mana is added, from the colors
+/// of the objects they name, so each body lowers whole to one
+/// `AnyOneColorAmongPermanents` mana ability over its own filter.
+#[test]
+fn color_of_objects_choice_lowers_to_any_color_among_them() {
+    let cases = [
+        (
+            "Meteor Crater",
+            "{T}: Choose a color of a permanent you control. Add one mana of that color.",
+            "Land",
+            TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+        ),
+        (
+            "Corrupted Grafstone",
+            "This artifact enters tapped.\n{T}: Choose a color of a card in your graveyard. Add one mana of that color.",
+            "Artifact",
+            TargetFilter::Typed(
+                TypedFilter::card()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }]),
+            ),
+        ),
+    ];
+    for (name, oracle, card_type, filter) in cases {
+        let parsed = parse_oracle_text(oracle, name, &[], &[card_type.to_string()], &[]);
+        let activated: Vec<&AbilityDefinition> = parsed
+            .abilities
+            .iter()
+            .filter(|ability| ability.kind == AbilityKind::Activated)
+            .collect();
+        let [ability] = activated.as_slice() else {
+            panic!(
+                "{name}: expected one activated ability, got {:?}",
+                parsed.abilities
+            );
+        };
+        assert_eq!(
+            *ability.effect,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColorAmongPermanents {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter,
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+            "{name}: the whole body is one production over the objects it names"
+        );
+        assert!(
+            ability.sub_ability.is_none(),
+            "{name}: the choose sentence is folded into the production, not chained: {:?}",
+            ability.sub_ability
+        );
+        assert!(
+            crate::types::ability::is_mana_ability(ability),
+            "{name}: CR 605.1a: the lowered ability is a mana ability"
+        );
+    }
+}
+
+/// CR 608.2d: pins the close of the recognizer: the body does not end at "of
+/// that color", so it declines before the mana sentence is parsed. No printed
+/// card exhibits this shape: only Meteor Crater and Corrupted Grafstone print
+/// "choose a color of", and both end at their mana sentence. The nearest
+/// printed card is Meteor Crater.
+#[test]
+fn color_of_objects_choice_needs_the_that_color_production() {
+    assert!(
+        parse_color_of_objects_mana_ir(
+            "Choose a color of a permanent you control. Draw a card.",
+            AbilityKind::Activated,
+            &ParseContext::default(),
+        )
+        .is_none(),
+        "a second sentence that adds no mana must not be lowered"
+    );
+    // Positive reach-guard: Meteor Crater's printed body DOES reach the
+    // recognizer, so the decline above is not a recognizer that never matches.
+    assert!(
+        parse_color_of_objects_mana_ir(
+            "Choose a color of a permanent you control. Add one mana of that color.",
+            AbilityKind::Activated,
+            &ParseContext::default(),
+        )
+        .is_some(),
+        "Meteor Crater's printed body must reach the recognizer"
+    );
+}
+
+/// CR 608.2d: a sentence after the mana sentence would be dropped by a
+/// recognizer that clause dispatch never runs on, so the body declines. No
+/// printed card exhibits this shape: only Meteor Crater and Corrupted
+/// Grafstone print "choose a color of", and both end at their mana sentence.
+/// The nearest printed card is Meteor Crater.
+#[test]
+fn color_of_objects_choice_declines_a_trailing_sentence() {
+    assert!(
+        parse_color_of_objects_mana_ir(
+            "Choose a color of a permanent you control. Add one mana of that color. Draw a card.",
+            AbilityKind::Activated,
+            &ParseContext::default(),
+        )
+        .is_none(),
+        "the trailing draw must not be swallowed"
+    );
+    // Positive reach-guard: Meteor Crater's printed body DOES reach the
+    // recognizer, so the decline above is not a recognizer that never matches.
+    assert!(
+        parse_color_of_objects_mana_ir(
+            "Choose a color of a permanent you control. Add one mana of that color.",
+            AbilityKind::Activated,
+            &ParseContext::default(),
+        )
+        .is_some(),
+        "Meteor Crater's printed body must reach the recognizer"
+    );
+}
+
+/// CR 608.2d: a tail after "of that color" inside the mana sentence would be
+/// dropped too, so the body declines. No printed card exhibits this shape:
+/// only Meteor Crater and Corrupted Grafstone print "choose a color of", and
+/// both end at their mana sentence. The nearest printed card is Meteor Crater.
+#[test]
+fn color_of_objects_choice_declines_a_tail_inside_the_mana_sentence() {
+    assert!(
+        parse_color_of_objects_mana_ir(
+            "Choose a color of a permanent you control. Add one mana of that color, then draw a card.",
+            AbilityKind::Activated,
+            &ParseContext::default(),
+        )
+        .is_none(),
+        "the tail after \"of that color\" must not be swallowed"
+    );
+    // Positive reach-guard: Meteor Crater's printed body DOES reach the
+    // recognizer, so the decline above is not a recognizer that never matches.
+    assert!(
+        parse_color_of_objects_mana_ir(
+            "Choose a color of a permanent you control. Add one mana of that color.",
+            AbilityKind::Activated,
+            &ParseContext::default(),
+        )
+        .is_some(),
+        "Meteor Crater's printed body must reach the recognizer"
+    );
+}
+
+/// CR 608.2d: the unconstrained "Choose a color." names no objects, so the
+/// recognizer declines it and Astral Cornucopia ("{T}: Choose a color. Add one
+/// mana of that color for each charge counter on this artifact.") still
+/// collapses to mana of any one of the five colors.
+#[test]
+fn plain_color_choice_mana_still_collapses_to_any_one_color() {
+    assert!(
+        parse_color_of_objects_mana_ir(
+            "Choose a color. Add one mana of that color for each charge counter on this artifact.",
+            AbilityKind::Activated,
+            &ParseContext::default(),
+        )
+        .is_none(),
+        "the unconstrained choice is not a choice among objects"
+    );
+    // Positive reach-guard: the full card still parses to its collapsed
+    // production, so the decline above left it to the existing collapse.
+    let parsed = parse_oracle_text(
+        "This artifact enters with X charge counters on it.\n{T}: Choose a color. Add one mana of that color for each charge counter on this artifact.",
+        "Astral Cornucopia",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let activated: Vec<&AbilityDefinition> = parsed
+        .abilities
+        .iter()
+        .filter(|ability| ability.kind == AbilityKind::Activated)
+        .collect();
+    let [ability] = activated.as_slice() else {
+        panic!(
+            "Astral Cornucopia: expected one activated ability, got {:?}",
+            parsed.abilities
+        );
+    };
+    assert!(
+        matches!(
+            &*ability.effect,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor { color_options, .. },
+                ..
+            } if color_options.len() == 5
+        ),
+        "Astral Cornucopia's choice is made on activation (any one of five colors), got {:?}",
+        ability.effect
+    );
+}
+
 // ── Issue #8380: compound damage subjects, player-first ordering ─────────
 //
 // These target `try_parse_compound_player_object_damage` — the BUILDING BLOCK —
