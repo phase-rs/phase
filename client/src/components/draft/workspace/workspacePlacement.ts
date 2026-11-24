@@ -536,7 +536,7 @@ function allocatorCouldShareColumn(
 ): boolean {
   // The groups come from the host's pool data, so bound the subset search: an
   // axis holds each kind at most once, and there are only a handful of kinds.
-  const axis = rawAxis.filter((kind, index) => rawAxis.indexOf(kind) === index);
+  const axis = [...new Set(rawAxis)];
   if (axis.length > MAX_AXIS_GROUPS) return false;
   if (shared.some((kind) => !axis.includes(kind))) return false;
   const optional = axis.filter((kind) => !shared.includes(kind));
