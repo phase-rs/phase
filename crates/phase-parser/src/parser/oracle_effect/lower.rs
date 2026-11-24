@@ -13354,18 +13354,19 @@ fn bind_where_x_optional_pt(
 
 pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: WhereXBinding<'_>) {
     // CR 608.2c + CR 608.2k: an announced target takes precedence over the
-    // trigger-event owner, then the context-free scope applies. Ordinary effects
-    // require a creature-typed target (also permanent-typed for mana value);
-    // the continuous-modification arm keeps its existing target.is_some() gate.
+    // trigger-event owner when it names a compatible type. Otherwise the
+    // existing event or context-free scope applies.
     // Subject pronouns in ordinary effects use the Pump subject gate.
     let referent = where_x_target_referent(where_x);
     let mut target_antecedents;
-    let where_x = if where_x.event_source_owner()
-        && matches!(referent, Some(TargetReferent::DemonstrativeManaValue))
-        && effect
-            .target_filter()
-            .is_some_and(|filter| target_filter_names_type(filter, true))
-    {
+    let mana_value_names_target = matches!(
+        referent,
+        Some(TargetReferent::DemonstrativeManaValue(noun))
+            if effect.target_filter().is_some_and(|filter| {
+                target_filter_names_type(filter, noun == DemonstrativeNoun::Permanent)
+            })
+    );
+    let where_x = if where_x.event_source_owner() && mana_value_names_target {
         // The context-free mana-value grammar already supplies Target.
         target_antecedents = where_x.antecedents_or_empty();
         target_antecedents.characteristic_pronoun_owner = None;
@@ -13378,12 +13379,12 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
     };
     let pt_rebind_from = referent
         .filter(|referent| match referent {
-            TargetReferent::Demonstrative => effect
+            TargetReferent::Demonstrative(noun) => effect
                 .target_filter()
-                .is_some_and(target_filter_names_creature),
+                .is_some_and(|filter| target_filter_names_type(filter, *noun == DemonstrativeNoun::Permanent)),
             // CR 608.2c: "its power" in the where-clause of "target creature gets
             // +X/…" names the clause subject, the announced target, not the source.
-            TargetReferent::DemonstrativeManaValue => false,
+            TargetReferent::DemonstrativeManaValue(_) => false,
             TargetReferent::SubjectPronoun => {
                 matches!(effect, Effect::Pump { target, .. } if target_filter_names_creature(target))
             }
@@ -13753,9 +13754,13 @@ pub(super) fn apply_where_x_effect_expression(effect: &mut Effect, where_x: Wher
             // is announced as a target ("another target creature you control" —
             // Xenagos, God of Revels), so a "that creature" anaphor in the
             // where-clause is the chosen target, not a cost/trigger referent.
-            let target_based = target.is_some();
             let rebind_from = referent
-                .filter(|_| target_based)
+                .filter(|referent| match referent {
+                    TargetReferent::Demonstrative(noun) => target.as_ref().is_some_and(|filter| {
+                        target_filter_names_type(filter, *noun == DemonstrativeNoun::Permanent)
+                    }),
+                    _ => target.is_some(),
+                })
                 .and_then(|referent| referent.provisional_pt_scope(where_x));
             for static_def in static_abilities.iter_mut() {
                 if let Some(condition) = static_def.condition.as_mut() {
@@ -14023,9 +14028,9 @@ fn apply_where_x_continuous_modification(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TargetReferent {
     /// Bare demonstrative power or toughness.
-    Demonstrative,
+    Demonstrative(DemonstrativeNoun),
     /// Bare demonstrative mana value.
-    DemonstrativeManaValue,
+    DemonstrativeManaValue(DemonstrativeNoun),
     /// Possessive pronoun referring to the clause subject.
     SubjectPronoun,
 }
@@ -14033,10 +14038,12 @@ enum TargetReferent {
 impl TargetReferent {
     fn provisional_pt_scope(self, where_x: WhereXBinding<'_>) -> Option<ObjectScope> {
         match self {
-            Self::Demonstrative if where_x.event_source_owner() => Some(ObjectScope::EventSource),
-            Self::Demonstrative => Some(ObjectScope::CostPaidObject),
+            Self::Demonstrative(_) if where_x.event_source_owner() => {
+                Some(ObjectScope::EventSource)
+            }
+            Self::Demonstrative(_) => Some(ObjectScope::CostPaidObject),
             Self::SubjectPronoun => Some(ObjectScope::Source),
-            Self::DemonstrativeManaValue => None,
+            Self::DemonstrativeManaValue(_) => None,
         }
     }
 }
@@ -14045,10 +14052,10 @@ impl TargetReferent {
 fn where_x_target_referent(where_x: WhereXBinding<'_>) -> Option<TargetReferent> {
     let expression = where_x.expression?;
     match parse_demonstrative_object_stat(expression, ObjectScope::Target) {
-        Some((_, QuantityRef::ObjectManaValue { .. })) => {
-            return Some(TargetReferent::DemonstrativeManaValue)
+        Some((noun, QuantityRef::ObjectManaValue { .. })) => {
+            return Some(TargetReferent::DemonstrativeManaValue(noun))
         }
-        Some(_) => return Some(TargetReferent::Demonstrative),
+        Some((noun, _)) => return Some(TargetReferent::Demonstrative(noun)),
         None => {}
     }
     let expression = expression.trim().trim_end_matches('.').to_ascii_lowercase();
@@ -14065,19 +14072,25 @@ fn where_x_target_referent(where_x: WhereXBinding<'_>) -> Option<TargetReferent>
     .then_some(TargetReferent::SubjectPronoun)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DemonstrativeNoun {
+    Creature,
+    Permanent,
+}
+
 /// Recognize a complete bare demonstrative characteristic phrase.
 pub(super) fn parse_demonstrative_object_stat(
     expression: &str,
     scope: ObjectScope,
-) -> Option<(TypeFilter, QuantityRef)> {
+) -> Option<(DemonstrativeNoun, QuantityRef)> {
     let expression = expression.trim().trim_end_matches('.').to_ascii_lowercase();
     let (_, binding) = all_consuming(pair(
         alt((
             value(
-                TypeFilter::Creature,
+                DemonstrativeNoun::Creature,
                 tag::<_, _, OracleError<'_>>("that creature's "),
             ),
-            value(TypeFilter::Permanent, tag("that permanent's ")),
+            value(DemonstrativeNoun::Permanent, tag("that permanent's ")),
         )),
         alt((
             value(QuantityRef::Power { scope }, tag("power")),
@@ -17722,25 +17735,49 @@ mod where_x_tests {
     }
 
     #[test]
-    fn where_x_announced_creature_precedes_a_trigger_subject() {
-        // No printed card combines these clauses. Thickest in the Thicket supplies
-        // the announced-target pattern and Arni, Renowned Champion the trigger-subject pattern.
-        for (oracle, qty) in [
+    fn where_x_announced_target_must_match_the_demonstrative_noun() {
+        // No printed card combines these clauses. Feeding Grounds and Thickest
+        // in the Thicket announce a creature for the counters. Radagast the
+        // Brown reads the mana value of the creature named by its trigger.
+        for (oracle, names_creature, qty) in [
             (
                 "Whenever another creature you control enters, put X +1/+1 counters on target creature, where X is that creature's power.",
+                true,
                 QuantityRef::Power { scope: ObjectScope::Target },
             ),
             (
+                "Whenever another creature you control enters, put X +1/+1 counters on target creature, where X is that creature's mana value.",
+                true,
+                QuantityRef::ObjectManaValue { scope: ObjectScope::Target },
+            ),
+            (
+                "Whenever another creature you control enters, put X +1/+1 counters on target noncreature permanent, where X is that creature's mana value.",
+                false,
+                QuantityRef::ObjectManaValue { scope: ObjectScope::EventSource },
+            ),
+            (
+                "Whenever another creature you control enters, put X +1/+1 counters on target permanent, where X is that creature's mana value.",
+                false,
+                QuantityRef::ObjectManaValue { scope: ObjectScope::EventSource },
+            ),
+            (
                 "Whenever another creature you control enters, put X +1/+1 counters on target permanent, where X is that permanent's mana value.",
+                false,
                 QuantityRef::ObjectManaValue { scope: ObjectScope::Target },
             ),
         ] {
             let trigger = crate::parser::oracle_trigger::parse_trigger_line(oracle, "Synthetic");
             let body = trigger.execute.expect("trigger body");
-            let Effect::PutCounter { count, .. } = body.effect.as_ref() else {
+            let Effect::PutCounter { count, target, .. } = body.effect.as_ref() else {
                 panic!("expected a counter effect: {body:?}");
             };
-            assert_eq!(count, &QuantityExpr::Ref { qty });
+            assert!(super::target_filter_names_type(target, true), "{oracle}: {target:?}");
+            assert_eq!(
+                super::target_filter_names_creature(target),
+                names_creature,
+                "{oracle}"
+            );
+            assert_eq!(count, &QuantityExpr::Ref { qty }, "{oracle}");
         }
     }
 

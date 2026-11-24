@@ -53656,38 +53656,33 @@ fn parse_effect_chain_ir_body(
         let outer_antecedent_is_another_object = chunk_object_referent.is_none()
             && inherited_compound_owner_seed.is_none()
             && !matches!(resolve_it_pronoun(ctx), TargetFilter::SelfRef);
-        // CR 608.2c + CR 608.2k: sacrificing the source of a noncreature
-        // permanent ability does not introduce a new creature antecedent.
-        // A typed demonstrative where-X tail can still name the trigger's creature.
-        let where_x_names_trigger_creature = previous.is_some_and(|previous| {
-            matches!(
-                previous.parsed.effect,
-                Effect::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    ..
-                }
-            )
-        }) && resolve_it_pronoun(ctx)
-            == TargetFilter::TriggeringSource
-            && !ctx.source_core_types.is_empty()
-            && ctx
-                .source_core_types
-                .iter()
-                .all(|kind| *kind != CoreType::Creature)
-            && local_where_x_expression
-                .as_deref()
-                .is_some_and(|expression| {
-                    matches!(
-                        lower::parse_demonstrative_object_stat(
-                            expression,
-                            ObjectScope::EventSource
-                        ),
-                        Some((TypeFilter::Creature, _))
-                    )
-                });
+        // CR 608.2c + CR 608.2k: naming the source makes it the nearest
+        // antecedent when the next reference is a bare pronoun or names a
+        // type compatible with the source. Without card types, keep the
+        // fragment parser's bare-pronoun behavior. Monkey Cage reads:
+        // "When a creature enters, sacrifice this artifact and create X 2/2 green Monkey creature tokens, where X is that creature's mana value."
+        // Its artifact source cannot supply the creature antecedent, so the
+        // where-X reference retains the creature named by the trigger.
+        let source_matches_reference = || {
+            ctx.source_core_types.is_empty()
+                || local_where_x_expression
+                    .as_deref()
+                    .and_then(|expression| {
+                        lower::parse_demonstrative_object_stat(expression, ObjectScope::EventSource)
+                    })
+                    .is_none_or(|(noun, _)| match noun {
+                        lower::DemonstrativeNoun::Creature => {
+                            ctx.source_core_types.contains(&CoreType::Creature)
+                        }
+                        lower::DemonstrativeNoun::Permanent => ctx
+                            .source_core_types
+                            .iter()
+                            .any(|kind| kind.is_permanent_type()),
+                    })
+        };
         if previous_instruction_named_source
             && (inherited_player_subject.is_some() || outer_antecedent_is_another_object)
-            && !where_x_names_trigger_creature
+            && source_matches_reference()
         {
             ctx.object_pronoun_ref = Some(TargetFilter::SelfRef);
         }

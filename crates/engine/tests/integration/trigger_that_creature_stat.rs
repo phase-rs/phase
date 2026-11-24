@@ -10,9 +10,11 @@
 
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::actions::{AlternativeCastDecision, GameAction};
+use engine::types::actions::{AlternativeCastDecision, CastChoice, GameAction};
 use engine::types::counter::CounterType;
-use engine::types::game_state::{CastOfferKind, CastingVariant, WaitingFor};
+use engine::types::game_state::{
+    CastOfferKind, CastPaymentMode, CastingVariant, PayCostKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{EmergeCost, Keyword};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -206,11 +208,11 @@ fn choose_optional(runner: &mut GameRunner, accept: bool) {
 }
 
 #[test]
-fn kresh_cast_with_emerge_counts_the_creature_that_died() {
+fn kresh_cast_by_sacrificing_a_creature_via_injected_emerge_counts_the_creature_that_died() {
     let mut scenario = main_phase();
     scenario.with_mana_pool(P0, pool([ManaType::Black, ManaType::Red, ManaType::Green]));
     let fodder = scenario
-        .add_creature(P0, "Fodder", 1, 1)
+        .add_creature(P0, "Squire", 1, 2)
         .with_mana_cost(ManaCost::generic(2))
         .id();
     let victim = scenario
@@ -225,8 +227,10 @@ fn kresh_cast_with_emerge_counts_the_creature_that_died() {
             ManaCostShard::Green,
         ],
     };
-    // Herigast, Erupting Nullkite: "Each creature spell you cast has emerge. The emerge
-    // cost is equal to its mana cost." The engine does not yet offer the printed grant.
+    // The printed grant is Herigast, Erupting Nullkite: "Each creature spell you cast has emerge. The emerge
+    // cost is equal to its mana cost." The engine does not yet offer that grant, so
+    // install the keyword directly. The cast, sacrifice payment and trigger
+    // resolution use the production path.
     let kresh = scenario
         .add_creature_to_hand_from_oracle(P0, "Kresh the Bloodbraided", 3, 3, KRESH)
         .with_mana_cost(mana_cost.clone())
@@ -306,7 +310,7 @@ fn kresh_does_not_trigger_on_its_own_death() {
     kresh_death(true, false, 0);
 }
 
-fn assert_discover(runner: &GameRunner, expected: u32, hit: ObjectId) {
+fn finish_discover(runner: &mut GameRunner, expected: u32, hit: ObjectId, miss: ObjectId) {
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::CastOffer {
         player,
@@ -316,6 +320,14 @@ fn assert_discover(runner: &GameRunner, expected: u32, hit: ObjectId) {
         "expected discover {expected} hitting {hit:?}, got {:?}",
         runner.state().waiting_for
     );
+    runner
+        .act(GameAction::DiscoverChoice {
+            choice: CastChoice::Decline,
+        })
+        .unwrap();
+    assert_eq!(runner.state().objects[&hit].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&miss].zone, Zone::Library);
+    assert_finished(runner);
 }
 
 fn pantlaza_entry(own_entry: bool, dinosaur: bool) {
@@ -347,15 +359,22 @@ fn pantlaza_entry(own_entry: bool, dinosaur: bool) {
             .id()
     };
     let value = if own_entry { 4 } else { 3 };
-    let hit = library_spell(&mut scenario, "Eligible discover card", value);
-    library_spell(&mut scenario, "Over the discover limit", value + 1);
+    let (hit_name, miss_name) = if own_entry {
+        ("Concentrate", "Tidings")
+    } else {
+        ("Divination", "Concentrate")
+    };
+    let hit = library_spell(&mut scenario, hit_name, value);
+    let miss = library_spell(&mut scenario, miss_name, value + 1);
     let mut runner = scenario.build();
     runner.cast(entrant).commit().stop_at_optional().resolve();
     assert_eq!(runner.state().objects[&entrant].zone, Zone::Battlefield);
     if own_entry || dinosaur {
         choose_optional(&mut runner, true);
-        assert_discover(&runner, value, hit);
+        finish_discover(&mut runner, value, hit, miss);
     } else {
+        assert_eq!(runner.state().objects[&hit].zone, Zone::Library);
+        assert_eq!(runner.state().objects[&miss].zone, Zone::Library);
         assert_finished(&runner);
     }
 }
@@ -382,7 +401,7 @@ fn pantlaza_uses_last_known_toughness_when_the_dinosaur_has_left() {
         .add_creature_from_oracle(P0, "Pantlaza, Sun-Favored", 4, 4, PANTLAZA)
         .with_subtypes(vec!["Dinosaur"]);
     let dinosaur = scenario
-        .add_creature_to_hand(P0, "Dinosaur", 2, 2)
+        .add_creature_to_hand_from_oracle(P0, "Grazing Whiptail", 3, 4, "Reach")
         .with_subtypes(vec!["Dinosaur"])
         .with_mana_cost(free())
         .id();
@@ -391,7 +410,8 @@ fn pantlaza_uses_last_known_toughness_when_the_dinosaur_has_left() {
         .with_mana_cost(free())
         .id();
     let spell = murder(&mut scenario);
-    let hit = library_spell(&mut scenario, "Eligible discover card", 5);
+    let hit = library_spell(&mut scenario, "Blatant Thievery", 7);
+    let miss = library_spell(&mut scenario, "Decree of Savagery", 9);
     let mut runner = scenario.build();
     runner.cast(dinosaur).commit();
     runner.pass_both_players();
@@ -410,7 +430,7 @@ fn pantlaza_uses_last_known_toughness_when_the_dinosaur_has_left() {
     runner.pass_both_players();
     choose_optional(&mut runner, true);
     // CR 608.2h: use toughness at departure, including Giant Growth.
-    assert_discover(&runner, 5, hit);
+    finish_discover(&mut runner, 7, hit, miss);
 }
 
 #[test]
@@ -608,7 +628,7 @@ fn monkey_cage_reads_the_face_down_incarnation_after_cloudshift() {
     enter_face_down_then_blink(false);
 }
 
-fn sacrifice_on_entry(name: &str, oracle: &str, expected_life: i32, expected_mill: usize) {
+fn sacrifice_on_entry(name: &str, oracle: &str, gains_life: bool, mills: bool) {
     let mut scenario = main_phase();
     let entrant = if name == "Altar of the Wretched" {
         scenario
@@ -621,43 +641,61 @@ fn sacrifice_on_entry(name: &str, oracle: &str, expected_life: i32, expected_mil
             .with_mana_cost(free())
             .id()
     };
-    let fodder = scenario
-        .add_creature(P0, "Grizzly Bears", 2, 2)
-        .with_plus_counters(3)
-        .id();
+    let other = scenario.add_creature(P0, "Spined Wurm", 5, 4).id();
+    let fodder = scenario.add_creature(P0, "Trained Armodon", 3, 3).id();
     scenario.with_library_top(P0, &["Forest"; 12]);
     let mut runner = scenario.build();
+    let selected_power = runner.state().objects[&fodder].power.unwrap();
     let life = runner.life(P0);
     runner.cast(entrant).accept_optional().resolve();
     pass_to_prompt_or_completion(&mut runner);
-    if let WaitingFor::EffectZoneChoice { .. } = runner.state().waiting_for {
-        runner
-            .act(GameAction::SelectCards {
-                cards: vec![fodder],
-            })
-            .unwrap();
-        pass_to_prompt_or_completion(&mut runner);
-    }
+    let WaitingFor::EffectZoneChoice {
+        player,
+        cards,
+        count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected a sacrifice choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!((*player, *count), (P0, 1));
+    assert!(cards.contains(&other));
+    assert!(cards.contains(&fodder));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![fodder],
+        })
+        .unwrap();
+    pass_to_prompt_or_completion(&mut runner);
     assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&other].zone, Zone::Battlefield);
+    let expected_life = if gains_life { selected_power } else { 0 };
+    let expected_mill = if mills { selected_power as usize } else { 0 };
     assert_eq!(runner.life(P0) - life, expected_life);
-    assert_eq!(runner.state().players[0].hand.len(), 5);
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        selected_power as usize
+    );
     assert_eq!(runner.state().players[0].graveyard.len(), 1 + expected_mill);
     assert_finished(&runner);
 }
 
 #[test]
 fn disciple_of_bolas_reads_the_sacrificed_creature() {
-    sacrifice_on_entry("Disciple of Bolas", BOLAS, 5, 0);
+    sacrifice_on_entry("Disciple of Bolas", BOLAS, true, false);
 }
 
 #[test]
 fn disciple_of_freyalise_reads_the_sacrificed_creature() {
-    sacrifice_on_entry("Disciple of Freyalise", FREYALISE, 5, 0);
+    sacrifice_on_entry("Disciple of Freyalise", FREYALISE, true, false);
 }
 
 #[test]
 fn altar_of_the_wretched_reads_the_sacrificed_creature() {
-    sacrifice_on_entry("Altar of the Wretched", ALTAR, 0, 5);
+    sacrifice_on_entry("Altar of the Wretched", ALTAR, false, true);
 }
 
 #[test]
@@ -667,19 +705,52 @@ fn shadowheart_reads_the_sacrificed_creature() {
     let shadowheart = scenario
         .add_creature_from_oracle(P0, "Shadowheart, Dark Justiciar", 3, 4, SHADOWHEART)
         .id();
-    let fodder = scenario
-        .add_creature(P0, "Grizzly Bears", 2, 2)
-        .with_plus_counters(3)
-        .id();
+    let other = scenario.add_creature(P0, "Spined Wurm", 5, 4).id();
+    let fodder = scenario.add_creature(P0, "Trained Armodon", 3, 3).id();
     scenario.with_library_top(P0, &["Forest"; 6]);
     let mut runner = scenario.build();
+    let selected_power = runner.state().objects[&fodder].power.unwrap();
     runner
-        .activate(shadowheart, 0)
-        .pay_with(&[fodder])
-        .resolve();
+        .act(GameAction::ActivateAbility {
+            source_id: shadowheart,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    let WaitingFor::PayCost {
+        player,
+        kind: PayCostKind::Sacrifice,
+        choices,
+        count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected a sacrifice payment, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!((*player, *count), (P0, 1));
+    assert!(choices.contains(&other));
+    assert!(choices.contains(&fodder));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![fodder],
+        })
+        .unwrap();
+    if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+        runner.act(GameAction::PassPriority).unwrap();
+    }
     pass_to_prompt_or_completion(&mut runner);
     assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
-    assert_eq!(runner.state().players[0].hand.len(), 5);
+    assert_eq!(runner.state().objects[&other].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        selected_power as usize
+    );
     assert_finished(&runner);
 }
 
