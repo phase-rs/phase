@@ -197,6 +197,7 @@ async fn run_background_reaper(
     bg_lobby: SharedLobby,
     bg_lobby_subs: SharedLobbySubscribers,
     bg_game_db: SharedGameDb,
+    bg_tournament_hosting: SharedTournamentHosting,
 ) {
     let mut interval = tokio::time::interval(PERSISTED_SESSION_REAPER_INTERVAL);
     loop {
@@ -227,6 +228,24 @@ async fn run_background_reaper(
                 forfeited = removed.len(),
                 deferred, "disconnect grace sweep"
             );
+            // Release the hosting binding of any forfeited hosted tournament
+            // game: this terminal reports no result, so the pairing stays
+            // result-less and hosted-eligible and re-hosts on a later spawn
+            // tick (generation-fenced). Without this the binding would point at
+            // a removed game. `bg_tournament_hosting` is taken singly here.
+            {
+                let mut hosting = bg_tournament_hosting.lock().await;
+                for game_code in &removed {
+                    if let Some((code, pairing)) = hosting.forget_game(game_code) {
+                        info!(
+                            tournament = %code,
+                            pairing,
+                            game = %game_code,
+                            "released hosting binding for forfeited tournament game"
+                        );
+                    }
+                }
+            }
             // Nothing else is held here: the branch below takes
             // `bg_game_spectators` at its end and the lobby-expiry branch
             // takes `bg_lobby` and `bg_state` in sequence, never one inside
@@ -291,6 +310,8 @@ async fn run_background_reaper(
             &bg_lobby_subs,
             &bg_connections,
             &bg_game_spectators,
+            &bg_state,
+            &bg_tournament_hosting,
             &lobby_sweep,
             routes,
         )
@@ -3354,6 +3375,7 @@ async fn serve() {
         lobby.clone(),
         lobby_subscribers.clone(),
         game_db.clone(),
+        tournament_hosting.clone(),
     ));
 
     let cors = match cli.cors_origin.as_deref() {
@@ -3800,6 +3822,7 @@ mod stale_session_reaper_tests {
             Arc::new(Mutex::new(Broker::new())),
             Arc::new(Mutex::new(Vec::new())),
             game_db,
+            Arc::new(Mutex::new(server_core::TournamentHostingManager::new())),
         ))
     }
 
@@ -7352,15 +7375,18 @@ impl ExpiredLobbyRoutes {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finish_lobby_expiry_sweep(
     lobby: &SharedLobby,
     subscribers: &SharedLobbySubscribers,
     connections: &SharedConnections,
     spectators: &SharedGameSpectators,
+    game_state: &SharedState,
+    tournament_hosting: &SharedTournamentHosting,
     sweep: &LobbyExpirySweep,
     routes: ExpiredLobbyRoutes,
 ) {
-    let removed = {
+    let (removed, expired_tournaments) = {
         let mut broker = lobby.lock().await;
         let reaped = consume_lobby_expiry_sweep(&mut broker, sweep, &SysEnv);
         if !reaped.lobby_removed.is_empty()
@@ -7381,6 +7407,8 @@ async fn finish_lobby_expiry_sweep(
             );
         }
         let removed = reaped.lobby_removed.clone();
+        // Read before `into_outbounds()` consumes `reaped`.
+        let expired_tournaments = reaped.expired_tournaments.clone();
         // Mutation and publication remain one ordered broker critical section:
         // subscribers cannot observe a later listing update before this removal.
         for outbound in reaped.into_outbounds() {
@@ -7389,8 +7417,32 @@ async fn finish_lobby_expiry_sweep(
                     .await;
             }
         }
-        removed
+        (removed, expired_tournaments)
     };
+    // Release the hosted games of any tournament this sweep deleted or
+    // abandoned. The lobby guard is already dropped; take hosting then the
+    // registry (the global lobby → hosting → registry order, with lobby no
+    // longer held). The core's durable `hosted` provenance is untouched — only
+    // the server-layer bindings and the orphaned sessions are reaped.
+    if !expired_tournaments.is_empty() {
+        let mut hosting = tournament_hosting.lock().await;
+        let orphaned: Vec<String> = expired_tournaments
+            .iter()
+            .flat_map(|code| hosting.forget_tournament(code))
+            .collect();
+        drop(hosting);
+        if !orphaned.is_empty() {
+            let mut sessions = game_state.lock().await;
+            for game_code in &orphaned {
+                sessions.remove_game(game_code);
+            }
+            info!(
+                tournaments = expired_tournaments.len(),
+                games = orphaned.len(),
+                "released hosted games for expired tournament(s)"
+            );
+        }
+    }
     // No broker guard while waiting for either global route map. Pruning by
     // captured channel identity narrows the window in which a new owner of a
     // reused game code could lose its routes; it cannot close it (see
@@ -7722,13 +7774,53 @@ fn build_draft_match_start_message(
     })
 }
 
+/// Bind a spawned hosted tournament game to its exact Full lifetime before it
+/// is marked hosted. Mirrors [`initialize_draft_match_runtime`]: without a
+/// persisted Full identity the game cannot be reconnected to and its terminal
+/// cannot report ("Full session has no runtime identity"), so a hosted match
+/// that skipped this would strand its pairing.
+fn initialize_tournament_match_runtime(
+    game_manager: &mut SessionManager,
+    game_db: &SharedGameDb,
+    spawn: &server_core::TournamentMatchSpawn,
+) -> Result<server_core::FullSessionKey, String> {
+    let full_key = game_db
+        .create_full_session_key(&spawn.game_code)
+        .map_err(|error| format!("Failed to bind tournament match identity: {error}"))?;
+    // Creation window: this game was just spawned and no handle has been handed
+    // out, so the synchronous exclusive accessor is the right one.
+    let session = game_manager
+        .session_exclusive(&spawn.game_code)
+        .ok_or_else(|| format!("Spawned tournament match is missing: {}", spawn.game_code))?;
+    // These seats have not attached yet — keep presence accurate without
+    // starting reconnect expiry before an actual socket has disconnected.
+    session.connected.fill(false);
+    initialize_full_runtime(game_db, session, full_key.clone())?;
+    Ok(full_key)
+}
+
 /// Spawn any hosted tournament games newly made ready (a round paired, or the
-/// last missing deck submitted). Mirrors [`maybe_spawn_draft_matches`], but the
-/// `TournamentManager` lives inside the `Broker`, so this locks lobby +
-/// game_state + tournament_hosting (in that order). Idempotent: the core's
-/// `hostable_pairings` returns only fully-decked pending pairings and the
-/// hosting manager skips codes already spawned, so it is safe to call after
-/// every tournament mutation.
+/// last missing deck submitted). Mirrors [`maybe_spawn_draft_matches`]. Safe to
+/// call after any tournament frame — a readiness pre-check returns early,
+/// before CPU admission, when nothing new is hostable.
+///
+/// Lock order is **lobby → tournament_hosting → game registry**: both the lobby
+/// and hosting guards are taken (owned) up front so the synchronous creation
+/// closure can mutate them, and the registry is taken last inside
+/// [`GameExecutor::with_registry`], which fronts CPU admission so a hosted spawn
+/// cannot exhaust the executor or starve ordinary game creation. The game-over
+/// handoff takes each of these three locks singly (never nested), so it cannot
+/// form a cycle with this order.
+///
+/// Per ready pairing: create + start the game (capacity- and legality-gated in
+/// [`TournamentHostingManager::spawn_ready_matches`]), then bind its Full
+/// runtime, then — only on success — mark it hosted in the core and record the
+/// binding. A runtime-init or `begin_hosting` failure removes the game and
+/// records nothing, so a partial spawn never strands a pairing in
+/// `ReportGate::Hosted`. Idempotent: `hostable_pairings` returns only
+/// fully-decked pending pairings and the manager skips pairings it already
+/// serves, so it is safe to call after every state-changing tournament mutation.
+#[allow(clippy::too_many_arguments)]
 async fn maybe_spawn_tournament_matches(
     code: &str,
     lobby: &SharedLobby,
@@ -7736,22 +7828,95 @@ async fn maybe_spawn_tournament_matches(
     db: &SharedDb,
     combos: &SharedComboTable,
     tournament_hosting: &SharedTournamentHosting,
+    executor: &game_executor::GameExecutor,
+    game_db: &SharedGameDb,
+    max_games: usize,
 ) {
-    let spawn_count = {
-        let mut broker = lobby.lock().await;
-        let mut game_mgr = game_state.lock().await;
-        let mut hosting = tournament_hosting.lock().await;
-        hosting
-            .spawn_ready_matches(
-                code,
-                broker.tournaments_mut(),
-                &mut game_mgr,
-                db,
-                combos,
-                &SysEnv,
-            )
-            .len()
-    };
+    let code_owned = code.to_string();
+    let card_db = db.clone();
+    let combo_table = combos.clone();
+    let persistence = game_db.clone();
+    let mut lobby_guard = lobby.clone().lock_owned().await;
+    let mut hosting_guard = tournament_hosting.clone().lock_owned().await;
+
+    // Readiness pre-check, under the locks this function already holds and
+    // before CPU admission: if no hostable pairing is newly spawnable (none, or
+    // every one is already served), do no hosting work. This is what keeps a
+    // rejected or inert tournament frame — which mutates no tournament state, so
+    // readies no new pairing — from reaching `with_registry`'s admission or any
+    // game creation, and it keeps the (hot) broker lock off the CPU-admission
+    // path except when a game will actually be spawned.
+    let has_spawnable = lobby_guard
+        .tournaments()
+        .hostable_pairings(&code_owned)
+        .iter()
+        .any(|hostable| hosting_guard.game_code_for(&code_owned, hostable.pairing_id).is_none());
+    if !has_spawnable {
+        return;
+    }
+
+    let (game_guard, closure_out) = executor
+        .with_registry(game_state, move |game_mgr| {
+            // 1. Create + start a game for each newly-ready pairing. These are
+            //    NOT yet hosted or bound.
+            let spawns = hosting_guard.spawn_ready_matches(
+                &code_owned,
+                lobby_guard.tournaments(),
+                game_mgr,
+                &card_db,
+                &combo_table,
+                max_games,
+            );
+            let mut count = 0usize;
+            for spawn in spawns {
+                // 2. Bind the Full runtime; on failure roll the game back and
+                //    leave the pairing un-hosted for a later tick to retry.
+                if let Err(error) =
+                    initialize_tournament_match_runtime(game_mgr, &persistence, &spawn)
+                {
+                    warn!(
+                        tournament = %spawn.code,
+                        pairing = spawn.pairing_id,
+                        game = %spawn.game_code,
+                        %error,
+                        "failed to initialize hosted tournament match runtime"
+                    );
+                    game_mgr.remove_game(&spawn.game_code);
+                    continue;
+                }
+                // 3. Mark hosted (durable) only now the game is live and
+                //    reconnectable, then record the binding. A `begin_hosting`
+                //    failure (a state the readiness gate already excludes)
+                //    rolls the game back rather than leaving it masquerading as
+                //    the hosted table.
+                match lobby_guard
+                    .tournaments_mut()
+                    .begin_hosting(&spawn.code, spawn.pairing_id, &SysEnv)
+                {
+                    Ok(_generation) => {
+                        hosting_guard.bind(&spawn.code, spawn.pairing_id, spawn.game_code.clone());
+                        count += 1;
+                    }
+                    Err(error) => {
+                        warn!(
+                            tournament = %spawn.code,
+                            pairing = spawn.pairing_id,
+                            game = %spawn.game_code,
+                            %error,
+                            "begin_hosting refused a spawned tournament match; rolling back"
+                        );
+                        game_mgr.remove_game(&spawn.game_code);
+                    }
+                }
+            }
+            (lobby_guard, hosting_guard, count)
+        })
+        .await;
+    // Drop order is innermost-first: registry, then hosting, then lobby.
+    let (lobby_guard, hosting_guard, spawn_count) = closure_out;
+    drop(game_guard);
+    drop(hosting_guard);
+    drop(lobby_guard);
     if spawn_count > 0 {
         info!(tournament = %code, count = spawn_count, "spawned hosted tournament match(es)");
     }
@@ -12283,6 +12448,18 @@ async fn handle_client_message(
 
             connections.lock().await.remove(&game_code);
             game_spectators.lock().await.remove(&game_code);
+            // If this abandoned game was a hosted tournament match, release its
+            // binding (the abandon reported no result): the pairing stays
+            // result-less and hosted-eligible and re-hosts on a later tick,
+            // rather than pointing at a removed game.
+            if let Some((code, pairing)) = tournament_hosting.lock().await.forget_game(&game_code) {
+                info!(
+                    tournament = %code,
+                    pairing,
+                    game = %game_code,
+                    "released hosting binding for abandoned tournament game"
+                );
+            }
             delist_and_announce(
                 lobby,
                 lobby_subscribers,
@@ -13693,21 +13870,38 @@ async fn handle_client_message(
             )
             .await;
             // A newly paired round or a newly-complete deck set can make a
-            // pairing hostable; spawn any ready hosted games (idempotent).
-            match &client_msg {
-                ClientMessage::StartTournamentRound { code, .. }
-                | ClientMessage::SubmitTournamentDeck { code, .. } => {
-                    maybe_spawn_tournament_matches(
-                        code,
-                        lobby,
-                        state,
-                        db,
-                        combos,
-                        tournament_hosting,
-                    )
-                    .await;
+            // pairing hostable; spawn any ready hosted games.
+            //
+            // Hosting runs real game engines, so it belongs only to a Full-mode
+            // server — a LobbyOnly node rejects reconnect, actions and
+            // concessions, which would strand any pairing it marked Hosted (the
+            // broker dispatch above stays mode-agnostic, so the tournament stays
+            // manually reportable there). Calling this after every tournament
+            // frame — authorized or rejected — is safe and cheap: a rejected
+            // frame mutates no tournament state, so `maybe_spawn`'s readiness
+            // pre-check finds no newly-hostable pairing and returns before any
+            // CPU admission or game creation. The authoritative trust boundary
+            // is the core's `hostable_pairings` plus `begin_hosting`
+            // re-validation, not this call site.
+            if matches!(mode, ServerMode::Full) {
+                match &client_msg {
+                    ClientMessage::StartTournamentRound { code, .. }
+                    | ClientMessage::SubmitTournamentDeck { code, .. } => {
+                        maybe_spawn_tournament_matches(
+                            code,
+                            lobby,
+                            state,
+                            db,
+                            combos,
+                            tournament_hosting,
+                            &context.game_executor,
+                            game_db,
+                            context.limits.max_games,
+                        )
+                        .await;
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
@@ -20965,6 +21159,223 @@ mod game_submission_tests {
         assert!(result.is_ok(), "the finished game was never delisted");
     }
 
+    /// End-to-end hosted-tournament lifecycle through the production code paths:
+    /// a ready Swiss + head-to-head + Bo3 pairing is spawned by the production
+    /// trigger, the spawned game carries a persisted Full runtime identity, the
+    /// spawn is idempotent, and driving the match terminal through the
+    /// production contest handler reports the result back to the tournament core
+    /// and releases the hosting binding.
+    ///
+    /// Discriminating: it fails if the runtime-init (F1), the spawn, or the
+    /// game-over handoff wiring is reverted — reverting runtime init strands the
+    /// snapshot assertion (and the terminal cannot report), and removing the
+    /// handoff leaves the pairing result-less and the binding live.
+    #[tokio::test]
+    async fn a_hosted_tournament_match_spawns_runs_and_reports_through_production() {
+        use engine::types::contest::{ContestConfig, ContestKind, ContestState};
+        use lobby_broker::tournament::{
+            BracketShape, CreateTournamentRequest, MatchArity, ScoringPolicy,
+        };
+
+        // A one-card DB whose only entry is a basic land: a 60-Forest deck is a
+        // legal Standard list (basics are exempt from the 4-copy limit), so it
+        // passes the hosted-spawn deck-legality gate and the engine can start
+        // the game.
+        let db = CardDatabase::from_json_str(
+            &serde_json::json!({
+                "forest": {
+                    "name": "Forest",
+                    "scryfall_oracle_id": "b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6",
+                    "mana_cost": {"type": "NoCost"},
+                    "card_type": {"supertypes": ["Basic"], "core_types": ["Land"], "subtypes": ["Forest"]},
+                    "legalities": {"standard": "legal"},
+                    "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": []
+                }
+            })
+            .to_string(),
+        )
+        .expect("forest db");
+        let (_url, server, _temp_dir, app) = spawn_full_mode_server_with_db(db).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            let tcode = "TOURNEY";
+            // Hosted play is Bo3, which requires a (non-empty) sideboard
+            // (CR 100.4a / CR 903.5e); basics are exempt from the copy limit.
+            let forest = DeckData {
+                main_deck: vec!["Forest".to_string(); 60],
+                sideboard: vec!["Forest".to_string(); 15],
+                ..Default::default()
+            };
+            // Drive the tournament to a ready, hostable pairing through the core
+            // the dispatch path mutates.
+            let pairing_id = {
+                let mut broker = app.lobby.lock().await;
+                let t = broker.tournaments_mut();
+                let arity = MatchArity::new(2).expect("arity");
+                t.create_tournament(
+                    tcode,
+                    CreateTournamentRequest {
+                        name: "E2E".to_string(),
+                        arity,
+                        scoring: ScoringPolicy::default_for_arity(arity),
+                        bracket: BracketShape::Swiss,
+                        total_rounds: None,
+                        plus_rounds: None,
+                        format: None,
+                        match_type: None,
+                    },
+                    &SysEnv,
+                )
+                .expect("create tournament");
+                t.join_tournament(tcode, "p0", "P0", &SysEnv).expect("join 0");
+                t.join_tournament(tcode, "p1", "P1", &SysEnv).expect("join 1");
+                t.generate_pairings(tcode, &SysEnv).expect("pair round 1");
+                t.submit_deck(tcode, "p0", forest.clone(), &SysEnv)
+                    .expect("deck 0");
+                t.submit_deck(tcode, "p1", forest.clone(), &SysEnv)
+                    .expect("deck 1");
+                assert!(
+                    !t.hostable_pairings(tcode).is_empty(),
+                    "reach guard: the pairing is ready to host"
+                );
+                t.get(tcode).expect("tournament").pairings[0].id
+            };
+
+            // Production spawn trigger.
+            maybe_spawn_tournament_matches(
+                tcode,
+                &app.lobby,
+                &app.sessions,
+                &app.db,
+                &app.combos,
+                &app.tournament_hosting,
+                &app.context.game_executor,
+                &app.game_db,
+                app.context.limits.max_games,
+            )
+            .await;
+
+            // Successful creation, durable hosted marker, and binding.
+            let game_code = app
+                .tournament_hosting
+                .lock()
+                .await
+                .game_code_for(tcode, pairing_id)
+                .map(str::to_string)
+                .expect("a hosted game was spawned and bound to the pairing");
+            assert!(
+                app.lobby
+                    .lock()
+                    .await
+                    .tournaments()
+                    .hosting_generation(tcode, pairing_id)
+                    .is_some(),
+                "the pairing is marked hosted in the core"
+            );
+            // Runtime identity: the spawned session has a persisted Full runtime
+            // (reverting F1 removes this — the snapshot would be unavailable, or
+            // the game would have been rolled back and never bound above).
+            {
+                let handle = app.sessions.lock().await.session(&game_code).expect("session");
+                let mut session = handle.lock().await;
+                session
+                    .full_persist_snapshot()
+                    .expect("a runtime-bound hosted session has a snapshot");
+            }
+
+            // Idempotency: a second trigger spawns nothing new.
+            let before = app.sessions.lock().await.game_count();
+            maybe_spawn_tournament_matches(
+                tcode,
+                &app.lobby,
+                &app.sessions,
+                &app.db,
+                &app.combos,
+                &app.tournament_hosting,
+                &app.context.game_executor,
+                &app.game_db,
+                app.context.limits.max_games,
+            )
+            .await;
+            assert_eq!(
+                app.sessions.lock().await.game_count(),
+                before,
+                "spawning the same ready pairing twice creates no second game"
+            );
+
+            // Park the Bo3 at match point (P0 up 1-0) on a contest P0 wins, so
+            // this game's end completes the match and drives the production
+            // terminal (same injection the contest tests use).
+            {
+                let handle = app.sessions.lock().await.session(&game_code).expect("session");
+                let mut session = handle.lock().await;
+                session.state.match_score.p0_wins = 1;
+                let config = ContestConfig {
+                    countdown_ms: 1,
+                    inactivity_timeout_ms: 400,
+                    reconnect_grace_ms: 5_000,
+                    settle_window_ms: 0,
+                    max_active_ms: 60_000,
+                };
+                session.contest.policy.config = config;
+                session.state.players[1].life = 0;
+                session.state.waiting_for =
+                    engine::types::game_state::WaitingFor::PhysicalContest {
+                        contest: Box::new(ContestState::new(
+                            1,
+                            ContestKind::Staring,
+                            PlayerId(0),
+                            PlayerId(1),
+                            config,
+                        )),
+                        source_id: engine::types::identifiers::ObjectId(1),
+                    };
+            }
+            ensure_contest_driver(
+                &app.context.game_executor,
+                &app.sessions,
+                &app.connections,
+                &app.draft_sessions,
+                &app.game_db,
+                &app.game_spectators,
+                &app.lobby,
+                &app.lobby_subscribers,
+                &app.tournament_hosting,
+                &game_code,
+            )
+            .await;
+
+            // The production game-over handoff reports the result to the core
+            // (the pairing gains an outcome) and releases the binding.
+            loop {
+                let reported = app
+                    .lobby
+                    .lock()
+                    .await
+                    .tournaments()
+                    .get(tcode)
+                    .and_then(|t| t.pairings.iter().find(|p| p.id == pairing_id))
+                    .map(|p| p.outcome.is_some())
+                    .unwrap_or(false);
+                let forgotten = app
+                    .tournament_hosting
+                    .lock()
+                    .await
+                    .game_code_for(tcode, pairing_id)
+                    .is_none();
+                if reported && forgotten {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        server.abort();
+        assert!(
+            result.is_ok(),
+            "the hosted tournament match did not spawn, run, and report through production"
+        );
+    }
+
     /// Park a started AI game (human P0, AI P1 at 0 life) on a contest the AI wins, so
     /// the contest driver's settlement ends the game, and start the driver.
     async fn start_game_ending_contest(app: &AppState, code: &str) {
@@ -24227,15 +24638,25 @@ mod issue_4548_deadlock_tests {
             build_commit: build_commit().to_string(),
         }]));
         let held = connections.lock().await;
+        let game_state: SharedState = Arc::new(Mutex::new(SessionManager::new()));
+        let tournament_hosting: SharedTournamentHosting =
+            Arc::new(Mutex::new(server_core::TournamentHostingManager::new()));
         let cleanup = tokio::spawn({
-            let (lobby, connections, spectators) =
-                (lobby.clone(), connections.clone(), spectators.clone());
+            let (lobby, connections, spectators, game_state, tournament_hosting) = (
+                lobby.clone(),
+                connections.clone(),
+                spectators.clone(),
+                game_state.clone(),
+                tournament_hosting.clone(),
+            );
             async move {
                 finish_lobby_expiry_sweep(
                     &lobby,
                     &subscribers,
                     &connections,
                     &spectators,
+                    &game_state,
+                    &tournament_hosting,
                     &sweep,
                     routes,
                 )
@@ -24298,11 +24719,16 @@ mod issue_4548_deadlock_tests {
             .unwrap()
             .push(new_spectator.clone());
         let subscribers = Arc::new(Mutex::new(Vec::new()));
+        let game_state: SharedState = Arc::new(Mutex::new(SessionManager::new()));
+        let tournament_hosting: SharedTournamentHosting =
+            Arc::new(Mutex::new(server_core::TournamentHostingManager::new()));
         finish_lobby_expiry_sweep(
             &lobby,
             &subscribers,
             &connections,
             &spectators,
+            &game_state,
+            &tournament_hosting,
             &sweep,
             routes,
         )

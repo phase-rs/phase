@@ -3075,6 +3075,8 @@ fn socket_hosted_json_pings_keep_the_listing_alive() {
                                         &app.lobby_subscribers,
                                         &app.connections,
                                         &app.game_spectators,
+                                        &app.sessions,
+                                        &app.tournament_hosting,
                                         &sweep,
                                         routes,
                                     )

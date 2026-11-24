@@ -481,6 +481,12 @@ pub struct ReapOutcome {
     /// The tournament half, which no caller can decline and which is swept
     /// here rather than reported (see [`TournamentManager::check_expired`]).
     pub tournament: Vec<Outbound>,
+    /// Codes of tournaments this sweep deleted or abandoned. The core's
+    /// tournament state is `GameState`-free, so it cannot tear down the server-
+    /// hosted games those tournaments spawned; the shell uses these codes to
+    /// release the hosting bindings and remove the orphaned sessions (mirrors
+    /// how `lobby_removed` drives the shell's own Full-mode session cleanup).
+    pub expired_tournaments: Vec<String>,
 }
 
 impl ReapOutcome {
@@ -1239,12 +1245,17 @@ impl Broker {
 
         let events = self.tournaments.check_expired(env);
         let list_changed = !events.is_empty();
+        // Both terminal transitions release hosted games: a `Deleted` record is
+        // gone, and an `Abandoned` one hosts nothing more — either way the
+        // shell must forget the bindings and reap the sessions.
+        let mut expired_tournaments: Vec<String> = Vec::new();
         for event in events {
             match event {
                 // The record is gone, so there is no view left to send — the
                 // code alone is the whole message.
                 TournamentExpiryEvent::Deleted(code) => {
                     info!(tournament = %code, "tournament expired — record removed");
+                    expired_tournaments.push(code.clone());
                     out.push(Outbound::ToSubscribers(
                         LobbyServerMessage::TournamentRemoved { code },
                     ));
@@ -1253,6 +1264,7 @@ impl Broker {
                 // so subscribers get its updated view rather than a removal.
                 TournamentExpiryEvent::Abandoned(code) => {
                     info!(tournament = %code, "tournament inactive — marked abandoned");
+                    expired_tournaments.push(code.clone());
                     match self.tournament_view(&code) {
                         Some(view) => out.push(Outbound::ToSubscribers(
                             LobbyServerMessage::TournamentUpdate { code, view },
@@ -1284,6 +1296,7 @@ impl Broker {
             lobby_removed,
             superseded,
             tournament: out,
+            expired_tournaments,
         }
     }
 
