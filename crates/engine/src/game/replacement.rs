@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use crate::game::cost_payability::AbilityCostPayability;
