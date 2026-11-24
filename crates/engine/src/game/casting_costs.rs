@@ -624,20 +624,11 @@ fn declaration_offerable_reserving(
     let Some(residual) = split.residual.as_ref() else {
         return Ok(true);
     };
-    let fodder = mana_sources::mana_ability_card_fodder(state, player);
-    let legs = declaration_reserved_legs(state, player, pending.object_id, residual, &fodder);
-    if legs.is_empty() {
+    let Some((legs, contended)) =
+        contended_declaration_legs(state, player, pending.object_id, residual)
+    else {
         return Ok(true);
-    }
-    let mut contended = mana_contended_battlefield(state, player, pending.object_id);
-    contended.extend(fodder);
-    if !legs
-        .iter()
-        .flat_map(|leg| &leg.candidates)
-        .any(|id| contended.contains(id))
-    {
-        return Ok(true);
-    }
+    };
     let mut held = Vec::new();
     let mut explored = 0;
     // A search that runs out of budget stays offered, as the alternative-cost
@@ -712,16 +703,33 @@ pub(super) fn cost_contends_with_mana_abilities(
     object_id: ObjectId,
     cost: &AbilityCost,
 ) -> bool {
+    contended_declaration_legs(state, player, object_id, cost).is_some()
+}
+
+/// CR 118.3 + CR 601.2g-h: the reserved legs of `cost`, an additional cost of
+/// the spell `object_id`, beside the objects a mana ability of `player` could
+/// also use (the contended battlefield objects and the card fodder). `None`
+/// when the cost has no such leg or none of its candidates is contended.
+fn contended_declaration_legs(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &AbilityCost,
+) -> Option<(
+    Vec<super::cost_payability::ReservableLeg>,
+    HashSet<ObjectId>,
+)> {
     let fodder = mana_sources::mana_ability_card_fodder(state, player);
     let legs = declaration_reserved_legs(state, player, object_id, cost, &fodder);
     if legs.is_empty() {
-        return false;
+        return None;
     }
     let mut contended = mana_contended_battlefield(state, player, object_id);
     contended.extend(fodder);
     legs.iter()
         .flat_map(|leg| &leg.candidates)
         .any(|id| contended.contains(id))
+        .then_some((legs, contended))
 }
 
 fn continue_after_declared_mana_split(

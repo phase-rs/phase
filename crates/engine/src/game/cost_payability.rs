@@ -2279,9 +2279,10 @@ fn tap_creature_candidates<'a>(
     })
 }
 
-/// CR 118.3 + CR 601.2h: one battlefield-object leg of a spell's cost whose
-/// objects must stay available beside the mana payment: exactly `count` of
-/// `candidates`, held for the leg's `use_`.
+/// CR 118.3 + CR 601.2h: one object leg of a spell's cost whose objects must
+/// stay available beside the mana payment (battlefield objects, or hand and
+/// graveyard cards a mana ability's cost could consume): exactly `count` of
+/// `candidates`, held for the leg's `reserved_use`.
 #[derive(Debug, Clone)]
 pub(super) struct ReservableLeg {
     pub(super) reserved_use: super::casting::ReservedUse,
@@ -2293,8 +2294,9 @@ pub(super) struct ReservableLeg {
 /// battlefield objects beside its mana: a counted `TapCreatures` leg (the
 /// objects must stay untapped, CR 118.3), and each counted sacrifice, exile or
 /// return leg over battlefield objects (CR 601.2g: they may be tapped for mana
-/// first, but must still be there). Hand and graveyard legs can't make mana; a
-/// leg whose count the joint model doesn't represent isn't reserved.
+/// first, but must still be there). Hand and graveyard legs are
+/// [`reservable_card_legs`]'s; a leg whose count the joint model doesn't
+/// represent isn't reserved.
 pub(super) fn reservable_battlefield_legs(
     state: &GameState,
     player: PlayerId,
