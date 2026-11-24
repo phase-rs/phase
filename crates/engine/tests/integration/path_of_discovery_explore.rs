@@ -30,6 +30,15 @@ const UNSUMMON: &str = "Return target creature to its owner's hand.";
 /// verbatim Oracle text.
 const RUBINIA: &str = "You may choose not to untap Rubinia Soulsinger during your untap step.\n{T}: Gain control of target creature for as long as you control Rubinia Soulsinger and Rubinia Soulsinger remains tapped.";
 
+/// Reality Ripple {U} Instant — verbatim Oracle text.
+const REALITY_RIPPLE: &str = "Target artifact, creature, or land phases out. (While it's phased \
+out, it's treated as though it doesn't exist. It phases in before its controller untaps during \
+their next untap step.)";
+
+/// Merfolk Branchwalker {1}{G} Creature — Merfolk Scout 2/1 — verbatim Oracle
+/// text.
+const MERFOLK_BRANCHWALKER: &str = "When this creature enters, it explores. (Reveal the top card of your library. Put that card into your hand if it's a land. Otherwise, put a +1/+1 counter on this creature, then put the card back or put it into your graveyard.)";
+
 fn board() -> GameScenario {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -728,6 +737,226 @@ fn path_bounced_in_response_with_empty_library_explores_without_counter_or_choic
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
             && runner.state().stack.is_empty(),
         "resolution must settle with no parked choice, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phased-out explorer rows (issue #10021, finding F1): the entrant phases out
+// in response to Path's trigger (or its own) and still explores (CR 701.44a +
+// CR 701.44b), but CR 702.26b bars the +1/+1 counter.
+// ---------------------------------------------------------------------------
+
+/// CR 702.26b + CR 701.44a + CR 701.44c (nonland branch, pinned arm): P0
+/// controls Path of Discovery and casts Grizzly Bears; with Path's trigger on
+/// the stack, P1 casts Reality Ripple on the Bears; Lightning Bolt is on top
+/// of P0's library. The phased-out Bears still explore — P0 reveals — but no
+/// +1/+1 counter lands on the Bears, on Path, or anywhere else, and P0 may
+/// put the Bolt into the graveyard.
+#[test]
+fn path_phased_out_in_response_explores_without_counter() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let path = scenario
+        .add_enchantment_from_oracle(P0, "Path of Discovery", PATH_OF_DISCOVERY)
+        .id();
+    let bolt = scenario
+        .add_spell_to_library_top(P0, "Lightning Bolt", true)
+        .id();
+    let bear = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let ripple = scenario
+        .add_spell_to_hand_from_oracle(P1, "Reality Ripple", true, REALITY_RIPPLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    let mut events = Vec::new();
+
+    commit_cast(&mut runner, bear, &[], &mut events);
+    pass_until_trigger_on_stack(&mut runner, &mut events, path);
+    pass_until_player_priority(&mut runner, &mut events, P1);
+    commit_cast(&mut runner, ripple, &[bear], &mut events);
+    pass_until_stack_len(&mut runner, &mut events, 1);
+    // REACH: the Ripple resolved while the trigger waits — the bear is phased
+    // out yet still on the battlefield (CR 702.26d), so the negatives below
+    // cannot pass for want of a phase-out. The carried pin stays current for
+    // the same reason, which is exactly why the phased-out bear reaches the
+    // pinned arm of the counter guard.
+    assert_eq!(
+        runner.state().objects[&bear].zone,
+        Zone::Battlefield,
+        "reach: the phased-out bear stays on the battlefield"
+    );
+    assert!(
+        runner.state().objects[&bear].is_phased_out(),
+        "reach: Reality Ripple phased the bear out"
+    );
+
+    pass_until_digchoice(&mut runner, &mut events);
+    assert_digchoice(
+        &runner,
+        P0,
+        &[bolt],
+        "the phased-out bear's controller must get the explore choice",
+    );
+    // CR 701.44a: decline the put-back; the Bolt goes to the graveyard.
+    let result = runner
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect("declining the put-back is legal");
+    events.extend(result.events);
+    assert_eq!(
+        runner.state().objects[&bolt].zone,
+        Zone::Graveyard,
+        "the declined card must go to the graveyard"
+    );
+
+    // CR 701.44b + CR 701.44c: the phased-out bear explored — the completion
+    // names the bear (not Path) and its controller revealed.
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Explore,
+                source_id,
+                ..
+            } if *source_id == bear
+        )),
+        "the explore completion must name the phased-out bear, events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::CardsRevealed { player, card_ids, .. }
+                if *player == P0 && card_ids.as_slice() == [bolt]
+        )),
+        "P0 must reveal the Bolt, events: {events:?}"
+    );
+    // CR 702.26b: ... and no counter landed anywhere — in particular neither
+    // the bear nor Path received one.
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CounterAdded { .. })),
+        "no counter may be placed for a phased-out explorer, events: {events:?}"
+    );
+    assert_eq!(
+        plus1(&runner, bear),
+        0,
+        "the phased-out bear must receive no counter"
+    );
+    assert_eq!(
+        plus1(&runner, path),
+        0,
+        "Path of Discovery must not explore itself"
+    );
+    assert_all_plus1_zero(&runner, "a phased-out explorer puts no counter on anything");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().stack.is_empty(),
+        "resolution must settle after the disposition, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 702.26b + CR 701.44a (nonland branch, unpinned arm): P0 casts Merfolk
+/// Branchwalker; with its own enter-trigger on the stack, P1 casts Reality
+/// Ripple on the Walker; Lightning Bolt is on top of P0's library. The bare
+/// self-explore head carries no pin, so this routes through the unpinned arm
+/// of the counter guard: the phased-out Walker still explores — P0 reveals —
+/// but no +1/+1 counter lands anywhere.
+#[test]
+fn merfolk_branchwalker_phased_out_in_response_explores_without_counter() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bolt = scenario
+        .add_spell_to_library_top(P0, "Lightning Bolt", true)
+        .id();
+    let walker = scenario
+        .add_creature_to_hand_from_oracle(P0, "Merfolk Branchwalker", 2, 1, MERFOLK_BRANCHWALKER)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let ripple = scenario
+        .add_spell_to_hand_from_oracle(P1, "Reality Ripple", true, REALITY_RIPPLE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    let mut events = Vec::new();
+
+    commit_cast(&mut runner, walker, &[], &mut events);
+    pass_until_trigger_on_stack(&mut runner, &mut events, walker);
+    pass_until_player_priority(&mut runner, &mut events, P1);
+    commit_cast(&mut runner, ripple, &[walker], &mut events);
+    pass_until_stack_len(&mut runner, &mut events, 1);
+    // REACH: the Ripple resolved while the trigger waits — the walker is
+    // phased out yet still on the battlefield (CR 702.26d).
+    assert_eq!(
+        runner.state().objects[&walker].zone,
+        Zone::Battlefield,
+        "reach: the phased-out walker stays on the battlefield"
+    );
+    assert!(
+        runner.state().objects[&walker].is_phased_out(),
+        "reach: Reality Ripple phased the walker out"
+    );
+
+    pass_until_digchoice(&mut runner, &mut events);
+    assert_digchoice(
+        &runner,
+        P0,
+        &[bolt],
+        "the phased-out walker's controller must get the explore choice",
+    );
+    // CR 701.44a: decline the put-back; the Bolt goes to the graveyard.
+    let result = runner
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect("declining the put-back is legal");
+    events.extend(result.events);
+    assert_eq!(
+        runner.state().objects[&bolt].zone,
+        Zone::Graveyard,
+        "the declined card must go to the graveyard"
+    );
+
+    // CR 701.44b: the phased-out walker explored — the completion names the
+    // walker and its controller revealed.
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Explore,
+                source_id,
+                ..
+            } if *source_id == walker
+        )),
+        "the explore completion must name the phased-out walker, events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::CardsRevealed { player, card_ids, .. }
+                if *player == P0 && card_ids.as_slice() == [bolt]
+        )),
+        "P0 must reveal the Bolt, events: {events:?}"
+    );
+    // CR 702.26b: ... and no counter landed anywhere.
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CounterAdded { .. })),
+        "no counter may be placed for a phased-out explorer, events: {events:?}"
+    );
+    assert_eq!(
+        plus1(&runner, walker),
+        0,
+        "the phased-out walker must receive no counter"
+    );
+    assert_all_plus1_zero(&runner, "a phased-out explorer puts no counter on anything");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().stack.is_empty(),
+        "resolution must settle after the disposition, got {:?}",
         runner.state().waiting_for
     );
 }

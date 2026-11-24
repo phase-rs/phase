@@ -27,6 +27,12 @@ use super::resolve_ability_chain;
 /// replacement-nested departed explorer, whose stamped targets give identity
 /// but no pin) gets no counter, while a blinked-and-back self keeps today's
 /// counter. Mirrors `super::connive::add_connive_counters`.
+///
+/// CR 702.26b + CR 702.26d: a phased-out explorer is still on the battlefield
+/// (phasing preserves zone and incarnation, so a carried pin stays current)
+/// but is treated as though it does not exist and cannot be affected — the
+/// phase conjunct sits alongside the pin check on both arms, never inside it,
+/// while the reveal still proceeds per CR 701.44a + CR 701.44b.
 fn add_explore_counter(
     state: &mut GameState,
     explorer_id: ObjectId,
@@ -35,10 +41,8 @@ fn add_explore_counter(
 ) {
     let live = state.objects.get(&explorer_id);
     let current = match (live, explorer_pin) {
-        (Some(object), Some(pin)) => {
-            object.zone == crate::types::zones::Zone::Battlefield && pin.is_current(state)
-        }
-        (Some(object), None) => object.zone == crate::types::zones::Zone::Battlefield,
+        (Some(object), Some(pin)) => object.is_phased_in_permanent() && pin.is_current(state),
+        (Some(object), None) => object.is_phased_in_permanent(),
         (None, _) => false,
     };
     if !current {
