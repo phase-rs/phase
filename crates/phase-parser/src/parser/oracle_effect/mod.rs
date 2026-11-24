@@ -20912,7 +20912,7 @@ fn parse_keeper_dispose_rest_ir(
                 // CR 603.2b + CR 102.1: the trigger condition's player.
                 KeeperChooserScope::ThatPlayer => that_player_keeper_scope(ctx),
                 // Unreachable: this whole block is inside the
-                // `KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent`
+                // `KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent | KeeperChooserScope::ThatPlayer`
                 // match arm above (`Controller` is handled by the sibling arm),
                 // so a `Controller` value can never flow through this branch.
                 KeeperChooserScope::Controller => {
