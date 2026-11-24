@@ -398,11 +398,14 @@ fn rangers_of_ithilien_public_trigger_prompt_validates_lesser_power() {
 const RANGERS_OF_ITHILIEN: &str = "Vigilance\nWhen this creature enters, gain control of up to one target creature with lesser power for as long as you control this creature. Then the Ring tempts you.";
 const DEFLECTING_SWAT: &str = "If you control a commander, you may cast this spell without paying its mana cost.\nYou may choose new targets for target spell or ability.";
 const STRIONIC_RESONATOR: &str = "{2}, {T}: Copy target triggered ability you control. You may choose new targets for the copy. (A triggered ability uses the words \"when,\" \"whenever,\" or \"at.\")";
+const VEDALKEN_ORRERY: &str = "You may cast spells as though they had flash.";
+const RENATA: &str = "Each other creature you control enters the battlefield with an additional +1/+1 counter on it.";
 
 struct RangersRetargetBoard {
     runner: GameRunner,
     rangers: ObjectId,
-    rangers_tall: ObjectId,
+    rangers_countered: ObjectId,
+    renata: ObjectId,
     initial: ObjectId,
     lesser: ObjectId,
     zero_power: ObjectId,
@@ -424,16 +427,16 @@ fn rangers_retarget_board(response: &str) -> RangersRetargetBoard {
         .add_creature_to_hand_from_oracle(P0, "Rangers of Ithilien", 3, 3, RANGERS_OF_ITHILIEN)
         .with_mana_cost(ManaCost::zero())
         .id();
-    let rangers_tall = scenario
-        .add_creature_to_hand_from_oracle(
-            P0,
-            "Rangers of Ithilien (4/4)",
-            4,
-            4,
-            RANGERS_OF_ITHILIEN,
-        )
+    let rangers_countered = scenario
+        .add_creature_to_hand_from_oracle(P0, "Rangers of Ithilien", 3, 3, RANGERS_OF_ITHILIEN)
         .with_mana_cost(ManaCost::zero())
-        .flash()
+        .id();
+    // Vedalken Orrery is a printed card that supplies the flash permission needed
+    // to cast the second printed Rangers while the first trigger remains on the stack.
+    scenario.add_artifact_from_oracle(P0, "Vedalken Orrery", VEDALKEN_ORRERY);
+    let renata = scenario
+        .add_creature_to_hand_from_oracle(P0, "Renata, Called to the Hunt", 3, 3, RENATA)
+        .with_mana_cost(ManaCost::zero())
         .id();
     let swat = (response == "swat").then(|| {
         scenario
@@ -470,7 +473,8 @@ fn rangers_retarget_board(response: &str) -> RangersRetargetBoard {
     RangersRetargetBoard {
         runner: scenario.build(),
         rangers,
-        rangers_tall,
+        rangers_countered,
+        renata,
         initial,
         lesser,
         zero_power,
@@ -641,17 +645,19 @@ fn deflecting_swat_retargets_public_rangers_trigger_by_lesser_power() {
     assert_eq!(board.runner.state().objects[&board.greater].controller, P1);
 }
 
-/// CR 603.2 + CR 115.7e + CR 400.7: when two otherwise identical Rangers
+/// CR 603.2 + CR 115.7e + CR 400.7: when two otherwise identical printed Rangers
 /// triggers are on the stack, the retarget walk must bind to the selected
-/// entry's event. The 4/4 trigger admits the 3/3 target; accidentally reading
-/// the older 3/3 trigger would reject it.
+/// entry's event. The countered 4/4 trigger admits the 3/3 target; accidentally
+/// reading the older 3/3 trigger would reject it.
 #[test]
 fn deflecting_swat_uses_the_selected_rangers_event_with_two_triggers() {
     let mut board = rangers_retarget_board("swat");
     let first_rangers = board.rangers;
     let first_trigger = put_rangers_trigger_on_stack(&mut board, first_rangers);
-    let tall_rangers = board.rangers_tall;
-    let second_trigger = put_rangers_trigger_on_stack(&mut board, tall_rangers);
+    board.runner.cast(board.renata).commit();
+    board.runner.resolve_top();
+    let countered_rangers = board.rangers_countered;
+    let second_trigger = put_rangers_trigger_on_stack(&mut board, countered_rangers);
     assert_ne!(first_trigger, second_trigger);
 
     let swat = board.swat.expect("Swat on the board");
@@ -690,7 +696,7 @@ fn deflecting_swat_uses_the_selected_rangers_event_with_two_triggers() {
     keep.act(GameAction::RetargetSpell {
         new_targets: vec![None],
     })
-    .expect("keep the selected 4/4 Rangers trigger's original target");
+    .expect("keep the selected countered Rangers trigger's original target");
     keep.advance_until_stack_empty();
     assert_eq!(keep.state().objects[&board.initial].controller, P0);
     board
@@ -698,7 +704,7 @@ fn deflecting_swat_uses_the_selected_rangers_event_with_two_triggers() {
         .act(GameAction::RetargetSpell {
             new_targets: vec![Some(TargetRef::Object(board.equal))],
         })
-        .expect("4/4 Rangers trigger may retarget to the 3/3 creature");
+        .expect("countered Rangers trigger may retarget to the 3/3 creature");
     board.runner.advance_until_stack_empty();
     assert_eq!(board.runner.state().objects[&board.equal].controller, P0);
 }
@@ -844,16 +850,18 @@ fn strionic_resonator_copies_public_rangers_trigger_by_lesser_power() {
     assert_eq!(board.runner.state().objects[&board.greater].controller, P1);
 }
 
-/// CR 707.10c + CR 603.2: Resonator must copy the selected (4/4) Rangers
-/// trigger's event when a different (3/3) Rangers trigger is also present.
+/// CR 707.10c + CR 603.2: Resonator must copy the selected countered (4/4)
+/// Rangers trigger's event when a different (3/3) Rangers trigger is also present.
 /// The copied ability can therefore retarget to the 3/3 creature.
 #[test]
 fn strionic_resonator_copies_the_selected_rangers_event_with_two_triggers() {
     let mut board = rangers_retarget_board("resonator");
     let first_rangers = board.rangers;
     let first_trigger = put_rangers_trigger_on_stack(&mut board, first_rangers);
-    let tall_rangers = board.rangers_tall;
-    let second_trigger = put_rangers_trigger_on_stack(&mut board, tall_rangers);
+    board.runner.cast(board.renata).commit();
+    board.runner.resolve_top();
+    let countered_rangers = board.rangers_countered;
+    let second_trigger = put_rangers_trigger_on_stack(&mut board, countered_rangers);
     assert_ne!(first_trigger, second_trigger);
 
     let resonator = board.resonator.expect("Resonator on the board");
@@ -878,7 +886,7 @@ fn strionic_resonator_copies_the_selected_rangers_event_with_two_triggers() {
         .contains(&TargetRef::Object(board.greater)));
     let mut keep = GameRunner::from_state(board.runner.state().clone());
     keep.act(GameAction::ChooseTarget { target: None })
-        .expect("keep the selected 4/4 Rangers trigger's original target");
+        .expect("keep the selected countered Rangers trigger's original target");
     keep.advance_until_stack_empty();
     assert_eq!(keep.state().objects[&board.initial].controller, P0);
     board
@@ -886,7 +894,7 @@ fn strionic_resonator_copies_the_selected_rangers_event_with_two_triggers() {
         .act(GameAction::ChooseTarget {
             target: Some(TargetRef::Object(board.equal)),
         })
-        .expect("choose the 3/3 creature for the copied 4/4 trigger");
+        .expect("choose the 3/3 creature for the copied countered trigger");
     board.runner.advance_until_stack_empty();
     assert_eq!(board.runner.state().objects[&board.equal].controller, P0);
 }
