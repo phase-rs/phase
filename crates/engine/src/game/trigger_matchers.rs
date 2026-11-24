@@ -3990,6 +3990,7 @@ pub(super) fn match_mana_ability_produced(
         player_id,
         source_id,
         produced,
+        resolution,
         ..
     } = event
     else {
@@ -4008,7 +4009,8 @@ pub(super) fn match_mana_ability_produced(
             .is_some_and(|color| {
                 produced.contains(&crate::game::mana_sources::mana_color_to_type(&color))
             }),
-        None => true,
+        // CR 603.2c + CR 608.2p: Observe each resolution once.
+        None => !resolution.is_recipient_only(),
     }
 }
 

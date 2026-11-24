@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Record post-replacement mana totals on mana ability resolution events and announce triggered mana production to ordinary observers"
+}

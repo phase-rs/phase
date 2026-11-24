@@ -113,8 +113,8 @@ pub enum ManaTapState {
     FromTapTriggersResolved,
 }
 
-/// CR 605.4a: Records whether the triggered mana abilities coupled to one
-/// aggregate mana-ability production event have already resolved inline.
+/// CR 605.4a + CR 608.2p: Controls how a mana production event is offered
+/// to triggered mana abilities. Ordinary triggers can observe every state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaAbilityTriggerState {
     /// Coupled triggered mana abilities have not yet resolved.
@@ -122,11 +122,32 @@ pub enum ManaAbilityTriggerState {
     Pending,
     /// Coupled triggered mana abilities resolved inline during a payment.
     InlineResolved,
+    /// With loop detection off, only ordinary triggers may observe a triggered
+    /// mana ability’s production. This prevents new mana-trigger chains.
+    ObserversOnly,
 }
 
 impl ManaAbilityTriggerState {
     pub fn is_pending(&self) -> bool {
         matches!(self, Self::Pending)
+    }
+}
+
+/// CR 603.2c + CR 608.2p: One recipient event represents the whole mana
+/// ability resolution, regardless of how many players received its mana.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ManaResolutionShare {
+    /// An additional recipient's event or a payload recorded before totals.
+    #[default]
+    RecipientOnly,
+    /// CR 614.1a: Total mana added across all recipients after replacement.
+    WholeResolution { total: u32 },
+}
+
+impl ManaResolutionShare {
+    pub fn is_recipient_only(&self) -> bool {
+        matches!(self, Self::RecipientOnly)
     }
 }
 
@@ -1259,14 +1280,21 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "ManaTapState::is_not_from_tap")]
         tap_state: ManaTapState,
     },
-    /// CR 605.1b: A mana ability resolved and produced mana; a triggered mana
-    /// ability's production is emitted only while loop detection samples. Unlike
-    /// `ManaAdded`, this is one aggregate event per ability resolution; unlike
-    /// `TappedForMana`, it also covers mana abilities without a tap cost.
+    /// CR 605.1b + CR 608.2p: An activated mana ability reports one aggregate
+    /// event per recipient, including abilities without a tap cost. A completed
+    /// activation with no output reports one empty event for its activator.
+    /// A triggered mana ability reports an event per mana instruction that
+    /// deposits mana. With loop detection off, only ordinary triggers can
+    /// observe those triggered-mana production events.
     ManaAbilityProduced {
         player_id: PlayerId,
         source_id: ObjectId,
         produced: Vec<ManaType>,
+        #[serde(
+            default,
+            skip_serializing_if = "ManaResolutionShare::is_recipient_only"
+        )]
+        resolution: ManaResolutionShare,
         #[serde(default, skip_serializing_if = "ManaAbilityTriggerState::is_pending")]
         trigger_state: ManaAbilityTriggerState,
     },
