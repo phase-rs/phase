@@ -8026,7 +8026,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     })
 }
 
-fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+fn try_parse_earthbend_clause(tp: TextPair<'_>, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     // CR 608.2c: the optional leading "you " subject ("you earthbend 4" — Fatal
     // Fissure's delayed trigger) names the controller performing the keyword
     // action. Earthbend is a player action with no extra targeting, so the
@@ -8047,7 +8047,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     // coverage counts the card as unsupported until the quantity is handled.
     // (matthewevans review, PR #5881.)
     let Some((target, counter_count)) =
-        imperative::parse_earthbend_count_expr(tp.original, &lower_rest)
+        imperative::parse_earthbend_count_expr(tp.original, &lower_rest, ctx)
     else {
         return Some(parsed_clause(Effect::unimplemented(
             "where_x_binding",
@@ -13596,7 +13596,7 @@ fn parse_effect_clause_inner_with_damage_context(
         return clause;
     }
 
-    if let Some(clause) = try_parse_earthbend_clause(tp) {
+    if let Some(clause) = try_parse_earthbend_clause(tp, ctx) {
         return clause;
     }
 
@@ -53895,15 +53895,39 @@ fn parse_effect_chain_ir_body(
         // compound-owner seed are nearer and keep precedence; when the pronoun
         // already binds the source the seed is a no-op so the `ParentTarget`
         // self-recall authority (assembly) keeps its chains.
-        let previous_instruction_named_source = builder
-            .clauses()
-            .last()
-            .is_some_and(|previous| parsed_clause_targets_self_ref(&previous.parsed));
+        let previous = builder.clauses().last();
+        let previous_instruction_named_source =
+            previous.is_some_and(|previous| parsed_clause_targets_self_ref(&previous.parsed));
         let outer_antecedent_is_another_object = chunk_object_referent.is_none()
             && inherited_compound_owner_seed.is_none()
             && !matches!(resolve_it_pronoun(ctx), TargetFilter::SelfRef);
+        // CR 608.2c + CR 608.2k: naming the source makes it the nearest
+        // antecedent when the next reference is a bare pronoun or names a
+        // type compatible with the source. Without card types, keep the
+        // fragment parser's bare-pronoun behavior. Monkey Cage reads:
+        // "When a creature enters, sacrifice this artifact and create X 2/2 green Monkey creature tokens, where X is that creature's mana value."
+        // Its artifact source cannot supply the creature antecedent, so the
+        // where-X reference retains the creature named by the trigger.
+        let source_matches_reference = || {
+            ctx.source_core_types.is_empty()
+                || local_where_x_expression
+                    .as_deref()
+                    .and_then(|expression| {
+                        lower::parse_demonstrative_object_stat(expression, ObjectScope::EventSource)
+                    })
+                    .is_none_or(|(noun, _)| match noun {
+                        lower::DemonstrativeNoun::Creature => {
+                            ctx.source_core_types.contains(&CoreType::Creature)
+                        }
+                        lower::DemonstrativeNoun::Permanent => ctx
+                            .source_core_types
+                            .iter()
+                            .any(|kind| kind.is_permanent_type()),
+                    })
+        };
         if previous_instruction_named_source
             && (inherited_player_subject.is_some() || outer_antecedent_is_another_object)
+            && source_matches_reference()
         {
             ctx.object_pronoun_ref = Some(TargetFilter::SelfRef);
         }

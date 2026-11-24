@@ -4956,6 +4956,19 @@ export interface DerivedViews {
    * or battle. Mirrors `engine::game::derived_views::DerivedViews::attack_targets`.
    */
   attack_targets?: Record<string, AttackTarget>;
+  /**
+   * The engine's lethal-first default for the open AssignCombatDamage prompt,
+   * derived from live combat state. Advisory only and absent outside that prompt.
+   * Mirrors `engine::game::derived_views::DerivedViews::combat_damage_suggestion`.
+   */
+  combat_damage_suggestion?: CombatDamageSplit;
+}
+
+/** Mirrors `engine::types::game_state::CombatDamageSplit`. */
+export interface CombatDamageSplit {
+  assignments: [ObjectId, number][];
+  trample_damage: number;
+  controller_damage: number;
 }
 
 /** Mirrors `engine::game::derived_views::UnblockedAttackPreview`. */
