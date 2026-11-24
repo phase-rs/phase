@@ -265,8 +265,9 @@ pub fn infer_commander(db: &CardDatabase, main: &[CommanderInferenceRow]) -> Opt
         return None;
     }
 
-    // CR 903.3: only a card that can be a commander is promoted. Import
-    // policy: pick the first eligible single copy in request order.
+    // Import heuristic: pick the first single copy accepted by the broad
+    // Commander picker. Standalone eligibility under CR 903.3 and CR 702.124k
+    // is checked separately by deck validation.
     positive_rows.find_map(|row| {
         let key = canonical_deck_count_key(db, &row.name);
         let face = db.get_face_by_name(&row.name)?;
