@@ -167,7 +167,15 @@ fn empty_search_shuffle(names: &[&str]) -> Vec<usize> {
     events.extend(pass_stack(&mut r));
     assert_eq!(shuffles(&events, P0), 1);
     settled(&r);
-    library_positions(&library(&r, P0), &cards)
+    let positions = library_positions(&library(&r, P0), &cards);
+    // The seeded reference really permutes the library, so a search route that emitted the
+    // shuffle event without randomizing would not match it.
+    assert_ne!(
+        positions,
+        (0..cards.len()).collect::<Vec<_>>(),
+        "the seeded reference shuffle leaves the library in its starting order"
+    );
+    positions
 }
 
 fn library_positions(order: &[ObjectId], initial: &[ObjectId]) -> Vec<usize> {
