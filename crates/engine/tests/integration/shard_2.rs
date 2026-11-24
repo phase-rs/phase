@@ -35,6 +35,7 @@ mod adamant_enters_with_leading_if_gate;
 mod adamantoise_vigor_combat_order;
 mod added_untap_step_is_not_a_turn_start;
 mod additional_combat_anchor_and_recipient;
+mod additional_cost_shared_mana_resource;
 mod additional_phase_recipient_kinds;
 mod advanced_reconstruction_regression;
 mod adventure_offer_castable_faces;

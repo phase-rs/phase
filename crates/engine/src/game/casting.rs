@@ -13366,6 +13366,10 @@ impl PaymentReservation<'_> {
 /// being sacrificed as a cost (a Yasharn-class prohibition, read by every
 /// sacrifice gate) and, for a tap leg, tapped. `None` when nothing is reserved.
 /// The scratch never reaches a real payment.
+///
+/// CR 118.3 + CR 601.2h: a card committed to another part of the total cost
+/// isn't available to a mana ability's cost; CR 118.10: one payment pays one
+/// cost. A reserved hand or graveyard card is therefore taken out of its zone.
 pub(super) fn reserved_payment_state(
     state: &GameState,
     player: PlayerId,
@@ -13378,33 +13382,53 @@ pub(super) fn reserved_payment_state(
     if let Some(payer) = scratch.players.iter_mut().find(|p| p.id == player) {
         payer.life -= i32::try_from(reserved.life).unwrap_or(i32::MAX);
     }
+    let mut battlefield_held = false;
     for &(id, reserved_use) in reserved.objects {
-        let Some(obj) = scratch.objects.get_mut(&id) else {
+        let Some((zone, owner)) = scratch.objects.get(&id).map(|obj| (obj.zone, obj.owner)) else {
             continue;
         };
-        if reserved_use == ReservedUse::Untapped {
-            obj.tapped = true;
+        match zone {
+            Zone::Battlefield => {
+                battlefield_held = true;
+                if reserved_use == ReservedUse::Untapped {
+                    if let Some(obj) = scratch.objects.get_mut(&id) {
+                        obj.tapped = true;
+                    }
+                }
+                // CR 613.1f + CR 613.7: the bar is granted in layer 6 with the
+                // newest timestamp, so an earlier ability-removing effect
+                // (Humility) can't strip it while a later grant's
+                // self-sacrifice mana ability survives.
+                scratch.add_transient_continuous_effect(
+                    id,
+                    player,
+                    Duration::Permanent,
+                    TargetFilter::SpecificObject { id },
+                    vec![ContinuousModification::GrantStaticAbility {
+                        definition: Box::new(StaticDefinition::new(StaticMode::CantPayCost {
+                            who: crate::types::statics::ProhibitionScope::AllPlayers,
+                            cost: crate::types::statics::CostPaymentProhibition::Sacrifice {
+                                filter: TargetFilter::SelfRef,
+                            },
+                        })),
+                    }],
+                    None,
+                );
+            }
+            Zone::Hand | Zone::Graveyard => {
+                // allow-raw-zone: holds a card for another cost leg on the discarded payment-probe clone; no zone change occurs (CR 118.3)
+                super::zones::remove_from_zone(&mut scratch, id, zone, owner);
+                // allow-raw-zone: holds a card for another cost leg on the discarded payment-probe clone; no zone change occurs (CR 118.3)
+                super::zones::add_to_zone(&mut scratch, id, Zone::Exile, owner);
+                if let Some(obj) = scratch.objects.get_mut(&id) {
+                    // allow-raw-zone: holds a card for another cost leg on the discarded payment-probe clone; no zone change occurs (CR 118.3)
+                    obj.zone = Zone::Exile;
+                }
+            }
+            Zone::Library | Zone::Stack | Zone::Exile | Zone::Command => {}
         }
-        // CR 613.1f + CR 613.7: the bar is granted in layer 6 with the newest
-        // timestamp, so an earlier ability-removing effect (Humility) can't
-        // strip it while a later grant's self-sacrifice mana ability survives.
-        scratch.add_transient_continuous_effect(
-            id,
-            player,
-            Duration::Permanent,
-            TargetFilter::SpecificObject { id },
-            vec![ContinuousModification::GrantStaticAbility {
-                definition: Box::new(StaticDefinition::new(StaticMode::CantPayCost {
-                    who: crate::types::statics::ProhibitionScope::AllPlayers,
-                    cost: crate::types::statics::CostPaymentProhibition::Sacrifice {
-                        filter: TargetFilter::SelfRef,
-                    },
-                })),
-            }],
-            None,
-        );
     }
-    if !reserved.objects.is_empty() {
+    if battlefield_held {
         scratch.layers_dirty.mark_full();
     }
     super::layers::flush_layers(&mut scratch);
@@ -23077,6 +23101,28 @@ fn prepared_payment_terms_state(
         .and_then(|resolution| resolution.authority().payment_terms_state(state))
 }
 
+/// CR 601.2b: the pending cast a prepared spell's additional-cost declaration
+/// is previewed with, before the cast is announced.
+fn prepared_declaration_pending(prepared: &PreparedSpellCast, player: PlayerId) -> PendingCast {
+    let resolved = prepared.ability_def.as_ref().map_or_else(
+        || ResolvedAbility::new(Effect::NoOp, Vec::new(), prepared.object_id, player),
+        |def| build_resolved_from_def(def, prepared.object_id, player),
+    );
+    let mut pending = PendingCast::new(
+        prepared.object_id,
+        prepared.card_id,
+        resolved,
+        prepared.mana_cost.clone(),
+    );
+    pending.base_cost = Some(prepared.base_mana_cost.clone());
+    pending.casting_variant = prepared.casting_variant;
+    pending.alternative_cost_keyword = prepared.alternative_cost_keyword.clone();
+    pending.cast_timing_permission = prepared.cast_timing_permission;
+    pending.origin_zone = prepared.origin_zone;
+    pending.payment_mode = prepared.payment_mode;
+    pending
+}
+
 fn can_cast_prepared_now_with_probe(
     state: &GameState,
     player: PlayerId,
@@ -23359,6 +23405,23 @@ fn can_cast_prepared_now_with_probe(
         {
             return false;
         }
+        // CR 601.2f-h + CR 118.3 + CR 118.10: when a mana ability's cost could
+        // use up an object this cost is paid with (Rubble Rouser's graveyard
+        // exile beside Abhorrent Oculus, Blood Pet beside Village Rites), the
+        // two are judged together by the declaration-time authority. The
+        // contention gate keeps every other spell on the checks above.
+        if casting_costs::cost_contends_with_mana_abilities(state, player, prepared.object_id, cost)
+            && !casting_costs::required_declaration_offerable(
+                state,
+                player,
+                &prepared_declaration_pending(prepared, player),
+                cost,
+                None,
+            )
+            .unwrap_or(false)
+        {
+            return false;
+        }
     }
 
     // CR 118.3 + CR 601.2f-h: A mandatory choice of additional costs is
@@ -23373,22 +23436,7 @@ fn can_cast_prepared_now_with_probe(
         .get(&prepared.object_id)
         .and_then(|o| o.additional_cost.as_ref())
     {
-        let resolved = prepared.ability_def.as_ref().map_or_else(
-            || ResolvedAbility::new(Effect::NoOp, Vec::new(), prepared.object_id, player),
-            |def| build_resolved_from_def(def, prepared.object_id, player),
-        );
-        let mut pending = PendingCast::new(
-            prepared.object_id,
-            prepared.card_id,
-            resolved,
-            prepared.mana_cost.clone(),
-        );
-        pending.base_cost = Some(prepared.base_mana_cost.clone());
-        pending.casting_variant = prepared.casting_variant;
-        pending.alternative_cost_keyword = prepared.alternative_cost_keyword.clone();
-        pending.cast_timing_permission = prepared.cast_timing_permission;
-        pending.origin_zone = prepared.origin_zone;
-        pending.payment_mode = prepared.payment_mode;
+        let pending = prepared_declaration_pending(prepared, player);
         let branch_is_offerable = |cost: &AbilityCost| {
             casting_costs::required_declaration_offerable(state, player, &pending, cost, None)
                 .unwrap_or(false)

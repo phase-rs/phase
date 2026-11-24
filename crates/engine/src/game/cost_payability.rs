@@ -2358,6 +2358,78 @@ pub(super) fn reservable_battlefield_legs(
     reservable
 }
 
+/// CR 118.3 + CR 601.2h: the hand and graveyard legs of a spell's cost whose
+/// cards a mana ability's cost could also consume. `fodder` is the set of cards
+/// such abilities can spend ([`super::mana_sources::mana_ability_card_fodder`]);
+/// a counted leg none of whose candidates is in it changes no mana probe and
+/// isn't reserved. The spell itself is never a candidate: it is on the stack
+/// when its costs are paid (CR 601.2a).
+pub(super) fn reservable_card_legs(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    legs: &[AbilityCost],
+    fodder: &std::collections::HashSet<ObjectId>,
+) -> Vec<ReservableLeg> {
+    let mut reservable = Vec::new();
+    for leg in legs {
+        if matches!(leg, AbilityCost::TapCreatures { .. }) {
+            continue;
+        }
+        let mut object_legs = Vec::new();
+        collect_object_cost_legs(
+            state,
+            player,
+            source,
+            None,
+            leg,
+            CostSourceRole::SpellBeingCast,
+            ExileCostPopulation::PayerZones,
+            &mut object_legs,
+        );
+        for object_leg in object_legs {
+            let ObjectLegDemand::Exactly(count) = object_leg.demand else {
+                continue;
+            };
+            let candidates: Vec<ObjectId> = object_leg
+                .candidates
+                .into_iter()
+                .filter(|id| *id != source && !state.battlefield.contains(id))
+                .collect();
+            if candidates.iter().any(|id| fodder.contains(id)) {
+                reservable.push(ReservableLeg {
+                    reserved_use: super::casting::ReservedUse::Present,
+                    count,
+                    candidates,
+                });
+            }
+        }
+    }
+    reservable
+}
+
+/// CR 118.3: every object `cost`, a cost of an ability of `source`, could be
+/// paid with: the candidates of each of its object-using legs.
+pub(super) fn object_cost_candidates(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    cost: &AbilityCost,
+) -> Vec<ObjectId> {
+    let mut legs = Vec::new();
+    collect_object_cost_legs(
+        state,
+        player,
+        source,
+        None,
+        cost,
+        CostSourceRole::AbilitySource,
+        ExileCostPopulation::PayerZones,
+        &mut legs,
+    );
+    legs.into_iter().flat_map(|leg| leg.candidates).collect()
+}
+
 /// CR 117.1 + CR 118.3: Infer the source zone for a non-self
 /// `AbilityCost::Exile`. Explicit zones are authoritative. A missing zone
 /// keeps the existing parser convention: permanent-implying filters mean
