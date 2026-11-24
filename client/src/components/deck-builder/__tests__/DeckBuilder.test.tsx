@@ -195,17 +195,11 @@ describe("DeckBuilder", () => {
         commander: [],
       },
     });
-    // Mock chain: load path returns the precon as-is (no inference) so the
-    // editor starts commander-less, mirroring the user's mid-edit state. The
-    // second call (from handleSave) is the one we want to verify performs
-    // inference and produces a commander.
-    vi.mocked(resolveCommander)
-      .mockImplementationOnce(async (deck) => deck)
-      .mockImplementationOnce(async (deck) => ({
-        ...deck,
-        main: deck.main.filter((e) => e.name !== "Card 1"),
-        commander: ["Card 1"],
-      }));
+    vi.mocked(resolveCommander).mockImplementationOnce(async (deck) => ({
+      ...deck,
+      main: deck.main.filter((e) => e.name !== "Card 1"),
+      commander: ["Card 1"],
+    }));
     localStorage.clear();
 
     render(
@@ -223,18 +217,11 @@ describe("DeckBuilder", () => {
     const saveButton = await screen.findByRole("button", { name: "Save" });
     await waitFor(() => expect(saveButton).not.toBeDisabled());
 
-    // Pre-save sanity: load path called resolveCommander once and returned a
-    // commander-less deck (the mock returns as-is for the load call because
-    // commander.length === 0 path of the mock implementation doesn't apply
-    // until save when currentDeck.commander is also empty — see mock above).
-    expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(1);
+    expect(resolveCommander).not.toHaveBeenCalled();
 
     await user.click(saveButton);
 
-    // Save triggered a second resolveCommander call which inferred Card 1.
-    await waitFor(() => {
-      expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(2);
-    });
+    await waitFor(() => expect(resolveCommander).toHaveBeenCalledTimes(1));
     await waitFor(() => {
       // The precon loader sets deckName to "<name> (<code>)" without the
       // [Pre-built] prefix — saving stores under that bare key.
@@ -333,7 +320,7 @@ describe("DeckBuilder", () => {
       }
     });
 
-    it("a rename moves the deck when the repair rewrote it while its Load was resolving", async () => {
+    it("a rename moves the deck when the repair rewrites it after Load", async () => {
       const user = userEvent.setup();
       localStorage.setItem(
         STORAGE_KEY_PREFIX + "Old Deck",
@@ -341,12 +328,6 @@ describe("DeckBuilder", () => {
       );
       localStorage.setItem(ACTIVE_DECK_KEY, "Old Deck");
       const spy = vi.spyOn(getSharedAdapter(), "canonicalCardNames").mockImplementation(mapRevival);
-
-      let release!: (deck: { main: Array<{ name: string; count: number }>; sideboard: never[] }) => void;
-      const held = new Promise((resolve) => {
-        release = resolve;
-      });
-      vi.mocked(resolveCommander).mockImplementationOnce(() => held as never);
 
       try {
         render(
@@ -359,21 +340,15 @@ describe("DeckBuilder", () => {
             onResetSearch={vi.fn()}
           />,
         );
-        await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(1));
+        const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+        await waitFor(() => expect(nameInput).toHaveValue("Old Deck"));
 
         await act(async () => {
           await canonicalizeSavedDeckNames();
         });
-        // Reach guard: the pass rewrote the open deck's stored bytes while the Load awaited.
         const rewritten = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "Old Deck") ?? "{}");
         expect(rewritten.main).toEqual([{ name: "Revival // Revenge", count: 4 }]);
 
-        await act(async () => {
-          release({ main: [{ name: "Revival/Revenge", count: 4 }], sideboard: [] });
-        });
-
-        const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
-        await waitFor(() => expect(nameInput).toHaveValue("Old Deck"));
         await user.clear(nameInput);
         await user.type(nameInput, "Renamed Deck");
         await user.click(screen.getByRole("button", { name: "Save" }));
@@ -514,7 +489,7 @@ describe("DeckBuilder", () => {
         });
         vi.mocked(resolveCommander).mockImplementationOnce(((deck: unknown) => held.then(() => deck)) as never);
         await user.click(screen.getByRole("button", { name: "Save" }));
-        await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(2));
+        await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(1));
 
         await act(async () => {
           await canonicalizeSavedDeckNames();
@@ -574,17 +549,11 @@ describe("DeckBuilder", () => {
       }
     });
 
-    it.each([1, 2, 3])("adopts a rewrite dispatched k microtasks after a pending Load resolves (k=%i)", async (k) => {
+    it("adopts a rewrite dispatched immediately after Load commits", async () => {
       const user = userEvent.setup();
       const initialRaw = JSON.stringify({ main: [{ name: "Revival/Revenge", count: 4 }], sideboard: [], format: "Standard" });
       localStorage.setItem(STORAGE_KEY_PREFIX + "Old Deck", initialRaw);
       localStorage.setItem(ACTIVE_DECK_KEY, "Old Deck");
-
-      let release!: (deck: { main: Array<{ name: string; count: number }>; sideboard: never[] }) => void;
-      const held = new Promise((resolve) => {
-        release = resolve;
-      });
-      vi.mocked(resolveCommander).mockImplementationOnce(() => held as never);
 
       render(
         <DeckBuilder
@@ -596,19 +565,9 @@ describe("DeckBuilder", () => {
           onResetSearch={vi.fn()}
         />,
       );
-      await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(1));
-
+      expect(resolveCommander).not.toHaveBeenCalled();
       const rewrittenRaw = JSON.stringify({ main: [{ name: "Revival // Revenge", count: 4 }], sideboard: [], format: "Standard" });
-      await act(async () => {
-        release({ main: [{ name: "Revival/Revenge", count: 4 }], sideboard: [] });
-        // Dispatch the rewrite directly at the k-th microtask turn after
-        // resolveCommander resolves, instead of going through
-        // canonicalizeSavedDeckNames (whose event only lands after handleLoad's
-        // continuation already assigned savedDeckRef, so it can't exercise this
-        // path). Measured against this suite: k=1,2,3 turn red if handleLoad's
-        // per-Load stopAdopting() is moved back onto `.finally(stopAdopting)` on
-        // the resolveCommander await; k=0 and k>=4 do not discriminate.
-        for (let i = 0; i < k; i++) await Promise.resolve();
+      act(() => {
         localStorage.setItem(STORAGE_KEY_PREFIX + "Old Deck", rewrittenRaw);
         notifySavedDeckRewritten(testSavedDeckTxn, { name: "Old Deck", previousRaw: initialRaw, raw: rewrittenRaw });
       });
@@ -2450,51 +2409,27 @@ describe("DeckBuilder", () => {
       expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(thirdWrite);
     });
 
-    it("Load saved version resolving Save & continue's own conflict continues before inference and keeps a further edit", async () => {
+    it("Load saved version continues Save & continue's pending action and leaves the loaded deck editable", async () => {
       const user = userEvent.setup();
       mountP();
       const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
       await waitFor(() => expect(nameInput).toHaveValue("P"));
       await user.click(await screen.findByRole("button", { name: "remove-Lightning Bolt" }));
-      const savedVersion = {
-        main: [{ name: "Mountain", count: 99 }, { name: "Zimone, Mystery Unraveler", count: 1 }],
-        sideboard: [],
-      };
-      await withSavedDeckLibrary((txn) => writeSavedDeckData(txn, "P", JSON.stringify(savedVersion)));
+      await withSavedDeckLibrary((txn) => writeSavedDeckData(txn, "P", otherTab));
 
       await user.click(screen.getByRole("button", { name: /Menu/ }));
       await user.click(await screen.findByRole("button", { name: "Save & continue" }));
       await screen.findByRole("dialog", { name: CONFLICT });
       expect(navigateMock).not.toHaveBeenCalled();
 
-      let resolveLoad!: (deck: Awaited<ReturnType<typeof resolveCommander>>) => void;
-      const held = new Promise<Awaited<ReturnType<typeof resolveCommander>>>((resolve) => {
-        resolveLoad = resolve;
-      });
-      vi.mocked(resolveCommander).mockImplementationOnce(() => held);
-
       await user.click(screen.getByRole("button", { name: "Load saved version" }));
-      await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(2));
-      expect(screen.getByText("99 Mountain")).toBeInTheDocument();
-      expect(screen.queryByText("3 Lightning Bolt")).not.toBeInTheDocument();
-      expect(navigateMock).toHaveBeenCalledExactlyOnceWith("/");
-      expect(screen.queryByRole("dialog", { name: "Unsaved changes" })).not.toBeInTheDocument();
+      await vi.waitFor(() => expect(navigateMock).toHaveBeenCalledExactlyOnceWith("/"));
+      expect(resolveCommander).not.toHaveBeenCalled();
+      expect(screen.getByText("60 Mountain")).toBeInTheDocument();
 
-      // The conflict Load has opened and continued navigation while inference is pending.
       await user.click(screen.getByRole("button", { name: "remove-Mountain" }));
-      await act(async () => {
-        resolveLoad({
-          main: [{ name: "Mountain", count: 99 }],
-          sideboard: [],
-          commander: ["Zimone, Mystery Unraveler"],
-        });
-        await held;
-      });
-
-      expect(navigateMock).toHaveBeenCalledExactlyOnceWith("/");
-      expect(screen.getByText("98 Mountain")).toBeInTheDocument();
-      expect(screen.getByText("1 Zimone, Mystery Unraveler")).toBeInTheDocument();
-      expect(screen.queryByText("Zimone, Mystery Unraveler", { exact: true })).not.toBeInTheDocument();
+      expect(screen.getByText("59 Mountain")).toBeInTheDocument();
+      expect(localStorage.getItem(STORAGE_KEY_PREFIX + "P")).toBe(otherTab);
     });
 
     // A write that lands after the refusal but while the dialog is still open must not be lost:
@@ -2714,7 +2649,6 @@ describe("DeckBuilder", () => {
     const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
     await waitFor(() => expect(nameInput).toHaveValue("Deck A"));
 
-    // The initial Load already called resolveCommander once; mock only the call the pending Save makes.
     let resolveInference!: (deck: unknown) => void;
     const deferred = new Promise((resolve) => {
       resolveInference = resolve;
@@ -2722,7 +2656,7 @@ describe("DeckBuilder", () => {
     vi.mocked(resolveCommander).mockImplementationOnce(() => deferred as never);
 
     await user.click(screen.getByRole("button", { name: "Save" }));
-    await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(1));
 
     await user.click(screen.getByRole("button", { name: "Load deck..." }));
     await user.click(screen.getByRole("option", { name: "Deck B" }));
@@ -2745,7 +2679,7 @@ describe("DeckBuilder", () => {
     ]);
   });
 
-  it("an older Load that resolves after a newer Load does not overwrite the editor", async () => {
+  it("consecutive saved-deck Loads open the newest selection", async () => {
     const user = userEvent.setup();
     localStorage.setItem(
       STORAGE_KEY_PREFIX + "Deck A",
@@ -2773,28 +2707,16 @@ describe("DeckBuilder", () => {
     const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
     await waitFor(() => expect(nameInput).toHaveValue("Deck A"));
 
-    // The initial Load already called resolveCommander once; hold only the call Load B makes.
-    let resolveB!: (deck: unknown) => void;
-    const held = new Promise((resolve) => {
-      resolveB = resolve;
-    });
-    vi.mocked(resolveCommander).mockImplementationOnce(() => held as never);
-
     await user.click(screen.getByRole("button", { name: "Load deck..." }));
     await user.click(screen.getByRole("option", { name: "Deck B" }));
-    await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(2));
+    expect(nameInput).toHaveValue("Deck B");
+    expect(screen.getByText("1 Beta")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Load deck..." }));
     await user.click(screen.getByRole("option", { name: "Deck C" }));
     await waitFor(() => expect(nameInput).toHaveValue("Deck C"));
 
-    // Let Load B's now-resolved promise, and any state updates it triggers, settle
-    // before asserting nothing changed.
-    await act(async () => {
-      resolveB({ main: [{ name: "Beta", count: 1 }], sideboard: [] });
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    expect(resolveCommander).not.toHaveBeenCalled();
     expect(nameInput).toHaveValue("Deck C");
     expect(screen.getByText("1 Gamma")).toBeInTheDocument();
     expect(screen.queryByText("1 Beta")).not.toBeInTheDocument();
@@ -2809,7 +2731,7 @@ describe("DeckBuilder", () => {
       STORAGE_KEY_PREFIX + "Deck C",
       JSON.stringify({ main: [{ name: "Gamma", count: 1 }], sideboard: [], format: "Standard" }),
     );
-    vi.mocked(loadPreconDeckMap).mockResolvedValue({
+    const catalog = {
       secrets: {
         code: "SOS",
         name: "Secrets of Strixhaven",
@@ -2819,7 +2741,7 @@ describe("DeckBuilder", () => {
         sideBoard: [],
         commander: [{ name: "Zimone, Mystery Unraveler", count: 1 }],
       },
-    });
+    };
 
     const { rerender } = render(
       <DeckBuilder
@@ -2834,12 +2756,12 @@ describe("DeckBuilder", () => {
     const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
     await waitFor(() => expect(nameInput).toHaveValue("Deck A"));
 
-    // The initial Load already called resolveCommander once; hold only the call the precon Load makes.
-    let resolvePrecon!: (deck: unknown) => void;
-    const held = new Promise((resolve) => {
-      resolvePrecon = resolve;
+    let resolveCatalog!: (decks: typeof catalog) => void;
+    const held = new Promise<typeof catalog>((resolve) => {
+      resolveCatalog = resolve;
     });
-    vi.mocked(resolveCommander).mockImplementationOnce(() => held as never);
+    const catalogCalls = vi.mocked(loadPreconDeckMap).mock.calls.length;
+    vi.mocked(loadPreconDeckMap).mockReturnValueOnce(held);
 
     rerender(
       <DeckBuilder
@@ -2851,7 +2773,8 @@ describe("DeckBuilder", () => {
         onResetSearch={vi.fn()}
       />,
     );
-    await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(2));
+    expect(loadPreconDeckMap).toHaveBeenCalledTimes(catalogCalls + 1);
+    expect(nameInput).toHaveValue("Deck A");
 
     rerender(
       <DeckBuilder
@@ -2868,31 +2791,31 @@ describe("DeckBuilder", () => {
     // Let the precon Load's now-resolved promise, and any state updates it triggers, settle
     // before asserting nothing changed.
     await act(async () => {
-      resolvePrecon({ main: [{ name: "Island", count: 99 }], sideboard: [] });
-      await Promise.resolve();
-      await Promise.resolve();
+      resolveCatalog(catalog);
+      await held;
     });
     expect(nameInput).toHaveValue("Deck C");
     expect(screen.getByText("1 Gamma")).toBeInTheDocument();
     expect(screen.queryByText("99 Island")).not.toBeInTheDocument();
   });
 
-  it("precon Load inference that resolves after the user edits the opened deck does not overwrite that edit", async () => {
+  it("a precon Load that resolves after the user edits the current deck does not overwrite that edit", async () => {
     const user = userEvent.setup();
     localStorage.setItem(
       STORAGE_KEY_PREFIX + "Deck A",
       JSON.stringify({ main: [{ name: "Alpha", count: 1 }, { name: "Beta", count: 1 }], sideboard: [], format: "Standard" }),
     );
-    vi.mocked(loadPreconDeckMap).mockResolvedValue({
+    const catalog = {
       secrets: {
         code: "SOS",
         name: "Secrets of Strixhaven",
         type: "Commander",
         coveragePct: 100,
-        mainBoard: [{ name: "Island", count: 99 }, { name: "Zimone, Mystery Unraveler", count: 1 }],
+        mainBoard: [{ name: "Island", count: 99 }],
         sideBoard: [],
+        commander: [{ name: "Zimone, Mystery Unraveler", count: 1 }],
       },
-    });
+    };
 
     const { rerender } = render(
       <DeckBuilder
@@ -2907,12 +2830,12 @@ describe("DeckBuilder", () => {
     const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
     await waitFor(() => expect(nameInput).toHaveValue("Deck A"));
 
-    // The initial Load already called resolveCommander once; hold only the call the precon Load makes.
-    let resolvePrecon!: (deck: Awaited<ReturnType<typeof resolveCommander>>) => void;
-    const held = new Promise<Awaited<ReturnType<typeof resolveCommander>>>((resolve) => {
-      resolvePrecon = resolve;
+    let resolveCatalog!: (decks: typeof catalog) => void;
+    const held = new Promise<typeof catalog>((resolve) => {
+      resolveCatalog = resolve;
     });
-    vi.mocked(resolveCommander).mockImplementationOnce(() => held);
+    const catalogCalls = vi.mocked(loadPreconDeckMap).mock.calls.length;
+    vi.mocked(loadPreconDeckMap).mockReturnValueOnce(held);
 
     rerender(
       <DeckBuilder
@@ -2924,40 +2847,37 @@ describe("DeckBuilder", () => {
         onResetSearch={vi.fn()}
       />,
     );
-    await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(2));
+    expect(loadPreconDeckMap).toHaveBeenCalledTimes(catalogCalls + 1);
+    expect(nameInput).toHaveValue("Deck A");
 
-    // The precon is already open while its commander inference is pending.
-    expect(nameInput).toHaveValue("Secrets of Strixhaven (SOS)");
-    expect(screen.getByText("99 Island")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "remove-Island" }));
+    // The user edits the still-displayed Deck A while the precon Load awaits.
+    await user.click(await screen.findByRole("button", { name: "remove-Beta" }));
+    expect(screen.queryByText("1 Beta")).not.toBeInTheDocument();
+
+    // Let the precon Load's now-resolved promise, and any state updates it triggers, settle
+    // before asserting the edit was not discarded.
     await act(async () => {
-      resolvePrecon({
-        main: [{ name: "Island", count: 99 }],
-        sideboard: [],
-        commander: ["Zimone, Mystery Unraveler"],
-      });
+      resolveCatalog(catalog);
       await held;
     });
-    expect(nameInput).toHaveValue("Secrets of Strixhaven (SOS)");
-    expect(screen.getByText("98 Island")).toBeInTheDocument();
-    expect(screen.getByText("1 Zimone, Mystery Unraveler")).toBeInTheDocument();
-    expect(screen.queryByText("Zimone, Mystery Unraveler", { exact: true })).not.toBeInTheDocument();
+    expect(nameInput).toHaveValue("Deck A");
+    expect(screen.getByText("1 Alpha")).toBeInTheDocument();
+    expect(screen.queryByText("1 Beta")).not.toBeInTheDocument();
+    expect(screen.queryByText("99 Island")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Menu/ }));
     expect(await screen.findByRole("button", { name: "Discard" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
   });
 
-  it("saved-deck Load inference that resolves after the user edits the opened deck does not overwrite that edit", async () => {
+  it("a saved-deck Load leaves subsequent edits to the opened deck intact", async () => {
     const user = userEvent.setup();
-    const commander = "Isamaru, Hound of Konda";
-    const plains = { name: "Plains", count: 99 };
     localStorage.setItem(
       STORAGE_KEY_PREFIX + "Deck A",
       JSON.stringify({ main: [{ name: "Alpha", count: 1 }, { name: "Beta", count: 1 }], sideboard: [], format: "Standard" }),
     );
     localStorage.setItem(
       STORAGE_KEY_PREFIX + "Deck B",
-      JSON.stringify({ main: [plains, { name: commander, count: 1 }], sideboard: [], format: "Standard" }),
+      JSON.stringify({ main: [{ name: "Gamma", count: 1 }], sideboard: [], format: "Standard" }),
     );
 
     render(
@@ -2973,36 +2893,15 @@ describe("DeckBuilder", () => {
     const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
     await waitFor(() => expect(nameInput).toHaveValue("Deck A"));
 
-    // The initial Load already called resolveCommander once; hold only the call Load B makes.
-    let resolveB!: (deck: Awaited<ReturnType<typeof resolveCommander>>) => void;
-    const held = new Promise<Awaited<ReturnType<typeof resolveCommander>>>((resolve) => {
-      resolveB = resolve;
-    });
-    vi.mocked(resolveCommander).mockImplementationOnce(() => held);
-
     await user.click(screen.getByRole("button", { name: "Load deck..." }));
     await user.click(screen.getByRole("option", { name: "Deck B" }));
-    await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(2));
+    expect(nameInput).toHaveValue("Deck B");
+    expect(screen.getByText("1 Gamma")).toBeInTheDocument();
 
-    // Deck B is already open while its commander inference is pending.
+    await user.click(screen.getByRole("button", { name: "remove-Gamma" }));
     expect(nameInput).toHaveValue("Deck B");
-    expect(resolveCommander).toHaveBeenLastCalledWith(expect.objectContaining({
-      main: [plains, { name: commander, count: 1 }],
-    }));
-    expect(screen.getByText("99 Plains")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "remove-Plains" }));
-    await act(async () => {
-      resolveB({
-        main: [plains],
-        sideboard: [],
-        commander: [commander],
-      });
-      await held;
-    });
-    expect(nameInput).toHaveValue("Deck B");
-    expect(screen.getByText("98 Plains")).toBeInTheDocument();
-    expect(screen.getByText(`1 ${commander}`)).toBeInTheDocument();
-    expect(screen.queryByText(commander, { exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByText("1 Gamma")).not.toBeInTheDocument();
+    expect(resolveCommander).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: /Menu/ }));
     expect(await screen.findByRole("button", { name: "Discard" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
@@ -3028,7 +2927,6 @@ describe("DeckBuilder", () => {
     const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
     await waitFor(() => expect(nameInput).toHaveValue("Deck A"));
 
-    // The initial Load already called resolveCommander once; mock only the call the pending Save makes.
     let resolveInference!: (deck: unknown) => void;
     const deferred = new Promise((resolve) => {
       resolveInference = resolve;
@@ -3036,7 +2934,7 @@ describe("DeckBuilder", () => {
     vi.mocked(resolveCommander).mockImplementationOnce(() => deferred as never);
 
     await user.click(screen.getByRole("button", { name: "Save" }));
-    await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(1));
 
     await user.click(await screen.findByRole("button", { name: "remove-Beta" }));
 
@@ -3075,7 +2973,6 @@ describe("DeckBuilder", () => {
     const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
     await waitFor(() => expect(nameInput).toHaveValue("Deck A"));
 
-    // The initial Load already called resolveCommander once; mock only the call the Save makes.
     vi.mocked(resolveCommander).mockImplementationOnce(async () => ({
       main: [{ name: "Beta", count: 1 }],
       sideboard: [],
@@ -3562,11 +3459,6 @@ describe("DeckBuilder", () => {
   });
 
   it("does not reactively auto-resolve a commander mid-edit", async () => {
-    // Regression: the reactive auto-resolve effect was deleted in favour of
-    // save-time inference. Loading a Commander-shaped 100-singleton precon
-    // with no explicit commander must NOT trigger a second resolveCommander
-    // call — that call used to immediately re-populate the commander after
-    // any user Remove, forcing users to cycle through legendary creatures.
     const mainBoard = Array.from({ length: 100 }, (_, i) => ({
       name: `Card ${i + 1}`,
       count: 1,
@@ -3582,10 +3474,6 @@ describe("DeckBuilder", () => {
         commander: [],
       },
     });
-    // Identity mock — if the reactive effect still existed, it would call
-    // resolveCommander a second time after the load-path applyDeckToEditor.
-    vi.mocked(resolveCommander).mockImplementation(async (deck) => deck);
-
     render(
       <DeckBuilder
         format="Commander"
@@ -3601,9 +3489,9 @@ describe("DeckBuilder", () => {
     const saveButton = await screen.findByRole("button", { name: "Save" });
     await waitFor(() => expect(saveButton).not.toBeDisabled());
 
-    // Exactly one call: the load path. No reactive re-fire on the empty
-    // commanders state — pre-deletion, the effect would have called twice.
-    expect(vi.mocked(resolveCommander)).toHaveBeenCalledTimes(1);
+    await userEvent.click(screen.getByRole("button", { name: "remove-Card 1" }));
+    expect(screen.queryByText("1 Card 1")).not.toBeInTheDocument();
+    expect(resolveCommander).not.toHaveBeenCalled();
   });
 
   it("loads virtual precons into the editor without requiring saved storage", async () => {
