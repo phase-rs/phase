@@ -14247,7 +14247,21 @@ pub(super) fn target_filter_names_creature(filter: &TargetFilter) -> bool {
     target_filter_names_type(filter, DemonstrativeNoun::Creature)
 }
 
+/// CR 110.1 defines a permanent as a card or token on the battlefield.
+/// Creature demonstratives keep their established type-only binding for printed cards.
 fn target_filter_names_type(filter: &TargetFilter, noun: DemonstrativeNoun) -> bool {
+    if noun == DemonstrativeNoun::Permanent
+        && filter
+            .population_zones()
+            .into_iter()
+            .any(|zone| zone != Zone::Battlefield)
+    {
+        return false;
+    }
+    target_filter_has_demonstrative_type(filter, noun)
+}
+
+fn target_filter_has_demonstrative_type(filter: &TargetFilter, noun: DemonstrativeNoun) -> bool {
     match filter {
         TargetFilter::Typed(typed) => typed
             .type_filters
@@ -14255,12 +14269,12 @@ fn target_filter_names_type(filter: &TargetFilter, noun: DemonstrativeNoun) -> b
             .any(|kind| type_filter_names_demonstrative(kind, noun)),
         TargetFilter::And { filters } => filters
             .iter()
-            .any(|filter| target_filter_names_type(filter, noun)),
+            .any(|filter| target_filter_has_demonstrative_type(filter, noun)),
         TargetFilter::Or { filters } => {
             !filters.is_empty()
                 && filters
                     .iter()
-                    .all(|filter| target_filter_names_type(filter, noun))
+                    .all(|filter| target_filter_has_demonstrative_type(filter, noun))
         }
         _ => false,
     }
@@ -17810,6 +17824,33 @@ mod where_x_tests {
                 "{oracle}"
             );
             assert_eq!(count, &QuantityExpr::Ref { qty }, "{oracle}");
+        }
+    }
+
+    #[test]
+    fn where_x_permanent_demonstrative_requires_a_battlefield_target() {
+        // No printed card has this shape. Deliver from Chaos reads the mana value
+        // of its artifact-or-creature target. Radagast the Brown reads the mana
+        // value of the creature named by its trigger.
+        for (target, scope) in [
+            ("artifact", ObjectScope::Target),
+            ("artifact card from a graveyard", ObjectScope::EventSource),
+        ] {
+            let oracle = format!(
+                "Whenever another creature you control enters, put X +1/+1 counters on target {target}, where X is that permanent's mana value."
+            );
+            let trigger = crate::parser::oracle_trigger::parse_trigger_line(&oracle, "Synthetic");
+            let body = trigger.execute.expect("trigger body");
+            let Effect::PutCounter { count, .. } = body.effect.as_ref() else {
+                panic!("expected a counter effect: {body:?}");
+            };
+            assert_eq!(
+                count,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue { scope }
+                },
+                "{oracle}"
+            );
         }
     }
 
