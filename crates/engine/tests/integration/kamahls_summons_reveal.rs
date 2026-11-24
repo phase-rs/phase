@@ -227,7 +227,7 @@ fn kamahls_summons_dynamic_batches_share_one_mystic_reflection_replacement() {
         })
         .expect("P1 may reveal both creatures");
 
-    // CR 614.1a + CR 101.4: Mystic Reflection is consumed by the single
+    // CR 614.1c + CR 608.2e: Mystic Reflection is consumed by the single
     // compound creation event, so both unequal per-seat dynamic batches copy
     // the chosen creature.
     assert_eq!(token_count(&runner, P0), 1);
