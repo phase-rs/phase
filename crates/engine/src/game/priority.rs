@@ -1216,6 +1216,7 @@ mod tests {
                 PlayerId(0),
             )),
             ability_index: 0,
+            paused_removal: None,
         });
         assert!(!pass_priority_structurally_legal(&cost_move, PlayerId(0)));
         assert!(

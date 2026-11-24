@@ -9054,6 +9054,13 @@ pub(crate) fn drain_pending_cost_move_resume(
                             // still has to resume then.
                             | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
                             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+                            // CR 616.1 + CR 606.4: after the replacement subtree
+                            // retires at ordinary priority, finish the owning
+                            // loyalty activation exactly once.
+                            | PendingCostMoveResume::LoyaltyActivation {
+                                paused_removal: Some(_),
+                                ..
+                            }
                     )
                 )
         }
@@ -27231,6 +27238,7 @@ mod cost_move_drain_priority_boundary_tests {
                     counter_count_before: 1,
                 },
                 remaining: Vec::new(),
+                aggregate_credit: crate::types::game_state::CounterRemovalAggregateCredit::Credit,
                 replacement_subtree: ReplacementSubtreeBoundary::at(&state.resolution_stack),
             }),
             cost_paid_object: None,

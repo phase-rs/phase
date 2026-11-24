@@ -2064,6 +2064,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::CastVariantPaid { .. }
         | TriggerCondition::CastVariantPaidPersistent { .. }
         | TriggerCondition::ActivatedAbilityIsNonMana
+        | TriggerCondition::LoyaltyCountersRemovedAtLeast { .. }
         | TriggerCondition::FirstTimeObjectTappedThisTurn
         // Both first-time siblings are terminal here: neither carries a legacy
         // player-filter/quantity ref, so the D5 legacy-batch-prompt flag is
@@ -7768,6 +7769,7 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         | TriggerCondition::CastVariantPaid { .. }
         | TriggerCondition::CastVariantPaidPersistent { .. }
         | TriggerCondition::ActivatedAbilityIsNonMana
+        | TriggerCondition::LoyaltyCountersRemovedAtLeast { minimum: _ }
         | TriggerCondition::FirstTimeObjectTappedThisTurn
         | TriggerCondition::WasType { .. }
         | TriggerCondition::AttackedThisTurn
