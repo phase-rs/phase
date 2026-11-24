@@ -4115,6 +4115,56 @@ describe("draft store workspace authority", () => {
       ))).toBe(true);
     });
 
+    it("publishes_what_issued_each_interaction_generation", async () => {
+      const issued: Array<{ generation: number; cause: string; locked: boolean }> = [];
+      let causeMovedAlone = 0;
+      const unsubscribe = useDraftStore.subscribe((state, before) => {
+        if (state.interactionGeneration !== before.interactionGeneration) {
+          issued.push({ generation: state.interactionGeneration, cause: state.interactionGenerationCause, locked: state.pickInteractionLocked });
+        } else if (state.interactionGenerationCause !== before.interactionGenerationCause) {
+          causeMovedAlone += 1;
+        }
+      });
+
+      await resumeFifo();
+      wasm.local_fifo_select.mockReturnValue(fifoView({ pool: [card("pk-a")], promptGeneration: 4 }));
+      await expect(useDraftStore.getState().pickCard("pk-a")).resolves.toEqual({ status: "acknowledged" });
+      await expect(useDraftStore.getState().endRun("fifo-draft")).resolves.toBeUndefined();
+      useDraftStore.getState().reset();
+      unsubscribe();
+
+      expect(issued.map(({ cause, locked }) => ({ cause, locked }))).toEqual([
+        { cause: "lifecycle", locked: false },
+        { cause: "engine-prompt", locked: false },
+        { cause: "accepted-selection", locked: false },
+        { cause: "lifecycle", locked: false },
+        { cause: "lifecycle", locked: false },
+      ]);
+      expect(causeMovedAlone).toBe(0);
+    });
+
+    it("publishes_a_reset_during_a_pending_fifo_selection_as_a_lifecycle_generation", async () => {
+      await resumeFifo();
+      const pending = deferred<DraftPlayerView>();
+      wasm.local_fifo_select.mockReturnValue(pending.promise);
+      const pick = useDraftStore.getState().pickCard("pk-a");
+      const locked = useDraftStore.getState();
+      expect(locked).toMatchObject({ pickInteractionLocked: true, pendingPickIntent: { kind: "pick", instanceIds: ["pk-a"] } });
+      const issued: Array<{ cause: string; locked: boolean; intent: unknown }> = [];
+      const unsubscribe = useDraftStore.subscribe((state, before) => {
+        if (state.interactionGeneration !== before.interactionGeneration) {
+          issued.push({ cause: state.interactionGenerationCause, locked: state.pickInteractionLocked, intent: state.pendingPickIntent });
+        }
+      });
+
+      useDraftStore.getState().reset();
+      unsubscribe();
+      pending.resolve(fifoView({ pool: [card("pk-a")], promptGeneration: 4 }));
+
+      expect(issued).toEqual([{ cause: "lifecycle", locked: false, intent: null }]);
+      await expect(pick).resolves.toEqual({ status: "ignored", reason: "stale" });
+    });
+
     it("persists_a_fifo_session_through_its_owner_with_its_declared_identity", async () => {
       await resumeFifo();
       wasm.local_fifo_select.mockReturnValue(fifoView({ pool: [card("pk-a")], promptGeneration: 4 }));

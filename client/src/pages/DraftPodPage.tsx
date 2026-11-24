@@ -104,6 +104,7 @@ function readPickInteraction(): DraftPickInteractionSnapshot {
   const state = useMultiplayerDraftStore.getState();
   return {
     interactionGeneration: state.interactionGeneration,
+    interactionGenerationCause: state.interactionGenerationCause,
     pickInteractionLocked: state.pickInteractionLocked,
     pendingPickIntent: state.pendingPickIntent,
   };

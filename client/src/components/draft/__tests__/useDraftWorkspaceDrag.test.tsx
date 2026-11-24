@@ -10,6 +10,7 @@ import type {
 } from "../workspace/useDraftWorkspaceDrag";
 import { useDraftWorkspaceDrag } from "../workspace/useDraftWorkspaceDrag";
 import type { PackDropAdmission, PackDropSettlement, PackDropSource } from "../PackDisplay";
+import type { DraftPickOutcome } from "../../../stores/draftStore";
 
 const card = {
   instance_id: "card-1", name: "Card One", set_code: "TST", collector_number: "1",
@@ -42,7 +43,7 @@ function firePointerActivation(
 }
 
 function createInteraction() {
-  let snapshot: DraftPickInteractionSnapshot = { interactionGeneration: 1, pickInteractionLocked: false, pendingPickIntent: null };
+  let snapshot: DraftPickInteractionSnapshot = { interactionGeneration: 1, interactionGenerationCause: "lifecycle", pickInteractionLocked: false, pendingPickIntent: null };
   const listeners = new Set<() => void>();
   return {
     read: () => snapshot,
@@ -968,6 +969,7 @@ describe("useDraftWorkspaceDrag", () => {
     fireEvent.pointerMove(source, { clientX: 50, clientY: 50, pointerId: 2, pointerType: "mouse" });
     act(() => interaction.publish({
       interactionGeneration: 1,
+      interactionGenerationCause: "lifecycle",
       pickInteractionLocked: true,
       pendingPickIntent: { kind: "pick", instanceIds: ["other"], destination: "deck" },
     }));
@@ -1128,7 +1130,7 @@ describe("useDraftWorkspaceDrag", () => {
     const onSettled = vi.fn();
     const onDrop = vi.fn((request): DraftDropDispatch => {
       callOrder.push("drop");
-      interaction.publish({ interactionGeneration: 1, pickInteractionLocked: true, pendingPickIntent: { kind: "pick", instanceIds: ["card-1"], destination: "sideboard", placementHint: { column: 2 } } });
+      interaction.publish({ interactionGeneration: 1, interactionGenerationCause: "lifecycle", pickInteractionLocked: true, pendingPickIntent: { kind: "pick", instanceIds: ["card-1"], destination: "sideboard", placementHint: { column: 2 } } });
       return { requestToken: request.requestToken, interactionGeneration: 1, outcome };
     });
     render(<Harness interaction={interaction} onDrop={onDrop as never} onAdmission={onAdmission} onSettled={onSettled} />);
@@ -1151,7 +1153,7 @@ describe("useDraftWorkspaceDrag", () => {
 
     await act(async () => resolveOutcome({ status: "acknowledged" }));
     expect(onSettled).not.toHaveBeenCalled();
-    act(() => interaction.publish({ interactionGeneration: 1, pickInteractionLocked: false, pendingPickIntent: null }));
+    act(() => interaction.publish({ interactionGeneration: 1, interactionGenerationCause: "lifecycle", pickInteractionLocked: false, pendingPickIntent: null }));
     expect(onSettled).toHaveBeenCalledWith({ kind: "outcome", outcome: { status: "acknowledged" } });
   });
 
@@ -1193,6 +1195,7 @@ describe("useDraftWorkspaceDrag", () => {
     fireEvent.pointerMove(source, { clientX: 20, clientY: 20, pointerId: 55, pointerType: "mouse" });
     act(() => interaction.publish({
       interactionGeneration: 1,
+      interactionGenerationCause: "lifecycle",
       pickInteractionLocked: true,
       pendingPickIntent: { kind: "pick", instanceIds: ["other"], destination: "deck" },
     }));
@@ -1208,7 +1211,7 @@ describe("useDraftWorkspaceDrag", () => {
     const interaction = createInteraction();
     const conflictSettled = vi.fn();
     const conflictDrop = vi.fn((request) => {
-      interaction.publish({ interactionGeneration: 1, pickInteractionLocked: true, pendingPickIntent: { kind: "pick", instanceIds: ["other"], destination: "deck" } });
+      interaction.publish({ interactionGeneration: 1, interactionGenerationCause: "lifecycle", pickInteractionLocked: true, pendingPickIntent: { kind: "pick", instanceIds: ["other"], destination: "deck" } });
       return { requestToken: request.requestToken, interactionGeneration: 1, outcome: Promise.resolve({ status: "ignored" as const, reason: "busy" as const }) };
     });
     const { unmount } = render(<Harness interaction={interaction} onDrop={conflictDrop as never} onSettled={conflictSettled} />);
@@ -1595,12 +1598,12 @@ describe("useDraftWorkspaceDrag", () => {
     expect(screen.getByTestId("announcement")).toHaveTextContent("Pick cancelled.");
     fireEvent.pointerDown(source, { button: 0, clientX: 5, clientY: 5, isPrimary: true, pointerId: 72, pointerType: "mouse" });
     fireEvent.pointerMove(source, { clientX: 20, clientY: 20, pointerId: 72, pointerType: "mouse" });
-    act(() => interaction.publish({ interactionGeneration: 2, pickInteractionLocked: false, pendingPickIntent: null }));
+    act(() => interaction.publish({ interactionGeneration: 2, interactionGenerationCause: "lifecycle", pickInteractionLocked: false, pendingPickIntent: null }));
     expect(screen.getByTestId("preview")).toHaveTextContent("");
     fireEvent.pointerUp(source, { clientX: 20, clientY: 20, pointerId: 72, pointerType: "mouse" });
     expect(rejectedDrop).not.toHaveBeenCalled();
 
-    act(() => interaction.publish({ interactionGeneration: 1, pickInteractionLocked: false, pendingPickIntent: null }));
+    act(() => interaction.publish({ interactionGeneration: 1, interactionGenerationCause: "lifecycle", pickInteractionLocked: false, pendingPickIntent: null }));
     fireEvent.pointerDown(source, { button: 0, clientX: 5, clientY: 5, isPrimary: true, pointerId: 73, pointerType: "mouse" });
     fireEvent.pointerMove(source, { clientX: 20, clientY: 20, pointerId: 73, pointerType: "mouse" });
     fireEvent.pointerUp(source, { clientX: 20, clientY: 20, pointerId: 73, pointerType: "mouse" });
@@ -1719,14 +1722,14 @@ describe("useDraftWorkspaceDrag", () => {
     /** Drops `card-1` on the collapsed sideboard; the dispatch takes the lock with its own intent. */
     function dropOwned(
       interaction: ReturnType<typeof createInteraction>,
-      outcome: Promise<{ status: "acknowledged" }>,
+      outcome: Promise<DraftPickOutcome>,
       onSettled: (result: PackDropSettlement) => void,
     ) {
       const onDrop = vi.fn((request: DraftDropRequest): DraftDropDispatch => {
-        interaction.publish({ interactionGeneration: 1, pickInteractionLocked: true, pendingPickIntent: ownedIntent });
+        interaction.publish({ interactionGeneration: 1, interactionGenerationCause: "lifecycle", pickInteractionLocked: true, pendingPickIntent: ownedIntent });
         return { requestToken: request.requestToken, interactionGeneration: 1, outcome };
       });
-      render(<Harness interaction={interaction} onDrop={onDrop as never} onSettled={onSettled} />);
+      const rendered = render(<Harness interaction={interaction} onDrop={onDrop as never} onSettled={onSettled} />);
       const source = screen.getByTestId("source");
       const target = screen.getByTestId("target");
       source.setPointerCapture = vi.fn();
@@ -1736,6 +1739,7 @@ describe("useDraftWorkspaceDrag", () => {
       fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 4, pointerType: "mouse" });
       fireEvent.pointerUp(source, { clientX: 30, clientY: 30, pointerId: 4, pointerType: "mouse" });
       expect(onDrop).toHaveBeenCalledOnce();
+      return { rendered, onDrop };
     }
 
     it("settles_an_owned_drop_on_its_outcome_when_its_unlock_moves_the_generation", async () => {
@@ -1749,7 +1753,7 @@ describe("useDraftWorkspaceDrag", () => {
         dropOwned(interaction, outcome, onSettled);
         expect(onSettled).not.toHaveBeenCalled();
 
-        const unlock = () => interaction.publish({ interactionGeneration: 2, pickInteractionLocked: false, pendingPickIntent: null });
+        const unlock = () => interaction.publish({ interactionGeneration: 2, interactionGenerationCause: "accepted-selection", pickInteractionLocked: false, pendingPickIntent: null });
         if (order === "unlock-first") {
           act(unlock);
           expect(onSettled).not.toHaveBeenCalled();
@@ -1773,9 +1777,54 @@ describe("useDraftWorkspaceDrag", () => {
       // Admitted: a refused admission settles as soon as the pointer is released.
       expect(onSettled).not.toHaveBeenCalled();
 
-      act(() => interaction.publish({ interactionGeneration: 2, pickInteractionLocked: true, pendingPickIntent: ownedIntent }));
+      act(() => interaction.publish({ interactionGeneration: 2, interactionGenerationCause: "lifecycle", pickInteractionLocked: true, pendingPickIntent: ownedIntent }));
 
       expect(onSettled).toHaveBeenCalledExactlyOnceWith({ kind: "conflict" });
+    });
+
+    it("conflicts_an_owned_pending_drop_replaced_by_a_lifecycle_and_captures_the_next_drag", async () => {
+      // A reset or a replacing start publishes a new generation with no lock and
+      // no pending intent, the same shape as an accepted selection's prompt
+      // advance; only the store's cause tells them apart.
+      const interaction = createInteraction();
+      let resolveOutcome!: (value: DraftPickOutcome) => void;
+      const outcome = new Promise<DraftPickOutcome>((resolve) => { resolveOutcome = resolve; });
+      const onSettled = vi.fn();
+      const { rendered, onDrop } = dropOwned(interaction, outcome, onSettled);
+      const source = screen.getByTestId("source");
+
+      // Reach: the drop is admitted as owned and still pending, and it holds the
+      // controller, so a pointer-down now captures nothing.
+      expect(interaction.read()).toMatchObject({ pickInteractionLocked: true, pendingPickIntent: ownedIntent });
+      expect(onSettled).not.toHaveBeenCalled();
+      fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 5, pointerType: "mouse" });
+      expect(source.setPointerCapture).toHaveBeenCalledExactlyOnceWith(4);
+
+      act(() => interaction.publish({ interactionGeneration: 2, interactionGenerationCause: "lifecycle", pickInteractionLocked: false, pendingPickIntent: null }));
+
+      const nextSettled = vi.fn();
+      rendered.rerender(
+        <Harness
+          interaction={interaction}
+          onDrop={onDrop as never}
+          onSettled={nextSettled}
+          sourceOverride={{
+            kind: "pick", authorityId: "card-2", sourceInstanceId: "card-2", instanceIds: ["card-2"], cards: [card],
+            sourceIndices: [0], interactionGeneration: 2, previewWidth: 146, previewHeight: 204, previewImages: [],
+            onAdmission: vi.fn(), onSettled: nextSettled,
+          }}
+        />,
+      );
+      fireEvent.pointerDown(source, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 6, pointerType: "mouse" });
+      expect(source.setPointerCapture).toHaveBeenLastCalledWith(6);
+      expect(onSettled).toHaveBeenCalledExactlyOnceWith({ kind: "conflict" });
+
+      // The replaced drop's late outcome settles nothing and leaves the new drag live.
+      await act(async () => resolveOutcome({ status: "ignored", reason: "stale" }));
+      expect(onSettled).toHaveBeenCalledOnce();
+      fireEvent.pointerMove(source, { clientX: 30, clientY: 30, pointerId: 6, pointerType: "mouse" });
+      expect(screen.getByTestId("preview")).not.toHaveTextContent("");
+      expect(nextSettled).not.toHaveBeenCalled();
     });
   });
 });

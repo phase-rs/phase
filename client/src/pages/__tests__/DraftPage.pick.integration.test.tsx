@@ -244,6 +244,30 @@ describe("DraftPage production pick integration", () => {
     expect(document.querySelector('[data-instance-id="picked"][data-visual-state="leaving"]')).not.toBeNull();
   });
 
+  it("settles_a_drag_whose_accepted_selection_advances_the_prompt_as_picked", async () => {
+    const result = deferred<DraftPlayerView>();
+    wasm.local_fifo_select.mockReturnValue(result.promise);
+    await renderDraft();
+    const { source, target } = prepareDrag();
+    dragToTarget(source, target);
+    await waitFor(() => expect(useDraftStore.getState().pickInteractionLocked).toBe(true));
+    const generation = useDraftStore.getState().interactionGeneration;
+
+    const advanced = view({ pool: [card("picked")], pack: [card("next")] }) as DraftPlayerView & { fifo: FifoPlayerView };
+    await act(async () => result.resolve({
+      ...advanced,
+      fifo: { ...advanced.fifo, prompt_id: { ...STARTED_PROMPT, generation: STARTED_PROMPT.generation + 1 } },
+    } as DraftPlayerView));
+
+    expect(useDraftStore.getState()).toMatchObject({
+      interactionGenerationCause: "accepted-selection", pickInteractionLocked: false, pendingPickIntent: null,
+    });
+    expect(useDraftStore.getState().interactionGeneration).toBeGreaterThan(generation);
+    await waitFor(() => expect(useDraftStore.getState().workspaceState?.placements.picked).toMatchObject({ zone: "sideboard", column: 0 }));
+    expect(await screen.findByText("Picked picked.")).toBeInTheDocument();
+    expect(document.querySelector('[data-visual-state="failure-restored"]')).toBeNull();
+  });
+
   it("joins_owned_unlock_with_explicit_rejection_without_inserting_or_leaving", async () => {
     const result = deferred<DraftPlayerView>();
     wasm.local_fifo_select.mockReturnValue(result.promise);
@@ -270,7 +294,7 @@ describe("DraftPage production pick integration", () => {
     expect(formatGate.evaluate).toHaveBeenCalledWith({
       main_deck: [], sideboard: [], commander: [], companion: [], planar_deck: [],
       scheme_deck: [], signature_spell: [], draft_set_codes: [],
-      selected_format: "Limited", selected_match_type: "Bo1", player_count: 2,
+      min_deck_size: 40, selected_format: "Limited", selected_match_type: "Bo1", player_count: 2,
     });
     await waitFor(() => expect(wasm.local_fifo_submit_deck).toHaveBeenCalledOnce());
     expect(formatGate.evaluate.mock.invocationCallOrder[0])
@@ -299,7 +323,7 @@ describe("DraftPage production pick integration", () => {
     expect(formatGate.evaluate).toHaveBeenCalledWith({
       main_deck: [], sideboard: [], commander: [], companion: [], planar_deck: [],
       scheme_deck: [], signature_spell: [], draft_set_codes: [],
-      selected_format: "Limited", selected_match_type: "Bo1", player_count: 2,
+      min_deck_size: 40, selected_format: "Limited", selected_match_type: "Bo1", player_count: 2,
     });
     expect(wasm.local_fifo_submit_deck).not.toHaveBeenCalled();
     expect(useDraftStore.getState().workspaceState).toBe(workspaceBefore);

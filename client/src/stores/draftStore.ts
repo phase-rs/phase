@@ -143,6 +143,20 @@ export type DraftPickOutcome =
   | { readonly status: "rejected"; readonly reason: "adapter" | "invalid-request" | "unacknowledged" }
   | { readonly status: "ignored"; readonly reason: "busy" | "stale" };
 
+/**
+ * What issued a published `interactionGeneration`. A lifecycle reset and an
+ * accepted selection's next prompt both publish a new generation with the pick
+ * lock released, so a drop that owned the lock reads this to tell its own
+ * acceptance from a replacement.
+ */
+export type DraftInteractionGenerationCause =
+  /** A start, resume, reset, abandon or End Run replaced the session. */
+  | "lifecycle"
+  /** The engine accepted the player's selection and published its next prompt in the same update that released the lock. */
+  | "accepted-selection"
+  /** The engine published a prompt the player's selection did not produce. */
+  | "engine-prompt";
+
 export type PendingDraftPickIntent =
   | {
       kind: "pick";
@@ -178,6 +192,8 @@ interface DraftStoreState {
   workspaceState: DraftWorkspaceState | null;
   pendingPickIntent: PendingDraftPickIntent | null;
   interactionGeneration: number;
+  /** What issued `interactionGeneration`; published in the same update as it. */
+  interactionGenerationCause: DraftInteractionGenerationCause;
   pickInteractionLocked: boolean;
   poolSortMode: PoolSortMode;
   poolPanelOpen: boolean;
@@ -250,6 +266,7 @@ const initialState: DraftStoreState = {
   workspaceState: null,
   pendingPickIntent: null,
   interactionGeneration: 0,
+  interactionGenerationCause: "lifecycle",
   pickInteractionLocked: false,
   poolSortMode: "color",
   poolPanelOpen: true,
@@ -318,6 +335,7 @@ function publishInitialState(generation: number): void {
     // captured and forwarded to the engine.
     difficulty: state.difficulty,
     interactionGeneration: generation,
+    interactionGenerationCause: "lifecycle",
   }));
 }
 
@@ -482,6 +500,7 @@ type WorkspaceInstallPatch = Partial<Omit<
   | "view"
   | "workspaceState"
   | "interactionGeneration"
+  | "interactionGenerationCause"
 >>;
 
 type WorkspaceInstallOperation =
@@ -546,6 +565,17 @@ function operationResolvesOwnPlacement(operation: WorkspaceInstallOperation): re
       return operation.addedInstanceIds.filter(
         (instanceId) => operation.placementHints?.[instanceId] !== undefined,
       );
+  }
+}
+
+/** What issues the generation an install publishes when its view moves the prompt. */
+function promptMoveCause(operation: WorkspaceInstallOperation): DraftInteractionGenerationCause {
+  switch (operation.kind) {
+    case "state":
+      return "engine-prompt";
+    case "acknowledged-pick":
+    case "acknowledged-auto-pick":
+      return "accepted-selection";
   }
 }
 
@@ -618,7 +648,9 @@ function installWorkspace(operation: WorkspaceInstallOperation): void {
     ...operation.patch,
     view: operation.authoritativeView,
     workspaceState: workspace,
-    ...(promptMoved ? { interactionGeneration: nextInteractionGeneration() } : {}),
+    ...(promptMoved
+      ? { interactionGeneration: nextInteractionGeneration(), interactionGenerationCause: promptMoveCause(operation) }
+      : {}),
   });
   if (operation.persistence === "schedule") schedulePersistence(0);
 }
@@ -2506,7 +2538,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     const token = admitExclusive("end")!;
     const operation = { draftId: id, promise };
     endingRun = operation;
-    useDraftStore.setState({ interactionGeneration: interaction });
+    useDraftStore.setState({ interactionGeneration: interaction, interactionGenerationCause: "lifecycle" });
 
     void Promise.resolve().then(() => cleanupQuickDraftLifecycle(id)).then(
       () => {

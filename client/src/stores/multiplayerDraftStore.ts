@@ -106,6 +106,7 @@ import {
 import { exactAddedIds, poolMultiplicity } from "./draftPickAcknowledgement";
 import type {
   DraftAutoPickPlacementHints,
+  DraftInteractionGenerationCause,
   DraftPickDestination,
   DraftPickOutcome,
   DraftPickPlacementHint,
@@ -338,6 +339,8 @@ interface MultiplayerDraftState {
   workspaceState: DraftWorkspaceState | null;
   pendingPickIntent: PendingDraftPickIntent | null;
   interactionGeneration: number;
+  /** Always `"lifecycle"`: this store moves `interactionGeneration` only when it replaces the session. */
+  interactionGenerationCause: DraftInteractionGenerationCause;
   pickInteractionLocked: boolean;
   workspaceSyncError: string | null;
   mainDeck: string[];
@@ -1709,6 +1712,7 @@ const initialState: MultiplayerDraftState = {
   workspaceState: null,
   pendingPickIntent: null,
   interactionGeneration: 0,
+  interactionGenerationCause: "lifecycle",
   pickInteractionLocked: false,
   workspaceSyncError: null,
   mainDeck: [],

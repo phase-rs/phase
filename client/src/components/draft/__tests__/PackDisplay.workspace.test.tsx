@@ -252,7 +252,7 @@ function WorkspaceDragCommanderPickTwoHarness({
   const drag = useDraftWorkspaceDrag({
     enabled: true,
     workspaceProjectionEnabled: true,
-    readPickInteraction: () => ({ interactionGeneration: 4, pickInteractionLocked: false, pendingPickIntent: null }),
+    readPickInteraction: () => ({ interactionGeneration: 4, interactionGenerationCause: "lifecycle", pickInteractionLocked: false, pendingPickIntent: null }),
     subscribePickInteraction: () => () => undefined,
     onDrop: () => { throw new Error("Workspace drags do not dispatch picks."); },
     resolveCollapsedSideboardColumn: () => 0,
@@ -343,6 +343,7 @@ function RealDragPackHarness({
   const [renderedView, setRenderedView] = useState(viewOverride ?? view);
   const [interaction, setInteraction] = useState<DraftPickInteractionSnapshot>({
     interactionGeneration: 4,
+    interactionGenerationCause: "lifecycle",
     pickInteractionLocked: false,
     pendingPickIntent: null,
   });
@@ -365,6 +366,7 @@ function RealDragPackHarness({
       const dispatch = onDrop(request);
       publish({
         interactionGeneration: 4,
+        interactionGenerationCause: "lifecycle",
         pickInteractionLocked: true,
         pendingPickIntent: { kind: "pick", instanceIds: ["unknown"], destination: request.destination, placementHint: request.placementHint },
       });
@@ -394,7 +396,7 @@ function RealDragPackHarness({
       />
       <div data-testid="real-drag-target" ref={drag.registerCollapsedSideboard} />
       {advancedView !== undefined && <button type="button" onClick={() => setRenderedView(advancedView)}>advance pack</button>}
-      <button type="button" onClick={() => publish({ interactionGeneration: 4, pickInteractionLocked: false, pendingPickIntent: null })}>unlock</button>
+      <button type="button" onClick={() => publish({ interactionGeneration: 4, interactionGenerationCause: "lifecycle", pickInteractionLocked: false, pendingPickIntent: null })}>unlock</button>
     </>
   );
 }
