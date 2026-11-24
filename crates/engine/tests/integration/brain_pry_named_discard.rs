@@ -112,7 +112,7 @@ fn parses_discard_filter_and_if_they_cant_rider() {
     assert!(matches!(
         &*chain[0].effect,
         Effect::Choose {
-            choice_type: ChoiceType::CardName,
+            choice_type: ChoiceType::CardName { .. },
             ..
         }
     ));

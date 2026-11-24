@@ -31,7 +31,6 @@
     "accept": "受け入れる",
     "shorten": "短縮",
     "decline": "ショートカットを拒否",
-    "untilLethal": "ゲームが終了するまで繰り返す。",
     "withoutEnd": "終わりなく繰り返す。すべてのプレイヤーが受け入れた場合、ゲームは引き分けになる。",
     "fixedCount_one": "最大1回繰り返す。",
     "fixedCount_other": "最大{{count}}回繰り返す。",
@@ -51,16 +50,13 @@
     "allocationSum": "{{total}}回中{{allocated}}回を割り当て済み。",
     "evenSplit": "均等分配に戻す",
     "customDistribution": "カスタム分配 — この分配はエンジンでプレビューされていません。",
-    "announceTitle": "各反復で宣言する対象を選択:",
-    "announce": "宣言",
-    "announceAria": "{{subject}}を宣言",
     "mayTitle": "任意能力{{group}} — 各反復でこの選択を繰り返しますか？",
     "mayTake": "実行",
     "mayDecline": "実行しない",
     "mayTakeAria": "任意能力{{group}}を実行",
     "mayDeclineAria": "任意能力{{group}}を実行しない",
     "winKind": {
-      "LethalDamage": "このループは致死ダメージを与えます。",
+      "LethalDamage": "このループは対戦相手のライフを0以下にします。",
       "PoisonLoss": "このループは致死量の毒カウンターを与えます。",
       "Decking": "このループは対戦相手をライブラリーアウトさせます。",
       "ImmediateWin": "このループはゲームに勝利します。",
@@ -70,6 +66,7 @@
     "respondDeclaredTitle": "提案された宣言:",
     "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. {{subject}}の置換効果",
     "respondDecision": {
       "take": "{{subject}} — 各反復で実行",
       "decline": "{{subject}} — 各反復で実行しない"
@@ -155,7 +152,8 @@
     "loading": "{{name}}を読み込み中",
     "unimplemented": "未実装: {{mechanics}}",
     "dfc": "両面カード",
-    "tapped": "タップ状態"
+    "tapped": "タップ状態",
+    "reloadArt": "タップしてアートを再読み込み"
   },
   "preview": {
     "holdCtrlBack": "Ctrlを押して裏面を表示",
@@ -164,6 +162,8 @@
     "flip": "反転",
     "report": "問題を報告",
     "reported": "報告済み ✓",
+    "reportNotSent": "未送信",
+    "reloadArt": "アートを再読み込み",
     "altParsedAbilities": "Alt: 解析済み能力",
     "debugId": "ID: {{id}}",
     "engineParse": "エンジン解析",
@@ -706,6 +706,8 @@
     "commander": "統率者",
     "commanderTitle": "統率者: {{name}}",
     "commanderTitleTax": "統率者: {{name}}（税: +{{tax}}）",
+    "boss": "ボス",
+    "bossTitle": "ボス: {{name}}",
     "castCommander": "{{name}}を唱える — ダブルクリックまたはドラッグしてプレイ",
     "castCommanderTax": "{{name}}を唱える（税: +{{tax}}） — ダブルクリックまたはドラッグしてプレイ",
     "ninjutsuCommander": "統率者忍術: {{name}} — クリックしてブロックされていない攻撃クリーチャーを手札に戻し、この統率者をタップ状態で攻撃中に戦場へ出す",
@@ -869,7 +871,14 @@
     "lethalBadge": "致死",
     "planeswalkerLoyalty": "プレインズウォーカー（忠誠度: {{loyalty}}）",
     "defendingPlayerTrample": "防御プレイヤー（トランプル）",
+    "attackTargetTrample": "{{name}}（トランプル）",
     "pwControllerTrample": "PWコントローラー（PW越しのトランプル）",
+    "lethalButton": "致死",
+    "clearButton": "クリア",
+    "assignLethalTo": "{{target}}に致死ダメージを割り振る",
+    "clearDamageFor": "{{target}}へのダメージの割り振りをクリア",
+    "lethalFirstButton": "致死ダメージを優先",
+    "lethalFirstTitle": "各ブロック・クリーチャーに順番に致死ダメージを割り振り、その後で残りを割り振る",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "残り{{count}}点のダメージを{{target}}に割り振る",
     "assignRemainingTo_many": "残り{{count}}点のダメージを{{target}}に割り振る",
@@ -1219,6 +1228,11 @@
       "drawFirst": "後攻",
       "drawFirstDescription": "最初のターンに追加のドローを得る"
     },
+    "startingPlayer": {
+      "title": "先攻を選択",
+      "playerPlaysFirst": "{{name}}が先攻",
+      "opponentChoosing": "{{name}}が先攻を選択しています…"
+    },
     "mulligan": {
       "opponentDeciding": "対戦相手が初手を検討中…",
       "londonTitle": "ロンドン・マリガン（{{count}}回目）",
@@ -1269,6 +1283,7 @@
       "draw": "引き分け",
       "victory": "勝利",
       "defeat": "敗北",
+      "complete": "ゲーム終了",
       "lifeSummary": "あなた：<player>{{playerLife}}</player> <sep>/</sep> 対戦相手：<opponent>{{opponentLife}}</opponent>",
       "turns": "ターン数：{{count}}",
       "duration": "対戦時間：{{time}}",
@@ -1365,7 +1380,10 @@
         "Ticket": "チケット"
       },
       "generic": "コスト",
-      "pay": "{{cost}}を支払う"
+      "pay": "{{cost}}を支払う",
+      "draw": "カードを1枚引く",
+      "drawCount_one": "カードを{{count}}枚引く",
+      "drawCount_other": "カードを{{count}}枚引く"
     },
     "unlessPayment": {
       "defaultEffect": "支払わなければ打ち消す",
@@ -1373,7 +1391,8 @@
       "title": "支払わなければ：{{effect}}",
       "titleChooseOne": "いずれかを支払わなければ：{{effect}}",
       "dontPay": "支払わない",
-      "takeEffect": "効果を受ける"
+      "takeEffect": "効果を受ける",
+      "priorChoice": "プレイヤー{{id}}：{{choice}}"
     },
     "spliceOffer": {
       "title": "秘儀に連繋しますか？",
@@ -1576,7 +1595,9 @@
       "titleReveal": "手札から公開",
       "titleOpponentHand": "対戦相手の手札",
       "subtitleReveal": "公開するカードを選択するか、断る",
-      "subtitleChoose": "カードを選択"
+      "subtitleChoose": "カードを選択",
+      "subtitleRevealAnyNumber": "公開するカードを好きな枚数選択",
+      "subtitleChooseCount": "{{count}}枚のカードを選択"
     },
     "search": {
       "title": "ライブラリーを検索",
@@ -1840,6 +1861,10 @@
       "title": "コピーの順番",
       "subtitle": "次にコピーをスタックに置く呪文を選ぶ"
     },
+    "memberOrder": {
+      "title": "カードの順序",
+      "subtitle": "次に処理するカードを選んでください"
+    },
     "collectEvidence": {
       "title": "証拠収集",
       "subtitle": "あなたの墓地から、マナ総量の合計が{{minimum}}以上になるようにカードを追放"
@@ -1880,6 +1905,13 @@
       "titleExact_one": "カード1枚を捨てる",
       "titleExact_other": "カード{{count}}枚を捨てる",
       "titleWard": "護法 — カード1枚を捨てる",
+      "instructionWithReason": "{{reason}}：{{instruction}}",
+      "reason": {
+        "ward": "護法",
+        "connive": "謀議",
+        "additionalCost": "追加コスト",
+        "manaAbility": "マナ能力"
+      },
       "subtitleUpTo_one": "捨てるカードを最大{{count}}枚選択",
       "subtitleUpTo_other": "捨てるカードを最大{{count}}枚選択",
       "subtitleUnless": "{{count}}枚のカード、または条件に一致するカード1枚を捨てるものを選択",
@@ -2039,7 +2071,8 @@
     "scrollLeft": "左へスクロール",
     "scrollRight": "右へスクロール",
     "confirm": "確認",
-    "cancel": "キャンセル"
+    "cancel": "キャンセル",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "アドベンチャー",
@@ -2163,9 +2196,20 @@
     "title": "贈り物の受け取り手を選択",
     "subtitle": "約束した贈り物を受け取る対戦相手を選択"
   },
+  "costRecipient": {
+    "title": "対戦相手を選択",
+    "subtitle": "このコストで選ぶ対戦相手を選んでください：{{cost}}"
+  },
   "entryController": {
     "title": "戦場に出る際のコントローラーを選択",
     "subtitle": "このパーマネントが戦場に出る際にコントロールする対戦相手を選択"
+  },
+  "replacementDecisionOrder": {
+    "title": "先に行う選択を選ぶ",
+    "subtitle": "これらの置換の選択は同時に行われます。先に行う選択を選んでください。",
+    "unknownObject": "不明なオブジェクト",
+    "attachedTo": "{{host}}についている",
+    "attachments": "{{names}}がついている"
   },
   "optionalCost": {
     "gift": {
@@ -2333,6 +2377,13 @@
     "creatureFallback": "クリーチャー{{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "残りの{{count}}を{{target}}に割り振る",
+    "assignRemainingTo_many": "残りの{{count}}を{{target}}に割り振る",
+    "assignRemainingTo_one": "残りの{{count}}を{{target}}に割り振る",
+    "assignRemainingTo_other": "残りの{{count}}を{{target}}に割り振る",
+    "clearButton": "クリア",
+    "clearTarget": "{{target}}への割り振りをクリア",
     "unitCounter": "{{counter}}カウンター",
     "unitDamage": "ダメージ",
     "unitLife": "ライフ",
@@ -2461,6 +2512,9 @@
     "optionalTriggers": "任意の誘発型能力（{{count, number}}）",
     "replacementChoices": "置換効果の選択（{{count, number}}）"
   },
+  "choiceModal": {
+    "holdForFullCard": "長押しでカード全体を表示"
+  },
   "optionalEffect": {
     "sourceFallback": "効果",
     "title": "{{name}} — 任意の効果",
@@ -2517,6 +2571,8 @@
       "zoneHand": "あなたの手札",
       "discard": "{{count}}{{cards}}を捨てる",
       "exile": "{{zone}}から{{count}}{{cards}}を追放",
+      "haveOpponentGainLife": "対戦相手1人に{{amount}}点のライフを得させる",
+      "haveEachOtherPlayerGainLife": "他の各プレイヤーに{{amount}}点のライフを得させる",
       "reveal": "{{zone}}から{{count}}{{cards}}を公開する"
     }
   },
@@ -2573,7 +2629,7 @@
     "appliedLast": "最後に適用 — これが有効",
     "resultLabel": "結果：{{outcome}}",
     "confirmOrder": "順序を確認",
-    "dragHint": "ドラッグして並べ替えるか、矢印を使用。",
+    "dragHint": "<grip>⠿</grip> ハンドルをドラッグして並べ替えるか、矢印を使用。",
     "chooseSubtitle": "適用する置換効果を選択",
     "candidateFallback": "置換効果{{number}}",
     "orderSubtitleComposing": "これらの効果はすべてこのイベントの起こり方を変更します。適用順をドラッグで設定してください — すべて適用されるため順序で結果が変わります（CR 616.1）。",
@@ -2582,6 +2638,7 @@
     "composesNote": "すべての効果が適用され、順序によって組み合わせ方が変わります。",
     "moveUpNamed": "{{name}}を前へ移動",
     "moveDownNamed": "{{name}}を後へ移動",
+    "dragHandleNamed": "{{name}}をドラッグして並べ替え",
     "positionAnnounce": "{{total}}個中{{position}}番目"
   },
   "retargetChoice": {
@@ -2601,6 +2658,9 @@
     "partitionSubtitle": "あなたのクリーチャーを2つの束に分ける。{{chooser}}が1つを選ぶ。",
     "partitionSubtitleRemaining_one": "あなたのクリーチャーを2つの束に分ける。{{chooser}}が1つを選ぶ。（あなたの後に残りプレイヤー{{count}}人）",
     "partitionSubtitleRemaining_other": "あなたのクリーチャーを2つの束に分ける。{{chooser}}が1つを選ぶ。（あなたの後に残りプレイヤー{{count}}人）",
+    "partitionInstruction": "{{chooser}}が1つを選ぶ",
+    "partitionInstructionRemaining_one": "{{chooser}}が1つを選ぶ（あなたの後に残りプレイヤー{{count}}人）",
+    "partitionInstructionRemaining_other": "{{chooser}}が1つを選ぶ（あなたの後に残りプレイヤー{{count}}人）",
     "pileALabel": "束A：",
     "pileBLabel": "束B：",
     "pileAria": "{{name}} — 束{{pile}}",
@@ -2662,6 +2722,7 @@
   },
   "outsideGame": {
     "fromExile": "追放領域から",
+    "fromCompanion": "相棒から",
     "fromSideboard": "サイドボードから",
     "fromBoosterPack": "{{setCode}}ブースターパックから",
     "fromCubeBoosterPack": "キューブ・ブースターパックから"
@@ -2686,6 +2747,20 @@
     "EndCombat": "戦闘終了",
     "PostCombatMain": "メイン・フェイズ2",
     "End": "終了ステップ",
+    "Cleanup": "クリンナップ"
+  },
+  "phaseShortName": {
+    "Untap": "アンタップ",
+    "Upkeep": "アップキープ",
+    "Draw": "ドロー",
+    "PreCombatMain": "メイン1",
+    "BeginCombat": "戦闘開始",
+    "DeclareAttackers": "攻撃",
+    "DeclareBlockers": "ブロック",
+    "CombatDamage": "ダメージ",
+    "EndCombat": "戦闘終了",
+    "PostCombatMain": "メイン2",
+    "End": "終了",
     "Cleanup": "クリンナップ"
   },
   "counterMoveDistribution": {

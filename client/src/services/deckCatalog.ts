@@ -12,9 +12,11 @@ import {
   loadDeckOrigins,
   loadSavedDeck,
   loadSavedDeckBracket,
+  loadSavedDeckComboDeclaration,
   loadSavedDeckFormat,
 } from "../constants/storage";
-import type { CommanderBracket } from "../types/bracket";
+import type { ComboDeclaration, CommanderBracket } from "../types/bracket";
+import { UNDECLARED_COMBO } from "../types/bracket";
 import { getPreconBracket } from "../data/preconBrackets";
 import { BUNDLED_CEDH_DECKS } from "../data/cedhDecks";
 import { CEDH_BRACKET } from "./cedhLock";
@@ -40,6 +42,8 @@ export interface DeckCatalogCandidate {
   knownFormat?: GameFormat;
   coveragePct?: number | null;
   bracket?: CommanderBracket | null;
+  /** The owner's two-card-combo answer. Only a saved deck has an owner to give one. */
+  comboDeclaration: ComboDeclaration;
   feedDeck?: FeedDeck;
   preconDeck?: PreconDeckEntry;
 }
@@ -124,6 +128,7 @@ function pushPreconCandidate(
     knownFormat: "Commander",
     coveragePct: deck.coveragePct,
     bracket,
+    comboDeclaration: UNDECLARED_COMBO,
     preconDeck: deck,
   });
 }
@@ -150,6 +155,7 @@ export async function buildDeckCatalog({
       deck,
       knownFormat: knownFormatForSavedDeck(name, feedCache),
       bracket: loadSavedDeckBracket(name),
+      comboDeclaration: loadSavedDeckComboDeclaration(name),
     });
     savedDisplayNames.add(name);
   }
@@ -167,6 +173,7 @@ export async function buildDeckCatalog({
         deck: feedDeckToParsedDeck(deck),
         knownFormat,
         bracket: null,
+        comboDeclaration: UNDECLARED_COMBO,
         feedDeck: deck,
       });
     }

@@ -123,6 +123,12 @@ const CATEGORY_1_ROWS: &[&str] = &[
     // Complex Automaton: ObjectCount{Permanent} intervening-if read × self-Bounce
     // whose moved census (permanent) overlaps the read filter.
     "complex automaton",
+    // Fraying Line ("Otherwise, exile this artifact and each creature without a rope
+    // counter on it, then remove all rope counters from all creatures"): the first
+    // copy's mass RemoveCounter strips every rope counter, so the second copy's
+    // "each creature without a rope counter" census then matches every creature —
+    // which creatures are exiled depends on order (CR 603.3b + CR 608.2h).
+    "fraying line",
 ];
 
 /// §7 documented-conservative over-prompts: cards whose sweep decision-diff is a
@@ -214,6 +220,10 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // re-check, and each returns only itself (disjoint graveyard referents).
     // The death-count read × zone-change write conflict is conservative.
     "darklight phoenix",
+    // Spellpyre Phoenix: the hand write conservatively overlaps JournalCards.
+    // Each trigger returns its own card and leaves both players' cycle counts
+    // intact, so the intervening-if rechecks give the same result in either order.
+    "spellpyre phoenix",
     // Control(another nonland) read × self-Sacrifice — self-limiting.
     "reclusive wight",
     // Not(SourceIsTapped) read × untap-ALL write — idempotent.
@@ -319,10 +329,8 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // fire-time gate (evaluated at trigger time; the GE quantity is monotone
     // within the group — each copy's +1/+1 only raises total power, so a
     // fired gate stays fired at any re-check) + PutCounter P1P1 SelfRef
-    // (disjoint) + SetTapState Untap TriggeringSource (AST measured; Oracle
-    // "it" = the officer — mistargeted to the attack event's source, i.e. the
-    // sole attacker or a no-op; separate card-fix; idempotent either way). No
-    // flippable shared state. Commutes.
+    // (disjoint) + SetTapState Untap SelfRef (AST measured; "it" = the
+    // officer, CR 608.2c). No flippable shared state. Commutes.
     "tactical officer",
     // ---- same-event additive shared writes with per-source gates (correct
     // parses) ----
@@ -472,11 +480,13 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
 /// an intended prompt the legacy engine wrongly auto-ordered — not an over-prompt.
 const BATCH_GENUINE_ROWS: &[&str] = &[
     // LTB: Sacrifice{Dragons-you-control, count: ObjectCount{same}} → sub
-    // ChangeZone{TrackedSet(0) → Battlefield, enters_under: You} (AST measured).
-    // Each co-departing member returns ITS OWN tracked exile set, and returned
+    // ChangeZoneAll{origin: Exile, ExiledBySource → Battlefield,
+    // enters_under: You} (AST measured).
+    // Each co-departing member returns ITS OWN linked exile (the cards its ETB exiled), and returned
     // creatures can be Dragons the OTHER member's re-sacrifice then consumes —
     // final state differs by order (CR 603.3b intended prompt). Runtime pin:
-    // b2_dotd_member_bound_pin (reads_member_bound refuses batch-T1).
+    // b2_dotd_member_bound_pin on the pre-change ChangeZone{TrackedSet} twin; this
+    // shape sets the same flag via member_bound_target_filter's ExiledBySource arm.
     "day of the dragons",
     // LTB (self_ref): Discard{count: HandSize{Controller}} → sub Draw{count:
     // Intensity{Source}} gated on EffectOutcome(OptionalEffectPerformed) (AST
@@ -490,8 +500,8 @@ const BATCH_GENUINE_ROWS: &[&str] = &[
     // #5719 — the Draw was Unimplemented until the quantity channel bound Intensity,
     // and the sweep skips Unimplemented-bearing triggers.
     "great desert hellion",
-    // Dies (self_ref): DestroyAll{creatures with CombatRelation{BlockingOrBlockedBy,
-    // subject: Source}} (AST measured). Each co-departing Abu Ja'far answers from
+    // Dies (self_ref): DestroyAll{creatures with CombatRelation{BlockPairing{Either,
+    // None}, subject: Source}} (AST measured). Each co-departing Abu Ja'far answers from
     // ITS OWN departure row's block pairings (CR 608.2h), so the members destroy
     // different creatures, and a leaves trigger one resolution sets off resolves
     // before the next (Reveillark returning the creature the other Abu Ja'far
@@ -500,7 +510,7 @@ const BATCH_GENUINE_ROWS: &[&str] = &[
     // two_abu_jafars_dying_together_let_their_controller_order_the_triggers
     "abu ja'far",
     // Dies during combat (self_ref): DamageAll{6, creatures with CombatRelation{
-    // BlockedBySubject{ThisCombat}, subject: Source}} (AST measured). Each
+    // BlockPairing{SubjectIsBlocker, ThisCombat}, subject: Source}} (AST measured). Each
     // co-departing Membrane damages the attacker IT blocked, the attacker dies to
     // state-based actions between the two resolutions, and a leaves trigger it
     // sets off resolves before the next (CR 603.6c): same shape as Abu Ja'far.
@@ -1226,6 +1236,7 @@ fn ordering_parity_sweep() {
         let expected_cat1: BTreeSet<String> = [
             "complex automaton",
             "docent of perfection",
+            "fraying line",
             "marauding raptor",
             "ouroboroid",
             "promise of tomorrow",
@@ -1319,6 +1330,7 @@ fn token_power_src() -> Effect {
 }
 fn return_all_creatures_gy_to_bf() -> Effect {
     Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination: Zone::Battlefield,
@@ -1362,6 +1374,7 @@ fn self_departure(id: u64, co: &[u64]) -> Option<GameEvent> {
         to: Zone::Graveyard,
         record: Box::new(ZoneChangeRecord {
             co_departed: co.iter().map(|&x| ObjectId(x)).collect(),
+            instruction_lead: None,
             ..ZoneChangeRecord::test_minimal(ObjectId(id), Some(Zone::Battlefield), Zone::Graveyard)
         }),
     })
@@ -1867,6 +1880,7 @@ fn search_own_creatures() -> Effect {
 /// no `enters_under`) that consumes the search's `You` move-owner fact.
 fn change_zone_lib_to_bf() -> Effect {
     Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         library_shuffle: Default::default(),
         origin: Some(Zone::Library),
         destination: Zone::Battlefield,
@@ -2283,6 +2297,7 @@ fn sacrifice_all_own_creatures() -> ResolvedAbility {
 /// A `ChangeZone{target → Battlefield, enters_under: You}` return (Exile → bf).
 fn change_zone_return(target: TargetFilter) -> Effect {
     Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         library_shuffle: Default::default(),
         origin: Some(Zone::Exile),
         destination: Zone::Battlefield,
@@ -2597,6 +2612,7 @@ fn b3_source_independent_and_persist_false() {
 
     let self_sac = || {
         sacrifice_all_own_creatures().sub_ability(ra(Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Graveyard,

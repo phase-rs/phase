@@ -31,7 +31,6 @@
     "accept": "Accept",
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
-    "untilLethal": "Repeat until the game ends.",
     "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
@@ -51,16 +50,13 @@
     "allocationSum": "{{allocated}} of {{total}} repetitions allocated.",
     "evenSplit": "Reset to the even split",
     "customDistribution": "Custom distribution — the engine has not previewed this split.",
-    "announceTitle": "Choose the target every repetition announces:",
-    "announce": "Announce",
-    "announceAria": "Announce {{subject}}",
     "mayTitle": "Optional ability {{group}} — repeat this choice each iteration?",
     "mayTake": "Take it",
     "mayDecline": "Decline it",
     "mayTakeAria": "Take optional ability {{group}}",
     "mayDeclineAria": "Decline optional ability {{group}}",
     "winKind": {
-      "LethalDamage": "This loop deals lethal damage.",
+      "LethalDamage": "This loop reduces an opponent's life total to 0 or less.",
       "PoisonLoss": "This loop gives lethal poison counters.",
       "Decking": "This loop decks an opponent.",
       "ImmediateWin": "This loop wins the game.",
@@ -70,6 +66,7 @@
     "respondDeclaredTitle": "Proposed declaration:",
     "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. {{subject}}'s replacement effect",
     "respondDecision": {
       "take": "{{subject}} — taken each iteration",
       "decline": "{{subject}} — declined each iteration"
@@ -155,7 +152,8 @@
     "loading": "Loading {{name}}",
     "unimplemented": "Unimplemented: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Tapped"
+    "tapped": "Tapped",
+    "reloadArt": "Tap to reload art"
   },
   "preview": {
     "holdCtrlBack": "Hold Ctrl for back face",
@@ -164,6 +162,8 @@
     "flip": "Flip",
     "report": "Report a problem",
     "reported": "Reported ✓",
+    "reportNotSent": "Not sent",
+    "reloadArt": "Reload art",
     "altParsedAbilities": "Alt: parsed abilities",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine Parse",
@@ -706,6 +706,8 @@
     "commander": "Commander",
     "commanderTitle": "Commander: {{name}}",
     "commanderTitleTax": "Commander: {{name}} (Tax: +{{tax}})",
+    "boss": "Boss",
+    "bossTitle": "Boss: {{name}}",
     "castCommander": "Cast {{name}} — double-click or drag to play",
     "castCommanderTax": "Cast {{name}} (Tax: +{{tax}}) — double-click or drag to play",
     "ninjutsuCommander": "Commander ninjutsu: {{name}} — click to return an unblocked attacker to hand and put this commander onto the battlefield tapped and attacking",
@@ -869,7 +871,14 @@
     "lethalBadge": "Lethal",
     "planeswalkerLoyalty": "Planeswalker (loyalty: {{loyalty}})",
     "defendingPlayerTrample": "Defending Player (Trample)",
+    "attackTargetTrample": "{{name}} (Trample)",
     "pwControllerTrample": "PW Controller (Trample Over PW)",
+    "lethalButton": "Lethal",
+    "clearButton": "Clear",
+    "assignLethalTo": "Assign lethal damage to {{target}}",
+    "clearDamageFor": "Clear damage assigned to {{target}}",
+    "lethalFirstButton": "Lethal first",
+    "lethalFirstTitle": "Assign lethal damage to each blocker in order, then the rest",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "Assign the remaining {{count}} damage to {{target}}",
     "assignRemainingTo_many": "Assign the remaining {{count}} damage to {{target}}",
@@ -1219,6 +1228,11 @@
       "drawFirst": "Draw First",
       "drawFirstDescription": "Take the extra draw on your first turn"
     },
+    "startingPlayer": {
+      "title": "Choose Who Plays First",
+      "playerPlaysFirst": "{{name}} plays first",
+      "opponentChoosing": "{{name}} is choosing who plays first…"
+    },
     "mulligan": {
       "opponentDeciding": "Opponent is deciding their opening hand…",
       "londonTitle": "London Mulligan ({{count}} taken)",
@@ -1269,6 +1283,7 @@
       "draw": "DRAW",
       "victory": "VICTORY",
       "defeat": "DEFEAT",
+      "complete": "GAME OVER",
       "lifeSummary": "You: <player>{{playerLife}}</player> <sep>/</sep> Opponent: <opponent>{{opponentLife}}</opponent>",
       "turns": "Turns: {{count}}",
       "duration": "Duration: {{time}}",
@@ -1365,7 +1380,10 @@
         "Ticket": "ticket"
       },
       "generic": "a cost",
-      "pay": "Pay {{cost}}"
+      "pay": "Pay {{cost}}",
+      "draw": "draw a card",
+      "drawCount_one": "draw {{count}} card",
+      "drawCount_other": "draw {{count}} cards"
     },
     "unlessPayment": {
       "defaultEffect": "Counter Unless You Pay",
@@ -1373,7 +1391,8 @@
       "title": "{{effect}} Unless You Pay",
       "titleChooseOne": "{{effect}} Unless You Pay One",
       "dontPay": "Don’t Pay",
-      "takeEffect": "Take the Effect"
+      "takeEffect": "Take the Effect",
+      "priorChoice": "Player {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "Splice onto Arcane?",
@@ -1576,7 +1595,9 @@
       "titleReveal": "Reveal from Hand",
       "titleOpponentHand": "Opponent's Hand",
       "subtitleReveal": "Choose a card to reveal, or decline",
-      "subtitleChoose": "Choose a card"
+      "subtitleRevealAnyNumber": "Choose any number of cards to reveal",
+      "subtitleChoose": "Choose a card",
+      "subtitleChooseCount": "Choose {{count}} cards"
     },
     "search": {
       "title": "Search Library",
@@ -1840,6 +1861,10 @@
       "title": "Order the copies",
       "subtitle": "Choose the spell whose copy goes on the stack next"
     },
+    "memberOrder": {
+      "title": "Order the cards",
+      "subtitle": "Choose which card is handled next"
+    },
     "collectEvidence": {
       "title": "Collect Evidence",
       "subtitle": "Exile cards from your graveyard with total mana value {{minimum}} or greater"
@@ -1880,6 +1905,13 @@
       "titleExact_one": "Discard a card",
       "titleExact_other": "Discard {{count}} cards",
       "titleWard": "Ward — Discard a card",
+      "instructionWithReason": "{{reason}}: {{instruction}}",
+      "reason": {
+        "ward": "Ward",
+        "connive": "Connive",
+        "additionalCost": "Additional cost",
+        "manaAbility": "Mana ability"
+      },
       "subtitleUpTo_one": "Choose up to {{count}} card to discard",
       "subtitleUpTo_other": "Choose up to {{count}} cards to discard",
       "subtitleUnless": "Choose {{count}} cards or 1 matching card to discard",
@@ -2039,7 +2071,8 @@
     "scrollLeft": "Scroll left",
     "scrollRight": "Scroll right",
     "confirm": "Confirm",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Adventure",
@@ -2163,9 +2196,20 @@
     "title": "Choose Gift Recipient",
     "subtitle": "Choose which opponent receives the promised gift."
   },
+  "costRecipient": {
+    "title": "Choose an Opponent",
+    "subtitle": "Choose the opponent for this cost: {{cost}}."
+  },
   "entryController": {
     "title": "Choose Entry Controller",
     "subtitle": "Choose which opponent controls this permanent as it enters."
+  },
+  "replacementDecisionOrder": {
+    "title": "Choose Which Decision First",
+    "subtitle": "These replacement choices happen at the same time. Choose which one to make first.",
+    "unknownObject": "Unknown object",
+    "attachedTo": "On {{host}}",
+    "attachments": "With {{names}}"
   },
   "optionalCost": {
     "gift": {
@@ -2333,6 +2377,13 @@
     "creatureFallback": "Creature {{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Assign the remaining {{count}} to {{target}}",
+    "assignRemainingTo_many": "Assign the remaining {{count}} to {{target}}",
+    "assignRemainingTo_one": "Assign the remaining {{count}} to {{target}}",
+    "assignRemainingTo_other": "Assign the remaining {{count}} to {{target}}",
+    "clearButton": "Clear",
+    "clearTarget": "Clear {{target}}",
     "unitCounter": "{{counter}} counter",
     "unitDamage": "damage",
     "unitLife": "life",
@@ -2461,6 +2512,9 @@
     "optionalTriggers": "Optional triggers ({{count, number}})",
     "replacementChoices": "Replacement choices ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Hold to see the full card"
+  },
   "optionalEffect": {
     "sourceFallback": "Effect",
     "title": "{{name}} - Optional Effect",
@@ -2517,6 +2571,8 @@
       "zoneHand": "your hand",
       "discard": "Discard {{count}} {{cards}}",
       "exile": "Exile {{count}} {{cards}} from {{zone}}",
+      "haveOpponentGainLife": "Have an opponent gain {{amount}} life",
+      "haveEachOtherPlayerGainLife": "Have each other player gain {{amount}} life",
       "reveal": "Reveal {{count}} {{cards}} from {{zone}}"
     }
   },
@@ -2573,7 +2629,7 @@
     "appliedLast": "Applied last — this wins",
     "resultLabel": "Result: {{outcome}}",
     "confirmOrder": "Confirm Order",
-    "dragHint": "Drag to reorder, or use the arrows.",
+    "dragHint": "Drag the <grip>⠿</grip> handle to reorder, or use the arrows.",
     "chooseSubtitle": "Choose which replacement effect to apply.",
     "candidateFallback": "Replacement Effect {{number}}",
     "orderSubtitleComposing": "These effects all change how this event happens. Drag to set the order they apply in — each one applies, so the order changes the result (CR 616.1).",
@@ -2582,6 +2638,7 @@
     "composesNote": "Every effect applies — the order changes how they combine.",
     "moveUpNamed": "Move {{name}} earlier",
     "moveDownNamed": "Move {{name}} later",
+    "dragHandleNamed": "Drag {{name}} to reorder",
     "positionAnnounce": "Position {{position}} of {{total}}"
   },
   "retargetChoice": {
@@ -2601,6 +2658,9 @@
     "partitionSubtitle": "Separate your creatures into two piles. {{chooser}} will choose one.",
     "partitionSubtitleRemaining_one": "Separate your creatures into two piles. {{chooser}} will choose one. ({{count}} more player after you)",
     "partitionSubtitleRemaining_other": "Separate your creatures into two piles. {{chooser}} will choose one. ({{count}} more players after you)",
+    "partitionInstruction": "{{chooser}} chooses one",
+    "partitionInstructionRemaining_one": "{{chooser}} chooses one ({{count}} more player after you)",
+    "partitionInstructionRemaining_other": "{{chooser}} chooses one ({{count}} more players after you)",
     "pileALabel": "Pile A:",
     "pileBLabel": "Pile B:",
     "pileAria": "{{name}} — pile {{pile}}",
@@ -2682,6 +2742,7 @@
   },
   "outsideGame": {
     "fromExile": "From exile",
+    "fromCompanion": "From companion",
     "fromSideboard": "From sideboard",
     "fromBoosterPack": "From {{setCode}} booster pack",
     "fromCubeBoosterPack": "From a Cube booster pack"
@@ -2706,6 +2767,20 @@
     "EndCombat": "End Combat",
     "PostCombatMain": "Main Phase 2",
     "End": "End Step",
+    "Cleanup": "Cleanup"
+  },
+  "phaseShortName": {
+    "Untap": "Untap",
+    "Upkeep": "Upkeep",
+    "Draw": "Draw",
+    "PreCombatMain": "Main 1",
+    "BeginCombat": "Combat",
+    "DeclareAttackers": "Attackers",
+    "DeclareBlockers": "Blockers",
+    "CombatDamage": "Damage",
+    "EndCombat": "End Combat",
+    "PostCombatMain": "Main 2",
+    "End": "End",
     "Cleanup": "Cleanup"
   },
   "counterMoveDistribution": {

@@ -16,6 +16,7 @@ vi.mock("../../../services/llm/catalog", () => ({
       requiresApiKey: true,
       apiKeyUrl: "https://platform.openai.com/api-keys",
       models: [{ id: "gpt-5", label: "GPT-5" }],
+      decisionContexts: ["selfContained"],
     },
   ],
 }));

@@ -1,3 +1,4 @@
+import { deckEntryKey, type DeckEntry } from "../../../services/deckParser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useEffect, useState } from "react";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
@@ -74,15 +75,21 @@ vi.mock("../CardSearch", () => ({
   },
 }));
 
-vi.mock("../DeckStack", () => ({
-  DeckStack: ({ deck, commanders }: { deck: { main: Array<{ name: string; count: number }> }; commanders: string[] }) => (
-    <div>
-      <div>Deck Stack</div>
-      {commanders.map((name) => <div key={name}>{name}</div>)}
-      {deck.main.map((entry) => <div key={entry.name}>{entry.count} {entry.name}</div>)}
-    </div>
-  ),
-}));
+let useRealDeckStack = false;
+vi.mock("../DeckStack", async (importOriginal) => {
+  const { DeckStack } = await importOriginal<typeof import("../DeckStack")>();
+  return {
+    DeckStack: (props: React.ComponentProps<typeof DeckStack>) => useRealDeckStack ? (
+      <DeckStack {...props} />
+    ) : (
+      <div>
+        <div>Deck Stack</div>
+        {props.commanders.map((name) => <div key={name}>{name}</div>)}
+        {props.deck.main.map((entry) => <div key={deckEntryKey(entry)}>{entry.count} {entry.name}</div>)}
+      </div>
+    ),
+  };
+});
 
 vi.mock("../DeckList", () => ({
   DeckList: ({
@@ -90,15 +97,15 @@ vi.mock("../DeckList", () => ({
     onRemoveCard,
   }: {
     deck: { main: Array<{ name: string; count: number }>; commander?: string[] };
-    onRemoveCard: (name: string, section: "main" | "sideboard") => void;
+    onRemoveCard: (entry: DeckEntry, section: "main" | "sideboard") => void;
   }) => (
     <div>
       <div>Deck List</div>
       {deck.commander?.map((name) => <div key={name}>{name}</div>)}
       {deck.main.map((entry) => (
-        <div key={entry.name}>
+        <div key={deckEntryKey(entry)}>
           <span>{entry.count} {entry.name}</span>
-          <button type="button" onClick={() => onRemoveCard(entry.name, "main")}>
+          <button type="button" onClick={() => onRemoveCard(entry, "main")}>
             remove-{entry.name}
           </button>
         </div>
@@ -128,6 +135,7 @@ describe("DeckBuilder", () => {
 
   afterEach(() => {
     cleanup();
+    useRealDeckStack = false;
     navigateMock.mockReset();
     cacheCardsMock.mockClear();
     vi.mocked(loadPreconDeckMap).mockReset();
@@ -136,6 +144,36 @@ describe("DeckBuilder", () => {
     vi.mocked(useIsMobile).mockReturnValue(false);
     uninstallWebLocks();
     localStorage.clear();
+  });
+
+  it("increments only the second Forest printing from the stack view", async () => {
+    useRealDeckStack = true;
+    const user = userEvent.setup();
+    const first = { name: "Forest", count: 4, sourcePrinting: { setCode: "one", collectorNumber: "276" } };
+    const second = { name: "Forest", count: 3, sourcePrinting: { setCode: "dmu", collectorNumber: "277" } };
+    const key = STORAGE_KEY_PREFIX + "Forest Deck";
+    localStorage.setItem(key, JSON.stringify({ main: [first, second], sideboard: [], format: "Standard" }));
+
+    render(
+      <DeckBuilder
+        format="Standard"
+        onFormatChange={vi.fn()}
+        initialDeckName="Forest Deck"
+        searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+        onSearchFiltersChange={vi.fn()}
+        onResetSearch={vi.fn()}
+      />,
+    );
+
+    await screen.findByText("3 Forest");
+    await user.click(screen.getByRole("button", { name: "Stack view" }));
+    await screen.findByTitle("Add one Forest (ONE 276)");
+    await user.click(screen.getByTitle("Add one Forest (DMU 277)"));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(JSON.parse(localStorage.getItem(key) ?? "{}").main).toEqual([first, { ...second, count: 4 }]);
+    });
   });
 
   it("runs commander inference at save-time and persists the result", async () => {

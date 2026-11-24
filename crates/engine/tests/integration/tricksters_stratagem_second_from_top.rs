@@ -12,6 +12,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::process_triggers;
 use engine::types::ability::{Effect, LibraryPosition};
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -128,39 +129,6 @@ fn owner_chooses_and_top_branch_is_second_from_the_top() {
     );
 }
 
-/// CHARACTERIZATION of a PRE-EXISTING defect, not of intended behaviour.
-/// Declining the optional "up to one target creature you control" connive slot
-/// leaves the connive sub-ability inheriting the parent's target list
-/// (`targeting.rs` ~1212), and `effects/connive.rs:34-45` takes the FIRST object
-/// target (`ability.targets.iter().find_map(TargetRef::Object)`) instead of
-/// `targeting::resolved_targets(..)` as the sibling `put_on_top_or_bottom.rs:28`
-/// does. So the tucked creature itself connives: its owner draws the card above
-/// it and discards it, leaving the creature on TOP of the library - the exact
-/// outcome "second from the top" exists to prevent. Not fixed here (separate
-/// measurement); when connive.rs is fixed this assertion must flip to index 1.
-#[test]
-fn declined_connive_slot_currently_lets_the_tucked_creature_connive() {
-    let (mut runner, victim, _) =
-        cast_until_choice_with(&["Filler A", "Filler B", "Filler C"], false);
-    runner
-        .act(GameAction::ChooseTopOrBottom { top: true })
-        .expect("owner picks the top branch");
-    for _ in 0..8 {
-        if runner.state().stack.is_empty() {
-            break;
-        }
-        runner
-            .act(GameAction::PassPriority)
-            .expect("finish the chain");
-    }
-    let lib = library(&runner, P1);
-    assert_eq!(
-        lib.iter().position(|id| *id == victim),
-        Some(0),
-        "KNOWN DEFECT: victim ends on top after the mis-targeted connive, library = {lib:?}"
-    );
-}
-
 /// Reach-guard partner: the bottom branch still lands at the very bottom.
 #[test]
 fn bottom_branch_is_still_the_bottom() {
@@ -241,4 +209,146 @@ fn calim_discard_trigger_conjures_seventh_from_the_top() {
     );
     assert_eq!(&after[..6], &before[..6]);
     assert_eq!(&after[7..], &before[6..]);
+}
+
+#[test]
+fn declining_connive_target_preserves_the_owners_selected_library_slot() {
+    let (mut runner, victim, fillers) =
+        cast_until_choice_with(&["Filler A", "Filler B", "Filler C"], false);
+    let caster_library = library(&runner, P0);
+    runner
+        .act(GameAction::ChooseTopOrBottom { top: true })
+        .expect("the owner chooses second from the top");
+    assert_eq!(
+        library(&runner, P1),
+        vec![fillers[0], victim, fillers[1], fillers[2]],
+        "declining the optional connive target must not make the tucked creature connive"
+    );
+    assert_eq!(library(&runner, P0), caster_library);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+}
+
+#[test]
+fn illegal_tuck_target_does_not_stop_the_other_creature_conniving() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Owner A", "Owner B", "Owner C"]);
+    let discarded = scenario
+        .add_spell_to_hand_from_oracle(P0, "Opt", true, "Scry 1.\nDraw a card.")
+        .id();
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let conniver = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Trickster's Stratagem", false, TRICKSTERS_STRATAGEM)
+        .id();
+    let response = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+        .id();
+    let mut runner = scenario.build();
+    // Infrastructure: seed a typed nonland in the otherwise-empty library.
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        discarded,
+        Zone::Library,
+        &mut Vec::new(),
+    );
+    let owner_library = library(&runner, P1);
+    runner
+        .cast(spell)
+        .target_objects(&[victim, conniver])
+        .commit();
+    runner
+        .cast(response)
+        .target_object(victim)
+        .commit()
+        .try_resolve()
+        .expect("Murder invalidates the tuck target before the original spell resolves");
+
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(library(&runner, P1), owner_library);
+    assert!(library(&runner, P0).is_empty());
+    assert_eq!(state.objects[&victim].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&conniver].zone, Zone::Battlefield);
+    assert_eq!(
+        state.objects[&conniver]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        Some(&1)
+    );
+    assert_eq!(state.objects[&discarded].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+    assert!(state.players[0].hand.is_empty());
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
+}
+
+#[test]
+fn illegal_connive_target_does_not_replace_the_missing_creature_with_the_spell() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["Owner A", "Owner B", "Owner C"]);
+    let not_discarded = scenario
+        .add_spell_to_hand_from_oracle(P0, "Opt", true, "Scry 1.\nDraw a card.")
+        .id();
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let conniver = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Trickster's Stratagem", false, TRICKSTERS_STRATAGEM)
+        .id();
+    let response = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+        .id();
+    let mut runner = scenario.build();
+    // Infrastructure: seed a typed nonland in the otherwise-empty library.
+    engine::game::zones::move_to_zone(
+        runner.state_mut(),
+        not_discarded,
+        Zone::Library,
+        &mut Vec::new(),
+    );
+    let owner_library = library(&runner, P1);
+    runner
+        .cast(spell)
+        .target_objects(&[victim, conniver])
+        .commit();
+    runner
+        .cast(response)
+        .target_object(conniver)
+        .commit()
+        .try_resolve()
+        .expect("Murder invalidates the connive target before the original spell resolves");
+    match &runner.state().waiting_for {
+        WaitingFor::TopOrBottomChoice {
+            player, object_id, ..
+        } => {
+            assert_eq!(*player, P1);
+            assert_eq!(*object_id, victim);
+        }
+        other => panic!("the surviving tuck target still requires its owner's choice: {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseTopOrBottom { top: true })
+        .expect("the owner chooses second from the top");
+
+    let state = runner.state();
+    assert_eq!(
+        library(&runner, P1),
+        vec![owner_library[0], victim, owner_library[1], owner_library[2]]
+    );
+    assert_eq!(library(&runner, P0), vec![not_discarded]);
+    assert_eq!(state.objects[&conniver].zone, Zone::Graveyard);
+    assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+    assert!(state.players[0].hand.is_empty());
+    assert!(state.players[1].hand.is_empty());
+    assert!(state.graveyard_of(P1).is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.pending_replacement.is_none());
+    assert!(state.stack.is_empty());
+    assert!(state.resolution_stack.is_empty());
 }

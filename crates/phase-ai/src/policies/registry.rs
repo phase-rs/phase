@@ -129,7 +129,7 @@ pub enum PolicyId {
     /// mana rock (Basalt Monolith class) — a self-funded, net-zero loop.
     SelfUntapLoop,
     ComboLineProgress,
-    CedhKeepablesMulligan,
+    BracketKeepablesMulligan,
     FixedDeckKeepMulligan,
     /// Universal mulligan card-count floor — see `policies::mulligan::card_floor`.
     MulliganCardFloor,
@@ -493,6 +493,15 @@ impl PolicyRegistry {
                 .filter(|policy| ids.contains(&policy.id()))
                 .collect(),
         )
+    }
+
+    /// Every default policy plus `extra`: a production registry with one
+    /// test-only policy added.
+    #[cfg(test)]
+    pub(crate) fn default_with_for_tests(extra: Box<dyn TacticalPolicy>) -> Self {
+        let mut policies = Self::default().policies;
+        policies.push(extra);
+        Self::from_policies(policies)
     }
 
     /// Return a process-wide shared `PolicyRegistry`, constructed once on first

@@ -49,6 +49,7 @@ fn redirect_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefin
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 destination: redirected_to,
                 origin: None,
@@ -65,6 +66,75 @@ fn redirect_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefin
                 enters_modified_if: None,
             },
         ))
+}
+
+/// CR 101.4c + CR 616.1: a staged batch consults every member before any
+/// prompt, so `player` holds one decision per member of `held` and first
+/// chooses which to make. Pin that prompt (the announcement order is the
+/// batch's, so the set is pinned), make the first announced member's decision
+/// first, and check its choice is the one published. Returns the members in
+/// announcement order; every member after the first still holds its decision.
+fn make_first_held_decision(
+    runner: &mut GameRunner,
+    player: engine::types::player::PlayerId,
+    held: &[ObjectId],
+) -> Vec<ObjectId> {
+    let WaitingFor::ReplacementDecisionOrder {
+        player: chooser,
+        objects,
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected the held decisions' order prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(chooser, player);
+    let mut offered = objects.clone();
+    offered.sort();
+    let mut expected = held.to_vec();
+    expected.sort();
+    assert_eq!(offered, expected, "one held decision per staged member");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![objects[0]],
+        })
+        .expect("make the first announced member's decision first");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| pending.proposed.affected_object_id()),
+        Some(objects[0]),
+        "the selected member's choice is published"
+    );
+    let staged = runner
+        .state()
+        .resolution_stack
+        .iter()
+        .find_map(|frame| match frame {
+            engine::types::resolution::ResolutionFrame::BatchDelivery(batch) => {
+                batch.staged.as_ref()
+            }
+            _ => None,
+        })
+        .expect("the staged batch is parked");
+    for later in &objects[1..] {
+        assert!(
+            staged
+                .members
+                .iter()
+                .any(|member| member.identity.object_id == *later
+                    && member.held_decision.is_some()),
+            "every later member still holds its own decision"
+        );
+    }
+    objects
 }
 
 /// CR 616.1: source-linked exile tracking is part of the parked zone-move
@@ -114,9 +184,10 @@ fn exile_tracking_parked_resume_preserves_source_link() {
     }));
 }
 
-/// W-R1 (red first): a Dig rest pile sent to the library bottom is an
-/// effect-owned batch. Competing Library-destination `Moved` replacements must
-/// pause before the kept tracked set is published, then re-pause safely while
+/// W-R1 (red first): a Dig rest pile sent to a zone other than the library
+/// (a card already in the library reordered within it is not a zone change,
+/// CR 701.20b) is an effect-owned batch. Competing hand-destination `Moved`
+/// replacements must pause before the kept tracked set is published, then re-pause safely while
 /// the rest pile drains.
 #[test]
 fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
@@ -138,12 +209,12 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
         scenario
             .add_creature(P0, "Dig Library To Graveyard", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Graveyard))
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Hand))
             .id(),
         scenario
             .add_creature(P0, "Dig Library To Exile", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Exile))
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Exile))
             .id(),
     ];
 
@@ -158,7 +229,7 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
             keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
-            rest_destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Graveyard),
             rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
@@ -182,17 +253,16 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
     let paused = runner
         .act(GameAction::SelectCards { cards: vec![kept] })
         .expect("Dig submits the kept card and reaches the first bottom placement");
+    // CR 101.4c: the staged rest pile consulted both rest cards before any
+    // prompt; P0 orders its two held placements and makes the first announced
+    // one first. The second rest card is parked behind that choice as a held
+    // decision.
     assert!(matches!(
         paused.waiting_for,
-        WaitingFor::ReplacementChoice { .. }
+        WaitingFor::ReplacementDecisionOrder { player: P0, .. }
     ));
-    let parked_order = runner
-        .state()
-        .active_batch_delivery()
-        .expect("the second rest card is parked behind the first replacement choice")
-        .remaining
-        .clone();
-    assert_eq!(parked_order.len(), 1);
+    // The batch first parks at that order prompt, so the parked-state checks
+    // are made there, exactly where the first placement prompt used to be.
     assert!(
         runner.state().chain_tracked_set_id.is_none(),
         "the kept set cannot publish while a rest placement remains undecided"
@@ -201,6 +271,22 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
         assert!(
             runner.state().revealed_cards.contains(&card_id),
             "reveal bookkeeping must remain intact while the rest-pile batch is parked"
+        );
+    }
+    let announced = make_first_held_decision(&mut runner, P0, &[rest_a, rest_b]);
+    let parked_order = announced[1..].to_vec();
+    assert_eq!(parked_order.len(), 1);
+    assert!(
+        runner.state().chain_tracked_set_id.is_none(),
+        "the kept set cannot publish while a rest placement remains undecided"
+    );
+    // CR 701.20a: ordering the held decisions is part of the same instruction,
+    // so the first placement's choice is still asked with the cards revealed,
+    // as it was before the order prompt existed.
+    for card_id in [kept, rest_a, rest_b] {
+        assert!(
+            runner.state().revealed_cards.contains(&card_id),
+            "the reveal survives the decision-order answer"
         );
     }
 
@@ -243,8 +329,114 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
         .into_iter()
         .find(|id| !parked_order.contains(id))
         .expect("first attempted rest card is outside the parked suffix");
-    assert_ne!(runner.state().objects[&redirected_id].zone, Zone::Library);
-    assert_eq!(runner.state().objects[&parked_order[0]].zone, Zone::Library);
+    assert_ne!(runner.state().objects[&redirected_id].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&parked_order[0]].zone,
+        Zone::Graveyard
+    );
+}
+
+/// CR 616.1: a held decision is asked only if it still stands when it is about
+/// to be published. Here P0 holds one placement decision per rest card and is
+/// choosing which to make first when both competing redirects stop existing;
+/// the selected decision and the one behind it are consulted again instead of
+/// being asked, and the rest pile goes to the library bottom unredirected.
+///
+/// Synthetic: the redirect permanents carry hand-built `Moved` replacements
+/// and lose them by direct state edit while the order prompt is up (no game
+/// action is legal there except the selection and a concession). The printed
+/// shape this stands for is a held decision whose replacement source is gone
+/// by the time its turn comes.
+#[test]
+fn held_decisions_whose_replacements_are_gone_are_not_asked_when_selected() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature(P0, "Dig Source", 1, 1).id();
+    let kept = scenario
+        .add_spell_to_library_top(P0, "Dig Kept Card", true)
+        .id();
+    let rest_a = scenario
+        .add_spell_to_library_top(P0, "Dig Rest Card A", true)
+        .id();
+    let rest_b = scenario
+        .add_spell_to_library_top(P0, "Dig Rest Card B", true)
+        .id();
+    let redirect_sources = [
+        scenario
+            .add_creature(P0, "Dig Library To Graveyard", 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Hand))
+            .id(),
+        scenario
+            .add_creature(P0, "Dig Library To Exile", 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Exile))
+            .id(),
+    ];
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].library = im::vector![kept, rest_a, rest_b];
+    let ability = ResolvedAbility::new(
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 3 },
+            destination: None,
+            keep_count: Some(1),
+            keep_count_expr: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: Some(Zone::Graveyard),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
+            rest_split_top_count: None,
+            rest_order: DigRestOrder::Preserve,
+            reveal: true,
+            enter_tapped: false,
+            enters_attacking: false,
+            source: DigSource::Library,
+        },
+        vec![],
+        source,
+        P0,
+    );
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+        .expect("Dig reaches its selection");
+    runner
+        .act(GameAction::SelectCards { cards: vec![kept] })
+        .expect("Dig submits the kept card");
+    let WaitingFor::ReplacementDecisionOrder {
+        player: P0,
+        objects,
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "P0 orders its two held placements, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(objects.len(), 2);
+    for redirect_source in redirect_sources {
+        let redirect_source = runner
+            .state_mut()
+            .objects
+            .get_mut(&redirect_source)
+            .expect("synthetic redirect source remains on the battlefield");
+        redirect_source.replacement_definitions.clear();
+        Arc::make_mut(&mut redirect_source.base_replacement_definitions).clear();
+    }
+    let selected = runner
+        .act(GameAction::SelectCards {
+            cards: vec![objects[0]],
+        })
+        .expect("the selection is accepted");
+    assert!(
+        matches!(selected.waiting_for, WaitingFor::Priority { .. }),
+        "neither stale decision is asked, got {:?}",
+        selected.waiting_for
+    );
+    for rest in [rest_a, rest_b] {
+        assert_eq!(runner.state().objects[&rest].zone, Zone::Graveyard);
+    }
+    assert!(runner.state().resolution_stack.is_empty());
 }
 
 /// CR 608.2c + CR 616.1: declining an up-to Dig selection publishes its empty
@@ -265,12 +457,12 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
         scenario
             .add_creature(P0, "Zero-Kept Library To Graveyard", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Graveyard))
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Hand))
             .id(),
         scenario
             .add_creature(P0, "Zero-Kept Library To Exile", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Exile))
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Exile))
             .id(),
     ];
 
@@ -285,7 +477,7 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
             keep_count_expr: None,
             up_to: true,
             filter: TargetFilter::Any,
-            rest_destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Graveyard),
             rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
@@ -305,10 +497,13 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
     let paused = runner
         .act(GameAction::SelectCards { cards: vec![] })
         .expect("an empty up-to selection reaches the rest-pile replacement choice");
+    // CR 101.4c: both rest cards were consulted before any prompt; P0 orders
+    // its two held placements and makes the first announced one first.
     assert!(matches!(
         paused.waiting_for,
-        WaitingFor::ReplacementChoice { .. }
+        WaitingFor::ReplacementDecisionOrder { player: P0, .. }
     ));
+    make_first_held_decision(&mut runner, P0, &[rest_a, rest_b]);
 
     let reparking = runner
         .act(GameAction::ChooseReplacement { index: 0 })
@@ -332,23 +527,18 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
     assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
     let redirected_rest = [rest_a, rest_b]
         .into_iter()
-        .find(|id| {
-            matches!(
-                runner.state().objects[id].zone,
-                Zone::Graveyard | Zone::Exile
-            )
-        })
+        .find(|id| matches!(runner.state().objects[id].zone, Zone::Hand | Zone::Exile))
         .expect("one rest-pile card must take the configured redirect");
     let returned_rest = [rest_a, rest_b]
         .into_iter()
-        .find(|id| runner.state().objects[id].zone == Zone::Library)
-        .expect("the other rest-pile card must complete its library placement");
+        .find(|id| runner.state().objects[id].zone == Zone::Graveyard)
+        .expect("the other rest-pile card must complete its graveyard placement");
     assert_ne!(redirected_rest, returned_rest);
     assert!(
         runner.state().players[P0.0 as usize]
-            .library
+            .graveyard
             .contains(&returned_rest),
-        "the unredirected rest-pile card must be present in P0's library"
+        "the unredirected rest-pile card must be present in P0's graveyard"
     );
 
     let tracked = runner
@@ -702,12 +892,12 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
         scenario
             .add_creature(P0, "Deferred Dig Library Redirect A", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Graveyard))
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Hand))
             .id(),
         scenario
             .add_creature(P0, "Deferred Dig Library Redirect B", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Exile))
+            .with_replacement_definition(redirect_moved_to(Zone::Graveyard, Zone::Exile))
             .id(),
     ];
 
@@ -722,7 +912,7 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
             keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
-            rest_destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Graveyard),
             rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
@@ -763,15 +953,20 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
     let rest_pause = runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("kept-card resolution enters the deferred rest-pile route");
+    // CR 101.4c: the staged rest pile consulted both rest cards before any
+    // prompt; P0 orders its two held placements and makes the first announced
+    // one first. The second rest placement is parked behind that redirect as a
+    // held decision.
     assert!(matches!(
         rest_pause.waiting_for,
-        WaitingFor::ReplacementChoice { .. }
+        WaitingFor::ReplacementDecisionOrder { player: P0, .. }
     ));
+    let announced = make_first_held_decision(&mut runner, P0, &[rest_a, rest_b]);
+    assert_eq!(announced.len(), 2);
     let first_rest_park = runner
         .state()
         .active_batch_delivery()
         .expect("the second rest placement is parked behind the first redirect");
-    assert_eq!(first_rest_park.remaining.len(), 1);
     assert!(
         matches!(
             first_rest_park.completion.as_ref(),
@@ -980,24 +1175,27 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         .description("Prevent the staged mana cost move".to_string())]
     .into();
     state.pending_replacement = Some(PendingReplacement {
+        settled_damage_guards: Vec::new(),
         proposed: ProposedEvent::Destroy {
             object_id: source,
             source: None,
             cant_regenerate: false,
             applied: Default::default(),
         },
+        token_substitute: None,
         sacrifice_provenance: None,
         candidates: vec![ReplacementId { source, index: 0 }],
         search_found_candidates: Vec::new(),
+        ordering_peers: Vec::new(),
         depth: 0,
         is_optional: false,
         choice_player: None,
-        library_placement: None,
         exile_controller: None,
         exile_duration: None,
         exile_tracking: engine::types::game_state::ZoneDeliveryExileTracking::None,
         excess_recipient: None,
         lifelink_bonus: 0,
+        source_incarnation: None,
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
@@ -1420,6 +1618,7 @@ fn ward_multi_sacrifice_payment_reparks_each_replacement_before_effect_resolved(
         )),
         remaining: 1,
         min_total_power: Some(2),
+        trigger_event: None,
     };
 
     let initial = runner
@@ -1529,6 +1728,7 @@ fn ward_sequential_sacrifice_payment_reprompts_only_after_replacement_resolves()
         )),
         remaining: 2,
         min_total_power: None,
+        trigger_event: None,
     };
 
     let initial = runner
@@ -1640,6 +1840,7 @@ fn ward_sacrifice_payment_completes_synchronously_without_replacements() {
         )),
         remaining: 1,
         min_total_power: Some(2),
+        trigger_event: None,
     };
     let aggregate = aggregate_runner
         .act(GameAction::SelectCards {
@@ -1685,6 +1886,7 @@ fn ward_sacrifice_payment_completes_synchronously_without_replacements() {
         )),
         remaining: 2,
         min_total_power: None,
+        trigger_event: None,
     };
     let first = sequential_runner
         .act(GameAction::SelectCards {
@@ -2971,7 +3173,7 @@ fn pitch_exile_cost_honors_moved_redirect_and_completes_cast() {
         })
         .expect("cast Nourishing Shoal");
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept pitch cost");
 
     let result = runner
@@ -3057,7 +3259,7 @@ fn multi_card_exile_cost_resumes_after_each_replacement_choice() {
         })
         .expect("cast two-card pitch witness");
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept two-card pitch cost");
     let result = runner
         .act(GameAction::SelectCards {
@@ -3130,7 +3332,7 @@ fn return_to_hand_cost_honors_moved_redirect_and_completes_cast() {
         })
         .expect("cast Daze cost witness");
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept return-to-hand cost");
     assert!(matches!(
         runner.state().waiting_for,
@@ -3235,13 +3437,14 @@ fn self_exile_activation_cost_pauses_for_moved_redirect_without_pending_cast() {
     );
 }
 
-#[test]
-fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exiles_only() {
-    let mut scenario = GameScenario::new();
+fn mimeoplasm_forced_cost_board(
+    cost_owner: engine::types::player::PlayerId,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(3, 0x326c);
     scenario.at_phase(Phase::PreCombatMain);
 
     let first = scenario
-        .add_creature_to_graveyard(P0, "First Mimeoplasm Witness", 2, 2)
+        .add_creature_to_graveyard(cost_owner, "First Mimeoplasm Witness", 2, 2)
         .id();
     let second = scenario
         .add_creature_to_graveyard(P0, "Second Mimeoplasm Witness", 3, 3)
@@ -3249,10 +3452,10 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
     let mimeoplasm = scenario
         .add_creature_to_hand_from_oracle(
             P0,
-            "Mimeoplasm Forced-Cost Witness",
+            "The Mimeoplasm",
             5,
             5,
-            "As ~ enters, you may exile two creature cards from graveyards. If you do, ~ enters as a copy of one of them, except it has +1/+1 counters equal to the other's power.",
+            "As The Mimeoplasm enters, you may exile two creature cards from graveyards. If you do, it enters as a copy of one of those cards with a number of additional +1/+1 counters on it equal to the power of the other card.",
         )
         .id();
     for name in ["First Mimeoplasm Redirect", "Second Mimeoplasm Redirect"] {
@@ -3268,7 +3471,7 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
     scenario.add_basic_land(P0, ManaColor::Black);
 
     let mut runner = scenario.build();
-    assert!(runner.state().players[P0.0 as usize]
+    assert!(runner.state().players[cost_owner.0 as usize]
         .graveyard
         .contains(&first));
     assert!(runner.state().players[P0.0 as usize]
@@ -3296,6 +3499,27 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
     runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("accept Mimeoplasm's replacement cost");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "accepting the cost must park a real inner move for cost owner {cost_owner:?}: {:?}",
+        runner.state().waiting_for,
+    );
+    assert!(
+        matches!(
+            runner.state().pending_cost_move_resume,
+            Some(PendingCostMoveResume::ReplacementMayCost { .. })
+        ),
+        "the real exile-cost pipeline must own the nested continuation",
+    );
+    (runner, first, second, mimeoplasm)
+}
+
+#[test]
+fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exiles_only() {
+    let (runner, first, second, mimeoplasm) = mimeoplasm_forced_cost_board(P0);
 
     let state = runner.state();
     let Some(PendingCostMoveResume::ReplacementMayCost { remaining, .. }) =
@@ -3386,6 +3610,265 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
     assert!(
         state.active_spell_resolution().is_none(),
         "the outer context is consumed only when Mimeoplasm's own entry completes"
+    );
+}
+
+/// Supplemental typed-cost infrastructure witness. As in the ordinary row
+/// above, Mimeoplasm's independent copy/counter branch is intentionally stripped;
+/// full-Oracle Mox rows establish the actual optional-entry card semantics.
+#[test]
+fn fu7_nested_may_cost_departure_preserves_outer_cursor_or_retires_departed_payer() {
+    for (leaver, cost_owner) in [(P1, P0), (P0, P0), (P1, P1)] {
+        let (mut runner, first, second, mimeoplasm) = mimeoplasm_forced_cost_board(cost_owner);
+        let root_before = runner
+            .state()
+            .pending_cost_move_resume
+            .clone()
+            .expect("the forced exile must park its MayCost root before any departure");
+        let inner_before = runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .expect("the forced exile must park a real replacement prompt")
+            .clone();
+        assert_eq!(inner_before.candidates.len(), 2);
+        let PendingCostMoveResume::ReplacementMayCost {
+            source_id,
+            current,
+            remaining,
+            outer_replacement: Some(outer),
+            ..
+        } = &root_before
+        else {
+            panic!("the inner move must retain its exact outer MayCost root");
+        };
+        assert_eq!(*source_id, mimeoplasm);
+        assert_eq!(inner_before.proposed.affected_object_id(), Some(*current));
+        assert!(matches!(
+            inner_before.proposed,
+            ProposedEvent::ZoneChange {
+                from: Zone::Graveyard,
+                to: Zone::Exile,
+                ..
+            }
+        ));
+        assert_eq!(outer.proposed.affected_object_id(), Some(mimeoplasm));
+        assert!(matches!(
+            outer.proposed,
+            ProposedEvent::ZoneChange {
+                from: Zone::Stack,
+                to: Zone::Battlefield,
+                ..
+            }
+        ));
+        assert_eq!(runner.state().objects[current].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&mimeoplasm].zone, Zone::Stack);
+        assert!(
+            runner
+                .state()
+                .active_spell_resolution()
+                .is_some_and(|ctx| ctx.object_id == mimeoplasm),
+            "the inner prompt must retain the actual outer permanent-spell resolution",
+        );
+        assert_eq!(*current, if cost_owner == P0 { first } else { second });
+        let expected_remaining = [if cost_owner == P0 { second } else { first }];
+        assert_eq!(remaining.as_slice(), expected_remaining);
+        assert_eq!(outer.choice_player, Some(P0));
+        assert!(outer.may_cost_paid);
+        runner
+            .act(GameAction::Concede { player_id: leaver })
+            .unwrap();
+        if leaver == P0 {
+            assert!(!runner.state().battlefield.contains(&mimeoplasm));
+            assert!(runner.state().pending_cost_move_resume.is_none());
+            assert!(runner.state().pending_replacement.is_none());
+        } else if cost_owner == leaver {
+            assert_eq!(runner.state().objects[&mimeoplasm].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&second].zone, Zone::Graveyard);
+            assert!(runner.state().pending_cost_move_resume.is_none());
+            assert!(runner.state().pending_replacement.is_none());
+        } else {
+            assert_eq!(
+                runner.state().pending_cost_move_resume.as_ref(),
+                Some(&root_before)
+            );
+            let inner_after = runner.state().pending_replacement.as_ref().unwrap();
+            assert_eq!(inner_after.proposed, inner_before.proposed);
+            assert_eq!(inner_after.depth, inner_before.depth);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { player: P0, .. }
+            ));
+            for _ in 0..2 {
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .unwrap();
+            }
+            assert_eq!(runner.state().objects[&first].zone, Zone::Hand);
+            assert_eq!(runner.state().objects[&second].zone, Zone::Hand);
+            assert_eq!(runner.state().objects[&mimeoplasm].zone, Zone::Battlefield);
+            assert!(runner.state().pending_cost_move_resume.is_none());
+            assert!(runner.state().pending_replacement.is_none());
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(!runner.state().replacement_may_cost_paused);
+    }
+}
+
+/// CR 608.2c + CR 614.12a + CR 616.1: an effect puts the Mimeoplasm forced-cost witness onto the
+/// battlefield and then gains 3 life. Its accepted two-card exile cost pauses on a redirect choice for each
+/// card, and the effect's next instruction waits until both exiles and the entry have completed.
+///
+/// Revert probe: without the rider exclusion for the exile carrier, the life gain resolves after the first
+/// redirect answer — before the second cost exile is even paid — and precedes the entry.
+#[test]
+fn an_exile_may_cost_entry_finishes_before_the_effects_next_instruction() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario
+        .add_creature_to_graveyard(P0, "First Mimeoplasm Witness", 2, 2)
+        .id();
+    let second = scenario
+        .add_creature_to_graveyard(P0, "Second Mimeoplasm Witness", 3, 3)
+        .id();
+    let mimeoplasm = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Mimeoplasm Forced-Cost Witness",
+            5,
+            5,
+            "As ~ enters, you may exile two creature cards from graveyards. If you do, ~ enters as a copy of one of them, except it has +1/+1 counters equal to the other's power.",
+        )
+        .id();
+    for name in ["First Mimeoplasm Redirect", "Second Mimeoplasm Redirect"] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_moved_to(Zone::Exile, Zone::Hand));
+    }
+    let mut runner = scenario.build();
+    let mut forced_cost_only =
+        runner.state().objects[&mimeoplasm].replacement_definitions[0].clone();
+    // As in the test above: strip only the independent copy/counter branch.
+    forced_cost_only.execute = None;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&mimeoplasm)
+        .expect("Mimeoplasm witness exists")
+        .replacement_definitions = vec![forced_cost_only].into();
+
+    let entry_then_life = ResolvedAbility::new(
+        Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            origin: Some(Zone::Hand),
+            destination: Zone::Battlefield,
+            target: TargetFilter::SpecificObject { id: mimeoplasm },
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+            library_shuffle: Default::default(),
+        },
+        vec![],
+        ObjectId(9000),
+        P0,
+    )
+    .sub_ability(ResolvedAbility::new(
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 3 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+        ObjectId(9000),
+        P0,
+    ));
+    let mut events = Vec::new();
+    resolve_ability_chain(runner.state_mut(), &entry_then_life, &mut events, 0)
+        .expect("the effect pauses on the witness's entry replacement");
+
+    let entry_and_life_order = |events: &[GameEvent]| -> Vec<&'static str> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if *object_id == mimeoplasm => Some("entry"),
+                GameEvent::LifeChanged { .. } => Some("life"),
+                _ => None,
+            })
+            .collect()
+    };
+    let frame_kinds = |state: &GameState| -> Vec<engine::types::resolution::FrameKind> {
+        state
+            .resolution_stack
+            .iter()
+            .map(|frame| frame.kind())
+            .collect()
+    };
+
+    // Accept the cost, then answer the first card's redirect.
+    for _ in 0..2 {
+        let result = runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .expect("the replacement answer is legal");
+        events.extend(result.events);
+    }
+    let state = runner.state();
+    assert_eq!(state.objects[&first].zone, Zone::Hand);
+    assert_eq!(state.objects[&second].zone, Zone::Graveyard);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "the second card's redirect prompt is open, got {:?}",
+        state.waiting_for
+    );
+    assert_eq!(
+        state.objects[&mimeoplasm].zone,
+        Zone::Hand,
+        "no premature entry"
+    );
+    assert_eq!(
+        state.players[0].life, 20,
+        "the effect's next instruction waits"
+    );
+    assert_eq!(
+        frame_kinds(state),
+        vec![
+            engine::types::resolution::FrameKind::AbilityContinuation,
+            engine::types::resolution::FrameKind::ChangeZone,
+        ],
+        "the enclosing effect's frames are still live"
+    );
+
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the second redirect answer is legal");
+    events.extend(result.events);
+
+    let state = runner.state();
+    assert_eq!(entry_and_life_order(&events), vec!["entry", "life"]);
+    assert_eq!(state.players[0].life, 23);
+    assert_eq!(state.objects[&second].zone, Zone::Hand);
+    assert_eq!(state.objects[&mimeoplasm].zone, Zone::Battlefield);
+    assert!(state.pending_cost_move_resume.is_none());
+    assert!(state.pending_replacement.is_none());
+    assert!(
+        state.resolution_stack.is_empty(),
+        "got {:?}",
+        frame_kinds(state)
     );
 }
 
@@ -3883,6 +4366,8 @@ fn mana_self_exile_cost_redirect_serializes_and_resumes_unless_payment_once() {
         trigger_event: None,
         effect_description: Some("unless payment witness".to_string()),
         remaining: vec![P1],
+        repeat: None,
+        affected_object: None,
     };
     let mut initial_events = Vec::new();
     let initial = activate_mana_ability(
@@ -3912,7 +4397,8 @@ fn mana_self_exile_cost_redirect_serializes_and_resumes_unless_payment_once() {
                 trigger_event: None,
                 effect_description: Some(description),
                 remaining,
-            } if cost.as_ref() == &unless_cost
+
+                ..} if cost.as_ref() == &unless_cost
                 && paused_effect.as_ref() == &pending_effect
                 && description == "unless payment witness"
                 && remaining == &vec![P1]
@@ -3954,6 +4440,7 @@ fn mana_self_exile_cost_redirect_serializes_and_resumes_unless_payment_once() {
             trigger_event,
             effect_description,
             remaining,
+            ..
         } => {
             assert_eq!(*player, P0);
             assert_eq!(cost, &unless_cost);
@@ -4095,6 +4582,8 @@ fn auto_tap_cost_move_redirect_preserves_outer_unless_payment() {
         trigger_event: None,
         effect_description: Some("auto-tap unless payment witness".to_string()),
         remaining: vec![P1],
+        repeat: None,
+        affected_object: None,
     };
 
     let paused = runner
@@ -4115,7 +4604,8 @@ fn auto_tap_cost_move_redirect_preserves_outer_unless_payment() {
                 trigger_event: None,
                 effect_description: Some(description),
                 remaining,
-            } if cost.as_ref() == &unless_cost
+
+                ..} if cost.as_ref() == &unless_cost
                 && paused_effect.as_ref() == &pending_effect
                 && description == "auto-tap unless payment witness"
                 && remaining == &vec![P1]
@@ -5165,24 +5655,27 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         .description("Prevent the staged cost move".to_string())]
     .into();
     runner.state_mut().pending_replacement = Some(PendingReplacement {
+        settled_damage_guards: Vec::new(),
         proposed: ProposedEvent::Destroy {
             object_id: source,
             source: None,
             cant_regenerate: false,
             applied: Default::default(),
         },
+        token_substitute: None,
         sacrifice_provenance: None,
         candidates: vec![ReplacementId { source, index: 0 }],
         search_found_candidates: Vec::new(),
+        ordering_peers: Vec::new(),
         depth: 0,
         is_optional: false,
         choice_player: None,
-        library_placement: None,
         exile_controller: None,
         exile_duration: None,
         exile_tracking: engine::types::game_state::ZoneDeliveryExileTracking::None,
         excess_recipient: None,
         lifelink_bonus: 0,
+        source_incarnation: None,
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
@@ -9610,6 +10103,8 @@ fn prevented_mana_cost_move_serializes_and_restores_unless_payment_root() {
             trigger_event: None,
             effect_description: Some("prevented unless payment witness".to_string()),
             remaining: vec![P1],
+            repeat: None,
+            affected_object: None,
         },
         None,
     )
@@ -9635,7 +10130,8 @@ fn prevented_mana_cost_move_serializes_and_restores_unless_payment_root() {
             trigger_event: None,
             effect_description: Some(ref description),
             ref remaining,
-        } if cost == &unless_cost
+
+            ..} if cost == &unless_cost
             && resumed_effect.as_ref() == &pending_effect
             && description == "prevented unless payment witness"
             && remaining == &vec![P1]
@@ -11623,19 +12119,24 @@ fn cascade_bottom_batch_pauses_for_library_redirect_before_completion() {
     resolve_ability_chain(runner.state_mut(), &ability, &mut initial_events, 0)
         .expect("cascade should reach its library-bottom cleanup");
 
+    // CR 101.4c: the staged bottom batch consults every miss before any
+    // prompt, so P0 holds one placement decision per miss and first chooses
+    // which to make (the first announced one). The later misses are the parked
+    // suffix as held decisions (unconsulted `remaining` entries before the
+    // scheduler), still batch-owned.
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::ReplacementChoice { .. }
+            WaitingFor::ReplacementDecisionOrder { player: P0, .. }
         ),
         "the first cascade bottom placement must surface its competing Moved redirects"
     );
-    let parked_order = runner
-        .state()
-        .active_batch_delivery()
-        .expect("the remaining randomized cascade suffix must be batch-owned")
-        .remaining
-        .clone();
+    let announced = make_first_held_decision(&mut runner, P0, &misses);
+    let parked_order = announced[1..].to_vec();
+    assert!(
+        runner.state().active_batch_delivery().is_some(),
+        "the remaining randomized cascade suffix must be batch-owned"
+    );
     assert_eq!(
         parked_order.len(),
         misses.len() - 1,
@@ -11662,9 +12163,19 @@ fn cascade_bottom_batch_pauses_for_library_redirect_before_completion() {
         Zone::Library,
         "the chosen redirect suppresses the original bottom placement"
     );
+    // The suffix re-pauses: P0 still holds both later placements, so it orders
+    // them again (CR 101.4c) and makes the next announced one first.
     assert!(
-        matches!(redirected.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        matches!(
+            redirected.waiting_for,
+            WaitingFor::ReplacementDecisionOrder { player: P0, .. }
+        ),
         "the remaining batch suffix must re-pause while the Library redirects remain active"
+    );
+    assert_eq!(
+        make_first_held_decision(&mut runner, P0, &parked_order),
+        parked_order,
+        "the re-pause offers the suffix in its announcement order"
     );
     for redirect_source in redirect_sources {
         runner
@@ -11678,6 +12189,15 @@ fn cascade_bottom_batch_pauses_for_library_redirect_before_completion() {
     let completed = runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("the now-unredirected parked cascade suffix drains");
+    // CR 616.1: the last miss's decision was held while the redirects were
+    // active. They are gone when it would be asked, so the scheduler consults
+    // that placement again instead of asking a choice that no longer exists,
+    // and the batch completes.
+    assert!(
+        matches!(completed.waiting_for, WaitingFor::Priority { .. }),
+        "a held decision whose replacements are gone is not asked, got {:?}",
+        completed.waiting_for
+    );
     let library: Vec<_> = runner.state().players[P0.0 as usize]
         .library
         .iter()
@@ -12121,23 +12641,22 @@ fn put_on_top_batch_redirects_and_preserves_chosen_order_without_redirects() {
     resolve_ability_chain(redirected.state_mut(), &ability, &mut redirected_events, 0)
         .expect("put-on-top reaches its first library placement");
 
+    // CR 101.4c: the staged top placement consults both cards before any
+    // prompt, so P0 holds both placements and first chooses which to make (the
+    // first announced). The other card is the parked suffix as a held decision.
     assert!(
         matches!(
             redirected.state().waiting_for,
-            WaitingFor::ReplacementChoice { .. }
+            WaitingFor::ReplacementDecisionOrder { player: P0, .. }
         ),
         "the first top placement must surface its competing Moved redirects"
     );
+    let announced = make_first_held_decision(&mut redirected, P0, &[first, second]);
     assert!(
         redirected.state().active_batch_delivery().is_some(),
         "the remaining placement must be carried by the batch across the pause"
     );
-    let parked_order = redirected
-        .state()
-        .active_batch_delivery()
-        .expect("the remaining top placement is batch-owned")
-        .remaining
-        .clone();
+    let parked_order = announced[1..].to_vec();
     assert!(
         !redirected_events.iter().any(|event| matches!(
             event,
@@ -12151,15 +12670,35 @@ fn put_on_top_batch_redirects_and_preserves_chosen_order_without_redirects() {
     );
     let first_redirect = redirected
         .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("choosing the first top-placement redirect delivers that card");
+        .expect("choosing the first redirect advances the batch's approval");
     let redirected_id = [first, second]
         .into_iter()
         .find(|id| !parked_order.contains(id))
         .expect("the attempted top card is outside the parked suffix");
     assert_eq!(
         redirected.state().objects[&redirected_id].zone,
-        Zone::Graveyard,
-        "the replacement suppresses placement at the old top position"
+        Zone::Hand,
+        "approved members wait for the entire batch's replacement consultation"
+    );
+    // CR 616.1: consult every member before delivering the modified batch event.
+    assert_eq!(
+        redirected.state().objects[&parked_order[0]].zone,
+        Zone::Hand
+    );
+    assert_eq!(
+        redirected.state().players[P0.0 as usize].library.front(),
+        Some(&marker)
+    );
+    assert_eq!(
+        redirected
+            .state()
+            .active_batch_delivery()
+            .expect("the approving batch remains parked")
+            .staged
+            .as_ref()
+            .expect("top placement uses staged delivery")
+            .stage,
+        engine::types::game_state::BatchDeliveryStage::Approving
     );
     assert!(
         matches!(
@@ -12180,6 +12719,11 @@ fn put_on_top_batch_redirects_and_preserves_chosen_order_without_redirects() {
     let completed = redirected
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("the now-unredirected top-placement suffix drains");
+    assert_eq!(
+        redirected.state().objects[&redirected_id].zone,
+        Zone::Graveyard,
+        "the first approved redirect is delivered when the batch settles"
+    );
     assert_eq!(
         redirected.state().players[P0.0 as usize]
             .library
@@ -12206,6 +12750,7 @@ fn put_on_top_batch_redirects_and_preserves_chosen_order_without_redirects() {
         1,
         "PutAtLibraryPosition completes exactly once after the whole batch settles"
     );
+    assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
 }
 
 /// W-L2: A declined Discover keeps its hit and chain tail parked until the
@@ -12305,9 +12850,12 @@ fn discover_bottom_batch_pauses_before_its_hit_and_continuation_complete() {
             choice: engine::types::actions::CastChoice::Decline,
         })
         .expect("declined discover starts the replacement-aware miss batch");
+    // CR 101.4c: the staged miss batch consults both misses before any prompt,
+    // so P0 holds both placements and first chooses which to make (the first
+    // announced). The other miss is the parked suffix as a held decision.
     assert!(matches!(
         paused.waiting_for,
-        WaitingFor::ReplacementChoice { .. }
+        WaitingFor::ReplacementDecisionOrder { player: P0, .. }
     ));
     assert_eq!(
         runner.state().objects[&hit].zone,
@@ -12315,12 +12863,12 @@ fn discover_bottom_batch_pauses_before_its_hit_and_continuation_complete() {
         "the raw hit-to-hand instruction waits until the miss batch completes"
     );
     assert_eq!(runner.state().players[P0.0 as usize].life, 20);
-    let parked_order = runner
-        .state()
-        .active_batch_delivery()
-        .expect("the remaining randomized discover misses are batch-owned")
-        .remaining
-        .clone();
+    let announced = make_first_held_decision(&mut runner, P0, &[miss_a, miss_b]);
+    assert!(
+        runner.state().active_batch_delivery().is_some(),
+        "the remaining randomized discover misses are batch-owned"
+    );
+    let parked_order = announced[1..].to_vec();
     let first_redirect = runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("the first discover miss is redirected before the batch completes");
@@ -13698,12 +14246,15 @@ fn targeted_sacrifice_reparks_replacement_before_terminal_effect_resolved() {
 
     let first_resumed = runner
         .act(GameAction::ChooseReplacement { index: 0 })
-        .expect("the first replacement delivers and re-parks the second sacrifice");
+        .expect("the first replacement queues its move and re-parks the second sacrifice");
     assert!(matches!(
         first_resumed.waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
-    assert_eq!(runner.state().objects[&first].zone, Zone::Exile);
+    // CR 616.1: the answer decides how the first permanent moves, but the two
+    // sacrifices are one simultaneous action: nothing moves until the second
+    // permanent's replacements have been consulted too.
+    assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
     assert!(
         !initial_events
@@ -13724,6 +14275,7 @@ fn targeted_sacrifice_reparks_replacement_before_terminal_effect_resolved() {
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("the remaining selected sacrifice and terminal tail resolve");
     assert!(matches!(completed.waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(runner.state().objects[&first].zone, Zone::Exile);
     assert_eq!(runner.state().objects[&second].zone, Zone::Exile);
     assert_eq!(runner.state().last_effect_count, Some(2));
     assert_eq!(
@@ -14398,6 +14950,7 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
     ] {
         let mut runner = GameRunner::from_state(base_state.clone());
         runner.state_mut().waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: P0,
             cards: vec![hand_first, library_first, hand_second, library_second],
             count: 4,
@@ -14415,14 +14968,17 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
             track_exiled_by_source: false,
             face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: Some(position),
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
 
         let completed = runner

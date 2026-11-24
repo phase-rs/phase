@@ -5,16 +5,16 @@ use serde::{Deserialize, Serialize};
 
 use super::game_object::GameObject;
 use super::players;
-use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::filter::{matches_target_filter, type_filter_matches, FilterContext};
 use crate::game::functioning_abilities::static_kind_present;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
-    AttackerBlockStatus, ContinuousModification, StaticCondition, StaticDefinition, TargetFilter,
-    TargetRef,
+    AttackerBlockStatus, ContinuousModification, ControllerRef, StaticCondition, StaticDefinition,
+    TargetFilter, TargetRef,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ExtraPhase, GameState};
+use crate::types::game_state::{ExtraPhase, GameState, TransientContinuousEffect};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -379,11 +379,11 @@ pub struct CombatState {
         serialize_with = "crate::types::deterministic_serde::hash_set"
     )]
     pub attacking_incarnations_this_combat: HashSet<ObjectIncarnationRef>,
-    /// CR 509.1g + CR 400.7: Every blocker/attacker pair recorded as blocking
-    /// this combat, each side pinned to its exact incarnation. Historical
-    /// record, not live blocker membership: CR 506.4 does not prune it, so a
-    /// trigger that resolves after either creature left combat can still read
-    /// it.
+    /// CR 509.1g + CR 400.7: Every blocker/attacker pair created by declaring
+    /// blockers this combat, including band members (CR 702.22h), each side
+    /// pinned to its exact incarnation. Historical record, not live blocker
+    /// membership: CR 506.4 does not prune it, so a trigger that resolves after
+    /// either creature left combat can still read it.
     #[serde(
         default,
         serialize_with = "crate::types::deterministic_serde::hash_set"
@@ -1046,11 +1046,11 @@ fn record_combat_membership_edit(
 }
 
 /// CR 509.1g + CR 400.7: Records one (blocker, attacker) pair into the
-/// block-history windows. Single authority, so the live declaration path, the
-/// CR 506.3e put-onto-the-battlefield-blocking path and the CR 733 replay applier
-/// cannot drift. The caller supplies the blocker's exact incarnation from its
-/// own authority; the attacker's is captured from the live object, and an
-/// attacker with no live object records nothing.
+/// block-history windows. `declare_blockers_for_player` is the only caller:
+/// CR 509.4 keeps a creature put onto the battlefield blocking out of this
+/// history. The caller supplies the blocker's exact incarnation from its own
+/// authority; the attacker's is captured from the live object, and an attacker
+/// with no live object records nothing.
 fn record_block_history(
     state: &mut GameState,
     blocker: ObjectIncarnationRef,
@@ -1071,6 +1071,83 @@ fn record_block_history(
         combat.creature_blocked_attackers_this_combat.insert(pair);
     }
     state.creature_blocked_attackers_this_turn.insert(pair);
+}
+
+/// CR 509.4: entering blocking never counts as having blocked. Repair saves
+/// in the legacy release/pre-marker format, before declaration history was versioned.
+/// Receipts identify the blocker incarnation but only the attacker's storage id.
+/// With at most one declare-blockers step begun this turn, no later declaration
+/// (CR 509.1g) could have followed the entering block, so its history is removed.
+/// With exactly two declare-blockers steps and two combats begun, a live combat's
+/// window distinguishes the second declaration (CR 509.1g): the released writer
+/// cleared that window at each combat's beginning and wrote entries and declarations
+/// into both windows. Remove a receipt-matched turn pair only if absent there.
+/// Otherwise preserve ambiguous history: a finished second combat, additional
+/// combats (including ones skipping blockers), or more declarations cannot prove
+/// whether a later genuine block contributed. An entry in the live second combat
+/// also remains indistinguishable from a declaration and is conservatively kept.
+/// Current trusted saves bypass this repair and preserve genuine declarations.
+pub(crate) fn migrate_restored_entering_block_history(state: &mut GameState) {
+    use crate::types::resolved_commands::ResolvedRulesCommand;
+
+    let declarations = state.steps_started_this_turn.count(Phase::DeclareBlockers);
+    let distinguishing_combat = if declarations <= 1 {
+        None
+    } else if declarations == 2 && state.steps_started_this_turn.count(Phase::BeginCombat) == 2 {
+        let Some(combat) = state.combat.as_ref() else {
+            return;
+        };
+        Some(combat.creature_blocked_attackers_this_combat.clone())
+    } else {
+        return;
+    };
+
+    let entering: HashSet<_> = state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .filter_map(|entry| {
+            let Some(ResolvedRulesCommand::CombatMembership(command)) = entry.command.as_ref()
+            else {
+                return None;
+            };
+            match command.edit {
+                ResolvedCombatMembershipEdit::Block {
+                    resulting_attacker, ..
+                } => Some((command.object, resulting_attacker)),
+                ResolvedCombatMembershipEdit::Attack { .. }
+                | ResolvedCombatMembershipEdit::MarkBlocked
+                | ResolvedCombatMembershipEdit::Remove { .. }
+                | ResolvedCombatMembershipEdit::RetireAttacked { .. } => None,
+            }
+        })
+        .collect();
+    let mut removed_blockers = HashSet::new();
+    let mut keep = |pair: &BlockHistoryPair| {
+        let remove = entering.contains(&(pair.blocker, pair.attacker.object_id))
+            && distinguishing_combat
+                .as_ref()
+                .is_none_or(|current| !current.contains(pair));
+        if remove {
+            removed_blockers.insert(pair.blocker);
+        }
+        !remove
+    };
+    state.creature_blocked_attackers_this_turn.retain(&mut keep);
+    if let Some(combat) = state.combat.as_mut() {
+        combat.creature_blocked_attackers_this_combat.retain(keep);
+    }
+    state.creatures_blocked_this_turn.retain(|id| {
+        let entering_live = state.objects.get(id).is_some_and(|object| {
+            let live = ObjectIncarnationRef::from_object(object);
+            removed_blockers.contains(&live)
+        });
+        !entering_live
+            || state
+                .creature_blocked_attackers_this_turn
+                .iter()
+                .any(|pair| pair.blocker.object_id == *id)
+    });
 }
 
 /// CR 509.1g + CR 400.7: every current block pairing `object_id` is in, in both
@@ -1393,22 +1470,58 @@ pub fn choose_entry_attack_target_or_enter(
     }
 }
 
-/// CR 509.1g + CR 506.3e + CR 509.1h: Put a permanent onto the battlefield as a
-/// blocking creature for `attacker_id`. Used by effects that create or place a
-/// creature already "blocking that creature" (Mirror Match's copy tokens).
+/// CR 509.1g + CR 509.1h: Record both directions of a block edge.
+/// The caller handles the attacker's sticky blocked flag and any events.
+pub(crate) fn record_block_edge(
+    combat: &mut CombatState,
+    blocker_id: ObjectId,
+    attacker_id: ObjectId,
+) {
+    combat
+        .blocker_to_attacker
+        .entry(blocker_id)
+        .or_default()
+        .push(attacker_id);
+    combat
+        .blocker_assignments
+        .entry(attacker_id)
+        .or_default()
+        .push(blocker_id);
+}
+
+/// CR 509.4 + CR 506.3e + CR 509.1g + CR 509.1h: Put a permanent onto the
+/// battlefield as a blocking creature for `attacker_id`. Used by effects that
+/// create or place a creature already "blocking that creature" (Mirror Match's
+/// copy tokens). Per CR 509.4 the creature is "blocking" but never "blocked"; an
+/// effect that makes an existing creature block (CR 509.3a) is a different event
+/// and must not reuse this function.
 ///
-/// Per CR 506.3e, the creature only becomes a blocking creature if `attacker_id`
-/// is attacking the blocker's controller (or a planeswalker/battle they control,
-/// captured by `AttackerInfo.defending_player`); otherwise the creature is on
-/// the battlefield but is never considered a blocking creature, so this is a
-/// no-op for the combat bookkeeping. Per CR 509.3a/509.3b, a creature put onto
-/// the battlefield blocking does NOT cause "whenever ~ blocks" abilities to
-/// trigger, so no `BlockersDeclared` event is emitted; combat damage reads the
-/// recorded assignments directly. Returns `true` when the block was established.
-pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: ObjectId) -> bool {
+/// CR 506.3a: a noncreature entrant never becomes a blocking permanent. Per
+/// CR 506.3e, a creature only becomes a blocker if `attacker_id` is attacking its
+/// controller, a planeswalker they control, or a battle they protect (captured
+/// by `AttackerInfo.defending_player`); otherwise it enters without blocking.
+/// CR 509.3a/509.3b + CR 509.4: entering blocking never fires blocker-side
+/// "blocks" abilities, so no `BlockersDeclared`
+/// event is emitted. CR 509.3c/509.3d: attacker-side events distinguish the first
+/// blocked transition from each entering blocker. Returns `true` when the block
+/// was established.
+pub fn place_blocking(
+    state: &mut GameState,
+    blocker_id: ObjectId,
+    attacker_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    // CR 613.1: entry may only have dirtied layers, so settle continuous type
+    // changes before deciding whether the actual entrant is a creature.
+    crate::game::layers::flush_layers(state);
     let Some(blocker) = state.objects.get(&blocker_id) else {
         return false;
     };
+    // CR 506.3a: a noncreature enters without establishing a block. This is not
+    // declaration legality: CR 509.4b still ignores declaration restrictions.
+    if !blocker.card_types.core_types.contains(&CoreType::Creature) {
+        return false;
+    }
     let blocker_controller = blocker.controller;
     let reference = ObjectIncarnationRef::from_object(blocker);
     let Some(combat) = state.combat.as_mut() else {
@@ -1432,21 +1545,10 @@ pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: 
     let expected_attacker_blocked = info.blocked;
     info.blocked = true;
     // CR 509.1g: the creature becomes a blocking creature for the chosen attacker.
-    combat
-        .blocker_to_attacker
-        .entry(blocker_id)
-        .or_default()
-        .push(attacker_id);
-    combat
-        .blocker_assignments
-        .entry(attacker_id)
-        .or_default()
-        .push(blocker_id);
-    // CR 509.1a tracking: record the blocker for per-turn "blocked this turn" queries.
-    state.creatures_blocked_this_turn.insert(blocker_id);
-    // CR 509.1g + CR 400.7: record the pair into the block-history
-    // windows through the single write authority.
-    record_block_history(state, reference, attacker_id);
+    record_block_edge(combat, blocker_id, attacker_id);
+    // CR 509.4: put onto the battlefield blocking, this creature is "blocking" but
+    // never "blocked", so neither the per-turn blocked set nor the block history
+    // records it. Declaration is the only writer of those ledgers.
     // CR 506.4 + CR 613.1f: a new blocking creature can satisfy Layer 6
     // `FilterProp::Blocking` grants; re-evaluate continuous effects.
     state.layers_dirty.mark_full();
@@ -1461,6 +1563,21 @@ pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: 
             expected_attacker_blocked,
         },
     );
+    // CR 509.3c: only an unblocked attacker becomes blocked for the bare form.
+    if !expected_attacker_blocked {
+        // CR 400.7: stamp the incarnation that became blocked.
+        events.push(GameEvent::AttackerBecameBlocked {
+            attacker: attacker_id,
+            attacker_incarnation: state.objects.get(&attacker_id).map(|obj| obj.incarnation),
+        });
+    }
+    // CR 509.3d + CR 509.4: every entering blocker supplies a creature-bound
+    // attacker-side occurrence, without claiming that the entering creature
+    // itself "blocked". Carry the pair directly for event-context pin capture.
+    events.push(GameEvent::AttackerBecameBlockedByFilteredBlocker {
+        attacker: attacker_id,
+        blocker: blocker_id,
+    });
     true
 }
 
@@ -1625,18 +1742,7 @@ pub fn apply_resolved_combat_membership(
             // CR 509.1h then CR 509.1g: the same writes the live authority
             // performed, in the same order.
             info.blocked = true;
-            combat
-                .blocker_to_attacker
-                .entry(object_id)
-                .or_default()
-                .push(*resulting_attacker);
-            combat
-                .blocker_assignments
-                .entry(*resulting_attacker)
-                .or_default()
-                .push(object_id);
-            state.creatures_blocked_this_turn.insert(object_id);
-            record_block_history(state, command.object, *resulting_attacker);
+            record_block_edge(combat, object_id, *resulting_attacker);
         }
         ResolvedCombatMembershipEdit::MarkBlocked => {
             let combat = state
@@ -2195,7 +2301,31 @@ pub(crate) fn attacked_player_for_target(target: AttackTarget) -> Option<PlayerI
 /// per-candidate `_from_precomputed` filters run without re-walking the whole
 /// battlefield for every attacker. Mirrors the filter in
 /// `block_restriction_statics_against`.
-pub fn collect_block_restriction_statics(state: &GameState) -> Vec<(ObjectId, StaticDefinition)> {
+pub fn collect_block_restriction_statics(state: &GameState) -> BlockRestrictions<'_> {
+    BlockRestrictions {
+        statics: collect_functioning_block_restriction_statics(state),
+        transients: live_transient_block_restrictions(state).collect(),
+    }
+}
+
+/// CR 509.1b: Admitted opponent-relative blocker restrictions read directly at declaration.
+pub(crate) fn live_transient_block_restrictions(
+    state: &GameState,
+) -> impl Iterator<Item = &TransientContinuousEffect> {
+    use super::layers::{transient_effect_is_live, transient_relative_blocker_filter};
+
+    state.transient_continuous_effects.iter().filter(|tce| {
+        tce.modifications
+            .iter()
+            .any(|modification| transient_relative_blocker_filter(modification).is_some())
+            && transient_effect_is_live(state, tce)
+    })
+}
+
+/// Collect the functioning statics for queries about projected restrictions.
+pub(crate) fn collect_functioning_block_restriction_statics(
+    state: &GameState,
+) -> Vec<(ObjectId, StaticDefinition)> {
     // CR 509.1b: O(1) presence gate — no CantBeBlocked* discriminant present means the
     // filtered sweep yields nothing, so return empty without walking the battlefield.
     if !(static_kind_present(state, StaticModeKind::CantBeBlocked)
@@ -2204,21 +2334,22 @@ pub fn collect_block_restriction_statics(state: &GameState) -> Vec<(ObjectId, St
         || static_kind_present(state, StaticModeKind::CantBeBlockedByMoreThan)
         || static_kind_present(state, StaticModeKind::CantBeBlockedUnlessAllBlock))
     {
-        return Vec::new();
+        Vec::new()
+    } else {
+        super::functioning_abilities::battlefield_functioning_statics(state)
+            .filter(|(_, def)| {
+                matches!(
+                    def.mode,
+                    StaticMode::CantBeBlocked
+                        | StaticMode::CantBeBlockedExceptBy { .. }
+                        | StaticMode::CantBeBlockedBy { .. }
+                        | StaticMode::CantBeBlockedByMoreThan { .. }
+                        | StaticMode::CantBeBlockedUnlessAllBlock
+                )
+            })
+            .map(|(src, def)| (src.id, def.clone()))
+            .collect()
     }
-    super::functioning_abilities::battlefield_functioning_statics(state)
-        .filter(|(_, def)| {
-            matches!(
-                def.mode,
-                StaticMode::CantBeBlocked
-                    | StaticMode::CantBeBlockedExceptBy { .. }
-                    | StaticMode::CantBeBlockedBy { .. }
-                    | StaticMode::CantBeBlockedByMoreThan { .. }
-                    | StaticMode::CantBeBlockedUnlessAllBlock
-            )
-        })
-        .map(|(src, def)| (src.id, def.clone()))
-        .collect()
 }
 
 /// CR 509.1b: Collect every functioning `CantBlock` / `CantAttackOrBlock` static
@@ -2320,12 +2451,140 @@ fn block_restriction_statics_against_from_precomputed<'a>(
         .collect()
 }
 
+/// A snapshot of the attacker-side restrictions for one combat legality pass.
+pub struct BlockRestrictions<'a> {
+    statics: Vec<(ObjectId, StaticDefinition)>,
+    transients: Vec<&'a TransientContinuousEffect>,
+}
+
+impl BlockRestrictions<'static> {
+    /// Collect functioning statics for queries that only inspect those statics.
+    pub fn from_statics(state: &GameState) -> Self {
+        Self {
+            statics: collect_functioning_block_restriction_statics(state),
+            transients: Vec::new(),
+        }
+    }
+}
+
+/// CR 102.3 + CR 109.5: Evaluate the admitted tree against the live blocker,
+/// testing opponent leaves relative to the creating ability's controller.
+fn matches_relative_blocker(
+    state: &GameState,
+    blocker: &GameObject,
+    creator: PlayerId,
+    filter: &TargetFilter,
+) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => {
+            let controller_matches = match &typed.controller {
+                None => true,
+                Some(ControllerRef::Opponent) => {
+                    players::is_opponent(state, creator, blocker.controller)
+                }
+                Some(
+                    ControllerRef::You
+                    | ControllerRef::ScopedPlayer
+                    | ControllerRef::TargetPlayer
+                    | ControllerRef::TargetOpponent
+                    | ControllerRef::ParentTargetController
+                    | ControllerRef::EventTargetController
+                    | ControllerRef::ParentTargetOwner
+                    | ControllerRef::DefendingPlayer
+                    | ControllerRef::ChosenPlayer { .. }
+                    | ControllerRef::DeclaredPlayer { .. }
+                    | ControllerRef::SourceChosenPlayer
+                    | ControllerRef::TriggeringPlayer
+                    | ControllerRef::EnchantedPlayer
+                    | ControllerRef::ActivePlayer
+                    | ControllerRef::SpecificPlayer { .. },
+                ) => {
+                    // Admission checks every leaf for an absent or Opponent controller.
+                    unreachable!("blocker filter was admitted by transient_relative_blocker_filter")
+                }
+            };
+            controller_matches
+                && typed.type_filters.iter().all(|constraint| {
+                    type_filter_matches(constraint, blocker, &state.all_creature_types)
+                })
+        }
+        TargetFilter::And { filters } => filters
+            .iter()
+            .all(|filter| matches_relative_blocker(state, blocker, creator, filter)),
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|filter| matches_relative_blocker(state, blocker, creator, filter)),
+        TargetFilter::Not { filter } => !matches_relative_blocker(state, blocker, creator, filter),
+        // Admission rejects every other filter shape, including nested ones.
+        _ => unreachable!("blocker filter was admitted by transient_relative_blocker_filter"),
+    }
+}
+
+/// CR 509.1b: Restrictions on an individual attacker and blocker pair.
+fn pair_block_restriction(
+    state: &GameState,
+    attacker_id: ObjectId,
+    blocker: &GameObject,
+    restrictions: &BlockRestrictions<'_>,
+) -> Option<&'static str> {
+    use super::layers::{evaluate_condition_with_recipient, transient_relative_blocker_filter};
+
+    for (def, source) in block_restriction_statics_against_from_precomputed(
+        state,
+        attacker_id,
+        &restrictions.statics,
+    ) {
+        let context = FilterContext::from_source(state, source);
+        match &def.mode {
+            StaticMode::CantBeBlocked => return Some("can't be blocked"),
+            StaticMode::CantBeBlockedExceptBy {
+                kind: BlockExceptionKind::Quality(filter),
+            } if !matches_target_filter(state, blocker.id, filter, &context) => {
+                return Some("can't be blocked except by the required quality");
+            }
+            StaticMode::CantBeBlockedBy { filter }
+                if matches_target_filter(state, blocker.id, filter, &context) =>
+            {
+                return Some("can't be blocked by this creature");
+            }
+            _ => {}
+        }
+    }
+
+    // CR 611.2c + CR 113.8: An admitted opponent-relative restriction uses the
+    // creating ability's controller and the blocker's current characteristics.
+    restrictions
+        .transients
+        .iter()
+        .any(|tce| {
+            matches_target_filter(
+                state,
+                attacker_id,
+                &tce.affected,
+                &FilterContext::from_source_with_controller(tce.source_id, tce.controller),
+            ) && tce.condition.as_ref().is_none_or(|condition| {
+                evaluate_condition_with_recipient(
+                    state,
+                    condition,
+                    tce.controller,
+                    tce.source_id,
+                    attacker_id,
+                )
+            }) && tce
+                .modifications
+                .iter()
+                .filter_map(transient_relative_blocker_filter)
+                .any(|filter| matches_relative_blocker(state, blocker, tce.controller, filter))
+        })
+        .then_some("can't be blocked by this creature")
+}
+
 /// CR 509.1b: True when a bare, currently applicable `CantBeBlocked` static
 /// makes this creature unblockable. This shares the combat legality predicate's
 /// affected-filter and recipient-condition evaluation; richer `CantBeBlocked*`
 /// restrictions intentionally remain distinct.
 pub fn has_cant_be_blocked_static(state: &GameState, attacker_id: ObjectId) -> bool {
-    let restrictions = collect_block_restriction_statics(state);
+    let restrictions = collect_functioning_block_restriction_statics(state);
     has_cant_be_blocked_static_from_precomputed(state, attacker_id, &restrictions)
 }
 
@@ -2524,6 +2783,12 @@ fn must_be_blocked_by_all_requirements_for_attacker<'a>(
 /// materialization), evaluate "your opponents" relative to the SPELL
 /// controller. Otherwise (`None` anchor — permanent-static lures) resolve the
 /// controller from the carrier object, unchanged.
+///
+/// The same anchor serves the blocker-side `BlockRestriction` consumers
+/// (`validate_blockers_core` and `can_block_pair_with_precomputed`): a
+/// controller-relative "can't block creatures you control" grafted onto
+/// another player's creature by a resolving spell (Immortal Obligation) reads
+/// "you" as that spell's controller (CR 509.1b + CR 608.2c).
 fn blocker_filter_context(
     state: &GameState,
     src_id: ObjectId,
@@ -2711,7 +2976,7 @@ fn creature_has_must_block_requirement(
     player: PlayerId,
     has_must_block_static: bool,
     blocker_restriction: &[(ObjectId, StaticDefinition)],
-    block_restriction: &[(ObjectId, StaticDefinition)],
+    block_restriction: &BlockRestrictions<'_>,
     blocker_allowed: &[(ObjectId, StaticDefinition)],
     can_block_shadow_exists: bool,
 ) -> bool {
@@ -3502,57 +3767,12 @@ fn validate_blockers_core(
             .get(&attacker_id)
             .ok_or_else(|| format!("Attacker {:?} not found", attacker_id))?;
 
-        // CR 509.1b + CR 301.5a + CR 303.4: scan every battlefield static whose
-        // `affected` filter matches the attacker — covers intrinsic
-        // (`SelfRef`), Equipment-granted (`EquippedBy`), and Aura-granted
-        // (`EnchantedBy`) `CantBeBlocked*` modes uniformly. The static's own
-        // source supplies the `FilterContext` so inner filters like "creatures
-        // you control" resolve against the granting permanent's controller.
-        for (def, src_id) in block_restriction_statics_against_from_precomputed(
-            state,
-            attacker_id,
-            &block_restriction,
-        ) {
-            match &def.mode {
-                StaticMode::CantBeBlocked => {
-                    return Err(format!(
-                        "{:?} cannot block {:?} (can't be blocked)",
-                        blocker_id, attacker_id
-                    ));
-                }
-                StaticMode::CantBeBlockedExceptBy { kind } => match kind {
-                    BlockExceptionKind::Quality(target_filter) => {
-                        if !matches_target_filter(
-                            state,
-                            blocker_id,
-                            target_filter,
-                            &FilterContext::from_source(state, src_id),
-                        ) {
-                            return Err(format!(
-                                "{:?} cannot block {:?} (can't be blocked except by {:?})",
-                                blocker_id, attacker_id, target_filter
-                            ));
-                        }
-                    }
-                    // CR 509.1b: a count constraint is a multi-blocker check —
-                    // enforced in the blockers_per_attacker count pass, not per-pair.
-                    BlockExceptionKind::MinBlockers { .. } => {}
-                },
-                StaticMode::CantBeBlockedBy { filter }
-                    if matches_target_filter(
-                        state,
-                        blocker_id,
-                        filter,
-                        &FilterContext::from_source(state, src_id),
-                    ) =>
-                {
-                    return Err(format!(
-                        "{:?} cannot block {:?} (can't be blocked by {filter:?})",
-                        blocker_id, attacker_id
-                    ));
-                }
-                _ => {}
-            }
+        if let Some(reason) =
+            pair_block_restriction(state, attacker_id, blocker, &block_restriction)
+        {
+            return Err(format!(
+                "{blocker_id:?} cannot block {attacker_id:?} ({reason})"
+            ));
         }
 
         if ring_bearer_unblockable_by_greater_power(state, attacker, blocker) {
@@ -3672,11 +3892,15 @@ fn validate_blockers_core(
             let StaticMode::BlockRestriction { filter } = &def.mode else {
                 continue;
             };
+            // CR 109.5 + CR 608.2c: a restriction grafted by a resolving
+            // effect reads "you" as its installing player (the graft's
+            // source_controller); a printed one has none and reads its
+            // source's controller.
             if !matches_target_filter(
                 state,
                 attacker_id,
                 filter,
-                &FilterContext::from_source(state, src_id),
+                &blocker_filter_context(state, src_id, def.source_controller),
             ) {
                 return Err(format!(
                     "{blocker_id:?} can block only creatures matching the block restriction"
@@ -3775,7 +3999,7 @@ fn validate_blockers_core(
         let has_unless_all = block_restriction_statics_against_from_precomputed(
             state,
             *attacker_id,
-            &block_restriction,
+            &block_restriction.statics,
         )
         .into_iter()
         .any(|(def, _src_id)| def.mode == StaticMode::CantBeBlockedUnlessAllBlock);
@@ -4726,7 +4950,7 @@ impl ResolvedRequiredDefender {
     fn members(&self) -> std::iter::Copied<std::slice::Iter<'_, AttackTarget>> {
         match self {
             Self::Fixed(defender) => std::slice::from_ref(defender).iter().copied(),
-            Self::Matching(defenders) => defenders.as_slice().iter().copied(),
+            Self::Matching(defenders) => defenders.iter().copied(),
         }
     }
 
@@ -5573,6 +5797,11 @@ fn attack_passes_temporary_prohibition(
                 crate::types::ability::ProhibitedActivity::Attack {
                     defended,
                     protected_player,
+                    // MECHANICAL: the scope-selection field is parser→resolver
+                    // metadata consumed solely by `add_restriction` at creation;
+                    // enforcement reads only the snapshotted player. No behavior
+                    // change.
+                    protected_scope: _,
                 },
             ..
         } = restriction
@@ -7052,6 +7281,30 @@ pub(super) fn commit_attack_declaration(
         .iter()
         .map(|a| a.defending_player)
         .collect();
+    // CR 508.6: Record DIRECT player attacks into the uncollapsed ledger —
+    // `AttackTarget::Player(p)` entries only, keyed by each creature's
+    // controller (the CR 508.6 "first player"). Planeswalker/battle targets
+    // record nothing here (no CR 508.5 collapse), so retrospective
+    // "attacked you" predicates read exactly what the Faramir ruling
+    // (2023-06-16) requires. Mirrors the collapsed sibling populated from
+    // `players_attacked_this_step` via `record_attackers_declared` below.
+    let direct_player_attacks: Vec<(PlayerId, PlayerId)> = attacks
+        .iter()
+        .filter_map(|(object_id, target)| match target {
+            AttackTarget::Player(defender) => state
+                .objects
+                .get(object_id)
+                .map(|obj| (obj.controller, *defender)),
+            _ => None,
+        })
+        .collect();
+    for (attacker, defender) in direct_player_attacks {
+        state
+            .attacked_players_directly_this_turn
+            .entry(attacker)
+            .or_default()
+            .insert(defender);
+    }
     // CR 508.1k + CR 506.4 + CR 613.1f: A chosen creature becomes attacking and
     // stays attacking until removed from combat or the combat phase ends. Marking
     // layers dirty forces Layer 6 ability-adding effects (CR 613.1f) with
@@ -7149,6 +7402,8 @@ pub(super) fn commit_attack_declaration(
     state
         .attacker_declarations_this_turn
         .extend(attacker_declarations);
+    // CR 613.4c: the attack count grew after the CR 508.1k snapshot, so layer 7c re-reads it.
+    crate::game::layers::mark_layers_full(state);
 
     super::restrictions::record_attackers_declared(state, attacker_count);
 }
@@ -8112,7 +8367,7 @@ pub fn can_block_pair_with_precomputed(
     blocker_id: ObjectId,
     attacker_id: ObjectId,
     blocker_restriction: &[(ObjectId, StaticDefinition)],
-    block_restriction: &[(ObjectId, StaticDefinition)],
+    block_restriction: &BlockRestrictions<'_>,
     blocker_allowed: &[(ObjectId, StaticDefinition)],
     can_block_shadow_exists: bool,
 ) -> bool {
@@ -8129,42 +8384,8 @@ pub fn can_block_pair_with_precomputed(
     if blocker.has_keyword(&Keyword::Decayed) {
         return false;
     }
-    // CR 509.1b + CR 301.5a + CR 303.4: scan every battlefield static whose
-    // `affected` filter matches the attacker — covers intrinsic, Equipment-
-    // granted, and Aura-granted `CantBeBlocked*` uniformly. Mirrors the
-    // declare-blockers validation in `validate_blockers_for_player`.
-    for (def, src_id) in
-        block_restriction_statics_against_from_precomputed(state, attacker_id, block_restriction)
-    {
-        match &def.mode {
-            StaticMode::CantBeBlocked => return false,
-            StaticMode::CantBeBlockedExceptBy { kind } => match kind {
-                BlockExceptionKind::Quality(target_filter) => {
-                    if !matches_target_filter(
-                        state,
-                        blocker_id,
-                        target_filter,
-                        &FilterContext::from_source(state, src_id),
-                    ) {
-                        return false;
-                    }
-                }
-                // CR 509.1b: a count constraint is a multi-blocker check,
-                // enforced in validate_blockers, not this per-pair predicate.
-                BlockExceptionKind::MinBlockers { .. } => {}
-            },
-            StaticMode::CantBeBlockedBy { filter }
-                if matches_target_filter(
-                    state,
-                    blocker_id,
-                    filter,
-                    &FilterContext::from_source(state, src_id),
-                ) =>
-            {
-                return false;
-            }
-            _ => {}
-        }
+    if pair_block_restriction(state, attacker_id, blocker, block_restriction).is_some() {
+        return false;
     }
     if ring_bearer_unblockable_by_greater_power(state, attacker, blocker) {
         return false;
@@ -8228,11 +8449,14 @@ pub fn can_block_pair_with_precomputed(
         let StaticMode::BlockRestriction { filter } = &def.mode else {
             continue;
         };
+        // CR 109.5 + CR 608.2c: a restriction grafted by a resolving effect
+        // reads "you" as its installing player (the graft's source_controller);
+        // a printed one has none and reads its source's controller.
         if !matches_target_filter(
             state,
             attacker_id,
             filter,
-            &FilterContext::from_source(state, src_id),
+            &blocker_filter_context(state, src_id, def.source_controller),
         ) {
             return false;
         }
@@ -8375,18 +8599,18 @@ pub fn get_valid_block_targets_for_player(
 /// it and `block_requirements_for_player` surfaces it to the UI, so the count a
 /// player sees can never disagree with the count the engine enforces.
 pub fn min_blockers_required(state: &GameState, attacker_id: ObjectId) -> u32 {
-    let block_restriction = collect_block_restriction_statics(state);
+    let block_restriction = BlockRestrictions::from_statics(state);
     min_blockers_required_from_precomputed(state, attacker_id, &block_restriction)
 }
 
 /// CR 702.111b + CR 509.1b: Minimum blockers required (menace floor of 2 and any
 /// `MinBlockers` restriction floor).
 /// Precomputed-slice variant of [`min_blockers_required`]. Hoist
-/// [`collect_block_restriction_statics`] once before any attacker loop.
+/// [`BlockRestrictions::from_statics`] once before any attacker loop that only reads statics.
 pub fn min_blockers_required_from_precomputed(
     state: &GameState,
     attacker_id: ObjectId,
-    block_restriction: &[(ObjectId, StaticDefinition)],
+    block_restriction: &BlockRestrictions<'_>,
 ) -> u32 {
     let mut min = 1;
     if state
@@ -8396,9 +8620,11 @@ pub fn min_blockers_required_from_precomputed(
     {
         min = min.max(2);
     }
-    for (def, _src_id) in
-        block_restriction_statics_against_from_precomputed(state, attacker_id, block_restriction)
-    {
+    for (def, _src_id) in block_restriction_statics_against_from_precomputed(
+        state,
+        attacker_id,
+        &block_restriction.statics,
+    ) {
         if let StaticMode::CantBeBlockedExceptBy {
             kind: BlockExceptionKind::MinBlockers { min: n },
         } = &def.mode
@@ -8416,7 +8642,7 @@ pub fn min_blockers_required_from_precomputed(
 fn min_blockers_sources_from_precomputed(
     state: &GameState,
     attacker_id: ObjectId,
-    block_restriction: &[(ObjectId, StaticDefinition)],
+    block_restriction: &BlockRestrictions<'_>,
 ) -> Vec<ObjectId> {
     let mut sources = Vec::new();
     if state
@@ -8429,9 +8655,11 @@ fn min_blockers_sources_from_precomputed(
         // keyword is projected onto it) — same accepted limitation as F3.
         sources.push(attacker_id);
     }
-    for (def, src_id) in
-        block_restriction_statics_against_from_precomputed(state, attacker_id, block_restriction)
-    {
+    for (def, src_id) in block_restriction_statics_against_from_precomputed(
+        state,
+        attacker_id,
+        &block_restriction.statics,
+    ) {
         if let StaticMode::CantBeBlockedExceptBy {
             kind: BlockExceptionKind::MinBlockers { min },
         } = &def.mode
@@ -8454,25 +8682,29 @@ fn min_blockers_sources_from_precomputed(
 /// This is the inverse of [`min_blockers_required`]; an attacker carrying both a
 /// minimum and a maximum must satisfy both.
 pub fn max_blockers_allowed(state: &GameState, attacker_id: ObjectId) -> Option<u32> {
-    let block_restriction = collect_block_restriction_statics(state);
+    let block_restriction = BlockRestrictions::from_statics(state);
     max_blockers_allowed_from_precomputed(state, attacker_id, &block_restriction)
 }
 
 /// CR 509.1b: Maximum blockers allowed (`CantBeBlockedByMoreThan` restriction).
 /// Precomputed-slice variant of [`max_blockers_allowed`]. Hoist
-/// [`collect_block_restriction_statics`] once before any attacker loop.
+/// [`BlockRestrictions::from_statics`] once before any attacker loop that only reads statics.
 pub fn max_blockers_allowed_from_precomputed(
     state: &GameState,
     attacker_id: ObjectId,
-    block_restriction: &[(ObjectId, StaticDefinition)],
+    block_restriction: &BlockRestrictions<'_>,
 ) -> Option<u32> {
-    block_restriction_statics_against_from_precomputed(state, attacker_id, block_restriction)
-        .into_iter()
-        .filter_map(|(def, _src_id)| match def.mode {
-            StaticMode::CantBeBlockedByMoreThan { max } => Some(max),
-            _ => None,
-        })
-        .min()
+    block_restriction_statics_against_from_precomputed(
+        state,
+        attacker_id,
+        &block_restriction.statics,
+    )
+    .into_iter()
+    .filter_map(|(def, _src_id)| match def.mode {
+        StaticMode::CantBeBlockedByMoreThan { max } => Some(max),
+        _ => None,
+    })
+    .min()
 }
 
 /// For one defending player, the per-attacker minimum-blocker requirement for
@@ -8490,7 +8722,7 @@ pub fn block_requirements_for_player(
     };
     // Hoist the block-restriction slice once for the O(attackers × battlefield)
     // sweep — invoked from `engine_combat.rs` and `turns.rs` production paths.
-    let block_restriction = collect_block_restriction_statics(state);
+    let block_restriction = BlockRestrictions::from_statics(state);
     combat
         .attackers
         .iter()
@@ -11972,7 +12204,7 @@ mod tests {
                     }
                     ',' if depth == 1 => {
                         args.push(current.trim().to_string());
-                        current = String::new();
+                        current.clear();
                     }
                     _ => current.push(c),
                 }

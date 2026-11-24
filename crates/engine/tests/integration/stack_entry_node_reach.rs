@@ -6,15 +6,15 @@ use engine::game::effects::stack_reach::stack_entry_node_reach;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityCost, Effect, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter,
-    TargetRef, TriggerCondition,
+    AbilityCost, AbilityKind, Effect, QuantityExpr, ResolvedAbility, TargetChoiceTiming,
+    TargetFilter, TargetRef, TriggerCondition,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, StackEntry, StackEntryKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -73,7 +73,34 @@ fn main_phase(scenario: GameScenario) -> GameRunner {
 
 /// P0 casts a 2/2 creature spell and passes; P1 casts `text` at it.
 fn counter_board(name: &str, text: &str, cost: ManaCost) -> (GameRunner, ObjectId, ObjectId) {
+    counter_board_with(name, text, cost, false)
+}
+
+/// Verbatim printed Oracle text (Scryfall): its activation leaves a turn-long
+/// floating redirect of cards put into its activator's graveyard.
+const MAGUS_OF_THE_WILL: &str = "{2}{B}, {T}, Exile this creature: Until end of turn, you may play lands and cast spells from your graveyard. If a card would be put into your graveyard from anywhere this turn, exile that card instead.";
+
+/// `counter_board`, where with `p1_will` P0 first passes priority and P1's
+/// Magus of the Will is activated and resolves before P0 casts.
+fn counter_board_with(
+    name: &str,
+    text: &str,
+    cost: ManaCost,
+    p1_will: bool,
+) -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
+    let magus = p1_will.then(|| {
+        scenario.with_mana_pool(
+            P1,
+            [ManaType::Colorless, ManaType::Colorless, ManaType::Black]
+                .into_iter()
+                .map(|mana| ManaUnit::new(mana, ObjectId(0), false, Vec::new()))
+                .collect(),
+        );
+        scenario
+            .add_creature_from_oracle(P1, "Magus of the Will", 3, 3, MAGUS_OF_THE_WILL)
+            .id()
+    });
     scenario.at_phase(Phase::PreCombatMain);
     let bear = scenario
         .add_creature_to_hand(P0, "Bear", 2, 2)
@@ -93,6 +120,24 @@ fn counter_board(name: &str, text: &str, cost: ManaCost) -> (GameRunner, ObjectI
         scenario.add_creature_to_graveyard(P1, "Dead", 1, 1);
     }
     let mut runner = main_phase(scenario);
+    if let Some(magus) = magus {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("P0 passes priority to P1");
+        let index = runner.state().objects[&magus]
+            .abilities
+            .iter()
+            .position(|ability| matches!(ability.kind, AbilityKind::Activated))
+            .expect("Magus of the Will has an activated ability");
+        runner.activate(magus, index).pay_with(&[magus]).resolve();
+        // Reach guard: the redirect is floating, its source is exiled, and P0
+        // is back on priority.
+        assert_eq!(runner.state().objects[&magus].zone, Zone::Exile);
+        assert!(!runner.state().pending_damage_replacements.is_empty());
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0)
+        );
+    }
     runner.cast(bear).commit();
     let bear_spell = runner.state().stack.back().expect("bear spell").id;
     engine::game::engine::apply_as_current_for_simulation(
@@ -106,13 +151,18 @@ fn counter_board(name: &str, text: &str, cost: ManaCost) -> (GameRunner, ObjectI
 }
 
 fn swallowed_board() -> (GameRunner, ObjectId, ObjectId) {
-    counter_board(
+    swallowed_board_with(false)
+}
+
+fn swallowed_board_with(p1_will: bool) -> (GameRunner, ObjectId, ObjectId) {
+    counter_board_with(
         "Swallowed by Leviathan",
         SWALLOWED_BY_LEVIATHAN,
         ManaCost::Cost {
             shards: vec![ManaCostShard::Blue],
             generic: 2,
         },
+        p1_will,
     )
 }
 
@@ -188,6 +238,69 @@ fn swallowed_by_leviathan_counter_acts_on_the_chosen_spell() {
         ),
         other => panic!("expected the unless-payment counter, got {other:?}"),
     }
+}
+
+/// CR 611.2a + CR 614.1a + CR 701.25a: P1's resolved Magus of the Will leaves
+/// only a floating redirect, which exiles each card P1's surveil would put into
+/// P1's graveyard. The counter below the surveil answers nothing, as the
+/// redirect is one that may apply to the moves before it and to its own move
+/// of the spell; without the redirect it names the chosen spell (the witness
+/// above). The surveil's own answer is isolated by
+/// `a_node_below_a_surveil_whose_cards_a_floating_redirect_may_move_acts_on_nothing`.
+#[test]
+fn swallowed_by_leviathan_counter_answers_nothing_under_a_floating_redirect() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(|| {
+            let (mut runner, bear_spell, entry) = swallowed_board_with(true);
+            let tops: Vec<ObjectId> = (0..2)
+                .map(|_| {
+                    let state = runner.state_mut();
+                    let card = CardId(state.next_object_id);
+                    create_object(state, card, P1, "Top".to_string(), Zone::Library)
+                })
+                .collect();
+            let counter = swallowed_counter_index(&runner, entry);
+            assert!(
+                reach(runner.state(), entry)[counter].2.is_empty(),
+                "the floating redirect may exile the surveilled cards, so the counter answers nothing"
+            );
+
+            // The live resolver agrees: the surveilled cards are exiled, so the
+            // unless cost still counts the three cards already there.
+            runner.resolve_top();
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::SurveilChoice { .. }),
+                "engine agreement: the surveil runs before the counter"
+            );
+            runner
+                .act(GameAction::SelectCards { cards: Vec::new() })
+                .expect("put both cards into the graveyard");
+            assert!(
+                tops.iter()
+                    .all(|top| runner.state().objects[top].zone == Zone::Exile),
+                "Magus of the Will's redirect exiles each surveilled card"
+            );
+            match &runner.state().waiting_for {
+                WaitingFor::UnlessPayment {
+                    cost,
+                    pending_effect,
+                    ..
+                } => assert_eq!(
+                    (&pending_effect.targets, cost),
+                    (
+                        &vec![TargetRef::Object(bear_spell)],
+                        &AbilityCost::Mana {
+                            cost: ManaCost::generic(3)
+                        },
+                    ),
+                ),
+                other => panic!("expected the unless-payment counter, got {other:?}"),
+            }
+        })
+        .expect("spawn the test thread")
+        .join()
+        .expect("the test thread must not panic");
 }
 
 const JESKAI_REVELATION: &str = "Return target spell or permanent to its owner's hand. Jeskai Revelation deals 4 damage to any target. Create two 1/1 white Monk creature tokens with prowess. Draw two cards. You gain 4 life.";
@@ -1465,13 +1578,49 @@ fn a_slot_reads_the_root_of_its_own_entry() {
     };
     state.priority_player = PlayerId(0);
     let mut runner = GameRunner::from_state(state);
-    runner.resolve_top();
-    let damage_on = |id| runner.state().objects[&id].damage_marked;
+    let initial_stack_len = runner.state().stack.len();
+    let mut events = Vec::new();
+    for _ in 0..10 {
+        if runner.state().stack.len() < initial_stack_len {
+            break;
+        }
+        let result = runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority to resolve the upper synthetic entry");
+        events.extend(result.events);
+    }
+    assert!(runner.state().stack.len() < initial_stack_len);
+    assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&first].damage_marked, 0);
     assert_eq!(
-        (damage_on(first), damage_on(second)),
-        (0, 2),
-        "engine agreement: both nodes of the upper entry hit its own target"
+        runner.state().objects[&second].zone,
+        Zone::Graveyard,
+        "the upper entry's two 1-damage nodes are lethal to the second creature"
     );
+    let second_damage: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::DamageDealt {
+                    source_id,
+                    target: TargetRef::Object(id),
+                    amount: 1,
+                    is_combat: false,
+                    ..
+                } if *source_id == source && *id == second
+            )
+        })
+        .collect();
+    assert_eq!(
+        second_damage.len(),
+        2,
+        "both nodes of the upper entry hit its own target"
+    );
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        GameEvent::DamageDealt { target: TargetRef::Object(id), .. } if *id == first
+    )));
 }
 
 #[test]
@@ -3519,6 +3668,160 @@ fn a_node_below_a_surveil_whose_cards_a_replacement_may_move_acts_on_nothing() {
             "engine agreement, Leyline of {owner:?}: only an opponent's Leyline exiles the card"
         );
     }
+}
+
+const DRYAD_MILITANT: &str = "({G/W} can be paid with either {G} or {W}.)\nIf an instant or sorcery card would be put into a graveyard from anywhere, exile it instead.";
+
+#[test]
+fn a_node_below_a_surveil_reads_no_hidden_library_card() {
+    // CR 400.2 + CR 401.2: the surveilled card is face down in the library, so
+    // whether Dryad Militant may exile it is judged without reading it. With
+    // Dryad Militant the damage below the surveil answers nothing whether the
+    // top card is an instant or not; without it the damage is answered either way.
+    for dryad in [false, true] {
+        for top_is_instant in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let aimed = scenario.add_creature(P0, "Aimed", 3, 3).id();
+            if dryad {
+                scenario.add_creature_from_oracle(P0, "Dryad Militant", 2, 1, DRYAD_MILITANT);
+            }
+            let mut runner = scenario.build();
+            let state = runner.state_mut();
+            let top = {
+                let card = CardId(state.next_object_id);
+                create_object(state, card, PlayerId(1), "Top".to_string(), Zone::Library)
+            };
+            if top_is_instant {
+                let object = state.objects.get_mut(&top).expect("the top card");
+                object.card_types.core_types.push(CoreType::Instant);
+                object.base_card_types = object.card_types.clone();
+            }
+            let source = spell_object(state, PlayerId(1));
+            let mut surveil = node(surveil_one(), Vec::new(), source);
+            surveil.sub_ability = Some(Box::new(node(
+                damage_one(),
+                vec![TargetRef::Object(aimed)],
+                source,
+            )));
+            let entry = push_spell(state, PlayerId(1), surveil);
+            let answer = reach(runner.state(), entry)
+                .last()
+                .expect("the damage node")
+                .2
+                .clone();
+            if dryad {
+                assert!(answer.is_empty(), "top is an instant: {top_is_instant}");
+            } else {
+                assert_eq!(
+                    answer,
+                    vec![TargetRef::Object(aimed)],
+                    "reach guard: without Dryad Militant the damage is answered, top is an instant: {top_is_instant}"
+                );
+            }
+            if !dryad {
+                continue;
+            }
+            // Engine agreement: Dryad Militant exiles the surveilled card only
+            // when it is an instant.
+            let mut runner = resolve_raw(runner.state().clone());
+            runner
+                .act(GameAction::SelectCards { cards: Vec::new() })
+                .expect("put the card into the graveyard");
+            assert_eq!(
+                runner.state().objects.get(&top).map(|o| o.zone),
+                Some(if top_is_instant {
+                    Zone::Exile
+                } else {
+                    Zone::Graveyard
+                }),
+                "top is an instant: {top_is_instant}"
+            );
+        }
+    }
+}
+
+/// CR 611.2a + CR 614.1a + CR 400.2: a floating redirect that P1's resolved
+/// Magus of the Will left standing may exile the card P1's surveil moves, so
+/// the damage below the surveil answers nothing, as it does under a permanent's
+/// redirect (Dryad Militant, above). Damage is not a zone move, so only the
+/// surveil's answer can withhold it. With Magus of the Will unactivated the
+/// damage is answered and the surveilled card reaches the graveyard.
+#[test]
+fn a_node_below_a_surveil_whose_cards_a_floating_redirect_may_move_acts_on_nothing() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(|| {
+            for will in [false, true] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let aimed = scenario.add_creature(P0, "Aimed", 3, 3).id();
+                scenario.with_mana_pool(
+                    P1,
+                    [ManaType::Colorless, ManaType::Colorless, ManaType::Black]
+                        .into_iter()
+                        .map(|mana| ManaUnit::new(mana, ObjectId(0), false, Vec::new()))
+                        .collect(),
+                );
+                let magus = scenario
+                    .add_creature_from_oracle(P1, "Magus of the Will", 3, 3, MAGUS_OF_THE_WILL)
+                    .id();
+                let mut runner = scenario.build();
+                if will {
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("P0 passes priority to P1");
+                    let index = runner.state().objects[&magus]
+                        .abilities
+                        .iter()
+                        .position(|ability| matches!(ability.kind, AbilityKind::Activated))
+                        .expect("Magus of the Will has an activated ability");
+                    runner.activate(magus, index).pay_with(&[magus]).resolve();
+                    assert_eq!(runner.state().objects[&magus].zone, Zone::Exile);
+                    assert!(
+                        !runner.state().pending_damage_replacements.is_empty(),
+                        "reach guard: Magus of the Will's redirect is floating"
+                    );
+                }
+                let state = runner.state_mut();
+                let top = {
+                    let card = CardId(state.next_object_id);
+                    create_object(state, card, P1, "Top".to_string(), Zone::Library)
+                };
+                let source = spell_object(state, P1);
+                let mut surveil = node(surveil_one(), Vec::new(), source);
+                surveil.sub_ability = Some(Box::new(node(
+                    damage_one(),
+                    vec![TargetRef::Object(aimed)],
+                    source,
+                )));
+                let entry = push_spell(state, P1, surveil);
+                let answer = reach(runner.state(), entry)
+                    .last()
+                    .expect("the damage node")
+                    .2
+                    .clone();
+                if will {
+                    assert!(answer.is_empty());
+                } else {
+                    assert_eq!(answer, vec![TargetRef::Object(aimed)]);
+                }
+
+                // Engine agreement: the redirect exiles the surveilled card.
+                let mut runner = resolve_raw(runner.state().clone());
+                runner
+                    .act(GameAction::SelectCards { cards: Vec::new() })
+                    .expect("put the card into the graveyard");
+                assert_eq!(
+                    runner.state().objects.get(&top).map(|o| o.zone),
+                    Some(if will { Zone::Exile } else { Zone::Graveyard }),
+                    "Magus of the Will activated: {will}"
+                );
+            }
+        })
+        .expect("spawn the test thread")
+        .join()
+        .expect("the test thread must not panic");
 }
 
 #[test]

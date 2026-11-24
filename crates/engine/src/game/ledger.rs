@@ -1,9 +1,10 @@
 //! Final authority for composable per-event ledger facts.
 
 use crate::game::game_object::ObjectIncarnationRefExt;
-use crate::types::ability::TriggerDefinitionRef;
+use crate::types::ability::{AbilityTag, TriggerDefinitionRef};
 use crate::types::game_state::{
-    AbilityActivationRecord, CastOccurrence, GameState, SpellCastRecord,
+    AbilityActivationRecord, AbilityUsageKey, CastOccurrence, CyclingOccurrence, CyclingRecord,
+    GameState, SpellCastRecord, StackEntryKind,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -75,6 +76,52 @@ pub fn record_spell_cast(
     })
 }
 
+/// CR 702.29c + CR 702.29f: Record the just-completed cycle for the announced activator.
+pub(crate) fn record_completed_cycle(
+    state: &mut GameState,
+    activator: PlayerId,
+    record: CyclingRecord,
+    stack_entry: ObjectId,
+) -> CyclingOccurrence {
+    let journal_index = state
+        .cycles_completed_this_game_by_player
+        .get(&activator)
+        .map_or(0, im::Vector::len);
+    resolve_and_apply_ledger_edit(
+        state,
+        ResolvedLedgerEdit::CompletedCycle {
+            player: activator,
+            record,
+            expected_history_len: journal_index,
+            stack_entry,
+        },
+    )
+    .expect("completed cycling has a known activator, a named card and a just-placed entry");
+    CyclingOccurrence {
+        activator,
+        journal_index,
+    }
+}
+
+/// CR 601.2i: True iff `occurrence` names `object_id`'s cast in this turn's
+/// spell-cast journal. Coordinates left over from an earlier turn, or naming
+/// another object, do not match.
+pub(crate) fn cast_occurrence_is_current(
+    state: &GameState,
+    occurrence: CastOccurrence,
+    object_id: ObjectId,
+) -> bool {
+    usize::try_from(occurrence.turn_journal_index)
+        .ok()
+        .and_then(|index| {
+            state
+                .spells_cast_this_turn_by_player
+                .get(&occurrence.caster)
+                .and_then(|records| records.get(index))
+        })
+        .is_some_and(|record| record.spell_object_id == Some(object_id))
+}
+
 /// Validate every fallible spell-cast ledger precondition without mutation.
 ///
 /// CR 601.2g provides the mana-ability window before payment, CR 601.2h pays
@@ -122,11 +169,9 @@ pub(crate) fn validate_spell_cast_recording(
 /// not journaled).
 pub fn record_ability_activation(
     state: &mut GameState,
-    source: ObjectId,
-    ability_index: usize,
+    key: AbilityUsageKey,
     record: Option<AbilityActivationRecord>,
 ) -> Result<(), ResolvedLedgerEditReplayInvariantError> {
-    let key = (source, ability_index);
     let expected_turn_history_len = match &record {
         Some(record) => Some(history_len(
             state
@@ -139,8 +184,6 @@ pub fn record_ability_activation(
     resolve_and_apply_ledger_edit(
         state,
         ResolvedLedgerEdit::AbilityActivated {
-            source,
-            ability_index,
             expected_turn_count: state
                 .activated_abilities_this_turn
                 .get(&key)
@@ -151,6 +194,7 @@ pub fn record_ability_activation(
                 .get(&key)
                 .copied()
                 .unwrap_or(0),
+            key,
             record: record.map(Box::new),
             expected_turn_history_len,
         },
@@ -290,6 +334,50 @@ pub fn apply_resolved_ledger_edit(
     command: &ResolvedLedgerEditCommand,
 ) -> Result<(), ResolvedLedgerEditReplayInvariantError> {
     match &command.edit {
+        ResolvedLedgerEdit::CompletedCycle {
+            player,
+            record,
+            expected_history_len,
+            stack_entry,
+        } => {
+            if !state
+                .players
+                .iter()
+                .any(|candidate| candidate.id == *player)
+            {
+                return Err(ResolvedLedgerEditReplayInvariantError::UnknownPlayer(
+                    *player,
+                ));
+            }
+            let actual = state
+                .cycles_completed_this_game_by_player
+                .get(player)
+                .map_or(0, im::Vector::len);
+            // CR 602.2a + CR 702.29a: The entry is a cycling activation, and the
+            // player who activated it controls it on the stack.
+            let is_activators_cycle = state.stack.iter().any(|entry| {
+                entry.id == *stack_entry
+                    && entry.controller == *player
+                    && matches!(
+                        &entry.kind,
+                        StackEntryKind::ActivatedAbility { ability, .. }
+                            if ability.context.ability_tag == Some(AbilityTag::Cycling)
+                    )
+            });
+            if actual != *expected_history_len
+                || ledger_edit_is_invalid(&command.edit)
+                || !is_activators_cycle
+            {
+                return Err(
+                    ResolvedLedgerEditReplayInvariantError::CompletedCyclePreconditionMismatch,
+                );
+            }
+            state
+                .cycles_completed_this_game_by_player
+                .entry(*player)
+                .or_default()
+                .push_back(record.clone());
+        }
         ResolvedLedgerEdit::SpellCast {
             player,
             record,
@@ -368,18 +456,16 @@ pub fn apply_resolved_ledger_edit(
                 .push_back(record.clone());
         }
         ResolvedLedgerEdit::AbilityActivated {
-            source,
-            ability_index,
+            key,
             expected_turn_count,
             expected_game_count,
             record,
             expected_turn_history_len,
         } => {
-            let key = (*source, *ability_index);
             // CR 602.2 + CR 601.2i: the record and its history length are a
             // pair; a legacy command carries neither and appends nothing.
             match (record, expected_turn_history_len) {
-                (Some(record), Some(_)) if record.source != *source => {
+                (Some(record), Some(_)) if record.source != key.source => {
                     // CR 602.2: the record must describe the activation this
                     // command counts, not another source's.
                     return Err(
@@ -406,13 +492,13 @@ pub fn apply_resolved_ledger_edit(
             }
             if state
                 .activated_abilities_this_turn
-                .get(&key)
+                .get(key)
                 .copied()
                 .unwrap_or(0)
                 != *expected_turn_count
                 || state
                     .activated_abilities_this_game
-                    .get(&key)
+                    .get(key)
                     .copied()
                     .unwrap_or(0)
                     != *expected_game_count
@@ -429,10 +515,10 @@ pub fn apply_resolved_ledger_edit(
                 .ok_or(ResolvedLedgerEditReplayInvariantError::CounterOverflow)?;
             state
                 .activated_abilities_this_turn
-                .insert(key, next_turn_count);
+                .insert(key.clone(), next_turn_count);
             state
                 .activated_abilities_this_game
-                .insert(key, next_game_count);
+                .insert(key.clone(), next_game_count);
             if let Some(record) = record {
                 state
                     .abilities_activated_this_turn_by_player
@@ -862,19 +948,36 @@ mod tests {
                 Zone::Battlefield,
             ),
         );
+        // CR 602.5c: the source holds a real printed ability so the tests
+        // derive the same per-instance key the production record path uses.
+        let ability = crate::types::ability::AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Activated,
+            crate::types::ability::Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: crate::types::ability::TargetFilter::Controller,
+            },
+        );
+        std::sync::Arc::make_mut(&mut state.objects.get_mut(&id).expect("just inserted").abilities)
+            .push(ability);
         id
     }
 
+    /// CR 602.5c: the production key for the source's printed ability at index
+    /// 0 — the same derivation `record_ability_activation` uses.
+    fn usage_key(state: &GameState, source: ObjectId) -> AbilityUsageKey {
+        crate::game::restrictions::ability_usage_key(state, source, 0)
+            .expect("the source holds its printed ability")
+    }
+
     fn activation_command(
-        source: ObjectId,
+        key: AbilityUsageKey,
         expected_count: u32,
         record: Option<AbilityActivationRecord>,
         expected_turn_history_len: Option<u32>,
     ) -> ResolvedLedgerEditCommand {
         ResolvedLedgerEditCommand {
             edit: ResolvedLedgerEdit::AbilityActivated {
-                source,
-                ability_index: 0,
+                key,
                 expected_turn_count: expected_count,
                 expected_game_count: expected_count,
                 record: record.map(Box::new),
@@ -901,10 +1004,11 @@ mod tests {
     fn activation_replay_appends_its_record_and_refuses_a_stale_history_length() {
         let mut state = GameState::new_two_player(7);
         let source = activation_source(&mut state);
+        let key = usage_key(&state, source);
         let record = journal_record(&state, source);
         apply_resolved_ledger_edit(
             &mut state,
-            &activation_command(source, 0, Some(record.clone()), Some(0)),
+            &activation_command(key.clone(), 0, Some(record.clone()), Some(0)),
         )
         .expect("a paired record replays");
         assert_eq!(
@@ -914,13 +1018,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![record.clone()]
         );
-        assert_eq!(state.activated_abilities_this_turn[&(source, 0)], 1);
+        assert_eq!(state.activated_abilities_this_turn[&key], 1);
 
         let before = state.clone();
         assert_eq!(
             apply_resolved_ledger_edit(
                 &mut state,
-                &activation_command(source, 1, Some(record), Some(0)),
+                &activation_command(key, 1, Some(record), Some(0)),
             ),
             Err(ResolvedLedgerEditReplayInvariantError::AbilityActivationPreconditionMismatch)
         );
@@ -935,10 +1039,11 @@ mod tests {
     fn a_legacy_activation_replay_appends_no_journal_row() {
         let mut state = GameState::new_two_player(7);
         let source = activation_source(&mut state);
-        apply_resolved_ledger_edit(&mut state, &activation_command(source, 0, None, None))
+        let key = usage_key(&state, source);
+        apply_resolved_ledger_edit(&mut state, &activation_command(key.clone(), 0, None, None))
             .expect("a legacy command replays");
-        assert_eq!(state.activated_abilities_this_turn[&(source, 0)], 1);
-        assert_eq!(state.activated_abilities_this_game[&(source, 0)], 1);
+        assert_eq!(state.activated_abilities_this_turn[&key], 1);
+        assert_eq!(state.activated_abilities_this_game[&key], 1);
         assert!(
             state.abilities_activated_this_turn_by_player.is_empty(),
             "no journal row from a legacy command"
@@ -951,15 +1056,16 @@ mod tests {
     fn a_half_present_activation_record_pair_is_refused_at_apply() {
         let mut state = GameState::new_two_player(7);
         let source = activation_source(&mut state);
+        let key = usage_key(&state, source);
         let record = journal_record(&state, source);
         for (label, command) in [
             (
                 "record without length",
-                activation_command(source, 0, Some(record.clone()), None),
+                activation_command(key.clone(), 0, Some(record.clone()), None),
             ),
             (
                 "length without record",
-                activation_command(source, 0, None, Some(0)),
+                activation_command(key.clone(), 0, None, Some(0)),
             ),
         ] {
             let before = state.clone();
@@ -978,10 +1084,11 @@ mod tests {
     fn an_activation_record_for_another_source_is_refused_at_apply() {
         let mut state = GameState::new_two_player(7);
         let source = activation_source(&mut state);
+        let key = usage_key(&state, source);
         let mut record = journal_record(&state, source);
         apply_resolved_ledger_edit(
             &mut state,
-            &activation_command(source, 0, Some(record.clone()), Some(0)),
+            &activation_command(key.clone(), 0, Some(record.clone()), Some(0)),
         )
         .expect("reach guard: the matching record replays");
         record.source = ObjectId(source.0 + 1);
@@ -989,7 +1096,7 @@ mod tests {
         assert_eq!(
             apply_resolved_ledger_edit(
                 &mut state,
-                &activation_command(source, 1, Some(record), Some(1)),
+                &activation_command(key, 1, Some(record), Some(1)),
             ),
             Err(ResolvedLedgerEditReplayInvariantError::AbilityActivationPreconditionMismatch)
         );

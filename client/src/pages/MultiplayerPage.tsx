@@ -31,6 +31,7 @@ import {
   ACTIVE_DECK_KEY,
   loadActiveDeck,
   loadActiveDeckBracket,
+  loadActiveDeckComboDeclaration,
   loadSavedDeck,
   touchDeckPlayed,
 } from "../constants/storage";
@@ -471,8 +472,11 @@ function MultiplayerPageContent({
     }
     const deck = loadActiveDeck();
     if (!deck) return null;
-    const bracket = bracketToEngineTier(loadActiveDeckBracket());
-    return { ...await submitParsedDeck(deck), bracket_tier: bracket };
+    return {
+      ...await submitParsedDeck(deck),
+      bracket_tier: bracketToEngineTier(loadActiveDeckBracket()),
+      combo_declaration: loadActiveDeckComboDeclaration(),
+    };
   }, []);
 
   const resolveGuestFromStore = useMultiplayerStore((s) => s.resolveGuest);

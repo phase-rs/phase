@@ -2,9 +2,9 @@ use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{all_consuming, map, opt, value};
+use nom::combinator::{all_consuming, map, opt, rest, value};
 use nom::multi::separated_list1;
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{preceded, separated_pair, terminated};
 use nom::Parser;
 
 use super::oracle_classifier::lower_starts_with;
@@ -17,6 +17,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_saga::is_saga_chapter;
 use super::oracle_util::{parse_mana_symbols, parse_ordinal, TextPair};
 use crate::parser::oracle_condition::parse_restriction_condition;
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     AbilityCost, AdditionalCost, CastingRestriction, Comparator, CountScope, ParsedCondition,
     QuantityExpr, QuantityRef, SpellCastingOption, TargetFilter,
@@ -71,8 +72,9 @@ pub(crate) fn split_additional_cost_trailing_spell_reduction<'a>(
 ///
 /// Recognized patterns:
 /// - "you may blight N" → `Optional(Blight { count: N })`
-/// - "blight N or pay {M}" → `Choice(Blight { count: N }, Mana { cost: M })`
-/// - General "X or Y" → `Choice(X, Y)` using `parse_single_cost` for each fragment
+/// - "blight N or pay {M}" → `Choice([Blight { count: N }, Mana { cost: M }])`
+/// - General "X or Y or Z..." → `Choice([X, Y, Z])` using `parse_single_cost`
+///   for each leg
 /// - "X and Y" → `Required(Composite[X, Y])`
 /// - Anything no arm can read → an honest `Unimplemented` cost (`Optional` for a
 ///   "you may" body, otherwise `Required`), NOT `None`. CR 601.2f + CR 601.2h:
@@ -136,32 +138,35 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
         }
     }
 
-    // "X or pay {M}" → Choice between cost X and mana payment.
-    // Uses the raw text for mana symbols (case-sensitive).
-    if let Some((left_lower, right_lower)) = body_lower.split_once(" or pay ") {
+    // "X or pay {M}" → Choice between cost X and a mana payment. The right leg
+    // is read from the case-preserving body so mana symbols keep their case, and
+    // a trailing reminder sentence is tolerated exactly as before: the mana-leg
+    // authority (`parse_mana_symbols`) reads the symbols it is given. Nom owns
+    // the split; `parse_single_cost` stays the authority for the other leg.
+    if let Ok((_, (left_lower, right_lower))) = all_consuming(separated_pair(
+        take_until::<_, _, OracleError<'_>>(" or pay "),
+        tag(" or pay "),
+        rest,
+    ))
+    .parse(body_lower)
+    {
         let right_raw = &body_raw[body_raw.len() - right_lower.len()..];
         if let Some((mana_cost, _)) = parse_mana_symbols(right_raw.trim()) {
             let cost_a = super::oracle_cost::parse_single_cost(left_lower.trim());
             if !matches!(cost_a, AbilityCost::Unimplemented { .. }) {
-                return Some(AdditionalCost::Choice(
+                return Some(AdditionalCost::Choice(vec![
                     cost_a,
                     AbilityCost::Mana { cost: mana_cost },
-                ));
+                ]));
             }
         }
     }
 
-    // General "X or Y" choice pattern using parse_single_cost for each fragment.
-    if let Some((left, right)) = body_lower.split_once(" or ") {
-        let cost_a = super::oracle_cost::parse_single_cost(left.trim());
-        let cost_b = super::oracle_cost::parse_single_cost(right.trim());
-        // Both fragments must parse to known costs — Unimplemented means the split was wrong
-        // (e.g. "sacrifice an artifact or creature" splits incorrectly on " or ").
-        if !matches!(cost_a, AbilityCost::Unimplemented { .. })
-            && !matches!(cost_b, AbilityCost::Unimplemented { .. })
-        {
-            return Some(AdditionalCost::Choice(cost_a, cost_b));
-        }
+    // General alternative-cost choice: an Oxford-comma list ("A, B, or C") or a
+    // two-way "A or B". Nom owns the list grammar; `parse_single_cost` stays the
+    // authority for each leg's cost.
+    if let Some(costs) = parse_additional_cost_alternatives(body_raw) {
+        return Some(AdditionalCost::Choice(costs));
     }
 
     if let Some(cost) = super::oracle_cost::parse_binary_cost_conjunction_nom(body_lower) {
@@ -211,6 +216,70 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
         });
     }
 
+    None
+}
+
+/// CR 601.2b + CR 601.2h: Parse an additional-cost body that names alternative
+/// costs the caster chooses among, returning every alternative in printed order.
+///
+/// Two productions, each consuming the whole body:
+/// - An Oxford-comma list of three or more alternatives, `A, B, or C` (Dusk
+///   Mangler: "sacrifice a creature, discard a card, or pay 4 life"). Commas
+///   separate the alternatives, so a leg may itself contain " or " ("sacrifice
+///   an artifact or creature").
+/// - A two-way `A or B`. " or " also joins the types inside one cost ("pay 5
+///   life or sacrifice a creature or enchantment"), so each " or " is tried as
+///   the alternative boundary, leftmost first, and the first split whose two
+///   sides are both readable costs wins.
+///
+/// Each leg is read by `parse_single_cost`, the cost authority; a list with any
+/// unreadable leg declines rather than emitting a partial choice.
+fn parse_additional_cost_alternatives(body: &str) -> Option<Vec<AbilityCost>> {
+    fn read_all(legs: &[&str]) -> Option<Vec<AbilityCost>> {
+        legs.iter()
+            .map(|leg| {
+                let cost = super::oracle_cost::parse_single_cost(leg.trim());
+                (!matches!(cost, AbilityCost::Unimplemented { .. })).then_some(cost)
+            })
+            .collect()
+    }
+    fn list_leg(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        nom::combinator::recognize(nom::multi::many1(preceded(
+            nom::combinator::not(nom::combinator::peek(tag(", "))),
+            nom::character::complete::anychar,
+        )))
+        .parse(i)
+    }
+    fn oxford_list(i: &str) -> nom::IResult<&str, Vec<&str>, OracleError<'_>> {
+        let (i, first) = list_leg(i)?;
+        let (i, middle) = nom::multi::many1(preceded(
+            terminated(tag(", "), nom::combinator::not(tag("or "))),
+            list_leg,
+        ))
+        .parse(i)?;
+        let (i, last) = preceded(tag(", or "), list_leg).parse(i)?;
+        let mut legs = Vec::with_capacity(middle.len() + 2);
+        legs.push(first);
+        legs.extend(middle);
+        legs.push(last);
+        Ok((i, legs))
+    }
+
+    if let Ok((_, legs)) = all_consuming(oxford_list).parse(body) {
+        return read_all(&legs);
+    }
+
+    // Two-way: walk each " or " boundary left to right with nom's cursor.
+    let mut boundary = 0;
+    while let Ok((_, before)) = take_until::<_, _, OracleError<'_>>(" or ").parse(&body[boundary..])
+    {
+        let split = boundary + before.len();
+        let (left, right) = (&body[..split], &body[split + " or ".len()..]);
+        if let Some(costs) = read_all(&[left, right]) {
+            return Some(costs);
+        }
+        boundary = split + " or ".len();
+    }
     None
 }
 
@@ -437,7 +506,9 @@ fn parse_self_has_flash_option(body_lower: &str) -> Option<SpellCastingOption> {
 /// Parses both forms. The `"you may [verb-cost] rather than pay this spell's mana cost"`
 /// form is verb-agnostic: the cost text (with verb intact) is delegated to `parse_oracle_cost`,
 /// the single authority for cost parsing. This composes `pay {N}{C}`, `tap [filter]`,
-/// `sacrifice [filter]`, and any future cost verb uniformly without per-verb arms.
+/// `sacrifice [filter]`, and any future cost verb uniformly without per-verb arms. The
+/// swapped clause order "rather than pay this spell's mana cost, you may [verb-cost]"
+/// (Invigorate) is recognized by the same extractor.
 fn parse_self_alternative_cost_option(
     body: &str,
     body_lower: &str,
@@ -479,8 +550,19 @@ fn parse_self_alternative_cost_option(
     None
 }
 
+/// CR 118.9: the alternative-cost anchor phrase, shared by both clause orders.
+const RATHER_THAN_PAY: &str = "rather than pay this spell's mana cost";
+/// `RATHER_THAN_PAY` with its leading word separator (canonical "you may [cost] rather than
+/// pay …" order). Rust `const` can't `concat!` a `const`; a unit test pins the equality.
+const RATHER_THAN_PAY_SUFFIX: &str = " rather than pay this spell's mana cost";
+
 /// Extract the cost-text and optional trailing-`if` condition from a
-/// `"you may [verb-cost] rather than pay this spell's mana cost[ if [condition]]"` line.
+/// `"you may [verb-cost] rather than pay this spell's mana cost[ if [condition]]"` line, or
+/// from the swapped clause order `"rather than pay this spell's mana cost, you may [verb-cost]"`.
+///
+/// CR 118.9: alternative costs are usually phrased "You may [action] rather than pay [this
+/// object's] mana cost"; Oracle also prints "rather than pay this spell's mana cost, you may
+/// [action]" (Invigorate).
 ///
 /// Composed via nom `tag()` + `take_until()`: prefix is verb-agnostic so a single combinator
 /// handles `pay`, `tap`, `sacrifice`, and any future cost verb that `parse_oracle_cost`
@@ -492,20 +574,32 @@ fn extract_rather_than_pay_alt_cost<'a>(
     body_lower: &str,
 ) -> Option<(&'a str, Option<&'a str>)> {
     const PREFIX: &str = "you may ";
-    const SUFFIX: &str = " rather than pay this spell's mana cost";
+
+    // CR 118.9: swapped clause order — "rather than pay this spell's mana cost, you may [cost]".
+    // A leading "If …," was already split and gated by the caller. No trailing-`if` slot: in
+    // this order a trailing condition would sit inside the cost text.
+    if let Ok((cost_lower, _)) = preceded(
+        tag::<_, _, OracleError<'_>>(RATHER_THAN_PAY),
+        (opt(tag(",")), tag(" you may ")),
+    )
+    .parse(body_lower)
+    {
+        let cost_text = body[body.len() - cost_lower.len()..].trim();
+        return (!cost_text.is_empty()).then_some((cost_text, None));
+    }
 
     let (after_prefix_lower, _) = tag::<_, _, OracleError<'_>>(PREFIX)
         .parse(body_lower)
         .ok()?;
     let prefix_len = body_lower.len() - after_prefix_lower.len();
 
-    let (after_suffix_lower, _) = take_until::<_, _, OracleError<'_>>(SUFFIX)
+    let (after_suffix_lower, _) = take_until::<_, _, OracleError<'_>>(RATHER_THAN_PAY_SUFFIX)
         .parse(after_prefix_lower)
         .ok()?;
     let cost_end = body_lower.len() - after_suffix_lower.len();
 
     let cost_text = body[prefix_len..cost_end].trim();
-    let after_suffix_pos = cost_end + SUFFIX.len();
+    let after_suffix_pos = cost_end + RATHER_THAN_PAY_SUFFIX.len();
     let remainder_lower = &body_lower[after_suffix_pos..];
     let trailing_if =
         if let Ok((cond_lower, _)) = tag::<_, _, OracleError<'_>>(" if ").parse(remainder_lower) {
@@ -682,7 +776,7 @@ pub fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRestricti
 /// "you've cast another [<filter>] spell this turn" (Illusory Angel, Talara's
 /// Battalion) is checked BEFORE the spell is cast (CR 601.3), when the spell
 /// being cast is not yet in this turn's spell history. The shared condition
-/// grammar reads the phrase as `SpellsCastThisTurn >= 2`, which is right where
+/// grammar reads the phrase as `SpellsCast >= 2`, which is right where
 /// the condition is evaluated on resolution (the resolving spell is already
 /// recorded) but asks for TWO earlier spells here — so the card was never
 /// castable. Same shape as the ETB "unless you've cast another spell" route in
@@ -693,9 +787,10 @@ fn parse_casting_condition(condition_text: &str) -> Option<ParsedCondition> {
         if rest.trim().is_empty() {
             return Some(ParsedCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: Some(TargetFilter::with_own_cast_exclusion(filter)),
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::GE,
@@ -1300,9 +1395,10 @@ Trample";
                     lhs:
                         QuantityExpr::Ref {
                             qty:
-                                QuantityRef::SpellsCastThisTurn {
+                                QuantityRef::SpellsCast {
                                     scope: CountScope::Controller,
                                     filter: Some(filter),
+                                    window: TurnWindow::ThisTurn,
                                 },
                         },
                     comparator: Comparator::GE,
@@ -1363,9 +1459,10 @@ Trample";
                 [CastingRestriction::RequiresCondition {
                     condition: Some(ParsedCondition::QuantityComparison {
                         lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::SpellsCastThisTurn {
+                            qty: QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: None,
+                                window: TurnWindow::ThisTurn
                             }
                         },
                         comparator: Comparator::GE,
@@ -1433,7 +1530,7 @@ Trample";
                 [CastingRestriction::RequiresCondition {
                     condition: Some(ParsedCondition::QuantityComparison {
                         lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::LifeLostThisTurn { .. }
+                            qty: QuantityRef::LifeLost { .. }
                         },
                         comparator: Comparator::GE,
                         rhs: QuantityExpr::Fixed { value: 1 },
@@ -1538,20 +1635,28 @@ Trample";
             "As an additional cost to cast this spell, behold an Elf or pay {2}. (To behold an Elf, choose an Elf you control or reveal an Elf card from your hand.)";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Choice(
-                AbilityCost::Behold {
-                    count: 1,
-                    filter: TargetFilter::Typed(filter),
-                    action: BeholdCostAction::ChooseOrReveal,
-                    ..
-                },
-                AbilityCost::Mana { cost },
-            )) => {
-                assert!(filter
-                    .type_filters
-                    .iter()
-                    .any(|tf| matches!(tf, TypeFilter::Subtype(name) if name == "Elf")));
-                assert_eq!(cost, ManaCost::generic(2));
+            Some(AdditionalCost::Choice(costs)) => {
+                assert_eq!(costs.len(), 2);
+                match &costs[0] {
+                    AbilityCost::Behold {
+                        count: 1,
+                        filter: TargetFilter::Typed(filter),
+                        action: BeholdCostAction::ChooseOrReveal,
+                        ..
+                    } => {
+                        assert!(filter
+                            .type_filters
+                            .iter()
+                            .any(|tf| matches!(tf, TypeFilter::Subtype(name) if name == "Elf")));
+                    }
+                    _ => panic!("Expected Behold as first choice"),
+                }
+                match &costs[1] {
+                    AbilityCost::Mana { cost } => {
+                        assert_eq!(*cost, ManaCost::generic(2));
+                    }
+                    _ => panic!("Expected Mana as second choice"),
+                }
             }
             other => panic!("Expected Choice(Behold Elf, Mana {{2}}), got {other:?}"),
         }
@@ -1668,19 +1773,32 @@ Trample";
                 "As an additional cost to cast this spell, blight {blight} or pay {{{generic}}}."
             );
             let result = parse_additional_cost_line(&lower, &raw);
-            assert_eq!(
-                result,
-                Some(AdditionalCost::Choice(
-                    AbilityCost::Blight { count: blight },
-                    AbilityCost::Mana {
-                        cost: ManaCost::Cost {
-                            generic,
-                            shards: vec![]
+            match result {
+                Some(AdditionalCost::Choice(costs)) => {
+                    assert_eq!(costs.len(), 2);
+                    match &costs[0] {
+                        AbilityCost::Blight { count } => {
+                            assert_eq!(*count, blight);
                         }
+                        _ => panic!("Expected Blight as first choice"),
                     }
-                )),
-                "blight {blight} or pay {{{generic}}}"
-            );
+                    match &costs[1] {
+                        AbilityCost::Mana { cost } => {
+                            assert_eq!(
+                                *cost,
+                                ManaCost::Cost {
+                                    generic,
+                                    shards: vec![]
+                                }
+                            );
+                        }
+                        _ => panic!("Expected Mana as second choice"),
+                    }
+                }
+                other => {
+                    panic!("blight {blight} or pay {{{generic}}}: expected Choice, got {other:?}")
+                }
+            }
         }
     }
 
@@ -1701,16 +1819,23 @@ Trample";
         let raw = "As an additional cost to cast this spell, discard a card or pay 3 life.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Choice(
-                AbilityCost::Discard {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    selection: CardSelectionMode::Chosen,
-                    ..
-                },
-                AbilityCost::PayLife {
-                    amount: QuantityExpr::Fixed { value: 3 },
-                },
-            )) => {}
+            Some(AdditionalCost::Choice(costs)) => {
+                assert_eq!(costs.len(), 2);
+                match &costs[0] {
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        selection: CardSelectionMode::Chosen,
+                        ..
+                    } => {}
+                    _ => panic!("Expected Discard as first choice"),
+                }
+                match &costs[1] {
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                    } => {}
+                    _ => panic!("Expected PayLife as second choice"),
+                }
+            }
             other => panic!("Expected Choice(Discard, PayLife), got {:?}", other),
         }
     }
@@ -1774,7 +1899,17 @@ Trample";
         let raw = "As an additional cost to cast this spell, sacrifice a creature or pay {2}.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Choice(AbilityCost::Sacrifice(_), AbilityCost::Mana { .. })) => {}
+            Some(AdditionalCost::Choice(costs)) => {
+                assert_eq!(costs.len(), 2);
+                match &costs[0] {
+                    AbilityCost::Sacrifice(_) => {}
+                    _ => panic!("Expected Sacrifice as first choice"),
+                }
+                match &costs[1] {
+                    AbilityCost::Mana { .. } => {}
+                    _ => panic!("Expected Mana as second choice"),
+                }
+            }
             other => panic!("Expected Choice(Sacrifice, Mana), got {:?}", other),
         }
     }
@@ -2132,14 +2267,21 @@ Trample";
             "As an additional cost to cast this spell, reveal a Dragon card from your hand or pay {1}.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Choice(
-                AbilityCost::Reveal {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    filter: Some(_),
-                    shared_quality: _,
-                },
-                AbilityCost::Mana { .. },
-            )) => {}
+            Some(AdditionalCost::Choice(costs)) => {
+                assert_eq!(costs.len(), 2);
+                match &costs[0] {
+                    AbilityCost::Reveal {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: Some(_),
+                        shared_quality: _,
+                    } => {}
+                    _ => panic!("Expected Reveal as first choice"),
+                }
+                match &costs[1] {
+                    AbilityCost::Mana { .. } => {}
+                    _ => panic!("Expected Mana as second choice"),
+                }
+            }
             other => panic!("Expected Choice(Reveal, Mana), got {:?}", other),
         }
     }
@@ -2171,6 +2313,127 @@ Trample";
                 if sac.requirement.fixed_count() == Some(1) => {}
             other => panic!("Expected Required(Sacrifice), got {:?}", other),
         }
+    }
+
+    /// Dusk Mangler — three-way additional cost choice: sacrifice a creature,
+    /// discard a card, or pay 4 life. This tests the multi-option Choice path
+    /// (issue #10442).
+    #[test]
+    fn parse_additional_cost_dusk_mangler_three_options() {
+        let lower =
+            "as an additional cost to cast this spell, sacrifice a creature, discard a card, or pay 4 life.";
+        let raw =
+            "As an additional cost to cast this spell, sacrifice a creature, discard a card, or pay 4 life.";
+        let result = parse_additional_cost_line(lower, raw);
+        match result {
+            Some(AdditionalCost::Choice(costs)) => {
+                assert_eq!(costs.len(), 3, "Dusk Mangler has three options");
+                // Option 0: sacrifice a creature
+                match &costs[0] {
+                    AbilityCost::Sacrifice(ref sac) => {
+                        assert_eq!(sac.requirement.fixed_count(), Some(1));
+                        let TargetFilter::Typed(tf) = &sac.target else {
+                            panic!("expected Typed filter for sacrifice");
+                        };
+                        assert!(tf
+                            .type_filters
+                            .iter()
+                            .any(|t| matches!(t, TypeFilter::Creature)));
+                    }
+                    _ => panic!("Expected Sacrifice as first choice"),
+                }
+                // Option 1: discard a card
+                match &costs[1] {
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        selection: CardSelectionMode::Chosen,
+                        self_scope: DiscardSelfScope::FromHand,
+                        ..
+                    } => {}
+                    _ => panic!("Expected Discard as second choice"),
+                }
+                // Option 2: pay 4 life
+                match &costs[2] {
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 4 },
+                    } => {}
+                    _ => panic!("Expected PayLife as third choice"),
+                }
+            }
+            other => panic!("Expected Choice with 3 options, got {other:?}"),
+        }
+    }
+
+    /// CR 601.2b: in a two-way choice whose second leg joins types with " or "
+    /// (Annihilating Glare / Deadly Precision: "pay {4} or sacrifice an
+    /// artifact or creature"; Final Payment: "pay 5 life or sacrifice a
+    /// creature or enchantment"), that " or " stays inside the sacrifice leg —
+    /// the line is still a two-way `Choice`, not three legs or one cost.
+    #[test]
+    fn parse_additional_cost_two_way_choice_keeps_type_disjunction_in_leg() {
+        for (raw, first_is_mana, second_types) in [
+            (
+                "As an additional cost to cast this spell, pay {4} or sacrifice an artifact or creature.",
+                true,
+                [TypeFilter::Artifact, TypeFilter::Creature],
+            ),
+            (
+                "As an additional cost to cast this spell, pay 5 life or sacrifice a creature or enchantment.",
+                false,
+                [TypeFilter::Creature, TypeFilter::Enchantment],
+            ),
+        ] {
+            let lower = raw.to_lowercase();
+            let Some(AdditionalCost::Choice(costs)) = parse_additional_cost_line(&lower, raw)
+            else {
+                panic!("{raw}: expected a two-way Choice");
+            };
+            assert_eq!(costs.len(), 2, "{raw}: {costs:?}");
+            if first_is_mana {
+                assert!(
+                    matches!(&costs[0], AbilityCost::Mana { cost } if cost.mana_value() == 4),
+                    "{raw}: {:?}",
+                    costs[0]
+                );
+            } else {
+                assert!(
+                    matches!(
+                        costs[0],
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 5 }
+                        }
+                    ),
+                    "{raw}: {:?}",
+                    costs[0]
+                );
+            }
+            let AbilityCost::Sacrifice(sac) = &costs[1] else {
+                panic!("{raw}: expected a sacrifice leg, got {:?}", costs[1]);
+            };
+            let rendered = format!("{:?}", sac.target);
+            for type_filter in &second_types {
+                assert!(
+                    rendered.contains(&format!("{type_filter:?}")),
+                    "{raw}: sacrifice leg must keep {type_filter:?}, got {rendered}"
+                );
+            }
+        }
+    }
+
+    /// A single cost whose object joins types with " or " ("sacrifice an
+    /// artifact or creature") is not a choice: no split yields two readable costs.
+    #[test]
+    fn parse_additional_cost_type_disjunction_alone_is_required() {
+        let raw = "As an additional cost to cast this spell, sacrifice an artifact or creature.";
+        let lower = raw.to_lowercase();
+        assert!(
+            matches!(
+                parse_additional_cost_line(&lower, raw),
+                Some(AdditionalCost::Required(AbilityCost::Sacrifice(_)))
+            ),
+            "got {:?}",
+            parse_additional_cost_line(&lower, raw)
+        );
     }
 
     // CR 118.9: Alternative-cost arms — verb-agnostic prefix delegates to `parse_oracle_cost`.
@@ -2435,6 +2698,106 @@ Trample";
                     .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Plains")) => {}
             other => panic!("expected TapCreatures + Plains-control condition, got {other:?}"),
         }
+    }
+
+    /// CR 118.9: the swapped clause order "rather than pay this spell's mana cost,
+    /// you may [cost]" (Invigorate, verbatim Oracle line 1) is an alternative cost,
+    /// gated by the leading "If you control a Forest," and costing
+    /// "have an opponent gain 3 life".
+    #[test]
+    fn alt_cost_swapped_clause_order_with_leading_if_invigorate() {
+        let option = parse_spell_casting_option_line(
+            "If you control a Forest, rather than pay this spell's mana cost, you may have an opponent gain 3 life.",
+            "Invigorate",
+        )
+        .expect("swapped-order alt-cost should parse");
+        assert_eq!(
+            option.kind,
+            crate::types::ability::SpellCastingOptionKind::AlternativeCost
+        );
+        assert_eq!(
+            option.condition,
+            Some(
+                parse_restriction_condition("you control a Forest")
+                    .expect("Forest-control condition parses")
+            )
+        );
+        assert_eq!(
+            option.cost,
+            Some(AbilityCost::EffectCost {
+                effect: Box::new(crate::types::ability::Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    player: TargetFilter::Typed(
+                        crate::types::ability::TypedFilter::default()
+                            .controller(ControllerRef::Opponent)
+                    ),
+                }),
+            })
+        );
+    }
+
+    /// CR 118.9: the swapped order composes with any cost verb, unconditioned.
+    #[test]
+    fn alt_cost_swapped_clause_order_unconditioned_mana() {
+        let option = parse_spell_casting_option_line(
+            "Rather than pay this spell's mana cost, you may pay {0}.",
+            "Test Spell",
+        )
+        .expect("swapped-order alt-cost should parse");
+        assert_eq!(
+            option.kind,
+            crate::types::ability::SpellCastingOptionKind::AlternativeCost
+        );
+        assert_eq!(option.condition, None);
+        assert!(
+            matches!(
+                option.cost,
+                Some(AbilityCost::Mana {
+                    cost: ManaCost::Cost { generic: 0, ref shards },
+                }) if shards.is_empty()
+            ),
+            "expected Mana {{0}}, got {:?}",
+            option.cost
+        );
+    }
+
+    /// CR 118.9 + CR 601.2b: an unrecognized leading-if predicate refuses the
+    /// swapped-order option (reach-guard: the unconditioned sibling above parses).
+    #[test]
+    fn alt_cost_swapped_clause_order_unrecognized_leading_if_refused() {
+        assert!(parse_spell_casting_option_line(
+            "Rather than pay this spell's mana cost, you may pay {0}.",
+            "Test Spell",
+        )
+        .is_some());
+        assert_eq!(
+            parse_spell_casting_option_line(
+                "If the sky is green, rather than pay this spell's mana cost, you may pay {0}.",
+                "Test Spell",
+            ),
+            None
+        );
+    }
+
+    /// The swapped order needs a cost after "you may"; the bare anchor phrase is not a cost.
+    #[test]
+    fn alt_cost_swapped_clause_order_without_cost_refused() {
+        assert_eq!(
+            parse_spell_casting_option_line(
+                "rather than pay this spell's mana cost, you may.",
+                "Test Spell",
+            ),
+            None
+        );
+        assert_eq!(
+            parse_spell_casting_option_line("rather than pay this spell's mana cost", "Test Spell"),
+            None
+        );
+    }
+
+    #[test]
+    fn rather_than_pay_suffix_is_space_plus_anchor() {
+        assert_eq!(RATHER_THAN_PAY_SUFFIX, [" ", RATHER_THAN_PAY].concat());
     }
 
     #[test]

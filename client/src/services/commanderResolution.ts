@@ -1,4 +1,5 @@
 import {
+  countDeckEntriesByName,
   looksCommanderSingleton,
   removeCommandersFromMain,
   repairParsedDeck,
@@ -31,8 +32,9 @@ export async function resolveCommander(deck: ParsedDeck): Promise<ParsedDeck> {
   if (totalCards(normalized.main) !== 100) return normalized;
   if (!looksCommanderSingleton(normalized.main)) return normalized;
 
+  const counts = countDeckEntriesByName(normalized.main);
   for (const entry of normalized.main) {
-    if (entry.count !== 1) continue;
+    if (counts.get(entry.name) !== 1) continue;
     if (!(await isCardCommanderEligible(entry.name))) continue;
 
     return removeCommandersFromMain({

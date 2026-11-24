@@ -753,6 +753,13 @@ pub struct DraftPlayerView {
     pub pick_selection_mode: PickSelectionMode,
     /// The viewer's drafted pool
     pub pool: Vec<DraftCardInstance>,
+    /// CR 702.139a: the companion the viewer's ACCEPTED deck submission
+    /// designated, read from the authoritative session. Published on the
+    /// viewer's own view only (a designation is private to its owner), so a
+    /// client that reloads or rejoins restores what the host accepted rather
+    /// than inferring it from local state it may have lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitted_companion: Option<String>,
     /// Drafted cards whose effects can be activated during a later pick.
     pub draft_effects: Vec<DraftCardInstance>,
     /// Engine-defined groups for displaying the viewer's pool without client-side
@@ -896,24 +903,12 @@ pub struct DraftPlayerView {
     /// withdraw it exactly when it becomes usable. It is read from the same
     /// retained latch either way.
     ///
-    /// **ADVISORY, NOT ENFORCED -- and the boundary is measured, not assumed.**
-    /// Game one's starting player comes from `engine::game::engine::start_game`'s
-    /// CR 103.1 contest, reached through
-    /// `server_core::session::GameSession::start_game`.
-    /// `start_game_with_starting_player` DOES exist and is public -- but it
-    /// takes a DECIDED starting player, not a chooser, and there is no pre-game
-    /// venue in which to ask the question: `GameState::next_game_chooser` is set
-    /// BY that function, and `GameAction::ChoosePlayDraw` must clear TWO gates,
-    /// not one: it is admissible only against
-    /// `WaitingFor::BetweenGamesChoosePlayDraw`, which `match_flow::start_next_game`
-    /// sets BETWEEN games, and `match_flow::handle_choose_play_draw`
-    /// independently refuses it whenever `state.match_phase !=
-    /// MatchPhase::BetweenGames`. Binding this seat to game one's starting
-    /// player therefore needs a NEW game-one play/draw election -- a new
-    /// `WaitingFor`, a widened action guard, a widened `MatchPhase`
-    /// admissibility rule, a protocol bump and a UI -- which is a match-flow
-    /// feature, not part of a draft kind. Until then the players apply it as
-    /// they do at a physical table, and the UI says so in words.
+    /// **ADVISORY, NOT ENFORCED.** Game one's CR 103.1 chooser is the d20
+    /// contest winner, who answers `WaitingFor::ChooseStartingPlayer`
+    /// (`engine::game::engine::start_game`, reached through
+    /// `server_core::session::GameSession::start_game`). Binding this seat as
+    /// that chooser is not done, so the field stays advisory and the players
+    /// apply it as they do at a physical table, and the UI says so in words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub play_first_chooser: Option<u8>,
 }
@@ -1564,6 +1559,14 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
     // Compute pairings for the current round
     let pairings = compute_pairing_views(session);
 
+    let submitted_companion = match session.seats.get(idx) {
+        Some(DraftSeat::Human { player_id, .. }) => session
+            .submitted_decks
+            .get(player_id)
+            .and_then(|submission| submission.companion.clone()),
+        Some(DraftSeat::Bot { .. }) | None => None,
+    };
+
     DraftPlayerView {
         flow: session.config.flow,
         fifo: fifo_player_view(session, seat_index),
@@ -1584,6 +1587,7 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         },
         pick_selection_mode: session.kind.procedure().pick_selection_mode,
         pool,
+        submitted_companion,
         draft_effects,
         pool_groups,
         sealed_packs,
@@ -3220,6 +3224,55 @@ mod tests {
         }
     }
 
+    /// CR 702.139a: the viewer's accepted companion designation is published on
+    /// the viewer's OWN view (so a reload or rejoin restores it from the host's
+    /// authoritative session) and on nobody else's.
+    #[test]
+    fn view_publishes_the_accepted_companion_to_its_owner_only() {
+        let (mut session, _) = test_session(2);
+        session.status = DraftStatus::Deckbuilding;
+        session.pools[0] = (0..42)
+            .map(|i| DraftCardInstance {
+                instance_id: format!("card-{i}"),
+                name: format!("Card {i}"),
+                set_code: "TST".to_string(),
+                collector_number: format!("{i}"),
+                rarity: "common".to_string(),
+                colors: Vec::new(),
+                cmc: 0,
+                type_line: String::new(),
+                draft_effect: None,
+            })
+            .collect();
+        session.pools[1] = session.pools[0].clone();
+        assert_eq!(filter_for_player(&session, 0).submitted_companion, None);
+
+        let mut main_deck: Vec<String> = (0..23).map(|i| format!("Card {i}")).collect();
+        main_deck.extend(std::iter::repeat_n("Plains".to_string(), 17));
+        session::apply(
+            &mut session,
+            DraftAction::SubmitDeck {
+                seat: 0,
+                main_deck,
+                commanders: Vec::new(),
+                companion: Some("Card 41".to_string()),
+                printings: Vec::new(),
+            },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            filter_for_player(&session, 0)
+                .submitted_companion
+                .as_deref(),
+            Some("Card 41")
+        );
+        assert_eq!(filter_for_player(&session, 1).submitted_companion, None);
+        let other = serde_json::to_string(&filter_for_player(&session, 1)).unwrap();
+        assert!(!other.contains("submitted_companion"));
+    }
+
     #[test]
     fn view_shows_submission_status_without_deck_contents() {
         let (mut session, _) = test_session(2);
@@ -3251,6 +3304,7 @@ mod tests {
                 seat: 0,
                 main_deck: main_deck.clone(),
                 commanders: Vec::new(),
+                companion: None,
                 printings: serde_json::from_value(serde_json::json!([{
                     "section":"main_deck", "name":"Secret annotation", "count":1,
                     "printing":{"set_code":"secret-set","collector_number":"001"}
@@ -3342,9 +3396,9 @@ mod tests {
         let view = filter_for_player(&session, 0);
         assert!(!view.seats[0].is_bot);
         assert!(view.seats[0].connected);
-        for i in 1..8 {
-            assert!(view.seats[i].is_bot);
-            assert!(view.seats[i].connected); // bots always connected
+        for seat in view.seats.iter().take(8).skip(1) {
+            assert!(seat.is_bot);
+            assert!(seat.connected); // bots always connected
         }
     }
 

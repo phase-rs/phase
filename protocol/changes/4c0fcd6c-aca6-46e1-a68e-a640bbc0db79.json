@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CR 101.4c + CR 616.1: staged populations schedule replacement choices live. Adds WaitingFor::ReplacementDecisionOrder { player, objects } (answered by SelectCards), StagedBatchDelivery.asking, and StagedBatchMember.held_decision / blocked; a pre-scheduler staged pause is upgraded at decode."
+}

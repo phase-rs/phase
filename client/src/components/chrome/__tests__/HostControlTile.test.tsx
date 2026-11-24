@@ -10,6 +10,7 @@ import type { SeatKind } from "../../../multiplayer/seatTypes";
 import echoWire from "../../../test/fixtures/seat-deck-echo-wire.json";
 import { usePreferencesStore } from "../../../stores/preferencesStore";
 import { UNFILED_POOL_GROUP, emptyPoolSelection } from "../../../services/randomPoolSelection";
+import { UNDECLARED_COMBO } from "../../../types/bracketEstimate";
 import { detectAndParseDeck, expandParsedDeck } from "../../../services/deckParser";
 import type * as Scryfall from "../../../services/scryfall";
 import type * as WasmAdapter from "../../../adapter/wasm-adapter";
@@ -34,7 +35,8 @@ const catalogMocks = vi.hoisted(() => ({
   candidates: [] as unknown[],
 }));
 
-vi.mock("../../../services/aiDeckCatalog", () => ({
+vi.mock("../../../services/aiDeckCatalog", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../services/aiDeckCatalog")>(),
   useAiDeckCatalog: () => ({
     candidates: catalogMocks.candidates,
     allCandidates: catalogMocks.candidates,
@@ -412,6 +414,18 @@ describe("HostControlTile", () => {
         setAi({ type: "DeckList", data: expect.objectContaining({ main_deck: ["Forest"] }) }),
       ));
     });
+
+    it("promotes a catalog deck with its owner's declarations", async () => {
+      const early = { kind: "intended", window: "early_game" } as const;
+      catalogMocks.candidates = [{ ...CATALOG_DECK, declaredBracket: 4, comboDeclaration: early }];
+      const { seatMutate } = renderSeats("Standard", aiWith({ type: "Random" }));
+      await waitFor(() => expect(seatMutate).toHaveBeenCalledWith(
+        setAi({
+          type: "DeckList",
+          data: expect.objectContaining({ bracket_tier: "optimized", combo_declaration: early }),
+        }),
+      ));
+    });
   });
   describe("owner choices and preparation fence (V8/V8b)", () => {
     // ES2021 test compilation cannot use Promise.withResolvers.
@@ -423,6 +437,7 @@ describe("HostControlTile", () => {
     const A: AiDeckCandidate = {
       id: "saved:A", name: "A", source: { type: "saved" },
       deck: detectAndParseDeck("Deck\n2 Forest (AAA) 001"), coveragePct: 100, archetype: null, bracket: null,
+      declaredBracket: null, comboDeclaration: UNDECLARED_COMBO,
     };
     const B: AiDeckCandidate = { ...A, id: "saved:B", name: "B", deck: detectAndParseDeck("Deck\n2 Forest (BBB) 002") };
     const host: PlayerSlot = { playerId: 0, name: "Host", kind: { type: "HostHuman" } };
@@ -458,7 +473,7 @@ describe("HostControlTile", () => {
       await waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
       const mutation = dispatch.mock.calls[0][0];
       expect(mutation).toEqual({ type: "SetKind", data: {
-        seatIndex: 3, kind: { type: "Ai", data: { difficulty: "Hard", deck: { type: "DeckList", data: { ...expandParsedDeck(B.deck), printings: printedB } } } },
+        seatIndex: 3, kind: { type: "Ai", data: { difficulty: "Hard", deck: { type: "DeckList", data: { ...expandParsedDeck(B.deck), printings: printedB, bracket_tier: null, combo_declaration: UNDECLARED_COMBO } } } },
       } });
       if (mutation.type !== "SetKind") throw new Error("Expected assignment");
       act(() => useMultiplayerStore.setState({ playerSlots: [host, { ...seated, kind: mutation.data.kind }] }));
@@ -467,7 +482,7 @@ describe("HostControlTile", () => {
       expect(dispatch).toHaveBeenCalledOnce();
       fireEvent.change(screen.getAllByRole("combobox")[0], { target: { value: "Easy" } });
       expect(immediate).toHaveBeenCalledWith({ type: "SetKind", data: {
-        seatIndex: 3, kind: { type: "Ai", data: { difficulty: "Easy", deck: { type: "DeckList", data: { ...expandParsedDeck(B.deck), printings: printedB } } } },
+        seatIndex: 3, kind: { type: "Ai", data: { difficulty: "Easy", deck: { type: "DeckList", data: { ...expandParsedDeck(B.deck), printings: printedB, bracket_tier: null, combo_declaration: UNDECLARED_COMBO } } } },
       } });
       // Optional nonprinting sections still distinguish otherwise equal lists.
       const planar = { ...B, id: "saved:Planar", deck: { ...B.deck, planar_deck: ["Plane"] } };
@@ -525,7 +540,7 @@ describe("HostControlTile", () => {
       await waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
       expect(dispatch).toHaveBeenCalledWith({ type: "SetKind", data: {
         seatIndex: 1, kind: { type: "Ai", data: {
-          difficulty: "Hard", deck: { type: "DeckList", data: { ...expandParsedDeck(A.deck), printings: printedB } },
+          difficulty: "Hard", deck: { type: "DeckList", data: { ...expandParsedDeck(A.deck), printings: printedB, bracket_tier: null, combo_declaration: UNDECLARED_COMBO } },
         } },
       } });
       await waitFor(() => expect(screen.getByRole("button", { name: "Start Game" })).toBeEnabled());
@@ -857,7 +872,7 @@ describe("HostControlTile", () => {
             type: "Ai",
             data: {
               difficulty: "Medium",
-              deck: { type: "DeckList", data: expandParsedDeck(DECK_C.deck) },
+              deck: { type: "DeckList", data: { ...expandParsedDeck(DECK_C.deck), bracket_tier: null } },
             },
           },
         },
@@ -894,7 +909,7 @@ describe("HostControlTile", () => {
             type: "Ai",
             data: {
               difficulty: "Medium",
-              deck: { type: "DeckList", data: expandParsedDeck(DECK_IF.deck) },
+              deck: { type: "DeckList", data: { ...expandParsedDeck(DECK_IF.deck), bracket_tier: null } },
             },
           },
         },

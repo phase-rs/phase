@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "A combat damage batch parked on a replacement choice carries the printed damage guards' reading it opened with (PendingCombatDamageReplacement.settled_guards). An older reader drops it and rereads the guards when the batch resumes; a newer reader of an older save resumes with no settled reading, so the remaining portions read the guards live."
+}

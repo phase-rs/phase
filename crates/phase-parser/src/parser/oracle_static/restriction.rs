@@ -2101,6 +2101,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: PermissionCastLimit::Unlimited,
@@ -2244,15 +2245,19 @@ pub(crate) fn try_parse_graveyard_cast_permission(
 
     let (filter, self_ref_permission) = parse_graveyard_permission_filter(&cleaned);
 
-    // CR 607.1 + CR 122.1 + CR 614.1c: peel the linked "if you cast a spell this
-    // way, that <permanent> enters with a [counter] counter on it" rider off the
-    // trailing text so the enters-with counter rides the permission and the
-    // remaining riders (extra_cost, condition) parse against the counter-free
-    // tail (Noctis, Prince of Lucis; Leonardo, Sewer Samurai — both finality).
+    // CR 607.1 + CR 122.1 + CR 614.1c + CR 614.1d: peel the linked "if you cast
+    // a spell this way, that <permanent> enters with a [counter] counter on it"
+    // / "… enters tapped" rider off the trailing text so the rider rides the
+    // permission and the remaining riders (extra_cost, condition) parse against
+    // the rider-free tail (Noctis, Prince of Lucis; Leonardo, Sewer Samurai —
+    // both finality; Edgar, Master Machinist — tapped).
     let (trailing, enters_rider) = split_cast_this_way_enters_rider(trailing);
-    let enters_with_counter = match enters_rider {
-        EntersWithRider::Absent => None,
-        EntersWithRider::Parsed(counter) => Some(counter),
+    let (enters_with_counter, enter_tapped) = match enters_rider {
+        EntersWithRider::Absent => (None, crate::types::zones::EtbTapState::Unspecified),
+        EntersWithRider::Parsed(counter) => {
+            (Some(counter), crate::types::zones::EtbTapState::Unspecified)
+        }
+        EntersWithRider::ParsedTapped => (None, crate::types::zones::EtbTapState::Tapped),
         EntersWithRider::Unmodeled => return None,
     };
 
@@ -2338,12 +2343,11 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     // CR 601.3 + CR 607.1: once the modelled lead, anchor, riders and gate are
     // consumed, the rest of the line must be punctuation only. Any other residual
     // is an unmodelled gate ("… unless you control a Zombie") or linked rider
-    // ("If you cast a spell this way, that artifact enters tapped." — Edgar,
-    // Master Machinist; "If you do, it perpetually becomes …" — Mischievous
-    // Lookout). Emitting the permission without it would be strictly more
-    // permissive than printed. And a populated turn-restriction condition would
-    // discharge the swallowed-clause expectation that used to flag the residual.
-    // So decline, and the line falls through to an honest Unimplemented.
+    // ("If you do, it perpetually becomes …" — Mischievous Lookout). Emitting the
+    // permission without it would be strictly more permissive than printed. And
+    // a populated turn-restriction condition would discharge the
+    // swallowed-clause expectation that used to flag the residual. So decline,
+    // and the line falls through to an honest Unimplemented.
     if !is_punctuation_only(residual) {
         return None;
     }
@@ -2354,6 +2358,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         && play_mode == CardPlayMode::Cast
         && required_cast_keyword.is_none()
         && enters_with_counter.is_none()
+        && enter_tapped.is_unspecified()
         && graveyard_destination_replacement.is_none()
         && extra_cost.is_none()
         && is_punctuation_only(residual);
@@ -2377,6 +2382,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         graveyard_destination_replacement,
         extra_cost,
         enters_with_counter,
+        enter_tapped,
         required_cast_keyword,
         pool: GraveyardPermissionPool::OwnGraveyard,
         cast_limit: PermissionCastLimit::Unlimited,
@@ -2650,6 +2656,7 @@ fn own_unlimited_cast_permission_zones(
         graveyard_destination_replacement,
         extra_cost,
         enters_with_counter,
+        enter_tapped,
         required_cast_keyword,
         pool,
         cast_limit,
@@ -2664,6 +2671,7 @@ fn own_unlimited_cast_permission_zones(
         && graveyard_destination_replacement.is_none()
         && extra_cost.is_none()
         && enters_with_counter.is_none()
+        && enter_tapped.is_unspecified()
         && required_cast_keyword.is_none()
         && *pool == GraveyardPermissionPool::OwnGraveyard
         && *cast_limit == PermissionCastLimit::Unlimited
@@ -2836,6 +2844,10 @@ enum EntersWithRider {
     Absent,
     /// Rider present and fully consumed as the trailing suffix.
     Parsed(crate::types::counter::CounterType),
+    /// CR 614.1d: "If you cast a spell this way, that <permanent> enters
+    /// tapped." present and fully consumed as the trailing suffix (Edgar,
+    /// Master Machinist).
+    ParsedTapped,
     /// Rider present but the recognizer left text after the counter clause —
     /// the caller must DECLINE so nothing is silently dropped.
     Unmodeled,
@@ -2868,20 +2880,25 @@ fn split_cast_this_way_enters_rider(trailing: &str) -> (&str, EntersWithRider) {
             // `text.len() - rest.len()` idiom) so the shared recognizer sees the
             // full "if you cast … this way, …" clause including its marker.
             let rider = &trailing[before.len()..];
-            if let Some((counter_type, rest)) =
-                super::oracle_effect::parse_cast_this_way_enters_with_counter(rider)
-            {
+            let recognized = super::oracle_effect::parse_cast_this_way_enters_with_counter(rider)
+                .map(|(counter_type, rest)| (EntersWithRider::Parsed(counter_type), rest))
+                .or_else(|| {
+                    super::oracle_effect::parse_cast_this_way_enters_tapped(rider)
+                        .map(|rest| (EntersWithRider::ParsedTapped, rest))
+                });
+            if let Some((parsed, rest)) = recognized {
                 // CR 614.1a + CR 607.1: commit the peel only when the recognizer
-                // consumed the WHOLE rider. Text after the counter clause (a
-                // destination sentence, a type-grant tail, or a future rider)
-                // must decline the permission rather than being silently dropped.
+                // consumed the WHOLE rider. Text after the rider clause (a
+                // destination sentence, a type-grant tail, "and attacking", or
+                // a future rider) must decline the permission rather than being
+                // silently dropped.
                 let after = rest.trim_start();
                 let after = opt(tag::<_, _, OracleError<'_>>("."))
                     .parse(after)
                     .map(|(after, _)| after)
                     .unwrap_or(after);
                 if after.trim().is_empty() {
-                    return (before, EntersWithRider::Parsed(counter_type));
+                    return (before, parsed);
                 }
                 // A document-level decline here is terminal for the
                 // graveyard-permission class: the document dispatcher emits the
@@ -3041,6 +3058,7 @@ fn try_parse_disjunctive_graveyard_cast_permission(
         graveyard_destination_replacement: None,
         extra_cost: None,
         enters_with_counter: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         required_cast_keyword: None,
         pool: GraveyardPermissionPool::OwnGraveyard,
         cast_limit: PermissionCastLimit::Unlimited,
@@ -3091,6 +3109,7 @@ fn try_parse_unlimited_combined_graveyard_permission(
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             required_cast_keyword: None,
             pool: GraveyardPermissionPool::OwnGraveyard,
             cast_limit: PermissionCastLimit::Unlimited,
@@ -3147,6 +3166,7 @@ fn usable_disjunctive_permission_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -3396,7 +3416,10 @@ pub(crate) fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option
     let enters_with_counter = match enters_rider {
         EntersWithRider::Absent => None,
         EntersWithRider::Parsed(counter) => Some(counter),
-        EntersWithRider::Unmodeled => return None,
+        // CR 614.1d: `ExileCastPermission` has no enters-tapped carrier, so an
+        // exile permission with that rider declines (an honest gap, not a
+        // permission that silently drops the rider).
+        EntersWithRider::ParsedTapped | EntersWithRider::Unmodeled => return None,
     };
 
     // CR 108.3 + CR 109.5: apply the "cards you own" ownership constraint to the
@@ -3486,6 +3509,22 @@ pub(crate) fn try_parse_persistent_exile_play_permission(
     text: &str,
     lower: &str,
 ) -> Option<StaticDefinition> {
+    // CR 611.3a: A trailing "as long as <condition>" clause gates the
+    // standing permission rather than belonging to the exile-pool reference.
+    // Reuse the shared body-preserving splitter so the static classifier and
+    // this permission parser agree on the condition boundary.
+    let text_pair = TextPair::new(text, lower);
+    let trailing_split = text_pair
+        .split_around(" as long as ")
+        .and_then(|_| split_trailing_gate_condition_with_body(&text_pair))
+        .and_then(|(body, condition_text)| {
+            parse_static_condition(condition_text).map(|condition| (body, condition))
+        });
+    let (permission_text, trailing_condition) =
+        trailing_split.map_or((text, None), |(body, condition)| (body, Some(condition)));
+    let permission_lower = permission_text.to_lowercase();
+    let lower = permission_lower.as_str();
+
     // Optional leading timing qualifier. CR 117.1c: "during your turn, " gates
     // the permission to the source controller's turn.
     let (rest, timing) = match nom_tag_lower(lower, lower, "during your turn, ") {
@@ -3493,10 +3532,11 @@ pub(crate) fn try_parse_persistent_exile_play_permission(
         None => (lower, ExileCastTiming::AnyTime),
     };
 
-    let (rest, condition) = match strip_leading_permission_condition(rest) {
+    let (rest, leading_condition) = match strip_leading_permission_condition(rest) {
         Some((rest, condition)) => (rest, Some(condition)),
         None => (rest, None),
     };
+    let condition = super::evasion::combine_conditions(leading_condition, trailing_condition);
 
     // Optional "you may look at cards exiled with <self>, and " preamble
     // (CR 601.3f). When present, the play clause uses the "those cards" anaphor
@@ -4808,5 +4848,41 @@ mod draw_from_bottom_tests {
             parse_draw_from_bottom(&lower, text).is_none(),
             "a silently-dropped trailing clause must NOT parse"
         );
+    }
+}
+
+#[cfg(test)]
+mod cast_permission_enter_tapped_tests {
+    use super::*;
+    use crate::types::zones::EtbTapState;
+
+    /// CR 113.6f + CR 601.3 (C6): the exclusivity clause ("…, but not from
+    /// anywhere else", Haakon) accounts only for a rider-free own permission. A
+    /// permission carrying the enters-tapped rider is refused, while the same
+    /// permission without it is accepted (positive control).
+    #[test]
+    fn exclusive_own_permission_refuses_an_enters_tapped_rider() {
+        let own = |enter_tapped: EtbTapState| {
+            StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: None,
+                extra_cost: None,
+                enters_with_counter: None,
+                enter_tapped,
+                required_cast_keyword: None,
+                pool: GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
+            })
+            .affected(TargetFilter::SelfRef)
+            .active_zones(vec![Zone::Graveyard])
+        };
+        assert!(
+            own_unlimited_cast_permission_zones(&own(EtbTapState::Unspecified)).is_some(),
+            "reach guard: the rider-free own permission is accepted"
+        );
+        assert!(own_unlimited_cast_permission_zones(&own(EtbTapState::Tapped)).is_none());
     }
 }

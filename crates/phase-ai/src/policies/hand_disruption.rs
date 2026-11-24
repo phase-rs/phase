@@ -307,6 +307,7 @@ mod tests {
                     selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
                     reveal: true,
+                    cardinality: engine::types::ability::ObjectSelectionCardinality::SINGLE,
                 },
             ),
         );
@@ -372,6 +373,7 @@ mod tests {
                     selection: engine::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
                     reveal: true,
+                    cardinality: engine::types::ability::ObjectSelectionCardinality::SINGLE,
                 },
             )
             .sub_ability(AbilityDefinition::new(
@@ -442,6 +444,7 @@ mod tests {
                 selection: engine::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                cardinality: engine::types::ability::ObjectSelectionCardinality::SINGLE,
             },
             Vec::new(),
             peek,
@@ -556,6 +559,7 @@ mod tests {
                 selection: engine::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                cardinality: engine::types::ability::ObjectSelectionCardinality::SINGLE,
             },
             Vec::new(),
             peek,
@@ -648,6 +652,7 @@ mod tests {
                 selection: engine::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                cardinality: engine::types::ability::ObjectSelectionCardinality::SINGLE,
             },
             Vec::new(),
             peek,
@@ -712,6 +717,7 @@ mod tests {
             selection: engine::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
             reveal: true,
+            cardinality: engine::types::ability::ObjectSelectionCardinality::SINGLE,
         };
         assert!(reveal_hand_matches_chosen_player_target(
             &state,
@@ -735,6 +741,7 @@ mod tests {
             selection: engine::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
             reveal: true,
+            cardinality: engine::types::ability::ObjectSelectionCardinality::SINGLE,
         };
         assert!(!reveal_hand_matches_chosen_player_target(
             &state,

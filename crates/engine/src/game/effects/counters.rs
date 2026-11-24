@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use crate::game::engine_replacement::CopyEntryResumption;
 use crate::game::game_object::GameObject;
@@ -6,8 +6,9 @@ use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     AbilityTag, CounterMoveSelection, CounterTransferMode, DelayedTriggerCondition,
-    DelayedTriggerKind, Duration, Effect, EffectError, EffectKind, EventCounterReproductionCount,
-    QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
+    DelayedTriggerKind, Duration, Effect, EffectError, EffectKind, EffectScope,
+    EventCounterReproductionCount, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter,
+    TargetRef,
 };
 #[cfg(test)]
 use crate::types::counter::parse_counter_type;
@@ -22,7 +23,9 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{CounterMoveStage, CounterPlacement, ProposedEvent};
+use crate::types::proposed_event::{
+    CounterCause, CounterMoveStage, CounterPlacement, LoyaltyCostRoot, ProposedEvent,
+};
 use crate::types::resolution::{ChildStackDepth, FrameGate, ResolutionFrame};
 use crate::types::resolved_commands::{
     ResolvedObjectCounterCommand, ResolvedObjectCounterEdit,
@@ -157,6 +160,7 @@ pub fn preview_counter_addition(
     target: ObjectIncarnationRef,
     counter_type: CounterType,
     count: u32,
+    cause: CounterCause,
 ) -> Option<CounterAdditionPreview> {
     let object = state.objects.get(&target.object_id)?;
     if ObjectIncarnationRef::from_object(object) != target {
@@ -171,6 +175,7 @@ pub fn preview_counter_addition(
             actor,
             object_id: target.object_id,
             counter_type,
+            cause,
         },
         count,
         applied: HashSet::new(),
@@ -218,6 +223,7 @@ pub fn add_counter_with_replacement(
     object_id: ObjectId,
     counter_type: CounterType,
     count: u32,
+    cause: CounterCause,
     events: &mut Vec<GameEvent>,
 ) -> bool {
     if count == 0 {
@@ -243,6 +249,7 @@ pub fn add_counter_with_replacement(
             actor,
             object_id,
             counter_type,
+            cause,
         },
         count,
         applied: HashSet::new(),
@@ -256,6 +263,7 @@ pub fn add_counter_with_replacement(
                         actor,
                         object_id,
                         counter_type,
+                        ..
                     },
                 count,
                 ..
@@ -295,6 +303,7 @@ pub(crate) fn add_object_counters_then(
     recipients: &[ObjectId],
     counter_type: &CounterType,
     count: u32,
+    cause: CounterCause,
     kind: EffectKind,
     source_id: ObjectId,
     post_action: PendingCounterPostAction,
@@ -312,7 +321,9 @@ pub(crate) fn add_object_counters_then(
     );
     let additions: Vec<PendingCounterAddition> = recipients
         .iter()
-        .map(|&object_id| object_counter_addition(actor, object_id, counter_type.clone(), count))
+        .map(|&object_id| {
+            object_counter_addition(actor, object_id, counter_type.clone(), count, cause)
+        })
         .collect();
     for (index, addition) in additions.iter().cloned().enumerate() {
         if !apply_object_counter_addition(state, addition, events) {
@@ -405,6 +416,24 @@ pub(crate) fn park_pending_counter_completion_at_child_boundary(
     }
 }
 
+/// CR 608.2c + CR 614.12a: an entry continuation that re-paused can leave
+/// an exhausted carrier over its copy-batch owner. Once that entry resumes,
+/// retire only carriers with no remaining work before publishing or draining
+/// the owner, whether the optional entry replacement was accepted or declined.
+pub(crate) fn retire_exhausted_counter_additions(state: &mut GameState) {
+    while state.active_counter_additions().is_some_and(|queue| {
+        queue.remaining.is_empty()
+            && queue
+                .completion
+                .as_ref()
+                .is_some_and(|completion| completion.is_noop())
+    }) {
+        let _ = state
+            .take_active_counter_additions()
+            .expect("an exhausted entry carrier owns the active frame");
+    }
+}
+
 /// CR 614.1a + CR 608.2c: when the active queue is the rest of a compound
 /// CreateToken event, parked over a copy batch's pause
 /// (`token::drive_token_event_delivery`), that batch has now finished: deliver
@@ -449,12 +478,14 @@ fn object_counter_addition(
     object_id: ObjectId,
     counter_type: CounterType,
     count: u32,
+    cause: CounterCause,
 ) -> PendingCounterAddition {
     PendingCounterAddition::Object {
         actor,
         object_id,
         counter_type,
         count,
+        cause,
     }
 }
 
@@ -468,11 +499,12 @@ fn apply_object_counter_addition(
         object_id,
         counter_type,
         count,
+        cause,
     } = addition
     else {
         return true;
     };
-    add_counter_with_replacement(state, actor, object_id, counter_type, count, events)
+    add_counter_with_replacement(state, actor, object_id, counter_type, count, cause, events)
 }
 
 fn merge_pending_counter_completion_after_nested_pause(
@@ -603,12 +635,34 @@ fn ready_copy_entry_completion(
         return None;
     }
     match queue.completion.as_ref()?.post_actions.first()? {
-        PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant } => Some(*entrant),
+        PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant, .. } => Some(*entrant),
         _ => None,
     }
 }
 
+/// CR 608.2f + CR 614.5 (F1): append `events` to a paused simultaneous
+/// multi-seat token clause's reunited span. Early-returns unless the clause
+/// record is installed; callers pass the slice that belongs to the clause
+/// (the installing action passes its clause window, later actions pass whole
+/// buffers). Consumers dedup the overlapping feeds.
+pub(crate) fn feed_simultaneous_token_clause(state: &mut GameState, events: &[GameEvent]) {
+    let Some(record) = state.pending_simultaneous_token_clause.as_mut() else {
+        return;
+    };
+    record.accumulated.extend(events.iter().cloned());
+}
+
+/// CR 608.2f + CR 614.5 (F1): entry/exit feeds around the counter drain so a
+/// paused token clause captures each seat's committed entry events however the
+/// drain exits — stash+return, merge+return, incomplete-remaining return,
+/// while-exhaustion falloff, or a no-active-frame call.
 pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    feed_simultaneous_token_clause(state, events);
+    drain_pending_counter_additions_inner(state, events);
+    feed_simultaneous_token_clause(state, events);
+}
+
+fn drain_pending_counter_additions_inner(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // Leave a ready fallible action resident without cloning or re-parking it.
     while let Some(mut queue) = state
         .active_counter_additions()
@@ -697,12 +751,22 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
                 object_id,
                 counter_type,
                 count,
-            } => add_counter_with_replacement(state, actor, object_id, counter_type, count, events),
+                cause,
+            } => add_counter_with_replacement(
+                state,
+                actor,
+                object_id,
+                counter_type,
+                count,
+                cause,
+                events,
+            ),
             PendingCounterAddition::Player {
                 actor,
                 player_id,
                 counter_kind,
                 count,
+                cause,
             } => {
                 super::player_counter::add_player_counter_with_replacement(
                     state,
@@ -710,6 +774,7 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
                     player_id,
                     counter_kind,
                     count,
+                    cause,
                     events,
                 ) != super::player_counter::PlayerCounterAdditionOutcome::NeedsChoice
             }
@@ -717,7 +782,10 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
                 actor,
                 player_id,
                 count,
-            } => super::energy::add_energy_with_replacement(state, actor, player_id, count, events),
+                cause,
+            } => super::energy::add_energy_with_replacement(
+                state, actor, player_id, count, cause, events,
+            ),
         };
         if !completed {
             return;
@@ -776,9 +844,16 @@ pub(crate) fn resume_copy_target_entry_completions(
                     "Copy entry completion lost its counter frame".to_string(),
                 )
             })?;
-        completion.post_actions.remove(0);
+        let PendingCounterPostAction::FinishCopyTargetChoiceEntry { resume_stage, .. } =
+            completion.post_actions.remove(0)
+        else {
+            unreachable!("ready copy-entry head was checked")
+        };
         match crate::game::engine_replacement::resume_copy_target_choice_entry(
-            state, entrant, events,
+            state,
+            entrant,
+            resume_stage,
+            events,
         )? {
             CopyEntryResumption::Paused => {
                 if !completion.is_noop() {
@@ -937,10 +1012,10 @@ fn apply_pending_counter_post_action(
             if let Some(host) = attach_to {
                 match host {
                     crate::game::game_object::AttachTarget::Object(id) => {
-                        super::attach::attach_to(state, object_id, id);
+                        super::attach::attach_to_with_events(state, object_id, id, events);
                     }
                     crate::game::game_object::AttachTarget::Player(pid) => {
-                        super::attach::attach_to_player(state, object_id, pid);
+                        super::attach::attach_to_player_with_events(state, object_id, pid, events);
                     }
                 }
             }
@@ -997,6 +1072,7 @@ fn apply_pending_counter_post_action(
                 return true;
             }
             let event = ProposedEvent::CreateToken {
+                redirected_to: None,
                 owner,
                 spec,
                 copy: None,
@@ -1171,18 +1247,18 @@ fn apply_pending_counter_post_action(
                 super::token::record_last_created_token(state, object_id);
             }
             // DELIBERATELY NOT `record_last_created_copy_batch_token`: this arm RE-SYNCS the batch
-            // buffer to the whole guarded ledger rather than appending one id, and the two are not
+            // buffer with the whole guarded ledger rather than appending one id, and the two are not
             // interchangeable — the buffer accumulates across batches while the ledger is reset per
-            // batch. Copying the ledger cannot publish an id the ledger's own guard withheld, so
+            // batch. Merging the ledger cannot publish an id the ledger's own guard withheld, so
             // this shape needs no second predicate; it needs the source to stay the GUARDED ledger,
             // which is what `state.last_created_token_ids` is after the call above.
-            let created_ids = state.last_created_token_ids.clone();
-            if let Some(pending) = state.active_copy_token_mut() {
-                pending.created_ids = created_ids;
-            }
+            super::token::record_copy_batch_ledger_on_active_copy_token(state);
             true
         }
-        PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant } => {
+        PendingCounterPostAction::FinishCopyTargetChoiceEntry {
+            entrant,
+            resume_stage,
+        } => {
             // The drain parks this fallible action for the result-aware engine
             // boundary (`resume_copy_target_entry_completions`) and never
             // dispatches it here. Should a caller reach this arm anyway, re-park
@@ -1197,7 +1273,10 @@ fn apply_pending_counter_post_action(
                 PendingEffectResolved::with_post_actions_without_effect(
                     EffectKind::BecomeCopy,
                     entrant.object_id,
-                    vec![PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant }],
+                    vec![PendingCounterPostAction::FinishCopyTargetChoiceEntry {
+                        entrant,
+                        resume_stage,
+                    }],
                 ),
             );
             false
@@ -1274,6 +1353,7 @@ fn apply_pending_counter_post_action(
                     if to == Zone::Battlefield {
                         crate::game::engine_replacement::flush_deferred_entry_events_into_priority_scan(
                             state,
+                            object_id,
                             events,
                         );
                     }
@@ -1485,6 +1565,7 @@ pub fn apply_resolved_counter_edit(
                 Some(CounterAddedRecord {
                     actor: *actor,
                     object_id: object.id,
+                    incarnation: Some(object.incarnation),
                     counter_type: command.counter_type.clone(),
                     count: *count,
                     name: object.name.clone(),
@@ -1605,10 +1686,14 @@ pub(crate) fn apply_counter_removal(
         .record_object_counter(command)
         .expect("resolved counter removal must have a live journal cause");
 
+    // CR 608.2c: stamp the open instruction so removals of different
+    // instructions of one resolution stay separate events.
+    let instruction_lead = crate::game::zones::open_instruction_lead(state, events.len());
     events.push(GameEvent::CounterRemoved {
         object_id,
         counter_type,
         count: removed,
+        instruction_lead,
     });
     removed
 }
@@ -1722,6 +1807,36 @@ pub fn remove_counter_with_replacement(
     count: u32,
     events: &mut Vec<GameEvent>,
 ) -> CounterRemovalOutcome {
+    remove_counter_with_replacement_inner(state, object_id, counter_type, count, None, events)
+}
+
+/// CR 602.2b + CR 606.4: propose one loyalty-counter cost removal with an
+/// identity marker that survives replacement ordering and distinguishes this
+/// root from any identical child removal.
+pub(crate) fn remove_loyalty_cost_counter_with_replacement(
+    state: &mut GameState,
+    object_id: ObjectId,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) -> CounterRemovalOutcome {
+    remove_counter_with_replacement_inner(
+        state,
+        object_id,
+        CounterType::Loyalty,
+        count,
+        Some(LoyaltyCostRoot::InitiatingRemoval),
+        events,
+    )
+}
+
+fn remove_counter_with_replacement_inner(
+    state: &mut GameState,
+    object_id: ObjectId,
+    counter_type: CounterType,
+    count: u32,
+    loyalty_cost_root: Option<LoyaltyCostRoot>,
+    events: &mut Vec<GameEvent>,
+) -> CounterRemovalOutcome {
     // CR 101.2: "Can't" overrides "can" — if a static prohibits removal of
     // this counter type from this object, bail out immediately.
     if counter_removal_blocked(state, object_id, &counter_type) {
@@ -1732,6 +1847,7 @@ pub fn remove_counter_with_replacement(
         object_id,
         counter_type,
         count,
+        loyalty_cost_root,
         applied: HashSet::new(),
     };
 
@@ -1813,6 +1929,7 @@ pub(crate) fn apply_move_counter_after_replacement(
         remove_count,
         add_count,
         stage,
+        cause,
         applied: _,
     } = event
     else {
@@ -1826,6 +1943,7 @@ pub(crate) fn apply_move_counter_after_replacement(
         counter_type,
         remove_count,
         add_count,
+        cause,
     };
 
     match stage {
@@ -1841,6 +1959,7 @@ pub(crate) fn apply_move_counter_after_replacement(
                 remove_count: counter_move.remove_count,
                 add_count: counter_move.add_count,
                 stage: CounterMoveStage::Add,
+                cause: counter_move.cause,
                 applied: HashSet::new(),
             };
             match replacement::replace_event(state, proposed, events) {
@@ -1862,6 +1981,7 @@ pub(crate) fn apply_move_counter_after_replacement(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn move_counter_with_replacement(
     state: &mut GameState,
     actor: PlayerId,
@@ -1869,6 +1989,7 @@ pub(crate) fn move_counter_with_replacement(
     destination_id: ObjectId,
     counter_type: CounterType,
     count: u32,
+    cause: CounterCause,
     events: &mut Vec<GameEvent>,
 ) -> bool {
     move_counter_with_replacement_entry(
@@ -1880,6 +2001,7 @@ pub(crate) fn move_counter_with_replacement(
             counter_type,
             remove_count: count,
             add_count: count,
+            cause,
         },
         events,
     )
@@ -1912,6 +2034,7 @@ fn move_counter_with_replacement_entry(
         remove_count: counter_move.remove_count,
         add_count: counter_move.add_count,
         stage: CounterMoveStage::Remove,
+        cause: counter_move.cause,
         applied: HashSet::new(),
     };
     match replacement::replace_event(state, proposed, events) {
@@ -1957,6 +2080,49 @@ pub fn resolve_add(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    let additions = resolved_counter_additions(state, ability);
+
+    let completion =
+        PendingEffectResolved::new(EffectKind::from(&ability.effect), ability.source_id);
+    for (index, addition) in additions.iter().enumerate() {
+        let PendingCounterAddition::Object {
+            object_id,
+            count,
+            counter_type,
+            ..
+        } = addition
+        else {
+            continue;
+        };
+        let event_start = events.len();
+        if !apply_object_counter_addition(state, addition.clone(), events) {
+            stash_pending_counter_additions(state, additions[index + 1..].to_vec(), completion);
+            return Ok(());
+        }
+        if *count > 0 {
+            emit_evolved_event_for_counter_addition(
+                ability,
+                events,
+                event_start,
+                *object_id,
+                counter_type,
+            );
+        }
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+        subject: None,
+    });
+
+    Ok(())
+}
+
+pub(crate) fn resolved_counter_additions(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<PendingCounterAddition> {
     let (counter_type, count) = match &ability.effect {
         Effect::PutCounter {
             counter_type,
@@ -1970,7 +2136,7 @@ pub fn resolve_add(
     };
 
     // CR 601.2d: If distribution was assigned at cast time, apply per-target counter counts.
-    let additions: Vec<PendingCounterAddition> = if let Some(distribution) = &ability.distribution {
+    if let Some(distribution) = &ability.distribution {
         distribution
             .iter()
             .filter_map(|(target, count)| {
@@ -1980,6 +2146,8 @@ pub fn resolve_add(
                         *obj_id,
                         counter_type.clone(),
                         *count,
+                        // CR 614.16: resolving-effect placements are eligible.
+                        CounterCause::ResolvingEffect,
                     ))
                 } else {
                     None
@@ -2014,43 +2182,12 @@ pub fn resolve_add(
                     obj_id,
                     counter_type.clone(),
                     counter_num,
+                    // CR 614.16: resolving-effect placements are eligible.
+                    CounterCause::ResolvingEffect,
                 )
             })
             .collect()
-    };
-
-    let completion =
-        PendingEffectResolved::new(EffectKind::from(&ability.effect), ability.source_id);
-    for (index, addition) in additions.iter().cloned().enumerate() {
-        let PendingCounterAddition::Object {
-            object_id, count, ..
-        } = addition
-        else {
-            continue;
-        };
-        let event_start = events.len();
-        if !apply_object_counter_addition(state, addition, events) {
-            stash_pending_counter_additions(state, additions[index + 1..].to_vec(), completion);
-            return Ok(());
-        }
-        if count > 0 {
-            emit_evolved_event_for_counter_addition(
-                ability,
-                events,
-                event_start,
-                object_id,
-                &counter_type,
-            );
-        }
     }
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
-
-    Ok(())
 }
 
 fn emit_evolved_event_for_counter_addition(
@@ -2103,7 +2240,8 @@ pub fn resolve_reproduce_event_counters(
 
     // Fold the firing's `CounterAdded` occurrences into a kind→count multiset,
     // preserving first-seen kind order for deterministic placement/event order.
-    let mut reproduced: Vec<(CounterType, u32)> = Vec::new();
+    // `None` marks a kind whose SameNumber sum is not representable as `u32`.
+    let mut reproduced: Vec<(CounterType, Option<u32>)> = Vec::new();
     for event in &state.current_trigger_events {
         let GameEvent::CounterAdded {
             counter_type,
@@ -2127,12 +2265,26 @@ pub fn resolve_reproduce_event_counters(
             Some((_, existing)) => match per_kind_count {
                 // SameNumber sums repeated kinds; PerKind is a flat per-kind
                 // count, so a repeated kind stays at `n` (already recorded).
-                EventCounterReproductionCount::SameNumber => *existing += amount,
+                // CR 107.1 + CR 122.1: counter counts have no rules maximum,
+                // but the engine stores them as `u32`. A sum past `u32::MAX`
+                // could not be placed on any permanent, so the kind's
+                // reproduction is dropped, the same outcome
+                // `apply_counter_addition` gives any addition past `u32::MAX`
+                // (no counters, no `CounterAdded` event). It is never clamped:
+                // clamping would place a capped count. A dropped kind stays
+                // dropped for the rest of the fold.
+                EventCounterReproductionCount::SameNumber => {
+                    *existing = existing.and_then(|sum| sum.checked_add(amount));
+                }
                 EventCounterReproductionCount::PerKind(_) => {}
             },
-            None => reproduced.push((counter_type.clone(), amount)),
+            None => reproduced.push((counter_type.clone(), Some(amount))),
         }
     }
+    let reproduced: Vec<(CounterType, u32)> = reproduced
+        .into_iter()
+        .filter_map(|(kind, amount)| amount.map(|amount| (kind, amount)))
+        .collect();
 
     if reproduced.is_empty() {
         events.push(GameEvent::EffectResolved {
@@ -2148,7 +2300,14 @@ pub fn resolve_reproduce_event_counters(
         .into_iter()
         .flat_map(|obj_id| {
             reproduced.iter().map(move |(kind, amount)| {
-                object_counter_addition(ability.controller, obj_id, kind.clone(), *amount)
+                object_counter_addition(
+                    ability.controller,
+                    obj_id,
+                    kind.clone(),
+                    *amount,
+                    // CR 614.16: resolving-effect placements are eligible.
+                    CounterCause::ResolvingEffect,
+                )
             })
         })
         .collect();
@@ -2312,6 +2471,8 @@ pub fn resolve_add_all(
                 obj_id,
                 counter_type.clone(),
                 counter_num,
+                // CR 614.16: resolving-effect placements are eligible.
+                CounterCause::ResolvingEffect,
             )
         })
         .collect();
@@ -2370,6 +2531,8 @@ pub fn resolve_multiply(
                 obj_id,
                 counter_type.clone(),
                 to_add,
+                // CR 614.16: resolving-effect placements are eligible.
+                CounterCause::ResolvingEffect,
             ));
         }
     }
@@ -2407,7 +2570,7 @@ pub fn resolve_multiply(
 /// never offered, so the rider must not fire.
 ///
 /// Both the presence check and the removal-prohibition check use the resolver's
-/// own authorities (`resolve_defined_or_targets`, `counter_removal_blocked`), so
+/// own authorities (`counter_removal_targets`, `counter_removal_blocked`), so
 /// feasibility and resolution can never diverge. A `count > 1` request is still
 /// feasible whenever ≥1 permitted counter exists — the resolver removes as many
 /// as available (CR 122.1 "as much as possible"), a nonzero action. Returns
@@ -2420,7 +2583,9 @@ pub(crate) fn remove_counter_optional_is_infeasible(
     let Effect::RemoveCounter { counter_type, .. } = &ability.effect else {
         return false;
     };
-    let targets = resolve_defined_or_targets(state, ability);
+    // The resolver's own recipient binding: a mass population, a tracked set,
+    // or the chosen/anaphoric targets.
+    let targets = counter_removal_targets(state, ability);
     // Feasible iff SOME resolved target holds a matching counter that is not
     // removal-blocked. `counter_type` is `Option<CounterType>`: `Some(ct)`
     // matches that specific kind ("a charge counter"), `None` means any kind
@@ -2536,10 +2701,13 @@ pub(super) fn nontargeted_counter_population_ids(
         || !target.names_enumerable_population()
         // CR 400.1: this enumeration is the BATTLEFIELD only (see ZONE SCOPE
         // above), so a zone-qualified recipient must not be answered with a
-        // battlefield population. `None` = no zone constraint = the battlefield
-        // default. `counter.rs`'s `recipient_zone_is_battlefield` is the parser
-        // half of this guard.
-        || !matches!(target.extract_in_zone(), None | Some(Zone::Battlefield))
+        // battlefield population. Every zone the filter names must be the
+        // battlefield; naming none is the battlefield default. `counter.rs`'s
+        // `recipient_zone_is_battlefield` is the parser half of this guard.
+        || !target
+            .population_zones()
+            .iter()
+            .all(|zone| *zone == Zone::Battlefield)
     {
         return None;
     }
@@ -2557,13 +2725,23 @@ pub(super) fn nontargeted_counter_population_ids(
 }
 
 /// CR 122.1: the objects a `RemoveCounter` node removes counters from. Shared
-/// by `resolve_remove` and `stack_reach`, so a pending node is read with the
-/// resolver's own binding.
+/// by `resolve_remove`, `remove_counter_optional_is_infeasible` and
+/// `stack_reach`, so a pending node is read with the resolver's own binding.
 pub(super) fn counter_removal_targets(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Vec<crate::types::identifiers::ObjectId> {
     match &ability.effect {
+        // CR 122.1 + CR 115.10a + CR 608.2h: a mass removal names no target; its
+        // population is every phased-in battlefield object the filter matches,
+        // determined once, before any counter is removed. Chain-propagated object
+        // targets never narrow it (`resolved_battlefield_population_ids` does not
+        // read `ability.targets`): Oblivion Stone's removal follows a Destroy node.
+        Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        } => super::resolved_battlefield_population_ids(state, ability, target),
         Effect::RemoveCounter {
             target:
                 target @ (TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }),
@@ -2752,6 +2930,12 @@ pub(super) fn resolve_defined_or_targets(
         ) {
             return crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter);
         }
+        // CR 400.7 + CR 608.2k: an event subject binds only while it can be found.
+        if let Some(ids) =
+            crate::game::targeting::bound_event_referent_objects(state, ability, filter)
+        {
+            return ids;
+        }
         let event_targets =
             crate::game::targeting::resolve_event_context_targets(state, filter, ability.source_id);
         if !event_targets.is_empty() {
@@ -2906,6 +3090,8 @@ pub fn resolve_move(
                         *dest_id,
                         ct.clone(),
                         count,
+                        // CR 614.16: resolving-effect placements are eligible.
+                        CounterCause::ResolvingEffect,
                     ));
                     if let Some(limit) = remaining.as_mut() {
                         *limit = limit.saturating_sub(count);
@@ -2961,6 +3147,9 @@ pub fn resolve_move(
                     dest_id,
                     ct.clone(),
                     count,
+                    // CR 614.16: move producers pass the initiating cause —
+                    // this transfer is initiated by a resolving effect.
+                    CounterCause::ResolvingEffect,
                     events,
                 ) {
                     return Ok(());
@@ -3141,6 +3330,9 @@ pub(crate) fn validate_and_queue_counter_move_distribution(
             counter_type: selection.counter_type.clone(),
             remove_count: selection.count,
             add_count: selection.count,
+            // CR 614.16: distribution moves are initiated by the resolving
+            // effect that opened the distribution prompt.
+            cause: CounterCause::ResolvingEffect,
         });
     }
 
@@ -3196,11 +3388,21 @@ fn resolve_counter_transfer_sources(
         };
     }
 
-    if let Some(TargetRef::Object(id)) = crate::game::targeting::resolve_event_context_target(
-        state,
-        source_filter,
-        ability.source_id,
-    ) {
+    // CR 122.8 + CR 608.2h: putting "those counters" reads the departed object's
+    // information (The Ozolith); moving them (CR 122.5) acts on the source, so
+    // it must still be the object the event named.
+    let source = match mode {
+        // allow-raw-event-referent: CR 608.2h information read of the departed object's counters
+        CounterTransferMode::Put => crate::game::targeting::resolve_event_context_target(
+            state,
+            source_filter,
+            ability.source_id,
+        ),
+        CounterTransferMode::Move => {
+            crate::game::targeting::affected_event_context_target(state, ability, source_filter)
+        }
+    };
+    if let Some(TargetRef::Object(id)) = source {
         return vec![id];
     }
 
@@ -3245,11 +3447,15 @@ fn resolve_counter_transfer_destinations(
         .collect();
     }
 
-    if let Some(TargetRef::Object(id)) = crate::game::targeting::resolve_event_context_target(
-        state,
-        target_filter,
-        ability.source_id,
-    ) {
+    // CR 400.7 + CR 608.2k: an event-subject destination binds only while it can be found.
+    if let Some(ids) =
+        crate::game::targeting::bound_event_referent_objects(state, ability, target_filter)
+    {
+        return ids;
+    }
+    if let Some(TargetRef::Object(id)) =
+        crate::game::targeting::affected_event_context_target(state, ability, target_filter)
+    {
         return vec![id];
     }
 
@@ -3472,6 +3678,7 @@ pub(crate) fn move_counters_optional_is_infeasible(
                     counter_type,
                     remove_count: count,
                     add_count: count,
+                    cause: CounterCause::Other,
                 },
             )
         })
@@ -3522,10 +3729,11 @@ pub fn resolve_remove(
         }
     }
 
-    let (counter_type, raw_count) = match &ability.effect {
+    let (counter_type, raw_count, scope) = match &ability.effect {
         Effect::RemoveCounter {
             counter_type,
             count,
+            scope,
             ..
         } => {
             // CR 122.1: Resolve the count against game state so dynamic amounts
@@ -3535,32 +3743,38 @@ pub fn resolve_remove(
             // and is keyed off `< 0` below, exactly as before.
             let resolved =
                 crate::game::quantity::resolve_quantity_with_targets(state, count, ability);
-            (counter_type.clone(), resolved)
+            (counter_type.clone(), resolved, *scope)
         }
-        _ => (Some(CounterType::Plus1Plus1), 1),
+        _ => (Some(CounterType::Plus1Plus1), 1, EffectScope::Single),
     };
 
     let targets = counter_removal_targets(state, ability);
-    let mut remaining = Vec::new();
+    let mut remaining = VecDeque::new();
     for obj_id in targets {
         // Build the list of (counter_type, count) pairs to remove.
         let removals: Vec<(CounterType, u32)> = if let Some(counter_type) = &counter_type {
-            // CR 122.1: count == -1 means "remove all" — resolve to the actual counter count.
-            let counter_num = if raw_count < 0 {
-                state
-                    .objects
-                    .get(&obj_id)
-                    .and_then(|obj| obj.counters.get(counter_type).copied())
-                    .unwrap_or(0)
+            let available = counter_count(state, obj_id, counter_type);
+            if available == 0 && scope == EffectScope::All {
+                // CR 609.3: removing a counter from an object that has none of
+                // that kind is impossible, so a mass removal ("remove a -1/-1
+                // counter from each creature you control") queues a row only for
+                // the members that have one, not for every member of the
+                // population. A single chosen object keeps its row unchanged.
+                Vec::new()
             } else {
-                raw_count as u32
-            };
-            vec![(counter_type.clone(), counter_num)]
+                // CR 122.1: count == -1 means "remove all" — resolve to the actual counter count.
+                let counter_num = if raw_count < 0 {
+                    available
+                } else {
+                    raw_count as u32
+                };
+                vec![(counter_type.clone(), counter_num)]
+            }
         } else {
             // Remove all counter types. count == -1 means remove all of each type;
             // positive count means remove up to that many total (player's choice — for now, remove
             // proportionally starting from the first type).
-            let counters: Vec<(CounterType, u32)> = state
+            let mut counters: Vec<(CounterType, u32)> = state
                 .objects
                 .get(&obj_id)
                 .map(|obj| {
@@ -3571,6 +3785,7 @@ pub fn resolve_remove(
                         .collect()
                 })
                 .unwrap_or_default();
+            order_untyped_removal_kinds(&mut counters, scope, raw_count);
             if raw_count < 0 {
                 counters
             } else {
@@ -3598,7 +3813,13 @@ pub fn resolve_remove(
         }));
     }
 
-    let total = remaining.iter().map(|entry| entry.count).sum();
+    // CR 107.1: counter counts have no rules maximum, but the queue total is a
+    // fixed-width `u32` over every queued removal (two permanents with 2^31
+    // counters each already exceed it). It is a diagnostic aggregate, so it
+    // saturates; each queued entry keeps its true count.
+    let total = remaining
+        .iter()
+        .fold(0u32, |total, entry| total.saturating_add(entry.count));
     state.push_counter_removals(PendingCounterRemovalQueue {
         remaining,
         effect_kind: EffectKind::from(&ability.effect),
@@ -3610,6 +3831,26 @@ pub fn resolve_remove(
     drain_pending_counter_removals(state, events);
 
     Ok(())
+}
+
+/// Orders the kinds an untyped, non-interactive counter removal walks.
+///
+/// `obj.counters` is a `HashMap`, whose iteration order changes from run to
+/// run, and the printed instruction fixes no order among the kinds a
+/// remove-all removes. A mass removal (`EffectScope::All`) or a remove-all
+/// (`raw_count < 0`) walks the kinds in `CounterType` order so the event order
+/// is deterministic. A finite untyped single removal ("remove a counter from
+/// target permanent", Thrull Parasite) is not remove-all processing: CR 608.2d
+/// gives its kind choice to the player, so this ordering must not decide which
+/// kind its budget removes, and its kinds are left as read.
+fn order_untyped_removal_kinds(
+    counters: &mut [(CounterType, u32)],
+    scope: EffectScope,
+    raw_count: i32,
+) {
+    if scope == EffectScope::All || raw_count < 0 {
+        counters.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    }
 }
 
 /// CR 608.2d + CR 608.2h: the total cap of an interactive counter removal, read
@@ -3791,7 +4032,7 @@ pub(crate) fn validate_and_queue_counter_removal(
             "counter removal request exceeds the most counters the effect may remove".to_string(),
         ));
     }
-    let remaining: Vec<PendingCounterRemoval> = selections
+    let remaining: VecDeque<PendingCounterRemoval> = selections
         .iter()
         .map(|s| PendingCounterRemoval {
             object_id: source_id,
@@ -3851,26 +4092,26 @@ pub(crate) fn settled_in_flight_counter_removal(
 /// counter removed this way" rider reading `QuantityRef::PreviousEffectAmount`,
 /// picks up the removed count.
 pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    while let Some(mut queue) = state.active_counter_removals().cloned() {
+    // The queue is advanced in place on its own frame: each step pops one entry
+    // from the front, so a wide mass removal drains in linear time.
+    loop {
+        let Some(queue) = state.active_counter_removals_mut() else {
+            return;
+        };
         if let Some(in_flight) = queue.in_flight.take() {
-            queue.applied_total = queue
-                .applied_total
-                .saturating_add(settled_in_flight_counter_removal(state, &in_flight));
-            state
-                .replace_active_counter_removals(queue)
+            let settled = settled_in_flight_counter_removal(state, &in_flight);
+            let queue = state
+                .active_counter_removals_mut()
                 .expect("settled counter-removal must retain its active frame");
+            queue.applied_total = queue.applied_total.saturating_add(settled);
             continue;
         }
-        let Some(PendingCounterRemoval {
-            object_id,
-            counter_type,
-            count,
-        }) = queue.remaining.first().cloned()
-        else {
+        let Some(removal) = queue.remaining.pop_front() else {
             // CR 608.2h: ordering invariant — stamp the actual removed total before the
             // terminating EffectResolved (and thus before the continuation drains).
-            publish_counter_removal_total(state, queue.applied_total);
-            state
+            let applied_total = queue.applied_total;
+            publish_counter_removal_total(state, applied_total);
+            let queue = state
                 .take_active_counter_removals()
                 .expect("settled counter-removals queue must own the active frame")
                 .expect("settled counter-removals frame must exist");
@@ -3881,18 +4122,16 @@ pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut
             });
             continue;
         };
-        queue.remaining.remove(0);
-        queue.in_flight = Some(begin_in_flight_counter_removal(
-            state,
-            PendingCounterRemoval {
-                object_id,
-                counter_type: counter_type.clone(),
-                count,
-            },
-        ));
+        let (object_id, counter_type, count) = (
+            removal.object_id,
+            removal.counter_type.clone(),
+            removal.count,
+        );
+        let in_flight = begin_in_flight_counter_removal(state, removal);
         state
-            .replace_active_counter_removals(queue)
-            .expect("re-parked counter-removals queue must own the active frame");
+            .active_counter_removals_mut()
+            .expect("re-parked counter-removals queue must own the active frame")
+            .in_flight = Some(in_flight);
         // CR 614.1: single-authority remove pipeline (applies prevention /
         // modification replacements; keeps obj.loyalty / obj.defense in lockstep).
         remove_counter_with_replacement(state, object_id, counter_type, count, events);
@@ -5314,7 +5553,14 @@ mod tests {
         let before = state.clone();
 
         assert_eq!(
-            preview_counter_addition(&state, PlayerId(0), target, CounterType::Plus1Plus1, 2,),
+            preview_counter_addition(
+                &state,
+                PlayerId(0),
+                target,
+                CounterType::Plus1Plus1,
+                2,
+                CounterCause::ResolvingEffect,
+            ),
             Some(CounterAdditionPreview::Applied { count: 2 })
         );
         assert_eq!(
@@ -5353,7 +5599,14 @@ mod tests {
         let before = state.clone();
 
         assert_eq!(
-            preview_counter_addition(&state, PlayerId(0), target, CounterType::Plus1Plus1, 2,),
+            preview_counter_addition(
+                &state,
+                PlayerId(0),
+                target,
+                CounterType::Plus1Plus1,
+                2,
+                CounterCause::ResolvingEffect,
+            ),
             Some(CounterAdditionPreview::Transformed { count: 4 })
         );
         assert_eq!(
@@ -5385,7 +5638,14 @@ mod tests {
         let target = ObjectIncarnationRef::from_object(&state.objects[&target_id]);
 
         assert_eq!(
-            preview_counter_addition(&state, PlayerId(0), target, CounterType::Plus1Plus1, 1,),
+            preview_counter_addition(
+                &state,
+                PlayerId(0),
+                target,
+                CounterType::Plus1Plus1,
+                1,
+                CounterCause::ResolvingEffect,
+            ),
             Some(CounterAdditionPreview::Prevented)
         );
     }
@@ -5404,7 +5664,14 @@ mod tests {
         let target = ObjectIncarnationRef::from_object(&state.objects[&target_id]);
 
         assert_eq!(
-            preview_counter_addition(&state, PlayerId(0), target, CounterType::Plus1Plus1, 1,),
+            preview_counter_addition(
+                &state,
+                PlayerId(0),
+                target,
+                CounterType::Plus1Plus1,
+                1,
+                CounterCause::ResolvingEffect,
+            ),
             Some(CounterAdditionPreview::ChoiceRequired {
                 player: PlayerId(0)
             })
@@ -5435,10 +5702,210 @@ mod tests {
                 stale_target,
                 CounterType::Plus1Plus1,
                 1,
+                CounterCause::ResolvingEffect,
             ),
             None,
             "a tactical fact must not apply to a new object that reused the same id"
         );
+    }
+
+    /// CR 614.16 (P3-1): the stashed cause survives the pause resume. An
+    /// effect-driven placement drained from the counter-addition queue still
+    /// matches a hand-built effect-gated doubler, while a cost/TBA placement
+    /// fails closed. The gate is hand-built because the parser anchor lands
+    /// in Phase 4; the doubling assertion is what flips if drain forwarding
+    /// is dropped (revert-fails). Reach-guard: each drained item still lands
+    /// (the asserted count IS the landed count).
+    #[test]
+    fn stashed_cause_survives_drain_for_effect_driven_placements() {
+        use crate::types::ability::{
+            QuantityModification, ReplacementCondition, ReplacementDefinition,
+            ReplacementPlayerScope, TargetFilter,
+        };
+        use crate::types::identifiers::CardId;
+        use crate::types::player::PlayerCounterKind;
+        use crate::types::replacements::ReplacementEvent;
+
+        // (cause, expected counters after draining one pending placement)
+        for (cause, expected) in [
+            (CounterCause::ResolvingEffect, 2u32),
+            (CounterCause::ReplacementOrPrevention, 2u32),
+            (CounterCause::Other, 1u32),
+        ] {
+            // Object shape: gated doubler scoped to the target.
+            let mut state = GameState::new_two_player(42);
+            let target_id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Counter Target".to_string(),
+                Zone::Battlefield,
+            );
+            let mut doubler = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .quantity_modification(QuantityModification::DOUBLE)
+                .condition(ReplacementCondition::EffectCausedPlacement);
+            doubler.valid_card = Some(TargetFilter::SelfRef);
+            state
+                .objects
+                .get_mut(&target_id)
+                .unwrap()
+                .replacement_definitions
+                .push(doubler);
+            stash_pending_counter_additions(
+                &mut state,
+                vec![PendingCounterAddition::Object {
+                    actor: PlayerId(0),
+                    object_id: target_id,
+                    counter_type: CounterType::Plus1Plus1,
+                    count: 1,
+                    cause,
+                }],
+                PendingEffectResolved::new(EffectKind::GenericEffect, target_id),
+            );
+            let mut events = Vec::new();
+            drain_pending_counter_additions(&mut state, &mut events);
+            assert_eq!(
+                state.objects[&target_id]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or(0),
+                expected,
+                "{cause:?} object placement must drain to {expected}"
+            );
+
+            // Player + energy shapes: gated doubler scoped to any player.
+            let mut state = GameState::new_two_player(42);
+            let source_id = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Counter Doubler".to_string(),
+                Zone::Battlefield,
+            );
+            let mut doubler = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .quantity_modification(QuantityModification::DOUBLE)
+                .condition(ReplacementCondition::EffectCausedPlacement);
+            doubler.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+            state
+                .objects
+                .get_mut(&source_id)
+                .unwrap()
+                .replacement_definitions
+                .push(doubler);
+            stash_pending_counter_additions(
+                &mut state,
+                vec![
+                    PendingCounterAddition::Player {
+                        actor: PlayerId(0),
+                        player_id: PlayerId(0),
+                        counter_kind: PlayerCounterKind::Poison,
+                        count: 1,
+                        cause,
+                    },
+                    PendingCounterAddition::Energy {
+                        actor: PlayerId(0),
+                        player_id: PlayerId(0),
+                        count: 1,
+                        cause,
+                    },
+                ],
+                PendingEffectResolved::new(EffectKind::GenericEffect, source_id),
+            );
+            let mut events = Vec::new();
+            drain_pending_counter_additions(&mut state, &mut events);
+            assert_eq!(
+                state.players[0].poison_counters, expected,
+                "{cause:?} player placement must drain to {expected}"
+            );
+            assert_eq!(
+                state.players[0].energy, expected,
+                "{cause:?} energy placement must drain to {expected}"
+            );
+        }
+    }
+
+    /// CR 614.16 (P3-1): the Remove→Add rebuild carries the initiating cause.
+    /// A move initiated by a resolving effect still doubles at its add stage
+    /// under a hand-built effect-gated doubler; a cost/TBA-initiated move
+    /// fails closed. Revert-fails: dropping the rebuild forwarding halves
+    /// the `ResolvingEffect` row. Reach-guard: the source is removed and the
+    /// destination holds the asserted count.
+    #[test]
+    fn move_rebuild_preserves_initiating_cause() {
+        use crate::types::ability::{
+            QuantityModification, ReplacementCondition, ReplacementDefinition, TargetFilter,
+        };
+        use crate::types::identifiers::CardId;
+        use crate::types::replacements::ReplacementEvent;
+
+        for (cause, expected) in [
+            (CounterCause::ResolvingEffect, 2u32),
+            (CounterCause::ReplacementOrPrevention, 2u32),
+            (CounterCause::Other, 1u32),
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let source_id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Counter Source".to_string(),
+                Zone::Battlefield,
+            );
+            let dest_id = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(0),
+                "Counter Destination".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&source_id)
+                .unwrap()
+                .counters
+                .insert(CounterType::Plus1Plus1, 1);
+            let mut doubler = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .quantity_modification(QuantityModification::DOUBLE)
+                .condition(ReplacementCondition::EffectCausedPlacement);
+            doubler.valid_card = Some(TargetFilter::SelfRef);
+            state
+                .objects
+                .get_mut(&dest_id)
+                .unwrap()
+                .replacement_definitions
+                .push(doubler);
+
+            let mut events = Vec::new();
+            assert!(move_counter_with_replacement(
+                &mut state,
+                PlayerId(0),
+                source_id,
+                dest_id,
+                CounterType::Plus1Plus1,
+                1,
+                cause,
+                &mut events,
+            ));
+            assert_eq!(
+                state.objects[&source_id]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or(0),
+                0,
+                "{cause:?} move must remove the source counter"
+            );
+            assert_eq!(
+                state.objects[&dest_id]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or(0),
+                expected,
+                "{cause:?} move-add stage must land {expected}"
+            );
+        }
     }
 
     fn install_counter_removal_optional_replacement(state: &mut GameState) {
@@ -5810,6 +6277,7 @@ mod tests {
                     counter_type: Some(CounterType::Plus1Plus1),
                     count: QuantityExpr::Fixed { value: 3 },
                     target: TargetFilter::Any,
+                    scope: crate::types::ability::EffectScope::Single,
                 },
                 obj_id,
             ),
@@ -6010,6 +6478,7 @@ mod tests {
                 object_id: ObjectId(10),
                 counter_type: CounterType::Plus1Plus1,
                 count: 1,
+                cause: CounterCause::Other,
             }],
             completion: Some(PendingEffectResolved::with_post_actions_without_effect(
                 EffectKind::Token,
@@ -6601,9 +7070,10 @@ mod tests {
     /// put X +1/+1 counters on it, where X is its power." End-to-end through the
     /// real parser: an entering creature receives +1/+1 counters equal to ITS
     /// OWN power, not Railway Brawler's. The source and entering creature have
-    /// DIFFERENT power so the referent is observable. Reverting the enters lift
-    /// leaves the count `scope: Source`, reading Railway Brawler's power (the
-    /// #5253 bug) — this assertion goes red.
+    /// DIFFERENT power so the referent is observable. The where-X
+    /// characteristic rung binds the count to the entering creature
+    /// (`EventSource`); a count read off the source would read Railway
+    /// Brawler's power (the #5253 bug), and this assertion goes red.
     #[test]
     fn railway_brawler_counters_entering_creature_by_its_own_power() {
         use crate::game::stack::resolve_top;
@@ -6743,6 +7213,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );
@@ -7008,7 +7479,7 @@ mod tests {
             GameEvent::CounterRemoved {
                 object_id,
                 counter_type: CounterType::Plus1Plus1,
-                count: 1,
+                count: 1, ..
             } if *object_id == source_id
         )));
     }
@@ -7057,6 +7528,7 @@ mod tests {
             dest_id,
             CounterType::Plus1Plus1,
             1,
+            CounterCause::ResolvingEffect,
             &mut events,
         ));
 
@@ -7081,7 +7553,7 @@ mod tests {
             GameEvent::CounterRemoved {
                 object_id,
                 counter_type: CounterType::Plus1Plus1,
-                count: 1,
+                count: 1, ..
             } if *object_id == source_id
         )));
         assert!(events.iter().any(|event| matches!(
@@ -7133,6 +7605,7 @@ mod tests {
                     counter_type: CounterType::Plus1Plus1,
                     remove_count: 1,
                     add_count: 1,
+                    cause: CounterCause::Other,
                 },
                 PendingCounterMove {
                     actor: PlayerId(0),
@@ -7141,6 +7614,7 @@ mod tests {
                     counter_type: CounterType::Plus1Plus1,
                     remove_count: 1,
                     add_count: 1,
+                    cause: CounterCause::Other,
                 },
             ],
             effect_kind: EffectKind::MoveCounters,
@@ -7247,6 +7721,7 @@ mod tests {
                     counter_type: None,
                     count: QuantityExpr::Fixed { value: -1 },
                     target: TargetFilter::Any,
+                    scope: crate::types::ability::EffectScope::Single,
                 },
                 source_id,
             )),
@@ -7329,6 +7804,163 @@ mod tests {
         assert!(state.objects[&source_id].counters.is_empty());
     }
 
+    /// Heartmender's mass removal ("remove a -1/-1 counter from each creature you
+    /// control", scope `All`) over a board of `creatures` creatures, of which the
+    /// ones at `with_counter` carry one -1/-1 counter each. Returns the state, the
+    /// creature ids and the resolved ability, with one optional counter-removal
+    /// replacement installed so every proposed removal pauses for a choice.
+    fn heartmender_mass_removal_board(
+        creatures: usize,
+        with_counter: &[usize],
+    ) -> (GameState, Vec<ObjectId>, ResolvedAbility) {
+        let mut state = GameState::new_two_player(42);
+        let ids: Vec<ObjectId> = (0..creatures)
+            .map(|index| {
+                let id = create_object(
+                    &mut state,
+                    CardId(1000 + index as u64),
+                    PlayerId(0),
+                    format!("Creature {index}"),
+                    Zone::Battlefield,
+                );
+                mark_creature(&mut state, id);
+                id
+            })
+            .collect();
+        for &index in with_counter {
+            state
+                .objects
+                .get_mut(&ids[index])
+                .unwrap()
+                .counters
+                .insert(CounterType::Minus1Minus1, 1);
+        }
+        install_counter_removal_optional_replacement(&mut state);
+        let ability = ResolvedAbility::new(
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Minus1Minus1),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                scope: EffectScope::All,
+            },
+            vec![],
+            ids[0],
+            PlayerId(0),
+        );
+        (state, ids, ability)
+    }
+
+    /// CR 609.3 + CR 614.1: a finite typed mass removal queues a row only for
+    /// the permanents that have a counter of that kind. On a wide board where one
+    /// creature has a -1/-1 counter, the paused removal is the only row: nothing
+    /// for the creatures without one is left queued behind it.
+    #[test]
+    fn mass_removal_on_wide_board_queues_one_row_for_the_one_marked_creature() {
+        let (mut state, ids, ability) = heartmender_mass_removal_board(12, &[7]);
+        let mut events = Vec::new();
+        resolve_remove(&mut state, &ability, &mut events).expect("mass removal resolves");
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "REACH-GUARD: the marked creature's removal pauses for its replacement"
+        );
+        let queue = state
+            .active_counter_removals()
+            .expect("the mass removal owns its prompt");
+        assert_eq!(
+            queue.in_flight.as_ref().map(|f| f.removal.object_id),
+            Some(ids[7]),
+            "the paused row is the marked creature's"
+        );
+        assert!(
+            queue.remaining.is_empty(),
+            "no row is queued for the eleven creatures without a -1/-1 counter: {:?}",
+            queue.remaining
+        );
+        assert_eq!(queue.total, 1);
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("the replacement choice resumes the queue");
+        assert!(state.active_counter_removals().is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.last_effect_count, Some(1));
+        assert!(ids.iter().all(|id| !state.objects[id]
+            .counters
+            .contains_key(&CounterType::Minus1Minus1)));
+    }
+
+    /// CR 614.1 + CR 608.2h: a mass removal that pauses for a replacement on one
+    /// permanent resumes with the next permanent's removal, across a save/restore
+    /// of the paused queue, and settles each removal's actual count in order.
+    #[test]
+    fn mass_removal_pauses_and_resumes_across_objects() {
+        let (mut state, ids, ability) = heartmender_mass_removal_board(5, &[1, 3]);
+        let mut events = Vec::new();
+        resolve_remove(&mut state, &ability, &mut events).expect("mass removal resolves");
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        let queue = state
+            .active_counter_removals()
+            .expect("the mass removal owns its first prompt");
+        assert_eq!(
+            queue.in_flight.as_ref().map(|f| f.removal.object_id),
+            Some(ids[1])
+        );
+        assert_eq!(
+            queue
+                .remaining
+                .iter()
+                .map(|removal| removal.object_id)
+                .collect::<Vec<_>>(),
+            vec![ids[3]],
+            "only the second marked creature waits behind the paused row"
+        );
+
+        let saved = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("the paused mass removal serializes");
+        let restored: ResolutionStateWire =
+            serde_json::from_value(saved).expect("the paused mass removal restores");
+        let mut state = restored.into_game_state();
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("the first replacement choice resumes the queue");
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "the second creature's removal pauses for its own replacement"
+        );
+        let queue = state
+            .active_counter_removals()
+            .expect("the re-parked queue owns the second prompt");
+        assert_eq!(
+            queue.in_flight.as_ref().map(|f| f.removal.object_id),
+            Some(ids[3])
+        );
+        assert!(queue.remaining.is_empty());
+        assert_eq!(queue.applied_total, 1, "the first removal settled");
+        assert!(!state.objects[&ids[1]]
+            .counters
+            .contains_key(&CounterType::Minus1Minus1));
+        assert_eq!(
+            state.objects[&ids[3]]
+                .counters
+                .get(&CounterType::Minus1Minus1),
+            Some(&1),
+            "the second removal has not happened yet"
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("the second replacement choice finishes the queue");
+        assert!(state.active_counter_removals().is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.last_effect_count, Some(2));
+        assert!(ids.iter().all(|id| !state.objects[id]
+            .counters
+            .contains_key(&CounterType::Minus1Minus1)));
+    }
+
     /// CR 122.1 + CR 614.1 + CR 608.2h: a v1 save parked an accepted
     /// counter-removal replacement after removing its current tuple from the
     /// queue. Restore reconstructs that tuple from `pending_replacement`, so
@@ -7364,6 +7996,7 @@ mod tests {
                     counter_type: None,
                     count: QuantityExpr::Fixed { value: -1 },
                     target: TargetFilter::Any,
+                    scope: crate::types::ability::EffectScope::Single,
                 },
                 source_id,
             )),
@@ -7469,6 +8102,7 @@ mod tests {
                     counter_type: None,
                     count: QuantityExpr::Fixed { value: -1 },
                     target: TargetFilter::Any,
+                    scope: crate::types::ability::EffectScope::Single,
                 },
                 source_id,
             )),
@@ -7661,6 +8295,7 @@ mod tests {
             dest_id,
             CounterType::Plus1Plus1,
             1,
+            CounterCause::ResolvingEffect,
             &mut events,
         ));
 
@@ -8002,6 +8637,7 @@ mod tests {
             pw_id,
             CounterType::Loyalty,
             1,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
 
@@ -8106,6 +8742,7 @@ mod tests {
             battle_id,
             CounterType::Defense,
             2,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
         assert_eq!(state.objects[&battle_id].defense, Some(6));
@@ -8164,6 +8801,7 @@ mod tests {
             pw_id,
             CounterType::Loyalty,
             1,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
         assert_eq!(state.objects[&pw_id].loyalty, Some(5));
@@ -8267,6 +8905,7 @@ mod tests {
             pw_id,
             CounterType::Loyalty,
             1,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
         assert_eq!(state.objects[&pw_id].loyalty, Some(5));
@@ -8285,6 +8924,7 @@ mod tests {
             pw_id,
             CounterType::Loyalty,
             1,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
         assert_eq!(
@@ -8417,6 +9057,7 @@ mod tests {
             obj_id,
             CounterType::Plus1Plus1,
             2,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
 
@@ -8486,6 +9127,7 @@ mod tests {
             opp_creature,
             CounterType::Plus1Plus1,
             2,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
 
@@ -8546,6 +9188,7 @@ mod tests {
             p1_creature,
             CounterType::Plus1Plus1,
             2,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
 
@@ -8605,6 +9248,7 @@ mod tests {
             keepers_id,
             CounterType::Plus1Plus1,
             3,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
 
@@ -8640,6 +9284,7 @@ mod tests {
             keepers_id,
             CounterType::Minus1Minus1,
             2,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
 
@@ -8677,6 +9322,7 @@ mod tests {
             keepers_id,
             CounterType::Generic("charge".to_string()),
             1,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
 
@@ -8716,6 +9362,7 @@ mod tests {
             bystander_id,
             CounterType::Plus1Plus1,
             2,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
 
@@ -8771,6 +9418,7 @@ mod tests {
                 keepers_id,
                 CounterType::Plus1Plus1,
                 1,
+                CounterCause::ResolvingEffect,
                 &mut events,
             );
             assert!(
@@ -8791,6 +9439,7 @@ mod tests {
             keepers_id,
             CounterType::Plus1Plus1,
             1,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
 
@@ -9007,6 +9656,7 @@ mod tests {
             dest,
             CounterType::Stun,
             1,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
 
@@ -9077,6 +9727,7 @@ mod tests {
             dest,
             CounterType::Stun,
             1,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
 
@@ -9388,6 +10039,59 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 111.1: `EmitCommittedCopyTokenEntry` re-syncs the batch ledger onto an
+    /// ACTIVE CopyToken owner by merging, so the earlier batches' tokens the owner already lists
+    /// ("those tokens") stay ahead of this batch's. An assignment there would drop them, since
+    /// the ledger is reset per batch. The earlier id lives only in the owner's buffer.
+    #[test]
+    fn emit_committed_copy_token_entry_merges_the_ledger_into_the_active_copy_token_owner() {
+        use crate::types::game_state::{OfferedBatchCustody, PendingCopyTokenResolution};
+        use std::collections::VecDeque;
+
+        let mut state = GameState::new_two_player(42);
+        let earlier = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Earlier Copy".to_string(),
+            Zone::Battlefield,
+        );
+        let object_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Copy Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.push_copy_token(PendingCopyTokenResolution {
+            created_ids: vec![earlier],
+            remaining: VecDeque::new(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id: earlier,
+            referent_set: None,
+            offered_batch: OfferedBatchCustody::Settled,
+        });
+        assert!(
+            state.last_created_token_ids.is_empty(),
+            "REACH-GUARD: the ledger holds only this batch, and starts empty"
+        );
+        let mut events = Vec::new();
+        assert!(apply_pending_counter_post_action(
+            &mut state,
+            PendingCounterPostAction::EmitCommittedCopyTokenEntry { object_id },
+            &mut events,
+        ));
+        assert_eq!(state.last_created_token_ids, vec![object_id]);
+        assert_eq!(
+            state
+                .active_copy_token()
+                .expect("REACH-GUARD: the owner stays parked")
+                .created_ids,
+            vec![earlier, object_id],
+            "the owner keeps the earlier batch's token, then lists this batch's once"
+        );
+    }
+
     /// The COPY-BATCH BUFFER half of the same invariant, and the one every test above is
     /// structurally blind to.
     ///
@@ -9423,7 +10127,7 @@ mod tests {
     /// Both leave the PRESENT row passing, so neither is caught by a fixture that never ran.
     #[test]
     fn a_vanished_token_never_reaches_the_anaphora_slot_through_the_copy_batch_buffer() {
-        use crate::types::game_state::PendingCopyTokenResolution;
+        use crate::types::game_state::{OfferedBatchCustody, PendingCopyTokenResolution};
         use std::collections::VecDeque;
 
         /// The two routes that publish a single just-created id while a copy batch is in flight.
@@ -9467,6 +10171,8 @@ mod tests {
                 remaining: VecDeque::new(),
                 effect_kind: EffectKind::CopyTokenOf,
                 source_id,
+                referent_set: None,
+                offered_batch: OfferedBatchCustody::Settled,
             });
             assert!(
                 state.active_copy_token().is_some(),
@@ -9855,5 +10561,221 @@ mod tests {
             vec![(CounterType::Loyalty, 4), (CounterType::Plus1Plus1, 4),]
         );
         assert!(coalesce_entry_counters([(CounterType::Loyalty, 0)]).is_empty());
+    }
+
+    /// CR 608.2d: a mass or remove-all untyped removal walks its kinds in
+    /// `CounterType` order, whatever order the object's counters were read in,
+    /// while a finite untyped single removal ("remove a counter", Thrull
+    /// Parasite) leaves its kinds as read, so the ordering never picks the kind
+    /// its budget removes.
+    #[test]
+    fn untyped_removal_kinds_are_ordered_only_for_mass_or_remove_all() {
+        let ice = || CounterType::Generic("ice".to_string());
+        let read_orders = [
+            vec![(ice(), 1), (CounterType::Plus1Plus1, 1)],
+            vec![(CounterType::Plus1Plus1, 1), (ice(), 1)],
+        ];
+        let sorted = vec![(CounterType::Plus1Plus1, 1), (ice(), 1)];
+
+        for read in &read_orders {
+            let mut mass_finite = read.clone();
+            order_untyped_removal_kinds(&mut mass_finite, EffectScope::All, 1);
+            assert_eq!(mass_finite, sorted, "mass finite from {read:?}");
+
+            let mut single_remove_all = read.clone();
+            order_untyped_removal_kinds(&mut single_remove_all, EffectScope::Single, -1);
+            assert_eq!(single_remove_all, sorted, "single remove-all from {read:?}");
+
+            let mut single_finite = read.clone();
+            order_untyped_removal_kinds(&mut single_finite, EffectScope::Single, 1);
+            assert_eq!(&single_finite, read, "single finite keeps {read:?}");
+        }
+    }
+}
+
+// Unit-level: an end-to-end Bold Plagiarist board with two same-kind placements on
+// one recipient in one firing was not driven (probe 4); these tests call the resolver
+// with the firing's `current_trigger_events` directly.
+#[cfg(test)]
+mod same_number_overflow_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::identifiers::CardId;
+
+    fn charge() -> CounterType {
+        CounterType::Generic("charge".to_string())
+    }
+
+    fn ice() -> CounterType {
+        CounterType::Generic("ice".to_string())
+    }
+
+    fn placed(object_id: ObjectId, counter_type: CounterType, count: u32) -> GameEvent {
+        GameEvent::CounterAdded {
+            object_id,
+            counter_type,
+            count,
+            actor: PlayerId(1),
+        }
+    }
+
+    /// A state with the placement's recipient and the reproducing creature on
+    /// the battlefield, and `firing` as the trigger's event window.
+    fn reproduce(
+        per_kind_count: EventCounterReproductionCount,
+        firing: impl Fn(ObjectId) -> Vec<GameEvent>,
+    ) -> (GameState, ObjectId, Vec<GameEvent>) {
+        let mut state = GameState::new_two_player(7);
+        let recipient = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Their Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let plagiarist = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bold Plagiarist".to_string(),
+            Zone::Battlefield,
+        );
+        state.current_trigger_events = firing(recipient);
+        let ability = ResolvedAbility::new(
+            Effect::ReproduceEventCounters {
+                target: TargetFilter::Any,
+                per_kind_count,
+            },
+            vec![TargetRef::Object(plagiarist)],
+            plagiarist,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_reproduce_event_counters(&mut state, &ability, &mut events).unwrap();
+        (state, plagiarist, events)
+    }
+
+    fn count_on(state: &GameState, id: ObjectId, kind: &CounterType) -> u32 {
+        state.objects[&id].counters.get(kind).copied().unwrap_or(0)
+    }
+
+    fn added(events: &[GameEvent], kind: &CounterType) -> Vec<u32> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CounterAdded {
+                    counter_type,
+                    count,
+                    ..
+                } if counter_type == kind => Some(*count),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Probe 9, the reference outcome: `apply_counter_addition` drops an
+    /// addition past `u32::MAX` (no counters, no `CounterAdded` event).
+    #[test]
+    fn an_addition_past_u32_max_is_dropped_without_an_event() {
+        let mut state = GameState::new_two_player(7);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Full Relic".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(charge(), u32::MAX);
+        let mut events = Vec::new();
+        add_counter_with_replacement(
+            &mut state,
+            PlayerId(0),
+            id,
+            charge(),
+            1,
+            CounterCause::ResolvingEffect,
+            &mut events,
+        );
+        assert_eq!(count_on(&state, id, &charge()), u32::MAX);
+        assert!(added(&events, &charge()).is_empty(), "{events:?}");
+    }
+
+    /// CR 122.1 + CR 107.1: "the same number and kind of counters" over two
+    /// same-kind placements of 2^31 sums past `u32::MAX`. That kind is dropped,
+    /// the outcome the add path gives any addition past `u32::MAX`; the other
+    /// kind in the same firing is still reproduced.
+    #[test]
+    fn an_unrepresentable_same_number_sum_drops_only_that_kind() {
+        let (state, plagiarist, events) =
+            reproduce(EventCounterReproductionCount::SameNumber, |recipient| {
+                vec![
+                    placed(recipient, charge(), 1 << 31),
+                    placed(recipient, charge(), 1 << 31),
+                    placed(recipient, ice(), 3),
+                ]
+            });
+        // Reach guard: the resolver ran and placed the representable kind.
+        assert_eq!(count_on(&state, plagiarist, &ice()), 3);
+        assert_eq!(added(&events, &ice()), vec![3]);
+        assert_eq!(count_on(&state, plagiarist, &charge()), 0);
+        assert!(added(&events, &charge()).is_empty(), "{events:?}");
+    }
+
+    /// A later placement of a dropped kind does not bring it back.
+    #[test]
+    fn a_dropped_same_number_kind_stays_dropped() {
+        let (state, plagiarist, events) =
+            reproduce(EventCounterReproductionCount::SameNumber, |recipient| {
+                vec![
+                    placed(recipient, charge(), 1 << 31),
+                    placed(recipient, charge(), 1 << 31),
+                    placed(recipient, charge(), 5),
+                    placed(recipient, ice(), 3),
+                ]
+            });
+        assert_eq!(count_on(&state, plagiarist, &ice()), 3);
+        assert_eq!(count_on(&state, plagiarist, &charge()), 0);
+        assert!(added(&events, &charge()).is_empty(), "{events:?}");
+    }
+
+    /// No cap below `u32::MAX`: one placement of 2^31, and a same-kind sum that
+    /// lands exactly on `u32::MAX`, are reproduced in full.
+    #[test]
+    fn a_representable_same_number_sum_is_reproduced_in_full() {
+        let (state, plagiarist, _) =
+            reproduce(EventCounterReproductionCount::SameNumber, |recipient| {
+                vec![placed(recipient, charge(), 1 << 31)]
+            });
+        assert_eq!(count_on(&state, plagiarist, &charge()), 1 << 31);
+
+        let (state, plagiarist, _) =
+            reproduce(EventCounterReproductionCount::SameNumber, |recipient| {
+                vec![
+                    placed(recipient, charge(), 1 << 31),
+                    placed(recipient, charge(), (1 << 31) - 1),
+                ]
+            });
+        assert_eq!(count_on(&state, plagiarist, &charge()), u32::MAX);
+    }
+
+    /// "One of each of those kinds" ignores magnitude, so the same firing
+    /// reproduces one counter of each kind.
+    #[test]
+    fn per_kind_reproduction_ignores_the_large_magnitudes() {
+        let (state, plagiarist, _) =
+            reproduce(EventCounterReproductionCount::PerKind(1), |recipient| {
+                vec![
+                    placed(recipient, charge(), 1 << 31),
+                    placed(recipient, charge(), 1 << 31),
+                    placed(recipient, ice(), 3),
+                ]
+            });
+        assert_eq!(count_on(&state, plagiarist, &charge()), 1);
+        assert_eq!(count_on(&state, plagiarist, &ice()), 1);
     }
 }

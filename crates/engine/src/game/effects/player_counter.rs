@@ -8,7 +8,7 @@ use crate::types::game_state::{
     GameState, PendingCounterAddition, PendingEffectResolved, UnrepresentablePolicy,
 };
 use crate::types::player::{PlayerCounterKind, PlayerId};
-use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+use crate::types::proposed_event::{CounterCause, CounterPlacement, ProposedEvent};
 use crate::types::resolved_commands::ResolvedPlayerEdit;
 
 /// The replacement-aware outcome of attempting to add player counters.
@@ -47,6 +47,7 @@ pub fn add_player_counter_with_replacement(
     player_id: PlayerId,
     counter_kind: PlayerCounterKind,
     count: u32,
+    cause: CounterCause,
     events: &mut Vec<GameEvent>,
 ) -> PlayerCounterAdditionOutcome {
     life::ordinary_settlement(
@@ -56,6 +57,7 @@ pub fn add_player_counter_with_replacement(
             player_id,
             counter_kind,
             count,
+            cause,
             UnrepresentablePolicy::IgnoreImpossible,
             events,
         ),
@@ -76,21 +78,33 @@ pub(crate) fn try_add_player_counter_with_replacement(
     player_id: PlayerId,
     counter_kind: PlayerCounterKind,
     count: u32,
+    cause: CounterCause,
     events: &mut Vec<GameEvent>,
 ) -> Result<PlayerCounterAdditionOutcome, LifeChangeUnrepresentable> {
     life::within_rejecting_ingress_window(state, |state, policy| {
-        add_player_counter_core(state, actor, player_id, counter_kind, count, policy, events)
+        add_player_counter_core(
+            state,
+            actor,
+            player_id,
+            counter_kind,
+            count,
+            cause,
+            policy,
+            events,
+        )
     })
 }
 
 /// The policy-parameterized player-counter add pipeline: replacement, then the
 /// shared settle step (`apply_player_counter_addition`).
+#[allow(clippy::too_many_arguments)]
 fn add_player_counter_core(
     state: &mut GameState,
     actor: PlayerId,
     player_id: PlayerId,
     counter_kind: PlayerCounterKind,
     count: u32,
+    cause: CounterCause,
     policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
 ) -> Result<PlayerCounterAdditionOutcome, LifeChangeUnrepresentable> {
@@ -100,12 +114,15 @@ fn add_player_counter_core(
 
     // CR 122.1 + CR 614.17: Player-counter additions pass through the
     // replacement pipeline so "players can't get counters" effects can prevent
-    // the event before any player state is mutated.
+    // the event before any player state is mutated. The caller stamps the CR
+    // 614.16 cause: only it knows whether this is a resolving effect, a
+    // replacement or prevention, or neither (cost / turn-based action).
     let proposed = ProposedEvent::AddCounter {
         placement: CounterPlacement::Player {
             actor,
             player_id,
             counter_kind,
+            cause,
         },
         count,
         applied: HashSet::new(),
@@ -213,6 +230,7 @@ pub fn preview_player_counter_addition(
     player_id: PlayerId,
     counter_kind: PlayerCounterKind,
     count: u32,
+    cause: CounterCause,
 ) -> PlayerCounterAdditionPreview {
     if count == 0 {
         return PlayerCounterAdditionPreview::Applied { count };
@@ -223,6 +241,7 @@ pub fn preview_player_counter_addition(
             actor,
             player_id,
             counter_kind,
+            cause,
         },
         count,
         applied: HashSet::new(),
@@ -374,13 +393,18 @@ pub fn resolve(
         targeted
     };
 
+    // CR 101.3 + CR 800.4i: A departed event player can still supply last
+    // known information to the branch predicate, but cannot receive counters.
     let additions: Vec<_> = players
-        .iter()
+        .into_iter()
+        .filter(|&player_id| crate::game::players::is_alive(state, player_id))
         .map(|player_id| PendingCounterAddition::Player {
             actor: ability.controller,
-            player_id: *player_id,
+            player_id,
             counter_kind: *counter_kind,
             count: amount,
+            // CR 614.16: resolving-effect placements are eligible.
+            cause: CounterCause::ResolvingEffect,
         })
         .collect();
     let completion = PendingEffectResolved::new(EffectKind::GivePlayerCounter, ability.source_id);
@@ -390,12 +414,20 @@ pub fn resolve(
             player_id,
             counter_kind,
             count,
+            cause,
         } = addition
         else {
             continue;
         };
-        if add_player_counter_with_replacement(state, actor, player_id, counter_kind, count, events)
-            == PlayerCounterAdditionOutcome::NeedsChoice
+        if add_player_counter_with_replacement(
+            state,
+            actor,
+            player_id,
+            counter_kind,
+            count,
+            cause,
+            events,
+        ) == PlayerCounterAdditionOutcome::NeedsChoice
         {
             super::counters::stash_pending_counter_additions(
                 state,
@@ -420,8 +452,10 @@ pub fn resolve(
 /// and "each opponent loses all counters" (Final Act). Clears both the
 /// dedicated `poison_counters` field (CR 104.3d routing, mirrored here) and
 /// every entry in the generic `player_counters` map. One
-/// `PlayerCounterChanged` event is emitted per cleared kind so animations and
-/// logs see an atomic, itemized record of the removal.
+/// `PlayerCounterChanged` event is emitted per journaled edit so animations and
+/// logs see an itemized record of the removal; a kind above `i32::MAX` is
+/// drained in several edits of at most `i32::MAX` each (the edit delta is
+/// `i32`).
 pub fn resolve_lose_all(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -473,9 +507,9 @@ pub fn resolve_lose_all(
 
 /// CR 122.1: Zero out every counter kind on a single player. Poison counters
 /// live in their own field (CR 104.3d state-based action routing); every other
-/// kind is tracked in the `player_counters` map. Both paths drain to zero and
-/// emit a per-kind `PlayerCounterChanged { delta: -count }` event so replay
-/// and UI can itemize what was removed.
+/// kind is tracked in the `player_counters` map. Both paths drain to zero
+/// through `drain_player_counter_kind`, which emits one `PlayerCounterChanged`
+/// event per journaled edit so replay and UI can itemize what was removed.
 fn clear_all_player_counters(
     state: &mut GameState,
     player_id: PlayerId,
@@ -487,23 +521,7 @@ fn clear_all_player_counters(
         .find(|player| player.id == player_id)
         .expect("counter target must be a live player")
         .poison_counters;
-    if poison > 0 {
-        let delta = -(poison as i32);
-        state
-            .resolve_and_apply_player_edit(
-                player_id,
-                ResolvedPlayerEdit::Counter {
-                    kind: PlayerCounterKind::Poison,
-                    delta,
-                },
-            )
-            .expect("live player counter removal must apply");
-        events.push(GameEvent::PlayerCounterChanged {
-            player: player_id,
-            counter_kind: PlayerCounterKind::Poison,
-            delta,
-        });
-    }
+    drain_player_counter_kind(state, player_id, PlayerCounterKind::Poison, poison, events);
 
     // Drain the generic map — collect kinds first to release the borrow before
     // mutating/emitting events.
@@ -518,20 +536,41 @@ fn clear_all_player_counters(
         .filter(|(_, count)| *count > 0)
         .collect();
     for (counter_kind, count) in drained {
+        drain_player_counter_kind(state, player_id, counter_kind, count, events);
+    }
+}
+
+/// CR 122.1 + CR 107.1: Remove all `count` counters of one kind from a player.
+/// Player counters are `u32` with no rules maximum, but a journaled edit's
+/// delta is an `i32`, so a kind holding more than `i32::MAX` counters is
+/// removed in several edits of at most `i32::MAX` each, one
+/// `PlayerCounterChanged` event per edit. The deltas sum to the true count.
+fn drain_player_counter_kind(
+    state: &mut GameState,
+    player_id: PlayerId,
+    counter_kind: PlayerCounterKind,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) {
+    let mut remaining = count;
+    while remaining > 0 {
+        let removed = crate::game::arithmetic::u32_to_i32_saturating(remaining);
+        let delta = -removed;
         state
             .resolve_and_apply_player_edit(
                 player_id,
                 ResolvedPlayerEdit::Counter {
                     kind: counter_kind,
-                    delta: -(count as i32),
+                    delta,
                 },
             )
             .expect("live player counter removal must apply");
         events.push(GameEvent::PlayerCounterChanged {
             player: player_id,
             counter_kind,
-            delta: -(count as i32),
+            delta,
         });
+        remaining -= removed.unsigned_abs();
     }
 }
 
@@ -572,6 +611,7 @@ mod tests {
             target_chooser: None,
             source_id: ObjectId(1),
             cast_occurrence: None,
+            cycling_occurrence: None,
             source_incarnation: None,
             announced_source_incarnation: None,
             trigger_source: None,
@@ -585,6 +625,7 @@ mod tests {
             illegal_target_slots: Vec::new(),
             unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
+            declared_player_target_slots: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -613,6 +654,7 @@ mod tests {
             ability_index: None,
             may_trigger_origin: None,
             repeat_for: None,
+            repeat_timing: crate::types::ability::RepeatForTiming::Sequential,
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
@@ -630,11 +672,13 @@ mod tests {
             target_reads: Default::default(),
             entry_onset: crate::types::ability::ContinuousEffectOnset::WhenFollowed,
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
+            instruction_join: crate::types::ability::InstructionJoin::Own,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,
             activation_cost_reduction: None,
             activation_record: None,
+            announced_usage_key: None,
             control_change_instruction: None,
         }
     }
@@ -792,6 +836,7 @@ mod tests {
             target_chooser: None,
             source_id: ObjectId(1),
             cast_occurrence: None,
+            cycling_occurrence: None,
             source_incarnation: None,
             announced_source_incarnation: None,
             trigger_source: None,
@@ -805,6 +850,7 @@ mod tests {
             illegal_target_slots: Vec::new(),
             unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
+            declared_player_target_slots: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -833,6 +879,7 @@ mod tests {
             ability_index: None,
             may_trigger_origin: None,
             repeat_for: None,
+            repeat_timing: crate::types::ability::RepeatForTiming::Sequential,
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
@@ -850,11 +897,13 @@ mod tests {
             target_reads: Default::default(),
             entry_onset: crate::types::ability::ContinuousEffectOnset::WhenFollowed,
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
+            instruction_join: crate::types::ability::InstructionJoin::Own,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,
             activation_cost_reduction: None,
             activation_record: None,
+            announced_usage_key: None,
             control_change_instruction: None,
         }
     }
@@ -931,6 +980,62 @@ mod tests {
             .any(|e| matches!(e, GameEvent::PlayerCounterChanged { .. })));
     }
 
+    fn deltas(events: &[GameEvent], kind: PlayerCounterKind) -> Vec<i32> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PlayerCounterChanged {
+                    counter_kind,
+                    delta,
+                    ..
+                } if *counter_kind == kind => Some(*delta),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 122.1 + CR 107.1: a kind holding more than `i32::MAX` counters is
+    /// removed in edits of at most `i32::MAX` each, whose deltas sum to the
+    /// true count; a small kind is still removed in one edit.
+    #[test]
+    fn lose_all_drains_generic_counts_above_i32_max_in_bounded_edits() {
+        let mut state = GameState::default();
+        let mut events = Vec::new();
+        state.players[0]
+            .player_counters
+            .insert(PlayerCounterKind::Experience, 3_000_000_000);
+        state.players[0]
+            .player_counters
+            .insert(PlayerCounterKind::Rad, 3);
+
+        let ability = make_lose_all(TargetFilter::Controller, PlayerId(0));
+        resolve_lose_all(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.players[0].player_counters.is_empty());
+        assert_eq!(
+            deltas(&events, PlayerCounterKind::Experience),
+            vec![-i32::MAX, -852_516_353]
+        );
+        assert_eq!(deltas(&events, PlayerCounterKind::Rad), vec![-3]);
+    }
+
+    /// The dedicated poison field drains through the same bounded edits.
+    #[test]
+    fn lose_all_drains_poison_above_i32_max_in_bounded_edits() {
+        let mut state = GameState::default();
+        let mut events = Vec::new();
+        state.players[0].poison_counters = 1 << 31;
+
+        let ability = make_lose_all(TargetFilter::Controller, PlayerId(0));
+        resolve_lose_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[0].poison_counters, 0);
+        assert_eq!(
+            deltas(&events, PlayerCounterKind::Poison),
+            vec![-i32::MAX, -1]
+        );
+    }
+
     /// A two-player state with a P0 `AddCounter` count replacement that applies
     /// to every player's placement.
     fn state_with_count_replacement(modification: QuantityModification) -> GameState {
@@ -979,6 +1084,7 @@ mod tests {
             PlayerId(0),
             PlayerCounterKind::Experience,
             1,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
 
@@ -1004,6 +1110,7 @@ mod tests {
             PlayerId(0),
             PlayerCounterKind::Experience,
             1,
+            CounterCause::ResolvingEffect,
             &mut events,
         );
         assert_eq!(experience(&state, PlayerId(0)), 3);
@@ -1029,6 +1136,7 @@ mod tests {
                 PlayerId(0),
                 PlayerCounterKind::Poison,
                 2,
+                CounterCause::ResolvingEffect,
             ),
             PlayerCounterAdditionPreview::Unsupported
         );
@@ -1046,6 +1154,7 @@ mod tests {
                 PlayerId(0),
                 PlayerCounterKind::Poison,
                 2,
+                CounterCause::ResolvingEffect,
             ),
             PlayerCounterAdditionPreview::Transformed { count: 4 }
         );

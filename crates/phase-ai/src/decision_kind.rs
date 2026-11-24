@@ -101,6 +101,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         WaitingFor::ResolveAllConsent { .. }
         | WaitingFor::ResolveAllReady { .. }
         | WaitingFor::ReplacementChoice { .. }
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::MeldPairChoice { .. }
         | WaitingFor::MeldAttackTargetChoice { .. }
         | WaitingFor::EntryAttackTargetChoice { .. }
@@ -138,7 +139,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ChooseFromZoneChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
-        | WaitingFor::SpellCopyOrderChoice { .. }
+        | WaitingFor::MemberOrderChoice { .. }
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardChoice { .. }
         // Turtle Team-Up (no CR section — casual product): hero-choice Events
@@ -149,6 +150,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ManifestDreadChoice { .. }
         | WaitingFor::BetweenGamesSideboard { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::NamedChoice { .. }
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }

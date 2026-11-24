@@ -79,7 +79,8 @@ fn added_to_turn_in_progress(
             })
         }
     };
-    player == Some(state.active_player)
+    // CR 500.10a + CR 805.4: on a shared team turn the turn is each member's.
+    player.is_some_and(|p| crate::game::players::is_turn_player(state, p))
 }
 
 /// CR 500.8: Add extra phases to the current turn via a LIFO stack.
@@ -311,6 +312,7 @@ mod tests {
             target_chooser: None,
             source_id: ObjectId(1),
             cast_occurrence: None,
+            cycling_occurrence: None,
             source_incarnation: None,
             announced_source_incarnation: None,
             trigger_source: None,
@@ -324,6 +326,7 @@ mod tests {
             illegal_target_slots: Vec::new(),
             unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
+            declared_player_target_slots: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -352,6 +355,7 @@ mod tests {
             ability_index: None,
             may_trigger_origin: None,
             repeat_for: None,
+            repeat_timing: crate::types::ability::RepeatForTiming::Sequential,
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
@@ -369,11 +373,13 @@ mod tests {
             target_reads: Default::default(),
             entry_onset: crate::types::ability::ContinuousEffectOnset::WhenFollowed,
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
+            instruction_join: crate::types::ability::InstructionJoin::Own,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,
             activation_cost_reduction: None,
             activation_record: None,
+            announced_usage_key: None,
             control_change_instruction: None,
         }
     }

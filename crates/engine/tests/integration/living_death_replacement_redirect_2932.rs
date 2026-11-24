@@ -43,6 +43,7 @@ fn graveyard_exile_replacement() -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 destination: Zone::Exile,
                 origin: None,

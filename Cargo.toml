@@ -9,7 +9,7 @@ members = ["crates/*"]
 exclude = ["client/src-tauri", "lobby-worker/broker-wasm"]
 
 [workspace.package]
-version = "0.124.0"
+version = "0.132.0"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
@@ -69,6 +69,10 @@ split-debuginfo = "unpacked"
 # Scoped to the one package so nothing else loses debug fidelity.
 [profile.dev.package.libmimalloc-sys]
 opt-level = 2
+
+# The fixture cache checksums its whole file in every test process.
+[profile.dev.package.crc32fast]
+opt-level = 3
 
 [profile.test]
 inherits = "dev"

@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 
 use engine::database::CardDatabase;
-use engine::game::bracket_estimate::CommanderBracketTier;
+use engine::game::bracket_estimate::{ComboDeclaration, ComboWindow, CommanderBracketTier};
 use engine::game::deck_loading::{
     resolve_deck_list, resolve_player_deck_list, DeckList, DeckPayload, PlayerDeckList,
     PlayerDeckPayload,
@@ -49,10 +49,7 @@ const MIXED_PRINTINGS: &str = r#"[
 const VALID_ELEMENT: &str = r#"{"section":"main_deck","name":"Forest","count":1,"printing":{"set_code":"lea","collector_number":"294"}}"#;
 
 fn lea_294() -> CardPrinting {
-    CardPrinting {
-        set_code: "lea".to_string(),
-        collector_number: "294".to_string(),
-    }
+    CardPrinting::owner("lea", "294")
 }
 
 fn printing(section: DeckSection, name: &str, count: u32, set: &str, number: &str) -> DeckPrinting {
@@ -60,10 +57,7 @@ fn printing(section: DeckSection, name: &str, count: u32, set: &str, number: &st
         section,
         name: name.to_string(),
         count,
-        printing: CardPrinting {
-            set_code: set.to_string(),
-            collector_number: number.to_string(),
-        },
+        printing: CardPrinting::owner(set, number),
     }
 }
 
@@ -128,7 +122,7 @@ fn name_only_deck_lists_serialize_without_a_printings_key() {
     };
     assert_eq!(
         serde_json::to_string(&wire).unwrap(),
-        r#"{"main_deck":["Forest"],"sideboard":[],"commander":[],"companion":[],"attraction_deck":[],"planar_deck":[],"scheme_deck":[],"contraption_deck":[],"sticker_sheets":[],"signature_spell":[],"bracket_tier":"core"}"#
+        r#"{"main_deck":["Forest"],"sideboard":[],"commander":[],"companion":[],"attraction_deck":[],"planar_deck":[],"scheme_deck":[],"contraption_deck":[],"sticker_sheets":[],"signature_spell":[],"bracket_tier":null,"combo_declaration":{"kind":"undeclared"}}"#
     );
 
     let base_keys: BTreeSet<&str> = [
@@ -154,18 +148,28 @@ fn name_only_deck_lists_serialize_without_a_printings_key() {
             .cloned()
             .collect()
     };
-    let expected: BTreeSet<String> = base_keys.iter().map(|key| key.to_string()).collect();
+    let with_extra = |extra: &str| -> BTreeSet<String> {
+        base_keys
+            .iter()
+            .copied()
+            .chain([extra])
+            .map(str::to_string)
+            .collect()
+    };
+    // The seat list carries the owner's combo answer; the resolved payload carries the
+    // estimator's floor instead. Neither carries the other's field.
+    let list_keys = with_extra("combo_declaration");
     assert_eq!(
         keys_of(serde_json::to_value(PlayerDeckList::default()).unwrap()),
-        expected
+        list_keys
     );
     assert_eq!(
         keys_of(serde_json::to_value(PlayerDeckPayload::default()).unwrap()),
-        expected
+        with_extra("estimated_bracket_tier")
     );
     let seats = serde_json::to_value(DeckList::default()).unwrap();
-    assert_eq!(keys_of(seats["player"].clone()), expected);
-    assert_eq!(keys_of(seats["opponent"].clone()), expected);
+    assert_eq!(keys_of(seats["player"].clone()), list_keys);
+    assert_eq!(keys_of(seats["opponent"].clone()), list_keys);
 }
 
 /// Legacy frames that predate the field decode with an empty sidecar. Reverting
@@ -449,7 +453,12 @@ fn deck_section_names_are_exactly_the_card_section_fields_of_deck_data() {
         .as_object()
         .unwrap()
         .keys()
-        .filter(|key| !matches!(key.as_str(), "sticker_sheets" | "bracket_tier"))
+        .filter(|key| {
+            !matches!(
+                key.as_str(),
+                "sticker_sheets" | "bracket_tier" | "combo_declaration"
+            )
+        })
         .cloned()
         .collect();
     let section_names: BTreeSet<String> =
@@ -486,7 +495,10 @@ fn wire_deck_and_engine_seat_list_convert_with_every_field() {
         contraption_deck: names(&["Cont"]),
         sticker_sheets: names(&["Sheet"]),
         signature_spell: names(&["Sig"]),
-        bracket_tier: CommanderBracketTier::Cedh,
+        bracket_tier: Some(CommanderBracketTier::Cedh),
+        combo_declaration: ComboDeclaration::Intended {
+            window: Some(ComboWindow::EarlyGame),
+        },
         printings: two_printings(),
     };
 
@@ -502,7 +514,13 @@ fn wire_deck_and_engine_seat_list_convert_with_every_field() {
     assert_eq!(list.contraption_deck, names(&["Cont"]));
     assert_eq!(list.sticker_sheets, names(&["Sheet"]));
     assert_eq!(list.signature_spell, names(&["Sig"]));
-    assert_eq!(list.bracket_tier, CommanderBracketTier::Cedh);
+    assert_eq!(list.bracket_tier, Some(CommanderBracketTier::Cedh));
+    assert_eq!(
+        list.combo_declaration,
+        ComboDeclaration::Intended {
+            window: Some(ComboWindow::EarlyGame)
+        }
+    );
     assert_eq!(list.printings, two_printings());
 
     // Reverse, from a second, disjoint set of markers.
@@ -518,7 +536,10 @@ fn wire_deck_and_engine_seat_list_convert_with_every_field() {
         contraption_deck: names(&["Cont2"]),
         sticker_sheets: names(&["Sheet2"]),
         signature_spell: names(&["Sig2"]),
-        bracket_tier: CommanderBracketTier::Optimized,
+        bracket_tier: Some(CommanderBracketTier::Optimized),
+        combo_declaration: ComboDeclaration::Intended {
+            window: Some(ComboWindow::LateGame),
+        },
         printings: other_printings(),
     };
     let back = DeckData::from(reverse_source);
@@ -532,7 +553,13 @@ fn wire_deck_and_engine_seat_list_convert_with_every_field() {
     assert_eq!(back.contraption_deck, names(&["Cont2"]));
     assert_eq!(back.sticker_sheets, names(&["Sheet2"]));
     assert_eq!(back.signature_spell, names(&["Sig2"]));
-    assert_eq!(back.bracket_tier, CommanderBracketTier::Optimized);
+    assert_eq!(back.bracket_tier, Some(CommanderBracketTier::Optimized));
+    assert_eq!(
+        back.combo_declaration,
+        ComboDeclaration::Intended {
+            window: Some(ComboWindow::LateGame)
+        }
+    );
     assert_eq!(back.printings, other_printings());
 
     // Invariant.
@@ -587,7 +614,8 @@ fn engine_resolvers_carry_each_seats_sidecar_unchanged() {
         ..Default::default()
     };
 
-    let payload: DeckPayload = resolve_deck_list(&db, &list);
+    let payload: DeckPayload =
+        resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
 
     // Reach guard: each seat's names resolved, so the resolver ran on every seat.
     assert_eq!(main_names(&payload.player), names(&["Forest"]));
@@ -604,7 +632,8 @@ fn engine_resolvers_carry_each_seats_sidecar_unchanged() {
     );
 
     // The single-seat authority.
-    let single = resolve_player_deck_list(&db, &list.player);
+    let single =
+        resolve_player_deck_list(&db, &engine::database::ComboTable::default(), &list.player);
     assert_eq!(main_names(&single), names(&["Forest"]));
     assert_eq!(single.printings, list.player.printings);
 }

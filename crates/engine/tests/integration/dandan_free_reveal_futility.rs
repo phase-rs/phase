@@ -4,6 +4,7 @@
 
 use engine::ai_support::legal_actions_for_viewer;
 use engine::database::card_db::CardDatabase;
+use engine::database::ComboTable;
 use engine::game::deck_loading::{
     load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
 };
@@ -37,6 +38,7 @@ fn payload(db: &CardDatabase, pile: &[(&str, usize)]) -> DeckPayload {
         .collect();
     resolve_deck_list(
         db,
+        &ComboTable::default(),
         &DeckList {
             player: PlayerDeckList {
                 main_deck,

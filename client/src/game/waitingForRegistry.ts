@@ -101,6 +101,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "RespondToPrecastCopyShortcut",
     "ReplacementChoice",
     "EntryControllerChoice",
+    // CR 101.4c: choose which held replacement decision to make first
+    // (ReplacementDecisionOrderModal).
+    "ReplacementDecisionOrder",
     "CopyTargetChoice",
     "CopyRetarget",
     "ExploreChoice",
@@ -138,9 +141,10 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // CR 701.71a: empower Jace N — single-pick among the controller's Jace
     // planeswalker tokens (EmpowerJaceChoiceModal, rendered via CardChoiceModal).
     "EmpowerJaceChoice",
-    // CR 405.3 + CR 707.10: pick the spell whose copy goes on the stack next
-    // (SpellCopyOrderChoiceModal, rendered via CardChoiceModal).
-    "SpellCopyOrderChoice",
+    // CR 608.2f + CR 405.3: pick the member processed next — a spell copy, or a
+    // per-member instruction whose iterations pause for a payment
+    // (MemberOrderChoiceModal, rendered via CardChoiceModal).
+    "MemberOrderChoice",
     "ChooseOneOfBranch",
     "ConniveDiscard",
     "DiscardChoice",
@@ -225,6 +229,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "OpeningHandBottomCards",
     "BetweenGamesSideboard",
     "BetweenGamesChoosePlayDraw",
+    "ChooseStartingPlayer",
   ]);
 
 /**

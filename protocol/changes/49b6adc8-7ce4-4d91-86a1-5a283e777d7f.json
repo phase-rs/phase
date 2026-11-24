@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "DerivedViews gains horde (engine-authored Horde seat, survivor, and deployed-Boss identity the Horde HUD renders instead of scanning command-zone objects). Optional and defaulted on ingress, so either side parses, but a peer missing the field silently drops Horde seat theming and command-dock Boss cards."
+}

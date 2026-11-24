@@ -59,6 +59,7 @@ fn najeela_chain(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
     let mut keyword_grant = ResolvedAbility::new(
         Effect::GenericEffect {
             static_abilities: vec![StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::Continuous,
                 affected: Some(TargetFilter::ParentTarget),
                 modifications: vec![
@@ -86,6 +87,7 @@ fn najeela_chain(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
                 protection_does_not_remove: None,
                 room_door: None,
                 granting_object: None,
+                bound_actor: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,

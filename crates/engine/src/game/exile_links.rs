@@ -1266,6 +1266,7 @@ mod tests {
     fn plain_exile_effect_has_no_linked_exile_consumer() {
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
@@ -1787,6 +1788,7 @@ mod tests {
         obj.abilities = std::sync::Arc::new(vec![AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Battlefield,

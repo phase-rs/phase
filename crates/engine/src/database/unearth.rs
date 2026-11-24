@@ -108,6 +108,7 @@ fn unearth_ability(mana_cost: ManaCost) -> AbilityDefinition {
 /// the owner of a card in their own graveyard), so `enters_under` stays `None`.
 fn return_to_battlefield_effect() -> Effect {
     Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination: Zone::Battlefield,
@@ -203,6 +204,7 @@ fn leaves_battlefield_exile_step() -> AbilityDefinition {
 /// replacement's redirect. Targets `SelfRef` (the returned permanent).
 fn exile_self_from_battlefield_effect() -> Effect {
     Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         library_shuffle: Default::default(),
         origin: Some(Zone::Battlefield),
         destination: Zone::Exile,

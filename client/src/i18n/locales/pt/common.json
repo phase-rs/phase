@@ -72,7 +72,7 @@
   },
   "comboDetector": {
     "label": "Detector de combos (experimental)",
-    "title": "Detectar loops infinitos: encerrar loops obrigatórios automaticamente e mostrar recursos ∞ (desativado por padrão)",
+    "title": "Detectar loops infinitos: encerrar loops obrigatórios automaticamente, oferecer atalhos para loops que um jogador controla e mostrar recursos ∞ (desativado por padrão)",
     "off": "Desligado",
     "interactive": "Interativo"
   },
@@ -330,6 +330,11 @@
     "heading": "Algo deu errado",
     "body": "O aplicativo encontrou um erro inesperado e não pode continuar nesta tela. Recarregar geralmente resolve.",
     "reload": "Recarregar"
+  },
+  "stateCodec": {
+    "actionInterrupted": "A transmissão do estado foi interrompida durante a ação",
+    "submissionNotSent": "A transmissão do estado está sendo restabelecida; esta ação não foi enviada.",
+    "reconnectSubmissionNotSent": "A conexão está sendo restabelecida; esta ação não foi enviada."
   },
   "actionError": {
     "title": "{{action}} falhou",

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as WasmAdapter from "../../adapter/wasm-adapter";
 import type * as Scryfall from "../../services/scryfall";
 import { detectAndParseDeck } from "../../services/deckParser";
+import { UNDECLARED_COMBO } from "../../types/bracketEstimate";
 import type * as PhaseSocket from "../../services/openPhaseSocket";
 import type * as Connection from "../../network/connection";
 import type * as Broker from "../../services/brokerClient";
@@ -131,6 +132,7 @@ vi.mock("../../constants/storage", async (importOriginal) => ({
   ACTIVE_DECK_KEY: "active-deck",
   loadActiveDeck: () => ({ ...detectAndParseDeck(harness.deckText), ...harness.deckExtras }),
   loadActiveDeckBracket: () => null,
+  loadActiveDeckComboDeclaration: () => ({ kind: "none_intended" }),
   touchDeckPlayed: vi.fn(),
 }));
 
@@ -263,6 +265,7 @@ function prepareRealSetup(mode: "server" | "p2p" = "server") {
   harness.candidates = [{
     id: "saved:AI", name: "AI Deck", source: { type: "saved" },
     deck: detectAndParseDeck("1 Forest (BBB) 002"), coveragePct: 100, archetype: null, bracket: null,
+    declaredBracket: null, comboDeclaration: UNDECLARED_COMBO,
   }];
   useMultiplayerStore.setState({
     connectionMode: mode, hostingServer: URL_B,
@@ -703,6 +706,7 @@ describe("MultiplayerPage host server", () => {
     harness.candidates = [{
       id: "saved:AI", name: "AI Deck", source: { type: "saved" },
       deck: detectAndParseDeck("1 Forest (BBB) 002"), coveragePct: 100, archetype: null, bracket: null,
+      declaredBracket: null, comboDeclaration: UNDECLARED_COMBO,
     }];
     useMultiplayerStore.setState({
       connectionMode: "server", hostingServer: URL_B,
@@ -781,7 +785,11 @@ describe("MultiplayerPage host server", () => {
     expect(ensureSubscriptionSocket).not.toHaveBeenCalledWith(URL_A);
     // The same URL reaches the store: the probe target and the dial target are
     // one value, not two reads that could disagree.
-    expect(startHosting).toHaveBeenCalledWith(expect.anything(), expect.anything(), URL_B);
+    expect(startHosting).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ combo_declaration: { kind: "none_intended" } }),
+      URL_B,
+    );
     expect(navigator.sendBeacon).not.toHaveBeenCalled();
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
@@ -956,7 +964,7 @@ describe("MultiplayerPage host server", () => {
       // lost now ride beside the printings, which stay frozen to the deck captured at submit.
       expect(frame.data.deck).toEqual({
         main_deck: ["Island", "Island"], sideboard: ["Forest"], commander: ["Commander"],
-        planar_deck: ["Plane"], scheme_deck: ["Scheme"], bracket_tier: "core", printings: expected,
+        planar_deck: ["Plane"], scheme_deck: ["Scheme"], combo_declaration: { kind: "none_intended" }, printings: expected,
         companion: ["Companion"], signature_spell: ["Spell"], sticker_sheets: ["Stickers"],
       });
     });
@@ -992,7 +1000,7 @@ describe("MultiplayerPage host server", () => {
         const frame = JSON.parse(transport.send.mock.calls[0][0]);
         expect(frame.data.deck).toEqual({
           main_deck: ["Island", "Island"], sideboard: [], commander: [], planar_deck: [], scheme_deck: [],
-          bracket_tier: "core", printings: expected,
+          combo_declaration: { kind: "none_intended" }, printings: expected,
         });
         expect(frame.data.ai_seats[0].deck.data.printings).toEqual([
           { section: "main_deck", name: "Island", count: 1, printing: { set_code: "bbb", collector_number: "002" } },

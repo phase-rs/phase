@@ -1,21 +1,44 @@
 mod feed;
 mod scrape;
+mod topdeck;
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use reqwest::blocking::Client;
 
 use crate::feed::Feed;
 use crate::scrape::{scrape_metagame, ScrapeConfig};
+use crate::topdeck::{fetch_top_decks, TopdeckConfig};
 
 #[derive(Parser)]
 #[command(name = "feed-scraper")]
-#[command(about = "Scrape MTGGoldfish metagame decks into feed JSON")]
+#[command(about = "Build metagame deck feeds as JSON")]
 struct Cli {
+    #[command(subcommand)]
+    source: Source,
+
+    /// Minimum deck count required to overwrite the existing feed file. A
+    /// partial scrape (e.g., rate-limited after a few decks) that returns
+    /// non-zero but < this threshold is treated the same as empty: the
+    /// existing file is preserved and the process exits non-zero.
+    #[arg(long, global = true, default_value_t = 5)]
+    min_decks: usize,
+}
+
+#[derive(Subcommand)]
+enum Source {
+    /// Scrape MTGGoldfish metagame pages
+    Mtggoldfish(MtggoldfishArgs),
+    /// Fetch the top cEDH tournament finishes from the TopDeck.gg API
+    Topdeck(TopdeckArgs),
+}
+
+#[derive(Args)]
+struct MtggoldfishArgs {
     /// Comma-separated formats to scrape (e.g., "standard,modern")
     #[arg(short, long, default_value = "standard")]
     format: String,
@@ -35,14 +58,29 @@ struct Cli {
     /// Delay between requests in milliseconds
     #[arg(long, default_value_t = 1000)]
     delay: u64,
+}
 
-    /// Minimum scraped-deck count required to overwrite the existing feed
-    /// file. A partial scrape (e.g., rate-limited after a few decks) that
-    /// returns non-zero but < this threshold is treated the same as empty:
-    /// the existing file is preserved and the process exits non-zero.
-    /// Default of 5 is a safe floor for top-10 Standard/Modern/etc. runs.
-    #[arg(long, default_value_t = 5)]
-    min_decks: usize,
+#[derive(Args)]
+struct TopdeckArgs {
+    /// TopDeck.gg API key
+    #[arg(long, env = "TOPDECK_API_KEY", hide_env_values = true)]
+    api_key: String,
+
+    /// Output file path
+    #[arg(short, long, default_value = "topdeck-cedh.json")]
+    output: PathBuf,
+
+    /// Number of decks to keep
+    #[arg(long, default_value_t = 16)]
+    top: usize,
+
+    /// Days back from today to search for completed events
+    #[arg(long, default_value_t = 30)]
+    days: u32,
+
+    /// Minimum event size
+    #[arg(long, default_value_t = 64)]
+    min_players: u32,
 }
 
 fn main() {
@@ -53,32 +91,31 @@ fn main() {
         .build()
         .expect("failed to build HTTP client");
 
-    let formats: Vec<&str> = cli.format.split(',').map(|s| s.trim()).collect();
+    let ok = match &cli.source {
+        Source::Mtggoldfish(args) => run_mtggoldfish(&client, args, cli.min_decks),
+        Source::Topdeck(args) => run_topdeck(&client, args, cli.min_decks),
+    };
 
-    let mut had_failure = false;
+    if !ok {
+        std::process::exit(1);
+    }
+}
 
+fn run_mtggoldfish(client: &Client, args: &MtggoldfishArgs, min_decks: usize) -> bool {
+    let formats: Vec<&str> = args.format.split(',').map(|s| s.trim()).collect();
+
+    let mut ok = true;
     for format in &formats {
         let config = ScrapeConfig {
             format: (*format).to_string(),
-            top_n: cli.top,
-            delay_ms: cli.delay,
+            top_n: args.top,
+            delay_ms: args.delay,
         };
 
-        eprintln!("Scraping {format} metagame (top {})...", cli.top);
-        let decks = scrape_metagame(&client, &config);
+        eprintln!("Scraping {format} metagame (top {})...", args.top);
+        let decks = scrape_metagame(client, &config);
         eprintln!("Scraped {} decks for {format}", decks.len());
 
-        if decks.len() < cli.min_decks {
-            eprintln!(
-                "ERROR: scrape returned {} decks for {format} (minimum {}); refusing to overwrite feed file",
-                decks.len(),
-                cli.min_decks,
-            );
-            had_failure = true;
-            continue;
-        }
-
-        let now = chrono_lite_now();
         let feed = Feed {
             id: format!("mtggoldfish-{format}"),
             name: format!("MTGGoldfish {}", capitalize(format)),
@@ -86,31 +123,90 @@ fn main() {
             icon: "G".to_string(),
             format: (*format).to_string(),
             version: 1,
-            updated: now,
+            updated: chrono_lite_now(),
             source: format!("https://www.mtggoldfish.com/metagame/{format}"),
             decks,
         };
 
-        let json = serde_json::to_string_pretty(&feed).expect("failed to serialize feed");
-
         let output_path = if formats.len() == 1 {
-            cli.output
+            args.output
                 .clone()
                 .unwrap_or_else(|| PathBuf::from(format!("mtggoldfish-{format}.json")))
         } else {
-            let dir = cli.output_dir.clone().unwrap_or_else(|| PathBuf::from("."));
+            let dir = args
+                .output_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("."));
             dir.join(format!("mtggoldfish-{format}.json"))
         };
 
-        std::fs::write(&output_path, &json).unwrap_or_else(|e| {
-            eprintln!("Failed to write {}: {e}", output_path.display());
-            had_failure = true;
-        });
-        eprintln!("Wrote {}", output_path.display());
+        ok &= write_feed(&feed, &output_path, min_decks);
+    }
+    ok
+}
+
+fn run_topdeck(client: &Client, args: &TopdeckArgs, min_decks: usize) -> bool {
+    let config = TopdeckConfig {
+        api_key: args.api_key.clone(),
+        days: args.days,
+        min_players: args.min_players,
+        top_n: args.top,
+    };
+
+    eprintln!(
+        "Fetching top {} cEDH finishes from TopDeck.gg (last {} days, {}+ players)...",
+        config.top_n, config.days, config.min_players,
+    );
+    let decks = match fetch_top_decks(client, &config) {
+        Ok(decks) => decks,
+        Err(e) => {
+            eprintln!("ERROR: TopDeck.gg request failed: {e}");
+            return false;
+        }
+    };
+
+    let feed = Feed {
+        id: "topdeck-cedh".to_string(),
+        name: "TopDeck.gg cEDH".to_string(),
+        description: format!(
+            "Top finishes from cEDH tournaments with {}+ players in the last {} days",
+            config.min_players, config.days,
+        ),
+        icon: "T".to_string(),
+        format: "commander".to_string(),
+        version: 1,
+        updated: chrono_lite_now(),
+        source: "https://topdeck.gg".to_string(),
+        decks,
+    };
+
+    write_feed(&feed, &args.output, min_decks)
+}
+
+/// Writes `feed` to `path` unless it holds fewer than `min_decks` decks, so a
+/// failed or partial fetch never replaces a good feed. Returns whether the
+/// file was written.
+fn write_feed(feed: &Feed, path: &Path, min_decks: usize) -> bool {
+    if feed.decks.len() < min_decks {
+        eprintln!(
+            "ERROR: {} has {} decks (minimum {min_decks}); refusing to overwrite {}",
+            feed.id,
+            feed.decks.len(),
+            path.display(),
+        );
+        return false;
     }
 
-    if had_failure {
-        std::process::exit(1);
+    let json = serde_json::to_string_pretty(feed).expect("failed to serialize feed");
+    match std::fs::write(path, json) {
+        Ok(()) => {
+            eprintln!("Wrote {}", path.display());
+            true
+        }
+        Err(e) => {
+            eprintln!("Failed to write {}: {e}", path.display());
+            false
+        }
     }
 }
 

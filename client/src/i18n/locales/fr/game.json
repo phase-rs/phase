@@ -31,7 +31,6 @@
     "accept": "Accept",
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
-    "untilLethal": "Repeat until the game ends.",
     "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
@@ -51,16 +50,13 @@
     "allocationSum": "{{allocated}} répétitions sur {{total}} réparties.",
     "evenSplit": "Rétablir la répartition équitable",
     "customDistribution": "Répartition personnalisée — le moteur n'a pas prévisualisé ce partage.",
-    "announceTitle": "Choisissez la cible que chaque répétition annonce :",
-    "announce": "Annoncer",
-    "announceAria": "Annoncer {{subject}}",
     "mayTitle": "Capacité optionnelle {{group}} — répéter ce choix à chaque itération ?",
     "mayTake": "L'utiliser",
     "mayDecline": "La refuser",
     "mayTakeAria": "Utiliser la capacité optionnelle {{group}}",
     "mayDeclineAria": "Refuser la capacité optionnelle {{group}}",
     "winKind": {
-      "LethalDamage": "This loop deals lethal damage.",
+      "LethalDamage": "This loop reduces an opponent's life total to 0 or less.",
       "PoisonLoss": "This loop gives lethal poison counters.",
       "Decking": "This loop decks an opponent.",
       "ImmediateWin": "This loop wins the game.",
@@ -70,6 +66,7 @@
     "respondDeclaredTitle": "Déclaration proposée :",
     "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. Effet de remplacement de {{subject}}",
     "respondDecision": {
       "take": "{{subject}} — utilisation à chaque itération",
       "decline": "{{subject}} — refus à chaque itération"
@@ -155,7 +152,8 @@
     "loading": "Chargement de {{name}}",
     "unimplemented": "Non implémenté : {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Engagé"
+    "tapped": "Engagé",
+    "reloadArt": "Toucher pour recharger l'illustration"
   },
   "preview": {
     "holdCtrlBack": "Maintenez Ctrl pour la face arrière",
@@ -164,6 +162,8 @@
     "flip": "Pivoter",
     "report": "Signaler un problème",
     "reported": "Signalé ✓",
+    "reportNotSent": "Non envoyé",
+    "reloadArt": "Recharger l'illustration",
     "altParsedAbilities": "Alt : capacités analysées",
     "debugId": "ID : {{id}}",
     "engineParse": "Analyse du moteur",
@@ -673,6 +673,8 @@
     "commander": "Commandant",
     "commanderTitle": "Commandant : {{name}}",
     "commanderTitleTax": "Commandant : {{name}} (Taxe : +{{tax}})",
+    "boss": "Boss",
+    "bossTitle": "Boss : {{name}}",
     "castCommander": "Lancer {{name}} — double-cliquez ou glissez pour jouer",
     "castCommanderTax": "Lancer {{name}} (Taxe : +{{tax}}) — double-cliquez ou glissez pour jouer",
     "ninjutsuCommander": "Ninjutsu de commandant : {{name}} — cliquez pour renvoyer un attaquant non bloqué en main et mettre ce commandant sur le champ de bataille engagé et attaquant",
@@ -836,7 +838,14 @@
     "lethalBadge": "Létal",
     "planeswalkerLoyalty": "Planeswalker (loyauté : {{loyalty}})",
     "defendingPlayerTrample": "Joueur défenseur (Piétinement)",
+    "attackTargetTrample": "{{name}} (Piétinement)",
     "pwControllerTrample": "Contrôleur du PW (Piétinement sur PW)",
+    "lethalButton": "Létal",
+    "clearButton": "Effacer",
+    "assignLethalTo": "Assigner des blessures létales à {{target}}",
+    "clearDamageFor": "Effacer les blessures assignées à {{target}}",
+    "lethalFirstButton": "Blessures létales d’abord",
+    "lethalFirstTitle": "Assignez des blessures létales à chaque bloqueur dans l’ordre, puis assignez le reste",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "Assigner les {{count}} blessures restantes à {{target}}",
     "assignRemainingTo_many": "Assigner les {{count}} blessures restantes à {{target}}",
@@ -1186,6 +1195,11 @@
       "drawFirst": "Piocher en premier",
       "drawFirstDescription": "Prenez la pioche supplémentaire à votre premier tour"
     },
+    "startingPlayer": {
+      "title": "Choisissez qui joue en premier",
+      "playerPlaysFirst": "{{name}} joue en premier",
+      "opponentChoosing": "{{name}} choisit qui joue en premier…"
+    },
     "mulligan": {
       "opponentDeciding": "L'adversaire décide de sa main de départ…",
       "londonTitle": "Mulligan de Londres ({{count}} pris)",
@@ -1236,6 +1250,7 @@
       "draw": "MATCH NUL",
       "victory": "VICTOIRE",
       "defeat": "DÉFAITE",
+      "complete": "PARTIE TERMINÉE",
       "lifeSummary": "Vous : <player>{{playerLife}}</player> <sep>/</sep> Adversaire : <opponent>{{opponentLife}}</opponent>",
       "turns": "Tours : {{count}}",
       "duration": "Durée : {{time}}",
@@ -1332,7 +1347,10 @@
         "Ticket": "ticket"
       },
       "generic": "un coût",
-      "pay": "Payer {{cost}}"
+      "pay": "Payer {{cost}}",
+      "draw": "piochez une carte",
+      "drawCount_one": "piochez {{count}} carte",
+      "drawCount_other": "piochez {{count}} cartes"
     },
     "unlessPayment": {
       "defaultEffect": "Contrer à moins que vous ne payiez",
@@ -1340,7 +1358,8 @@
       "title": "{{effect}} à moins que vous ne payiez",
       "titleChooseOne": "{{effect}} à moins que vous ne payiez l'un",
       "dontPay": "Ne pas payer",
-      "takeEffect": "Subir l'effet"
+      "takeEffect": "Subir l'effet",
+      "priorChoice": "Joueur {{id}} : {{choice}}"
     },
     "spliceOffer": {
       "title": "Imprégner d’arcane ?",
@@ -1538,7 +1557,9 @@
       "titleReveal": "Révéler depuis la main",
       "titleOpponentHand": "Main de l'adversaire",
       "subtitleReveal": "Choisissez une carte à révéler, ou refusez",
-      "subtitleChoose": "Choisissez une carte"
+      "subtitleChoose": "Choisissez une carte",
+      "subtitleRevealAnyNumber": "Choisissez un nombre quelconque de cartes à révéler",
+      "subtitleChooseCount": "Choisissez {{count}} cartes"
     },
     "search": {
       "title": "Chercher dans la bibliothèque",
@@ -1802,6 +1823,10 @@
       "title": "Ordonner les copies",
       "subtitle": "Choisissez le sort dont la copie va ensuite sur la pile"
     },
+    "memberOrder": {
+      "title": "Ordonnez les cartes",
+      "subtitle": "Choisissez la carte traitée ensuite"
+    },
     "collectEvidence": {
       "title": "Collecter des preuves",
       "subtitle": "Exilez des cartes de votre cimetière dont la valeur de mana totale est {{minimum}} ou plus"
@@ -1842,6 +1867,13 @@
       "titleExact_one": "Défaussez-vous d'une carte",
       "titleExact_other": "Défaussez-vous de {{count}} cartes",
       "titleWard": "Garde — Défaussez-vous d'une carte",
+      "instructionWithReason": "{{reason}} : {{instruction}}",
+      "reason": {
+        "ward": "Garde",
+        "connive": "Combine",
+        "additionalCost": "Coût supplémentaire",
+        "manaAbility": "Capacité de mana"
+      },
       "subtitleUpTo_one": "Choisissez jusqu'à {{count}} carte à défausser",
       "subtitleUpTo_other": "Choisissez jusqu'à {{count}} cartes à défausser",
       "subtitleUnless": "Choisissez {{count}} cartes ou 1 carte correspondante à défausser",
@@ -2001,7 +2033,8 @@
     "scrollLeft": "Défiler vers la gauche",
     "scrollRight": "Défiler vers la droite",
     "confirm": "Confirmer",
-    "cancel": "Annuler"
+    "cancel": "Annuler",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Aventure",
@@ -2125,9 +2158,20 @@
     "title": "Choisir le destinataire du cadeau",
     "subtitle": "Choisissez quel adversaire reçoit le cadeau promis."
   },
+  "costRecipient": {
+    "title": "Choisir un adversaire",
+    "subtitle": "Choisissez l'adversaire pour ce coût : {{cost}}."
+  },
   "entryController": {
     "title": "Choisir le contrôleur à l'arrivée",
     "subtitle": "Choisissez quel adversaire contrôle ce permanent à son arrivée."
+  },
+  "replacementDecisionOrder": {
+    "title": "Choisissez la première décision",
+    "subtitle": "Ces choix de remplacement ont lieu en même temps. Choisissez celui à faire en premier.",
+    "unknownObject": "Objet inconnu",
+    "attachedTo": "Sur {{host}}",
+    "attachments": "Avec {{names}}"
   },
   "optionalCost": {
     "gift": {
@@ -2295,6 +2339,13 @@
     "creatureFallback": "Créature {{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Assigner les {{count}} restants à {{target}}",
+    "assignRemainingTo_many": "Assigner les {{count}} restants à {{target}}",
+    "assignRemainingTo_one": "Assigner le {{count}} restant à {{target}}",
+    "assignRemainingTo_other": "Assigner les {{count}} restants à {{target}}",
+    "clearButton": "Effacer",
+    "clearTarget": "Effacer l’assignation à {{target}}",
     "unitCounter": "marqueur {{counter}}",
     "unitDamage": "blessures",
     "unitLife": "points de vie",
@@ -2423,6 +2474,9 @@
     "optionalTriggers": "Capacités déclenchées facultatives ({{count, number}})",
     "replacementChoices": "Choix de remplacement ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Maintenez appuyé pour voir la carte en entier"
+  },
   "optionalEffect": {
     "sourceFallback": "Effet",
     "title": "{{name}} - Effet facultatif",
@@ -2479,6 +2533,8 @@
       "zoneHand": "votre main",
       "discard": "Défaussez-vous de {{count}} {{cards}}",
       "exile": "Exilez {{count}} {{cards}} depuis {{zone}}",
+      "haveOpponentGainLife": "Faites gagner {{amount}} points de vie à un adversaire",
+      "haveEachOtherPlayerGainLife": "Faites gagner {{amount}} points de vie à chaque autre joueur",
       "reveal": "Révélez {{count}} {{cards}} de {{zone}}"
     }
   },
@@ -2535,7 +2591,7 @@
     "appliedLast": "Appliqué en dernier — celui-ci l'emporte",
     "resultLabel": "Résultat : {{outcome}}",
     "confirmOrder": "Confirmer l'ordre",
-    "dragHint": "Faites glisser pour réordonner, ou utilisez les flèches.",
+    "dragHint": "Faites glisser la poignée <grip>⠿</grip> pour réordonner, ou utilisez les flèches.",
     "chooseSubtitle": "Choisissez quel effet de remplacement appliquer.",
     "candidateFallback": "Effet de remplacement {{number}}",
     "orderSubtitleComposing": "Ces effets modifient tous la façon dont cet événement se produit. Faites glisser pour définir l'ordre d'application : chacun s'applique, donc l'ordre change le résultat (CR 616.1).",
@@ -2544,6 +2600,7 @@
     "composesNote": "Chaque effet s'applique — l'ordre change leur combinaison.",
     "moveUpNamed": "Déplacer {{name}} plus tôt",
     "moveDownNamed": "Déplacer {{name}} plus tard",
+    "dragHandleNamed": "Faites glisser {{name}} pour réordonner",
     "positionAnnounce": "Position {{position}} sur {{total}}"
   },
   "retargetChoice": {
@@ -2563,6 +2620,9 @@
     "partitionSubtitle": "Séparez vos créatures en deux tas. {{chooser}} en choisira un.",
     "partitionSubtitleRemaining_one": "Séparez vos créatures en deux tas. {{chooser}} en choisira un. ({{count}} joueur de plus après vous)",
     "partitionSubtitleRemaining_other": "Séparez vos créatures en deux tas. {{chooser}} en choisira un. ({{count}} joueurs de plus après vous)",
+    "partitionInstruction": "{{chooser}} en choisit un",
+    "partitionInstructionRemaining_one": "{{chooser}} en choisit un ({{count}} joueur de plus après vous)",
+    "partitionInstructionRemaining_other": "{{chooser}} en choisit un ({{count}} joueurs de plus après vous)",
     "pileALabel": "Tas A :",
     "pileBLabel": "Tas B :",
     "pileAria": "{{name}} — tas {{pile}}",
@@ -2644,6 +2704,7 @@
   },
   "outsideGame": {
     "fromExile": "Depuis l'exil",
+    "fromCompanion": "Depuis le compagnon",
     "fromSideboard": "Depuis la réserve",
     "fromBoosterPack": "D'un booster {{setCode}}",
     "fromCubeBoosterPack": "D'un booster du cube"
@@ -2668,6 +2729,20 @@
     "EndCombat": "Fin de combat",
     "PostCombatMain": "Phase principale 2",
     "End": "Étape de fin",
+    "Cleanup": "Nettoyage"
+  },
+  "phaseShortName": {
+    "Untap": "Dégagement",
+    "Upkeep": "Entretien",
+    "Draw": "Pioche",
+    "PreCombatMain": "Principale 1",
+    "BeginCombat": "Combat",
+    "DeclareAttackers": "Attaquants",
+    "DeclareBlockers": "Bloqueurs",
+    "CombatDamage": "Blessures",
+    "EndCombat": "Fin combat",
+    "PostCombatMain": "Principale 2",
+    "End": "Fin",
     "Cleanup": "Nettoyage"
   },
   "counterMoveDistribution": {

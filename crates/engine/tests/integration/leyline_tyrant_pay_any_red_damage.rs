@@ -879,14 +879,14 @@ fn ceiling_big_floating_pool_is_not_capped() {
     assert_all_red_spent(&runner);
 }
 
-/// Row WIDE: source width just past the old probe cap (512). Each Mountain
-/// contributes two probe units, so 260 of them cross it; Nyxbloom Ancient
-/// triples each (CR 106.12b), so the real maximum is 780 and the offer must
-/// reach it. Life is raised so the 780 damage is not lethal.
+/// Row WIDE: 257 Mountains give a source width of 514 (two probe units each),
+/// just past the former 512 source-width probe cap. Mana Reflection doubles
+/// each (CR 106.12b), so the real maximum is 514 and the offer must reach it.
+/// Life is raised so the 514 damage is not lethal.
 #[test]
 fn ceiling_wide_battlefield_is_not_capped() {
-    let mut names = vec!["Nyxbloom Ancient"];
-    names.extend(std::iter::repeat_n("Mountain", 260));
+    let mut names = vec!["Mana Reflection"];
+    names.extend(std::iter::repeat_n("Mountain", 257));
     let cards = mine(&names);
     let Some((mut runner, ids)) =
         real_board(&[ManaType::Black], Some(1_000_000), &cards, ManaColor::Red)
@@ -898,7 +898,7 @@ fn ceiling_wide_battlefield_is_not_capped() {
         !tapped(&runner, ids[1]),
         "reach: the Mountains are untapped"
     );
-    assert_eq!(max, 780, "260 tripled Mountains: {max}");
+    assert_eq!(max, 514, "257 doubled Mountains: {max}");
     assert_offer_is_payable(&mut runner, max);
     assert_all_red_spent(&runner);
 }

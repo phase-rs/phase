@@ -30,6 +30,7 @@ const ABILITY_KEYS: &[&str] = &[
     "modal",
     "mode_abilities",
     "repeat_for",
+    "repeat_timing",
     "min_x_value",
     "announced_x",
     "cant_be_copied",
@@ -45,6 +46,7 @@ const ABILITY_KEYS: &[&str] = &[
     "entry_onset",
     "iteration_kind_binding",
     "sibling_condition",
+    "instruction_join",
     "consumes_source",
     "is_mana_ability",
 ];

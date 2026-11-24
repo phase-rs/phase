@@ -6,6 +6,7 @@
 
 use crate::game::combat::AttackTarget;
 use crate::game::game_object::{AttachTarget, GameObject};
+use crate::types::ability::DamageKindFilter;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{GameState, LKISnapshot};
@@ -164,7 +165,7 @@ pub(crate) fn eval_recipient_attacking_owner_target(
         // Not produced by the block-evasion parser path. Kept explicit (no
         // wildcard) so future widening is compiler-flagged.
         AttackTargetFilter::Player
-        | AttackTargetFilter::Planeswalker
+        | AttackTargetFilter::Planeswalker { .. }
         | AttackTargetFilter::PlayerOrPlaneswalker
         | AttackTargetFilter::PlayerOrPermanents
         | AttackTargetFilter::Monarch
@@ -222,9 +223,28 @@ pub(crate) fn eval_source_entered_this_turn(state: &GameState, source_id: Object
 /// `StaticCondition::SourceHasDealtDamage` predicate; the "hasn't dealt damage yet"
 /// negation wraps this via `StaticCondition::Not`. The flag is set in
 /// `deal_damage` on the first nonzero amount actually dealt and cleared on a
-/// battlefield exit (`apply_zone_exit_cleanup`).
-pub(crate) fn eval_source_has_dealt_damage(state: &GameState, source_id: ObjectId) -> bool {
-    state.objects_that_dealt_damage.contains(&source_id)
+/// battlefield exit by `zones::retire_damage_history_on_zone_change` (live
+/// cleanup and zone-command replay).
+///
+/// CR 120.2a / CR 120.2b: `kind` selects which damage class counts. `Any` reads
+/// the id set above (the unchanged path for the unqualified "hasn't dealt damage
+/// yet" cards); `CombatOnly` / `NoncombatOnly` read the source object's
+/// `dealt_damage_kinds` latch, which the same writer sets in the same battlefield
+/// guard and `GameObject::retire_dealt_damage_kinds` clears (CR 400.7), called
+/// by `zones::retire_damage_history_on_zone_change` and by
+/// `GameObject::reset_for_battlefield_exit`.
+pub(crate) fn eval_source_has_dealt_damage(
+    state: &GameState,
+    source_id: ObjectId,
+    kind: DamageKindFilter,
+) -> bool {
+    match kind {
+        DamageKindFilter::Any => state.objects_that_dealt_damage.contains(&source_id),
+        DamageKindFilter::CombatOnly | DamageKindFilter::NoncombatOnly => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| obj.dealt_damage_kinds.has(kind)),
+    }
 }
 
 /// CR 105.2 + CR 611.3a: True when the source permanent shares a color with the
@@ -286,11 +306,123 @@ pub(crate) fn eval_source_attached_to_controlled_creature(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::combat::{AttackerInfo, CombatState};
     use crate::game::zones::create_object;
+    use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::game_state::GameState;
     use crate::types::player::PlayerId;
     use crate::types::CardId;
+
+    /// A8 - CR 120.2a / CR 120.2b: `Any` reads the id set, `CombatOnly` /
+    /// `NoncombatOnly` read the object's latch. Objects: none, combat-only,
+    /// noncombat-only, both; plus an id absent from `state.objects`.
+    #[test]
+    fn eval_source_has_dealt_damage_selects_store_by_kind() {
+        let mut state = GameState::new_two_player(42);
+        let mut make = |card: u64, record: &[bool]| {
+            let id = create_object(
+                &mut state,
+                CardId(card),
+                PlayerId(0),
+                "Source".to_string(),
+                Zone::Battlefield,
+            );
+            for &is_combat in record {
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .dealt_damage_kinds
+                    .record(is_combat);
+                state.objects_that_dealt_damage.insert(id);
+            }
+            id
+        };
+        let none = make(1, &[]);
+        let combat = make(2, &[true]);
+        let noncombat = make(3, &[false]);
+        let both = make(4, &[false, true]);
+        let absent = ObjectId(9_999);
+        assert!(!state.objects.contains_key(&absent));
+
+        use DamageKindFilter::{Any, CombatOnly, NoncombatOnly};
+        let answers = |id| {
+            (
+                eval_source_has_dealt_damage(&state, id, Any),
+                eval_source_has_dealt_damage(&state, id, CombatOnly),
+                eval_source_has_dealt_damage(&state, id, NoncombatOnly),
+            )
+        };
+        assert_eq!(answers(none), (false, false, false));
+        assert_eq!(answers(combat), (true, true, false));
+        assert_eq!(answers(noncombat), (true, false, true));
+        assert_eq!(answers(both), (true, true, true));
+        assert_eq!(answers(absent), (false, false, false));
+    }
+
+    /// CR 506.2: the subtype-defended restriction scope never participates in
+    /// the "attacking its owner" block-evasion classifier — it is not
+    /// owner-related. Same attack, sibling contrast: `OwnerOrPlaneswalker`
+    /// answers true on the owner's own Jace, the subtype scope stays false.
+    #[test]
+    fn subtype_scope_never_meets_owner_evasion_exception() {
+        let mut state = GameState::new_two_player(42);
+        let attacker = create_object(
+            &mut state,
+            CardId(0x0E001),
+            PlayerId(1),
+            "Evasion Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        // A Jace the attacker owns (controller == owner == PlayerId(1)).
+        let own_jace = create_object(
+            &mut state,
+            CardId(0x0E002),
+            PlayerId(1),
+            "Own Jace".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [attacker, own_jace] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.base_card_types = obj.card_types.clone();
+        }
+        {
+            let obj = state.objects.get_mut(&own_jace).unwrap();
+            obj.card_types.core_types = vec![CoreType::Planeswalker];
+            obj.card_types.subtypes = vec!["Jace".to_string()];
+            obj.base_card_types = obj.card_types.clone();
+        }
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(own_jace),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+        // Reach-guard: the sibling owner scope DOES meet the exception here.
+        assert!(
+            eval_recipient_attacking_owner_target(
+                &state,
+                attacker,
+                &AttackTargetFilter::OwnerOrPlaneswalker
+            ),
+            "attacking your own planeswalker meets the owner exception"
+        );
+        // The subtype restriction scope never does — same attack, same target.
+        assert!(
+            !eval_recipient_attacking_owner_target(
+                &state,
+                attacker,
+                &AttackTargetFilter::Planeswalker {
+                    subtype: Some("Jace".to_string())
+                }
+            ),
+            "the subtype-defended scope is not an owner-evasion exception"
+        );
+    }
 
     #[test]
     fn eval_is_initiative_matches_designation_holder() {

@@ -64,6 +64,15 @@ export function buildLlmDraftPickRequests(endpoint_json: string, set_names_json:
 export function check_restorable_draft_session(json: string): any;
 
 /**
+ * CR 702.139a + CR 100.4b: whether `companion` is backed by a drafted pool
+ * copy the main deck does not use. Both card lists are JSON arrays of card
+ * names (the pool's instance names and the main deck's names). Stateless —
+ * usable by P2P guests, and the one rule `validate_limited_deck` enforces at
+ * submission, so the deck builder never re-counts copies itself.
+ */
+export function companion_has_drafted_copy_outside_deck(pool_names_json: string, main_deck_json: string, companion: string): boolean;
+
+/**
  * Create a multiplayer draft session. Used by the P2P host to initialize a
  * multiplayer draft of any `DraftKind` with a wire number, with human + bot
  * seats from a Set pool, host-local Chaos candidate pools, or a custom Cube
@@ -290,9 +299,11 @@ export function submitPickWithLlmBotPicks(card_instance_id: string, responses_js
  * commander(s) (CR 903.3 / CR 702.124h). CR 903.1 puts the designation inside
  * the Commander variant, so `[]` is the correct and meaningful value for every
  * non-Commander kind.
+ * `companion`: the optional bare card name (not JSON) this seat designates as
+ * its companion (CR 702.139a).
  * The deck is validated against the pool via LimitedDeckValidator.
  */
-export function submit_deck(main_deck_json: string, commanders_json: string): any;
+export function submit_deck(main_deck_json: string, commanders_json: string, companion?: string | null): any;
 
 /**
  * Submit a deck for any seat.
@@ -304,7 +315,7 @@ export function submit_deck(main_deck_json: string, commanders_json: string): an
  * non-Commander kind.
  * Returns the DraftPlayerView for the specified seat.
  */
-export function submit_deck_for_seat(seat: number, main_deck_json: string, commanders_json: string): any;
+export function submit_deck_for_seat(seat: number, main_deck_json: string, commanders_json: string, companion?: string | null): any;
 
 /**
  * Submit the human player's pick and resolve all bot picks synchronously.
@@ -378,6 +389,8 @@ export interface InitOutput {
     readonly auto_pick: () => [number, number, number];
     readonly booster_pack_pool_for_game: () => [number, number, number];
     readonly buildLlmDraftPickRequests: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly check_restorable_draft_session: (a: number, b: number) => any;
+    readonly companion_has_drafted_copy_outside_deck: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly create_multiplayer_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number];
     readonly draft_procedure: (a: number, b: number, c: number) => [number, number, number];
     readonly export_draft_session: () => [number, number, number, number];
@@ -398,8 +411,8 @@ export interface InitOutput {
     readonly start_quick_draft: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly start_sealed_draft: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly submitPickWithLlmBotPicks: (a: number, b: number, c: number, d: number) => [number, number, number];
-    readonly submit_deck: (a: number, b: number, c: number, d: number) => [number, number, number];
-    readonly submit_deck_for_seat: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+    readonly submit_deck: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
+    readonly submit_deck_for_seat: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly submit_pick: (a: number, b: number) => [number, number, number];
     readonly submit_pick_for_seat: (a: number, b: number, c: number) => [number, number, number];
     readonly submit_pick_with_draft_effect: (a: number, b: number, c: number, d: number) => [number, number, number];
@@ -407,7 +420,6 @@ export interface InitOutput {
     readonly suggest_deck: () => [number, number, number];
     readonly suggest_lands: (a: number, b: number) => [number, number, number];
     readonly suggest_lands_for_seat: (a: number, b: number, c: number) => [number, number, number];
-    readonly check_restorable_draft_session: (a: number, b: number) => any;
     readonly init_panic_hook: () => void;
     readonly llmProviderCatalog: () => any;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

@@ -77,11 +77,7 @@ pub(super) fn tap_untap_target_ids(
         // delayed trigger whose referents were pinned into `targets`
         // (CR 603.7c) keeps the pinned-target arm below.
         filter if ability.targets.is_empty() && super::EVENT_SUBJECT_ANAPHORS.contains(filter) => {
-            crate::game::targeting::resolve_event_referent_permanents(
-                state,
-                filter,
-                ability.source_id,
-            )
+            crate::game::targeting::resolve_event_referent_permanents_for(state, ability, filter)
         }
         // CR 400.7 + CR 603.7c: a delayed tap/untap whose pinned referent became
         // a new object taps nothing. This arm is a RAW read that never reaches
@@ -362,6 +358,7 @@ fn prompt_resolution_tap_untap_choice(
     }
 
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: ability.controller,
         cards: eligible,
         count: bounds.max,
@@ -380,18 +377,61 @@ fn prompt_resolution_tap_untap_choice(
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         // CR 708.2a: tap/untap selection is not a face-down entry.
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
         // Tap/untap selection performs no zone move, so no bounded-move
         // duration rides the round-trip.
         duration: None,
+        privacy_zones: None,
     };
     true
+}
+
+/// CR 608.2c: the permanents a mass "tap/untap all ..." instruction selects:
+/// every battlefield permanent its filter matches, whether or not its status
+/// changes. The resolver walks this set, and a following "they" names it.
+fn mass_tap_state_selection(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Vec<ObjectId> {
+    let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
+        })
+        .copied()
+        .collect()
+}
+
+/// CR 608.2c + CR 701.26a: the population a mass tap/untap instruction is
+/// about to select, read on the board before it acts. Acting can change what
+/// the filter matches (an untap that removes a creature's only stun counter
+/// instead, CR 122.1d), so a following "they" binds this snapshot rather than
+/// a rescan. Empty for every other instruction, whose referents are its events.
+pub(crate) fn selection_before_resolution(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<ObjectId> {
+    match &ability.effect {
+        Effect::SetTapState {
+            target,
+            scope: EffectScope::All,
+            ..
+        } => mass_tap_state_selection(state, ability, target),
+        _ => Vec::new(),
+    }
 }
 
 /// CR 701.26a (tap) / CR 701.26b (untap): Mass tap/untap of every permanent
@@ -405,18 +445,7 @@ fn resolve_all(
     change: TapStateChange,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
-
-    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
-    let ctx = crate::game::filter::FilterContext::from_ability(ability);
-    let matching: Vec<_> = state
-        .battlefield
-        .iter()
-        .filter(|id| {
-            crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
-        })
-        .copied()
-        .collect();
+    let matching = mass_tap_state_selection(state, ability, target);
 
     for obj_id in matching {
         let outcome = match change {
@@ -698,8 +727,9 @@ mod tests {
     }
 
     /// CR 608.2b + CR 608.2k: class fence. A `SelfRef`-head → `TriggeringSource`
-    /// sub-effect (Blistercoil Weird: SpellCast trigger `Pump{SelfRef}` →
-    /// `SetTapState{TriggeringSource, "untap it"}`) with an EMPTY slot resolves
+    /// sub-effect (synthetic shape: after the CR 608.2c named-source rebinding,
+    /// Blistercoil Weird's "Untap it." parses to `SetTapState{SelfRef}`) with an
+    /// EMPTY slot resolves
     /// the anaphor from the published trigger event. Here no event is published,
     /// so the anaphor names no object
     /// and per CR 608.2b it must stay an inert no-op — it must NOT untap the
@@ -1028,7 +1058,7 @@ mod tests {
             state.objects[&faerie].counters.get(&CounterType::Stun),
             Some(&1)
         );
-        assert!(events.iter().any(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1 } if *object_id == faerie)));
+        assert!(events.iter().any(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1, .. } if *object_id == faerie)));
         assert!(!events
             .iter()
             .any(|event| matches!(event, GameEvent::PermanentUntapped { object_id } if *object_id == faerie)));
@@ -1151,7 +1181,7 @@ mod tests {
             .transient_continuous_effects
             .iter()
             .all(|effect| effect.id != duration_id));
-        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1 } if *object_id == faerie)).count(), 1);
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1, .. } if *object_id == faerie)).count(), 1);
     }
 
     #[test]

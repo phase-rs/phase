@@ -10,7 +10,8 @@ use crate::game::keywords;
 use crate::game::mana_sources;
 use crate::game::mulligan;
 use crate::types::ability::{
-    ChoiceType, CounterCostSelection, TapCreaturesSelectionMode, TargetRef,
+    ChoiceType, CounterCostSelection, ObjectSelectionCardinality, TapCreaturesSelectionMode,
+    TargetRef,
 };
 use crate::types::actions::{
     CastChoice, GameAction, LearnOption, MulliganChoice, OutsideGameSelection,
@@ -493,6 +494,20 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // CR 101.4c: choose which of this player's simultaneous replacement
+        // decisions to make first; each object is one decision.
+        WaitingFor::ReplacementDecisionOrder { player, objects } => objects
+            .iter()
+            .map(|&object| {
+                candidate(
+                    GameAction::SelectCards {
+                        cards: vec![object],
+                    },
+                    TacticalClass::Replacement,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::MoveCountersDistribution {
             player,
             available,
@@ -891,6 +906,16 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        WaitingFor::ChooseStartingPlayer { player, candidates } => candidates
+            .iter()
+            .map(|seat| {
+                candidate(
+                    GameAction::ChooseStartingPlayer { player: *seat },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 103.5 + 103.5b: For simultaneous mulligan, generate candidates
         // for each pending player. AI search iterates over the cross-product;
         // the engine accepts them in any arrival order. Serum Powder and
@@ -976,6 +1001,7 @@ fn exact_owns_candidate_domain(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::MeldAttackTargetChoice { .. }
             | WaitingFor::EntryAttackTargetChoice { .. }
             | WaitingFor::EntryControllerChoice { .. }
+            | WaitingFor::ReplacementDecisionOrder { .. }
             | WaitingFor::ChooseAnnouncingOpponent { .. }
             | WaitingFor::ChooseGiftRecipient { .. }
             | WaitingFor::MoveCountersDistribution { .. }
@@ -1004,6 +1030,7 @@ pub fn candidate_actions_broad_with_probe(
         | WaitingFor::MeldAttackTargetChoice { .. }
         | WaitingFor::EntryAttackTargetChoice { .. }
         | WaitingFor::EntryControllerChoice { .. }
+        | WaitingFor::ReplacementDecisionOrder { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::MoveCountersDistribution { .. }
@@ -1146,7 +1173,9 @@ pub fn candidate_actions_broad_with_probe(
         // never advantageous to the AI, and the engine validates `len() <= max`.
         // Search may still enumerate alternative subsets via legal-actions if a
         // richer policy is wired later; this guarantees the AI never wedges.
-        WaitingFor::ChooseUntapSubset { player, group, max } => {
+        WaitingFor::ChooseUntapSubset {
+            player, group, max, ..
+        } => {
             let chosen: Vec<ObjectId> = group.iter().copied().take(*max).collect();
             vec![candidate(
                 GameAction::SelectCards { cards: chosen },
@@ -1460,13 +1489,25 @@ pub fn candidate_actions_broad_with_probe(
             player,
             cards,
             optional,
+            cardinality,
             ..
         } => {
-            // CR 701.20a: Normal reveal forces exactly one pick. Optional reveal
-            // (e.g., reveal-lands) additionally permits an empty selection to
-            // signal "I decline to reveal" — the source's decline branch fires.
-            let mut variants = select_cards_variants(*player, cards, Some(1));
-            if *optional {
+            // CR 608.2d: issue the selections the prompt's published cardinality
+            // admits. Normal post-reveal choices take exactly one card; CR 107.1c
+            // "any number" (Metalworker) admits every subset, which the shared
+            // any-size enumerator covers with none, all, and each single card.
+            let mut variants = match cardinality {
+                ObjectSelectionCardinality::Exactly { count } => {
+                    select_cards_variants(*player, cards, Some(*count as usize))
+                }
+                ObjectSelectionCardinality::AnyNumber => {
+                    select_cards_variants(*player, cards, None)
+                }
+            };
+            // CR 701.20a: an optional reveal (e.g., reveal-lands) additionally
+            // permits an empty selection to signal "I decline to reveal" — the
+            // source's decline branch fires.
+            if *optional && !matches!(cardinality, ObjectSelectionCardinality::AnyNumber) {
                 variants.push(candidate(
                     GameAction::SelectCards { cards: vec![] },
                     TacticalClass::Selection,
@@ -1600,6 +1641,10 @@ pub fn candidate_actions_broad_with_probe(
                             pack_slot: *pack_slot,
                         });
                     }
+                    // CR 702.139a: the revealed companion is one card.
+                    OutsideGameChoiceSource::Companion { .. } => {
+                        pool.push(OutsideGameSelection::Companion);
+                    }
                 }
             }
             let sizes = if *up_to {
@@ -1685,9 +1730,9 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
-        // CR 405.3 + CR 707.10: the next copy of a batch may be of any spell
-        // that still has copies to make; every offered spell is a legal pick.
-        WaitingFor::SpellCopyOrderChoice {
+        // CR 608.2f + CR 405.3: the next member of an ordered loop may be any
+        // member still awaiting an iteration; every offered member is legal.
+        WaitingFor::MemberOrderChoice {
             player, choices, ..
         } => choices
             .iter()
@@ -1716,14 +1761,21 @@ pub fn candidate_actions_broad_with_probe(
             count,
             min_count,
             up_to,
+            mass_library_order,
             ..
         } => {
-            let sizes = if *up_to {
-                (*min_count..=*count).collect()
+            // CR 401.4: an owner-ordering EffectZoneChoice prompt (mass library order)
+            // must enumerate alternate permutations, not only a single combination.
+            if mass_library_order.is_some() {
+                bounded_select_card_permutations(*player, cards)
             } else {
-                vec![*count]
-            };
-            bounded_select_card_candidates(*player, cards, sizes)
+                let sizes = if *up_to {
+                    (*min_count..=*count).collect()
+                } else {
+                    vec![*count]
+                };
+                bounded_select_card_candidates(*player, cards, sizes)
+            }
         }
         WaitingFor::DrawnThisTurnTopdeckChoice {
             player,
@@ -2275,18 +2327,20 @@ pub fn candidate_actions_broad_with_probe(
             };
             bounded_select_card_candidates(*player, cards, sizes)
         }
-        WaitingFor::OptionalCostChoice { player, .. } => vec![
-            candidate(
-                GameAction::DecideOptionalCost { pay: true },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-            candidate(
-                GameAction::DecideOptionalCost { pay: false },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-        ],
+        // CR 601.2b: one candidate per option the prompt actually presents.
+        // `optional_cost_options` is the shared authority for the index domain,
+        // so candidate enumeration cannot disagree with the handler's
+        // bounds check about how many answers exist.
+        WaitingFor::OptionalCostChoice { player, cost, .. } => (0
+            ..crate::game::casting_costs::optional_cost_options(cost).len())
+            .map(|index| {
+                candidate(
+                    GameAction::DecideOptionalCost { index },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 702.47a–e: splice another eligible card onto the spell, or finish.
         WaitingFor::SpliceOffer {
             player, eligible, ..
@@ -2349,12 +2403,12 @@ pub fn candidate_actions_broad_with_probe(
         // CR 601.2b: Defiler cycle — accept or decline life payment for mana reduction.
         WaitingFor::DefilerPayment { player, .. } => vec![
             candidate(
-                GameAction::DecideOptionalCost { pay: true },
+                GameAction::DecideOptionalCost { index: 0 },
                 TacticalClass::Selection,
                 Some(*player),
             ),
             candidate(
-                GameAction::DecideOptionalCost { pay: false },
+                GameAction::DecideOptionalCost { index: 1 },
                 TacticalClass::Selection,
                 Some(*player),
             ),
@@ -2476,8 +2530,20 @@ pub fn candidate_actions_broad_with_probe(
             choices,
             count,
             min_count,
-            ..
-        } => bounded_select_card_candidates(*player, choices, *min_count..=*count),
+            resume,
+        } => {
+            // CR 601.2g + CR 601.2h: the AI plans its mana-ability payments, so
+            // it doesn't spend a creature held for the spell's deferred tap cost.
+            let choices: Vec<ObjectId> = choices
+                .iter()
+                .copied()
+                .filter(|&id| {
+                    !matches!(resume, CostResume::ManaAbility { .. })
+                        || !crate::game::restrictions::payment_tap_reserved(state, id)
+                })
+                .collect();
+            bounded_select_card_candidates(*player, &choices, *min_count..=*count)
+        }
         // CR 117.1 + CR 601.2b: Aggregate-threshold "exile any number" cost
         // (Baron Helmut Zemo's Boast). The threshold is satisfied by ANY chosen
         // subset whose summed `property` meets the comparator, so enumerate
@@ -2938,18 +3004,20 @@ pub fn candidate_actions_broad_with_probe(
             .collect(),
         // CR 118.12: "Counter unless pays" — opponent chooses pay or decline.
         WaitingFor::UnlessPayment { player, .. } => {
-            vec![
-                candidate(
-                    GameAction::PayUnlessCost { pay: true },
-                    TacticalClass::Selection,
-                    Some(*player),
-                ),
-                candidate(
+            let mut answers = vec![candidate(
+                GameAction::PayUnlessCost { pay: true },
+                TacticalClass::Selection,
+                Some(*player),
+            )];
+            // CR 702.24a: a repeated payment already begun only continues.
+            if !crate::game::engine_payment_choices::awaits_payment_continuation(state) {
+                answers.push(candidate(
                     GameAction::PayUnlessCost { pay: false },
                     TacticalClass::Selection,
                     Some(*player),
-                ),
-            ]
+                ));
+            }
+            answers
         }
         // CR 118.12a: Disjunctive unless-cost — paying player chooses **which**
         // sub-cost (by index) or declines all. One `ChooseUnlessCostBranch`
@@ -3481,13 +3549,10 @@ pub fn candidate_actions_broad_with_probe(
             attack_target,
             ..
         } => {
-            let mut remaining = *total_damage;
-            let mut assignments = Vec::new();
-            for slot in blockers {
-                let assign = remaining.min(slot.lethal_minimum);
-                assignments.push((slot.blocker_id, assign));
-                remaining = remaining.saturating_sub(assign);
-            }
+            use crate::game::combat::TrampleKind;
+            use crate::game::combat_damage::{lethal_first_split, ExcessRoute};
+            use crate::types::game_state::CombatDamageSplit;
+
             let has_recipient = state
                 .combat
                 .as_ref()
@@ -3500,39 +3565,37 @@ pub fn candidate_actions_broad_with_probe(
                 .and_then(|info| {
                     info.resolve_damage_target(
                         state,
-                        *trample == Some(crate::game::combat::TrampleKind::OverPlaneswalkers),
+                        *trample == Some(TrampleKind::OverPlaneswalkers),
                     )
                 })
                 .is_some();
-            // CR 506.4c + CR 702.19b: without a current excess recipient,
-            // ordinary trample still permits all damage to the blockers.
-            if (trample.is_none() || !has_recipient) && remaining > 0 {
-                if let Some(last) = assignments.last_mut() {
-                    last.1 += remaining;
-                    remaining = 0;
+            let route = match (trample, attack_target) {
+                (None, _) => ExcessRoute::ToBlockers,
+                (Some(TrampleKind::Standard | TrampleKind::OverPlaneswalkers), _)
+                    if !has_recipient =>
+                {
+                    ExcessRoute::ToBlockers
                 }
-            }
-            // CR 702.19c: For trample-over-PW attacking a PW, split excess:
-            // loyalty-worth to PW, remainder to controller.
-            let (trample_dmg, ctrl_dmg) = if *trample
-                == Some(crate::game::combat::TrampleKind::OverPlaneswalkers)
-                && matches!(
-                    attack_target,
-                    crate::game::combat::AttackTarget::Planeswalker(_)
-                ) {
-                let loyalty = pw_loyalty.unwrap_or(0);
-                let to_pw = remaining.min(loyalty);
-                let to_ctrl = remaining.saturating_sub(to_pw);
-                (to_pw, to_ctrl)
-            } else {
-                (if trample.is_some() { remaining } else { 0 }, 0)
+                (Some(TrampleKind::OverPlaneswalkers), AttackTarget::Planeswalker(_)) => {
+                    ExcessRoute::OverPlaneswalker {
+                        loyalty: pw_loyalty.unwrap_or(0),
+                    }
+                }
+                (Some(TrampleKind::Standard | TrampleKind::OverPlaneswalkers), _) => {
+                    ExcessRoute::Trample
+                }
             };
+            let CombatDamageSplit {
+                assignments,
+                trample_damage,
+                controller_damage,
+            } = lethal_first_split(*total_damage, blockers, route);
             let mut candidates = vec![candidate(
                 GameAction::AssignCombatDamage {
                     mode: crate::types::game_state::CombatDamageAssignmentMode::Normal,
                     assignments,
-                    trample_damage: trample_dmg,
-                    controller_damage: ctrl_dmg,
+                    trample_damage,
+                    controller_damage,
                 },
                 TacticalClass::Selection,
                 Some(*player),
@@ -3659,6 +3722,7 @@ pub fn candidate_actions_broad_with_probe(
         WaitingFor::RetargetChoice {
             player,
             stack_entry_index,
+            stack_entry_id: _,
             scope,
             current_targets,
             slots,
@@ -3724,14 +3788,11 @@ pub fn candidate_actions_broad_with_probe(
         // sole candidate is rejected by the reducer's `amount > max` guard and the AI has no
         // legal action at this prompt.
         //
-        // AI-reachable since the bounded fast-forward landed, which is what stales the older
-        // "the arm below only ever proposes `UntilLethal`" note this replaces: the
-        // `WaitingFor::LoopShortcut` arm below also proposes a capacity-valued `Fixed` against
-        // a bounded offer that publishes no pins, and only a `Fixed` count routes through
-        // `materialize_fixed_shortcut` — the single path that registers the stash `turns.rs`
-        // turns into this prompt. `UntilLethal` still routes to `apply_until_lethal_shortcut`
-        // and never gets here; it is now also not offered against a bounded offer at all. A
-        // human-declared shortcut in a mixed game reaches this prompt too.
+        // AI-reachable: the `WaitingFor::LoopShortcut` arm below proposes a capacity-valued
+        // `Fixed` against a bounded offer that publishes no pins, and only a `Fixed` count routes
+        // through `materialize_fixed_shortcut` — the single path that registers the stash
+        // `turns.rs` turns into this prompt. A human-declared shortcut in a mixed game reaches
+        // this prompt too.
         WaitingFor::PayAmountChoice {
             player,
             resource: PayableResource::LoopCollapse { .. },
@@ -3794,6 +3855,7 @@ pub fn candidate_actions_broad_with_probe(
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::PhysicalContest { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. }
         | WaitingFor::OrderTriggers { .. }
         | WaitingFor::MulliganDecision { .. }
         | WaitingFor::OpeningHandBottomCards { .. } => Vec::new(),
@@ -3926,22 +3988,11 @@ pub fn candidate_actions_broad_with_probe(
         // (Scored by `phase_ai::policies::loop_shortcut::LoopShortcutPolicy`.)
         WaitingFor::LoopShortcut {
             proposer,
-            predicted_winner,
             schema,
             declaration,
             period,
             ..
         } => {
-            // CR 732.2a: `UntilLethal` names no count, so it is legal ONLY against an offer
-            // that narrowed no bound. `handle_declare_shortcut` rejects it outright against
-            // a bounded one (`IterationCount::UntilLethal if offer.schema.is_bounded()` =>
-            // `reject_shortcut_declaration`), and that reject is a SUCCESSFUL, fail-closed
-            // handback to priority — `Ok(result)`, not an `Err`. So an unconditional
-            // `UntilLethal` candidate did not merely waste a search node: it handed the
-            // simulation layer an action the engine ACCEPTS and then silently discards,
-            // i.e. an illegal quantity choice wearing the shape of a legal one, which the
-            // policy layer then has to know to score away.
-            //
             // Emit only the quantity choices the offer can actually take. A bounded offer gets
             // `Fixed` at the published capacity below when its pin set permits a
             // `template: None` declaration; where neither applies, `DeclineShortcut` really is
@@ -3952,12 +4003,7 @@ pub fn candidate_actions_broad_with_probe(
                 crate::analysis::decision_template::IterationCount::WithoutEnd => {
                     Some(crate::analysis::decision_template::IterationCount::WithoutEnd)
                 }
-                // CR 732.2a: until lethal ends only where the offer's named winner wins.
-                crate::analysis::decision_template::IterationCount::Fixed(_)
-                | crate::analysis::decision_template::IterationCount::UntilLethal => {
-                    (!schema.is_bounded() && predicted_winner.is_some())
-                        .then_some(crate::analysis::decision_template::IterationCount::UntilLethal)
-                }
+                crate::analysis::decision_template::IterationCount::Fixed(_) => None,
             };
             if let Some(count) = unbounded {
                 v.push(candidate(
@@ -3969,10 +4015,8 @@ pub fn candidate_actions_broad_with_probe(
                     Some(*proposer),
                 ));
             }
-            // CR 732.2a: a BOUNDED offer states a legal repetition count, and the declare
-            // handler rejects `UntilLethal` against one outright — so without this candidate
-            // the AI's only non-declining option at such a node is an answer the engine
-            // refuses. `ShortcutDecisionSchema::is_bounded()` is the engine's single
+            // CR 732.2a: a BOUNDED offer states a legal repetition count.
+            // `ShortcutDecisionSchema::is_bounded()` is the engine's single
             // authority for "this producer narrowed the bound"; do NOT re-spell it as a
             // comparison against `MAX_SHORTCUT_CYCLES`.
             //
@@ -3997,13 +4041,11 @@ pub fn candidate_actions_broad_with_probe(
             // its own candidate. Reading `iteration_count` rather than re-deriving anything keeps
             // one authority for that count, the producer's.
             //
-            // WILDCARD-FREE over `IterationCount`: a bounded offer publishes `Fixed`, and the
-            // `UntilLethal` arm above already covers the unbounded case, so an `UntilLethal`
-            // suggestion here has no count to name and emits nothing rather than guessing one.
+            // WILDCARD-FREE over `IterationCount`: a `WithoutEnd` suggestion has no count to name
+            // and emits nothing rather than guessing one.
             let suggested = match schema.iteration_count {
                 crate::analysis::decision_template::IterationCount::Fixed(n) => Some(n),
-                crate::analysis::decision_template::IterationCount::UntilLethal
-                | crate::analysis::decision_template::IterationCount::WithoutEnd => None,
+                crate::analysis::decision_template::IterationCount::WithoutEnd => None,
             };
             if let Some(n) = suggested.filter(|_| {
                 schema.is_bounded()
@@ -4025,18 +4067,27 @@ pub fn candidate_actions_broad_with_probe(
             ));
             v
         }
-        // CR 732.2b/c: an opponent answers a loop-shortcut offer. PR-7 Phase 4c (LOW-2):
-        // self-preservation via the single-authority `smart_shortcut_response` — Shorten
-        // when the polled player has a meaningful way to break the loop, else Accept.
-        WaitingFor::RespondToShortcut { player, .. } => {
-            vec![candidate(
+        // CR 732.2b: "Each other player ... may either accept the proposed sequence, or shorten
+        // it"; the legality filter keeps the answers the proposal admits, and `apply()` still
+        // refuses a `Shorten` whose place names no different choice.
+        WaitingFor::RespondToShortcut { player, .. } => vec![
+            candidate(
                 GameAction::RespondToShortcut {
-                    response: crate::ai_support::smart_shortcut_response(state, *player),
+                    response: crate::analysis::loop_check::ShortcutResponse::Accept,
+                },
+                TacticalClass::Pass,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::RespondToShortcut {
+                    response: crate::analysis::loop_check::ShortcutResponse::Shorten {
+                        at_iteration: crate::ai_support::AI_SHORTEN_PLACE,
+                    },
                 },
                 TacticalClass::Utility,
                 Some(*player),
-            )]
-        }
+            ),
+        ],
         WaitingFor::PrecastCopyShortcutOffer {
             proposer, epoch, ..
         } => vec![
@@ -4059,36 +4110,36 @@ pub fn candidate_actions_broad_with_probe(
                 Some(*proposer),
             ),
         ],
+        // CR 732.2b: the pre-cast route is accepted, or shortened at a breakpoint issued to this
+        // responder.
         WaitingFor::RespondToPrecastCopyShortcut {
             player,
             epoch,
             breakpoint_ids,
             ..
-        } => {
-            let response = match crate::ai_support::smart_shortcut_response(state, *player) {
-                crate::analysis::loop_check::ShortcutResponse::Shorten { .. } => {
-                    breakpoint_ids.first().map_or(
-                        crate::types::actions::PrecastCopyShortcutResponse::Accept,
-                        |breakpoint_id| {
-                            crate::types::actions::PrecastCopyShortcutResponse::Shorten {
-                                breakpoint_id: *breakpoint_id,
-                            }
-                        },
-                    )
-                }
-                crate::analysis::loop_check::ShortcutResponse::Accept => {
-                    crate::types::actions::PrecastCopyShortcutResponse::Accept
-                }
-            };
-            vec![candidate(
+        } => std::iter::once((
+            crate::types::actions::PrecastCopyShortcutResponse::Accept,
+            TacticalClass::Pass,
+        ))
+        .chain(breakpoint_ids.iter().map(|breakpoint_id| {
+            (
+                crate::types::actions::PrecastCopyShortcutResponse::Shorten {
+                    breakpoint_id: *breakpoint_id,
+                },
+                TacticalClass::Utility,
+            )
+        }))
+        .map(|(response, class)| {
+            candidate(
                 GameAction::PrecastCopyShortcut {
                     epoch: *epoch,
                     response,
                 },
-                TacticalClass::Utility,
+                class,
                 Some(*player),
-            )]
-        }
+            )
+        })
+        .collect(),
     };
 
     actions
@@ -4322,6 +4373,9 @@ fn retarget_proposals(
             entry,
             stack_ability,
             &bindings,
+            Some(crate::game::targeting::StackTriggerContext::for_entry(
+                state, entry,
+            )),
         );
         // CR 115.7a + INVARIANT SC (phase-rs/phase#8355 round-8 review finding
         // H1, second pass): mirrors `engine::apply_retarget`'s same guard — a
@@ -4351,13 +4405,9 @@ fn retarget_proposals(
     };
 
     match scope {
-        // CR 115.7a: "each target can be changed only to another legal target."
-        // One proposal per member of the pool `apply_retarget` validates
-        // against. That pool normally still contains the current target — that
-        // member IS CR 115.7a's "the original target is unchanged" fallback, so
-        // it is offered rather than filtered out. An empty pool yields no
-        // proposals; after Unit 1 `change_targets::resolve` no longer parks that
-        // state.
+        // CR 115.7a: one proposal per pool member; the reducer's shared
+        // changed-occurrence check removes unchanged picks, including for
+        // outer-empty legacy pools. No alternative means no response.
         //
         // KNOWN GAP, carried deliberately. Each proposal is a ONE-element list,
         // because `apply_retarget`'s `Single` arm hard-requires exactly one
@@ -4514,6 +4564,7 @@ pub fn retarget_actions(
             state,
             &crate::game::engine::RetargetProposal {
                 stack_entry_index,
+                stack_entry_id: state.stack.get(stack_entry_index).map(|entry| entry.id),
                 scope,
                 current_targets,
                 slots,
@@ -4556,6 +4607,7 @@ pub(crate) fn retarget_response_exists(
             state,
             &crate::game::engine::RetargetProposal {
                 stack_entry_index,
+                stack_entry_id: state.stack.get(stack_entry_index).map(|entry| entry.id),
                 scope,
                 current_targets,
                 slots,
@@ -4589,11 +4641,15 @@ pub(crate) fn priority_actions_with_probe(
     player: PlayerId,
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
-    let mut actions = vec![candidate(
-        GameAction::PassPriority,
-        TacticalClass::Pass,
-        Some(player),
-    )];
+    let mut actions = Vec::new();
+    // CR 732.2c + CR 723.5: the pass is issued only where the reducer's own pass guard admits it.
+    if crate::game::priority::pass_priority_legality(state, player).is_ok() {
+        actions.push(candidate(
+            GameAction::PassPriority,
+            TacticalClass::Pass,
+            Some(player),
+        ));
+    }
 
     // CR 702.61a + CR 702.61b: While a spell with split second is on the stack,
     // players can't cast spells or activate non-mana abilities. Special actions
@@ -4886,97 +4942,24 @@ pub(crate) fn priority_actions_with_probe(
             }
         }
 
-        // CR 602.1: Hand-activated abilities (Cycling per CR 702.29a, etc.)
-        for &obj_id in &state.players[player.0 as usize].hand {
-            if let Some(obj) = state.objects.get(&obj_id) {
-                // CR 108.4 + CR 108.4a: a card in a hand represents neither a
-                // permanent nor a spell, so it has no controller — "if anything
-                // asks for the controller of a card that doesn't have one, use
-                // its owner instead". `obj.controller` is NOT cleared by every
-                // zone change (only a battlefield exit reverts it), so scoping a
-                // hand scan by `controller` asks for a value the rules say does
-                // not exist. Owner is the rule and it is also what this
-                // owner-keyed hand list already means.
-                if obj.owner == player {
-                    for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
-                        if ability_def.kind != crate::types::ability::AbilityKind::Activated
-                            || ability_def.activation_zone != Some(crate::types::zones::Zone::Hand)
-                            || crate::game::mana_abilities::is_mana_ability(&ability_def)
-                        {
-                            continue;
-                        }
-                        // CR 602.2b + CR 601.2g: the payment mode the reducer
-                        // honours, as for the battlefield loop above.
-                        if let Some(payment_mode) = casting::activation_offer_payment_mode(
-                            state,
-                            player,
-                            obj_id,
-                            i,
-                            &activation_restriction_gates,
-                        ) {
-                            actions.push(candidate(
-                                GameAction::ActivateAbility {
-                                    source_id: obj_id,
-                                    ability_index: i,
-                                    payment_mode,
-                                },
-                                TacticalClass::Ability,
-                                Some(player),
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-
-        // CR 113.6b + CR 602.2: Graveyard-activated abilities (Teacher's Pest,
-        // Bloodsoaked Champion, Dread Wanderer, etc.). CR 113.6b: an ability
-        // whose text states it functions from the graveyard can be activated
-        // from there. CR 602.2: to activate an ability is to put it onto the
-        // stack and pay its costs. Non-mana graveyard activations are
-        // suppressed by split second, mirroring the hand-zone loop above.
-        for &obj_id in state.graveyard_of(player) {
-            if let Some(obj) = state.objects.get(&obj_id) {
-                // CR 602.2: "Only an object's controller (or its owner, if it
-                // doesn't have a controller) can activate its activated ability
-                // unless the object specifically says otherwise." Nothing in a
-                // graveyard says otherwise here, so the restriction stands;
-                // `analysis/resource.rs` is where that exception is honored, via
-                // `activator_filter`. Restrict candidates to the acting player.
-                // CR 108.4 +
-                // CR 108.4a supply that owner fallback: a card in a graveyard is
-                // not a permanent or spell, so it has no controller, and CR 404.1
-                // puts it into its OWNER's graveyard. Owner is therefore the
-                // rules-correct scope for the flashback / unearth / escape class.
-                if obj.owner == player {
-                    for (i, ability_def) in casting::activated_ability_definitions(state, obj_id) {
-                        if ability_def.kind != crate::types::ability::AbilityKind::Activated
-                            || ability_def.activation_zone
-                                != Some(crate::types::zones::Zone::Graveyard)
-                            || crate::game::mana_abilities::is_mana_ability(&ability_def)
-                        {
-                            continue;
-                        }
-                        // CR 602.2b + CR 601.2g: the payment mode the reducer
-                        // honours, as for the battlefield loop above.
-                        if let Some(payment_mode) = casting::activation_offer_payment_mode(
-                            state,
-                            player,
-                            obj_id,
-                            i,
-                            &activation_restriction_gates,
-                        ) {
-                            actions.push(candidate(
-                                GameAction::ActivateAbility {
-                                    source_id: obj_id,
-                                    ability_index: i,
-                                    payment_mode,
-                                },
-                                TacticalClass::Ability,
-                                Some(player),
-                            ));
-                        }
-                    }
+        for obj_id in super::off_battlefield_activation_sources(state, player) {
+            for i in super::ordinary_activation_indices(state, player, obj_id, None) {
+                if let Some(payment_mode) = casting::activation_offer_payment_mode(
+                    state,
+                    player,
+                    obj_id,
+                    i,
+                    &activation_restriction_gates,
+                ) {
+                    actions.push(candidate(
+                        GameAction::ActivateAbility {
+                            source_id: obj_id,
+                            ability_index: i,
+                            payment_mode,
+                        },
+                        TacticalClass::Ability,
+                        Some(player),
+                    ));
                 }
             }
         }
@@ -5953,7 +5936,7 @@ fn named_choice_actions(
         }
     }
 
-    if options.is_empty() && matches!(choice_type, ChoiceType::CardName) {
+    if options.is_empty() && matches!(choice_type, ChoiceType::CardName { .. }) {
         return card_name_choice_candidates(state, player, source_display_name)
             .into_iter()
             .map(|choice| {
@@ -6179,7 +6162,12 @@ fn mana_payment_actions(
             match mode {
                 // CR 701.67a: no tap past the waterbend cost's generic count.
                 ConvokeMode::Waterbend
-                    if obj.is_waterbend_eligible(player) && waterbend_taps_remaining > 0 =>
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        obj,
+                        player,
+                        ConvokeMode::Waterbend,
+                    ) && waterbend_taps_remaining > 0 =>
                 {
                     // Waterbend: always colorless
                     actions.push(candidate(
@@ -6191,7 +6179,14 @@ fn mana_payment_actions(
                         Some(player),
                     ));
                 }
-                ConvokeMode::Improvise if obj.is_improvise_eligible(player) => {
+                ConvokeMode::Improvise
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        obj,
+                        player,
+                        ConvokeMode::Improvise,
+                    ) =>
+                {
                     // CR 702.126a: Improvise pays generic mana — always colorless.
                     actions.push(candidate(
                         GameAction::TapForConvoke {
@@ -6202,7 +6197,14 @@ fn mana_payment_actions(
                         Some(player),
                     ));
                 }
-                ConvokeMode::Convoke if obj.is_convoke_eligible(player) => {
+                ConvokeMode::Convoke
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        obj,
+                        player,
+                        ConvokeMode::Convoke,
+                    ) =>
+                {
                     // CR 702.51a: Colorless (for generic) always available
                     actions.push(candidate(
                         GameAction::TapForConvoke {
@@ -6541,6 +6543,8 @@ fn push_object_combo(
     combo: impl IntoIterator<Item = crate::types::identifiers::ObjectId>,
 ) {
     let combo: Vec<_> = combo.into_iter().collect();
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_selection_combinations(1);
     let key: Vec<u64> = combo.iter().map(|id| id.0).collect();
     if seen.insert(key) {
         output.push(combo);
@@ -6638,13 +6642,19 @@ fn bounded_ignore_combinations(ignorable: &[usize], ignore_count: usize) -> Vec<
 }
 
 fn combinations_usize(items: &[usize], k: usize) -> Vec<Vec<usize>> {
+    // Each output combination grows from exactly one base-case vector, so the
+    // base cases record each combination once despite the recursion.
     if k == 0 {
+        #[cfg(feature = "test-support")]
+        crate::game::perf_counters::record_selection_combinations(1);
         return vec![Vec::new()];
     }
     if items.len() < k {
         return Vec::new();
     }
     if items.len() == k {
+        #[cfg(feature = "test-support")]
+        crate::game::perf_counters::record_selection_combinations(1);
         return vec![items.to_vec()];
     }
 
@@ -6723,6 +6733,8 @@ fn combinations_generic<T: Clone>(items: &[T], k: usize) -> Vec<Vec<T>> {
     let mut result = Vec::new();
     let mut current = Vec::with_capacity(k);
     recurse(items, k, 0, &mut current, &mut result);
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_selection_combinations(result.len());
     result
 }
 
@@ -7860,9 +7872,9 @@ mod tests {
         )));
     }
 
-    /// CR 732.2a: an AI-controlled priority holder receives both legal shortcut choices.
+    /// CR 732.2a: an AI-controlled priority holder may decline the offered shortcut.
     /// The `legal_actions` assertion reaches the simulation-filtered surface used by AI search;
-    /// reverting the DeclineShortcut candidate leaves that surface declaration-only.
+    /// reverting the DeclineShortcut candidate leaves that surface without it.
     #[test]
     fn loop_shortcut_candidates_include_decline() {
         let mut state = GameState::new_two_player(42);
@@ -7880,7 +7892,6 @@ mod tests {
             },
             schema: crate::analysis::decision_template::ShortcutDecisionSchema::default(),
             declaration: None,
-            road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -7893,10 +7904,6 @@ mod tests {
             }),
             "the priority holder's DeclineShortcut must be an AI candidate"
         );
-        assert!(candidates.iter().any(|candidate| {
-            matches!(candidate.action, GameAction::DeclareShortcut { .. })
-                && candidate.metadata.actor == Some(PlayerId(1))
-        }));
 
         assert!(
             crate::ai_support::legal_actions(&state)
@@ -8975,9 +8982,10 @@ mod tests {
         names.extend((0..10_000).map(|i| format!("Bulk Card {i}")));
         state.all_card_names = names.into();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
-            choice_type: ChoiceType::CardName,
+            choice_type: ChoiceType::card_name(),
             options: Vec::new(),
             source: None,
             persist_player: None,
@@ -8998,9 +9006,10 @@ mod tests {
     fn card_name_prompt(mut state: GameState, names: Vec<String>) -> GameState {
         state.all_card_names = names.into();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
-            choice_type: ChoiceType::CardName,
+            choice_type: ChoiceType::card_name(),
             options: Vec::new(),
             source: None,
             persist_player: None,
@@ -9106,6 +9115,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let cards: Vec<ObjectId> = (1..=20).map(ObjectId).collect();
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards,
             count: 20,
@@ -9123,14 +9133,17 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
 
         let actions = candidate_actions_broad(&state);
@@ -9482,7 +9495,11 @@ mod tests {
                 .activation_restrictions(vec![ActivationRestriction::OnlyOnceEachTurn]),
             );
         }
-        state.activated_abilities_this_turn.insert((source, 0), 1);
+        // CR 602.5c: the used-budget entry is keyed by the resolved
+        // acquisition, not the index.
+        let usage = crate::game::restrictions::ability_usage_key(&state, source, 0)
+            .expect("the printed ability resolves");
+        state.activated_abilities_this_turn.insert(usage, 1);
 
         let actions = candidate_actions(&state);
         assert!(!actions.iter().any(|candidate| {
@@ -10628,6 +10645,7 @@ mod tests {
         let mut ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -10847,7 +10865,7 @@ mod tests {
                 suggested_declaration: None,
                 leading_aims: Vec::new(),
                 iteration_count: IterationCount::Fixed(5),
-                measured_repetition_bound: Some(5),
+                repetition_bound: crate::analysis::decision_template::RepetitionBound::Measured,
                 deliverable_capacity: 5,
                 points: vec![DecisionPoint {
                     slot: DecisionSlot::first(d6n_source(), ChoicePoint::AnnouncedTarget),
@@ -10861,7 +10879,6 @@ mod tests {
                 convoke_tappable_count: 0,
             },
             declaration,
-            road: crate::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -10880,7 +10897,7 @@ mod tests {
     /// `DeclineShortcut`.**
     ///
     /// CR 732.2a. The declare candidate carries the ENGINE's own published declaration, so an
-    /// offer that has none (a seat that never answered, or a `LoopAnswer::Conflicted` latch) must
+    /// offer that has none (a point with no recorded answer) must
     /// fail closed rather than hand the search layer a fabricated pin set — which
     /// `handle_declare_shortcut` would then refuse, i.e. an action that looks legal and is not.
     ///
@@ -10969,6 +10986,84 @@ mod tests {
             clear_markers: Vec::new(),
             emit_reveal_until_resolved: None,
             reveal_until_hit_snapshot: None,
+        };
+
+        let actions = candidate_actions_broad(&state);
+        let permutations: Vec<Vec<ObjectId>> = actions
+            .into_iter()
+            .filter_map(|cand| match cand.action {
+                GameAction::SelectCards { cards } => Some(cards),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(permutations.len(), 2);
+        assert_eq!(permutations[0], vec![a, b]);
+        assert_eq!(permutations[1], vec![b, a]);
+    }
+
+    /// CR 401.4: an owner-ordering EffectZoneChoice prompt (mass library order)
+    /// must enumerate alternate permutations, not only a single combination.
+    #[test]
+    fn mass_library_order_effect_zone_choice_ai_candidates_include_alternate_permutations() {
+        use crate::types::game_state::{MassLibraryOrderBatch, MassLibraryOrderMember};
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        let mut state = GameState::new_two_player(42);
+        let a = ObjectId(10);
+        let b = ObjectId(20);
+        let batch = MassLibraryOrderBatch {
+            owner: PlayerId(0),
+            arranger: None,
+            members: vec![
+                MassLibraryOrderMember {
+                    identity: ObjectIncarnationRef {
+                        object_id: a,
+                        incarnation: 0,
+                    },
+                    origin: Zone::Library,
+                    departing_permanent: None,
+                },
+                MassLibraryOrderMember {
+                    identity: ObjectIncarnationRef {
+                        object_id: b,
+                        incarnation: 0,
+                    },
+                    origin: Zone::Library,
+                    departing_permanent: None,
+                },
+            ],
+        };
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
+            privacy_zones: None,
+            player: PlayerId(0),
+            cards: vec![a, b],
+            count: 2,
+            min_count: 2,
+            up_to: false,
+            source_id: ObjectId(1),
+            effect_kind: crate::types::ability::EffectKind::PutAtLibraryPosition,
+            zone: Zone::Library,
+            destination: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+            face_down_profile: None,
+            with_entry_effect: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            count_param: 0,
+            library_position: Some(crate::types::ability::LibraryPosition::Bottom),
+            library_shuffle: Default::default(),
+            mass_library_order: Some(batch),
+            is_cost_payment: false,
+            enters_modified_if: None,
+            duration: None,
         };
 
         let actions = candidate_actions_broad(&state);

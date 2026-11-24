@@ -143,7 +143,9 @@ fn drive(s: &mut Setup, pay_cost: bool, chosen_type: &str, found: Option<ObjectI
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 s.runner
-                    .act(GameAction::DecideOptionalCost { pay: pay_cost })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay_cost { 0 } else { 1 },
+                    })
                     .expect("decide optional behold cost");
             }
             WaitingFor::CostTypeChoice { options, .. } => {
@@ -279,7 +281,7 @@ fn cost_type_choice_offers_only_feasible_types() {
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 s.runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .unwrap();
             }
             WaitingFor::CostTypeChoice { options, .. } => {
@@ -317,7 +319,7 @@ fn ai_legal_actions_mirror_feasible_options() {
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 s.runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .unwrap();
             }
             WaitingFor::CostTypeChoice { .. } => break,
@@ -377,7 +379,7 @@ fn cancel_after_type_choice_rewinds_and_recast_reprompts() {
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 s.runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .unwrap();
             }
             WaitingFor::CostTypeChoice { .. } => {
@@ -441,7 +443,7 @@ fn cancel_after_type_choice_rewinds_and_recast_reprompts() {
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 s.runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .unwrap();
             }
             WaitingFor::CostTypeChoice { .. } => {
@@ -520,7 +522,7 @@ fn resolve_then_flashback_recast_reprompts_creature_type() {
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 s.runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .unwrap();
             }
             WaitingFor::CostTypeChoice { .. } => {
@@ -563,7 +565,7 @@ fn cost_type_choice_options_redacted_for_opponent_viewer() {
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 s.runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .unwrap();
             }
             WaitingFor::CostTypeChoice { .. } => break,
@@ -575,7 +577,7 @@ fn cost_type_choice_options_redacted_for_opponent_viewer() {
     // that reveals a hand-beholdable type.
     match s.runner.state().waiting_for.clone() {
         WaitingFor::CostTypeChoice { options, .. } => assert!(
-            options.contains(&"Elf".to_string()),
+            options.iter().any(|i: &String| i == "Elf"),
             "precondition: CostTypeChoice offers the hand-derived type Elf: {options:?}"
         ),
         other => panic!("expected CostTypeChoice, got {other:?}"),
@@ -585,7 +587,7 @@ fn cost_type_choice_options_redacted_for_opponent_viewer() {
     let caster_view = filter_state_for_viewer(s.runner.state(), P0);
     match caster_view.waiting_for {
         WaitingFor::CostTypeChoice { ref options, .. } => assert!(
-            options.contains(&"Elf".to_string()),
+            options.iter().any(|i: &String| i == "Elf"),
             "caster must retain the full option list: {options:?}"
         ),
         ref other => panic!("expected CostTypeChoice in caster view, got {other:?}"),
@@ -623,7 +625,7 @@ fn behold_two_refuses_one_creature_selected_twice() {
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 s.runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("pay the behold cost");
             }
             WaitingFor::CostTypeChoice { .. } => {

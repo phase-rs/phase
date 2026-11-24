@@ -52,6 +52,19 @@ pub enum ManaType {
     Colorless,
 }
 
+impl ManaType {
+    /// CR 106.1b: the six types of mana, in canonical order — the five colors
+    /// in WUBRG order (CR 105.1), then colorless.
+    pub const ALL: [ManaType; 6] = [
+        ManaType::White,
+        ManaType::Blue,
+        ManaType::Black,
+        ManaType::Red,
+        ManaType::Green,
+        ManaType::Colorless,
+    ];
+}
+
 impl From<ManaColor> for ManaType {
     fn from(color: ManaColor) -> Self {
         match color {
@@ -95,6 +108,27 @@ impl ManaTypeSet {
     /// mana that satisfies `self` also satisfies `other`.
     pub const fn is_subset_of(self, other: Self) -> bool {
         self.0 & !other.0 == 0
+    }
+
+    /// Every mana type in either set.
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// CR 105.1: the colored members only. Colorless is a type of mana
+    /// (CR 106.1b) but not a color, so a clause that asks for mana *colors*
+    /// (Exotic Orchard, Fellwar Stone) never offers it.
+    pub const fn colors(self) -> Self {
+        Self(self.0 & !Self::of(ManaType::Colorless).0)
+    }
+
+    /// The members in canonical [`ManaType::ALL`] order (W, U, B, R, G, C), so
+    /// anything built from the set — a choice prompt, an LKI snapshot — is
+    /// deterministic.
+    pub fn iter(self) -> impl Iterator<Item = ManaType> {
+        ManaType::ALL
+            .into_iter()
+            .filter(move |mana_type| self.contains(*mana_type))
     }
 }
 
@@ -161,8 +195,10 @@ pub struct SpellMeta {
     pub subtypes: Vec<String>,
     /// Effective keyword classes on the spell while being cast.
     pub keyword_kinds: Vec<KeywordKind>,
-    /// Zone the spell is being cast from.
-    pub cast_from_zone: Option<crate::types::zones::Zone>,
+    /// CR 601.2a + CR 707.13 + CR 400.11: where the spell is being cast from — a zone or
+    /// outside the game. `None` means the origin is unknown (no payment site recorded
+    /// one), which satisfies no zone-gated spend restriction.
+    pub cast_origin: Option<crate::types::zones::CastProvenance>,
     /// CR 202.3: Mana value of the spell being cast, consulted by mana-value
     /// spend restrictions (`OnlyForSpellWithManaValue`). `None` at payment
     /// sites with no associated spell mana value.
@@ -533,7 +569,7 @@ pub enum ManaRestriction {
     /// graveyard" / "from exile" ([`ZoneSpendPolarity::From`]) and "from anywhere
     /// other than your hand" ([`ZoneSpendPolarity::NotFrom`], Mm'menon, the Right
     /// Hand). Gates on the spell's cast-from zone, consulting
-    /// `SpellMeta.cast_from_zone`. A distinct axis from
+    /// `SpellMeta.cast_origin`. A distinct axis from
     /// `OnlyForSpellWithKeywordKindFromZone` (which also requires a keyword).
     /// Carried as a [`ZoneSpend`] newtype payload whose custom `Deserialize`
     /// accepts the legacy bare-`Zone` form (`{"OnlyForSpellFromZone":"Graveyard"}`)
@@ -692,7 +728,9 @@ impl ManaRestriction {
                 required_zone,
             ) => {
                 meta.keyword_kinds.contains(required_keyword)
-                    && meta.cast_from_zone == Some(*required_zone)
+                    && meta
+                        .cast_origin
+                        .is_some_and(|origin| origin.is_from(*required_zone))
             }
             // CR 106.6: Mana-value-gated spend. Mirrors the cast-permission
             // mana-value check in game::casting
@@ -728,18 +766,18 @@ impl ManaRestriction {
             // CR 106.6 + CR 400.7: zone-gated spend. `From` requires the spell be
             // cast from the named zone; `NotFrom` requires it be cast from any
             // zone *except* the named one (e.g. "from anywhere other than your
-            // hand"). A spell with no recorded cast-from zone satisfies neither
-            // reading (conservative — `None == Some(zone)` is false for `From`,
-            // and `NotFrom` treats unknown origin as ineligible).
-            ManaRestriction::OnlyForSpellFromZone(zs) => match zs.polarity {
-                ZoneSpendPolarity::From => meta.cast_from_zone == Some(zs.zone),
-                ZoneSpendPolarity::NotFrom => meta
-                    .cast_from_zone
-                    .is_some_and(|cast_from| cast_from != zs.zone),
-            },
+            // hand"). A spell with no recorded cast origin (`None`, unknown) satisfies
+            // neither reading. A spell cast from OUTSIDE the game (CR 707.13 + CR 400.11:
+            // not a zone) fails `From` and satisfies `NotFrom`.
+            ManaRestriction::OnlyForSpellFromZone(zs) => {
+                meta.cast_origin.is_some_and(|origin| match zs.polarity {
+                    ZoneSpendPolarity::From => origin.is_from(zs.zone),
+                    ZoneSpendPolarity::NotFrom => origin.is_not_from(zs.zone),
+                })
+            }
             ManaRestriction::CannotCastSpellFromZone(zone) => meta
-                .cast_from_zone
-                .is_some_and(|cast_from| cast_from != *zone),
+                .cast_origin
+                .is_some_and(|origin| origin.is_not_from(*zone)),
             // CR 708.4: Face-down-spell-gated spend. The eligibility predicate is
             // `meta.is_face_down` — a spell qualifies only when it is being CAST
             // face down (morph/disguise/cloak); normal face-up casts are
@@ -2231,6 +2269,7 @@ pub enum ExactManaRemovalError {
 mod tests {
     use super::*;
     use crate::types::ability::{AbilityDefinition, AbilityKind, Effect};
+    use crate::types::zones::CastProvenance;
 
     #[test]
     fn mana_spell_grant_accepts_legacy_unqualified_counter_protection() {
@@ -2443,7 +2482,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Elf".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2457,7 +2496,7 @@ mod tests {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2471,7 +2510,7 @@ mod tests {
             types: vec!["Legendary".to_string(), "Creature".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2501,7 +2540,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Dragon".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2515,7 +2554,7 @@ mod tests {
             types: vec!["Enchantment".to_string(), "Omen".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2529,7 +2568,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Goblin".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2581,7 +2620,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Ninja".to_string(), "Turtle".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2595,7 +2634,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Turtle".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2609,7 +2648,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Goblin".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2631,7 +2670,7 @@ mod tests {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2661,7 +2700,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Elf".to_string(), "Warrior".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2675,7 +2714,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Goblin".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2689,7 +2728,7 @@ mod tests {
             types: vec!["Instant".to_string()],
             subtypes: vec!["Elf".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2717,7 +2756,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Elemental".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2731,7 +2770,7 @@ mod tests {
             types: vec!["Tribal".to_string(), "Instant".to_string()],
             subtypes: vec!["Elemental".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2745,7 +2784,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Goblin".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2759,7 +2798,7 @@ mod tests {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2787,7 +2826,7 @@ mod tests {
             types: vec!["Creature".to_string(), "Colorless".to_string()],
             subtypes: vec!["Eldrazi".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2801,7 +2840,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Eldrazi".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2815,7 +2854,7 @@ mod tests {
             types: vec!["Artifact".to_string(), "Colorless".to_string()],
             subtypes: vec!["Construct".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2873,7 +2912,7 @@ mod tests {
             types: vec!["Artifact".to_string(), "Colorless".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2887,7 +2926,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2930,7 +2969,7 @@ mod tests {
             types: vec!["Artifact".to_string()],
             subtypes: vec!["Equipment".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2944,7 +2983,7 @@ mod tests {
             types: vec!["Artifact".to_string(), "Creature".to_string()],
             subtypes: vec!["Golem".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2958,7 +2997,7 @@ mod tests {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -2972,7 +3011,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Human".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -3014,7 +3053,7 @@ mod tests {
             types: vec!["Artifact".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -3028,7 +3067,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -3204,7 +3243,7 @@ mod tests {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -3218,7 +3257,7 @@ mod tests {
             types: vec!["Sorcery".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -3232,7 +3271,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -3278,7 +3317,7 @@ mod tests {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![KeywordKind::Flashback],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -3292,7 +3331,7 @@ mod tests {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -3508,11 +3547,11 @@ mod tests {
             polarity: ZoneSpendPolarity::From,
         });
         let from_gy = SpellMeta {
-            cast_from_zone: Some(Zone::Graveyard),
+            cast_origin: Some(CastProvenance::Zone(Zone::Graveyard)),
             ..SpellMeta::default()
         };
         let from_exile = SpellMeta {
-            cast_from_zone: Some(Zone::Exile),
+            cast_origin: Some(CastProvenance::Zone(Zone::Exile)),
             ..SpellMeta::default()
         };
         assert!(restriction.allows_spell(&from_gy));
@@ -3533,11 +3572,11 @@ mod tests {
             polarity: ZoneSpendPolarity::NotFrom,
         });
         let from_hand = SpellMeta {
-            cast_from_zone: Some(Zone::Hand),
+            cast_origin: Some(CastProvenance::Zone(Zone::Hand)),
             ..SpellMeta::default()
         };
         let from_gy = SpellMeta {
-            cast_from_zone: Some(Zone::Graveyard),
+            cast_origin: Some(CastProvenance::Zone(Zone::Graveyard)),
             ..SpellMeta::default()
         };
         // Cast from hand → forbidden; cast from any other zone → allowed.
@@ -3547,6 +3586,40 @@ mod tests {
         assert!(!restriction.allows_spell(&SpellMeta::default()));
         // Still spell-casting only — never permits ability activation.
         assert!(!restriction.allows_activation(&["Creature".to_string()], &[], None));
+    }
+
+    // CR 106.6 + CR 707.13 + CR 400.11: a cast from OUTSIDE the game (Garth One-Eye's
+    // copy) is from no zone — it fails every inclusion ("from exile") reading and
+    // satisfies every negated ("from anywhere other than your hand") one, while an
+    // unknown origin (`None`) satisfies neither.
+    #[test]
+    fn outside_game_cast_origin_fails_from_and_satisfies_not_from() {
+        let outside = SpellMeta {
+            cast_origin: Some(CastProvenance::OutsideGame),
+            ..SpellMeta::default()
+        };
+        let from_exile = ManaRestriction::OnlyForSpellFromZone(ZoneSpend {
+            zone: Zone::Exile,
+            polarity: ZoneSpendPolarity::From,
+        });
+        let not_from_hand = ManaRestriction::OnlyForSpellFromZone(ZoneSpend {
+            zone: Zone::Hand,
+            polarity: ZoneSpendPolarity::NotFrom,
+        });
+        let keyword_from_exile = ManaRestriction::OnlyForSpellWithKeywordKindFromZone(
+            KeywordKind::Flashback,
+            Zone::Exile,
+        );
+        assert!(!from_exile.allows_spell(&outside));
+        assert!(not_from_hand.allows_spell(&outside));
+        assert!(ManaRestriction::CannotCastSpellFromZone(Zone::Hand).allows_spell(&outside));
+        assert!(!keyword_from_exile.allows_spell(&SpellMeta {
+            keyword_kinds: vec![KeywordKind::Flashback],
+            ..outside.clone()
+        }));
+        for restriction in [&from_exile, &not_from_hand] {
+            assert!(!restriction.allows_spell(&SpellMeta::default()));
+        }
     }
 
     // CR 106.6 + CR 400.7: backward-compat for the zone-spend restriction. The
@@ -3800,7 +3873,7 @@ mod tests {
             types: vec!["Artifact".to_string()],
             subtypes: vec!["Equipment".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -3816,7 +3889,7 @@ mod tests {
             types: vec!["Artifact".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],

@@ -60,7 +60,9 @@ fn run(pay_blight: bool) -> u32 {
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: pay_blight })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay_blight { 0 } else { 1 },
+                    })
                     .expect("decide blight");
             }
             WaitingFor::BlightChoice { .. } => {

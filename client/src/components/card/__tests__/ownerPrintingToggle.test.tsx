@@ -273,7 +273,7 @@ describe("owner printing carrier surfaces (group 1)", () => {
     await act(async () => env.admit());
     await expectImage(surface.container, URL_A);
     const settings = render(<PreferencesModal onClose={vi.fn()} initialTab="visual" />);
-    const checkbox = screen.getByRole("checkbox", { name: "Show cards as their owners chose" });
+    const checkbox = screen.getByRole("checkbox", { name: "Show chosen and varied card art" });
     fireEvent.click(checkbox);
     await expectImage(surface.container, URL_V);
     fireEvent.click(checkbox);
@@ -525,7 +525,7 @@ describe("owner printing carrier surfaces (group 1)", () => {
         cardSize={{ width: 120, height: 168 }} />);
       await expectImage(surface.container, URL_A);
       const settings = render(<PreferencesModal onClose={vi.fn()} initialTab="visual" />);
-      const checkbox = screen.getByRole("checkbox", { name: "Show cards as their owners chose" });
+      const checkbox = screen.getByRole("checkbox", { name: "Show chosen and varied card art" });
       fireEvent.click(checkbox);
       await expectImage(surface.container, URL_V);
       fireEvent.click(checkbox);
@@ -1093,7 +1093,7 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
       "components/card/CardPreview.tsx": 2, "components/hand/MobileHandDrawer.tsx": 1,
       "components/hand/OpponentHand.tsx": 1, "components/modal/CardTextboxPreview.tsx": 1,
       "components/stack/StackEntry.tsx": 1, "components/zone/CommandDock.tsx": 1,
-      "components/zone/CommandZone.tsx": 1, "components/zone/CommanderCardZone.tsx": 2,
+      "components/zone/CommandZone.tsx": 1, "components/zone/CommanderCardZone.tsx": 3,
       "components/zone/GraveyardPile.tsx": 1, "components/zone/LibraryPile.tsx": 1,
       "components/animation/ResolvedAnimationImage.tsx": 1, "components/animation/RevealOverlay.tsx": 1,
       "components/hand/CompanionFanCard.tsx": 1,
@@ -1116,15 +1116,16 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
       "components/modal/CardChoiceModal.tsx": 22, "components/modal/cardChoice/libraryModals.tsx": 6,
       "components/modal/cardChoice/SelectableCardGrid.tsx": 1, "components/modal/RetargetChoiceModal.tsx": 1,
       "components/modal/SeparatePilesModal.tsx": 2, "components/chrome/DebugLibraryViewer.tsx": 1,
-      "pages/GamePage.tsx": 2,
+      "components/modal/ReplacementDecisionOrderModal.tsx": 1, "pages/GamePage.tsx": 2,
     };
     const expectedHelpers: Record<string, number> = {
       "components/animation/ResolvedAnimationImage.tsx": 1, "components/stack/StackEntry.tsx": 1,
-      "components/zone/CommandDock.tsx": 1, "components/zone/CommanderCardZone.tsx": 2,
+      "components/zone/CommandDock.tsx": 1, "components/zone/CommanderCardZone.tsx": 3,
       "components/zone/GraveyardPile.tsx": 1, "components/zone/LibraryPile.tsx": 1,
       "components/zone/ZoneViewer.tsx": 1, "components/modal/CardChoiceModal.tsx": 20,
       "components/modal/cardChoice/libraryModals.tsx": 6,
       "components/modal/cardChoice/SelectableCardGrid.tsx": 1, "components/modal/RetargetChoiceModal.tsx": 1,
+      "components/modal/ReplacementDecisionOrderModal.tsx": 1,
     };
     const hooks: Record<string, number> = {};
     const images: Record<string, number> = {};
@@ -1237,14 +1238,14 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
     scan(src);
     expect(failures, failures.join("\n")).toEqual([]);
     expect(hooks).toEqual({ ...objectHooks, ...excludedHooks });
-    expect(Object.values(hooks).reduce((sum, count) => sum + count, 0)).toBe(29);
-    expect(Object.values(objectHooks).reduce((sum, count) => sum + count, 0)).toBe(17);
+    expect(Object.values(hooks).reduce((sum, count) => sum + count, 0)).toBe(30);
+    expect(Object.values(objectHooks).reduce((sum, count) => sum + count, 0)).toBe(18);
     expect(images).toEqual(expectedImages);
-    expect(Object.values(images).reduce((sum, count) => sum + count, 0)).toBe(47);
+    expect(Object.values(images).reduce((sum, count) => sum + count, 0)).toBe(48);
     expect(helpers).toEqual(expectedHelpers);
-    expect(Object.values(helpers).reduce((sum, count) => sum + count, 0)).toBe(36);
-    expect(Object.keys(helpers)).toHaveLength(11);
+    expect(Object.values(helpers).reduce((sum, count) => sum + count, 0)).toBe(38);
+    expect(Object.keys(helpers)).toHaveLength(12);
     expect(exclusions).toEqual({ "components/modal/BoosterPackModal.tsx": 1, "pages/GamePage.tsx": 1 });
-    expect(intermediates).toEqual({ HandCard: 1, ZoneFanCard: 2, DrawerCard: 1, CardTextboxPreview: 3 });
+    expect(intermediates).toEqual({ HandCard: 1, ZoneFanCard: 2, DrawerCard: 1, CardTextboxPreview: 4 });
   }, V15_CENSUS_TIMEOUT_MS);
 });

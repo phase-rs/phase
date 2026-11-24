@@ -2037,6 +2037,160 @@ describe("multiplayerDraftStore", () => {
       });
     });
 
+    // CR 702.139a: the between-rounds editor starts from the designation the
+    // last accepted submission carried, so an unchanged resubmission keeps it
+    // and only an explicit removal (a submission without one) clears it.
+    it.each(["host", "guest"] as const)(
+      "records the %s's accepted companion designation and clears it only on a submission without one",
+      async (role) => {
+        const deckbuildingView = { ...mockView("Deckbuilding"), pool: [card("spell", "Spell")] };
+        if (role === "host") {
+          await useMultiplayerDraftStore.getState().hostDraft({
+            poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+            kind: "Premier",
+            podSize: 8,
+            hostDisplayName: "Host",
+            tournamentFormat: "Swiss",
+            podPolicy: "Casual",
+          });
+          capturedHostEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+          mockHostAdapter.submitDeck.mockResolvedValue(deckbuildingView);
+        } else {
+          await useMultiplayerDraftStore.getState().joinDraft({
+            kind: "new",
+            roomCode: "ABCDE",
+            displayName: "Alice",
+          });
+          capturedGuestEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+        }
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBeNull();
+
+        await useMultiplayerDraftStore.getState().submitDeck([], "Lurrus of the Dream-Den");
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBe("Lurrus of the Dream-Den");
+
+        // The builder reopened from that designation resubmits it unchanged.
+        await useMultiplayerDraftStore.getState().submitDeck(
+          [],
+          useMultiplayerDraftStore.getState().submittedCompanion,
+        );
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBe("Lurrus of the Dream-Den");
+
+        // The explicit remove control submits no companion.
+        await useMultiplayerDraftStore.getState().submitDeck([]);
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBeNull();
+      },
+    );
+
+    // CR 702.139a: a resumed guest whose acceptance was replayed with no
+    // surviving submit caller learns its companion only from the recovery event.
+    // The Casual RoundComplete re-edit reads `submittedCompanion` and resubmits
+    // it unchanged, so the recovery path must restore it or the resubmission
+    // would clear an accepted designation.
+    describe("recovered guest submission keeps its companion for a Casual re-edit", () => {
+      const recoverAndReopen = async (companion: string | undefined) => {
+        await useMultiplayerDraftStore.getState().joinDraft({
+          kind: "new",
+          roomCode: "ABCDE",
+          displayName: "Alice",
+        });
+        capturedGuestEventHandler!({ type: "reconnecting", attempt: 1 } as never);
+        capturedGuestEventHandler!({
+          type: "workspaceRestored",
+          workspaceState: {
+            schemaVersion: 1,
+            placements: { spell: { zone: "deck", row: 0, column: 0, order: 0 } },
+            virtualBasics: [],
+          },
+        });
+        const deckbuildingView = { ...mockView("Deckbuilding"), pool: [card("spell", "Spell")] };
+        capturedGuestEventHandler!({ type: "viewUpdated", view: deckbuildingView });
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBeNull();
+
+        capturedGuestEventHandler!({
+          type: "recoveredDeckSubmissionAccepted",
+          mainDeck: ["Spell"],
+          commanders: [],
+          ...(companion === undefined ? {} : { companion }),
+          view: deckbuildingView,
+        });
+        capturedGuestEventHandler!({
+          type: "viewUpdated",
+          view: { ...mockView("RoundComplete"), pod_policy: "Casual", pool: [card("spell", "Spell")] },
+        });
+        // The reopened builder's unchanged confirmation: what DraftPodPage does
+        // with `submittedCompanion` as its `initialCompanion`.
+        const reopened = useMultiplayerDraftStore.getState().submittedCompanion;
+        await useMultiplayerDraftStore.getState().submitDeck([], reopened);
+        return reopened;
+      };
+
+      it("restores the accepted companion, so an unchanged resubmit keeps it", async () => {
+        const reopened = await recoverAndReopen("Lurrus of the Dream-Den");
+        expect(reopened).toBe("Lurrus of the Dream-Den");
+        expect(mockGuestAdapter.submitDeck).toHaveBeenCalledWith(["Spell"], [], "Lurrus of the Dream-Den");
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBe("Lurrus of the Dream-Den");
+      });
+
+      it("keeps a recovered acceptance with no companion at null", async () => {
+        const reopened = await recoverAndReopen(undefined);
+        expect(reopened).toBeNull();
+        expect(mockGuestAdapter.submitDeck).toHaveBeenCalledWith(["Spell"], []);
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBeNull();
+      });
+    });
+
+    // CR 702.139a: after a full reload the acknowledged submission is no longer
+    // pending, so the guest has nothing to replay and the store starts empty. The
+    // host's authoritative view carries the accepted designation, and installing
+    // it restores the store.
+    describe("a reload after acknowledgement restores the accepted companion from the host view", () => {
+      it("restores it for a rejoining guest with nothing left to replay", async () => {
+        await useMultiplayerDraftStore.getState().joinDraft({
+          kind: "new",
+          roomCode: "ABCDE",
+          displayName: "Alice",
+        });
+        capturedGuestEventHandler!({ type: "reconnecting", attempt: 1 } as never);
+        const rejoinView = {
+          ...mockView("Deckbuilding"),
+          pool: [card("spell", "Spell")],
+          submitted_companion: "Lurrus of the Dream-Den",
+        };
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBeNull();
+        capturedGuestEventHandler!({ type: "reconnected", seatIndex: 1 });
+        capturedGuestEventHandler!({ type: "viewUpdated", view: rejoinView });
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBe("Lurrus of the Dream-Den");
+
+        // A later broadcast that omits the field never erases the designation.
+        capturedGuestEventHandler!({
+          type: "viewUpdated",
+          view: { ...mockView("Deckbuilding"), pool: [card("spell", "Spell")] },
+        });
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBe("Lurrus of the Dream-Den");
+      });
+
+      it("restores it for a reloaded host from its own seat's view", async () => {
+        await useMultiplayerDraftStore.getState().hostDraft({
+          poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+          kind: "Premier",
+          podSize: 8,
+          hostDisplayName: "Host",
+          tournamentFormat: "Swiss",
+          podPolicy: "Competitive",
+        });
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBeNull();
+        capturedHostEventHandler!({
+          type: "viewUpdated",
+          view: {
+            ...mockView("Deckbuilding"),
+            pool: [card("spell", "Spell")],
+            submitted_companion: "Lurrus of the Dream-Den",
+          },
+        });
+        expect(useMultiplayerDraftStore.getState().submittedCompanion).toBe("Lurrus of the Dream-Den");
+      });
+    });
+
     describe("draft deck autosave", () => {
       beforeEach(async () => {
         installFifoWebLocks();

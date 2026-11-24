@@ -2047,7 +2047,8 @@ fn kenku_artificer_declared_artifact_becomes_the_creature() {
         declared
             .card_types
             .subtypes
-            .contains(&"Homunculus".to_string()),
+            .iter()
+            .any(|i| i == "Homunculus"),
         "the declared artifact gains the Homunculus subtype, got {:?}",
         declared.card_types.subtypes
     );
@@ -2253,8 +2254,9 @@ fn magitek_scythe_declined_attach_grants_nothing() {
 /// the declared target, which exists whether or not the cost was paid
 /// (CR 603.3d).
 ///
-/// RED AT BASE: only the doubling registers; the must-be-blocked requirement is
-/// lost to the trigger's source.
+/// P0 is funded for the {2}{R/G} offer below (CR 118.3 + CR 608.2d):
+/// without the mana the fixed-cost feasibility gate auto-declines and neither
+/// the doubling nor the must-be-blocked requirement registers.
 #[test]
 fn neyith_if_you_do_that_creature_must_be_blocked_is_the_target() {
     let mut scenario = GameScenario::new();
@@ -2262,6 +2264,11 @@ fn neyith_if_you_do_that_creature_must_be_blocked_is_the_target() {
     scenario.add_creature_from_oracle(P0, "Neyith of the Dire Hunt", 3, 3, NEYITH_ORACLE);
     scenario.add_creature(P0, "c1", 2, 2);
     let c2 = scenario.add_creature(P0, "c2", 2, 2).id();
+    // CR 118.3 + CR 608.2d: fund P0 (the "you" / payer of the {2}{R/G} offer)
+    // so the fixed-mana feasibility gate keeps the offer genuine.
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green);
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green);
+    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
     let mut runner = scenario.build();
     runner.advance_to_phase(Phase::BeginCombat);
 
@@ -2478,7 +2485,7 @@ fn rootwise_survivor_it_gains_haste_is_the_declared_land() {
         land.card_types.core_types
     );
     assert!(
-        land.card_types.subtypes.contains(&"Elemental".to_string()),
+        land.card_types.subtypes.iter().any(|i| i == "Elemental"),
         "the declared land gains the Elemental subtype, got {:?}",
         land.card_types.subtypes
     );

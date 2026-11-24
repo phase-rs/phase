@@ -1,6 +1,6 @@
 use crate::game::mana_sources::mana_type_to_color;
 use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
-use crate::game::{mana_payment, mana_sources};
+use crate::game::{could_produce, mana_payment, mana_sources};
 #[cfg(test)]
 use crate::types::ability::ManaContribution;
 use crate::types::ability::{
@@ -8,9 +8,10 @@ use crate::types::ability::{
     ManaSpendRestriction, ManaTargetRole, ManaTargetSlot, ObjectScope, ResolvedAbility, TargetRef,
 };
 use crate::types::ability::{DevotionColors, QuantityRef};
-use crate::types::events::{GameEvent, ManaAbilityTriggerState};
+use crate::types::events::{GameEvent, ManaAbilityTriggerState, ManaResolutionShare};
 use crate::types::game_state::{
-    GameState, ManaChoice, ManaChoiceContext, ManaChoicePrompt, MayTriggerOrigin, WaitingFor,
+    GameState, LoopDetectionMode, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
+    MayTriggerOrigin, WaitingFor,
 };
 use crate::types::mana::{ManaColor, ManaRestriction, ManaType};
 use crate::types::player::PlayerId;
@@ -229,10 +230,27 @@ pub fn resolve(
     // below) without a stack entry, so the inline gate must not swallow it.
     // Single-type echo yields no prompt here and falls through to the normal
     // gate, resolving with no interaction.
-    let echo_pause = crate::game::mana_abilities::echo_body_owes_type_choice(
-        ability,
-        state.current_trigger_event.as_ref(),
-    )
+    // CR 106.12a + CR 608.2d: a preselected echo type is usable only if
+    // the actual event produced it. A stale selection owes the normal choice.
+    let selected_echo =
+        if is_triggered_mana_inline && matches!(produced, ManaProduction::TriggerEventManaType) {
+            match &state.current_triggered_mana_override {
+                Some(crate::types::game_state::ProductionOverride::SingleColor(color)) => state
+                    .current_trigger_event
+                    .as_ref()
+                    .map(crate::game::mana_abilities::echo_distinct_types)
+                    .filter(|options| options.contains(color))
+                    .map(|options| (options, *color)),
+                Some(crate::types::game_state::ProductionOverride::Combination(_)) | None => None,
+            }
+        } else {
+            None
+        };
+    let echo_pause = (selected_echo.is_none()
+        && crate::game::mana_abilities::echo_body_owes_type_choice(
+            ability,
+            state.current_trigger_event.as_ref(),
+        ))
     .then(|| {
         crate::game::mana_abilities::mana_choice_prompt(
             &ability.effect,
@@ -303,7 +321,22 @@ pub fn resolve(
     // (Fertile Ground, Utopia Sprawl AnyOneColor), the auto-tap planner may have
     // stored a `current_triggered_mana_override` so the resolver produces the
     // planned color rather than defaulting to the first listed option.
-    let mana_types = if is_triggered_mana_inline {
+    let mana_types = if let Some((options, color)) = selected_echo {
+        // The public choice-completion authority also owns preselected echoes:
+        // exactly one unit, even when the triggering ability produced G/U.
+        chosen_mana_types_for_prompt(
+            state,
+            count_ability,
+            produced,
+            &ManaChoicePrompt::SingleColor { options },
+            ManaChoice::SingleColor(color),
+        )
+        .map_err(|error| EffectError::InvalidParam(error.to_string()))?
+    } else if matches!(produced, ManaProduction::TriggerEventManaType) {
+        // CR 106.5: an absent/invalid selection never manufactures a type.
+        // A multi-type event already paused above; one type resolves normally.
+        resolve_mana_types_with_ability(produced, &*state, count_ability)
+    } else if is_triggered_mana_inline {
         match state.current_triggered_mana_override.clone() {
             Some(crate::types::game_state::ProductionOverride::SingleColor(color)) => {
                 // Resolve the count from the production descriptor, then produce
@@ -363,35 +396,42 @@ pub fn resolve(
         },
     };
 
+    // CR 106.12b: a production of a {T} mana ability's inline sub-chain is still
+    // that ability resolving, so it is tapped for mana
+    // (`resolve_mana_ability_sub_chain` stamps `SpellContext::mana_tap_state`);
+    // every other production is not.
+    let tapped_for_mana = ability.context.mana_tap_state.tapped_for_mana();
     // CR 106.4: When an effect instructs a player to add mana, that mana goes
     // into that player's mana pool.
     let produced_mana = !mana_types.is_empty();
-    let mut deposited = false;
+    let mut total = 0_u32;
     for &mana_type in &mana_types {
-        deposited |= !mana_payment::produce_mana_with_attributes_from_source_quality(
+        // CR 614.1a: Count the units deposited after mana replacements.
+        let deposited = mana_payment::produce_mana_with_attributes_from_source_quality(
             state,
             ability.source_id,
             mana_type,
             recipient,
-            false,
+            tapped_for_mana,
             source_could_produce_two_or_more_colors,
             &concrete_restrictions,
             grants,
             expiry,
             events,
-        )
-        .is_empty();
+        );
+        total = total.saturating_add(u32::try_from(deposited.len()).unwrap_or(u32::MAX));
     }
     complete_triggered_mana_production(
         state,
         ability,
-        is_triggered_mana_inline && deposited,
+        is_triggered_mana_inline,
+        total,
         recipient,
         mana_types,
         events,
     );
     record_firebending_if_marked(state, ability, produced_mana, events);
-    record_triggered_ability_added_mana(state, ability, recipient, deposited);
+    record_triggered_ability_added_mana(state, ability, recipient, total != 0);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -402,30 +442,37 @@ pub fn resolve(
     Ok(())
 }
 
-/// CR 605.1b: a triggered mana ability that deposited mana announces its production, which a
-/// mana ability can trigger from, whether it resolved at once or after a type choice.
+/// CR 605.1b + CR 608.2p: Announce triggered mana production so ordinary
+/// resolution observers can see it, including after a mana type choice.
 fn complete_triggered_mana_production(
     state: &mut GameState,
     ability: &ResolvedAbility,
-    deposited_triggered_mana: bool,
+    is_triggered_mana_inline: bool,
+    total: u32,
     recipient: PlayerId,
     produced: Vec<ManaType>,
     events: &mut Vec<GameEvent>,
 ) {
-    // CR 605.1b is traded away under Off: this production event is emitted only where loop
-    // detection samples, the only modes that can recognise the self-retrigger it may start.
-    if !(deposited_triggered_mana && state.loop_detection.samples()) {
+    if !is_triggered_mana_inline || total == 0 {
         return;
     }
+    let trigger_state = match state.loop_detection {
+        LoopDetectionMode::Off => ManaAbilityTriggerState::ObserversOnly,
+        LoopDetectionMode::Interactive => ManaAbilityTriggerState::Pending,
+    };
     let event = GameEvent::ManaAbilityProduced {
         player_id: recipient,
         source_id: ability.source_id,
         produced,
-        trigger_state: ManaAbilityTriggerState::Pending,
+        resolution: ManaResolutionShare::WholeResolution { total },
+        trigger_state,
     };
     // CR 104.4b + CR 732.4: a mandatory self-retrigger inside one mana resolution
     // (CR 605.4a) is a loop of mandatory actions.
-    if crate::game::triggers::mana_production_retriggers_itself_mandatorily(state, ability, &event)
+    if trigger_state.is_pending()
+        && crate::game::triggers::mana_production_retriggers_itself_mandatorily(
+            state, ability, &event,
+        )
     {
         if state.game_end.is_none() {
             super::declare_mandatory_loop_draw(state, events);
@@ -499,27 +546,34 @@ pub fn handle_choose_mana_effect(
     let produced_mana = recipient.is_some() && !mana_types.is_empty();
     let is_triggered_mana_inline =
         crate::game::mana_abilities::is_resolving_triggered_mana(state, ability);
-    let mut deposited = false;
+    // CR 106.12b: a production of a {T} mana ability's inline sub-chain is still
+    // that ability resolving, so it is tapped for mana
+    // (`resolve_mana_ability_sub_chain` stamps `SpellContext::mana_tap_state`);
+    // every other production is not.
+    let tapped_for_mana = ability.context.mana_tap_state.tapped_for_mana();
+    let mut total = 0_u32;
     if let Some(recipient) = recipient {
         for &mana_type in &mana_types {
-            deposited |= !mana_payment::produce_mana_with_attributes_from_source_quality(
+            // CR 614.1a: Count the units deposited after mana replacements.
+            let deposited = mana_payment::produce_mana_with_attributes_from_source_quality(
                 state,
                 ability.source_id,
                 mana_type,
                 recipient,
-                false,
+                tapped_for_mana,
                 source_could_produce_two_or_more_colors,
                 &concrete_restrictions,
                 grants,
                 *expiry,
                 events,
-            )
-            .is_empty();
+            );
+            total = total.saturating_add(u32::try_from(deposited.len()).unwrap_or(u32::MAX));
         }
         complete_triggered_mana_production(
             state,
             ability,
-            is_triggered_mana_inline && deposited,
+            is_triggered_mana_inline,
+            total,
             recipient,
             mana_types,
             events,
@@ -527,7 +581,7 @@ pub fn handle_choose_mana_effect(
     }
     record_firebending_if_marked(state, ability, produced_mana, events);
     if let Some(recipient) = recipient {
-        record_triggered_ability_added_mana(state, ability, recipient, deposited);
+        record_triggered_ability_added_mana(state, ability, recipient, total != 0);
     }
 
     events.push(GameEvent::EffectResolved {
@@ -928,15 +982,18 @@ fn resolve_mana_types_impl(
                 None => Vec::new(),
             }
         }
-        // CR 106.7: Produce mana of any color that a land an opponent controls could produce.
-        // Delegates to mana_sources::opponent_land_color_options for the shared computation.
+        // CR 106.7 + CR 105.1: Produce mana of any color that a land an opponent
+        // controls could produce — never colorless (the Exotic Orchard ruling).
+        // Delegates to the one CR 106.7 authority, `could_produce::census`.
         ManaProduction::OpponentLandColors { count } => {
             let amount = resolve_count(count, state, ability, controller, source_id);
-            let color_options = mana_sources::opponent_land_color_options(state, controller);
-            // CR 106.5 + CR 106.7: If no color can be defined (including when the
-            // surveyed lands could produce only {C}, which is not a color per
-            // CR 106.1a), produce no mana.
-            let Some(first) = color_options.first().map(mana_color_to_type) else {
+            let color_options = could_produce::census(
+                state,
+                could_produce::CouldProducePopulation::OpponentLands { controller },
+                could_produce::CouldProduceMeasure::Colors,
+            );
+            // CR 106.5: If no color can be defined, produce no mana.
+            let Some(first) = color_options.first().copied() else {
                 return Vec::new();
             };
             vec![first; amount]
@@ -966,16 +1023,15 @@ fn resolve_mana_types_impl(
         // mirroring the `OpponentLandColors` / `AnyOneColor` precedent. The
         // per-type choice prompt is surfaced by `mana_choice_prompt` when the
         // option set has more than one type. CR 106.5: an empty option set
-        // (no matching lands, or only mutually-recursive producers) produces
-        // no mana.
+        // (no matching lands, or an unanchored cycle of could-produce clauses)
+        // produces no mana. CR 608.2k: the cost-referent form ("the sacrificed
+        // land") reads the referent's could-produce set from `ability`'s
+        // cost-paid snapshot, so a one-type referent auto-picks and a land that
+        // could produce nothing yields no mana.
         ManaProduction::AnyTypeProduceableBy { count, land_filter } => {
             let amount = resolve_count(count, state, ability, controller, source_id);
-            let type_options = mana_sources::produceable_mana_types_by_filter(
-                state,
-                land_filter,
-                controller,
-                source_id,
-            );
+            let type_options =
+                could_produce::types_for_clause(state, land_filter, controller, source_id, ability);
             let Some(first) = type_options.first().copied() else {
                 return Vec::new();
             };
@@ -1082,10 +1138,6 @@ fn resolve_mana_types_impl(
     }
 }
 
-/// CR 106.1 + CR 109.1: Shared helper returning the distinct colors (W/U/B/R/G)
-/// present among permanents matching `filter`. Colorless permanents contribute
-/// nothing. Used by both the mana ability resolver and `mana_sources` so that
-/// cost-payment and direct activation see the same option set.
 /// CR 202.2c + CR 106.5: Colors of the object identified by `scope`, for an
 /// `AnyCombinationOfObjectColors` mana production (Omnath, Locus of All). Reads
 /// the object's current `color` (zone-independent — correct after the revealed
@@ -1121,13 +1173,53 @@ pub(crate) fn object_colors_for_scope(
     .collect()
 }
 
+/// CR 105.1 + CR 105.2: union borrowed colors once, emitting the five colors
+/// in canonical WUBRG order; colorless contributes no member.
+pub(crate) fn distinct_colors<'a>(
+    colors: impl IntoIterator<Item = &'a ManaColor>,
+) -> Vec<ManaColor> {
+    let mut seen = 0u8;
+    for color in colors {
+        seen |= match color {
+            ManaColor::White => 1,
+            ManaColor::Blue => 2,
+            ManaColor::Black => 4,
+            ManaColor::Red => 8,
+            ManaColor::Green => 16,
+        };
+    }
+    let mut result = Vec::with_capacity(seen.count_ones() as usize);
+    for (index, color) in ManaColor::ALL.into_iter().enumerate() {
+        if seen & (1 << index) != 0 {
+            result.push(color);
+        }
+    }
+    result
+}
+
+/// CR 106.1 + CR 109.1: the distinct colors (W/U/B/R/G) among the objects
+/// matching `filter`, in the zone `filter.extract_in_zone()` names (the
+/// battlefield when it names none). Colorless objects contribute nothing.
+/// The mana ability resolver, `mana_abilities::mana_choice_prompt`,
+/// `mana_sources` and the could-produce walker all read it, so cost payment,
+/// direct activation and the walker see the same option set.
+///
+/// CR 400.3 + CR 404.1 + CR 108.4a + CR 109.5: a card in a hand, library or
+/// graveyard is in its owner's zone and has no controller, so "your graveyard"
+/// means the cards you own there. The filter is matched through
+/// `filter::matches_target_filter_for_zone`, which reads the owner in those
+/// zones, never the controller a departed card's last known information keeps
+/// for the rest of the step (The Grey Havens: "{T}: Add one mana of any color
+/// among legendary creature cards in your graveyard."; Corrupted Grafstone:
+/// "{T}: Choose a color of a card in your graveyard. Add one mana of that
+/// color.").
 pub(crate) fn distinct_colors_among_permanents(
     state: &GameState,
     ability: Option<&ResolvedAbility>,
     source_id: crate::types::identifiers::ObjectId,
     filter: &crate::types::ability::TargetFilter,
 ) -> Vec<crate::types::mana::ManaColor> {
-    use crate::game::filter::{matches_target_filter, FilterContext};
+    use crate::game::filter::{matches_target_filter_for_zone, FilterContext};
     let filter_ctx = match ability {
         Some(a) => FilterContext::from_ability(a),
         None => FilterContext::from_source(state, source_id),
@@ -1135,30 +1227,13 @@ pub(crate) fn distinct_colors_among_permanents(
     let zone = filter
         .extract_in_zone()
         .unwrap_or(crate::types::zones::Zone::Battlefield);
-    let mut seen: std::collections::HashSet<crate::types::mana::ManaColor> =
-        std::collections::HashSet::new();
-    for &id in crate::game::targeting::zone_object_ids(state, zone).iter() {
-        if !matches_target_filter(state, id, filter, &filter_ctx) {
-            continue;
-        }
-        if let Some(obj) = state.objects.get(&id) {
-            for color in &obj.color {
-                seen.insert(*color);
-            }
-        }
-    }
-    // Stable order for determinism (WUBRG).
-    use crate::types::mana::ManaColor;
-    [
-        ManaColor::White,
-        ManaColor::Blue,
-        ManaColor::Black,
-        ManaColor::Red,
-        ManaColor::Green,
-    ]
-    .into_iter()
-    .filter(|c| seen.contains(c))
-    .collect()
+    distinct_colors(
+        crate::game::targeting::zone_object_ids(state, zone)
+            .iter()
+            .filter(|&&id| matches_target_filter_for_zone(state, id, zone, filter, &filter_ctx))
+            .filter_map(|id| state.objects.get(id))
+            .flat_map(|obj| obj.color.iter()),
+    )
 }
 
 /// CR 605.1a + CR 406.1 + CR 610.3: Resolve the legal `ManaType` set for a
@@ -1394,6 +1469,20 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn distinct_color_reduction_is_bounded_ordered_and_borrowed() {
+        assert!(distinct_colors(std::iter::empty()).is_empty());
+        let colors = [ManaColor::Red, ManaColor::White, ManaColor::Red];
+        assert_eq!(
+            distinct_colors(&colors),
+            vec![ManaColor::White, ManaColor::Red]
+        );
+        assert_eq!(
+            distinct_colors(ManaColor::ALL.iter().rev().chain(&ManaColor::ALL)),
+            ManaColor::ALL.to_vec()
+        );
+    }
 
     fn make_mana_ability(produced: ManaProduction) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -3095,11 +3184,12 @@ mod tests {
         );
 
         // The full type union (helper-level) must include both colors.
-        let options = crate::game::mana_sources::produceable_mana_types_by_filter(
+        let options = crate::game::could_produce::types_for_clause(
             &state,
             &TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
             PlayerId(0),
             ObjectId(100),
+            None,
         );
         assert!(options.contains(&ManaType::White), "union must include W");
         assert!(options.contains(&ManaType::Black), "union must include B");
@@ -3128,9 +3218,9 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.total(), 0);
     }
 
-    /// CR 106.7: Two Reflecting Pools facing each other (no other lands) — the
-    /// recursive `AnyTypeProduceableBy` skip prevents infinite recursion and
-    /// the union collapses to empty (CR 106.5 — no mana).
+    /// CR 106.7: Two Reflecting Pools facing each other (no other lands) — no
+    /// land anchors a type, so the least fixed point is empty (CR 106.5 — no
+    /// mana).
     #[test]
     fn any_type_produceable_by_recursive_yields_empty() {
         use crate::game::zones::create_object;
@@ -3183,7 +3273,8 @@ mod tests {
         )
         .unwrap();
 
-        // Both producers are recursive; no other lands → empty union → no mana.
+        // Both producers are could-produce clauses and no land anchors a type →
+        // the least fixed point is empty → no mana.
         assert_eq!(state.players[0].mana_pool.total(), 0);
     }
 
@@ -3228,11 +3319,12 @@ mod tests {
         );
 
         let land_filter = TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You));
-        let options = crate::game::mana_sources::produceable_mana_types_by_filter(
+        let options = crate::game::could_produce::types_for_clause(
             &state,
             &land_filter,
             PlayerId(0),
             ObjectId(9999),
+            None,
         );
         assert!(
             options.contains(&ManaType::Colorless),
@@ -3242,11 +3334,10 @@ mod tests {
 
     /// CR 106.7 + CR 106.5: P0 controls Exotic Orchard (`OpponentLandColors`),
     /// P1 controls Reflecting Pool (`AnyTypeProduceableBy`), and neither
-    /// player controls any other land. The mutual recursion guard must be
-    /// symmetric — `opponent_land_color_options` skips both recursive
-    /// producers, so the survey terminates with the empty set rather than
-    /// re-anchoring `ControllerRef::You` to the wrong player or looping.
-    /// Activating either side produces no mana per CR 106.5.
+    /// player controls any other land. No anchor ⇒ the least fixed point is
+    /// empty: the solve terminates with the empty set rather than re-anchoring
+    /// `ControllerRef::You` to the wrong player or looping. Activating either
+    /// side produces no mana per CR 106.5.
     #[test]
     fn exotic_orchard_with_opponent_reflecting_pool_no_panic() {
         use crate::game::zones::create_object;
@@ -3314,22 +3405,28 @@ mod tests {
             .cost(AbilityCost::Tap),
         );
 
-        // P0's Exotic Orchard surveys P1's lands → only finds Reflecting Pool
-        // (recursive — skipped) → empty set.
-        let orchard_opts =
-            crate::game::mana_sources::opponent_land_color_options(&state, PlayerId(0));
+        // P0's Exotic Orchard surveys P1's lands → only finds Reflecting Pool,
+        // whose own census reaches no anchor → empty set.
+        let orchard_opts = crate::game::could_produce::census(
+            &state,
+            crate::game::could_produce::CouldProducePopulation::OpponentLands {
+                controller: PlayerId(0),
+            },
+            crate::game::could_produce::CouldProduceMeasure::Colors,
+        );
         assert!(
             orchard_opts.is_empty(),
             "Exotic Orchard facing only an opponent's Reflecting Pool must yield empty (CR 106.5); got {orchard_opts:?}"
         );
 
-        // P1's Reflecting Pool surveys P1's lands → only itself (recursive,
-        // skipped) → empty set. (Cross-controller cycle terminates cleanly.)
-        let pool_opts = crate::game::mana_sources::produceable_mana_types_by_filter(
+        // P1's Reflecting Pool surveys P1's lands → only itself, no anchor →
+        // empty set. (Cross-controller cycle terminates cleanly.)
+        let pool_opts = crate::game::could_produce::types_for_clause(
             &state,
             &TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
             PlayerId(1),
             pool,
+            None,
         );
         assert!(
             pool_opts.is_empty(),
@@ -3417,8 +3514,14 @@ mod tests {
     fn opponent_land_colors_reads_command_tower_for_its_controller() {
         let mut state = commander_board_with_opponent_command_tower();
 
-        let options = crate::game::mana_sources::opponent_land_color_options(&state, PlayerId(0));
-        assert_eq!(options, vec![ManaColor::Blue]);
+        let options = crate::game::could_produce::census(
+            &state,
+            crate::game::could_produce::CouldProducePopulation::OpponentLands {
+                controller: PlayerId(0),
+            },
+            crate::game::could_produce::CouldProduceMeasure::Colors,
+        );
+        assert_eq!(options, vec![ManaType::Blue]);
 
         let mut events = Vec::new();
         resolve(
@@ -3441,11 +3544,12 @@ mod tests {
     fn produceable_types_by_opponent_filter_reads_command_tower_for_its_controller() {
         let state = commander_board_with_opponent_command_tower();
 
-        let options = crate::game::mana_sources::produceable_mana_types_by_filter(
+        let options = crate::game::could_produce::types_for_clause(
             &state,
             &TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::Opponent)),
             PlayerId(0),
             ObjectId(100),
+            None,
         );
         assert_eq!(options, vec![ManaType::Blue]);
     }
@@ -3596,6 +3700,7 @@ mod tests {
             player_id: P0,
             source_id: forest,
             produced: vec![ManaType::Green],
+            resolution: ManaResolutionShare::WholeResolution { total: 1 },
             trigger_state: ManaAbilityTriggerState::Pending,
         };
         let candidates = crate::game::trigger_index::candidates_for_event(&state, &forest_event);
@@ -3642,10 +3747,10 @@ mod tests {
             .count()
     }
 
-    /// CR 605.1b is traded away under Off: a Caged Sun land's production is no event, so the
-    /// resolution neither retriggers the Sun nor ends the game.
+    /// CR 605.1b + CR 608.2p: Off announces a Caged Sun land's production for
+    /// ordinary observers, without retriggering the Sun or ending the game.
     #[test]
-    fn a_caged_sun_land_under_off_emits_no_production_event() {
+    fn a_caged_sun_land_under_off_announces_production_for_ordinary_observers() {
         use crate::types::game_state::LoopDetectionMode;
 
         let (mut state, sun, ability, forest_event) =
@@ -3656,7 +3761,13 @@ mod tests {
             1,
             "reach: the Sun added its mana"
         );
-        assert!(produced_by(&events, sun).is_empty());
+        assert!(matches!(
+            produced_by(&events, sun).as_slice(),
+            [GameEvent::ManaAbilityProduced {
+                trigger_state: ManaAbilityTriggerState::ObserversOnly,
+                ..
+            }]
+        ));
         assert_eq!(game_overs(&events), 0);
         assert_eq!(state.game_end, None);
     }
@@ -3890,6 +4001,7 @@ mod tests {
                 player_id: P0,
                 source_id: sun,
                 produced: vec![ManaType::Green],
+                resolution: ManaResolutionShare::WholeResolution { total: 1 },
                 trigger_state: ManaAbilityTriggerState::Pending,
             };
             assert_eq!(
@@ -3904,8 +4016,8 @@ mod tests {
         }
     }
 
-    /// CR 605.1b: Extraplanar Lens echoing a Simic Growth Chamber pauses for the type; the
-    /// answered production is an event wherever loop detection samples, as an unpaused one is.
+    /// CR 605.1b + CR 608.2p: Extraplanar Lens echoing a Simic Growth Chamber
+    /// pauses for the type, then announces production in either loop detection mode.
     #[test]
     fn an_echo_answered_after_its_type_choice_emits_its_production() {
         use crate::game::scenario::{GameScenario, P0};
@@ -3929,17 +4041,35 @@ mod tests {
                 exiled_id: imprinted,
                 kind: ExileLinkKind::TrackedBySource,
             });
-            let mana_actions =
-                crate::game::mana_sources::activatable_mana_actions_for_player(runner.state(), P0);
-            let tap = mana_actions
-                .into_iter()
-                .find(|action| {
-                    matches!(action, GameAction::TapLandForMana { selection }
-                        | GameAction::ActivateManaSource { selection }
-                        if selection.source.object_id == chamber)
+            let ability_index =
+                crate::game::casting::activated_ability_definitions(runner.state(), chamber)
+                    .into_iter()
+                    .find(|(_, ability)| matches!(&*ability.effect, Effect::Mana { .. }))
+                    .expect("the Chamber offers its printed indexed mana ability")
+                    .0;
+            // The semantic source action preselects an echo type; this test
+            // instead exercises the raw activation's real unresolved choice.
+            let tapped = runner
+                .act(GameAction::ActivateAbility {
+                    source_id: chamber,
+                    ability_index,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 })
-                .expect("the Chamber can tap for mana");
-            let tapped = runner.act(tap).expect("the tap applies");
+                .expect("the tap applies");
+            assert_eq!(
+                runner.state().players[0]
+                    .mana_pool
+                    .count_color(ManaType::Green),
+                1,
+                "{mode:?}: reach: the Chamber produced its base G before the echo choice"
+            );
+            assert_eq!(
+                runner.state().players[0]
+                    .mana_pool
+                    .count_color(ManaType::Blue),
+                1,
+                "{mode:?}: reach: the Chamber produced its base U before the echo choice"
+            );
             assert!(
                 matches!(
                     tapped.waiting_for,
@@ -3964,10 +4094,20 @@ mod tests {
                 2,
                 "{mode:?}: reach: the echo added the chosen type"
             );
-            assert_eq!(
-                produced_by(&answered.events, lens).len(),
-                usize::from(mode.samples()),
-                "{mode:?}"
+            let expected_state = match mode {
+                LoopDetectionMode::Off => ManaAbilityTriggerState::ObserversOnly,
+                LoopDetectionMode::Interactive => ManaAbilityTriggerState::Pending,
+            };
+            assert!(
+                matches!(
+                    produced_by(&answered.events, lens).as_slice(),
+                    [GameEvent::ManaAbilityProduced {
+                        trigger_state,
+                        resolution: ManaResolutionShare::WholeResolution { total: 1 },
+                        ..
+                    }] if *trigger_state == expected_state
+                ),
+                "{mode:?}: the echo announces exactly one completed production"
             );
         }
     }

@@ -18,12 +18,12 @@ mod prelude {
     pub(super) use super::super::oracle_cost::{
         line_reduces_colored_mana_only, parse_gerund_cost, parse_oracle_cost,
     };
+    #[cfg(test)]
+    pub(super) use super::super::oracle_effect::parse_effect_chain_with_context;
     pub(super) use super::super::oracle_effect::subject::{
         parse_restriction_modes, static_mode_needs_grant_propagation,
     };
-    pub(super) use super::super::oracle_effect::{
-        parse_effect_chain, parse_effect_chain_with_context, strip_trailing_duration,
-    };
+    pub(super) use super::super::oracle_effect::{parse_effect_chain, strip_trailing_duration};
     pub(super) use super::super::oracle_ir::context::ParseContext;
     pub(super) use super::super::oracle_ir::static_ir::StaticIr;
     pub(super) use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
@@ -51,10 +51,10 @@ mod prelude {
         AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction,
         AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, ColorChangeMode,
         CombatRelation, CombatRelationSubject, Comparator, ContinuousModification, ControllerRef,
-        CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition, PlayerFilter, PtStat,
-        PtValueScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality,
-        SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
-        TypedFilter,
+        CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition, PlayerFilter,
+        PlayerRelation, PtStat, PtValueScope, QuantityExpr, QuantityRef, RoundingMode,
+        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
+        TypeFilter, TypedFilter,
     };
     pub(super) use crate::types::card_type::{
         noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
@@ -67,11 +67,12 @@ mod prelude {
     pub(super) use crate::types::statics::{
         ActivationExemption, AdditionalCostTaxAction, AttackDefenderScope, BlockExceptionKind,
         CastCostMode, CastExtraCost, CastFreeOrigin, CastFrequency, CastingProhibitionCondition,
-        CombatAloneAction, CombatAloneRequirement, CostModifyMode, CostPaymentProhibition,
-        CostReductionReach, CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost,
-        ExileCastGrantee, ExileCastTiming, GraveyardPermissionPool, HandSizeModification,
-        PermissionCastLimit, ProhibitionScope, RequiredDefender, StaticMode,
-        SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
+        CausingObject, CombatAloneAction, CombatAloneRequirement, ControlledCreatureEvent,
+        CostModifyMode, CostPaymentProhibition, CostReductionReach, CrewAction,
+        CrewContributionKind, ExileCardPool, ExileCastCost, ExileCastGrantee, ExileCastTiming,
+        GraveyardPermissionPool, HandSizeModification, PermissionCastLimit, PlayerCauseAction,
+        ProhibitionScope, RequiredDefender, StaticMode, SuppressedTriggerEvent, TriggerCause,
+        ZoneChangeQualifier,
     };
     pub(super) use crate::types::zones::Zone;
 }
@@ -97,14 +98,18 @@ mod shared;
 mod static_helpers;
 mod type_change;
 
+pub(crate) use anthem::PrintedSubject;
 pub(crate) use shared::add_property;
+pub(crate) use shared::parse_affected_scoped_static_condition;
 pub(crate) use shared::parse_commander_subject_filter_prefix;
 pub(crate) use shared::peel_color_quality_prefix;
 
+pub(crate) use dispatch::is_lethal_damage_determined_by_power_static;
 pub(crate) use dispatch::is_speed_unlock_sentence;
 pub(crate) use dispatch::parse_may_look_at_face_down_filter;
 pub(crate) use dispatch::try_parse_counts_as_named_static;
 use dispatch::{parse_static_line_inner, InvertedAsLongAs};
+pub(crate) use keyword_grant::is_nth_qualified_spell_flash_permission;
 use prelude::StaticIr;
 pub(crate) use restriction::is_control_players_during_own_library_search;
 pub(crate) use restriction::is_graveyard_cast_permission_lead;
@@ -164,6 +169,7 @@ pub(crate) use evasion::{
     classify_block_exception, is_extra_blockers_static_candidate, is_forced_block_static_candidate,
     parse_forced_block_blocker_slot,
 };
+pub(crate) use grammar::cant_block_object_mode;
 pub(crate) use grammar::map_keyword;
 pub(crate) use grammar::parse_pt_mod;
 pub(crate) use grammar::promote_nested_ability_quotes;
@@ -172,7 +178,8 @@ pub use keyword_grant::{classify_quoted_inner, parse_quoted_ability_modification
 pub(crate) use keyword_grant::{
     find_refused_loyalty_grant_sentence, parse_chosen_qualifier_subject,
     parse_continuous_modifications, parse_graveyard_granted_keyword_kind, split_keyword_list,
-    try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
+    strip_enclosing_sentence_comma, try_parse_graveyard_keyword_grant_clause,
+    try_parse_graveyard_keyword_grant_static,
 };
 pub(crate) use mana_transform::{
     is_unspent_mana_loss_causes_life_loss_static, try_parse_retain_unspent_mana_static,
@@ -182,6 +189,7 @@ pub(crate) use restriction::parse_passive_cant_be_cast_spell_filter;
 pub(crate) use restriction::try_parse_top_of_library_cast_permission;
 pub(crate) use shared::canonicalize_anchor_label;
 pub(crate) use shared::parse_activated_abilities_cant_be_activated;
+pub(crate) use shared::parse_block_object_filter;
 pub(crate) use shared::parse_cant_attack_defended_scope_nom;
 pub(crate) use shared::parse_conditional_protection_grant_list;
 pub(crate) use shared::parse_continuous_subject_filter;
@@ -248,7 +256,10 @@ pub(crate) fn parse_static_line_ir(text: &str) -> Option<StaticIr> {
 /// transforms below satisfy this today: `populate_active_zones_from_condition`
 /// self-guards on `active_zones.is_empty()` and its collector ignores
 /// `ClassLevelGE`, and `bind_counter_anaphor_to_recipient` rewrites only
-/// `ObjectScope::Anaphoric`, of which none survive the first pass. A
+/// `ObjectScope::Anaphoric`, of which none survive the first pass, and the
+/// counter-kind census's `SelfRef` pronoun placeholder only when binding it to
+/// the recipient — the rewritten filter is no longer `SelfRef`, and a
+/// self-scoped static leaves `SelfRef` as it is, so a second pass is a no-op. A
 /// non-idempotent transform added here would silently double-apply across every
 /// such site.
 pub(crate) fn lower_static_ir(ir: &StaticIr) -> crate::types::ability::StaticDefinition {

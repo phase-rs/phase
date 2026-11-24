@@ -19,8 +19,11 @@ interface DialogShellProps {
   title: ReactNode;
   subtitle?: ReactNode;
   size?: "sm" | "md" | "lg";
-  scrollable?: boolean;
+  /** The dialog's body: the region that scrolls, between the pinned header
+   * and footer, when the dialog is taller than the screen. */
   children: ReactNode;
+  /** Pinned below the body, so it stays in view however tall the body grows.
+   * The place for the dialog's actions. */
   footer?: ReactNode;
   onClose?: () => void;
   /** When set, hovering anywhere on the dialog card fires inspectObject for
@@ -29,11 +32,56 @@ interface DialogShellProps {
   previewObjectId?: ObjectId;
 }
 
+// The overlay's gutter, which the card sits inside at rest; a drag by the
+// header can still carry it into the gutter. Each side also clears that
+// side's safe-area inset: under `viewport-fit=cover`, a landscape phone's
+// notch or camera cutout sits inside the left or right inset, and a wide
+// dialog would otherwise rest under it.
+const OVERLAY_CLASS = [
+  "fixed inset-0 z-50 flex py-2 lg:py-6",
+  "pl-[max(env(safe-area-inset-left),0.5rem)] pr-[max(env(safe-area-inset-right),0.5rem)]",
+  "lg:pl-[max(env(safe-area-inset-left),1rem)] lg:pr-[max(env(safe-area-inset-right),1rem)]",
+].join(" ");
+
 const SIZE_CLASS: Record<NonNullable<DialogShellProps["size"]>, string> = {
   sm: "max-w-sm",
   md: "max-w-md",
   lg: "max-w-3xl",
 };
+
+// The card is a column that never outgrows the screen: the header and the
+// `footer` slot stay pinned and only the body scrolls, so a tall dialog keeps
+// its title and its footer in view. `100dvh` follows the mobile URL bar where
+// `100vh` does not. The rem terms are the overlay's vertical padding, top plus
+// bottom (`py-2`, `lg:py-6`), and the safe-area insets come off as well, so a
+// card at its cap always fits inside the overlay.
+//
+// The card can scroll too, as a last resort: on a screen so short that the
+// header and footer leave the body less than its one-row floor, the column
+// overflows and the card scrolls it whole, footer included. The card also
+// owns `overscroll-contain`, which stops a scroll that runs past the end of
+// the body whenever the card itself scrolls, and on Chromium 144+ even when
+// it has nothing to scroll. In game, the viewport lock keeps the board still
+// regardless.
+const CARD_CLASS = [
+  "relative z-10 flex w-full flex-col overflow-y-auto overflow-x-hidden overscroll-contain thin-scrollbar",
+  "rounded-[16px] lg:rounded-[24px] border border-white/10 bg-[#0b1020]/96",
+  "shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md",
+  "max-h-[calc(100dvh_-_1rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))]",
+  "lg:max-h-[calc(100dvh_-_3rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))]",
+].join(" ");
+
+// The scroll region between the pinned header and footer. `min-h-11` keeps it
+// at least one tap target tall, however tall the header and footer grow.
+// `relative` makes the body the containing block for an absolutely positioned
+// child (an `sr-only` label, say), so the child scrolls with the body; with
+// the card as its containing block, it would stretch the card's scroll range
+// and let the pinned header and footer scroll away. `overflow-x-hidden` clips
+// a wide child as the card does (`overflow-y-auto` alone turns x to `auto` and
+// would grow a horizontal scrollbar). The body leaves `overscroll-contain` to
+// the card: Chromium 144+ applies it even to a container with nothing left to
+// scroll, so here it would stop a swipe on the body from reaching the card.
+const BODY_CLASS = "relative min-h-11 flex-1 overflow-y-auto overflow-x-hidden thin-scrollbar";
 
 export function DialogShell({
   eyebrow,
@@ -41,7 +89,6 @@ export function DialogShell({
   title,
   subtitle,
   size = "sm",
-  scrollable = false,
   children,
   footer,
   onClose,
@@ -77,25 +124,19 @@ export function DialogShell({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const cardClass = [
-    "relative z-10 w-full overflow-hidden rounded-[16px] lg:rounded-[24px] border border-white/10 bg-[#0b1020]/96 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md",
-    scrollable
-      ? "max-h-[calc(100vh_-_2rem_-_env(safe-area-inset-top)_-_env(safe-area-inset-bottom))] overflow-y-auto"
-      : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-
   // Wrapper class controls dialog width AND provides the positioning
   // context for the peek tab, which sits at the wrapper's right edge so
-  // it stays attached to the card (which clips its own overflow).
-  const wrapperClass = ["relative z-10 w-full", SIZE_CLASS[size]].join(" ");
+  // it stays attached to the card (which clips its own overflow). The wrapper
+  // centres itself with auto margins: unlike `items-center`, they fall to zero
+  // when the card is taller than the overlay, so an oversized card starts at
+  // the top instead of spilling off both edges.
+  const wrapperClass = ["relative z-10 m-auto w-full", SIZE_CLASS[size]].join(" ");
 
   return (
     <AnimatePresence>
       <motion.div
         ref={constraintsRef}
-        className="fixed inset-0 z-50 flex items-center justify-center px-2 py-2 lg:px-4 lg:py-6"
+        className={OVERLAY_CLASS}
         data-card-preview-dock="side"
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
@@ -123,7 +164,7 @@ export function DialogShell({
           dragElastic={0.05}
           dragConstraints={constraintsRef}
         >
-          <div {...cardHoverProps} className={cardClass}>
+          <div {...cardHoverProps} className={CARD_CLASS}>
             <DialogHeader
               eyebrow={resolvedEyebrow}
               eyebrowClassName={eyebrowClassName}
@@ -133,9 +174,9 @@ export function DialogShell({
               onHandlePointerDown={startHeaderDrag}
             />
             {onClose ? <CloseButton onClose={onClose} /> : null}
-            {children}
+            <div className={BODY_CLASS}>{children}</div>
             {footer ? (
-              <div className="border-t border-white/5 px-3 py-3 lg:px-5 lg:py-4">
+              <div className="shrink-0 border-t border-white/5 px-3 py-3 lg:px-5 lg:py-4">
                 {footer}
               </div>
             ) : null}
@@ -185,7 +226,7 @@ export function DialogHeader({
   return (
     <div
       onPointerDown={onHandlePointerDown}
-      className={`relative border-b border-white/10 px-3 py-3 lg:px-5 lg:py-5 ${handleClass}`}
+      className={`relative shrink-0 border-b border-white/10 px-3 py-3 lg:px-5 lg:py-5 ${handleClass}`}
     >
       <div className={eyebrowClass}>{eyebrow}</div>
       <h2 id={titleId} className="mt-1 text-base font-semibold text-white lg:text-xl">
@@ -275,9 +316,9 @@ export function PeekTab({
 export const PeekButton = PeekTab;
 
 /**
- * X close affordance in the dialog's top-right corner. Sits inside the card
- * (so it scrolls with content if the dialog is scrollable) at z-20 to ride
- * above the gradient overlay but below the peek tab. Renders only when the
+ * X close affordance in the dialog's top-right corner. Sits inside the card,
+ * over the pinned header, so it stays in view while the body scrolls; z-20
+ * rides above the gradient overlay but below the peek tab. Renders only when the
  * caller provides `onClose` — non-dismissable dialogs (ChoiceOverlay) don't
  * get one.
  */

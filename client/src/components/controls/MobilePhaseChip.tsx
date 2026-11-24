@@ -55,8 +55,16 @@ const SCOPE_PILL_CLASS: Record<PhaseStopScope, string> = {
  * the HUD). Splits the dots' two jobs across a disclosure: the chip shows the
  * current phase (icon + name, seat-color dot for whose turn), and tapping it
  * opens the phase-stop sheet with full-size per-step stop controls.
+ *
+ * `compact` (short landscape screens) swaps the spaced-out uppercase name for
+ * its short form ("Main 1") so the action rail fits beside the player HUD. The
+ * accessible name always carries the name on screen, so speech input can say
+ * what the chip shows.
  */
-export function MobilePhaseChip({ className }: { className?: string } = {}) {
+export function MobilePhaseChip({
+  className,
+  compact = false,
+}: { className?: string; compact?: boolean } = {}) {
   const { t } = useTranslation("game");
   const [sheetOpen, setSheetOpen] = useState(false);
   const phase = useGameStore((s) => s.gameState?.phase);
@@ -73,7 +81,7 @@ export function MobilePhaseChip({ className }: { className?: string } = {}) {
   // in that stop's scope color. Stops on other phases surface in the sheet.
   const currentStop = phaseStops.find((s) => s.phase === phase);
 
-  const phaseLabel = t(`phaseName.${phase}`);
+  const phaseLabel = compact ? t(`phaseShortName.${phase}`) : t(`phaseName.${phase}`);
 
   return (
     <>
@@ -83,7 +91,7 @@ export function MobilePhaseChip({ className }: { className?: string } = {}) {
         aria-label={t("phaseStop.chipAria", { phase: phaseLabel })}
         aria-haspopup="dialog"
         aria-expanded={sheetOpen}
-        className={`relative flex items-center justify-center gap-1.5 rounded-full border border-cyan-400/20 bg-slate-950/64 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-300 ring-1 ring-cyan-400/15 backdrop-blur-xl transition-all duration-200 hover:border-cyan-300/40 hover:text-white hover:ring-cyan-300/30 ${className ?? ""}`}
+        className={`relative flex items-center justify-center gap-1.5 rounded-full border border-cyan-400/20 bg-slate-950/64 py-1 text-[10px] font-semibold text-slate-300 ring-1 ring-cyan-400/15 backdrop-blur-xl transition-all duration-200 hover:border-cyan-300/40 hover:text-white hover:ring-cyan-300/30 ${compact ? "px-2 tracking-wide" : "px-3 uppercase tracking-[0.18em]"} ${className ?? ""}`}
       >
         {/* Seat-color dot: whose turn it is, mirroring the HUD plate's
             dot+label identity convention. */}
@@ -118,7 +126,6 @@ function PhaseStopSheet({ onClose }: { onClose: () => void }) {
       title={t("phaseStop.sheetTitle")}
       subtitle={t("phaseStop.sheetSubtitle")}
       size="sm"
-      scrollable
       onClose={onClose}
     >
       <ul className="flex flex-col px-2 py-2">

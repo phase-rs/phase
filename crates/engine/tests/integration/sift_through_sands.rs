@@ -105,10 +105,9 @@ fn assert_has_named_spell_cast_condition(
                 lhs:
                     engine::types::ability::QuantityExpr::Ref {
                         qty:
-                            engine::types::ability::QuantityRef::SpellsCastThisTurn {
+                            engine::types::ability::QuantityRef::SpellsCast {
                                 scope: engine::types::ability::CountScope::Controller,
-                                filter: Some(engine::types::ability::TargetFilter::Typed(typed)),
-                            },
+                                filter: Some(engine::types::ability::TargetFilter::Typed(typed)), window: engine::types::ability::TurnWindow::ThisTurn },
                     },
                 comparator: engine::types::ability::Comparator::GE,
                 rhs: engine::types::ability::QuantityExpr::Fixed { value: 1 },

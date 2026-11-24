@@ -82,7 +82,11 @@ pub fn derive_display_state(state: &mut GameState) {
         // the per-source readiness checks. Without this, each of the (up to N)
         // mana sources re-scans the whole battlefield for City-of-Solitude-class
         // statics, making this sweep O(N^2) on go-wide mana boards.
-        let activation_gates = mana_abilities::ManaActivationGates::compute(state);
+        // CR 605.3a: the display shows what the player may activate.
+        let activation_gates = mana_abilities::ManaActivationGates::compute_for(
+            state,
+            mana_abilities::ManaActivationPurpose::Explicit,
+        );
         let mana_availability: Vec<(crate::types::identifiers::ObjectId, Option<usize>, _)> =
             battlefield_ids
                 .into_iter()
@@ -317,17 +321,31 @@ pub fn derive_display_state(state: &mut GameState) {
 
 /// CR 400.2 / CR 701.20a: Repopulate `revealed_cards` for every active
 /// continuous reveal static after action-boundary clears (`apply_action` wipes
-/// momentary reveals at the start of each action). One pass over
-/// `game_active_statics` dispatches BOTH the `RevealTopOfLibrary` ("play with
-/// the top card of your library revealed" — Future Sight, Magus of the Future)
-/// and `RevealHand` ("play with hands revealed") statics, so callers get the
-/// authoritative reveal set without scanning the statics twice.
+/// momentary reveals at the start of each action). The reveal set itself is
+/// [`continuously_revealed_cards`], the rules authority; this is the display
+/// carrier's refresh from it.
 ///
 /// Public because the AI determinizer (`phase-ai/determinize.rs`) calls it on
 /// its simulation clone to pin statically-revealed cards before resampling —
 /// the reveal rule is an engine visibility concern (CR 400.2) and stays owned
 /// here rather than being recomputed AI-side.
 pub fn sync_continuous_reveals(state: &mut GameState) {
+    let revealed = continuously_revealed_cards(state);
+    state.revealed_cards.extend(revealed);
+}
+
+/// CR 400.2 + CR 401.5: the cards active "play with … revealed" statics keep
+/// revealed right now — the top card of each covered library and each covered
+/// hand. One pass over `game_active_statics` dispatches BOTH the
+/// `RevealTopOfLibrary` ("play with the top card of your library revealed" —
+/// Future Sight, Magus of the Future, Courser of Kruphix) and `RevealHand`
+/// ("play with hands revealed") statics, so callers get the authoritative
+/// reveal set without scanning the statics twice.
+///
+/// Pure, unlike its display refresh [`sync_continuous_reveals`]: a reader at a
+/// seam where `revealed_cards` has just been cleared (the CR 106.7 walker's
+/// publicity gate) asks this instead of the carrier.
+pub fn continuously_revealed_cards(state: &GameState) -> HashSet<ObjectId> {
     let mut reveal_top_all = false;
     let mut reveal_top_controllers = HashSet::<PlayerId>::new();
     let mut reveal_hand_all = false;
@@ -357,30 +375,24 @@ pub fn sync_continuous_reveals(state: &mut GameState) {
         }
     }
 
-    // Library-top reveals (collect owned Vec first so the immutable player read
-    // completes before the mutable `revealed_cards` write).
-    if reveal_top_all || !reveal_top_controllers.is_empty() {
-        let tops: Vec<ObjectId> = if reveal_top_all {
+    let mut revealed = HashSet::new();
+
+    // Library-top reveals.
+    if reveal_top_all {
+        revealed.extend(
             state
                 .players
                 .iter()
-                .filter_map(|player| player.library.front().copied())
-                .collect()
-        } else {
-            reveal_top_controllers
-                .into_iter()
-                .filter_map(|controller| {
-                    state
-                        .players
-                        .iter()
-                        .find(|player| player.id == controller)
-                        .and_then(|player| state.library_of(player.id).front().copied())
-                })
-                .collect()
-        };
-        for top in tops {
-            state.revealed_cards.insert(top);
-        }
+                .filter_map(|player| player.library.front().copied()),
+        );
+    } else {
+        revealed.extend(reveal_top_controllers.into_iter().filter_map(|controller| {
+            state
+                .players
+                .iter()
+                .find(|player| player.id == controller)
+                .and_then(|player| state.library_of(player.id).front().copied())
+        }));
     }
 
     // Hand reveals.
@@ -388,20 +400,21 @@ pub fn sync_continuous_reveals(state: &mut GameState) {
         || !reveal_hand_controllers.is_empty()
         || !reveal_hand_opponents_of.is_empty()
     {
-        let hand_cards: Vec<ObjectId> = state
-            .players
-            .iter()
-            .filter(|player| {
-                reveal_hand_all
-                    || reveal_hand_controllers.contains(&player.id)
-                    || reveal_hand_opponents_of
-                        .iter()
-                        .any(|controller| player.id != *controller)
-            })
-            .flat_map(|player| player.hand.iter().copied())
-            .collect();
-        state.revealed_cards.extend(hand_cards);
+        revealed.extend(
+            state
+                .players
+                .iter()
+                .filter(|player| {
+                    reveal_hand_all
+                        || reveal_hand_controllers.contains(&player.id)
+                        || reveal_hand_opponents_of
+                            .iter()
+                            .any(|controller| player.id != *controller)
+                })
+                .flat_map(|player| player.hand.iter().copied()),
+        );
     }
+    revealed
 }
 
 /// Commander damage received by `victim`, grouped by the commander's

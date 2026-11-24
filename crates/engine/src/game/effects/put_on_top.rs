@@ -250,12 +250,20 @@ pub fn resolve(
         let effective_filter =
             crate::game::targeting::resolve_tracked_set_sentinel(state, target_filter.clone());
         let ctx = crate::game::filter::FilterContext::from_ability(ability);
+        // CR 730.3c: the members, then the components this reader finds (D2, D7, D4);
+        // the library retain below keeps the reader's own zone scope.
         let candidate_ids: Vec<ObjectId> = match &effective_filter {
-            TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => state
-                .tracked_object_sets
-                .get(id)
-                .cloned()
-                .unwrap_or_default(),
+            TargetFilter::TrackedSet { id } => {
+                crate::game::merge::tracked_set_found_objects(state, *id, Some(ability), None)
+            }
+            TargetFilter::TrackedSetFiltered { id, caused_by, .. } => {
+                crate::game::merge::tracked_set_found_objects(
+                    state,
+                    *id,
+                    Some(ability),
+                    caused_by.as_ref(),
+                )
+            }
             _ => state.objects.keys().copied().collect(),
         };
         collected_targets = candidate_ids
@@ -382,6 +390,7 @@ pub fn resolve(
                 return Ok(());
             }
             state.waiting_for = WaitingFor::EffectZoneChoice {
+                performed_by: None,
                 player: choosing_player,
                 cards: eligible,
                 count: expected.min(eligible_count),
@@ -405,14 +414,17 @@ pub fn resolve(
                 face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                 // CR 708.2a: library-position selection is not a face-down entry.
                 face_down_profile: None,
+                with_entry_effect: None,
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 count_param: 0,
                 library_position: Some(position.clone()),
+                library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                 mass_library_order: None,
                 is_cost_payment: false,
                 enters_modified_if: None,
                 duration: None,
+                privacy_zones: None,
             };
             return Ok(());
         }
@@ -440,6 +452,7 @@ pub fn resolve(
     // than the placement count allows, prompt before auto-picking the first.
     if collected_targets.len() > expected && expected > 0 {
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: ability.controller,
             cards: collected_targets,
             count: expected,
@@ -490,14 +503,17 @@ pub fn resolve(
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: Some(position.clone()),
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
         return Ok(());
     }

@@ -15,6 +15,7 @@ import {
   listSavedDeckNames,
   loadSavedDeck,
   loadSavedDeckBracket,
+  loadSavedDeckComboDeclaration,
   loadSavedDeckFormat,
   migrateDeckMeta,
   PROFILE_REPLACEMENT_KEY,
@@ -27,6 +28,7 @@ import {
   saveDeckOrigins,
   saveFeedSubscriptions,
   saveSavedDeckBracket,
+  saveSavedDeckComboDeclaration,
   setDeckFolder,
   stampDeckMeta,
   toggleDeckStar,
@@ -36,6 +38,7 @@ import {
   writeSavedDeckData,
   STORAGE_KEY_PREFIX,
 } from "../storage";
+import { serializeSavedDeck } from "../../services/savedDeckProjection";
 import { expandParsedDeck } from "../../services/deckParser";
 import {
   installFifoWebLocks,
@@ -77,6 +80,17 @@ describe("profile-replacement generation", () => {
     bumpProfileReplacementGeneration(testSavedDeckTxn);
     expect(profileReplacementGeneration()).toBe(2);
   });
+});
+
+it("preserves all three Forest printings through save and reload", () => {
+  const main = [
+    { count: 4, name: "Forest", sourcePrinting: { setCode: "one", collectorNumber: "276" } },
+    { count: 3, name: "Forest", sourcePrinting: { setCode: "dmu", collectorNumber: "277" } },
+    { count: 5, name: "Forest", sourcePrinting: { setCode: "neo", collectorNumber: "292" } },
+  ];
+  const raw = serializeSavedDeck({ main, sideboard: [] }, "Modern", null, { kind: "undeclared" });
+  writeSavedDeckData(testSavedDeckTxn, "Split Forests", raw);
+  expect(loadSavedDeck("Split Forests")?.main).toEqual(main);
 });
 
 describe("saved-deck bracket sidecar", () => {
@@ -251,6 +265,50 @@ describe("saved-deck bracket sidecar", () => {
   it("saveSavedDeckBracket is a no-op when the deck does not exist", () => {
     saveSavedDeckBracket(testSavedDeckTxn, "Missing", 3);
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Missing")).toBeNull();
+  });
+});
+
+describe("saved-deck combo declaration sidecar", () => {
+  it("round-trips an intended early-game declaration", () => {
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Combo Deck",
+      JSON.stringify({ main: [], sideboard: [] }),
+    );
+    saveSavedDeckComboDeclaration(testSavedDeckTxn, "Combo Deck", {
+      kind: "intended",
+      window: "early_game",
+    });
+    expect(loadSavedDeckComboDeclaration("Combo Deck")).toEqual({
+      kind: "intended",
+      window: "early_game",
+    });
+  });
+
+  it("defaults missing, corrupt, and garbage declarations to undeclared", () => {
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Corrupt", "{");
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Garbage",
+      JSON.stringify({ combo_declaration: { kind: "intended", window: "soon" } }),
+    );
+    expect(loadSavedDeckComboDeclaration("Missing")).toEqual({ kind: "undeclared" });
+    expect(loadSavedDeckComboDeclaration("Corrupt")).toEqual({ kind: "undeclared" });
+    expect(loadSavedDeckComboDeclaration("Garbage")).toEqual({ kind: "undeclared" });
+  });
+
+  it("saving undeclared writes no field and preserves legacy JSON byte-for-byte", () => {
+    const raw = '{"main":[], "sideboard":[], "format":"Commander"}';
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Legacy", raw);
+    saveSavedDeckComboDeclaration(testSavedDeckTxn, "Legacy", { kind: "undeclared" });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Legacy")).toBe(raw);
+
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Declared",
+      JSON.stringify({ main: [], combo_declaration: { kind: "none_intended" } }),
+    );
+    saveSavedDeckComboDeclaration(testSavedDeckTxn, "Declared", { kind: "undeclared" });
+    expect(
+      JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "Declared")!),
+    ).not.toHaveProperty("combo_declaration");
   });
 });
 

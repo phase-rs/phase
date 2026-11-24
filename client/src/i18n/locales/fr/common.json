@@ -72,7 +72,7 @@
   },
   "comboDetector": {
     "label": "Détecteur de combos (expérimental)",
-    "title": "Détecter les boucles infinies : terminer automatiquement les boucles obligatoires et afficher les ressources ∞ (désactivé par défaut)",
+    "title": "Détecter les boucles infinies : terminer automatiquement les boucles obligatoires, proposer des raccourcis pour les boucles qu'un joueur contrôle et afficher les ressources ∞ (désactivé par défaut)",
     "off": "Désactivé",
     "interactive": "Interactif"
   },
@@ -330,6 +330,11 @@
     "heading": "Une erreur est survenue",
     "body": "L'application a rencontré une erreur inattendue et ne peut pas continuer sur cet écran. Recharger règle généralement le problème.",
     "reload": "Recharger"
+  },
+  "stateCodec": {
+    "actionInterrupted": "La transmission de l’état a été interrompue pendant l’action",
+    "submissionNotSent": "La transmission de l’état est en cours de rétablissement ; cette action n’a pas été envoyée.",
+    "reconnectSubmissionNotSent": "La connexion est en cours de rétablissement ; cette action n’a pas été envoyée."
   },
   "actionError": {
     "title": "Échec de {{action}}",

@@ -1252,6 +1252,7 @@ fn parent_target_move_after_an_empty_exile_top_moves_nothing() {
     );
     ability.sub_ability = Some(Box::new(ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Hand,

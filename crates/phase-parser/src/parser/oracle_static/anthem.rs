@@ -4,6 +4,7 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::parser::oracle_ir::ast::AnaphorNumber;
 
 /// Try to parse "[Subtype] creatures you control get/have ..." patterns.
 /// `text` is the original-case text starting at the subtype word.
@@ -65,7 +66,12 @@ pub(crate) fn parse_typed_you_control(
                     } else {
                         (prop_filter, after_prefix)
                     };
-                return parse_continuous_gets_has(after_prefix, prop_filter, text);
+                return parse_continuous_gets_has(
+                    after_prefix,
+                    prop_filter,
+                    text,
+                    PrintedSubject::Other,
+                );
             }
             // CR 205.3m: Try compound subtypes first ("Ninja and Rogue", "Elf or Warrior")
             // The helper bakes in extra_props and is_other, so skip add_another_filter below.
@@ -79,7 +85,12 @@ pub(crate) fn parse_typed_you_control(
                     } else {
                         (compound_filter, after_prefix)
                     };
-                return parse_continuous_gets_has(after_prefix, compound_filter, text);
+                return parse_continuous_gets_has(
+                    after_prefix,
+                    compound_filter,
+                    text,
+                    PrintedSubject::Other,
+                );
             }
             let typed_filter = if extra_props.is_empty() {
                 // No combat-status prefix — use original dispatch path
@@ -215,7 +226,12 @@ pub(crate) fn parse_typed_you_control(
             } else {
                 typed_filter
             };
-            return parse_continuous_gets_has(after_prefix, typed_filter, text);
+            return parse_continuous_gets_has(
+                after_prefix,
+                typed_filter,
+                text,
+                PrintedSubject::Other,
+            );
         }
     }
 
@@ -256,7 +272,12 @@ pub(crate) fn parse_typed_you_control(
                     } else {
                         (compound_filter, after_prefix)
                     };
-                return parse_continuous_gets_has(after_prefix, compound_filter, text);
+                return parse_continuous_gets_has(
+                    after_prefix,
+                    compound_filter,
+                    text,
+                    PrintedSubject::Other,
+                );
             }
             let typed_filter = if extra_props.is_empty() {
                 if let Some(filter) = parse_modified_creature_subject_filter(full_subject) {
@@ -343,7 +364,12 @@ pub(crate) fn parse_typed_you_control(
             } else {
                 typed_filter
             };
-            return parse_continuous_gets_has(after_prefix, typed_filter, text);
+            return parse_continuous_gets_has(
+                after_prefix,
+                typed_filter,
+                text,
+                PrintedSubject::Other,
+            );
         }
     }
 
@@ -426,7 +452,7 @@ pub(crate) fn parse_subject_continuous_static(text: &str) -> Option<StaticDefini
     if nom_primitives::scan_contains(&pred_lower, "for each")
         || nom_primitives::scan_contains(&pred_lower, "as long as")
     {
-        return parse_continuous_gets_has(predicate, affected, text);
+        return parse_continuous_gets_has(predicate, affected, text, printed_subject(&tp));
     }
 
     // CR 604.1: Strip suffix turn conditions from the ORIGINAL-case predicate
@@ -703,7 +729,7 @@ pub(crate) fn parse_contextual_continuous_subject_static(
     let condition = predicate_condition(&predicate);
     let affected =
         contextual_continuous_subject_filter(subject, subject_original, condition.as_ref())?;
-    parse_continuous_gets_has(&predicate, affected, description)
+    parse_continuous_gets_has(&predicate, affected, description, PrintedSubject::Other)
 }
 
 pub(crate) fn continuous_subject_verb(lower: &str) -> Option<(&str, &'static str, &str)> {
@@ -819,6 +845,7 @@ pub(crate) fn parse_soulbond_paired_static(
         predicate.original,
         TargetFilter::SourceOrPaired,
         description,
+        PrintedSubject::Other,
     )?;
     def.condition = Some(StaticCondition::SourceIsPaired);
     Some(def)
@@ -891,15 +918,19 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 ///    enchanted/equipped creature) the pronoun is not the source.
 /// 2. Only the bare source-STATE predicates that `~ is …` already resolves to a
 ///    typed condition are rewritten. The list below is the WHOLE list and must
-///    stay in lockstep with the `tag`s in `parse_self_pronoun_rewrite` below,
-///    which is the single combinator implementing every arm:
+///    stay in lockstep with the `tag`s in `parse_singular_pronoun_rewrite` and
+///    `parse_plural_pronoun_rewrite` below, the two combinators implementing
+///    every arm:
 ///    "tapped" / "untapped", their combat-state siblings "attacking" /
 ///    "blocking" / "blocked" and the compound "attacking or blocking" (which
 ///    `~ is …` lowers to `Or([SourceIsAttacking, SourceIsBlocking])`)
 ///    (CR 508.1k / 509.1g / 509.1h), "modified" (CR 700.9), "equipped"
 ///    (CR 301.5a) and "enchanted" (CR 303.4b) — nine phrases — plus the two
 ///    non-contraction "it entered …" forms handled below, "it entered this turn"
-///    and "it entered the battlefield this turn" (CR 400.7).
+///    and "it entered the battlefield this turn" (CR 400.7), plus the plural
+///    sticky-damage-history form "they haven't dealt [combat |noncombat ]damage
+///    yet" (CR 120.2a / CR 120.2b, Ruric Thar, Magecrusher), rewritten to
+///    "~ hasn't dealt … damage yet".
 ///    "it" is otherwise overloaded: "it's your
 ///    turn" is impersonal (a turn reference, not the source); "it's a Wall" /
 ///    "it's red" / "it's legendary" are type/characteristic gates with their own
@@ -922,16 +953,53 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 /// census of SelfRef-affected statics whose description begins
 /// "Enchanted|Equipped creature".
 ///
-/// Returns the condition unchanged when no arm of `parse_self_pronoun_rewrite`
-/// matches.
-pub(crate) fn rewrite_self_pronoun_subject(condition: &str) -> String {
+/// The plural "they haven't dealt … damage yet" arm does NOT rely on guard #1:
+/// it runs only when `subject` is [`PrintedSubject::SourceNamed`], i.e. the
+/// host line's printed subject names the source itself and is complete, not a
+/// compound that merely starts with the source ("~ and enchanted creature",
+/// "~ together with …"): a self-reference followed by any subject connective is
+/// not a complete subject. The hardcoded-SelfRef restriction arms (and the
+/// legacy "~ has/gets …" fallback, whose subject check is a negative list)
+/// therefore no longer feed it an attached, typed or compound subject. Predicate
+/// coordinators ("~ can't attack or block", "~ has flying and haste") stay
+/// `SourceNamed`. The singular arms above are unchanged under either value — the
+/// Hobble family is out of this function's scope and keeps today's binding.
+///
+/// Returns the condition unchanged when no permitted arm matches.
+pub(crate) fn rewrite_self_pronoun_subject(condition: &str, subject: PrintedSubject) -> String {
     let lower = condition.to_lowercase();
     // The combinator reads the lowercase text and emits only canonical
     // lowercase templating, so no original-case remainder has to be mapped back.
-    nom_parse_lower(&lower, parse_self_pronoun_rewrite).unwrap_or_else(|| condition.to_string())
+    let rewritten = match subject {
+        PrintedSubject::SourceNamed => nom_parse_lower(&lower, |input| {
+            alt((parse_singular_pronoun_rewrite, parse_plural_pronoun_rewrite)).parse(input)
+        }),
+        PrintedSubject::Other => nom_parse_lower(&lower, parse_singular_pronoun_rewrite),
+    };
+    rewritten.unwrap_or_else(|| condition.to_string())
 }
 
-/// The EXACT-tail contract shared by every arm of `parse_self_pronoun_rewrite`,
+/// CR 611.3a: whether a static's printed subject names the static's own source
+/// ("~", "this creature", "this Aura", …) — a static "applies at any given moment
+/// to whatever its text indicates", so only a source-named subject lets a plural
+/// bound pronoun in its gate name the source. Derived once per host line by
+/// `shared::printed_subject`; consumed by [`rewrite_self_pronoun_subject`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrintedSubject {
+    /// The printed subject is the source itself, and only the source: the
+    /// self-reference is not followed by a subject connective. Predicate
+    /// coordinators ("~ can't attack or block", "~ has flying and haste") do
+    /// not make the subject compound.
+    SourceNamed,
+    /// Any other subject: attached ("enchanted creature"), typed ("creatures
+    /// you control", "each artifact"), a bare pronoun ("it"), or a compound
+    /// that merely starts with the source ("~ and enchanted creature",
+    /// "~ or …", "~ and/or …", "~ together with …", "~ as well as …",
+    /// "~ plus …", "~ along with …").
+    Other,
+}
+
+/// The EXACT-tail contract shared by every arm of `parse_singular_pronoun_rewrite`,
 /// as a combinator: the tag must consume the whole remaining condition, so a
 /// trailing word survives instead of being silently dropped ("it's attacking
 /// alone" keeps "alone" and falls through to `SourceAttackingAlone`; "it's
@@ -945,12 +1013,14 @@ fn exact_tail<'a>(tail: &'static str) -> impl FnMut(&'a str) -> OracleResult<'a,
     move |input| terminated(tag(tail), (space0, eof)).parse(input)
 }
 
-/// CR 611.3a: the ONE combinator behind `rewrite_self_pronoun_subject` — the
-/// whole closed list of bound-pronoun subjects, in the three grammatical forms
-/// the doc comment on that function enumerates. Runs on lowercase text and
-/// emits the canonical `~ …` templating the context-free grammar
-/// (`oracle_nom::condition`) already types.
-fn parse_self_pronoun_rewrite(input: &str) -> OracleResult<'_, String> {
+/// CR 611.3a: the singular half of the closed list behind
+/// `rewrite_self_pronoun_subject` — the "it's …" / "it entered …" / "it
+/// attacked …" bound-pronoun subjects the doc comment on that function
+/// enumerates. Runs on lowercase text and emits the canonical `~ …` templating
+/// the context-free grammar (`oracle_nom::condition`) already types. Permitted
+/// for every printed subject (pre-existing behavior; see the Hobble standing
+/// constraint).
+fn parse_singular_pronoun_rewrite(input: &str) -> OracleResult<'_, String> {
     alt((
         // CR 508.1k / CR 509.1g / CR 509.1h: combat-state pronoun siblings of the
         // tapped/untapped rewrite. CR 700.9: "modified" is the self-state sibling
@@ -1004,10 +1074,38 @@ fn parse_self_pronoun_rewrite(input: &str) -> OracleResult<'_, String> {
     .parse(input)
 }
 
+/// CR 120.2a / CR 120.2b + CR 400.7: the plural bound pronoun of the sticky
+/// "hasn't dealt [combat |noncombat ]damage yet" gate (Ruric Thar, Magecrusher:
+/// "has hexproof as long as they haven't dealt combat damage yet"). The plural
+/// "they" pairs with the plural "haven't" only; the tail is the grammar's own
+/// `parse_dealt_damage_yet`, anchored to `eof` so a trailing "this turn" is
+/// refused. Re-emits the canonical "~ hasn't …" the grammar types as
+/// `Not(SourceHasDealtDamage { kind })`. Permitted only for a
+/// [`PrintedSubject::SourceNamed`] host line (`rewrite_self_pronoun_subject`).
+fn parse_plural_pronoun_rewrite(input: &str) -> OracleResult<'_, String> {
+    map(
+        preceded(
+            (tag("they "), nom_condition::parse_havent, tag(" ")),
+            terminated(
+                recognize(nom_condition::parse_dealt_damage_yet),
+                (space0, eof),
+            ),
+        ),
+        |tail: &str| format!("~ hasn't {tail}"),
+    )
+    .parse(input)
+}
+
+/// `subject` is the host line's printed subject (`shared::printed_subject`),
+/// forwarded to the gate's pronoun rewrite. Callers whose `affected` is not
+/// `SelfRef` pass [`PrintedSubject::Other`] (the rewrite is skipped anyway);
+/// a caller that hardcodes `SelfRef` derives it from the host line so the
+/// plural "they" arm cannot bind a non-source subject to the source.
 pub(crate) fn parse_continuous_gets_has(
     text: &str,
     affected: TargetFilter,
     description: &str,
+    subject: PrintedSubject,
 ) -> Option<StaticDefinition> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
@@ -1023,14 +1121,15 @@ pub(crate) fn parse_continuous_gets_has(
         let condition_text = after_cond.original.trim().trim_end_matches('.');
         // Recursively parse the continuous part without the condition
         if let Some(mut def) =
-            parse_continuous_gets_has(continuous_text, affected.clone(), description)
+            parse_continuous_gets_has(continuous_text, affected.clone(), description, subject)
         {
             // CR 611.3a: only resolve the self-pronoun "it" to the source when the
             // static modifies itself; attached-subject statics keep "it" bound to
             // the enchanted/equipped creature and stay an honest gap. That binding
             // decision has ONE authority — `parse_affected_scoped_static_condition`
             // (shared.rs) — shared with the "as long as"/"unless"/"if" gate parsers.
-            let typed = parse_affected_scoped_static_condition(condition_text, Some(&affected));
+            let typed =
+                parse_affected_scoped_static_condition(condition_text, Some(&affected), subject);
             let condition = typed.unwrap_or_else(|| {
                 unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
             });
@@ -1055,9 +1154,10 @@ pub(crate) fn parse_continuous_gets_has(
         let continuous_text = before_cond.original;
         let condition_text = after_cond.original.trim().trim_end_matches('.');
         if let Some(mut def) =
-            parse_continuous_gets_has(continuous_text, affected.clone(), description)
+            parse_continuous_gets_has(continuous_text, affected.clone(), description, subject)
         {
-            let typed = parse_affected_scoped_static_condition(condition_text, Some(&affected));
+            let typed =
+                parse_affected_scoped_static_condition(condition_text, Some(&affected), subject);
             let condition = match typed {
                 Some(inner) => StaticCondition::Not {
                     condition: Box::new(inner),
@@ -1075,7 +1175,7 @@ pub(crate) fn parse_continuous_gets_has(
 
     // CR 613.4c: Handle repeated dynamic pump terms — "gets +N/+M for each X and
     // +P/+Q for each Y" (Eidolon of Countless Battles) — where each term scales
-    // by its own count. Try this before the single-"for each" path so the second
+    // by its own count. Either term may also use "for every". Try this before the single-count path so the second
     // term isn't silently dropped and the pump collapsed to a fixed value.
     if let Some(modifications) = parse_repeated_for_each_pt_modifications(text) {
         return Some(
@@ -1086,10 +1186,10 @@ pub(crate) fn parse_continuous_gets_has(
         );
     }
 
-    // CR 613.4c: Handle "gets +N/+M for each [clause]" — dynamic P/T via ObjectCount.
-    if let Some((before_for_each, after_for_each)) = tp.split_around("for each ") {
-        let pt_text = before_for_each.original.trim();
-        let raw_for_each = after_for_each.lower.trim_end_matches('.');
+    // CR 613.4c: Handle "gets +N/+M for each/for every [clause]" — dynamic P/T.
+    if let Some((pt_text, after_for_each)) = split_for_each_marker(&lower) {
+        let pt_text = pt_text.trim();
+        let raw_for_each = after_for_each.trim_end_matches('.');
         // Strip a trailing keyword clause (" and has flying", " and gains haste",
         // etc.) so the for-each filter parser sees only its own clause. The
         // trailing keywords are picked up separately via `extract_keyword_clause`
@@ -1104,22 +1204,21 @@ pub(crate) fn parse_continuous_gets_has(
         // `scan_timing_restrictions`) so the dynamic P/T is still extracted; the
         // leading keyword is recovered separately via `extract_keyword_clause`.
         let mut pt_scan: &str = &pt_lower;
-        let pt_source = loop {
-            if let Some(rest) = nom_tag_lower(pt_scan, pt_scan, "gets ")
-                .or_else(|| nom_tag_lower(pt_scan, pt_scan, "get "))
-            {
-                break rest;
+        let (pt_source, subject_number) = loop {
+            if let Ok((rest, number)) = parse_pump_verb(pt_scan) {
+                break (rest, Some(number));
             }
             match pt_scan.find(' ') {
                 Some(idx) => pt_scan = pt_scan[idx + 1..].trim_start(),
-                None => break pt_lower.as_str(),
+                None => break (pt_lower.as_str(), None),
             }
         };
 
         if let Some((p, t)) = parse_pt_mod(pt_source) {
-            if let Some(quantity) =
-                super::oracle_quantity::parse_for_each_clause_expr_deferred(for_each_clause)
-            {
+            if let Some(quantity) = super::oracle_quantity::parse_for_each_clause_expr_deferred(
+                for_each_clause,
+                subject_number,
+            ) {
                 let mut modifications = Vec::new();
                 push_dynamic_pt_modifications(&mut modifications, p, t, quantity);
                 if !modifications.is_empty() {
@@ -1174,19 +1273,40 @@ pub(crate) fn parse_continuous_gets_has(
 pub(crate) fn parse_dynamic_for_each_pt_modifications(
     text: &str,
 ) -> Option<Vec<ContinuousModification>> {
+    parse_dynamic_for_each_pt_term(text, PumpTermVerb::Own)
+}
+
+/// Where a dynamic pump term's verb — and with it the static subject's
+/// grammatical number — comes from.
+#[derive(Debug, Clone, Copy)]
+enum PumpTermVerb {
+    /// The term must carry its own "gets"/"get".
+    Own,
+    /// A term of a repeated pump ("… and +1/+0 for each …") whose verb may be
+    /// elided and shared with the lead term; carries the lead term's number
+    /// when the lead carried a verb.
+    SharedWithLead(Option<AnaphorNumber>),
+}
+
+fn parse_dynamic_for_each_pt_term(
+    text: &str,
+    verb: PumpTermVerb,
+) -> Option<Vec<ContinuousModification>> {
     let lower = text.to_lowercase();
-    let (for_each_with_marker, pt_text) = take_until::<_, _, OracleError<'_>>("for each ")
-        .parse(lower.as_str())
-        .ok()?;
-    let (for_each_clause, _) = tag::<_, _, OracleError<'_>>("for each ")
-        .parse(for_each_with_marker)
-        .ok()?;
+    let (pt_text, for_each_clause) = split_for_each_marker(&lower)?;
     let pt_text = pt_text.trim();
-    let pt_source = nom_tag_lower(pt_text, pt_text, "gets ")
-        .or_else(|| nom_tag_lower(pt_text, pt_text, "get "))?;
+    let (pt_source, subject_number) = match (
+        nom_primitives::scan_at_word_boundaries_with_offset(pt_text, parse_pump_verb),
+        verb,
+    ) {
+        (Some((_, number, rest)), _) => (rest, Some(number)),
+        (None, PumpTermVerb::SharedWithLead(lead_number)) => (pt_text, lead_number),
+        (None, PumpTermVerb::Own) => return None,
+    };
     let (power, toughness) = parse_pt_mod(pt_source)?;
     let quantity = super::oracle_quantity::parse_for_each_clause_expr_deferred(
         strip_trailing_keyword_clause(for_each_clause.trim_end_matches('.')),
+        subject_number,
     )?;
 
     let mut modifications = Vec::new();
@@ -1194,10 +1314,41 @@ pub(crate) fn parse_dynamic_for_each_pt_modifications(
     (!modifications.is_empty()).then_some(modifications)
 }
 
+/// Split a lowercased predicate at its first outer "for each" / "for every"
+/// marker. Quoted granted abilities keep their own quantity clauses; masking
+/// them preserves byte offsets so both slices can come from the original lower
+/// view without exposing quoted markers to the static P/T dispatcher.
+fn split_for_each_marker(lower: &str) -> Option<(&str, &str)> {
+    let masked = nom_primitives::mask_double_quoted_spans_preserving_len(lower);
+    let (prefix, _, remainder) =
+        nom_primitives::scan_preceded(masked.as_ref(), nom_quantity::parse_for_each_marker)?;
+    let prefix_len = prefix.len();
+    let remainder_start = lower.len() - remainder.len();
+    Some((&lower[..prefix_len], &lower[remainder_start..]))
+}
+
+/// The pinned MTGJSON AtomicCards corpus has no printed predicate with a
+/// quoted "for every" count followed by an outer "for every" power modifier.
+/// This combines Biorganic Carapace's quoted count shape with Dark Matter
+/// Manipulator's outer wording to exercise the marker scan across the quote.
+#[cfg(test)]
+#[test]
+fn split_for_each_marker_skips_quoted_count_and_finds_outer_count() {
+    let predicate = r#"has "{t}: draw a card for every seven cards in your graveyard." and gets +2/+0 for every seven cards in your graveyard"#;
+    assert_eq!(
+        split_for_each_marker(predicate),
+        Some((
+            r#"has "{t}: draw a card for every seven cards in your graveyard." and gets +2/+0 "#,
+            "seven cards in your graveyard",
+        ))
+    );
+}
+
 /// CR 613.4c: A compound of repeated dynamic pump terms — "gets +N/+M for each X
 /// and +P/+Q for each Y" (Eidolon of Countless Battles) — where each term scales
-/// by its own count. Splits on the " and " that introduces another "+n/+m for
-/// each" pump term (so a single term's embedded "for each A and B" count-list
+/// by its own count. Either term may also use "for every". Splits on the " and "
+/// that introduces another "+n/+m for each/for every" pump term (so a single
+/// term's embedded "for each A and B" count-list
 /// stays with the single-term path) and accumulates every term's dynamic
 /// modifications. Returns `None` unless at least two whole pump terms parse, so
 /// the single-term path keeps ownership of every non-repeated case.
@@ -1223,18 +1374,17 @@ fn parse_repeated_for_each_pt_modifications(text: &str) -> Option<Vec<Continuous
         return None;
     }
 
+    // Only the first term carries the verb once the predicate is split; every
+    // term shares it, and with it the subject's number.
+    let lead_number =
+        nom_primitives::scan_at_word_boundaries_with_offset(&terms[0], parse_pump_verb)
+            .map(|(_, number, _)| number);
     let mut modifications = Vec::new();
     for term in &terms {
-        // `parse_dynamic_for_each_pt_modifications` expects the "gets"/"get" verb;
-        // only the first term carries it once the predicate is split.
-        let owned;
-        let term = if segment_has_gets_verb(term) {
-            term.as_str()
-        } else {
-            owned = format!("gets {term}");
-            owned.as_str()
-        };
-        modifications.extend(parse_dynamic_for_each_pt_modifications(term)?);
+        modifications.extend(parse_dynamic_for_each_pt_term(
+            term,
+            PumpTermVerb::SharedWithLead(lead_number),
+        )?);
     }
     (!modifications.is_empty()).then_some(modifications)
 }
@@ -1254,20 +1404,32 @@ fn split_on_and(s: &str) -> Vec<&str> {
     segments
 }
 
-/// True iff `segment` (already lowercased) opens with a "gets"/"get" verb.
-fn segment_has_gets_verb(segment: &str) -> bool {
-    alt((tag::<_, _, OracleError<'_>>("gets "), tag("get ")))
-        .parse(segment)
-        .is_ok()
+/// CR 613.4c + CR 608.2k: The pump verb "gets" / "get" at the head of
+/// `input` (already lowercased), with the grammatical number its agreement
+/// gives the static's subject: "gets" follows a singular subject ("Each
+/// creature you control gets", "Enchanted creature gets"), "get" a plural one
+/// ("Creatures you control get"). A census pronoun in the "for each" / "for every" tail must
+/// agree with that number to name the subject's object(s)
+/// (`parse_for_each_clause_deferred`).
+fn parse_pump_verb(input: &str) -> OracleResult<'_, AnaphorNumber> {
+    alt((
+        value(AnaphorNumber::Singular, tag("gets ")),
+        value(AnaphorNumber::Plural, tag("get ")),
+    ))
+    .parse(input)
 }
 
-/// True iff `segment` (already lowercased) begins a "+N/+M for each …" pump term:
-/// an optional "gets"/"get" verb, a P/T modifier, then " for each ". Used to tell
-/// a repeated-pump term boundary apart from an " and " inside a count clause.
+/// True iff `segment` (already lowercased) begins a "+N/+M for each …" or
+/// "+N/+M for every …" pump term: an optional "gets"/"get" verb, a P/T
+/// modifier, then the shared marker. Used to tell a repeated-pump term boundary
+/// apart from an " and " inside a count clause.
 fn segment_starts_pump_term(segment: &str) -> bool {
     preceded(
-        opt(alt((tag::<_, _, OracleError<'_>>("gets "), tag("get ")))),
-        preceded(nom_primitives::parse_pt_modifier, tag(" for each ")),
+        opt(parse_pump_verb),
+        preceded(
+            nom_primitives::parse_pt_modifier,
+            preceded(tag(" "), nom_quantity::parse_for_each_marker),
+        ),
     )
     .parse(segment.trim_start())
     .is_ok()
@@ -1358,8 +1520,12 @@ pub(crate) fn parse_dynamic_pt_in_text(
     // applied to both axes; a "+X/+Y" pump whose clause reads "where X is <A> and
     // Y is <B>" (Aspect of Wolf) binds each axis to its own quantity, so the
     // clause is split on " and y is " and each half is parsed independently.
-    let resolve_quantity =
-        |wx: &str| parse_cda_quantity(wx).or_else(|| parse_event_context_quantity(wx));
+    // CR 107.1b: X is clamped at 0 before the sign applies, so -X never adds.
+    let resolve_quantity = |wx: &str| {
+        parse_cda_quantity(wx)
+            .or_else(|| parse_event_context_quantity(wx))
+            .map(|x| super::oracle_effect::WhereXSlot::PtAdjustment.bind(x))
+    };
     let (p_quantity, t_quantity) = if is_distinct_xy {
         // Require the paired binding; a "+X/+Y" without it is unsupported.
         let (x_expr, y_expr) = split_x_and_y_where_clause(where_x_expression?)?;
@@ -1661,7 +1827,8 @@ mod rewrite_self_pronoun_subject_tests {
     use super::*;
 
     /// The whole closed list the function's doc comment enumerates, pinned arm by
-    /// arm so the single `parse_self_pronoun_rewrite` combinator cannot silently
+    /// arm so the `parse_singular_pronoun_rewrite` / `parse_plural_pronoun_rewrite`
+    /// combinators cannot silently
     /// widen or narrow it. Every entry here was accepted by the three literal-tail
     /// `matches!` arms this combinator replaced, and the outputs are byte-identical.
     #[test]
@@ -1683,7 +1850,7 @@ mod rewrite_self_pronoun_subject_tests {
             for subject in ["it's", "it is"] {
                 let input = format!("{subject} {state}");
                 assert_eq!(
-                    rewrite_self_pronoun_subject(&input),
+                    rewrite_self_pronoun_subject(&input, PrintedSubject::SourceNamed),
                     expected,
                     "{input:?} must normalize to the canonical source-state form"
                 );
@@ -1691,24 +1858,54 @@ mod rewrite_self_pronoun_subject_tests {
             // Same phrase with an uppercase printed subject: the rewrite reads
             // lowercase and emits canonical lowercase templating.
             assert_eq!(
-                rewrite_self_pronoun_subject(&format!("It's {state}")),
+                rewrite_self_pronoun_subject(&format!("It's {state}"), PrintedSubject::SourceNamed),
                 expected
             );
         }
         // CR 400.7: both "it entered …" tails.
         assert_eq!(
-            rewrite_self_pronoun_subject("it entered this turn"),
+            rewrite_self_pronoun_subject("it entered this turn", PrintedSubject::SourceNamed),
             "~ entered this turn"
         );
         assert_eq!(
-            rewrite_self_pronoun_subject("it entered the battlefield this turn"),
+            rewrite_self_pronoun_subject(
+                "it entered the battlefield this turn",
+                PrintedSubject::SourceNamed
+            ),
             "~ entered the battlefield this turn"
         );
         // CR 508.1a: the combat-history arm.
         assert_eq!(
-            rewrite_self_pronoun_subject("it attacked this turn"),
+            rewrite_self_pronoun_subject("it attacked this turn", PrintedSubject::SourceNamed),
             "~ attacked this turn"
         );
+        // CR 120.2a / CR 120.2b: the plural sticky-damage-history arm (Ruric
+        // Thar, Magecrusher), both apostrophes, every damage class.
+        for (input, expected) in [
+            (
+                "they haven't dealt combat damage yet",
+                "~ hasn't dealt combat damage yet",
+            ),
+            (
+                "they haven\u{2019}t dealt combat damage yet",
+                "~ hasn't dealt combat damage yet",
+            ),
+            (
+                "They haven't dealt combat damage yet",
+                "~ hasn't dealt combat damage yet",
+            ),
+            ("they haven't dealt damage yet", "~ hasn't dealt damage yet"),
+            (
+                "they haven't dealt noncombat damage yet",
+                "~ hasn't dealt noncombat damage yet",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_self_pronoun_subject(input, PrintedSubject::SourceNamed),
+                expected,
+                "{input:?}"
+            );
+        }
     }
 
     /// The `terminated(tag(..), eof)` anchor is the whole exact-tail contract: a
@@ -1719,7 +1916,10 @@ mod rewrite_self_pronoun_subject_tests {
     fn rewrite_self_pronoun_leaves_inexact_tails_alone() {
         // Positive reach guard: the rewrite itself is live, so the identity
         // assertions below cannot pass because the function stopped rewriting.
-        assert_eq!(rewrite_self_pronoun_subject("it's tapped"), "~ is tapped");
+        assert_eq!(
+            rewrite_self_pronoun_subject("it's tapped", PrintedSubject::SourceNamed),
+            "~ is tapped"
+        );
         for untouched in [
             // Trailing words that belong to other parse paths.
             "it's attacking alone",
@@ -1733,6 +1933,11 @@ mod rewrite_self_pronoun_subject_tests {
             "it entered this turn and attacked",
             "it attacked this combat",
             "it attacked",
+            // The plural sticky-damage arm pairs "they" with "haven't" only and
+            // anchors its tail.
+            "they hasn't dealt combat damage yet",
+            "they haven't dealt damage yet this turn",
+            "they haven't been dealt damage yet",
             // Off-list predicates: characteristics, types, and the impersonal
             // "it's your turn" turn reference.
             "it's black",
@@ -1746,7 +1951,7 @@ mod rewrite_self_pronoun_subject_tests {
             "enchanted creature is tapped",
         ] {
             assert_eq!(
-                rewrite_self_pronoun_subject(untouched),
+                rewrite_self_pronoun_subject(untouched, PrintedSubject::SourceNamed),
                 untouched,
                 "{untouched:?} is outside the closed list and must pass through unchanged"
             );
@@ -1765,14 +1970,56 @@ mod rewrite_self_pronoun_subject_tests {
     #[test]
     fn rewrite_self_pronoun_it_attacked_this_turn() {
         assert_eq!(
-            rewrite_self_pronoun_subject("it attacked this turn"),
+            rewrite_self_pronoun_subject("it attacked this turn", PrintedSubject::SourceNamed),
             "~ attacked this turn"
         );
         for untouched in ["it attacked this combat", "it attacked"] {
             assert_eq!(
-                rewrite_self_pronoun_subject(untouched),
+                rewrite_self_pronoun_subject(untouched, PrintedSubject::SourceNamed),
                 untouched,
                 "{untouched:?} has no turn-scoped runtime fact and must stay unrewritten"
+            );
+        }
+    }
+
+    /// CR 611.3a: the plural "they haven't dealt … damage yet" arm is allowed only
+    /// when the host line's printed subject names the source; for any other
+    /// subject the condition passes through unchanged. The singular arms keep
+    /// their pre-existing behavior under `Other` (entry-point contract, not a
+    /// card reading).
+    #[test]
+    fn rewrite_self_pronoun_plural_arm_requires_source_named_subject() {
+        for (input, expected) in [
+            (
+                "they haven't dealt combat damage yet",
+                "~ hasn't dealt combat damage yet",
+            ),
+            (
+                "they haven't dealt noncombat damage yet",
+                "~ hasn't dealt noncombat damage yet",
+            ),
+            ("they haven't dealt damage yet", "~ hasn't dealt damage yet"),
+        ] {
+            assert_eq!(
+                rewrite_self_pronoun_subject(input, PrintedSubject::SourceNamed),
+                expected,
+                "{input:?}"
+            );
+            assert_eq!(
+                rewrite_self_pronoun_subject(input, PrintedSubject::Other),
+                input,
+                "{input:?} must not bind a non-source subject's `they` to the source"
+            );
+        }
+        // Legacy singular arms are untouched by the subject parameter.
+        for subject in [PrintedSubject::SourceNamed, PrintedSubject::Other] {
+            assert_eq!(
+                rewrite_self_pronoun_subject("it's tapped", subject),
+                "~ is tapped"
+            );
+            assert_eq!(
+                rewrite_self_pronoun_subject("it entered this turn", subject),
+                "~ entered this turn"
             );
         }
     }

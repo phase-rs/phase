@@ -61,7 +61,8 @@ fn demon_of_fates_design_offers_alt_cost_for_enchantment() {
     // The engine must surface an OptionalCostChoice with the PayLife alternative.
     match &runner.state().waiting_for {
         WaitingFor::OptionalCostChoice { cost, .. } => match cost {
-            AdditionalCost::Choice(alt, _printed) => {
+            AdditionalCost::Choice(costs) if !costs.is_empty() => {
+                let alt = &costs[0];
                 assert_eq!(
                     *alt,
                     AbilityCost::PayLife {
@@ -121,7 +122,7 @@ fn demon_of_fates_design_accept_alt_cost_pays_life() {
 
     // Accept the alternative cost.
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accepting the alternative cost should succeed");
 
     // Spell must be on the stack.

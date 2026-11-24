@@ -660,7 +660,7 @@ fn paid_group_survives_paused_kicker_declaration_and_target_selection() {
     ));
     let mut runner = persisted_roundtrip(runner.state());
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("pay kicker after restore");
     let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
         panic!("paid branch must request target selection");

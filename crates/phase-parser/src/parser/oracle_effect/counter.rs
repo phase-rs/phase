@@ -1,20 +1,21 @@
 use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until};
-use nom::character::complete::space1;
-use nom::combinator::{all_consuming, eof, opt, peek, value, verify};
+use nom::character::complete::{satisfy, space1};
+use nom::combinator::{all_consuming, eof, not, opt, peek, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
     ChosenCounterCountCondition, Comparator, CounterMoveSelection, CounterTransferMode,
-    DoublePTMode, DoubleTarget, Effect, EventCounterReproductionCount, FilterProp, MultiTargetSpec,
-    ObjectScope, QuantityExpr, QuantityRef, TargetFilter, XModification,
+    DoublePTMode, DoubleTarget, Effect, EffectScope, EventCounterReproductionCount, FilterProp,
+    MultiTargetSpec, ObjectScope, QuantityExpr, QuantityRef, TargetFilter, XModification,
 };
 use crate::types::counter::{parse_counter_type, CounterType};
 use crate::types::mana::ManaColor;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
+use super::super::oracle_nom::filter::parse_plural_core_type_noun;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_target::{
@@ -1080,6 +1081,7 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
             counter_type: ctx.counter_anaphor_kind.clone(),
             count: QuantityExpr::Fixed { value: -1 },
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
         });
     }
 
@@ -1174,13 +1176,173 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
         return None;
     }
 
-    let target = resolve_remove_counter_from_target(target_text, ctx);
+    // CR 115.10a + CR 608.2d: a recipient the text chooses ("a creature you
+    // control", "each of two creatures", "target permanent", "up to one ...")
+    // keeps today's single-scope reading, byte-identical.
+    let source = classify_removal_source(target_text);
+    let names_target = contains_target_word(target_text);
+    // CR 115.1 + CR 115.10a: a population that names a target inside it ("each
+    // creature target player controls") is a mass removal whose population is
+    // bound by a chosen target. Neither scope models that: the single scope would
+    // remove from one object, and the mass scope declares no target slot. Refuse
+    // it, so the clause stays an honest `Effect::unimplemented`.
+    if source == RemovalSource::Mass && names_target {
+        return None;
+    }
+    if source == RemovalSource::Chosen || names_target {
+        let target = resolve_remove_counter_from_target(target_text, ctx);
+        return Some(Effect::RemoveCounter {
+            counter_type,
+            count,
+            target,
+            scope: EffectScope::Single,
+        });
+    }
 
-    Some(Effect::RemoveCounter {
-        counter_type,
-        count,
-        target,
-    })
+    // Neither "each of"/"any number of" (both are `Chosen` leads) can reach this
+    // point, so the remove-specific distribution strips in
+    // `resolve_remove_counter_from_target` cannot apply; the shared recipient
+    // resolver keeps its anaphor guards and reports what it left unconsumed.
+    let (target, remainder) = resolve_counter_target_with_remainder(target_text, ctx);
+    // CR 301.5a + CR 303.4b: a population lead ("from all equipped creatures",
+    // "from each enchanted creature") names every creature an Equipment or Aura
+    // is attached to, not the source's one host. `EquippedBy` / `EnchantedBy`
+    // resolve against the source's own attachment when the source is attached
+    // (CR 301.5f / CR 303.4m), so neither scope models that population: refuse
+    // it, so the clause stays an honest `Effect::unimplemented`.
+    if source == RemovalSource::Mass && target.contains_source_attachment_host() {
+        return None;
+    }
+    // CR 608.2k + CR 201.5 + CR 303.4b: an anaphor ("from it", "from that
+    // creature"), a self-reference ("from ~") or the source's attachment host
+    // ("from enchanted creature") is bound by the resolver's context tiers,
+    // never a population.
+    if target.is_context_ref() || target.contains_source_attachment_host() {
+        return Some(Effect::RemoveCounter {
+            counter_type,
+            count,
+            target,
+            scope: EffectScope::Single,
+        });
+    }
+
+    match source {
+        RemovalSource::Mass
+            if mass_removal_is_admissible(&target, remainder, counter_type.as_ref(), &count) =>
+        {
+            Some(Effect::RemoveCounter {
+                counter_type,
+                count,
+                target,
+                scope: EffectScope::All,
+            })
+        }
+        // Fail closed: a population the gate cannot admit, or a recipient with no
+        // recognized determiner, stays an honest `Effect::unimplemented` through
+        // the caller's fall-through rather than a guessed scope.
+        RemovalSource::Mass | RemovalSource::Unclassified | RemovalSource::Chosen => None,
+    }
+}
+
+/// How a remove-counter "from <recipient>" phrase names its recipient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemovalSource {
+    /// CR 122.1 + CR 115.10a: every object of a described population ("all
+    /// permanents", "each creature you control", "permanents that player
+    /// controls").
+    Mass,
+    /// CR 115.10a + CR 608.2d: one chosen object or a chosen set ("a creature
+    /// you control", "each of two creatures", "target permanent", "up to one
+    /// ...", "among ...").
+    Chosen,
+    /// No recognized determiner or plural lead (anaphors and self-references
+    /// land here and are settled by the resolver's context tiers).
+    Unclassified,
+}
+
+/// CR 122.1 + CR 115.10a + CR 608.2d: classify the recipient phrase of a counter
+/// removal by its leading determiner. `Chosen` is tried first, so "each of ..."
+/// and "a ..." can never read as a population; the distributive determiners
+/// additionally refuse a following "of ". A determiner-less plural core-type noun
+/// ("permanents that player controls", "other creatures you control") is plural
+/// by grammar and therefore distributive, the same stance
+/// `recipient_is_singular_indefinite` takes for counter multiplication.
+fn parse_removal_source(input: &str) -> OracleResult<'_, RemovalSource> {
+    alt((
+        value(
+            RemovalSource::Chosen,
+            alt((
+                tag("each of "),
+                parse_singular_indefinite_determiner,
+                tag("up to "),
+                tag("among "),
+                tag("target "),
+            )),
+        ),
+        value(
+            RemovalSource::Mass,
+            terminated(
+                alt((tag("all "), tag("each "), tag("every "))),
+                not(tag("of ")),
+            ),
+        ),
+        value(
+            RemovalSource::Mass,
+            preceded(
+                opt(tag("other ")),
+                peek(terminated(
+                    parse_plural_core_type_noun,
+                    not(satisfy(char::is_alphanumeric)),
+                )),
+            ),
+        ),
+    ))
+    .parse(input)
+}
+
+fn classify_removal_source(text: &str) -> RemovalSource {
+    nom_on_lower(text, text, parse_removal_source)
+        .map_or(RemovalSource::Unclassified, |(source, _)| source)
+}
+
+/// CR 122.1 + CR 400.1 + CR 608.2h: may a mass counter removal be emitted for
+/// this population? All must hold, else the clause stays an honest
+/// `Effect::unimplemented`:
+///  * the phrase describes an enumerable population (not an anaphor and not a
+///    contentless filter the parser could not classify, such as "each player"
+///    or "each suspended card");
+///  * the population phrase was consumed whole: a dropped tail such as "and
+///    each suspended card" would silently halve the instruction;
+///  * the population is on the battlefield, the zone the resolver enumerates;
+///  * the count is "all" (`Fixed(-1)`, any kind) or a fixed positive number of a
+///    NAMED kind. An untyped finite count ("remove a counter from each
+///    creature") is a per-object choice of kind (CR 608.2d), and "up to" or a
+///    dynamic count are not modelled for a population.
+fn mass_removal_is_admissible(
+    target: &TargetFilter,
+    remainder: &str,
+    counter_type: Option<&CounterType>,
+    count: &QuantityExpr,
+) -> bool {
+    let count_is_supported = match count {
+        QuantityExpr::Fixed { value: -1 } => true,
+        QuantityExpr::Fixed { value } => *value > 0 && counter_type.is_some(),
+        QuantityExpr::Ref { .. }
+        | QuantityExpr::DivideRounded { .. }
+        | QuantityExpr::Offset { .. }
+        | QuantityExpr::ClampMin { .. }
+        | QuantityExpr::Multiply { .. }
+        | QuantityExpr::Sum { .. }
+        | QuantityExpr::UpTo { .. }
+        | QuantityExpr::Power { .. }
+        | QuantityExpr::Difference { .. }
+        | QuantityExpr::Max { .. } => false,
+    };
+    target.names_enumerable_population()
+        && !target.is_context_ref()
+        && remainder.trim().is_empty()
+        && recipient_zone_is_battlefield(target)
+        && count_is_supported
 }
 
 /// CR 115.1d + CR 122.1: Extract the fixed resolution-time selection in
@@ -1297,24 +1459,34 @@ fn resolve_remove_counter_from_target(text: &str, ctx: &mut ParseContext) -> Tar
 /// the "target" keyword only changes WHEN the recipient is chosen
 /// (CR 115.1 / CR 608.2d), which `lower::target_choice_timing_for_clause` owns.
 fn resolve_counter_target(text: &str, ctx: &mut ParseContext) -> TargetFilter {
+    resolve_counter_target_with_remainder(text, ctx).0
+}
+
+/// [`resolve_counter_target`] that also returns the text the recipient parse
+/// left unconsumed (empty for the anaphor and self-reference guards). The mass
+/// removal gate refuses a population whose phrase was not consumed whole.
+fn resolve_counter_target_with_remainder<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> (TargetFilter, &'a str) {
     if is_self_ref(text) {
-        return TargetFilter::SelfRef;
+        return (TargetFilter::SelfRef, "");
     }
     if is_it_pronoun(text) {
         // CR 608.2k: Bare pronoun — context-dependent.
-        return resolve_it_pronoun(ctx);
+        return (resolve_it_pronoun(ctx), "");
     }
     if super::super::oracle_target::resolve_demonstrative_target(text, ctx).is_some() {
         // CR 608.2k + CR 301.5a: Trigger-context "that creature" → triggering source.
-        return TargetFilter::TriggeringSource;
+        return (TargetFilter::TriggeringSource, "");
     }
     // CR 608.2c: the fallback reads only the caller's player antecedents, so a
     // "that player controls" suffix binds to the player the ability already
     // named. Object anaphors are settled by the guards above, never here.
-    let (t, _rem) = ctx.with_player_antecedents(|scoped| parse_target_with_ctx(text, scoped));
+    let (t, rem) = ctx.with_player_antecedents(|scoped| parse_target_with_ctx(text, scoped));
     #[cfg(debug_assertions)]
-    assert_no_compound_remainder(_rem, text);
-    t
+    assert_no_compound_remainder(rem, text);
+    (t, rem)
 }
 
 /// CR 122.8: Parse "put its counters on [target]" / "put those counters on
@@ -1522,15 +1694,21 @@ fn counter_recipient_is_resolvable(target: &TargetFilter) -> bool {
 /// only, so a zone-qualified recipient ("each creature in your graveyard")
 /// resolves to nothing there. Refuse it at the parser so the clause stays an
 /// honest `Effect::unimplemented` instead of lowering to an effect that silently
-/// does nothing. `None` means the filter imposes no zone constraint — the
-/// battlefield default — and is admissible. The resolver's gate carries the same
-/// conjunct as an independent second guard; widening this to a zone-aware
-/// enumeration must move BOTH.
+/// does nothing. Every zone the filter names must be the battlefield; naming
+/// none is the battlefield default and is admissible. The mass counter removal
+/// gate (`mass_removal_is_admissible`) applies the same test, since its resolver
+/// (`effects::resolved_battlefield_population_ids`) also enumerates only the
+/// battlefield. The multiplication resolver's gate carries the same
+/// conjunct as an independent second guard; the mass removal resolver relies on
+/// this parser gate alone. Widening this to a zone-aware enumeration must move
+/// every consumer.
 fn recipient_zone_is_battlefield(target: &TargetFilter) -> bool {
-    matches!(
-        target.extract_in_zone(),
-        None | Some(crate::types::zones::Zone::Battlefield)
-    )
+    // Every zone the filter names, not only the first `InZone` it finds: an
+    // `InAnyZone` set or a later disjunct can name another zone.
+    target
+        .population_zones()
+        .iter()
+        .all(|zone| *zone == crate::types::zones::Zone::Battlefield)
 }
 
 /// CR 115.10a + CR 608.2d + CR 701.10e: the single admissibility test both
@@ -1591,13 +1769,17 @@ fn counter_recipient_is_admissible(target: &TargetFilter, recipient_text: &str) 
 /// is matched with its trailing space, so none of them can match a longer word.
 fn recipient_is_singular_indefinite(text: &str) -> bool {
     nom_on_lower(text, text, |i| {
-        value(
-            (),
-            alt((tag("a "), tag("an "), tag("any "), tag("another "))),
-        )
-        .parse(i)
+        value((), parse_singular_indefinite_determiner).parse(i)
     })
     .is_some()
+}
+
+/// CR 608.2d: the singular indefinite determiners ("a", "an", "any",
+/// "another"), each with its trailing space so none can match a longer word.
+/// Shared by the counter-multiplication singularity test and the counter-removal
+/// population classifier.
+fn parse_singular_indefinite_determiner(input: &str) -> OracleResult<'_, &str> {
+    alt((tag("a "), tag("an "), tag("any "), tag("another "))).parse(input)
 }
 
 /// CR 701.10e: Parse "double the number of {type} counters on {target}".
@@ -3088,6 +3270,7 @@ mod tests {
             counter_type,
             count,
             target,
+            scope: crate::types::ability::EffectScope::Single,
         }) = result
         else {
             panic!("expected RemoveCounter, got {result:?}");
@@ -3154,6 +3337,7 @@ mod tests {
             counter_type,
             count,
             target,
+            scope: crate::types::ability::EffectScope::Single,
         }) = result
         else {
             panic!("expected RemoveCounter, got {result:?}");
@@ -3292,6 +3476,7 @@ mod tests {
                 counter_type,
                 count,
                 target,
+                scope: crate::types::ability::EffectScope::Single,
             }) = result
             else {
                 panic!("{input}: expected RemoveCounter, got {result:?}");
@@ -3324,6 +3509,7 @@ mod tests {
             counter_type,
             count,
             target,
+            scope: crate::types::ability::EffectScope::Single,
         }) = result
         else {
             panic!("expected RemoveCounter, got {result:?}");
@@ -4800,5 +4986,626 @@ mod tests {
             counter_anaphor_created_token_binding("each of them", &default_ctx()),
             None
         );
+    }
+
+    // ---- Mass counter removal (`Effect::RemoveCounter { scope }`, #9899) ----
+
+    /// Every `Effect` of `type` `kind` anywhere in a serialized parse, decoded
+    /// back to the typed `Effect`.
+    fn effects_of_kind(value: &serde_json::Value, kind: &str, out: &mut Vec<Effect>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.get("type").and_then(serde_json::Value::as_str) == Some(kind) {
+                    if let Ok(effect) = serde_json::from_value::<Effect>(value.clone()) {
+                        out.push(effect);
+                    }
+                }
+                map.values().for_each(|v| effects_of_kind(v, kind, out));
+            }
+            serde_json::Value::Array(items) => {
+                items.iter().for_each(|v| effects_of_kind(v, kind, out));
+            }
+            // Scalars nest no `Effect`.
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
+        }
+    }
+
+    fn parsed_effects_of_kind<T: serde::Serialize>(parsed: &T, kind: &str) -> Vec<Effect> {
+        let value = serde_json::to_value(parsed).expect("parse output serializes");
+        let mut out = Vec::new();
+        effects_of_kind(&value, kind, &mut out);
+        out
+    }
+
+    fn remove_counter(text: &str) -> Option<Effect> {
+        try_parse_remove_counter(text, &mut default_ctx())
+    }
+
+    fn scope_of(effect: &Effect) -> EffectScope {
+        match effect {
+            Effect::RemoveCounter { scope, .. } => *scope,
+            other => panic!("expected RemoveCounter, got {other:?}"),
+        }
+    }
+
+    /// CR 122.1 + CR 115.10a: the population classifier reads the leading
+    /// determiner of the "from <recipient>" phrase. Chosen leads win over the
+    /// distributive ones ("each of" never reads as "each"), and a bare plural
+    /// core-type noun is distributive only on a word boundary.
+    #[test]
+    fn removal_source_classifier_axes() {
+        use RemovalSource::{Chosen, Mass, Unclassified};
+        for (text, want) in [
+            ("all permanents", Mass),
+            ("each creature you control", Mass),
+            ("every land", Mass),
+            ("permanents that player controls", Mass),
+            ("other creatures you control", Mass),
+            ("lands", Mass),
+            ("each of two creatures you control", Chosen),
+            ("each of any number of sagas you control", Chosen),
+            ("a creature you control", Chosen),
+            ("an artifact", Chosen),
+            ("any number of artifacts", Chosen),
+            ("another creature", Chosen),
+            ("up to one target creature", Chosen),
+            ("among permanents you control", Chosen),
+            ("target permanent", Chosen),
+            ("all of them", Unclassified),
+            ("permanent you control", Unclassified),
+            ("permanentsx", Unclassified),
+            ("it", Unclassified),
+            ("~", Unclassified),
+            ("that creature", Unclassified),
+            ("elves you control", Unclassified),
+        ] {
+            assert_eq!(classify_removal_source(text), want, "{text}");
+        }
+    }
+
+    /// P1: Aether Snap's removal names no target: every counter of every kind
+    /// on every permanent, with no target slot.
+    #[test]
+    fn remove_all_counters_from_all_permanents_is_mass() {
+        let effect = remove_counter("remove all counters from all permanents")
+            .expect("mass removal must parse");
+        assert_eq!(
+            effect,
+            Effect::RemoveCounter {
+                counter_type: None,
+                count: QuantityExpr::Fixed { value: -1 },
+                target: TargetFilter::Typed(TypedFilter::permanent()),
+                scope: EffectScope::All,
+            }
+        );
+        assert!(effect.target_filter().is_none(), "no target slot");
+    }
+
+    /// P2-P4: typed "all" and typed finite per-object counts over `all`/`each`
+    /// populations.
+    #[test]
+    fn typed_mass_removals_keep_their_per_object_count() {
+        let gold = remove_counter("remove all gold counters from all creatures").unwrap();
+        assert_eq!(
+            gold,
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Generic("gold".to_string())),
+                count: QuantityExpr::Fixed { value: -1 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                scope: EffectScope::All,
+            }
+        );
+        let haze = remove_counter("remove two loyalty counters from each planeswalker").unwrap();
+        assert_eq!(
+            haze,
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Loyalty),
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+                scope: EffectScope::All,
+            }
+        );
+        let heartmender =
+            remove_counter("remove a -1/-1 counter from each creature you control").unwrap();
+        assert_eq!(
+            heartmender,
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Minus1Minus1),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                scope: EffectScope::All,
+            }
+        );
+        for effect in [gold, haze, heartmender] {
+            assert!(effect.target_filter().is_none(), "{effect:?}");
+        }
+    }
+
+    /// P7: the bare-plural arm composes the optional "other " axis, which
+    /// carries `FilterProp::Another` into the population.
+    #[test]
+    fn bare_plural_other_population_is_mass_with_another() {
+        let effect = remove_counter("remove all counters from other creatures you control")
+            .expect("bare plural mass removal must parse");
+        let Effect::RemoveCounter {
+            target: TargetFilter::Typed(filter),
+            scope: EffectScope::All,
+            ..
+        } = &effect
+        else {
+            panic!("expected mass removal, got {effect:?}");
+        };
+        assert!(
+            filter.properties.contains(&FilterProp::Another),
+            "{filter:?}"
+        );
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+    }
+
+    /// P6 + N4 + N6: a recipient the text chooses stays single-scope, exactly
+    /// as before (CR 115.10a: "target"; CR 608.2d: "a"/"any number of"/"from
+    /// among" choices).
+    #[test]
+    fn chosen_recipients_stay_single_scope() {
+        for text in [
+            "remove a counter from a permanent you control",
+            "remove a counter from target creature",
+            "remove all counters from target permanent",
+            "remove all counters from any number of artifacts",
+            "remove three quest counters from among permanents you control",
+            "remove a lore counter from each of any number of sagas you control",
+            "remove a +1/+1 counter from each of two creatures you control",
+        ] {
+            let effect = remove_counter(text).unwrap_or_else(|| panic!("{text}: must parse"));
+            assert_eq!(scope_of(&effect), EffectScope::Single, "{text}");
+        }
+        // Reach guard: the same function admits the distributive form.
+        let mass = remove_counter("remove a counter from each permanent you control");
+        assert!(mass.is_none(), "untyped finite mass is refused: {mass:?}");
+        let typed = remove_counter("remove a time counter from each permanent you control")
+            .expect("typed finite mass parses");
+        assert_eq!(scope_of(&typed), EffectScope::All);
+    }
+
+    /// N3: anaphors and self references stay single-scope context references.
+    #[test]
+    fn anaphoric_recipients_stay_single_scope() {
+        for text in [
+            "remove all counters from it",
+            "remove a +1/+1 counter from ~",
+            "remove those counters",
+        ] {
+            let effect = remove_counter(text).unwrap_or_else(|| panic!("{text}: must parse"));
+            assert_eq!(scope_of(&effect), EffectScope::Single, "{text}");
+        }
+    }
+
+    /// CR 301.5a + CR 303.4b: a population lead over attachment hosts ("all
+    /// equipped creatures") names every equipped creature, not the source's one
+    /// host, so it must not collapse to a single attachment-host removal. It is
+    /// refused (honest `Unimplemented`); the bare "enchanted creature" recipient
+    /// still names the source's host as a single removal.
+    #[test]
+    fn mass_attachment_host_population_is_refused_not_single() {
+        for (text, recipient) in [
+            (
+                "remove all counters from all equipped creatures",
+                "all equipped creatures",
+            ),
+            (
+                "remove a +1/+1 counter from each enchanted creature",
+                "each enchanted creature",
+            ),
+        ] {
+            assert_eq!(
+                classify_removal_source(recipient),
+                RemovalSource::Mass,
+                "REACH-GUARD: {recipient} classifies as a population"
+            );
+            let (target, remainder) =
+                resolve_counter_target_with_remainder(recipient, &mut default_ctx());
+            assert!(
+                target.contains_source_attachment_host() && remainder.trim().is_empty(),
+                "REACH-GUARD: {recipient} resolves to an attachment host: {target:?} / {remainder:?}"
+            );
+            assert_eq!(remove_counter(text), None, "{text}");
+
+            let clause = format!("{}{}.", text[..1].to_uppercase(), &text[1..]);
+            let refused = super::super::parse_effect_chain(
+                &clause,
+                crate::types::ability::AbilityKind::Spell,
+            );
+            assert!(
+                parsed_effects_of_kind(&refused, "RemoveCounter").is_empty(),
+                "{clause}: no RemoveCounter may be emitted, got {refused:#?}"
+            );
+            assert_gap_names_clause(&parsed_effects_of_kind(&refused, "Unimplemented"), text);
+        }
+
+        // Control: the source's own host stays a single removal.
+        assert_eq!(
+            remove_counter("remove a +1/+1 counter from enchanted creature"),
+            Some(Effect::RemoveCounter {
+                counter_type: Some(CounterType::Plus1Plus1),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
+                ),
+                scope: EffectScope::Single,
+            })
+        );
+    }
+
+    /// N5 + positive pairs (T-8): every refusal comes from the mass gate, not
+    /// from an earlier parse failure. Each refused clause lowers to an honest
+    /// `Effect::Unimplemented` through the imperative fall-through; its paired
+    /// clause, differing only on the refused axis, parses as a mass removal.
+    #[test]
+    fn mass_gate_refusals_are_honest_and_paired() {
+        for (refused, admitted) in [
+            // Untyped finite count: a per-object choice of kind (CR 608.2d).
+            (
+                "Remove a counter from each creature you control.",
+                "Remove a -1/-1 counter from each creature you control.",
+            ),
+            // Player population (Raiders' Allegiance): not an object population.
+            (
+                "Remove all point counters from each player.",
+                "Remove all point counters from each creature.",
+            ),
+            // Exile-zone population (Talon Gates): contentless "each suspended card".
+            (
+                "Remove two time counters from each suspended card you own.",
+                "Remove two time counters from each permanent.",
+            ),
+            // F1 (Dust of Moments mode 1): the population phrase is not consumed
+            // whole, so the suspended-card half would be dropped silently.
+            (
+                "Remove two time counters from each permanent and each suspended card.",
+                "Remove two time counters from each permanent.",
+            ),
+            // Non-battlefield zone (Alaundo the Seer).
+            (
+                "Remove a time counter from each other card you own in exile.",
+                "Remove a time counter from each other creature you control.",
+            ),
+        ] {
+            let refused_def = super::super::parse_effect_chain(
+                refused,
+                crate::types::ability::AbilityKind::Spell,
+            );
+            assert!(
+                parsed_effects_of_kind(&refused_def, "RemoveCounter").is_empty(),
+                "{refused}: no RemoveCounter may be emitted, got {refused_def:#?}"
+            );
+            assert!(
+                matches!(*refused_def.effect, Effect::Unimplemented { .. }),
+                "{refused}: honest Unimplemented, got {refused_def:#?}"
+            );
+            assert_gap_names_clause(
+                std::slice::from_ref(&*refused_def.effect),
+                refused.trim_end_matches('.'),
+            );
+
+            let admitted_def = super::super::parse_effect_chain(
+                admitted,
+                crate::types::ability::AbilityKind::Spell,
+            );
+            assert_eq!(
+                scope_of(&admitted_def.effect),
+                EffectScope::All,
+                "{admitted}: {admitted_def:#?}"
+            );
+            assert!(admitted_def.effect.target_filter().is_none(), "{admitted}");
+        }
+        // The Alaundo pair's admitted half keeps "other" as `Another`.
+        let other = super::super::parse_effect_chain(
+            "Remove a time counter from each other creature you control.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        let Effect::RemoveCounter {
+            target: TargetFilter::Typed(filter),
+            ..
+        } = &*other.effect
+        else {
+            panic!("expected RemoveCounter, got {other:#?}");
+        };
+        assert!(filter.properties.contains(&FilterProp::Another));
+    }
+
+    /// The unimplemented gap a refused clause lowers to carries that clause's own
+    /// text, so the assertion is bound to the refusal and not to some other gap.
+    fn assert_gap_names_clause(effects: &[Effect], clause: &str) {
+        let clause = clause.to_lowercase();
+        assert!(
+            effects.iter().any(|effect| effect
+                .unimplemented_description()
+                .is_some_and(|text| text.to_lowercase().contains(&clause))),
+            "no Unimplemented gap carries {clause:?}: {effects:#?}"
+        );
+    }
+
+    /// CR 115.1 + CR 115.10a: a mass population with a target inside it ("each
+    /// creature target player controls") is neither a single removal nor a
+    /// target-free mass removal, so it is refused. The paired "you control" form
+    /// reaches the same branch and is admitted.
+    #[test]
+    fn mass_population_naming_a_target_is_refused() {
+        let text = "remove all counters from each creature target player controls";
+        let recipient = "each creature target player controls";
+        assert_eq!(
+            classify_removal_source(recipient),
+            RemovalSource::Mass,
+            "REACH-GUARD: the recipient classifies as a population"
+        );
+        assert!(contains_target_word(recipient), "REACH-GUARD");
+        assert!(remove_counter(text).is_none(), "{:?}", remove_counter(text));
+
+        let refused = super::super::parse_effect_chain(
+            "Remove all counters from each creature target player controls.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        assert!(
+            parsed_effects_of_kind(&refused, "RemoveCounter").is_empty(),
+            "{refused:#?}"
+        );
+        assert_gap_names_clause(
+            &parsed_effects_of_kind(&refused, "Unimplemented"),
+            "remove all counters from each creature target player controls",
+        );
+
+        let admitted = remove_counter("remove all counters from each creature you control")
+            .expect("the paired population parses");
+        assert_eq!(scope_of(&admitted), EffectScope::All);
+    }
+
+    /// CR 400.1: the mass gate checks every zone the population names. A
+    /// population over two non-battlefield zones reaches the gate (enumerable,
+    /// consumed whole) and is refused; the battlefield form is admitted.
+    #[test]
+    fn mass_population_naming_other_zones_is_refused() {
+        let recipient = "all creature cards in your graveyard or in your hand";
+        let (target, remainder) =
+            resolve_counter_target_with_remainder(recipient, &mut default_ctx());
+        assert!(
+            target.names_enumerable_population() && remainder.trim().is_empty(),
+            "REACH-GUARD: the population reaches the zone conjunct: {target:?} / {remainder:?}"
+        );
+        assert!(
+            target
+                .population_zones()
+                .iter()
+                .any(|zone| *zone != crate::types::zones::Zone::Battlefield),
+            "{target:?}"
+        );
+        // The single-zone reader sees no zone here (the zones sit in an
+        // `InAnyZone` set), so a gate built on it would have admitted the phrase.
+        assert_eq!(target.extract_in_zone(), None, "{target:?}");
+        assert!(!recipient_zone_is_battlefield(&target), "{target:?}");
+        let text = format!("remove all counters from {recipient}");
+        assert!(
+            remove_counter(&text).is_none(),
+            "{:?}",
+            remove_counter(&text)
+        );
+
+        // A filter whose first zone is the battlefield and whose `InAnyZone`
+        // adds another is refused too: no single zone stands for the set.
+        let mixed = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::InZone {
+                zone: crate::types::zones::Zone::Battlefield,
+            },
+            FilterProp::InAnyZone {
+                zones: vec![
+                    crate::types::zones::Zone::Battlefield,
+                    crate::types::zones::Zone::Graveyard,
+                ],
+            },
+        ]));
+        assert!(!recipient_zone_is_battlefield(&mixed));
+        assert!(!mass_removal_is_admissible(
+            &mixed,
+            "",
+            None,
+            &QuantityExpr::Fixed { value: -1 }
+        ));
+        assert!(recipient_zone_is_battlefield(&TargetFilter::Typed(
+            TypedFilter::creature()
+        )));
+        let admitted = remove_counter("remove all counters from all creatures")
+            .expect("the battlefield population parses");
+        assert_eq!(scope_of(&admitted), EffectScope::All);
+    }
+
+    /// N2: Sensational Spider-Man's "up to three ... from among all permanents"
+    /// is still refused by the multi-source "from among" rule, not reclassified.
+    #[test]
+    fn up_to_from_among_stays_refused() {
+        let text = "remove up to three stun counters from among all permanents";
+        assert!(remove_counter(text).is_none());
+        // Reach guard: the same count and kind parse against a single target.
+        let single = remove_counter("remove up to three stun counters from target permanent")
+            .expect("single up-to removal parses");
+        assert_eq!(scope_of(&single), EffectScope::Single);
+    }
+
+    /// Whole-card parses of the printed mass-removal class (Oracle text
+    /// verbatim from MTGJSON): every `RemoveCounter` the card produces is a
+    /// mass removal with no target slot, and none is a parse gap.
+    #[test]
+    fn printed_mass_removal_class_parses_to_scope_all() {
+        use crate::parser::oracle::parse_oracle_text;
+        let s = |v: &[&str]| v.iter().map(|x| (*x).to_string()).collect::<Vec<_>>();
+        for (name, oracle, types, subtypes) in [
+            (
+                "Aether Snap",
+                "Remove all counters from all permanents and exile all tokens.",
+                s(&["Sorcery"]),
+                s(&[]),
+            ),
+            (
+                "Aurification",
+                "Whenever a creature deals damage to you, put a gold counter on it.\nEach creature with a gold counter on it is a Wall in addition to its other creature types and has defender. (Those creatures can't attack.)\nWhen this enchantment leaves the battlefield, remove all gold counters from all creatures.",
+                s(&["Enchantment"]),
+                s(&[]),
+            ),
+            (
+                "Mine Layer",
+                "{1}{R}, {T}: Put a mine counter on target land.\nWhenever a land with a mine counter on it becomes tapped, destroy it.\nWhen this creature leaves the battlefield, remove all mine counters from all lands.",
+                s(&["Creature"]),
+                s(&["Dwarf"]),
+            ),
+            (
+                "Oblivion Stone",
+                "{4}, {T}: Put a fate counter on target permanent.\n{5}, {T}, Sacrifice this artifact: Destroy each nonland permanent without a fate counter on it, then remove all fate counters from all permanents.",
+                s(&["Artifact"]),
+                s(&[]),
+            ),
+            (
+                "Sporogenesis",
+                "At the beginning of your upkeep, you may put a fungus counter on target nontoken creature.\nWhenever a creature with a fungus counter on it dies, create a 1/1 green Saproling creature token for each fungus counter on that creature.\nWhen this enchantment leaves the battlefield, remove all fungus counters from all creatures.",
+                s(&["Enchantment"]),
+                s(&[]),
+            ),
+            (
+                "Heartmender",
+                "At the beginning of your upkeep, remove a -1/-1 counter from each creature you control.\nPersist (When this creature dies, if it had no -1/-1 counters on it, return it to the battlefield under its owner's control with a -1/-1 counter on it.)",
+                s(&["Creature"]),
+                s(&["Elemental"]),
+            ),
+            (
+                "Temporal Distortion",
+                "Whenever a creature or land becomes tapped, put an hourglass counter on it.\nEach permanent with an hourglass counter on it doesn't untap during its controller's untap step.\nAt the beginning of each player's upkeep, remove all hourglass counters from permanents that player controls.",
+                s(&["Enchantment"]),
+                s(&[]),
+            ),
+            (
+                "Corrosion",
+                "Cumulative upkeep {1} (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)\nAt the beginning of your upkeep, put a rust counter on each artifact target opponent controls. Then destroy each artifact with mana value less than or equal to the number of rust counters on it. Artifacts destroyed this way can't be regenerated.\nWhen this enchantment leaves the battlefield, remove all rust counters from all permanents.",
+                s(&["Enchantment"]),
+                s(&[]),
+            ),
+            (
+                "Norn's Dominion",
+                "When you planeswalk away from Norn's Dominion, destroy each nonland permanent without a fate counter on it, then remove all fate counters from all permanents.\nWhenever chaos ensues, you may put a fate counter on target permanent.",
+                s(&["Plane"]),
+                s(&["New Phyrexia"]),
+            ),
+            (
+                "Fraying Line",
+                "When this artifact enters, put a rope counter on target creature you control.\nAt the beginning of each player's upkeep, that player may pay {2}. If they do, they put a rope counter on a creature they control. Otherwise, exile this artifact and each creature without a rope counter on it, then remove all rope counters from all creatures.",
+                s(&["Artifact"]),
+                s(&[]),
+            ),
+            (
+                "The Windy City",
+                "When you planeswalk here and at the beginning of your upkeep, put a flying counter on target nontoken creature you control without flying.\nWhenever chaos ensues, exile target creature with flying. For as long as it remains exiled, its owner may cast it by paying {2} rather than paying its mana cost.\nWhen you planeswalk away from The Windy City, remove all flying counters from all creatures.",
+                s(&["Plane"]),
+                s(&["Chicago"]),
+            ),
+            (
+                "Pestilent Haze",
+                "Choose one \u{2014}\n\u{2022} All creatures get -2/-2 until end of turn.\n\u{2022} Remove two loyalty counters from each planeswalker.",
+                s(&["Sorcery"]),
+                s(&[]),
+            ),
+        ] {
+            let keywords = if name == "Heartmender" {
+                vec!["Persist".to_string()]
+            } else {
+                vec![]
+            };
+            let parsed = parse_oracle_text(oracle, name, &keywords, &types, &subtypes);
+            let removals = parsed_effects_of_kind(&parsed, "RemoveCounter");
+            // Corrosion's cumulative upkeep is a keyword cost, not a RemoveCounter
+            // effect; every card here prints exactly one removal clause.
+            assert_eq!(removals.len(), 1, "{name}: {parsed:#?}");
+            assert_eq!(scope_of(&removals[0]), EffectScope::All, "{name}");
+            assert!(removals[0].target_filter().is_none(), "{name}");
+        }
+    }
+
+    /// P5 (B1): Temporal Distortion's bare plural binds "that player" to the
+    /// upkeep player through the trigger's player antecedent.
+    #[test]
+    fn temporal_distortion_population_binds_the_upkeep_player() {
+        use crate::parser::oracle::parse_oracle_text;
+        let parsed = parse_oracle_text(
+            "Whenever a creature or land becomes tapped, put an hourglass counter on it.\nEach permanent with an hourglass counter on it doesn't untap during its controller's untap step.\nAt the beginning of each player's upkeep, remove all hourglass counters from permanents that player controls.",
+            "Temporal Distortion",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let removals = parsed_effects_of_kind(&parsed, "RemoveCounter");
+        let [Effect::RemoveCounter {
+            counter_type,
+            count,
+            target: TargetFilter::Typed(filter),
+            scope,
+        }] = removals.as_slice()
+        else {
+            panic!("expected one typed RemoveCounter, got {removals:#?}");
+        };
+        assert_eq!(*scope, EffectScope::All);
+        assert_eq!(
+            *counter_type,
+            Some(CounterType::Generic("hourglass".into()))
+        );
+        assert_eq!(*count, QuantityExpr::Fixed { value: -1 });
+        assert_eq!(filter.type_filters, vec![TypeFilter::Permanent]);
+        assert_eq!(filter.controller, Some(ControllerRef::ScopedPlayer));
+    }
+
+    /// Dust of Moments mode 1 and Talon Gates' clause no longer emit a
+    /// RemoveCounter (F1 remainder rule / contentless exile population).
+    #[test]
+    fn printed_exile_population_removals_are_refused() {
+        use crate::parser::oracle::parse_oracle_text;
+        for (name, oracle, types, clause) in [
+            (
+                "Dust of Moments",
+                "Choose one \u{2014}\n\u{2022} Remove two time counters from each permanent and each suspended card.\n\u{2022} Put two time counters on each permanent with a time counter on it and each suspended card.",
+                vec!["Instant".to_string()],
+                "remove two time counters from each permanent and each suspended card",
+            ),
+            (
+                "Talon Gates",
+                "Any time you could cast a sorcery, you may exile a nonland card from your hand with X time counters on it, where X is its mana value. If the exiled card doesn't have suspend, it gains suspend. (At the beginning of its owner's upkeep, they remove a time counter. When the last is removed, the player may cast it without paying its mana cost. If it's a creature, it has haste.)\nWhenever chaos ensues, remove two time counters from each suspended card you own.",
+                vec!["Plane".to_string()],
+                "remove two time counters from each suspended card you own",
+            ),
+        ] {
+            let parsed = parse_oracle_text(oracle, name, &[], &types, &[]);
+            let removals = parsed_effects_of_kind(&parsed, "RemoveCounter");
+            assert!(removals.is_empty(), "{name}: {removals:#?}");
+            // The refused clause itself is the honest gap, not another clause.
+            assert_gap_names_clause(&parsed_effects_of_kind(&parsed, "Unimplemented"), clause);
+        }
+    }
+
+    /// R10: serde. A pre-scope payload reads as `Single`; `Single` serializes
+    /// with no `scope` key (byte-identical payloads); `All` round-trips.
+    #[test]
+    fn remove_counter_scope_serde() {
+        let legacy = serde_json::json!({
+            "type": "RemoveCounter",
+            "counter_type": null,
+            "count": { "type": "Fixed", "value": -1 },
+            "target": { "type": "SelfRef" }
+        });
+        let effect: Effect = serde_json::from_value(legacy).expect("legacy payload");
+        assert_eq!(scope_of(&effect), EffectScope::Single);
+        let single = serde_json::to_value(&effect).unwrap();
+        assert!(single.get("scope").is_none(), "{single}");
+
+        let mass = remove_counter("remove all counters from all permanents").unwrap();
+        let json = serde_json::to_value(&mass).unwrap();
+        assert_eq!(json["scope"], serde_json::json!({ "type": "All" }));
+        let back: Effect = serde_json::from_value(json).unwrap();
+        assert_eq!(back, mass);
     }
 }

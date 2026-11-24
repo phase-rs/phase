@@ -26,7 +26,8 @@
   "home": {
     "resume": {
       "title": "Wznów grę",
-      "description": "Kontynuuj ostatnio zapisany pojedynek od bieżącej tury i stanu pola gry."
+      "description": "Kontynuuj ostatnio zapisany pojedynek od bieżącej tury i stanu pola gry.",
+      "viewResult": "Zobacz wynik"
     },
     "setup": {
       "title": "Graj z AI",
@@ -157,6 +158,7 @@
     "subscribe": "Subskrybuj",
     "unsubscribe": "Anuluj subskrypcję",
     "lastRefreshed": "Ostatnio odświeżono: {{date}}",
+    "dataProvidedBy": "Dane udostępnione przez",
     "addCustomFeed": "Dodaj własny kanał",
     "add": "Dodaj",
     "offlineUnavailable": "Aktualizacje kanałów są niedostępne offline.",

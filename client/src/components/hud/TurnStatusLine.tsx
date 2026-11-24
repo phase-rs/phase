@@ -18,8 +18,11 @@ import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
  * `canIActNow` (spectator- and turn-control-safe), never by a raw seat compare,
  * so spectators and Mindslaver-controlled turns get correct copy. Rendered as
  * an `aria-live` status region so the changing state is announced.
+ *
+ * `compact` (short landscape screens) shows only a colored dot and the name of
+ * whoever holds the decision, so the action rail fits beside the player HUD.
  */
-export function TurnStatusLine() {
+export function TurnStatusLine({ compact = false }: { compact?: boolean } = {}) {
   const { t } = useTranslation("game");
   const { waitingSeatId, canIActNow, reason } = useTurnStatus();
   // Hook must run unconditionally (before the early return). Resolves NEUTRAL
@@ -62,33 +65,52 @@ export function TurnStatusLine() {
     ? "border-emerald-300/50 bg-emerald-400 text-emerald-950"
     : "border-white/20 bg-slate-900/95";
 
+  const statusSentence = canIActNow ? (
+    t("status.yourPriority")
+  ) : (
+    <Trans
+      t={t}
+      i18nKey="status.waitingFor"
+      values={{ player: getOpponentDisplayName(waitingSeatId) }}
+      components={{ player: <span style={{ color: waitingSeatColor }} /> }}
+    />
+  );
+
   return (
     <div
       role="status"
       aria-live="polite"
-      className={`group relative flex max-w-[min(22rem,calc(100vw-1.25rem))] items-center rounded-[8px] border px-2.5 py-1 text-[11px] font-medium tracking-wide shadow-[0_8px_20px_rgba(15,23,42,0.38)] ${tone} ${turnBorderClass} ${attentionClass} [@media(max-height:500px)]:px-2 [@media(max-height:500px)]:py-0.5 [@media(max-height:500px)]:text-[10px]`}
+      className={`group relative flex max-w-[min(22rem,calc(100vw-1.25rem))] items-center rounded-[8px] border px-2.5 py-1 text-[11px] font-medium tracking-wide shadow-[0_8px_20px_rgba(15,23,42,0.38)] ${compact ? "gap-1" : ""} ${tone} ${turnBorderClass} ${attentionClass} [@media(max-height:500px)]:px-2 [@media(max-height:500px)]:py-0.5 [@media(max-height:500px)]:text-[10px]`}
     >
-      <span
-        aria-hidden
-        className={`pointer-events-none absolute -left-1 -top-1 z-10 flex h-4 w-4 items-center justify-center rounded-[5px] border shadow-[0_2px_6px_rgba(0,0,0,0.45)] ${badgeTone}`}
-        style={canIActNow ? undefined : { color: waitingSeatColor, borderColor: `${waitingSeatColor}99` }}
-      >
-        <ReasonIcon reasonId={reason?.id} />
-      </span>
-      <span className="truncate">
-        {canIActNow ? (
-          t("status.yourPriority")
-        ) : (
-          <Trans
-            t={t}
-            i18nKey="status.waitingFor"
-            values={{ player: getOpponentDisplayName(waitingSeatId) }}
-            components={{ player: <span style={{ color: waitingSeatColor }} /> }}
+      {compact ? (
+        // The dot and the name replace the corner badge and the sentence on
+        // screen; the sentence stays as screen-reader text so the live region
+        // still announces the whole status.
+        <>
+          <span
+            aria-hidden
+            className={`h-1.5 w-1.5 shrink-0 rounded-full ${canIActNow ? "bg-emerald-400" : ""}`}
+            style={canIActNow ? undefined : { backgroundColor: waitingSeatColor }}
           />
-        )}
-      </span>
+          <span aria-hidden className="truncate">
+            {canIActNow ? t("player.you") : getOpponentDisplayName(waitingSeatId)}
+          </span>
+          <span className="sr-only">{statusSentence}</span>
+        </>
+      ) : (
+        <>
+          <span
+            aria-hidden
+            className={`pointer-events-none absolute -left-1 -top-1 z-10 flex h-4 w-4 items-center justify-center rounded-[5px] border shadow-[0_2px_6px_rgba(0,0,0,0.45)] ${badgeTone}`}
+            style={canIActNow ? undefined : { color: waitingSeatColor, borderColor: `${waitingSeatColor}99` }}
+          >
+            <ReasonIcon reasonId={reason?.id} />
+          </span>
+          <span className="truncate">{statusSentence}</span>
+        </>
+      )}
       {reasonText && (
-        <GameplayTooltip className="w-56">
+        <GameplayTooltip className="w-56" touch="toggle">
           {canIActNow ? (
             t("status.yourPriorityReason", { reason: reasonText })
           ) : (
