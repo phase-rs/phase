@@ -34,7 +34,7 @@
     "@tauri-apps/plugin-updater": "^2.10.0",
     "fflate": "^0.8.2",
     "framer-motion": "^12.35.1",
-    "i18next": "^26.2.0",
+    "i18next": "^26.3.4",
     "idb": "^8.0.3",
     "idb-keyval": "^6.2.2",
     "mana-font": "^1.18.0",
