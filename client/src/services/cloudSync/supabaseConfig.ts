@@ -31,15 +31,22 @@ export interface SupabaseConfig {
   readonly anonKey: string;
 }
 
+/**
+ * The project the build-time defines name. It is the fallback for
+ * `SUPABASE_CONFIG`, and the project that any cloud-sync state written before
+ * runtime configuration existed belongs to.
+ */
+export const BUILD_TIME_SUPABASE_CONFIG: SupabaseConfig = {
+  url: typeof __SUPABASE_URL__ !== "undefined" ? __SUPABASE_URL__ : "",
+  anonKey:
+    typeof __SUPABASE_ANON_KEY__ !== "undefined" ? __SUPABASE_ANON_KEY__ : "",
+};
+
 function resolveSupabaseConfig(): SupabaseConfig {
   const url = runtimeConfigValue("supabaseUrl", isOpenableExternalUrl);
   const anonKey = runtimeConfigValue("supabaseAnonKey", () => true);
   if (url !== null && anonKey !== null) return { url, anonKey };
-  return {
-    url: typeof __SUPABASE_URL__ !== "undefined" ? __SUPABASE_URL__ : "",
-    anonKey:
-      typeof __SUPABASE_ANON_KEY__ !== "undefined" ? __SUPABASE_ANON_KEY__ : "",
-  };
+  return BUILD_TIME_SUPABASE_CONFIG;
 }
 
 export const SUPABASE_CONFIG: SupabaseConfig = resolveSupabaseConfig();
