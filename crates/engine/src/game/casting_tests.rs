@@ -5339,6 +5339,7 @@ fn granted_freerunning_static_surfaces_freerunning_variant() {
             ],
         };
         let def = StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::CastWithKeyword {
                 keyword: granted_kw,
             },
@@ -14617,6 +14618,7 @@ fn x_cost_max_accounts_for_granted_affinity_exceeding_fixed_generic() {
                 properties: vec![],
             });
             obj.static_definitions = vec![StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::CastWithKeyword { keyword: granted },
                 affected: Some(affected),
                 modifications: vec![],
@@ -17465,6 +17467,7 @@ fn witherbloom_grants_affinity_to_instant_and_sorcery_spells() {
             properties: vec![],
         });
         let def = StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::CastWithKeyword {
                 keyword: granted_kw,
             },
@@ -17569,6 +17572,7 @@ fn add_witherbloom_affinity_source(state: &mut GameState, player: PlayerId) -> O
         obj.card_types.core_types.push(CoreType::Creature);
         obj.card_types.supertypes.push(Supertype::Legendary);
         obj.static_definitions = vec![StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::CastWithKeyword {
                 keyword: Keyword::Affinity(TypedFilter {
                     type_filters: vec![TypeFilter::Creature],

@@ -229,6 +229,7 @@ mod census_release_batch_5;
 mod census_release_batch_6;
 mod census_release_batch_7;
 mod census_release_batch_8;
+mod census_release_next_cast;
 mod chain_of_smog_copy;
 mod chain_root_target_suspension;
 mod chains_of_mephistopheles_discard_draw_or_mill;

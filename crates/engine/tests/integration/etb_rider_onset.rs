@@ -15,6 +15,10 @@
 //! negative assertion is paired with a positive reach guard in the same test.
 //!
 //! REVERT DISCRIMINATORS:
+//! - Removing the token-static fold's onset gate makes Chandra's copy gain haste and
+//!   makes Soul Warden see Vv'viza's Lander enter as a creature.
+//! - Binding the attacking player as a seat leg makes Soul Warden see the Lander, draws
+//!   two cards for the attacking Ogre's Rats, and leaves Iron Man's Treasure entry held.
 //! - Restoring the kind classifier in `effects::resolved_chain_may_apply_with_entry`
 //!   (`GenericEffect | Animate | ReturnAsAura | ApplyPerpetual` defers whatever its verb) makes
 //!   the "gains/gets/becomes" rows fail: Macabre Mockery and Kardur draw 1, Hunting Wilds draws
@@ -34,6 +38,7 @@
 //!   makes R1 fail. Making the record field required fails U6's transport decode; making its
 //!   absent-on-wire default `Recorded` fails U6's refusal.
 
+use engine::game::combat::AttackTarget;
 use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityDefinition, ContinuousEffectOnset, Effect, ResolvedAbility, SubAbilityLink, TargetRef,
@@ -41,14 +46,16 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{
     AbilityOnsetRecord, GameState, PersistedGameState, PersistedRestoreFinalization, WaitingFor,
     ABILITY_ONSET_RECORD_FIELD,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::resolution::ResolutionFrame;
 use engine::types::zones::Zone;
 
@@ -1155,4 +1162,442 @@ fn u6_record_less_transport_payload_stays_unrecorded_until_persisted_admission()
         "the record travels with the state"
     );
     assert_onset_refusal(restore(persisted), "transported then persisted");
+}
+
+const IRON_MAN: &str = "Flying, haste\nGenius Industrialist — Whenever Iron Man attacks, create a Treasure token, then you may sacrifice a noncreature artifact. If you do, search your library for an artifact card with mana value equal to 1 plus the sacrificed artifact's mana value, put it onto the battlefield tapped, then shuffle.";
+const FIREWEAVER: &str =
+    "Whenever an artifact you control enters, this creature deals 1 damage to each opponent.";
+const SOL_RING: &str = "{T}: Add {C}{C}.";
+const OVERSEER: &str = "Flying, Vigilance\nWhen Vv'viza enters, conjure a card of your choice from the Planets Spellbook onto the battlefield.\nWhenever you attack, create a Lander token. It becomes a 2/1 artifact creature and gains flying.";
+const CHANDRA: &str = "[0]: Put a loyalty counter on each red planeswalker you control.\n[0]: Create two 1/1 red Elemental creature tokens. They gain haste. Sacrifice them at the beginning of the next end step.\n[−2]: You may cast target instant or sorcery card with mana value 3 or less from your graveyard. If that spell would be put into your graveyard, exile it instead.";
+const QUASIDUPLICATE: &str = "Create a token that's a copy of target creature you control.\nJump-start (You may cast this card from your graveyard by discarding a card in addition to paying its other costs. Then exile this card.)";
+const OGRE_CHITTERLORD: &str = "Menace\nWhenever this creature enters or attacks, create two 1/1 black Rat creature tokens with \"This token can't block.\" Then if you control five or more Rats, each Rat you control gets +2/+0 until end of turn.";
+const EXCAVA: &str = "Flying, haste\nWhenever Excava attacks, return up to one target artifact, creature, or non-Aura enchantment card with mana value 3 or less from your graveyard to the battlefield with a finality counter on it. It's a 1/1 Spirit creature with flying in addition to its other types. (If a creature with a finality counter on it would die, exile it instead.)";
+const DUODRONE: &str = "Whenever this creature attacks, each player creates a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")";
+const ARCHELOS: &str = "As long as Archelos is tapped, other permanents enter tapped.\nAs long as Archelos is untapped, other permanents enter untapped.";
+const FROZEN_AETHER: &str = "Artifacts, creatures, and lands your opponents control enter tapped.";
+
+fn attack_with(runner: &mut GameRunner, attacker: ObjectId) {
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .expect("legal attack");
+}
+
+fn settled(state: &GameState) -> bool {
+    state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. })
+}
+
+fn drive_to_boundary(runner: &mut GameRunner, reached: impl Fn(&GameState) -> bool) {
+    for _ in 0..100 {
+        if reached(runner.state()) {
+            return;
+        }
+        let result = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order = (0..triggers.len()).collect();
+                runner.act(GameAction::OrderTriggers { order })
+            }
+            WaitingFor::DeclareAttackers { .. } => runner.declare_attackers(&[]),
+            WaitingFor::DeclareBlockers { .. } => runner.declare_blockers(&[]),
+            other => panic!("unexpected prompt {other:?}"),
+        };
+        result.expect("legal public action");
+    }
+    panic!("boundary unreachable at {:?}", runner.state().waiting_for);
+}
+
+fn battlefield_tokens(state: &GameState) -> impl Iterator<Item = ObjectId> + '_ {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| state.objects[id].is_token)
+}
+
+/// CR 707.2 + CR 603.7c: the later copy inherits the token definition. The delayed
+/// sacrifice still refers to the original Elementals.
+#[test]
+fn chandra_elementals_keep_haste_and_cleanup_but_the_copy_does_not() {
+    let mut scenario = board();
+    let chandra = scenario
+        .add_planeswalker_from_oracle(P0, "Chandra, Acolyte of Flame", "Chandra", 4, CHANDRA)
+        .with_color(vec![ManaColor::Red])
+        .id();
+    let quasiduplicate = scenario
+        .add_spell_to_hand_from_oracle(P0, "Quasiduplicate", false, QUASIDUPLICATE)
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{U}{U}"))
+        .id();
+    scenario.with_mana_pool(P0, mana(ManaType::Blue, 3));
+    let mut runner = scenario.build();
+    let outcome = runner.activate(chandra, 1).resolve();
+    assert!(settled(outcome.state()));
+    let originals: Vec<_> = battlefield_tokens(outcome.state()).collect();
+    assert_eq!(originals.len(), 2);
+    for id in &originals {
+        let elemental = &outcome.state().objects[id];
+        assert_eq!(elemental.name, "Elemental");
+        assert!(elemental.has_keyword(&Keyword::Haste));
+    }
+    let outcome = runner
+        .cast(quasiduplicate)
+        .target_object(originals[0])
+        .resolve();
+    assert!(settled(outcome.state()));
+    let copies: Vec<_> = battlefield_tokens(outcome.state())
+        .filter(|id| !originals.contains(id))
+        .collect();
+    assert_eq!(copies.len(), 1);
+    let copy = copies[0];
+    let elemental = &outcome.state().objects[&copy];
+    assert_eq!(elemental.name, "Elemental");
+    assert_eq!((elemental.power, elemental.toughness), (Some(1), Some(1)));
+    assert!(
+        !elemental.has_keyword(&Keyword::Haste),
+        "Quasiduplicate's Elemental must not copy haste"
+    );
+    runner.advance_to_combat();
+    let attacks: Vec<_> = originals
+        .iter()
+        .map(|&id| (id, AttackTarget::Player(P1)))
+        .collect();
+    runner
+        .declare_attackers(&attacks)
+        .expect("both originals can attack");
+    drive_to_boundary(&mut runner, |state| {
+        state.phase == Phase::End && settled(state)
+    });
+    for id in originals {
+        assert!(
+            !runner.state().battlefield.contains(&id),
+            "original Elemental was sacrificed"
+        );
+    }
+    assert!(runner.state().battlefield.contains(&copy));
+}
+
+/// CR 111.10u + CR 608.2c + CR 611.2a: the Lander enters as an artifact, then the
+/// separate type-changing instruction applies for the rest of the game.
+#[test]
+fn vviza_lander_is_observed_before_it_becomes_a_creature() {
+    let mut scenario = board();
+    let overseer = scenario
+        .add_creature_from_oracle(P0, "Vv'viza, Orbital Overseer", 4, 4, OVERSEER)
+        .id();
+    scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+    scenario.add_creature_from_oracle(P0, "Reckless Fireweaver", 1, 3, FIREWEAVER);
+    let mut runner = scenario.build();
+    let (p0_life, p1_life) = (runner.life(P0), runner.life(P1));
+    attack_with(&mut runner, overseer);
+    assert!(runner
+        .state()
+        .stack
+        .iter()
+        .any(|entry| entry.source_id == overseer));
+    runner.advance_until_stack_empty();
+    let lander = battlefield_tokens(runner.state())
+        .find(|id| runner.state().objects[id].name == "Lander")
+        .expect("Lander entered");
+    assert_eq!(
+        p1_life - runner.life(P1),
+        1,
+        "Fireweaver observed the artifact entry"
+    );
+    assert_eq!(
+        runner.life(P0) - p0_life,
+        0,
+        "Soul Warden must not see the Lander enter as a creature"
+    );
+    let assert_lander = |state: &GameState| {
+        let token = &state.objects[&lander];
+        assert_eq!(token.zone, Zone::Battlefield);
+        assert!(token.card_types.core_types.contains(&CoreType::Artifact));
+        assert!(token.card_types.core_types.contains(&CoreType::Creature));
+        assert_eq!((token.power, token.toughness), (Some(2), Some(1)));
+        assert!(token.has_keyword(&Keyword::Flying));
+        assert!(
+            token
+                .abilities
+                .iter()
+                .any(|ability| matches!(&*ability.effect, Effect::SearchLibrary { .. })),
+            "Lander keeps its search ability"
+        );
+    };
+    assert_lander(runner.state());
+    let turn = runner.state().turn_number;
+    drive_to_boundary(&mut runner, |state| {
+        state.turn_number > turn
+            && state.active_player == P0
+            && state.phase == Phase::Upkeep
+            && settled(state)
+    });
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    assert_eq!(runner.state().active_player, P0);
+    assert_lander(runner.state());
+}
+
+/// CR 608.2c: the Rats enter as 1/1 creatures before the separate pump instruction.
+#[test]
+fn ogre_chitterlord_rats_enter_before_the_pump_on_cast_and_attack() {
+    for attack in [false, true] {
+        let mut scenario = board();
+        add_bond(&mut scenario);
+        for _ in 0..3 {
+            scenario
+                .add_creature(P0, "Rat", 1, 1)
+                .with_subtypes(vec!["Rat"]);
+        }
+        let ogre = if attack {
+            scenario
+                .add_creature_from_oracle(P0, "Ogre Chitterlord", 6, 5, OGRE_CHITTERLORD)
+                .id()
+        } else {
+            let ogre = scenario
+                .add_creature_to_hand_from_oracle(P0, "Ogre Chitterlord", 6, 5, OGRE_CHITTERLORD)
+                .with_mana_cost(parse_mtgjson_mana_cost("{4}{R}{R}"))
+                .id();
+            scenario.with_mana_pool(P0, mana(ManaType::Red, 6));
+            ogre
+        };
+        let mut runner = scenario.build();
+        let before = runner.state().players[0].hand.len();
+        if attack {
+            attack_with(&mut runner, ogre);
+        } else {
+            runner.cast(ogre).resolve().assert_hand_drawn(P0, 1);
+        }
+        runner.advance_until_stack_empty();
+        let state = runner.state();
+        assert!(settled(state));
+        let rats: Vec<_> = state
+            .battlefield
+            .iter()
+            .filter(|id| {
+                state.objects[id]
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|ty| ty == "Rat")
+            })
+            .collect();
+        assert!(rats.len() >= 5);
+        let new_rats: Vec<_> = rats
+            .into_iter()
+            .filter(|id| state.objects[id].is_token)
+            .collect();
+        assert_eq!(new_rats.len(), 2);
+        for id in new_rats {
+            assert_eq!(power(state, *id), Some(3));
+        }
+        if attack {
+            assert_eq!(
+                state.players[0].hand.len() - before,
+                0,
+                "Elemental Bond draws nothing for the attacking Ogre's Rats"
+            );
+        }
+    }
+}
+
+/// CR 611.2e: the Spirit rider applies as the nontoken permanent enters.
+#[test]
+fn excava_returned_artifact_enters_as_a_spirit_creature() {
+    let mut scenario = board();
+    let excava = scenario
+        .add_creature_from_oracle(P0, "Excava, the Risen Past", 3, 3, EXCAVA)
+        .from_oracle_text_with_keywords(&["Flying", "Haste"], EXCAVA)
+        .as_legendary()
+        .id();
+    scenario.add_creature_from_oracle(P0, "Soul Warden", 1, 1, SOUL_WARDEN);
+    let ring = scenario
+        .add_artifact_to_graveyard(P0, "Sol Ring")
+        .with_mana_cost(ManaCost::generic(1))
+        .from_oracle_text(SOL_RING)
+        .id();
+    let mut runner = scenario.build();
+    let before = runner.life(P0);
+    attack_with(&mut runner, excava);
+    drive_trigger(&mut runner, ring);
+    let returned = &runner.state().objects[&ring];
+    assert_eq!(returned.zone, Zone::Battlefield);
+    assert!(returned.card_types.core_types.contains(&CoreType::Artifact));
+    assert!(returned.card_types.core_types.contains(&CoreType::Creature));
+    assert!(returned
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Spirit"));
+    assert_eq!((returned.power, returned.toughness), (Some(1), Some(1)));
+    assert!(returned.has_keyword(&Keyword::Flying));
+    assert_eq!(returned.counters.get(&CounterType::Finality), Some(&1));
+    assert_eq!(
+        runner.life(P0) - before,
+        1,
+        "Soul Warden sees the returned creature enter"
+    );
+}
+
+/// CR 603.10 + CR 608.2c: the Treasure entry is observed before the sacrifice choice.
+#[test]
+fn iron_man_treasure_is_observed_before_the_optional_sacrifice() {
+    for accept in [false, true] {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        let iron_man = scenario
+            .add_creature_from_oracle(P0, "Iron Man, Titan of Innovation", 4, 4, IRON_MAN)
+            .from_oracle_text_with_keywords(&["Flying", "Haste"], IRON_MAN)
+            .as_artifact_creature()
+            .as_legendary()
+            .with_subtypes(vec!["Human", "Hero"])
+            .id();
+        let fireweaver = scenario
+            .add_creature_from_oracle(P0, "Reckless Fireweaver", 1, 3, FIREWEAVER)
+            .id();
+        let ring = scenario
+            .add_spell_to_library_top(P0, "Sol Ring", false)
+            .as_artifact()
+            .with_mana_cost(ManaCost::generic(1))
+            .from_oracle_text(SOL_RING)
+            .id();
+        scenario.with_library_top(P0, &["Plains", "Island"]);
+        let mut runner = scenario.build();
+        let life = runner.life(P1);
+        attack_with(&mut runner, iron_man);
+        assert!(runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == iron_man));
+        runner.advance_until_stack_empty();
+        let state = runner.state();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == iron_man)
+        );
+        let treasure = battlefield_tokens(state)
+            .find(|id| state.objects[id].name == "Treasure")
+            .expect("new Treasure");
+        assert_eq!(
+            (
+                state.unsettled_entry_batch_events.len(),
+                state.deferred_triggers.len()
+            ),
+            (0, 1),
+            "Treasure entry settles and Fireweaver's trigger is collected before the prompt"
+        );
+        assert_eq!(state.deferred_triggers[0].pending.source_id, fireweaver);
+        assert!(!state.instruction_boundary_marks.is_empty());
+        // The parked sacrifice frame is bound to the attacking player by its trigger, not
+        // by an instruction (the in-crate row reads the frame's entry-progress verdict).
+        let frame = state
+            .active_optional_effect_frame()
+            .expect("Iron Man's sacrifice prompt");
+        assert_eq!(frame.ability.scoped_player, Some(P0));
+        assert_eq!(frame.ability.context.trigger_bound_player, Some(P0));
+        let answer = runner
+            .act(GameAction::DecideOptionalEffect { accept })
+            .unwrap();
+        let sacrificed = answer.events.iter().any(|event| matches!(event, GameEvent::PermanentSacrificed { object_id, player_id } if *object_id == treasure && *player_id == P0));
+        assert_eq!(sacrificed, accept);
+        if accept {
+            let WaitingFor::SearchChoice {
+                player: P0, cards, ..
+            } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "expected search after sacrificing Treasure, got {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert_eq!(cards.as_slice(), &[ring]);
+            runner
+                .act(GameAction::SelectCards { cards: vec![ring] })
+                .unwrap();
+            assert_eq!(runner.state().objects[&ring].zone, Zone::Battlefield);
+            assert!(runner.state().objects[&ring].tapped);
+        }
+        runner.advance_until_stack_empty();
+        assert!(settled(runner.state()));
+        assert_eq!(life - runner.life(P1), if accept { 2 } else { 1 });
+    }
+}
+
+/// CR 101.4 + CR 603.6a: the Treasures enter as one event across all three seats.
+#[test]
+fn duodrone_rebinds_each_seat_without_observing_partial_entries() {
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    for player in [P0, P1, p2] {
+        scenario.with_library_top(player, &["Plains", "Island", "Swamp", "Mountain"]);
+    }
+    let drone = scenario
+        .add_creature_from_oracle(P0, "Marching Duodrone", 2, 2, DUODRONE)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Construct"])
+        .id();
+    scenario.add_creature_from_oracle(P0, "Reckless Fireweaver", 1, 3, FIREWEAVER);
+    scenario
+        .add_creature_from_oracle(P0, "Archelos, Lagoon Mystic", 2, 4, ARCHELOS)
+        .as_legendary()
+        .with_subtypes(vec!["Turtle", "Shaman"]);
+    scenario.add_enchantment_from_oracle(P0, "Frozen Aether", FROZEN_AETHER);
+    let mut runner = scenario.build();
+    let before = [runner.life(P1), runner.life(p2)];
+    attack_with(&mut runner, drone);
+    assert!(runner
+        .state()
+        .stack
+        .iter()
+        .any(|entry| entry.source_id == drone));
+    let mut prompts = 0;
+    for _ in 0..60 {
+        let state = runner.state();
+        match &state.waiting_for {
+            WaitingFor::ReplacementChoice {
+                player,
+                candidate_count,
+                ..
+            } => {
+                prompts += 1;
+                assert_eq!(*player, [P1, p2][prompts - 1]);
+                assert_eq!(*candidate_count, 2);
+                assert_eq!(state.unsettled_entry_batch_events.len(), prompts);
+                assert!(state.deferred_triggers.is_empty());
+                assert!(state.battlefield_entry_observations.is_empty());
+                assert!(state.instruction_boundary_marks.is_empty());
+                if *player == P1 {
+                    let queued = state.active_ability_continuation().expect("queued P2 leg");
+                    assert_eq!(queued.chain.scoped_player, Some(p2));
+                    assert_eq!(
+                        queued.chain.context.trigger_bound_player, None,
+                        "seat rebinding clears the attack trigger's marker"
+                    );
+                }
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .unwrap();
+            }
+            WaitingFor::Priority { .. } if state.stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+    assert_eq!(prompts, 2);
+    assert!(
+        settled(runner.state()),
+        "the trigger finished and priority returned, got {:?}",
+        runner.state().waiting_for
+    );
+    let mut treasures = [0; 3];
+    for id in battlefield_tokens(runner.state()) {
+        let token = &runner.state().objects[&id];
+        assert_eq!(token.name, "Treasure");
+        treasures[token.controller.0 as usize] += 1;
+    }
+    assert_eq!(treasures, [1, 1, 1]);
+    assert_eq!(
+        [before[0] - runner.life(P1), before[1] - runner.life(p2)],
+        [1, 1]
+    );
 }

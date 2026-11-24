@@ -24,6 +24,7 @@ import {
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { PeekTab } from "../modal/DialogShell.tsx";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
+import type { TooltipTouch } from "../ui/GameplayTooltip.tsx";
 
 /** Internal assignment map: every attacker maps to its chosen target, or `null`
  *  while it sits in the Unassigned bucket. */
@@ -533,7 +534,8 @@ export function AttackTargetPicker({
                             <tr key={stack.key} className="border-t border-white/5">
                               <td className="sticky left-0 z-10 bg-gray-900 px-2 py-1.5">
                                 <div className="flex items-center gap-2">
-                                  <StackLabel stack={stack} t={t} hoverProps={hoverProps} />
+                                  {/* A table cell, so a tap on a counter shows its explanation. */}
+                                  <StackLabel stack={stack} t={t} hoverProps={hoverProps} counterTouch="toggle" />
                                   <button
                                     type="button"
                                     onClick={() => spreadStack(stack)}
@@ -604,7 +606,8 @@ export function AttackTargetPicker({
                             aria-expanded={expanded}
                             className="flex w-full items-center gap-2 px-2 py-2.5 text-left hover:bg-white/5"
                           >
-                            <StackLabel stack={stack} t={t} hoverProps={hoverProps} />
+                            {/* Inside the expand button, so a tap expands the stack. */}
+                            <StackLabel stack={stack} t={t} hoverProps={hoverProps} counterTouch="ignore" />
                             <span
                               className={`ml-auto shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${
                                 unassigned > 0 ? "bg-amber-900/70 text-amber-100" : "bg-emerald-900/70 text-emerald-100"
@@ -859,10 +862,13 @@ interface StackLabelProps {
   stack: AttackerStack;
   t: TFunction<"game">;
   hoverProps: ReturnType<typeof useInspectHoverProps>;
+  /** What a touch tap on a counter does: the caller knows whether the label
+   *  sits in a control whose tap acts (see `GameplayTooltip`). */
+  counterTouch: TooltipTouch;
 }
 
 /** Stack name + count badge + P/T + counter chips, with inspect-on-hover. */
-function StackLabel({ stack, t, hoverProps }: StackLabelProps) {
+function StackLabel({ stack, t, hoverProps, counterTouch }: StackLabelProps) {
   const ptLabel = objectPtLabel(stack.representative ?? undefined);
   // CR 122.1 + CR 306.5c: the engine's counter-display projection is the single authority —
   // it already dropped zero FINITE rows, split the loyalty total out, and ordered the pills. Keyed on
@@ -896,7 +902,7 @@ function StackLabel({ stack, t, hoverProps }: StackLabelProps) {
             // unboundedly — render ∞ instead of the (still-finite) real count.
             const unbounded = isUnbounded(row);
             return (
-              <CounterTooltip key={type} type={type} count={row.count} isUnbounded={unbounded}>
+              <CounterTooltip key={type} type={type} count={row.count} isUnbounded={unbounded} touch={counterTouch}>
                 <span className="rounded bg-sky-900/80 px-1 text-[10px] font-semibold text-sky-100">
                   {formatCounterType(type)} {unbounded ? "∞" : `x${row.count}`}
                 </span>
