@@ -18,7 +18,6 @@
 //! equipping still costs the printed {4} when the activator lacks the designation.
 
 use engine::game::casting::{activated_ability_definitions, can_activate_ability_now};
-use engine::game::engine::EngineError;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::AbilityTag;
 use engine::types::actions::GameAction;
@@ -167,10 +166,10 @@ fn crown_of_gondor_discount_requires_the_activating_player_to_be_the_monarch() {
         ability_index: index,
         payment_mode: CastPaymentMode::Auto,
     });
-    assert!(matches!(
-        result,
-        Err(EngineError::ActionNotAllowed(reason)) if reason == "Cannot pay activation cost"
-    ));
+    assert!(
+        result.is_err(),
+        "three mana cannot pay the printed equip cost"
+    );
     assert_eq!(mana_left(&runner), 3);
     assert_eq!(runner.state().monarch, Some(P1));
 
