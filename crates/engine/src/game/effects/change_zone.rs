@@ -453,7 +453,10 @@ fn resolution_choice_cardinality(
     up_to: bool,
 ) -> (usize, usize, bool) {
     let Some(spec) = ability.multi_target.as_ref() else {
-        return (1, 0, up_to);
+        // CR 608.2d: the singular return from a settled instruction result
+        // requires choosing one card when a legal card is available.
+        let min_count = usize::from(ability.reads_return_result.is_some() && !up_to);
+        return (1, min_count, up_to);
     };
 
     match crate::game::ability_utils::resolve_multi_target_bounds(
@@ -544,10 +547,14 @@ fn resolution_zone_candidates(
                         && state.object_in_players_zone(object, Zone::Graveyard, ability.controller)
                         && records.iter().any(|record| {
                             record.object_id == **id
-                                && record.from_zone == Some(Zone::Battlefield)
+                                && (record.from_zone == Some(Zone::Battlefield)
+                                    // CR 730.3c: an absorbed component arrives
+                                    // without a separate battlefield departure.
+                                    || (record.from_zone.is_none()
+                                        && object.split_from_merge_survivor.is_some()))
                                 && record.to_zone == Zone::Graveyard
                                 && record.arrival.owner == ability.controller
-                                && record.recorded_departure_successor()
+                                && record.recorded_zone_change_successor()
                                     == Some(ObjectIncarnationRef::from_object(object))
                         })
                 })

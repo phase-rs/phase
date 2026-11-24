@@ -6506,7 +6506,7 @@ fn settle_batch_owner(
             let mut records = crate::types::game_state::settled_logical_zone_change_records(group);
             let announced_successors: HashSet<_> = records
                 .iter()
-                .filter_map(|record| record.recorded_departure_successor())
+                .filter_map(|record| record.recorded_zone_change_successor())
                 .collect();
             records.extend(
                 group
@@ -6516,10 +6516,10 @@ fn settle_batch_owner(
                         let GameEvent::ZoneChanged { record, .. } = &occurrence.event else {
                             return None;
                         };
-                        let successor = record.recorded_departure_successor()?;
+                        let successor = record.recorded_zone_change_successor()?;
                         let object = state.objects.get(&successor.object_id)?;
                         let survivor = object.split_from_merge_survivor?;
-                        (record.from_zone == Some(Zone::Battlefield)
+                        (record.from_zone.is_none()
                             && !announced_successors.contains(&successor)
                             && announced_successors.contains(&survivor)
                             && object.incarnation == successor.incarnation

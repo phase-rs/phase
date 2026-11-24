@@ -2743,14 +2743,16 @@ impl ZoneChangeRecord {
         self.trigger_source_context.as_ref()
     }
 
-    /// CR 400.7j: The public-zone object created by this exact recorded move.
-    /// The departure supplies the pin when the destination has no entry stamp.
-    pub(crate) fn recorded_departure_successor(&self) -> Option<ObjectIncarnationRef> {
+    /// CR 400.7j + CR 730.3c: The prior identity supplies the successor pin
+    /// for an ordinary move or an absorbed component's originless arrival.
+    pub(crate) fn recorded_zone_change_successor(&self) -> Option<ObjectIncarnationRef> {
         let identity = self.trigger_source_context()?.identity;
         let departure = identity.reference;
         if !self.departure.is_moved()
             || !self.to_zone.is_public()
-            || self.from_zone != Some(identity.expected_zone)
+            || self
+                .from_zone
+                .is_some_and(|zone| zone != identity.expected_zone)
             || self.object_id != departure.object_id
             || departure.incarnation == u64::MAX
         {

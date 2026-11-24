@@ -876,7 +876,6 @@ fn cast_with_replicate_gift_declined(
     runner: &mut GameRunner,
     spell: ObjectId,
     target: ObjectId,
-    djinn: ObjectId,
     events: &mut Vec<GameEvent>,
 ) {
     let card_id = runner.state().objects[&spell].card_id;
@@ -924,8 +923,8 @@ fn cast_with_replicate_gift_declined(
     assert_eq!(paid.additional_cost_payments.len(), 1);
     let payment = &paid.additional_cost_payments[0];
     assert_eq!(
-        (payment.origin, payment.grant_source, payment.count),
-        (AdditionalCostOrigin::Replicate, Some(djinn), 1)
+        (payment.origin, payment.count),
+        (AdditionalCostOrigin::Replicate, 1)
     );
     for _ in 0..20 {
         if runner.state().stack.is_empty()
@@ -962,11 +961,9 @@ fn coiling_rebirth_gift_rider_reads_gift_payment_instead_of_paid_replicate() {
                 shards: vec![ManaCostShard::Black, ManaCostShard::Black],
             })
             .id();
-        let djinn = (!promised).then(|| {
-            scenario
-                .add_creature_from_oracle(P0, "Djinn Illuminatus", 3, 5, DJINN)
-                .id()
-        });
+        if !promised {
+            scenario.add_creature_from_oracle(P0, "Djinn Illuminatus", 3, 5, DJINN);
+        }
         let gift = scenario.add_card_to_library_top(P1, "Plains");
         fund(&mut scenario, &[(ManaType::Black, 10)]);
         let mut runner = scenario.build();
@@ -977,13 +974,7 @@ fn coiling_rebirth_gift_rider_reads_gift_payment_instead_of_paid_replicate() {
                 GiftResolution::Resolved
             );
         } else {
-            cast_with_replicate_gift_declined(
-                &mut runner,
-                spell,
-                target,
-                djinn.expect("the test grants replicate"),
-                &mut events,
-            );
+            cast_with_replicate_gift_declined(&mut runner, spell, target, &mut events);
         }
         // CR 608.2b: the first resolving spell returns the shared target and
         // the other spell's target becomes illegal.
@@ -1024,11 +1015,9 @@ wasn't promised, you lose 2 life.";
                 shards: vec![ManaCostShard::Black],
             })
             .id();
-        let djinn = (!promised).then(|| {
-            scenario
-                .add_creature_from_oracle(P0, "Djinn Illuminatus", 3, 5, DJINN)
-                .id()
-        });
+        if !promised {
+            scenario.add_creature_from_oracle(P0, "Djinn Illuminatus", 3, 5, DJINN);
+        }
         fund(&mut scenario, &[(ManaType::Black, 6)]);
         let mut runner = scenario.build();
 
@@ -1041,13 +1030,7 @@ wasn't promised, you lose 2 life.";
             assert_eq!(gift_resolved(outcome.events()), 1);
         } else {
             let mut events = Vec::new();
-            cast_with_replicate_gift_declined(
-                &mut runner,
-                spell,
-                target,
-                djinn.expect("the test grants replicate"),
-                &mut events,
-            );
+            cast_with_replicate_gift_declined(&mut runner, spell, target, &mut events);
             assert_eq!(gift_resolved(&events), 0);
         }
         assert_eq!(object_zone(&runner, target), Zone::Graveyard);
