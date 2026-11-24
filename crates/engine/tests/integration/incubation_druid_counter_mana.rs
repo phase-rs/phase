@@ -6,8 +6,9 @@
 //! the chosen type, not one. Auto-payment is covered in
 //! `mana_any_one_color_quantity`; these rows drive the manual routes: the
 //! offered mana-source action and `ActivateAbility` with priority, and the
-//! ability activated inside a manual cast's payment window. Counters come from
-//! a real Adapt 3 activation.
+//! ability activated inside a manual cast's payment window. The priority
+//! `ActivateAbility` row starts with one counter. The other positive rows
+//! get three counters from a real Adapt 3 activation.
 
 use engine::game::mana_sources::{
     activatable_land_mana_options, activatable_mana_actions_for_player,
@@ -145,11 +146,18 @@ fn hand_tap_after_adapt_adds_three_of_the_chosen_type() {
 }
 
 #[test]
-fn activate_ability_route_with_counter() {
+fn activate_ability_with_one_counter_adds_three() {
     let (mut scenario, druid) = board();
-    let lands = add_adapt_lands(&mut scenario);
+    scenario.add_basic_land(P0, ManaColor::Blue);
+    scenario.add_basic_land(P0, ManaColor::Green);
+    scenario.with_counter(druid, CounterType::Plus1Plus1, 1);
     let mut runner = scenario.build();
-    adapt(&mut runner, druid, lands);
+    assert_eq!(
+        runner.state().objects[&druid]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        Some(&1)
+    );
 
     tap_and_choose(
         &mut runner,
