@@ -45,7 +45,12 @@ export function StepperRow({
   shortcuts?: readonly StepperShortcut[];
   hoverProps?: ReturnType<ReturnType<typeof useInspectHoverProps>>;
 }) {
-  const buttonClass = gameButtonClass({ tone: "neutral", size: "xs" });
+  // 44px touch target: `!` overrides the xs size's own min height.
+  const buttonClass = gameButtonClass({
+    tone: "neutral",
+    size: "xs",
+    className: "!min-h-11 min-w-11",
+  });
   return (
     <div
       {...hoverProps}

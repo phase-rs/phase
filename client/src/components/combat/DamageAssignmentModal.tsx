@@ -55,40 +55,6 @@ function damageShortcuts(
   ];
 }
 
-/**
- * The one-tap draft: each blocker's engine-provided `lethal_minimum` in prompt
- * order, as far as the damage reaches, then the excess wherever engine-provided
- * data name a recipient for it. Input arithmetic only — it never decides what
- * is lethal or what the creature is attacking, and an excess with no known
- * recipient is left for the player to place.
- */
-function lethalPreset(data: AssignCombatDamage["data"], hasAttackTarget: boolean) {
-  let excess = data.total_damage;
-  const amounts = data.blockers.map(({ lethal_minimum }) => {
-    const amount = Math.min(lethal_minimum, excess);
-    excess -= amount;
-    return amount;
-  });
-
-  let trampleDamage = 0;
-  let controllerDamage = 0;
-  if (data.trample === "OverPlaneswalkers" && data.attack_target.type === "Planeswalker") {
-    // CR 702.19c: the prompt carries the loyalty to assign before any spillover
-    // to the planeswalker's controller. CR 702.19e: once the planeswalker has
-    // left combat the prompt carries no loyalty and names the original defender.
-    if (data.pw_controller != null) {
-      trampleDamage = Math.min(excess, data.pw_loyalty ?? 0);
-      controllerDamage = excess - trampleDamage;
-    }
-  } else if (data.trample != null && hasAttackTarget) {
-    // CR 702.19b + CR 506.4c: excess goes to what the creature is attacking
-    // only while the engine still reports that attack relation.
-    trampleDamage = excess;
-  }
-
-  return { amounts, trampleDamage, controllerDamage };
-}
-
 export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data"] }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
@@ -99,9 +65,9 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
   const attackTarget = useGameStore(
     (s) => s.gameState?.derived?.attack_targets?.[String(data.attacker_id)],
   );
-  const hasAttackTarget = attackTarget != null;
-  const preset = lethalPreset(data, hasAttackTarget);
-  const presetTramples = preset.trampleDamage > 0 || preset.controllerDamage > 0;
+  // The engine supplies the complete one-tap draft for this prompt.
+  const suggestion = useGameStore((s) => s.gameState?.derived?.combat_damage_suggestion);
+  const lethalFirstTitle = t("combat.lethalFirstTitle");
 
   const [amounts, setAmounts] = useState<number[]>(() =>
     data.blockers.map(() => 0),
@@ -166,18 +132,25 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
       footer={<ConfirmButton onClick={handleConfirm} disabled={!isValid} label={t("combat.assignDamageButton")} />}
     >
       <div className="mb-4 space-y-3">
-        <button
-          className={gameButtonClass({ tone: "neutral", size: "xs" })}
-          // Nothing to do only when the preset is all zeroes and so is the draft.
-          disabled={!presetTramples && !preset.amounts.some((amount) => amount > 0) && total === 0}
-          onClick={() => {
-            setAmounts(preset.amounts);
-            setTrampleDamage(preset.trampleDamage);
-            setControllerDamage(preset.controllerDamage);
-          }}
-        >
-          {t(presetTramples ? "combat.lethalPresetTrample" : "combat.lethalPreset")}
-        </button>
+        {suggestion && (
+          <button
+            className={gameButtonClass({
+              tone: "neutral",
+              size: "xs",
+              className: "!min-h-11 min-w-11",
+            })}
+            aria-label={lethalFirstTitle}
+            title={lethalFirstTitle}
+            onClick={() => {
+              const assignments = new Map(suggestion.assignments);
+              setAmounts(data.blockers.map(({ blocker_id }) => assignments.get(blocker_id) ?? 0));
+              setTrampleDamage(suggestion.trample_damage);
+              setControllerDamage(suggestion.controller_damage);
+            }}
+          >
+            {t("combat.lethalFirstButton")}
+          </button>
+        )}
         {data.blockers.map((blocker, i) => {
           const isLethal = amounts[i] >= blocker.lethal_minimum;
           const stats = getStats(blocker.blocker_id);

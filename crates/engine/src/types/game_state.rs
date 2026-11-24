@@ -25588,6 +25588,16 @@ pub struct DamageSlot {
     pub lethal_minimum: u32,
 }
 
+/// A complete `Normal`-mode combat damage assignment: the payload of
+/// `GameAction::AssignCombatDamage` without its mode. Published as the engine's
+/// lethal-first suggestion in `DerivedViews::combat_damage_suggestion`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CombatDamageSplit {
+    pub assignments: Vec<(ObjectId, u32)>,
+    pub trample_damage: u32,
+    pub controller_damage: u32,
+}
+
 /// CR 601.2d / CR 608.2d: when a `WaitingFor::DistributeAmong` division is
 /// chosen and what it must cover.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

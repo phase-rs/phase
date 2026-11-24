@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameObject, WaitingFor } from "../../../adapter/types.ts";
+import type { CombatDamageSplit, GameObject, WaitingFor } from "../../../adapter/types.ts";
 import { dispatchAction } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { buildGameObjectWithCoreTypes, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
@@ -53,7 +53,17 @@ const playerTarget = { type: "Player", data: 1 } as const;
 const planeswalkerTarget = { type: "Planeswalker", data: 30 } as const;
 const battleTarget = { type: "Battle", data: 31 } as const;
 
-function renderDamagePrompt(overrides: Partial<DamagePrompt> = {}, live = true) {
+const lethalFirstTitle = "Assign lethal damage to each blocker in order, then the rest";
+const standardSuggestion: CombatDamageSplit = {
+  assignments: [[20, 2], [21, 3]],
+  trample_damage: 5,
+  controller_damage: 0,
+};
+
+function renderDamagePrompt(
+  overrides: Partial<DamagePrompt> = {},
+  suggestion?: CombatDamageSplit,
+) {
   const data: DamagePrompt = {
     player: 0,
     attacker_id: 10,
@@ -76,7 +86,10 @@ function renderDamagePrompt(overrides: Partial<DamagePrompt> = {}, live = true) 
         buildGameObjectWithCoreTypes(["Planeswalker"], { id: 30, name: "Jace Beleren" }),
         buildGameObjectWithCoreTypes(["Battle"], { id: 31, name: "Invasion of Zendikar" }),
       ),
-      derived: { attack_targets: live ? { [data.attacker_id]: data.attack_target } : {} },
+      derived: {
+        attack_targets: { [data.attacker_id]: data.attack_target },
+        combat_damage_suggestion: suggestion,
+      },
     }),
   });
   render(<DamageAssignmentModal data={data} />);
@@ -153,94 +166,73 @@ describe("DamageAssignmentModal", () => {
     });
   });
 
-  describe("lethal preset", () => {
-    it.each([
-      { target: playerTarget, trample: "Standard" },
-      { target: playerTarget, trample: "OverPlaneswalkers" },
-      { target: planeswalkerTarget, trample: "Standard" },
-      { target: battleTarget, trample: "Standard" },
-      { target: battleTarget, trample: "OverPlaneswalkers" },
-    ] as const)("assigns 2 and 3 to blockers and 5 over a live $target.type ($trample)", ({ target, trample }) => {
-      renderDamagePrompt({ attack_target: target, trample });
-      fireEvent.click(button("Lethal to blockers, rest tramples over"));
-      confirmDamage([[20, 2], [21, 3]], 5);
+  describe("engine-suggested damage", () => {
+    it("applies the Standard trample suggestion exactly", () => {
+      renderDamagePrompt({}, standardSuggestion);
+      fireEvent.click(button(lethalFirstTitle));
+      confirmDamage(standardSuggestion.assignments, standardSuggestion.trample_damage, standardSuggestion.controller_damage);
     });
 
-    it.each([
-      { title: "insufficient damage", total: 4, minimums: [3, 3], shares: [3, 1], excess: 0 },
-      { title: "zero lethal", total: 10, minimums: [0, 3], shares: [0, 3], excess: 7 },
-      { title: "deathtouch-style lethal", total: 10, minimums: [1, 3], shares: [1, 3], excess: 6 },
-    ])("uses the prompt's lethal minima in order for $title", ({ total, minimums, shares, excess }) => {
-      renderDamagePrompt({
-        total_damage: total,
-        blockers: [
-          { blocker_id: 20, lethal_minimum: minimums[0] },
-          { blocker_id: 21, lethal_minimum: minimums[1] },
-        ],
-      });
-      fireEvent.click(button(excess > 0 ? "Lethal to blockers, rest tramples over" : "Lethal to blockers"));
-      confirmDamage([[20, shares[0]], [21, shares[1]]], excess);
-    });
-
-    it.each([
-      { loyalty: 3, trampleDamage: 3, controllerDamage: 2 },
-      { loyalty: 0, trampleDamage: 0, controllerDamage: 5 },
-      { loyalty: 8, trampleDamage: 5, controllerDamage: 0 },
-    ])("splits excess with planeswalker loyalty $loyalty", ({ loyalty, trampleDamage, controllerDamage }) => {
+    it("applies the trample-over-planeswalkers suggestion exactly", () => {
+      const suggestion: CombatDamageSplit = {
+        assignments: [[20, 2], [21, 3]],
+        trample_damage: 3,
+        controller_damage: 2,
+      };
       renderDamagePrompt({
         attack_target: planeswalkerTarget,
         trample: "OverPlaneswalkers",
-        pw_loyalty: loyalty,
+        pw_loyalty: 3,
         pw_controller: 1,
-      });
-      fireEvent.click(button("Lethal to blockers, rest tramples over"));
-      confirmDamage([[20, 2], [21, 3]], trampleDamage, controllerDamage);
+      }, suggestion);
+      fireEvent.click(button(lethalFirstTitle));
+      confirmDamage(suggestion.assignments, suggestion.trample_damage, suggestion.controller_damage);
     });
 
-    it("replaces a conflicting draft, clears stale controller damage and is idempotent", () => {
+    it("replaces a conflicting draft and is idempotent", () => {
       renderDamagePrompt({
         attack_target: planeswalkerTarget,
         trample: "OverPlaneswalkers",
         pw_loyalty: 8,
         pw_controller: 1,
-      });
+      }, standardSuggestion);
       const [guardA, , planeswalker, controller] = screen.getAllByRole("button", { name: "+" });
-      for (const increment of [guardA, planeswalker, controller]) fireEvent.click(increment);
-      const preset = button("Lethal to blockers, rest tramples over");
-      fireEvent.click(preset);
+      for (const increment of [guardA, guardA, guardA, planeswalker, controller]) {
+        fireEvent.click(increment);
+      }
+
+      const fill = button(lethalFirstTitle);
+      const clearController = button("Clear damage assigned to PW Controller (Trample Over PW)");
+      expect(clearController).toBeEnabled();
+      expect(button("Assign Damage")).toBeDisabled();
+      fireEvent.click(fill);
       expect(button("Assign Damage")).toBeEnabled();
-      expect(button("Clear damage assigned to PW Controller (Trample Over PW)")).toBeDisabled();
-      fireEvent.click(preset);
+      expect(clearController).toBeDisabled();
+      fireEvent.click(fill);
+      confirmDamage(standardSuggestion.assignments, standardSuggestion.trample_damage, standardSuggestion.controller_damage);
+    });
+
+    it("matches suggestion entries to blocker IDs regardless of entry order", () => {
+      renderDamagePrompt({}, {
+        ...standardSuggestion,
+        assignments: [[21, 3], [20, 2]],
+      });
+      fireEvent.click(button(lethalFirstTitle));
       confirmDamage([[20, 2], [21, 3]], 5);
     });
 
-    it.each([
-      { title: "a nontrampler", attackTarget: playerTarget, trample: null, live: true },
-      { title: "a departed planeswalker", attackTarget: planeswalkerTarget, trample: "Standard", live: false },
-      { title: "a departed battle", attackTarget: battleTarget, trample: "Standard", live: false },
-    ] as const)("leaves excess unassigned for $title", ({ attackTarget, trample, live }) => {
-      renderDamagePrompt({ attack_target: attackTarget, trample }, live);
-      fireEvent.click(button("Lethal to blockers"));
-      expect(button("Assign Damage")).toBeDisabled();
-      if (trample) expect(button("Clear damage assigned to Defending Player (Trample)")).toBeDisabled();
-
-      fireEvent.click(button("Assign the remaining 5 damage to Guard A"));
-      confirmDamage([[20, 7], [21, 3]]);
+    it("offers a touch-sized shortcut with a destination-neutral label and title", () => {
+      renderDamagePrompt({}, standardSuggestion);
+      const fill = button(lethalFirstTitle);
+      expect(fill).toHaveTextContent("Lethal first");
+      expect(fill).toHaveAttribute("title", lethalFirstTitle);
+      expect(fill).toHaveClass("!min-h-11", "min-w-11");
     });
 
-    it("assigns excess to the original defender once a trample-over planeswalker has left combat", () => {
-      // CR 702.19e: the engine then sends no loyalty, only the original defender as controller.
-      renderDamagePrompt(
-        { attack_target: planeswalkerTarget, trample: "OverPlaneswalkers", pw_controller: 1 },
-        false,
-      );
-      fireEvent.click(button("Lethal to blockers, rest tramples over"));
-      confirmDamage([[20, 2], [21, 3]], 0, 5);
-    });
-
-    it("disables the preset when there is no damage to assign", () => {
-      renderDamagePrompt({ total_damage: 0 });
-      expect(button("Lethal to blockers")).toBeDisabled();
+    it("hides the shortcut when the engine sends no suggestion", () => {
+      renderDamagePrompt();
+      expect(screen.queryByText("Lethal first")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: lethalFirstTitle })).not.toBeInTheDocument();
     });
   });
 
@@ -303,7 +295,11 @@ describe("DamageAssignmentModal", () => {
         pw_loyalty: 3,
         pw_controller: 1,
       });
-      fireEvent.click(button("Lethal to blockers, rest tramples over"));
+      fireEvent.click(button("Assign lethal damage to Guard A"));
+      fireEvent.click(button("Assign lethal damage to Guard B"));
+      const [, , planeswalker] = screen.getAllByRole("button", { name: "+" });
+      for (let i = 0; i < 3; i++) fireEvent.click(planeswalker);
+      fireEvent.click(button("Assign the remaining 2 damage to PW Controller (Trample Over PW)"));
       const clearTrample = button("Clear damage assigned to Planeswalker (loyalty: 3)");
       const clearController = button("Clear damage assigned to PW Controller (Trample Over PW)");
       fireEvent.click(clearTrample);

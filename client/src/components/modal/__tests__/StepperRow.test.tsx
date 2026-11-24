@@ -28,12 +28,16 @@ it("renders caller-provided shortcuts in order with their accessible names and d
 
   const lethalButton = screen.getByRole("button", { name: "Assign lethal to Guard" });
   const clearButton = screen.getByRole("button", { name: "Clear Guard" });
-  expect(screen.getAllByRole("button")).toEqual([
+  const buttons = screen.getAllByRole("button");
+  expect(buttons).toEqual([
     screen.getByRole("button", { name: "−" }),
     screen.getByRole("button", { name: "+" }),
     lethalButton,
     clearButton,
   ]);
+  for (const button of buttons) {
+    expect(button).toHaveClass("!min-h-11", "min-w-11");
+  }
   expect(lethalButton).toBeDisabled();
   expect(clearButton).toBeEnabled();
   fireEvent.click(lethalButton);
