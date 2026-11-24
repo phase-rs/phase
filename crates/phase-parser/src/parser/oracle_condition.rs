@@ -309,9 +309,10 @@ fn static_condition_to_restriction_condition(
         }),
         // Player-state leaves with an exact restriction evaluator.
         StaticCondition::HasCityBlessing => Some(ParsedCondition::HasCityBlessing),
-        // CR 725.1 + CR 109.5 + CR 602.5b: "if you're the monarch" is a
-        // player-designation leaf read off the ACTIVATOR, exactly like the
-        // city's blessing above (Crown of Gondor's equip discount). Only the
+        // CR 725.1 + CR 109.5: "if you're the monarch" reads the activating
+        // player's designation. Crown of Gondor's equip discount uses this
+        // condition in an activation instruction (CR 602.1b) applied during
+        // total cost determination (CR 602.2b + CR 601.2f). Only the
         // controller-addressed subject converts: the scoped-player anaphor
         // ("that player is the monarch") has no referent at a cast/activation
         // gate, so it stays rejected rather than approximated.

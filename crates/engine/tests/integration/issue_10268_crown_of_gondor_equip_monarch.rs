@@ -13,18 +13,19 @@
 //! DISCRIMINATING: `can_activate_ability_now` (the production affordability
 //! gate) accepts the equip with exactly {1} only while the activator holds the
 //! designation, and the full announce/pay/resolve pipeline actually pays that
-//! reduced cost. Reverting the parser or the condition evaluator leaves the
-//! equip at a flat {4}, so every assertion below fails.
+//! reduced cost. With the discount removed, the monarch case fails its {1}
+//! affordability check. The vacant and opposing monarch cases verify that
+//! equipping still costs the printed {4} when the activator lacks the designation.
 
 use engine::game::casting::{activated_ability_definitions, can_activate_ability_now};
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::engine::EngineError;
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::AbilityTag;
+use engine::types::actions::GameAction;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
-use engine::types::player::PlayerId;
-
-const P1: PlayerId = PlayerId(1);
 
 const CROWN_OF_GONDOR: &str = "Equipped creature gets +1/+1 for each creature you control.\n\
 When a legendary creature you control enters, if there is no monarch, you become the monarch.\n\
@@ -99,6 +100,11 @@ fn activate_and_resolve_equip(runner: &mut GameRunner, crown: ObjectId, host: Ob
         outcome.state().objects[&host].attachments.contains(&crown),
         "the equipped creature carries the Equipment"
     );
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
 }
 
 /// CR 725.1 + CR 601.2f + CR 602.2b: {4} minus {3} is {1}, so exactly one mana
@@ -145,14 +151,41 @@ fn crown_of_gondor_equip_costs_full_price_without_the_designation() {
 }
 
 /// CR 109.5 + CR 725.1: the leaf reads the ACTIVATING player's designation, so
-/// an opponent holding the monarch must not discount P0's equip.
+/// P0 still pays the printed {4} when P1 holds the monarch designation.
 #[test]
 fn crown_of_gondor_discount_requires_the_activating_player_to_be_the_monarch() {
-    let (mut runner, crown, _host) = crown_board(1);
+    let (mut runner, crown, host) = crown_board(3);
     runner.state_mut().monarch = Some(P1);
     let index = equip_ability_index(&runner, crown);
     assert!(
         !can_activate_ability_now(runner.state(), P0, crown, index),
-        "another player's designation must not discount P0's equip"
+        "{{3}} must not afford P0's equip while P1 is the monarch"
     );
+    let result = runner.act(GameAction::ActivateAbility {
+        source_id: crown,
+        ability_index: index,
+        payment_mode: CastPaymentMode::Auto,
+    });
+    assert!(matches!(
+        result,
+        Err(EngineError::ActionNotAllowed(reason)) if reason == "Cannot pay activation cost"
+    ));
+    assert_eq!(mana_left(&runner), 3);
+    assert_eq!(runner.state().monarch, Some(P1));
+
+    runner.state_mut().players[P0.0 as usize]
+        .mana_pool
+        .add(ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+    assert!(
+        can_activate_ability_now(runner.state(), P0, crown, index),
+        "{{4}} must afford P0's equip while P1 is the monarch"
+    );
+    activate_and_resolve_equip(&mut runner, crown, host);
+    assert_eq!(mana_left(&runner), 0, "the full {{4}} equip cost was paid");
+    assert_eq!(runner.state().monarch, Some(P1));
 }

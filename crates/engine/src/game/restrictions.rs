@@ -1,3 +1,4 @@
+use crate::game::conditions::eval_is_monarch;
 use crate::game::cost_payability::AbilityCostPayability;
 use crate::game::game_object::{CastOrigin, GameObject};
 use crate::types::ability::{
@@ -2227,7 +2228,7 @@ fn evaluate_condition_for_granter(
         // the activating player (CR 109.5), not off the source's controller —
         // CR 602.2 can let someone else activate the ability. CR 725.5: a vacant
         // designation (no player holds it) makes the leaf false.
-        ParsedCondition::IsMonarch => state.monarch == Some(player),
+        ParsedCondition::IsMonarch => eval_is_monarch(state, player),
         // CR 702.195b: The enduring story is a player designation effects and
         // restrictions may identify.
         ParsedCondition::HasEnduringStory => state.enduring_story.contains(&player),
