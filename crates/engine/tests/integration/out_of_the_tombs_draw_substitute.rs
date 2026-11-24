@@ -27,9 +27,9 @@ use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::actions::GameAction;
+use engine::types::actions::{GameAction, ReplacementAutoChoice};
 use engine::types::events::GameEvent;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -55,7 +55,12 @@ struct Board {
 /// P0 controls Out of the Tombs and an Island, holds Reach Through Mists, and
 /// has `library` on top of an otherwise empty library and `graveyard` (real
 /// cards) in its graveyard. P1 controls Soul Warden and has a library.
-fn board(db: &CardDatabase, library: &[&str], graveyard: &[&str]) -> (Board, Vec<ObjectId>) {
+fn board(
+    db: &CardDatabase,
+    library: &[&str],
+    graveyard: &[&str],
+    competing_replacement: Option<&str>,
+) -> (Board, Vec<ObjectId>) {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let tombs = scenario
@@ -63,6 +68,9 @@ fn board(db: &CardDatabase, library: &[&str], graveyard: &[&str]) -> (Board, Vec
         .id();
     let island = scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
     let mists = scenario.add_real_card(P0, "Reach Through Mists", Zone::Hand, db);
+    if let Some(card) = competing_replacement {
+        scenario.add_real_card(P0, card, Zone::Battlefield, db);
+    }
     let warden = scenario.add_real_card(P1, "Soul Warden", Zone::Battlefield, db);
     if !library.is_empty() {
         scenario.with_library_top(P0, library);
@@ -188,7 +196,7 @@ fn empty_library_draw_returns_the_chosen_creature_instead() {
     let Some(db) = load_db() else {
         return;
     };
-    let (mut board, graveyard) = board(db, &[], &["Zellix, Sanity Flayer", "Runeclaw Bear"]);
+    let (mut board, graveyard) = board(db, &[], &["Zellix, Sanity Flayer", "Runeclaw Bear"], None);
     let [zellix, bear] = graveyard[..] else {
         unreachable!()
     };
@@ -243,13 +251,122 @@ fn empty_library_draw_returns_the_chosen_creature_instead() {
     assert_returned_without_loss(&board, &events, hand_before, warden_life);
 }
 
+/// CR 616.1: P0 chooses between Out of the Tombs and Laboratory Maniac.
+/// The order cannot be remembered because the return requires a card choice (CR 608.2d).
+#[test]
+fn interactive_draw_substitute_cannot_remember_replacement_order() {
+    let Some(db) = load_db() else {
+        return;
+    };
+    let (mut board, graveyard) = board(
+        db,
+        &[],
+        &["Zellix, Sanity Flayer", "Runeclaw Bear"],
+        Some("Laboratory Maniac"),
+    );
+    let [zellix, bear] = graveyard[..] else {
+        unreachable!()
+    };
+    let hand_before = hand_len(&board.runner) - 1;
+    let warden_life = life(&board.runner, P1);
+
+    let mut events = cast_mists(&mut board);
+
+    let WaitingFor::ReplacementChoice {
+        player,
+        kind,
+        candidates,
+        remember_identity,
+        ..
+    } = &board.runner.state().waiting_for
+    else {
+        panic!(
+            "expected two competing draw replacements, got {:?}",
+            board.runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*kind, ReplacementChoiceKind::Order);
+    assert_eq!(candidates.len(), 2);
+    let tombs_index = candidates
+        .iter()
+        .position(|candidate| candidate.source_id == board.substitute)
+        .expect("Out of the Tombs is offered");
+    let maniac_index = candidates
+        .iter()
+        .position(|candidate| candidate.source_name == "Laboratory Maniac")
+        .expect("Laboratory Maniac is offered");
+    let maniac = candidates[maniac_index].source_id;
+    assert!(
+        remember_identity.is_none(),
+        "Out of the Tombs can require a graveyard selection"
+    );
+    assert!(board
+        .runner
+        .act(GameAction::ChooseReplacementAndRemember {
+            choice: ReplacementAutoChoice::Order {
+                order: vec![tombs_index, maniac_index],
+            },
+        })
+        .is_err());
+    assert!(board.runner.state().replacement_auto_choices.is_empty());
+
+    events.extend(
+        board
+            .runner
+            .act(GameAction::ChooseReplacement { index: tombs_index })
+            .expect("P0 chooses Out of the Tombs")
+            .events,
+    );
+    let WaitingFor::EffectZoneChoice {
+        player,
+        cards,
+        count,
+        zone,
+        destination,
+        ..
+    } = &board.runner.state().waiting_for
+    else {
+        panic!(
+            "expected a graveyard selection, got {:?}",
+            board.runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*count, 1);
+    assert_eq!(*zone, Zone::Graveyard);
+    assert_eq!(*destination, Some(Zone::Battlefield));
+    assert_eq!(cards.len(), 2);
+    assert!(cards.contains(&zellix) && cards.contains(&bear));
+
+    events.extend(
+        board
+            .runner
+            .act(GameAction::SelectCards {
+                cards: vec![zellix],
+            })
+            .expect("P0 chooses Zellix")
+            .events,
+    );
+    settle(&mut board.runner, &mut events);
+
+    assert_eq!(
+        board.runner.state().objects[&zellix].zone,
+        Zone::Battlefield
+    );
+    assert_eq!(board.runner.state().objects[&bear].zone, Zone::Graveyard);
+    // CR 614.6 + CR 616.1f: the draw was replaced, leaving nothing for Maniac to replace.
+    assert!(!replaced_a_draw(&events, maniac));
+    assert_returned_without_loss(&board, &events, hand_before, warden_life);
+}
+
 /// The sole eligible creature returns; P0 neither draws nor loses.
 #[test]
 fn empty_library_draw_returns_the_only_creature_instead() {
     let Some(db) = load_db() else {
         return;
     };
-    let (mut board, graveyard) = board(db, &[], &["Zellix, Sanity Flayer", "Island"]);
+    let (mut board, graveyard) = board(db, &[], &["Zellix, Sanity Flayer", "Island"], None);
     let [zellix, island_card] = graveyard[..] else {
         unreachable!()
     };
@@ -286,7 +403,7 @@ fn empty_library_draw_without_a_creature_loses() {
     let Some(db) = load_db() else {
         return;
     };
-    let (mut board, graveyard) = board(db, &[], &["Island"]);
+    let (mut board, graveyard) = board(db, &[], &["Island"], None);
     let warden_life = life(&board.runner, P1);
 
     let events = cast_mists(&mut board);
@@ -317,7 +434,7 @@ fn nonempty_library_draws_normally() {
     let Some(db) = load_db() else {
         return;
     };
-    let (mut board, graveyard) = board(db, &["Library Card"], &["Zellix, Sanity Flayer"]);
+    let (mut board, graveyard) = board(db, &["Library Card"], &["Zellix, Sanity Flayer"], None);
     let zellix = graveyard[0];
     let hand_before = hand_len(&board.runner) - 1;
 
