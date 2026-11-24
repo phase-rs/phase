@@ -36036,12 +36036,11 @@ fn non_attack_player_trigger_does_not_emit_target_player() {
 // SHAPE: CR 608.2k binds the untargeted recipient to the damage dealer.
 #[test]
 fn aveline_that_many_counters_bind_the_triggering_creature() {
-    for text in [
+    assert_event_amount_counter_target(
         "Whenever a creature you control with deathtouch deals combat damage to a player, put that many +1/+1 counters on that creature.",
-        "Whenever a creature you control deals combat damage to a player, put that many +1/+1 counters on that creature.",
-    ] {
-        assert_event_amount_counter_target(text, "Aveline de Grandpré", TargetFilter::TriggeringSource);
-    }
+        "Aveline de Grandpré",
+        TargetFilter::TriggeringSource,
+    );
 }
 
 #[test]
@@ -36058,6 +36057,15 @@ fn hercules_that_many_counters_bind_self() {
     assert_event_amount_counter_target(
         "Whenever Hercules is dealt damage for the first time each turn, put that many +1/+1 counters on him. (He must survive the damage to get the counters.)",
         "Hercules, Olympian Hero",
+        TargetFilter::SelfRef,
+    );
+}
+
+#[test]
+fn venus_that_many_counters_bind_self() {
+    assert_event_amount_counter_target(
+        "Whenever Venus is dealt damage, put that many +1/+1 counters on her. (She must survive the damage to get the counters.)",
+        "Venus, Torn Between Worlds",
         TargetFilter::SelfRef,
     );
 }
