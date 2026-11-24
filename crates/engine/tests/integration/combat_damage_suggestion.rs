@@ -10,12 +10,11 @@ use engine::game::derived_views::{derive_views, ClientGameStateRef};
 use engine::game::engine::apply;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{ChosenAttribute, TargetRef};
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CombatDamageAssignmentMode, CombatDamageSplit, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -199,18 +198,7 @@ fn submit(
     }
 }
 
-fn cast_removal(runner: &mut GameRunner, spell: ObjectId, target: ObjectId, mana: &[ManaType]) {
-    let player = runner
-        .state_mut()
-        .players
-        .iter_mut()
-        .find(|p| p.id == P0)
-        .expect("P0 exists");
-    for &color in mana {
-        player
-            .mana_pool
-            .add(ManaUnit::new(color, ObjectId(0), false, vec![]));
-    }
+fn cast_removal(runner: &mut GameRunner, spell: ObjectId, target: ObjectId) {
     let outcome = runner.cast(spell).target_object(target).resolve();
     assert_eq!(
         outcome.zone_of(target),
@@ -220,19 +208,31 @@ fn cast_removal(runner: &mut GameRunner, spell: ObjectId, target: ObjectId, mana
     assert!(outcome.state().stack.is_empty());
 }
 
-fn assign_protector(runner: &mut GameRunner, battle: ObjectId) {
-    // Seed the protector of a pre-existing Siege if scenario setup did not choose P1.
-    let object = runner
-        .state_mut()
-        .objects
-        .get_mut(&battle)
-        .expect("Siege exists");
-    if object.protector() != Some(P1) {
-        object
-            .chosen_attributes
-            .retain(|attr| !matches!(attr, ChosenAttribute::Player(_)));
-        object.chosen_attributes.push(ChosenAttribute::Player(P1));
-    }
+fn siege_in_hand(scenario: &mut GameScenario, caster: PlayerId) -> ObjectId {
+    permanent(scenario, caster, "Island");
+    permanent(scenario, caster, "Mountain");
+    card(scenario, caster, "Invasion of Kaladesh", Zone::Hand)
+}
+
+fn cast_siege(runner: &mut GameRunner, battle: ObjectId, caster: PlayerId) {
+    let outcome = runner.cast(battle).resolve();
+    let choice = P1.0.to_string();
+    let WaitingFor::NamedChoice {
+        player, options, ..
+    } = outcome.final_waiting_for()
+    else {
+        panic!(
+            "expected Siege protector choice, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(*player, caster);
+    assert!(options.contains(&choice));
+    runner
+        .act(GameAction::ChooseOption { choice })
+        .expect("choose P1 as Siege protector");
+
+    let object = &runner.state().objects[&battle];
     assert_eq!(object.protector(), Some(P1));
     assert_eq!(object.zone, Zone::Battlefield);
 }
@@ -418,7 +418,10 @@ fn trample_over_planeswalker(case: PlaneswalkerCase) {
     let attacker = permanent(&mut scenario, P0, THRASTA);
     let blocker = permanent(&mut scenario, P1, "Grizzly Bears");
     let jace = permanent(&mut scenario, P1, "Jace Beleren");
-    let bolt = card(&mut scenario, P0, "Lightning Bolt", Zone::Hand);
+    let bolt = matches!(case, PlaneswalkerCase::Removed).then(|| {
+        permanent(&mut scenario, P0, "Mountain");
+        card(&mut scenario, P0, "Lightning Bolt", Zone::Hand)
+    });
     let mut runner = scenario.build();
     let target = AttackTarget::Planeswalker(jace);
     let attacks = earlier
@@ -427,8 +430,8 @@ fn trample_over_planeswalker(case: PlaneswalkerCase) {
         .map(|id| (id, target))
         .collect::<Vec<_>>();
     attack(&mut runner, &attacks);
-    if matches!(case, PlaneswalkerCase::Removed) {
-        cast_removal(&mut runner, bolt, jace, &[ManaType::Red]);
+    if let Some(bolt) = bolt {
+        cast_removal(&mut runner, bolt, jace);
     }
     block(&mut runner, &[(blocker, attacker)]);
     assert_eq!(chooser(&mut runner, attacker), P0);
@@ -462,24 +465,35 @@ fn trample_over_departed_planeswalker_reaches_original_defender() {
     trample_over_planeswalker(PlaneswalkerCase::Removed);
 }
 
+enum RemovalRecipient {
+    Planeswalker,
+    Siege,
+}
+
 // Row 8.
-fn ordinary_trample_after_removal(
-    target_to_build: fn(ObjectId) -> AttackTarget,
-    target_card: &str,
-    owner: PlayerId,
-) {
+fn ordinary_trample_after_removal(case: RemovalRecipient) {
     let mut scenario = scenario(2);
     let attacker = permanent(&mut scenario, P0, "Stampeding Rhino");
     let a = permanent(&mut scenario, P1, "Llanowar Elves");
     let b = permanent(&mut scenario, P1, "Darksteel Myr");
-    let recipient = permanent(&mut scenario, owner, target_card);
+    let recipient = match case {
+        RemovalRecipient::Planeswalker => permanent(&mut scenario, P1, "Jace Beleren"),
+        RemovalRecipient::Siege => siege_in_hand(&mut scenario, P0),
+    };
+    for _ in 0..3 {
+        permanent(&mut scenario, P0, "Forest");
+    }
     let removal = card(&mut scenario, P0, "Beast Within", Zone::Hand);
     let mut runner = scenario.build();
-    if let AttackTarget::Battle(_) = target_to_build(recipient) {
-        assign_protector(&mut runner, recipient);
-    }
-    attack(&mut runner, &[(attacker, target_to_build(recipient))]);
-    cast_removal(&mut runner, removal, recipient, &[ManaType::Green; 3]);
+    let target = match case {
+        RemovalRecipient::Planeswalker => AttackTarget::Planeswalker(recipient),
+        RemovalRecipient::Siege => {
+            cast_siege(&mut runner, recipient, P0);
+            AttackTarget::Battle(recipient)
+        }
+    };
+    attack(&mut runner, &[(attacker, target)]);
+    cast_removal(&mut runner, removal, recipient);
     block(&mut runner, &[(a, attacker), (b, attacker)]);
     assert_eq!(chooser(&mut runner, attacker), P0);
     submit(
@@ -493,12 +507,12 @@ fn ordinary_trample_after_removal(
 
 #[test]
 fn ordinary_trample_after_planeswalker_removal_stays_on_blockers() {
-    ordinary_trample_after_removal(AttackTarget::Planeswalker, "Jace Beleren", P1);
+    ordinary_trample_after_removal(RemovalRecipient::Planeswalker);
 }
 
 #[test]
 fn ordinary_trample_after_battle_removal_stays_on_blockers() {
-    ordinary_trample_after_removal(AttackTarget::Battle, "Invasion of Kaladesh", P0);
+    ordinary_trample_after_removal(RemovalRecipient::Siege);
 }
 
 // Row 10.
@@ -507,11 +521,12 @@ fn no_blockers_and_no_trample_offers_an_empty_normal_split() {
     let mut scenario = scenario(2);
     let attacker = permanent(&mut scenario, P0, "Lone Wolf");
     let blocker = permanent(&mut scenario, P1, "Grizzly Bears");
+    permanent(&mut scenario, P0, "Mountain");
     let bolt = card(&mut scenario, P0, "Lightning Bolt", Zone::Hand);
     let mut runner = scenario.build();
     attack(&mut runner, &[(attacker, AttackTarget::Player(P1))]);
     block(&mut runner, &[(blocker, attacker)]);
-    cast_removal(&mut runner, bolt, blocker, &[ManaType::Red]);
+    cast_removal(&mut runner, bolt, blocker);
     assert_eq!(chooser(&mut runner, attacker), P0);
     submit(&mut runner, P0, attacker, damage_action(vec![], 0, 0), &[]);
 }
@@ -522,11 +537,14 @@ fn concession_changes_suggestion_without_replacing_the_prompt() {
     let mut scenario = scenario(3);
     let attacker = permanent(&mut scenario, P0, "Stampeding Rhino");
     let blocker = permanent(&mut scenario, P1, "Grizzly Bears");
-    let siege = permanent(&mut scenario, P2, "Invasion of Kaladesh");
-    // The pre-existing Siege setup abandons its as-enters choice under P2.
-    scenario.at_phase(Phase::PreCombatMain);
+    // Leyline lets P2 cast their Siege during P0's precombat main phase.
+    permanent(&mut scenario, P2, "Leyline of Anticipation");
+    let siege = siege_in_hand(&mut scenario, P2);
     let mut runner = scenario.build();
-    assign_protector(&mut runner, siege);
+    for _ in 0..2 {
+        runner.act(GameAction::PassPriority).expect("pass to P2");
+    }
+    cast_siege(&mut runner, siege, P2);
     attack(&mut runner, &[(attacker, AttackTarget::Battle(siege))]);
     block(&mut runner, &[(blocker, attacker)]);
     assert_eq!(chooser(&mut runner, attacker), P0);
