@@ -261,6 +261,7 @@ fn rewrite_resolved_ability(
         reads_return_result: _,
         source_id: _,
         cast_occurrence: _,
+        cycling_occurrence: _,
         source_incarnation: _,
         announced_source_incarnation: _,
         trigger_source: _,
@@ -272,9 +273,11 @@ fn rewrite_resolved_ability(
         legacy_selected_target_incarnations: _,
         chosen_target_slots: _,
         activation_record: _,
+        announced_usage_key: _,
         illegal_target_slots: _,
         unjudged_target_slots: _,
         illegal_local_target_slots: _,
+        declared_player_target_slots: _,
         target_reads: _,
         entry_onset: _,
         controller: _,
@@ -311,6 +314,8 @@ fn rewrite_resolved_ability(
         replacement_applied: _,
         sub_link: _,
         sibling_condition: _,
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the CR 101.4 admission authority (`simultaneous_unless::admits`)
         modal: _,
         parent_target_missing_reason: _,
         illegal_targets_disposition: _,

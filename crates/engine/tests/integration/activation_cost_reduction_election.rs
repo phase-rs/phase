@@ -1001,7 +1001,8 @@ fn an_x_lock_reversal_restores_the_mana_undo_window_and_the_loop_period() {
             },
         );
         let land = land.expect("the land");
-        board.runner.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
+        board.runner.state_mut().loop_detection =
+            engine::types::game_state::LoopDetectionMode::Interactive;
         // A real manual mana-ability activation, through the engine-authored
         // selection.
         let (_, _, grouped) = engine::ai_support::legal_actions_full(board.state());
@@ -1391,7 +1392,8 @@ const TOKEN_MAKER: &str = "{3}: Create a 1/1 white Soldier creature token.";
 
 fn loop_board(modifiers: &[Modifier], text: &'static str, pool: usize) -> Board {
     let mut board = Board::with_activator(modifiers, Activator::Oracle(text), pool);
-    board.runner.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
+    board.runner.state_mut().loop_detection =
+        engine::types::game_state::LoopDetectionMode::Interactive;
     board
 }
 
@@ -1534,7 +1536,11 @@ fn the_loyalty_placement_records_through_the_authority() {
             .count(),
         1
     );
-    assert_eq!(runner.state().pending_activations, vec![(walker, index)]);
+    // CR 602.2a: the pending entry is the announcement-bound usage key, not
+    // the `(source, index)` pair.
+    let expected = engine::game::restrictions::ability_usage_key(runner.state(), walker, index)
+        .expect("the loyalty ability resolves");
+    assert_eq!(runner.state().pending_activations, vec![expected]);
 }
 
 /// CR 601.2f "in any order": past eight reductions the election must still find

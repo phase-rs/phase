@@ -806,11 +806,14 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance
     // without that player's `GameAction::SelectCards`.
     // 140 -> 141 is adjudicated: CR 405.3's relative stack order for a batch
-    // of spell copies (CR 707.10) added `SpellCopyOrderChoice`. It names one
+    // of spell copies (CR 707.10) added `MemberOrderChoice`. It names one
     // acting `player` — CR 405.3 gives the order to the player who controls
     // the copies — and is classified by `WaitingFor::acting_authority` as
     // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance
-    // without that player's `GameAction::SelectCards`.
+    // without that player's `GameAction::SelectCards`. The same prompt now also
+    // orders a per-member instruction loop whose iterations pause for a payment
+    // (CR 608.2f, Sword-Point Diplomacy); it still names exactly one acting
+    // player — the resolving controller — so the classification is unchanged.
     // 141 -> 142 is adjudicated: CR 605.3a + CR 601.2g via CR 602.2b's
     // payment window for a mana ability's own mana cost added
     // `ManaAbilityManaPayment`. It names one acting `player` — the one
@@ -845,9 +848,15 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // `WaitingFor::acting_authority` as `ActingAuthority::One(player)`. Not
     // actorless: the prompt cannot advance without that player's
     // `GameAction::ChooseStartingPlayer`.
-    if declared.len() != 148 {
+    // 148 -> 149 is adjudicated: the staged replacement-choice scheduler (CR
+    // 101.4c + CR 616.1) added `ReplacementDecisionOrder`. It HAS an acting
+    // player — the chooser holding two or more decisions picks which to make
+    // first with `SelectCards` — and is classified `ActingAuthority::One(player)`
+    // alongside `ReplacementChoice`. Not actorless: the staged population cannot
+    // advance without that player's selection.
+    if declared.len() != 149 {
         failures.push(format!(
-            "PIN declared.len()={} != 148.\n\
+            "PIN declared.len()={} != 149.\n\
              \n\
              Adding a `WaitingFor` variant IS the counted event this gate exists to make loud. \
              Repair it by ADJUDICATING, not by bumping the number:\n\

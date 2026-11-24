@@ -733,7 +733,12 @@ fn build_matchup_payload(db: &CardDatabase, spec: &MatchupSpec) -> Result<DeckPa
         },
         ..Default::default()
     };
-    Ok(resolve_deck_list(db, &deck_list))
+    // Duel decks carry no commander, so the estimator returns None on this path regardless of the table.
+    Ok(resolve_deck_list(
+        db,
+        &engine::database::ComboTable::default(),
+        &deck_list,
+    ))
 }
 
 /// Run a single game with separate AI configs for each player.

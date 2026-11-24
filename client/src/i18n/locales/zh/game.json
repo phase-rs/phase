@@ -454,6 +454,7 @@
     "dfc": "双面牌",
     "faceDownName": "面朝下的牌",
     "loading": "正在加载{{name}}",
+    "reloadArt": "点击重新加载插画",
     "tapped": "已横置",
     "unimplemented": "未实现：{{mechanics}}"
   },
@@ -593,6 +594,13 @@
       "titleSplit": "分配剩余的牌"
     },
     "discard": {
+      "instructionWithReason": "{{reason}}：{{instruction}}",
+      "reason": {
+        "additionalCost": "额外费用",
+        "connive": "筹谋",
+        "manaAbility": "法术力异能",
+        "ward": "守护"
+      },
       "subtitleExact_one": "选择{{count}}张牌弃掉",
       "subtitleExact_other": "选择{{count}}张牌弃掉",
       "subtitleKeep_one": "选择1张牌保留 —— 其余的弃掉",
@@ -837,7 +845,9 @@
     },
     "reveal": {
       "subtitleChoose": "选择一张牌",
+      "subtitleChooseCount": "选择{{count}}张牌",
       "subtitleReveal": "选择一张牌展示，或拒绝",
+      "subtitleRevealAnyNumber": "选择任意数量的牌展示",
       "titleOpponentHand": "对手的手牌",
       "titleReveal": "从手牌展示"
     },
@@ -918,6 +928,10 @@
     "spellCopyOrder": {
       "subtitle": "选择其复制品将下一个进入堆叠的咒语",
       "title": "排列复制品顺序"
+    },
+    "memberOrder": {
+      "title": "排列牌张顺序",
+      "subtitle": "选择下一张要处理的牌"
     },
     "station": {
       "label": "蓄势",
@@ -1084,7 +1098,8 @@
     "confirm": "确认",
     "eyebrow": "对局选择",
     "scrollLeft": "向左滚动",
-    "scrollRight": "向右滚动"
+    "scrollRight": "向右滚动",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "chooseOneOfBranch": {
     "eyebrow": "选择",
@@ -1121,6 +1136,12 @@
     "assignDamageButton": "分配伤害",
     "assignDamageSubtitle": "{{name}} —— 剩余：{{remaining}}",
     "assignDamageTitle": "分配{{amount}}点战斗伤害",
+    "lethalButton": "致命",
+    "clearButton": "清除",
+    "assignLethalTo": "向{{target}}分配致命伤害",
+    "clearDamageFor": "清除分配给{{target}}的伤害",
+    "lethalFirstButton": "优先分配致命伤害",
+    "lethalFirstTitle": "按顺序向每个阻挡生物分配致命伤害，再分配剩余伤害",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "将剩余的{{count}}点伤害分配给{{target}}",
     "assignRemainingTo_many": "将剩余的{{count}}点伤害分配给{{target}}",
@@ -1142,6 +1163,7 @@
     "confirmAttackers": "确认攻击者（{{count}}）",
     "confirmBlockers": "确认阻挡者（{{count}}）",
     "defendingPlayerTrample": "防御牌手（践踏）",
+    "attackTargetTrample": "{{name}}（践踏）",
     "lethalBadge": "致命",
     "lethalLabel": "致命：{{amount}}",
     "menaceRequirement": "必须被{{count}}个生物阻挡，否则不能被阻挡",
@@ -1177,9 +1199,6 @@
     "allocationIncreaseAria": "增加{{subject}}的重复次数",
     "allocationSum": "已分配 {{total}} 次重复中的 {{allocated}} 次。",
     "allocationTitle": "将重复次数分配到各目标：",
-    "announce": "宣告",
-    "announceAria": "宣告{{subject}}",
-    "announceTitle": "选择每次重复宣告的目标：",
     "confirm": "使用捷径",
     "convokeInfo_one": "每次循环自动横置至多 1 个生物以召集。",
     "convokeInfo_other": "每次循环自动横置至多 {{count}} 个生物以召集。",
@@ -1209,19 +1228,23 @@
     },
     "respondDeclaredTitle": "提议的宣告：",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. {{subject}}的替代性效应",
     "respondSubtitle": "对手提议使用循环捷径。你可以接受，或指定该序列停止的位置。",
     "respondTitle": "有人提议循环捷径",
     "shorten": "缩短循环",
-    "untilLethal": "重复直到游戏结束。",
     "withoutEnd": "无限重复。若所有玩家都接受，本局游戏为平局。",
     "winKind": {
       "Advantage": "此循环能产生无限的优势。",
       "Decking": "此循环让一名对手抓空牌库。",
       "ExtraTurns": "此循环能获得无限个额外回合。",
       "ImmediateWin": "此循环能赢得游戏。",
-      "LethalDamage": "此循环造成致命伤害。",
+      "LethalDamage": "此循环使一名对手的生命值降至0或更低。",
       "PoisonLoss": "此循环会造成致命的中毒指示物。"
     }
+  },
+  "costRecipient": {
+    "subtitle": "选择此费用的对手：{{cost}}",
+    "title": "选择对手"
   },
   "costReductionOrder": {
     "announcedHybrids": "已宣告的混血法术力支付",
@@ -1392,6 +1415,13 @@
     "title": "{{name}}已断开连接"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "将剩余的{{count}}分配给{{target}}",
+    "assignRemainingTo_many": "将剩余的{{count}}分配给{{target}}",
+    "assignRemainingTo_one": "将剩余的{{count}}分配给{{target}}",
+    "assignRemainingTo_other": "将剩余的{{count}}分配给{{target}}",
+    "clearButton": "清除",
+    "clearTarget": "清除分配给{{target}}的数值",
     "subtitle": "每个目标至少分配1{{unit}}。剩余：{{remaining}}",
     "subtitleAnyNumber": "可选择任意数量，每个选中的对象至少分配1{{unit}}。剩余：{{remaining}}",
     "title": "分配{{total}}{{unit}}",
@@ -1438,6 +1468,13 @@
   "entryController": {
     "subtitle": "选择该永久物进场时由哪位对手操控。",
     "title": "选择进场时的操控者"
+  },
+  "replacementDecisionOrder": {
+    "title": "选择先做哪个决定",
+    "subtitle": "这些替代选择同时发生。请选择先做哪一个。",
+    "unknownObject": "未知对象",
+    "attachedTo": "结附于{{host}}",
+    "attachments": "带有{{names}}"
   },
   "freeCastWindow": {
     "castNamed": "施放{{name}}",
@@ -1517,7 +1554,10 @@
       "returnToHand_one": "将一个永久物移回手牌",
       "returnToHand_other": "将{{count}}个永久物移回手牌",
       "sacrifice_one": "牺牲一个永久物",
-      "sacrifice_other": "牺牲{{count}}个永久物"
+      "sacrifice_other": "牺牲{{count}}个永久物",
+      "draw": "抓一张牌",
+      "drawCount_one": "抓{{count}}张牌",
+      "drawCount_other": "抓{{count}}张牌"
     },
     "debug": {
       "modeBanner": "调试模式 —— 点击任意牌",
@@ -1550,6 +1590,7 @@
     "gameOver": {
       "backToDraft": "返回轮抽",
       "backToLobby": "返回大厅",
+      "complete": "游戏结束",
       "continueRun": "继续挑战",
       "defeat": "失败",
       "draw": "平局",
@@ -1670,6 +1711,7 @@
       "defaultEffect": "除非你支付，否则反击",
       "dontPay": "不支付",
       "takeEffect": "承受效应",
+      "priorChoice": "玩家{{id}}：{{choice}}",
       "title": "除非你支付，否则{{effect}}",
       "titleChooseOne": "除非你支付其中一项，否则{{effect}}"
     },
@@ -2151,6 +2193,9 @@
       "title": "承诺赠礼？"
     }
   },
+  "choiceModal": {
+    "holdForFullCard": "长按查看整张牌"
+  },
   "optionalEffect": {
     "dontAskAgain": "本局游戏不再询问",
     "dontAskAgainForSameCard": "本局游戏中，对这张牌的每张同名牌都使用此选择",
@@ -2163,6 +2208,7 @@
     "fromBoosterPack": "来自 {{setCode}} 补充包",
     "fromCubeBoosterPack": "来自 Cube 补充包",
     "fromExile": "来自放逐区",
+    "fromCompanion": "来自伙伴",
     "fromSideboard": "来自备牌"
   },
   "passButton": {
@@ -2240,6 +2286,20 @@
     "PreCombatMain": "战斗前主阶段",
     "Untap": "重置步骤",
     "Upkeep": "维持步骤"
+  },
+  "phaseShortName": {
+    "BeginCombat": "战斗开始",
+    "Cleanup": "净化",
+    "CombatDamage": "战斗伤害",
+    "DeclareAttackers": "攻击",
+    "DeclareBlockers": "阻挡",
+    "Draw": "抓牌",
+    "End": "结束",
+    "EndCombat": "战斗结束",
+    "PostCombatMain": "主阶段2",
+    "PreCombatMain": "主阶段1",
+    "Untap": "重置",
+    "Upkeep": "维持"
   },
   "phaseStop": {
     "beginCombatDescription": "选择攻击者之前的最后一个优先权窗口。",
@@ -2373,7 +2433,9 @@
     "holdCtrlFront": "按住 Ctrl 以显示正面",
     "parse": "解析",
     "ptDeltaFrom": "来自{{source}}的{{delta}}",
+    "reloadArt": "重新加载插画",
     "report": "报告问题",
+    "reportNotSent": "未发送",
     "reported": "已报告 ✓",
     "rulingCount_one": "{{count}}条规则释疑",
     "rulingCount_other": "{{count}}条规则释疑",
@@ -2428,7 +2490,8 @@
     "chooseSubtitle": "选择要让哪个替代性效应生效。",
     "composesNote": "每个效应都会生效 —— 顺序会改变它们的结合方式。",
     "confirmOrder": "确认顺序",
-    "dragHint": "拖动以重新排序，或使用箭头。",
+    "dragHandleNamed": "拖动{{name}}以重新排序",
+    "dragHint": "拖动 <grip>⠿</grip> 手柄以重新排序，或使用箭头。",
     "eyebrow": "结算顺序",
     "moveDownNamed": "将{{name}}后移",
     "moveUpNamed": "将{{name}}前移",
@@ -2448,6 +2511,8 @@
       "exile": "从{{zone}}放逐{{count}}张{{cards}}",
       "filteredCard": "{{types}}牌",
       "filteredCards": "{{types}}牌",
+      "haveOpponentGainLife": "让一位对手获得{{amount}}点生命",
+      "haveEachOtherPlayerGainLife": "让其他每位玩家获得{{amount}}点生命",
       "nonType": "非{{type}}",
       "orSeparator": " 或 ",
       "reveal": "从{{zone}}展示{{count}}张{{cards}}",
@@ -2546,6 +2611,9 @@
     "chooseTitle": "选择一个牌堆",
     "chooserName": "牌手 {{number}}",
     "empty": "（空）",
+    "partitionInstruction": "{{chooser}}选择其中一个",
+    "partitionInstructionRemaining_one": "{{chooser}}选择其中一个（你之后还有{{count}}名牌手）",
+    "partitionInstructionRemaining_other": "{{chooser}}选择其中一个（你之后还有{{count}}名牌手）",
     "partitionSubtitle": "将你的生物分成两个牌堆。{{chooser}}将选择其中一个。",
     "partitionSubtitleRemaining_one": "将你的生物分成两个牌堆。{{chooser}}将选择其中一个。（你之后还有{{count}}名牌手）",
     "partitionSubtitleRemaining_other": "将你的生物分成两个牌堆。{{chooser}}将选择其中一个。（你之后还有{{count}}名牌手）",
@@ -2782,6 +2850,8 @@
     "commander": "指挥官",
     "commanderTitle": "指挥官：{{name}}",
     "commanderTitleTax": "指挥官：{{name}}（税：+{{tax}}）",
+    "boss": "头目",
+    "bossTitle": "头目: {{name}}",
     "companion": "行侣",
     "companionActivate": "支付{3}：将{{name}}置于你手上",
     "companionTitle": "行侣：{{name}}",

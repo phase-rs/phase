@@ -670,6 +670,15 @@ fn cost_rider_reads_a_hand(rider: &CostReduction) -> bool {
         || rider.condition.as_ref().is_some_and(condition_reads_a_hand)
 }
 
+/// Any counter threshold anywhere in the source's filter grammar that reads a hand
+/// (via `filter_contains_filter_prop`).
+fn source_filter_reads_a_hand(filter: &TargetFilter) -> bool {
+    engine::types::ability::filter_contains_filter_prop(
+        filter,
+        &|property| matches!(property, engine::types::ability::FilterProp::Counters { count, .. } if count.any_ref(&mut reads_a_hand)),
+    )
+}
+
 /// Does `condition` test a hand that can be the AI's, in either direction? Unlike
 /// [`condition_caps_hand`], a floor counts too: Arm-Mounted Anchor's equip costs {2} less with
 /// one or fewer cards in hand.
@@ -690,6 +699,7 @@ fn condition_reads_a_hand(condition: &ParsedCondition) -> bool {
             conditions.iter().any(condition_reads_a_hand)
         }
         ParsedCondition::Not { condition } => condition_reads_a_hand(condition),
+        ParsedCondition::SourceMatchesFilter { filter } => source_filter_reads_a_hand(filter),
         ParsedCondition::SourceInZone { .. }
         | ParsedCondition::SourceIsAttacking
         | ParsedCondition::SourceIsAttackingOrBlocking
@@ -1017,6 +1027,7 @@ fn phase_opens_with_triggers(state: &GameState, player: PlayerId, phase: Phase) 
                     ..
                 } => at == phase && for_player == player,
                 DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
+                | DelayedTriggerCondition::AtBeginningOfGrantedTurn { .. }
                 | DelayedTriggerCondition::WhenLeavesPlay { .. }
                 | DelayedTriggerCondition::WhenDies { .. }
                 | DelayedTriggerCondition::WhenLeavesPlayFiltered { .. }

@@ -5,11 +5,11 @@ use crate::game::zone_pipeline::{
     self, ApprovedZoneChange, DeliveryCtx, ExileLinkSpec, ZoneDeliveryResult,
 };
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, FilterProp, ResolvedAbility, TargetFilter, TargetRef,
-    TypedFilter,
+    Effect, EffectError, EffectKind, FilterProp, InstructionJoin, ResolvedAbility, TargetFilter,
+    TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, ZoneChangeAnnouncement};
 use crate::types::identifiers::ObjectId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
@@ -97,8 +97,6 @@ fn deliver_destruction_zone_change(
         source_id: source,
         exile_links: ExileLinkSpec::default(),
         drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-        // Destroy delivers to the graveyard — never a library placement.
-        library_placement: None,
     };
     !matches!(
         zone_pipeline::deliver(state, approved, ctx, events),
@@ -183,6 +181,18 @@ pub(crate) fn destroy_single_object(
     }
 }
 
+/// CR 608.2c + CR 603.10a: where the simultaneous-departure group of a destroy
+/// node begins. A further slot of a target list ("destroy target artifact,
+/// target creature, ...") is part of the instruction its first slot began, so
+/// its group reaches back to that instruction's start and the list's last slot
+/// groups every slot; any other node groups only its own events.
+fn destroy_group_start(state: &GameState, ability: &ResolvedAbility, events_len: usize) -> usize {
+    match ability.instruction_join {
+        InstructionJoin::ListSlot => crate::game::zones::open_instruction_start(state, events_len),
+        InstructionJoin::Own => events_len,
+    }
+}
+
 /// CR 701.8a: Destroy moves permanent from battlefield to owner's graveyard.
 /// CR 701.8b: Indestructible permanents can't be destroyed.
 /// Skips objects with the "indestructible" keyword.
@@ -198,6 +208,45 @@ pub fn resolve(
             ..
         }
     );
+    // CR 701.8a: two or more determined objects are one announced
+    // simultaneous destruction; stage the whole guarded population so a
+    // replacement pause cannot drop the unprocessed suffix or its completion.
+    let mut unique_targets: Vec<ObjectId> = Vec::new();
+    for target in destroyed_targets(state, ability) {
+        if let TargetRef::Object(obj_id) = target {
+            if !unique_targets.contains(&obj_id) {
+                unique_targets.push(obj_id);
+            }
+        }
+    }
+    if unique_targets.len() >= 2 {
+        let logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+            state,
+            &ZoneChangeAnnouncement::all(&unique_targets, Zone::Graveyard),
+        );
+        let requests = unique_targets
+            .iter()
+            .map(|&object_id| {
+                crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                    object_id,
+                    Zone::Graveyard,
+                    ability.source_id,
+                )
+            })
+            .collect();
+        let _ = zone_pipeline::deliver_staged_destroy_batch(
+            state,
+            requests,
+            logical_zone_change_group,
+            ability,
+            ability.source_id,
+            cant_regenerate,
+            events,
+        );
+        return Ok(());
+    }
+
+    let instruction_start = destroy_group_start(state, ability, events.len());
     for target in destroyed_targets(state, ability) {
         if let TargetRef::Object(obj_id) = target {
             match destroy_single_object(state, obj_id, ability.source_id, cant_regenerate, events) {
@@ -206,6 +255,14 @@ pub fn resolve(
             }
         }
     }
+
+    // CR 603.10a + CR 608.2c: every permanent this instruction destroyed —
+    // each target, and any permanent a destruction replacement moved instead
+    // (CR 702.89a umbra armor destroys the Aura) — left the battlefield in one
+    // simultaneous event, so co-departing observers see each other. The last
+    // slot of a list restamps the whole list, so every slot's departure is in
+    // one group.
+    crate::game::zones::stamp_simultaneous_from_slice(state, &mut events[instruction_start..]);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -369,6 +426,38 @@ pub fn resolve_all(
         .copied()
         .collect();
 
+    // CR 701.8a: the whole guarded mass population is one announced
+    // simultaneous destruction. A pause must not lose the unprocessed suffix.
+    // CR 101.4 + CR 616.1: its replacement decisions are asked in APNAP order
+    // by the staged batch's scheduler (`zone_pipeline::drive_staged_approval`).
+    if matching.len() >= 2 {
+        let logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+            state,
+            &ZoneChangeAnnouncement::all(&matching, Zone::Graveyard),
+        );
+        let requests = matching
+            .iter()
+            .map(|&object_id| {
+                crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                    object_id,
+                    Zone::Graveyard,
+                    ability.source_id,
+                )
+            })
+            .collect();
+        let _ = zone_pipeline::deliver_staged_destroy_batch(
+            state,
+            requests,
+            logical_zone_change_group,
+            ability,
+            ability.source_id,
+            cant_regenerate,
+            events,
+        );
+        return Ok(());
+    }
+
+    let instruction_start = destroy_group_start(state, ability, events.len());
     for &obj_id in &matching {
         let proposed = ProposedEvent::Destroy {
             object_id: obj_id,
@@ -391,16 +480,15 @@ pub fn resolve_all(
         }
     }
 
-    // CR 603.10a + CR 704.3: every creature destroyed by this effect left the
-    // battlefield simultaneously, so co-departing leaves-the-battlefield/dies
-    // observers (Blood Artist, Zulaport Cutthroat) must observe each other.
-    // CR 701.19a/b: a regenerated member (and any other Prevented destruction)
-    // stays on the battlefield, so `departed_subset` excludes it from every
-    // survivor's co-departed group.
-    crate::game::zones::mark_simultaneous_departures(
-        events,
-        &crate::game::zones::departed_subset(state, &matching),
-    );
+    // CR 603.10a + CR 608.2c: every permanent destroyed by this effect left
+    // the battlefield simultaneously, so co-departing leaves-the-battlefield/dies
+    // observers (Blood Artist, Zulaport Cutthroat) must observe each other. The
+    // group is read from this instruction's own events, so a permanent a
+    // destruction replacement moved instead (CR 702.89a: umbra armor destroys
+    // the Aura) is part of it. CR 701.19a/b: a regenerated member (and any
+    // other Prevented destruction) stays on the battlefield and emits no
+    // departure, so it is in no survivor's co-departed group.
+    crate::game::zones::stamp_simultaneous_from_slice(state, &mut events[instruction_start..]);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),

@@ -6,6 +6,8 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
+use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 use crate::types::zones::{EtbTapState, Zone};
 
 /// CR 701.20e + CR 608.2c: Look at top N cards (shown only to the looking player),
@@ -33,9 +35,6 @@ pub fn resolve(
     ) = match &ability.effect {
         Effect::Dig {
             player,
-            count,
-            keep_count,
-            keep_count_expr,
             up_to,
             filter,
             destination,
@@ -47,26 +46,13 @@ pub fn resolve(
             enter_tapped,
             enters_attacking,
             source,
+            ..
         } => {
-            let resolved_count =
-                resolve_quantity_with_targets(state, count, ability).max(0) as usize;
-            // CR 107.1b: a dynamic keep count that resolves negative is clamped
-            // to zero (no card is kept), never a negative selection bound.
-            let dynamic_keep = keep_count_expr
-                .as_ref()
-                .map(|e| resolve_quantity_with_targets(state, e, ability).max(0) as usize);
-            let keep_all_for_reorder = destination == &Some(Zone::Library)
-                && rest_destination == &Some(Zone::Library)
-                && keep_count.is_none()
-                && dynamic_keep.is_none();
+            let counts = dig_counts(state, ability).unwrap_or(DigCounts { looked: 1, kept: 1 });
             (
                 player,
-                resolved_count,
-                if keep_all_for_reorder {
-                    resolved_count
-                } else {
-                    dynamic_keep.unwrap_or_else(|| keep_count.unwrap_or(1) as usize)
-                },
+                counts.looked,
+                counts.kept,
                 *up_to,
                 filter.clone(),
                 *destination,
@@ -148,9 +134,8 @@ pub fn resolve(
         .find(|p| p.id == library_owner)
         .ok_or(EffectError::PlayerNotFound)?;
 
-    // CR 609.3: If a library has fewer cards than required, use as many as available.
-    let count = dig_num.min(state.library_of(player.id).len());
-    if count == 0 {
+    let cards = top_of_library(state, player.id, dig_num);
+    if cards.is_empty() {
         // CR 608.2c: Nothing was looked at — a chained `ParentTarget` consumer
         // ("put up to one of them on top … the rest on the bottom") has no
         // cards to act on and must not fall back to acting on this ability's
@@ -165,12 +150,6 @@ pub fn resolve(
         return Ok(());
     }
 
-    let cards: Vec<_> = state
-        .library_of(player.id)
-        .iter()
-        .take(count)
-        .copied()
-        .collect::<Vec<_>>();
     let raw_keep_count = raw_keep_num.min(cards.len());
 
     // CR 701.20e / CR 701.20a: Pure-peek pattern (keep_count = 0): "look at" /
@@ -191,6 +170,7 @@ pub fn resolve(
                 .collect();
             events.push(GameEvent::CardsRevealed {
                 player: ability.controller,
+                occurrences: state.disclosed_occurrences(&cards),
                 card_ids: cards.clone(),
                 card_names,
             });
@@ -223,13 +203,14 @@ pub fn resolve(
         for &card_id in &cards {
             state.revealed_cards.insert(card_id);
         }
-        state.last_revealed_ids = cards.clone();
+        super::record_revealed_result(state, cards.clone());
         let card_names: Vec<String> = cards
             .iter()
             .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
             .collect();
         events.push(GameEvent::CardsRevealed {
             player: ability.controller,
+            occurrences: state.disclosed_occurrences(&cards),
             card_ids: cards.clone(),
             card_names,
         });
@@ -313,6 +294,94 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// How many cards a Dig looks at and how many it keeps on this step.
+struct DigCounts {
+    looked: usize,
+    kept: usize,
+}
+
+/// CR 107.1b + CR 608.2c: `ability`'s Dig counts, fixed as the effect is
+/// applied, or `None` when its effect is not a Dig. Shared by [`resolve`] and
+/// [`looked_cards`], so the handler and every reader of its selection count
+/// the same cards.
+fn dig_counts(state: &GameState, ability: &ResolvedAbility) -> Option<DigCounts> {
+    let Effect::Dig {
+        count,
+        keep_count,
+        keep_count_expr,
+        destination,
+        rest_destination,
+        ..
+    } = &ability.effect
+    else {
+        return None;
+    };
+    let looked = resolve_quantity_with_targets(state, count, ability).max(0) as usize;
+    // CR 107.1b: a dynamic keep count that resolves negative is clamped
+    // to zero (no card is kept), never a negative selection bound.
+    let dynamic_keep = keep_count_expr
+        .as_ref()
+        .map(|e| resolve_quantity_with_targets(state, e, ability).max(0) as usize);
+    let keep_all_for_reorder = destination == &Some(Zone::Library)
+        && rest_destination == &Some(Zone::Library)
+        && keep_count.is_none()
+        && dynamic_keep.is_none();
+    let kept = if keep_all_for_reorder {
+        looked
+    } else {
+        dynamic_keep.unwrap_or_else(|| keep_count.unwrap_or(1) as usize)
+    };
+    Some(DigCounts { looked, kept })
+}
+
+/// CR 401.5: the top `count` cards of `owner`'s library, top first. If the
+/// library has fewer cards than required, as many as there are.
+fn top_of_library(state: &GameState, owner: PlayerId, count: usize) -> Vec<ObjectId> {
+    state
+        .library_of(owner)
+        .iter()
+        .take(count)
+        .copied()
+        .collect()
+}
+
+/// The cards a library Dig looks at, and whether it hands them on.
+pub(crate) struct DigLook {
+    pub(crate) cards: Vec<ObjectId>,
+    /// CR 701.20e + CR 608.2c: whether resolving the Dig publishes `cards` to
+    /// `last_revealed_ids` for its sub-abilities and returns — the pure peek,
+    /// which keeps nothing on this step. A Dig that keeps one or more pauses
+    /// on `WaitingFor::DigChoice` instead, and its continuation is bound to the
+    /// cards the player keeps.
+    pub(crate) publishes_revealed: bool,
+}
+
+/// CR 701.20e + CR 401.5: what resolving `ability`'s library Dig would look
+/// at right now — the same owner, counts and selection [`resolve`] uses.
+/// `None` for a non-Dig effect, a Dig over an earlier look
+/// (`DigSource::PriorLook`, which reads `private_look_ids`), a player
+/// reference that names no one, and an owner who is not in the game.
+pub(crate) fn looked_cards(state: &GameState, ability: &ResolvedAbility) -> Option<DigLook> {
+    let Effect::Dig { player, source, .. } = &ability.effect else {
+        return None;
+    };
+    if *source == DigSource::PriorLook {
+        return None;
+    }
+    let counts = dig_counts(state, ability)?;
+    // CR 608.2b: a player reference that names no one looks at nothing.
+    let owner = super::resolve_player_for_context_ref(state, ability, player)?;
+    if !state.players.iter().any(|candidate| candidate.id == owner) {
+        return None;
+    }
+    let cards = top_of_library(state, owner, counts.looked);
+    let publishes_revealed = !cards.is_empty() && counts.kept.min(cards.len()) == 0;
+    Some(DigLook {
+        cards,
+        publishes_revealed,
+    })
 }
 
 /// CR 701.20e + CR 608.2c: Resolve a Dig whose card set comes from a
@@ -1483,6 +1552,7 @@ mod tests {
             ])),
             use_lki: false,
             subject_slot: None,
+            subject: crate::types::ability::ObjectScope::Target,
         });
         state.park_ability_continuation(PendingContinuation::new(Box::new(gain_life), &state));
 
@@ -2560,7 +2630,7 @@ mod tests {
     }
 
     /// Issue #1365 (Thassa's Oracle reanimated via Dread Return with an empty
-    /// library — Hermit Druid milled the whole deck first). CR 401.5: a Dig
+    /// library — Hermit Druid milled the whole deck first). CR 609.3: a Dig
     /// against an empty library looks at zero cards. The chained "put up to
     /// one of them on top … the rest on the bottom" instruction has nothing to
     /// place, but the trailing `WinTheGame` gate (devotion >= library size)
@@ -2568,7 +2638,8 @@ mod tests {
     /// Oracle must still be on the battlefield and the library must still be
     /// empty when the condition is checked.
     ///
-    /// Pre-fix, the `PutAtLibraryPosition` link's `ParentTarget` resolution
+    /// The current parser folds placement into `Dig`. The historical chain
+    /// used a separate `PutAtLibraryPosition` link. Its `ParentTarget` resolution
     /// fell back to "self" (no prior Dig selection, empty `ability.targets`),
     /// moving Thassa's Oracle itself from the battlefield onto its own
     /// library — corrupting devotion (no longer on the battlefield) and the

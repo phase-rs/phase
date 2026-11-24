@@ -22,15 +22,78 @@ use super::{casting, priority, triggers};
 /// `Box`es, and every caller's source is one; taking them by value here would
 /// move a 5,264 B `ResolvedAbility` and a 744 B `PendingTrigger` through this
 /// frame only to re-box both, buying two allocations and a free for nothing.
-/// Threading the boxes keeps the frame at two pointers. See
-/// `engine/src/types/game_state_size.rs` for the stack budget these sizes
-/// count against.
+/// Threading the boxes keeps the frame at two pointers (plus the `Copy`
+/// span owner). See `engine/src/types/game_state_size.rs` for the stack budget
+/// these sizes count against.
+///
+/// CR 601.2c + CR 603.3d + CR 700.13: the targets becoming targets and the
+/// crime this construction commits are this finisher's span; `span_owner` says
+/// who collects it (exactly once, CR 603.2c).
 pub(super) fn finalize_trigger_target_selection(
+    state: &mut GameState,
+    trigger: Box<PendingTrigger>,
+    ability: Box<ResolvedAbility>,
+    events: &mut Vec<GameEvent>,
+    span_owner: triggers::ConstructionSpanOwner,
+) -> WaitingFor {
+    let span_start = events.len();
+    let placement = place_trigger_targets(state, trigger, ability, events);
+    // CR 603.2e: match the finisher's own span now, before any drain.
+    let held = triggers::hold_construction_span(state, events, span_start, span_owner);
+    let produced = match placement {
+        FinalizedPlacement::Returned(waiting_for) => *waiting_for,
+        FinalizedPlacement::OnStack { controller } => {
+            priority::clear_priority_passes(state);
+            debug_assert!(
+                !triggers::is_pending_trigger_construction_active(state),
+                "deferred-trigger drain entered with construction still active",
+            );
+            match span_owner {
+                // CR 113.2c + CR 603.2 + CR 603.3b: After the active trigger is on
+                // the stack, drain any siblings that were deferred because this one
+                // needed input (e.g., the second Boggart Prankster's "you attack"
+                // trigger waiting behind the first). If a deferred trigger itself
+                // needs input, hand back its WaitingFor; otherwise continue to
+                // Priority. CR 603.2c: the windows of that drain run on the action
+                // buffer, so their ranges are claimed.
+                triggers::ConstructionSpanOwner::Finisher => triggers::drain_on_action_buffer(
+                    state,
+                    events,
+                    triggers::drain_deferred_triggers_after_trigger_construction,
+                )
+                .unwrap_or(WaitingFor::Priority { player: controller }),
+                // CR 603.3b: inside a dispatch window, the enclosing dispatcher's
+                // end-of-batch drain places the queue after the batch's remaining
+                // siblings; no nested window runs inside this one.
+                triggers::ConstructionSpanOwner::EnclosingWindow => {
+                    WaitingFor::Priority { player: controller }
+                }
+            }
+        }
+    };
+    // CR 603.3b: what triggered during this process waits until the drain returned.
+    triggers::release_construction_span(state, held);
+    produced
+}
+
+/// Private control flow of the finisher, not a rules or wire enum.
+enum FinalizedPlacement {
+    /// Construction ended without a drain: the division prompt (CR 601.2d) or a
+    /// dangling-cursor recovery (CR 608.1). Boxed so the common `OnStack`
+    /// return does not carry a `WaitingFor`-sized frame.
+    Returned(Box<WaitingFor>),
+    /// The entry is finalized on the stack and the crime committed (CR 700.13).
+    OnStack { controller: PlayerId },
+}
+
+/// The finisher's placement body: emit the targeting events, announce a
+/// division, finalize the on-stack entry and commit the crime.
+fn place_trigger_targets(
     state: &mut GameState,
     mut trigger: Box<PendingTrigger>,
     ability: Box<ResolvedAbility>,
     events: &mut Vec<GameEvent>,
-) -> WaitingFor {
+) -> FinalizedPlacement {
     let assigned_targets = declared_targets_in_chain(&ability);
     let crime_candidate =
         casting::targets_commit_crime(state, &assigned_targets, trigger.controller);
@@ -78,17 +141,19 @@ pub(super) fn finalize_trigger_target_selection(
                         // (CR 117.3b would give the active player).
                         triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
                         priority::clear_priority_passes(state);
-                        return WaitingFor::Priority { player: controller };
+                        return FinalizedPlacement::Returned(Box::new(WaitingFor::Priority {
+                            player: controller,
+                        }));
                     }
                     state.pending_trigger = Some(trigger);
                     priority::clear_priority_passes(state);
-                    return WaitingFor::DistributeAmong {
+                    return FinalizedPlacement::Returned(Box::new(WaitingFor::DistributeAmong {
                         player: controller,
                         total,
                         targets: dist_targets,
                         unit,
                         scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
-                    };
+                    }));
                 }
             }
         }
@@ -108,27 +173,11 @@ pub(super) fn finalize_trigger_target_selection(
         // re-normalizes (CR 117.3b would give active player).
         triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
         priority::clear_priority_passes(state);
-        return WaitingFor::Priority { player: controller };
+        return FinalizedPlacement::Returned(Box::new(WaitingFor::Priority { player: controller }));
     }
 
     casting::commit_crime_after_stack_placement(state, crime_candidate, controller, events);
-
-    priority::clear_priority_passes(state);
-    // CR 113.2c + CR 603.2 + CR 603.3b: After the active trigger is on the
-    // stack, drain any siblings that were deferred because this one needed
-    // input (e.g., the second Boggart Prankster's "you attack" trigger waiting
-    // behind the first). If a deferred trigger itself needs input, hand back
-    // its WaitingFor; otherwise continue to Priority.
-    debug_assert!(
-        !triggers::is_pending_trigger_construction_active(state),
-        "deferred-trigger drain entered with construction still active",
-    );
-    if let Some(waiting_for) =
-        triggers::drain_deferred_triggers_after_trigger_construction(state, events)
-    {
-        return waiting_for;
-    }
-    WaitingFor::Priority { player: controller }
+    FinalizedPlacement::OnStack { controller }
 }
 
 /// CR 706.2 + CR 603.12: Re-stamp the pending trigger's carried die-roll
@@ -200,7 +249,13 @@ pub(super) fn handle_trigger_target_selection_select_targets(
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
 
-    let produced = finalize_trigger_target_selection(state, trigger, ability, events);
+    let produced = finalize_trigger_target_selection(
+        state,
+        trigger,
+        ability,
+        events,
+        triggers::ConstructionSpanOwner::Finisher,
+    );
     // Round-20 seam 3: wrapping at the action seam — not per return inside
     // `finalize_trigger_target_selection` — covers all five of its returns
     // uniformly and keeps the `engine_modes` delegation, which runs inside
@@ -362,7 +417,13 @@ pub(super) fn handle_trigger_target_selection_choose_target(
                 .take()
                 .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
 
-            let produced = finalize_trigger_target_selection(state, trigger, ability, events);
+            let produced = finalize_trigger_target_selection(
+                state,
+                trigger,
+                ability,
+                events,
+                triggers::ConstructionSpanOwner::Finisher,
+            );
             // Round-20 seam 3, step-by-step walk completion.
             Ok(triggers::finish_trigger_construction_action(
                 state, events, produced,

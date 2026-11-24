@@ -614,6 +614,7 @@ fn row_body_chain_face_three_removes_one_loyalty_then_returns_a_cheap_card() {
                 counter_type: Some(CounterType::Loyalty),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
+                scope: engine::types::ability::EffectScope::Single,
             }
         ),
         "{def:#?}"
@@ -665,6 +666,7 @@ fn row_body_chain_faces_four_and_five_deal_damage_then_remove_two_loyalty() {
                 counter_type: Some(CounterType::Loyalty),
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::SelfRef,
+                scope: engine::types::ability::EffectScope::Single,
             }
         ),
         "{def:#?}"

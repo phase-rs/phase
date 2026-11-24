@@ -404,6 +404,80 @@ describe("P2P deck-submission channel", () => {
   });
 
   /**
+   * CR 702.139a/b: the draft engine refuses a companion the starting deck makes
+   * ineligible (a backed Gyruda over an odd-mana-value card). The host must
+   * then treat the submission as NOT accepted: no durable receipt, no
+   * acknowledgement, no progression, and a retry under the same submission id
+   * reaches the reducer again rather than replaying a phantom acceptance.
+   *
+   * REVERT-PROBE: record the receipt or persist before awaiting the adapter and
+   * `persistSessionStrict` is called / the retry skips the adapter.
+   */
+  it("neither acknowledges, persists nor advances a companion the engine refuses", async () => {
+    const host = newHost("Premier");
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = true;
+    privateHost.paused = false;
+    privateHost.persistSessionStrict = vi.fn(async () => {});
+    privateHost.broadcastViews = vi.fn(async () => {});
+    const refusal = "companion 'Gyruda, Doom of Depths' is not a legal companion for this starting deck";
+    const submitDeckForSeat = vi.fn(async () => { throw new Error(refusal); });
+    privateHost.adapter = stubAdapter({ submitDeckForSeat });
+    const send = seatGuestSession(privateHost, 2);
+    const events: string[] = [];
+    host.onEvent((event) => events.push(event.type));
+    const message = {
+      type: "draft_submit_deck",
+      submissionId: "gyruda-1",
+      mainDeck: ["Seat 2 Card 0"],
+      commanders: [],
+      companion: "Gyruda, Doom of Depths",
+    };
+
+    await expect(privateHost.handleGuestMessage(2, message)).rejects.toThrow("not a legal companion");
+    expect(send).toHaveBeenCalledWith({
+      type: "draft_error", reason: refusal, submissionId: "gyruda-1", submissionDisposition: "Rejected",
+    });
+    expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "draft_deck_submit_ack" }));
+    expect(privateHost.persistSessionStrict).not.toHaveBeenCalled();
+    expect(privateHost.broadcastViews).not.toHaveBeenCalled();
+    expect(events).not.toContain("deckSubmitted");
+    expect(events).not.toContain("allDecksSubmitted");
+
+    // Same id again: the reducer is consulted anew (no receipt was recorded).
+    await expect(privateHost.handleGuestMessage(2, message)).rejects.toThrow("not a legal companion");
+    expect(submitDeckForSeat).toHaveBeenCalledTimes(2);
+    expect(submitDeckForSeat).toHaveBeenCalledWith(2, ["Seat 2 Card 0"], [], "Gyruda, Doom of Depths");
+  });
+
+  it("acknowledges and persists a companion the engine accepts", async () => {
+    const host = newHost("Premier");
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = true;
+    privateHost.paused = false;
+    privateHost.persistSessionStrict = vi.fn(async () => {});
+    privateHost.broadcastViews = vi.fn(async () => {});
+    privateHost.adapter = stubAdapter();
+    const send = seatGuestSession(privateHost, 2);
+
+    await privateHost.handleGuestMessage(2, {
+      type: "draft_submit_deck",
+      submissionId: "gyruda-ok",
+      mainDeck: ["Seat 2 Card 0"],
+      commanders: [],
+      companion: "Gyruda, Doom of Depths",
+    });
+
+    expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledWith(
+      2, ["Seat 2 Card 0"], [], "Gyruda, Doom of Depths",
+    );
+    expect(privateHost.persistSessionStrict).toHaveBeenCalled();
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "draft_deck_submit_ack", submissionId: "gyruda-ok" }),
+    );
+  });
+
+  /**
    * V7. MTR 7.3: a Casual pod may revise a deck between rounds. Every seat has
    * already submitted, so the all-submitted branch of
    * `publishAcceptedDeckSubmission` fires at `RoundComplete`; that revision

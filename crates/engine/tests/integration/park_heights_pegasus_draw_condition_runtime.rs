@@ -35,7 +35,7 @@ use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::AbilityKind;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{BattlefieldEntryRecord, GameState};
+use engine::types::game_state::{BattlefieldEntryRecord, FaceState, GameState};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -59,6 +59,7 @@ fn record_creature_entry(state: &mut GameState, object_id: u64, controller: Play
     state
         .battlefield_entries_this_turn
         .push_back(BattlefieldEntryRecord {
+            token_status: Some(engine::types::game_state::EntryTokenStatus::Nontoken),
             object_id: ObjectId(object_id),
             name: format!("Entered Creature {object_id}"),
             core_types: vec![CoreType::Creature],
@@ -67,6 +68,7 @@ fn record_creature_entry(state: &mut GameState, object_id: u64, controller: Play
             colors: vec![],
             keywords: vec![],
             controller,
+            face_state: FaceState::FaceUp,
         });
 }
 

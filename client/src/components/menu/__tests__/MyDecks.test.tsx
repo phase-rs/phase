@@ -59,9 +59,11 @@ const { useCardImage, useSetSymbol, advanceSetSource } = vi.hoisted(() => ({
 
 vi.mock("../../../hooks/useCardImage", () => ({ useCardImage }));
 
-vi.mock("../../../hooks/useBracketEstimate", () => ({
-  useBracketEstimate: () => ({ estimate: null, loading: false, unsupported: false }),
+const { useBracketEstimate } = vi.hoisted(() => ({
+  useBracketEstimate: vi.fn(() => ({ estimate: null, loading: false, unsupported: false })),
 }));
+
+vi.mock("../../../hooks/useBracketEstimate", () => ({ useBracketEstimate }));
 
 vi.mock("../../../adapter/wasm-adapter", () => ({
   getSharedAdapter: () => ({}),
@@ -122,6 +124,8 @@ function legalCandidate(name: string, bracket: CommanderBracket | null): AiDeckC
     coveragePct: null,
     archetype: null,
     bracket,
+    declaredBracket: bracket,
+    comboDeclaration: { kind: "undeclared" },
   };
 }
 
@@ -134,6 +138,8 @@ function preconCandidate(deckId: string, name: string): AiDeckCandidate {
     coveragePct: null,
     archetype: null,
     bracket: null,
+    declaredBracket: null,
+    comboDeclaration: { kind: "undeclared" },
     knownFormat: "Commander",
   };
 }
@@ -199,6 +205,25 @@ describe("MyDecks", () => {
     expect(within(commanderTile!).getByLabelText("Declared bracket: B3 Upgraded")).toBeInTheDocument();
   });
 
+  it("estimates an untagged Commander deck with its own combo answer", async () => {
+    const early = { kind: "intended", window: "early_game" };
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Early Combo", JSON.stringify({
+      main: [{ name: "Island", count: 99 }],
+      sideboard: [],
+      commander: ["Test Commander"],
+      format: "Commander",
+      combo_declaration: early,
+    }));
+    vi.mocked(evaluateDeckCompatibilityBatch).mockResolvedValue({});
+
+    render(<MyDecks mode="manage" activeDeckName={null} />);
+
+    await screen.findByText("Early Combo");
+    await waitFor(() =>
+      expect(useBracketEstimate).toHaveBeenCalledWith(expect.objectContaining({ comboDeclaration: early })),
+    );
+  });
+
   it("keeps cached subscriptions usable while offline and re-enables refresh on reconnect", async () => {
     const feedDeck = {
       name: "Offline Feed Deck",
@@ -259,6 +284,22 @@ describe("MyDecks", () => {
     act(() => useConnectivityStore.getState().setForcedOffline(false));
 
     expect(screen.getByRole("button", { name: "Refresh All" })).toBeEnabled();
+  });
+
+  it("credits an attributed feed's data provider below the grid only while its decks are listed", async () => {
+    saveDeck("My Own Deck", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    vi.mocked(evaluateDeckCompatibilityBatch).mockResolvedValue({});
+
+    render(<MyDecks mode="manage" activeDeckName={null} />);
+    await screen.findByText("My Own Deck");
+    expect(screen.queryByRole("link", { name: "TopDeck.gg" })).not.toBeInTheDocument();
+    cleanup();
+
+    saveDeck("Vivi Ornitier (Weekly #1)", { main: [{ name: "Island", count: 99 }], sideboard: [] });
+    saveDeckOrigins({ "Vivi Ornitier (Weekly #1)": "topdeck-cedh" });
+    render(<MyDecks mode="manage" activeDeckName={null} />);
+
+    expect(await screen.findByRole("link", { name: "TopDeck.gg" })).toHaveAttribute("href", "https://topdeck.gg");
   });
 
   it("checks commander selection context and can reveal incompatible decks on demand", async () => {

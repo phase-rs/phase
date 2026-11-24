@@ -428,12 +428,19 @@ Print the PR URL. Print a one-line status: `success`, `partial`, or `aborted`. E
 
 ---
 
+## 9. When the maintainer review arrives
+
+A review that requests changes lists numbered findings `F1…Fn`. Address them with `$address-review`: every finding fixed, narrowed or disputed in one batch, the §5 final review and Gate A run again at the new head, one push, the PR body's records updated for the pushed head, and one reply mapping each finding to its disposition. Each additional push to a PR with an open review costs another review round.
+
+---
+
 ## Appendix A — Skill equivalents
 
 Use skills when the runtime supports them:
 
 - **Invoking `$engine-implementer`:** load `.claude/skills/engine-implementer/SKILL.md` and follow its full plan → review → implement → verify → review → commit pipeline.
 - **Invoking `$review-engine-impl`:** load `.claude/skills/review-engine-impl/SKILL.md` and execute its checklist against the uncommitted diff or commit diff.
+- **Invoking `$address-review`:** load `.claude/skills/address-review/SKILL.md` and follow it when a maintainer review requests changes (§9).
 - **Invoking `commit-push-pr`:** run the raw `git` + `gh` sequence shown in Step 7.
 
 Every other step (quality floor, track selection, clone, card pick, validation, verify, report) is tool-agnostic.

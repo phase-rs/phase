@@ -194,6 +194,8 @@ fn eval(
 
     let decision = AiDecisionContext {
         waiting_for: WaitingFor::EffectZoneChoice {
+            performed_by: None,
+            privacy_zones: None,
             player: AI,
             cards: pool,
             count: 1,
@@ -211,11 +213,13 @@ fn eval(
             track_exiled_by_source: false,
             face_down_in_exile: ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: Vec::new(),
             conditional_enter_with_counters: Vec::new(),
             count_param: 0,
             mass_library_order: None,
             library_position: None,
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,

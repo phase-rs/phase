@@ -7,23 +7,27 @@
 //! build, but the suite only references a few hundred distinct cards.
 //!
 //! So [`shared_card_db`] loads a small committed fixture
-//! (`tests/fixtures/integration_cards.json.gz`, a strict subset of the export) that
+//! (`tests/fixtures/integration_cards/`, a strict subset of the export) that
 //! parses in milliseconds. Regenerate it with `python3 scripts/gen-test-fixture.py`
 //! after adding a test that references a new card; set `FORGE_TEST_FULL_DB=1` to
 //! force the full export. [`shared_card_export_json`] still loads the full export
 //! for the few drift-guard tests that must inspect every card.
 
-use std::fs::File;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use engine::database::card_db::CardDatabase;
+use engine::database::integration_fixture;
+use engine::game::scenario::GameRunner;
 use engine::game::triggers::trigger_source_context_for_latch;
+use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
-use engine::types::game_state::{GameState, NamedChoiceSource, NamedChoiceSourceBinding};
+use engine::types::events::GameEvent;
+use engine::types::game_state::{
+    GameState, NamedChoiceSource, NamedChoiceSourceBinding, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
-use flate2::read::GzDecoder;
+use engine::types::TargetRef;
 use serde_json::{Map, Value};
 
 /// Builds the exact object-and-resolution authority used by persisted named
@@ -73,17 +77,8 @@ fn export_path() -> PathBuf {
     }
 }
 
-/// Path to the curated integration-test fixture (a subset of the export).
-// TWIN-SYNC: keep this fixture path in lockstep with src/test_support.rs.
-fn fixture_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/integration_cards.json.gz")
-}
-
-fn load_fixture(path: &Path) -> CardDatabase {
-    let file = File::open(path).expect("fixture should open");
-    let reader = BufReader::new(file);
-    let decoder = GzDecoder::new(reader);
-    CardDatabase::from_export_reader(decoder).expect("fixture should load")
+fn load_fixture() -> CardDatabase {
+    CardDatabase::from_integration_fixture_cached().expect("fixture should load")
 }
 
 /// Returns the shared, process-wide card database, loading it on first use.
@@ -95,9 +90,8 @@ fn load_fixture(path: &Path) -> CardDatabase {
 pub fn shared_card_db() -> Option<&'static CardDatabase> {
     static DB: OnceLock<Option<CardDatabase>> = OnceLock::new();
     DB.get_or_init(|| {
-        let fixture = fixture_path();
-        if std::env::var_os("FORGE_TEST_FULL_DB").is_none() && fixture.exists() {
-            return Some(load_fixture(&fixture));
+        if std::env::var_os("FORGE_TEST_FULL_DB").is_none() && integration_fixture::exists() {
+            return Some(load_fixture());
         }
         let path = export_path();
         if !path.exists() {
@@ -131,4 +125,110 @@ pub fn shared_card_export_json() -> Option<&'static Map<String, Value>> {
         }
     })
     .as_ref()
+}
+
+/// Assert one exact damage event from `source_id` to `target`.
+pub fn assert_damage_dealt(
+    events: &[GameEvent],
+    source_id: ObjectId,
+    target: TargetRef,
+    amount: u32,
+    is_combat: bool,
+) {
+    let matching = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::DamageDealt {
+                    source_id: actual_source,
+                    target: actual_target,
+                    amount: actual_amount,
+                    is_combat: actual_is_combat,
+                    ..
+                } if *actual_source == source_id
+                    && *actual_target == target
+                    && *actual_amount == amount
+                    && *actual_is_combat == is_combat
+            )
+        })
+        .count();
+    assert_eq!(matching, 1, "expected exactly one matching damage event");
+}
+
+/// Assert that no damage event in `events` has `target` as its recipient.
+pub fn assert_no_damage_to(events: &[GameEvent], target: TargetRef) {
+    assert!(
+        events.iter().all(|event| !matches!(
+            event,
+            GameEvent::DamageDealt {
+                target: actual_target,
+                ..
+            } if *actual_target == target
+        )),
+        "expected no damage event to {target:?}"
+    );
+}
+
+/// Resolve the current stack through public actions and return every event those
+/// actions emit. Stops at an interactive prompt the generic helper must not
+/// answer on behalf of the test.
+pub fn advance_until_stack_empty_and_collect_events(runner: &mut GameRunner) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    for _ in 0..40 {
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
+                order: (0..triggers.len()).collect(),
+            },
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                GameAction::PassPriority
+            }
+            _ => break,
+        };
+        let result = runner
+            .act(action)
+            .expect("stack-driving action should succeed");
+        events.extend(result.events);
+    }
+    events
+}
+
+/// CR 615.13: what one parked two-phase damage batch has prevented so far — its
+/// `ParkedDamageBatch::prevention_tally`, published once when the batch completes.
+pub struct ParkedBatchView {
+    pub tally: Vec<engine::types::game_state::PreventedDamageEntry>,
+}
+
+/// The parked damage batches on the resolution stack (each an
+/// `Effect::ResumeDamageBatch` carrier), bottom first.
+pub trait ParkedBatchViews {
+    fn parked_batch_views(&self) -> Vec<ParkedBatchView>;
+}
+
+impl ParkedBatchViews for engine::types::game_state::GameState {
+    fn parked_batch_views(&self) -> Vec<ParkedBatchView> {
+        self.resolution_stack
+            .iter()
+            .filter_map(|frame| match frame {
+                engine::types::resolution::ResolutionFrame::AbilityContinuation(frame)
+                    if matches!(
+                        frame.pending.chain.effect,
+                        engine::types::ability::Effect::ResumeDamageBatch { .. }
+                    ) =>
+                {
+                    Some(ParkedBatchView {
+                        tally: frame
+                            .pending
+                            .chain
+                            .context
+                            .parked_damage_batch
+                            .as_deref()
+                            .map(|parked| parked.prevention_tally.clone())
+                            .unwrap_or_default(),
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }

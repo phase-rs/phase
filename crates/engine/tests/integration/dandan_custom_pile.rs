@@ -4,10 +4,10 @@
 //! copy limit (CR 407.3's ante refusal stays).
 
 use std::collections::BTreeMap;
-use std::io::BufReader;
 use std::sync::Arc;
 
 use engine::database::card_db::CardDatabase;
+use engine::database::ComboTable;
 use engine::game::deck_loading::{
     load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
 };
@@ -21,7 +21,6 @@ use engine::types::format::{FormatConfig, GameFormat, SelectedFormat};
 use engine::types::game_state::GameState;
 use engine::types::match_config::MatchConfig;
 use engine::types::replay::ReplayHeader;
-use flate2::read::GzDecoder;
 
 use crate::dandan_shared_pile_storage::expected_decklist;
 use crate::support::shared_card_db;
@@ -89,7 +88,11 @@ fn object_names(state: &GameState) -> BTreeMap<String, usize> {
 #[test]
 fn the_pile_seats_submission_is_the_one_shared_library() {
     let Some(db) = shared_card_db() else { return };
-    let mut payload = resolve_deck_list(db, &jund_list(Some(vec!["Island".to_string(); 80])));
+    let mut payload = resolve_deck_list(
+        db,
+        &ComboTable::default(),
+        &jund_list(Some(vec!["Island".to_string(); 80])),
+    );
     // A card split across two entries still loads as one card's copies.
     let forest = payload
         .player
@@ -120,7 +123,10 @@ fn the_pile_seats_submission_is_the_one_shared_library() {
 #[test]
 fn an_empty_submission_plays_the_default_list() {
     let Some(db) = shared_card_db() else { return };
-    let state = loaded(db, &resolve_deck_list(db, &DeckList::default()));
+    let state = loaded(
+        db,
+        &resolve_deck_list(db, &ComboTable::default(), &DeckList::default()),
+    );
     assert_eq!(multiset(library_names(&state)), expected_decklist());
 }
 
@@ -130,7 +136,7 @@ fn only_the_pile_seats_main_deck_loads() {
     let mut list = jund_list(None);
     list.player.sideboard = vec!["Black Lotus".to_string()];
     list.player.commander = vec!["Amulet of Quoz".to_string()];
-    let payload = resolve_deck_list(db, &list);
+    let payload = resolve_deck_list(db, &ComboTable::default(), &list);
     assert_eq!(
         payload.player.sideboard.len(),
         1,
@@ -154,7 +160,10 @@ fn only_the_pile_seats_main_deck_loads() {
 #[test]
 fn a_started_game_plays_only_the_pile() {
     let Some(db) = shared_card_db() else { return };
-    let mut state = loaded(db, &resolve_deck_list(db, &jund_list(None)));
+    let mut state = loaded(
+        db,
+        &resolve_deck_list(db, &ComboTable::default(), &jund_list(None)),
+    );
     let _ = start_game_with_starting_player(&mut state, P0);
 
     assert_eq!(
@@ -168,13 +177,7 @@ fn a_started_game_plays_only_the_pile() {
 }
 
 fn owned_db() -> Arc<CardDatabase> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/integration_cards.json.gz");
-    let file = std::fs::File::open(path).expect("fixture opens");
-    Arc::new(
-        CardDatabase::from_export_reader(GzDecoder::new(BufReader::new(file)))
-            .expect("fixture loads"),
-    )
+    Arc::new(CardDatabase::from_integration_fixture().expect("fixture loads"))
 }
 
 fn header(deck_data: DeckList) -> ReplayHeader {
@@ -193,7 +196,8 @@ fn a_replay_reloads_the_pile_from_the_recorded_deck_list() {
     let db = owned_db();
     let header = header(jund_list(None));
 
-    let replayed = reconstruct_initial_state(&header, Some(&db)).expect("replay reconstructs");
+    let replayed = reconstruct_initial_state(&header, Some(&db), &ComboTable::default())
+        .expect("replay reconstructs");
     assert_eq!(object_names(&replayed), jund_multiset());
 
     // Preservation: replay and the live load agree for the same header and seed.
@@ -201,7 +205,11 @@ fn a_replay_reloads_the_pile_from_the_recorded_deck_list() {
     live.set_match_config(header.match_config);
     load_and_hydrate_decks(
         &mut live,
-        &resolve_deck_list(&db, header.deck_data.as_ref().unwrap()),
+        &resolve_deck_list(
+            &db,
+            &ComboTable::default(),
+            header.deck_data.as_ref().unwrap(),
+        ),
         Some(&db),
     );
     let _ = start_game_with_starting_player(&mut live, P0);

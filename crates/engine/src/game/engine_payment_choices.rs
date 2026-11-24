@@ -1,15 +1,14 @@
-use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, ResolvedAbility,
-    SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, Effect, EffectKind, ResolvedAbility, SacrificeRequirement,
+    SubAbilityLink, TargetFilter, TargetRef,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AutoMayChoice, CastPaymentMode, GameState, MayTriggerAutoChoiceScope,
     MayTriggerAutoChoiceSelector, PendingContinuation, PendingCostMoveResume,
-    PendingPlayerScopeUnlessPayment, ResolutionOptionalPaymentOption, WaitingFor,
-    WardSacrificePaymentResume,
+    PendingPlayerScopeUnlessPayment, ResolutionOptionalPaymentOption, UnpaidCostRemainder,
+    UnpaidCostSuffix, WaitingFor, WardSacrificePaymentResume,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -17,7 +16,7 @@ use crate::types::mana::ManaCost;
 use crate::types::mana::ManaSourceSelection;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
-use crate::types::resolution::OptionalEffectFrame;
+use crate::types::resolution::{OptionalEffectFrame, ParkedOpponentMayPoll};
 use crate::types::zones::Zone;
 use crate::types::ResolutionOptionalPaymentChoice;
 
@@ -166,6 +165,13 @@ fn handle_optional_effect_choice_inner(
                 trigger_events: pending_events,
                 trigger_match_count: pending_count,
                 return_result_occurrence,
+                replacement_action,
+                // A parked poll cursor owns no prompt, so it cannot be the frame
+                // an answer consumes: `validate` refuses a state whose top
+                // direct-choice frame does not match the live `WaitingFor`, and a
+                // parked cursor's gate is `AfterChild`. Bound rather than elided
+                // so a later field forces this re-audit.
+                parked_poll: _,
             } = frame;
             let choice = if accept {
                 AutoMayChoice::Accept
@@ -197,8 +203,15 @@ fn handle_optional_effect_choice_inner(
                 &mut state.active_return_result_occurrence,
                 return_result_occurrence,
             );
-            let result =
-                effects::resolve_optional_effect_decision(state, *ability, choice, events, 1);
+            // CR 614.6 + CR 615.5 + CR 608.2c: a "may" offered inside a replacement's own action
+            // resolves inside that action, so its "that much" reads the action's amount. The
+            // guard covers only this decision's resolution and drops before
+            // `resume_pending_continuation_if_priority`, so the enclosing spell's tail and any
+            // other work queued beneath this frame read their own amounts.
+            let result = {
+                let _action = crate::game::quantity::resume_replacement_action(replacement_action);
+                effects::resolve_optional_effect_decision(state, *ability, choice, events, 1)
+            };
             state.active_return_result_occurrence = previous_return_occurrence;
             state.current_trigger_event = previous_trigger_event;
             state.current_trigger_events = previous_trigger_events;
@@ -384,211 +397,231 @@ fn handle_opponent_may_choice_inner(
 
     if accept {
         if let Some(frame) = state.active_optional_effect_frame().cloned() {
+            // CR 608.2d + CR 104.3a + CR 800.4a: a seat judged able when offered can
+            // lose its options before it answers (another player left the game and
+            // took their objects with them), so the accepting seat is judged again,
+            // by the same authority. The next seat is offered, or every seat has
+            // declined.
+            if effects::offered_seat_cannot_accept(state, &frame.ability, promptee) {
+                return advance_opponent_may_offer(
+                    state,
+                    &remaining,
+                    decision_subject_id,
+                    source_id,
+                    description,
+                    events,
+                    events_before,
+                );
+            }
+
             let mut ability = frame.ability.clone();
             // CR 608.2c: "their" in an accepted any-player instruction binds
             // to the player who accepted across the complete local chain.
             // `controller` remains the controller of the resolving ability.
-            ability.set_scoped_player_recursive(promptee);
-            ability.context.accepting_player = Some(promptee);
-
-            // CR 608.2d: a player cannot accept an exact resolution-time
-            // selection they cannot make. This query deliberately recognizes
-            // only counted `their graveyard` exile instructions; every
-            // adjacent optional effect stays on the established path below.
-            if crate::game::effects::change_zone::exact_scoped_graveyard_exile_is_infeasible(
-                state, &ability,
-            ) == Some(true)
-            {
-                if let Some((&next, rest)) = remaining.split_first() {
-                    state.waiting_for = WaitingFor::OpponentMayChoice {
-                        player: next,
-                        decision_subject_id,
-                        source_id,
-                        description,
-                        remaining: rest.to_vec(),
-                    };
-                    return Ok(state.waiting_for.clone());
-                }
-
-                state
-                    .take_active_optional_effect_frame()
-                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
-                    .expect("cloned optional-effect frame remains active until final decision");
-                set_active_priority(state);
-                resolve_all_declined_opponent_may(state, &frame.ability, events)?;
-                resume_pending_continuation_if_priority(state, events)?;
-                super::triggers::collect_and_drain_observer_triggers_if_settled(
-                    state,
-                    events,
-                    events_before,
-                );
-                return Ok(state.waiting_for.clone());
-            }
-
+            effects::bind_accepting_seat(&mut ability, promptee);
             ability.optional = false;
             ability.optional_for = None;
 
-            // CR 701.21a + CR 608.2c: only a permanent's controller can sacrifice
-            // it, so an accepted "any player/opponent may sacrifice a creature"
-            // instruction is performed by the accepting player. Bind the head's
-            // pool to them: the parsed scope (`Opponent` for Desecration Demon,
-            // none for Argothian Wurm) names the offer, not the sacrificer.
-            if let Effect::Sacrifice {
-                target: TargetFilter::Typed(typed),
-                ..
-            } = &mut ability.effect
+            if let Some(effects::SeatSelectionPool { legal, required }) =
+                effects::opponent_may_selection_pool(state, &ability, promptee)
             {
-                typed.controller = Some(ControllerRef::ScopedPlayer);
-            }
-
-            let target_selection = match &ability.effect {
-                // CR 701.21a (sacrifice) / CR 701.26a (tap): an optional
-                // sacrifice or single-target tap cost. Tap requires an untapped
-                // permanent (CR 701.26a); sacrifice has no such restriction.
-                Effect::Sacrifice { target, .. }
-                | Effect::SetTapState {
-                    target,
-                    scope: EffectScope::Single,
-                    state: TapStateChange::Tap,
-                } => {
-                    let require_untapped = matches!(
-                        ability.effect,
-                        Effect::SetTapState {
-                            scope: EffectScope::Single,
-                            state: TapStateChange::Tap,
-                            ..
-                        }
-                    );
-                    // CR 701.21a: the sacrifice pool is read in the ability's own
-                    // frame, exactly as the Sacrifice resolver reads it. Tap
-                    // keeps the acceptor's frame.
-                    let filter_ctx = if require_untapped {
-                        filter::FilterContext::from_source_with_controller(
-                            ability.source_id,
-                            promptee,
-                        )
-                    } else {
-                        filter::FilterContext::from_ability(&ability)
-                    };
-                    let legal: Vec<ObjectId> = state
-                        .objects
-                        .iter()
-                        .filter(|(_, obj)| {
-                            obj.zone == Zone::Battlefield
-                                && obj.controller == promptee
-                                && (!require_untapped || !obj.tapped)
-                                && filter::matches_target_filter(state, obj.id, target, &filter_ctx)
-                                // CR 701.21a + CR 609.3: an option to sacrifice
-                                // is one a player can't take when the sacrifice
-                                // can't happen (Sigarda, Host of Herons).
-                                && (require_untapped
-                                    || effects::sacrifice::can_sacrifice_for_ability(
-                                        state, &ability, obj.id, promptee,
-                                    ))
-                        })
-                        .map(|(id, _)| *id)
-                        .collect();
-                    // CR 608.2d: the printed count is exact ("sacrifice two
-                    // creatures"), so a smaller pool can't perform the option.
-                    let required = match &ability.effect {
-                        Effect::Sacrifice { count, .. } => {
-                            let (count, _) = count.peel_up_to();
-                            crate::game::quantity::resolve_quantity_with_targets(
-                                state, count, &ability,
-                            )
-                            .max(1) as usize
-                        }
-                        _ => 1,
-                    };
-                    Some((
-                        if legal.len() < required {
-                            Vec::new()
-                        } else {
-                            legal
-                        },
-                        required,
-                    ))
-                }
-                _ => None,
-            };
-
-            if let Some((legal, required)) = target_selection {
-                if !legal.is_empty() {
-                    state
-                        .take_active_optional_effect_frame()
-                        .map_err(|error| EngineError::InvalidAction(error.to_string()))?
-                        .expect(
-                            "cloned optional-effect frame remains active until target selection",
-                        );
-                    ability.context.optional_effect_performed = true;
-                    state
-                        .player_actions_this_way
-                        .insert((promptee, PlayerActionKind::AcceptedOptionalEffect));
-                    if let Some(mut sub) = ability.sub_ability.take() {
-                        // CR 608.2c + CR 608.2d: the "If a player does, …"
-                        // consequence runs because the player accepted. Carry the
-                        // accepted ability's context (with
-                        // `optional_effect_performed = true`) onto the stashed
-                        // continuation so its `OptionalEffectPerformed` gate
-                        // evaluates true when the continuation drains after the
-                        // sacrifice/tap target is chosen — otherwise the
-                        // consequence (e.g. "put this creature on top of its
-                        // owner's library") is silently skipped.
-                        // `handle_multi_target_selection` retracts the mark if
-                        // the chosen instruction then does nothing.
-                        sub.context = ability.context.clone();
-                        sub.context.optional_effect_performed = true;
-                        state.park_ability_continuation(PendingContinuation::new(sub, state));
-                    }
-                    state.waiting_for = WaitingFor::MultiTargetSelection {
-                        player: promptee,
-                        legal_targets: legal,
-                        min_targets: required,
-                        max_targets: required,
-                        pending_ability: ability,
-                    };
-                    return Ok(state.waiting_for.clone());
-                }
-
-                if !remaining.is_empty() {
-                    let next = remaining[0];
-                    let rest = remaining[1..].to_vec();
-                    state.waiting_for = WaitingFor::OpponentMayChoice {
-                        player: next,
-                        decision_subject_id,
-                        source_id,
-                        description,
-                        remaining: rest,
-                    };
-                    return Ok(state.waiting_for.clone());
-                }
-
+                // The acceptance-time judgment above includes the empty-pool case.
+                debug_assert!(
+                    !legal.is_empty(),
+                    "an accepted any-player selection has a legal pool"
+                );
                 state
                     .take_active_optional_effect_frame()
                     .map_err(|error| EngineError::InvalidAction(error.to_string()))?
-                    .expect("cloned optional-effect frame remains active until final decision");
-                set_active_priority(state);
-                resolve_all_declined_opponent_may(state, &ability, events)?;
-            } else {
-                state
-                    .take_active_optional_effect_frame()
-                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
-                    .expect("cloned optional-effect frame remains active until final decision");
+                    .expect("cloned optional-effect frame remains active until target selection");
                 ability.context.optional_effect_performed = true;
                 state
                     .player_actions_this_way
                     .insert((promptee, PlayerActionKind::AcceptedOptionalEffect));
-                if matches!(ability.effect, Effect::DealDamage { .. }) {
-                    ability.set_unpinned_targets(vec![TargetRef::Player(promptee)]);
+                if let Some(mut sub) = ability.sub_ability.take() {
+                    // CR 608.2c + CR 608.2d: the "If a player does, …"
+                    // consequence runs because the player accepted. Carry the
+                    // accepted ability's context (with
+                    // `optional_effect_performed = true`) onto the stashed
+                    // continuation so its `OptionalEffectPerformed` gate
+                    // evaluates true when the continuation drains after the
+                    // sacrifice/tap target is chosen — otherwise the
+                    // consequence (e.g. "put this creature on top of its
+                    // owner's library") is silently skipped.
+                    // `handle_multi_target_selection` retracts the mark if
+                    // the chosen instruction then does nothing.
+                    sub.context = ability.context.clone();
+                    sub.context.optional_effect_performed = true;
+                    // CR 614.6 + CR 615.5 + CR 608.2c: the parked rest belongs to the
+                    // replacement action the offer was made in, so it captures that action.
+                    let pending = {
+                        let _action = crate::game::quantity::resume_replacement_action(
+                            frame.replacement_action,
+                        );
+                        PendingContinuation::new(sub, state)
+                    };
+                    state.park_ability_continuation(pending);
                 }
-                set_active_priority(state);
+                state.waiting_for = WaitingFor::MultiTargetSelection {
+                    player: promptee,
+                    legal_targets: legal,
+                    min_targets: required,
+                    max_targets: required,
+                    pending_ability: ability,
+                };
+                return Ok(state.waiting_for.clone());
+            }
+
+            state
+                .take_active_optional_effect_frame()
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                .expect("cloned optional-effect frame remains active until final decision");
+            ability.context.optional_effect_performed = true;
+            state
+                .player_actions_this_way
+                .insert((promptee, PlayerActionKind::AcceptedOptionalEffect));
+            if matches!(ability.effect, Effect::DealDamage { .. }) {
+                ability.set_unpinned_targets(vec![TargetRef::Player(promptee)]);
+            }
+            set_active_priority(state);
+            // CR 614.6 + CR 615.5 + CR 608.2c: the accepted action resolves inside the
+            // replacement action the offer was made in. The guard covers only this resolution
+            // and drops before the re-offer and `resume_pending_continuation_if_priority`.
+            let resolved = {
+                let _action =
+                    crate::game::quantity::resume_replacement_action(frame.replacement_action);
                 effects::resolve_ability_chain(state, &ability, events, 1)
-                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            };
+            resolved.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+
+            // CR 118.12 + CR 101.4: an acceptance answers one responder, not
+            // the poll. Dash Hopes' ruling is explicit: "As soon as any
+            // player performs the action, the spell is countered, but the
+            // remaining players still get the option." Re-park the frame for
+            // the next responder instead of letting the first acceptance end
+            // the poll.
+            //
+            // The re-offered frame carries the ORIGINAL ability (this
+            // promptee's bindings — scoped player, payer, rebound anaphor —
+            // are theirs alone and must not leak to the next responder),
+            // with `optional_effect_performed` set so a later all-decline
+            // does not fire the "if no one does" rider for an action that
+            // was performed.
+            //
+            // Only when a later responder still HAS the option (CR 608.2d)
+            // — `acceptance_leaves_the_option_open` is the authority, and
+            // the Sin Prodder case is why the re-offer is not unconditional.
+            //
+            // The accepted action may or may not have resolved to completion.
+            // CR 101.4 owes the next responder an offer either way, so the
+            // only question is whether this poll may own the prompt right
+            // now: exactly one frame may (`MultipleDirectChoiceOwners`), and
+            // an action that suspended on a prompt of its own — a CR 616.1
+            // replacement-ordering choice, say — holds it.
+            //
+            // Settled priority: install the offer as the live prompt.
+            // Otherwise: park the cursor beneath that live prompt, where it
+            // owns nothing and arms once the frames above it are gone. Same
+            // two roles a `Parked`/`Armed` Cipher offer and a past-cursor-0
+            // `DieRoll` carry, and the reason `parked_poll` moves the gate to
+            // `AfterChild`.
+            if acceptance_leaves_the_option_open(&ability.effect) {
+                let mut reoffered = frame.ability.clone();
+                reoffered.context.optional_effect_performed = true;
+                // CR 614.6 + CR 615.5 + CR 608.2c: the next responder's offer belongs to the
+                // same resolution as this one, so it copies this frame's context, the
+                // replacement action it was made in included, rather than capturing the
+                // context now (this action's guard has already dropped).
+                let mut offer = OptionalEffectFrame {
+                    parked_poll: None,
+                    ability: reoffered,
+                    ..frame.clone()
+                };
+                // CR 608.2d: each seat is judged when its own offer is made, and
+                // the two branches below make that offer at different times, so
+                // they judge at different times.
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    // Settled: this offer goes live NOW, so it is judged now —
+                    // through the same authority as the fan-out and the decline
+                    // path, so a re-offer can no more name a seat that has left
+                    // the game or cannot take the option than they can.
+                    if let Some((next, rest)) =
+                        effects::next_offerable_seat(state, &frame.ability, &remaining)
+                    {
+                        state
+                            .install_direct_choice_frame(
+                                crate::types::resolution::ResolutionFrame::OptionalEffect(offer),
+                                WaitingFor::OpponentMayChoice {
+                                    player: next,
+                                    decision_subject_id,
+                                    source_id,
+                                    description,
+                                    remaining: rest,
+                                },
+                            )
+                            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                    }
+                } else if let Some((&next, rest)) = remaining.split_first() {
+                    // Suspended: the offer is not made until the cursor arms,
+                    // which is after the accepted action finishes. Judging the
+                    // seats HERE would be judging them too early — the accepted
+                    // action can still change who may accept, in both directions
+                    // — so the cursor is parked unjudged and
+                    // `arm_parked_opponent_may_poll` judges it at the moment the
+                    // offer is actually made.
+                    offer.parked_poll = Some(Box::new(ParkedOpponentMayPoll {
+                        next,
+                        remaining: rest.to_vec(),
+                        decision_subject_id,
+                        source_id,
+                        description,
+                    }));
+                    state
+                        .park_opponent_may_poll_beneath_live_prompt(offer)
+                        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                }
             }
         }
-    } else if !remaining.is_empty() {
-        let next = remaining[0];
-        let rest = remaining[1..].to_vec();
+    } else {
+        return advance_opponent_may_offer(
+            state,
+            &remaining,
+            decision_subject_id,
+            source_id,
+            description,
+            events,
+            events_before,
+        );
+    }
+
+    resume_pending_continuation_if_priority(state, events)?;
+    super::triggers::collect_and_drain_observer_triggers_if_settled(state, events, events_before);
+    Ok(state.waiting_for.clone())
+}
+
+/// CR 608.2d + CR 101.4: the handler's single advance past the seat that just
+/// declined or could not accept. The next seat in `remaining` that can be offered
+/// is asked (`effects::next_offerable_seat`, which judges each seat at its own
+/// turn); with none left, every seat has declined and the all-declined completion
+/// runs.
+fn advance_opponent_may_offer(
+    state: &mut GameState,
+    remaining: &[PlayerId],
+    decision_subject_id: Option<ObjectId>,
+    source_id: ObjectId,
+    description: Option<String>,
+    events: &mut Vec<GameEvent>,
+    events_before: usize,
+) -> Result<WaitingFor, EngineError> {
+    let next = match state.active_optional_effect_frame() {
+        Some(frame) => effects::next_offerable_seat(state, &frame.ability, remaining),
+        // No producer leaves an `OpponentMayChoice` without its frame; with no
+        // ability to judge, the next queued seat is offered unjudged.
+        None => remaining
+            .split_first()
+            .map(|(&next, rest)| (next, rest.to_vec())),
+    };
+    if let Some((next, rest)) = next {
         state.waiting_for = WaitingFor::OpponentMayChoice {
             player: next,
             decision_subject_id,
@@ -597,19 +630,145 @@ fn handle_opponent_may_choice_inner(
             remaining: rest,
         };
         return Ok(state.waiting_for.clone());
-    } else {
-        set_active_priority(state);
-        if let Some(frame) = state
-            .take_active_optional_effect_frame()
-            .map_err(|error| EngineError::InvalidAction(error.to_string()))?
-        {
-            resolve_all_declined_opponent_may(state, &frame.ability, events)?;
-        }
     }
 
+    set_active_priority(state);
+    if let Some(frame) = state
+        .take_active_optional_effect_frame()
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+    {
+        // CR 614.6 + CR 615.5 + CR 608.2c: the all-declined completion resolves inside the
+        // replacement action the offer was made in. The guard drops at the end of this block,
+        // before `resume_pending_continuation_if_priority`.
+        let _action = crate::game::quantity::resume_replacement_action(frame.replacement_action);
+        resolve_all_declined_opponent_may(state, &frame.ability, events)?;
+    }
     resume_pending_continuation_if_priority(state, events)?;
     super::triggers::collect_and_drain_observer_triggers_if_settled(state, events, events_before);
     Ok(state.waiting_for.clone())
+}
+
+/// CR 101.4: Arms a parked any-player poll cursor — the offer for the responder
+/// after an acceptance whose action suspended on a prompt of its own.
+///
+/// Called from `resume_resolution_frames`, i.e. only once the frames above the
+/// cursor are gone and priority has settled, which is what puts the next offer
+/// after the accepted action's own child prompt rather than racing it. Clearing
+/// `parked_poll` moves the frame's gate back to `DirectChoice`, so the frame and
+/// the prompt it is permitted to consume become consistent in the same step —
+/// the invariant `install_direct_choice_frame` enforces when it installs a fresh
+/// owner, held here by mutating a frame that is already the top one, exactly as
+/// `cipher::arm_parked_encode_offer` does.
+///
+/// CR 102.1 + CR 800.4f + CR 608.2d: the parked seats are judged here, not at
+/// park time, because the accepted action resolves in between and can remove a
+/// responder from the game or take their option away. With no seat left to ask,
+/// the poll closes instead of arming.
+pub(crate) fn arm_parked_opponent_may_poll(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let Some((poll, ability, replacement_action)) =
+        state.active_optional_effect_frame().and_then(|frame| {
+            frame.parked_poll.as_deref().cloned().map(|poll| {
+                (
+                    poll,
+                    frame.ability.as_ref().clone(),
+                    frame.replacement_action,
+                )
+            })
+        })
+    else {
+        return Ok(());
+    };
+
+    // CR 102.1 + CR 800.4f + CR 608.2d: the cursor was parked before the
+    // accepted action resolved, and that action can change who may still be
+    // asked — a responder can leave the game while it resolves (CR 104.3a +
+    // CR 800.4a, taking their objects with them), and "If an object requires a
+    // player who has left the game to pay a cost or choose whether to pay a
+    // cost, that cost is not paid." A seat can also simply stop being able to
+    // take the option (CR 608.2d). So the parked seats are judged HERE, when
+    // the offer is actually made, through the same authority the fan-out and
+    // the decline path use (`effects::next_offerable_seat`) rather than
+    // trusting the seat recorded at park time.
+    //
+    // `poll.next` is the seat that was next when the cursor parked, so it goes
+    // back at the head of the queue to be judged like any other.
+    let mut seats = Vec::with_capacity(poll.remaining.len() + 1);
+    seats.push(poll.next);
+    seats.extend_from_slice(&poll.remaining);
+
+    let Some((next, rest)) = effects::next_offerable_seat(state, &ability, &seats) else {
+        // CR 101.4 + CR 800.4f: no seat is left to ask, so the poll is over and
+        // its frame closes. A parked poll exists only because an earlier
+        // responder accepted, so the "if no one does" rider is already spent —
+        // the completion below is a no-op for that reason, not by omission, and
+        // it stays routed through the one authority so a future producer that
+        // parks an unperformed poll still fires the rider.
+        debug_assert!(
+            ability.context.optional_effect_performed,
+            "a parked poll is only created after a responder accepted"
+        );
+        state
+            .take_active_optional_effect_frame()
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+            .expect("a parked poll's frame stays active until it is armed or closed");
+        set_active_priority(state);
+        // CR 614.6 + CR 615.5 + CR 608.2c: like every resolution of this frame's ability, the
+        // completion resolves inside the replacement action the poll was offered in.
+        let _action = crate::game::quantity::resume_replacement_action(replacement_action);
+        return resolve_all_declined_opponent_may(state, &ability, events);
+    };
+
+    if let Some(frame) = state.active_optional_effect_frame_mut() {
+        frame.parked_poll = None;
+    }
+    state.waiting_for = WaitingFor::OpponentMayChoice {
+        player: next,
+        decision_subject_id: poll.decision_subject_id,
+        source_id: poll.source_id,
+        description: poll.description,
+        remaining: rest,
+    };
+    Ok(())
+}
+
+/// CR 101.4 + CR 608.2d: whether an acceptance leaves the offer standing for the
+/// responders after it, which is what decides if the poll outlives the first
+/// acceptance.
+///
+/// CR 101.4 polls every eligible player and nothing in it stops the poll when one
+/// player chooses, so continuation is never a per-card policy. What ends a later
+/// responder's option is CR 608.2d — "The player can't choose an option that's
+/// illegal or impossible." So the only question is whether the accepted action is
+/// still available to the next responder:
+///
+/// - **Self-funded actions stay available.** Each responder pays or suffers out of
+///   their own resources, so an earlier acceptance consumes nothing of theirs.
+///   Dash Hopes and Temporal Extortion both carry the printed ruling "As soon as
+///   any player performs the action, the spell is countered, but the remaining
+///   players still get the option." Browbeat and Book Burning ("any player may
+///   have ~ deal N damage to them") are the same shape; they have no rulings of
+///   their own, so they are classified from the mechanism, not from a quotation.
+/// - **One-shot actions on a single object do not.** Sin Prodder's "any opponent
+///   may have YOU put that card into your graveyard" moves one specific card
+///   once. After the first acceptance the option is impossible, which is exactly
+///   why its printed ruling says "Once a player does so ... Sin Prodder's trigger
+///   has no further action."
+///
+/// The distinction is already carried by the AST at the one site that needs it:
+/// the accept branch binds the action's subject to the responder for precisely
+/// the self-funded shapes (`PayCost`'s payer, `DealDamage`'s target) and leaves
+/// every other effect aimed wherever the card aimed it. Reading that rather than
+/// storing a policy field keeps one predicate covering the whole class.
+///
+/// Fail-closed: an effect shape not listed here stops the poll, which is the
+/// behaviour every path had before the poll was made to continue at all. A new
+/// self-funded shape must opt in here, and the Sin Prodder row is the control
+/// that proves the predicate is actually consulted.
+fn acceptance_leaves_the_option_open(effect: &Effect) -> bool {
+    matches!(effect, Effect::PayCost { .. } | Effect::DealDamage { .. })
 }
 
 fn resolve_all_declined_opponent_may(
@@ -617,46 +776,41 @@ fn resolve_all_declined_opponent_may(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    if let Some(ref sub) = ability.sub_ability {
-        if sub
-            .condition
-            .as_ref()
-            .is_some_and(AbilityCondition::is_optional_effect_performed)
-        {
-            // CR 608.2d: "If a player does, X. If no one does, Y." — no one
-            // performed the optional action, so fire Y (the else branch of the
-            // OptionalEffectPerformed sub).
-            if let Some(ref else_branch) = sub.else_ability {
-                let mut else_resolved = else_branch.as_ref().clone();
-                // CR 608.2c: the else branch resolves as the continuation of the
-                // stashed optional ability. Preserve a captured event-context
-                // target (such as the affected player of a replaced Draw) after
-                // the post-replacement drain that supplied it has retired.
-                if else_resolved.targets.is_empty() && !ability.targets.is_empty() {
-                    else_resolved.mirror_targets_from(ability);
-                }
-                else_resolved.context = ability.context.clone();
-                else_resolved
-                    .set_replacement_applied_recursive(ability.replacement_applied.clone());
-                effects::resolve_ability_chain(state, &else_resolved, events, 1)
-                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-            }
-        } else if sub
-            .condition
-            .as_ref()
-            .is_some_and(AbilityCondition::is_not_optional_effect_performed)
-        {
-            // CR 608.2d + CR 101.4: standalone "If no one does, Y" reward on
-            // an "any opponent/player may" head (Browbeat, Book Burning). The
-            // reward is carried directly on the `Not(OptionalEffectPerformed)`
-            // gated sub. No one performed the optional action, so fire the
-            // sub's effect now. (On accept, the head's own chain resolution
-            // evaluates this same negated condition as false and skips it.)
-            let mut sub_resolved = sub.as_ref().clone();
-            sub_resolved.context = ability.context.clone();
-            effects::resolve_ability_chain(state, &sub_resolved, events, 1)
-                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-        }
+    // CR 118.12 + the Dash Hopes ruling ("As soon as any player performs the
+    // action, the spell is countered, but the remaining players still get the
+    // option"): because such a poll continues past the first acceptance, a LATER
+    // decline reaches this path even though the action WAS performed, and the
+    // "if no one does" rider must not fire then — Browbeat's one seat took the 5
+    // damage, so nobody draws three cards.
+    //
+    // The performed bit CANNOT carry that fact on its own, and the qualifier is
+    // the correction to round 3 rather than a narrowing for convenience: an
+    // acceptance sets the bit RECURSIVELY down the chain
+    // (`set_optional_effect_performed_recursive`), so a nested poll inherits it
+    // from an ENCLOSING optional that was accepted and never spent anything of
+    // its own. `effects::declined_by_every_seat_branch` resets the bit for this
+    // exact reason ("not an acceptance inherited from an enclosing optional"),
+    // so reading it here unqualified closed the rider of every nested poll under
+    // an accepted outer optional.
+    //
+    // Why the qualifier is EXACT for a poll that ends at its first acceptance:
+    // such a poll never re-offers, so no decline can reach this function after
+    // one of its OWN seats accepted, and a set bit is therefore necessarily
+    // inherited. Only a poll that continues past an acceptance can have spent
+    // its own rider, so only those polls may read the bit as their own.
+    //
+    // Residual, disclosed rather than hidden: for a CONTINUING poll nested under
+    // an accepted enclosing optional, the inherited bit is still
+    // indistinguishable from its own acceptance. Closing that needs the fact
+    // stored per-poll on `OptionalEffectFrame` instead of in the chain context.
+    if acceptance_leaves_the_option_open(&ability.effect)
+        && ability.context.optional_effect_performed
+    {
+        return Ok(());
+    }
+    if let Some(branch) = effects::declined_by_every_seat_branch(ability) {
+        effects::resolve_ability_chain(state, &branch, events, 1)
+            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
     }
     Ok(())
 }
@@ -671,7 +825,7 @@ pub(super) fn handle_tribute_choice(
     waiting_for: WaitingFor,
     accept: bool,
     events: &mut Vec<GameEvent>,
-) -> Result<ActionResult, EngineError> {
+) -> Result<WaitingFor, EngineError> {
     let WaitingFor::TributeChoice {
         player,
         source_id,
@@ -684,8 +838,9 @@ pub(super) fn handle_tribute_choice(
         ));
     };
 
+    let events_before = events.len();
     if accept && !effects::tribute::apply_paid(state, player, source_id, count, events) {
-        return Ok(action_result(events, state.waiting_for.clone()));
+        return Ok(state.waiting_for.clone());
     } else if !accept {
         effects::tribute::apply_declined(state, source_id);
     }
@@ -694,7 +849,17 @@ pub(super) fn handle_tribute_choice(
     // the persisted TributeOutcome when its intervening-if condition is checked.
     set_active_priority(state);
     resume_pending_continuation_if_priority(state, events)?;
-    Ok(action_result(events, state.waiting_for.clone()))
+    // CR 603.2 + CR 603.6a + CR 702.104a: the tribute is decided as the creature
+    // enters, so this answer puts it onto the battlefield (and may go on to a
+    // co-entrant's prompt) without reaching `run_post_action_pipeline`. Its
+    // battlefield entries go to the entry gate here; its other events are left
+    // as before.
+    super::triggers::collect_and_drain_entry_observer_triggers_if_settled(
+        state,
+        events,
+        events_before,
+    );
+    Ok(state.waiting_for.clone())
 }
 
 /// CR 118.12a: Resolve the player's choice between sub-costs of a disjunctive
@@ -717,6 +882,7 @@ pub(super) fn handle_unless_payment_choose_cost(
         effect_description,
         mut remaining_choices,
         mut chosen,
+        affected_object,
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -779,6 +945,7 @@ pub(super) fn handle_unless_payment_choose_cost(
                     effect_description,
                     remaining_choices,
                     chosen,
+                    affected_object,
                 };
                 return Ok(action_result(events, state.waiting_for.clone()));
             }
@@ -800,6 +967,8 @@ pub(super) fn handle_unless_payment_choose_cost(
                 // Disjunctive (`OneOf`) unless-costs are single-payer — the
                 // "any player" poll never co-occurs with a sub-cost choice.
                 remaining: Vec::new(),
+                affected_object,
+                repeat: None,
             };
             handle_unless_payment(state, next, true, events)
         }
@@ -825,6 +994,8 @@ pub(super) fn handle_unless_payment_choose_cost(
                 trigger_event,
                 effect_description,
                 remaining: Vec::new(),
+                affected_object,
+                repeat: None,
             };
             handle_unless_payment(state, next, false, events)
         }
@@ -909,9 +1080,6 @@ fn pay_top_library_exile_cost(
                 source_id,
                 exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
                 drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                // Cost-payment exile/sacrifice deliveries are never library
-                // placements.
-                library_placement: None,
             },
             events,
         ) {
@@ -949,16 +1117,17 @@ pub(crate) fn begin_player_scope_token_unless_sacrifice(
     let Some(modifier) = ability.unless_pay.as_ref() else {
         return false;
     };
-    let AbilityCost::Sacrifice(cost) = &modifier.cost else {
+    let Some(costs::SingleChoicePayment::SacrificeOne { .. }) =
+        costs::single_choice_payment(&modifier.cost)
+    else {
         return false;
     };
     // The scoped resolver owns the actual payer. Oracle lowering can preserve
     // an anaphoric "they" as `Player` before the outer player scope is applied.
     if !matches!(
-        (&modifier.payer, &cost.requirement, &ability.effect),
+        (&modifier.payer, &ability.effect),
         (
             TargetFilter::ScopedPlayer | TargetFilter::Player,
-            SacrificeRequirement::Count { count: 1 },
             Effect::Token {
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 ..
@@ -983,6 +1152,7 @@ pub(crate) fn begin_player_scope_token_unless_sacrifice(
         declining_players: Vec::new(),
         current_player: *current_player,
         cost: modifier.cost.clone(),
+        payments: Vec::new(),
     }));
     set_player_scope_unless_payment_waiting_for(state);
     true
@@ -1000,6 +1170,8 @@ fn set_player_scope_unless_payment_waiting_for(state: &mut GameState) {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
+        repeat: None,
     };
 }
 
@@ -1041,21 +1213,66 @@ fn settle_player_scope_token_unless_payment(
     pending: Box<PendingPlayerScopeUnlessPayment>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    // `UnlessPayment` belongs only to the per-payer question. Clear it before
-    // resolving the one aggregate result so a decline cannot leave its prior
-    // chooser serialized after token creation or a replacement resume.
-    set_active_priority(state);
-    if !pending.declining_players.is_empty() {
-        let mut effect = *pending.pending_effect;
+    let PendingPlayerScopeUnlessPayment {
+        pending_effect,
+        declining_players,
+        payments,
+        ..
+    } = *pending;
+    let (source_id, controller) = (pending_effect.source_id, pending_effect.controller);
+    let tokens = (!declining_players.is_empty()).then(|| {
+        let mut effect = pending_effect;
         if let Effect::Token { count, .. } = &mut effect.effect {
             *count = crate::types::ability::QuantityExpr::Fixed {
-                value: pending.declining_players.len() as i32,
+                value: declining_players.len() as i32,
             };
         }
-        effects::resolve_ability_chain(state, &effect, events, 0)
-            .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+        effect
+    });
+    let sacrifices = payments
+        .into_iter()
+        .map(|payment| (payment.player, payment.objects))
+        .collect();
+    // CR 101.4: once every seat has answered, the chosen creatures are
+    // sacrificed and the tokens created together (Acererak the Archlich's
+    // ruling), through the shared scoped-unless settlement. It clears the
+    // per-payer prompt first, so no prior chooser stays serialized after the
+    // tokens or a replacement resume.
+    crate::game::scoped_unless_poll::settle_token_unless_sacrifice(
+        state, source_id, controller, sacrifices, tokens, events,
+    )
+}
+
+/// Whether `player`'s live sacrifice selection about `source_id` is the
+/// aggregate token poll's payment.
+fn token_unless_poll_owns_prompt(state: &GameState, player: PlayerId, source_id: ObjectId) -> bool {
+    state
+        .pending_player_scope_unless_payment
+        .as_deref()
+        .is_some_and(|pending| {
+            pending.current_player == player && pending.pending_effect.source_id == source_id
+        })
+}
+
+/// CR 101.4 + CR 118.12a: the paying seat's chosen creature is recorded, not
+/// sacrificed; the next seat is asked, or the poll settles.
+fn record_token_unless_sacrifice(
+    state: &mut GameState,
+    player: PlayerId,
+    chosen: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let objects = crate::game::scoped_unless_poll::pin(state, chosen);
+    if let Some(pending) = state.pending_player_scope_unless_payment.as_deref_mut() {
+        pending
+            .payments
+            .push(crate::types::game_state::PlayerScopeUnlessSelection {
+                player,
+                action: crate::types::game_state::PlayerScopeUnlessAction::Sacrifice,
+                objects,
+            });
     }
-    Ok(state.waiting_for.clone())
+    advance_player_scope_token_unless_payment(state, player, true, events)
 }
 
 /// CR 800.4a + CR 101.4: After eliminating the current final payer, settle
@@ -1087,17 +1304,22 @@ fn handle_player_scope_token_unless_payment(
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
-    let WaitingFor::UnlessPayment { player, cost, .. } = waiting_for else {
+    let WaitingFor::UnlessPayment {
+        player,
+        cost,
+        trigger_event,
+        ..
+    } = waiting_for
+    else {
         unreachable!("aggregate payment uses UnlessPayment")
     };
     if !pay {
         return finish_player_scope_token_unless_payment(state, player, false, events);
     }
-    let AbilityCost::Sacrifice(cost) = cost else {
-        unreachable!("aggregate parser gate admits only sacrifice costs")
-    };
-    let SacrificeRequirement::Count { count: 1 } = cost.requirement else {
-        unreachable!("aggregate parser gate admits exactly one sacrifice")
+    let Some(costs::SingleChoicePayment::SacrificeOne { target }) =
+        costs::single_choice_payment(&cost)
+    else {
+        unreachable!("admitted by begin_player_scope_token_unless_sacrifice")
     };
     let pending_effect = state
         .pending_player_scope_unless_payment
@@ -1106,7 +1328,7 @@ fn handle_player_scope_token_unless_payment(
         .pending_effect
         .clone();
     let eligible =
-        eligible_unless_sacrifice_permanents(state, player, pending_effect.source_id, &cost.target);
+        eligible_unless_sacrifice_permanents(state, player, pending_effect.source_id, target);
     if eligible.is_empty() {
         return finish_player_scope_token_unless_payment(state, player, false, events);
     }
@@ -1116,6 +1338,7 @@ fn handle_player_scope_token_unless_payment(
         pending_effect,
         remaining: 1,
         min_total_power: None,
+        trigger_event,
     };
     Ok(action_result(events, state.waiting_for.clone()))
 }
@@ -1126,6 +1349,18 @@ pub(super) fn handle_unless_payment(
     pay: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
+    if let WaitingFor::UnlessPayment {
+        player,
+        cost,
+        pending_effect,
+        ..
+    } = &waiting_for
+    {
+        if crate::game::scoped_unless_poll::owns_prompt(state, *player, pending_effect.source_id) {
+            let wf = crate::game::scoped_unless_poll::answer(state, *player, cost, pay, events)?;
+            return Ok(action_result(events, wf));
+        }
+    }
     if state
         .pending_player_scope_unless_payment
         .as_ref()
@@ -1140,6 +1375,11 @@ pub(super) fn handle_unless_payment(
     {
         return handle_player_scope_token_unless_payment(state, waiting_for, pay, events);
     }
+    // CR 702.24a: the continuation of a repeated draw payment already begun is
+    // not a fresh choice: none of the checks on choosing to pay apply to it.
+    if payment_continuation_prompt(state).is_some_and(|prompt| prompt == waiting_for) {
+        return continue_repeated_draw_payment(state, pay, events);
+    }
     let WaitingFor::UnlessPayment {
         player,
         cost,
@@ -1147,6 +1387,8 @@ pub(super) fn handle_unless_payment(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
+        repeat,
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -1165,11 +1407,19 @@ pub(super) fn handle_unless_payment(
     // mirroring the CR 119.8 analogue (`life_costs::can_pay_life_cost` is the
     // choice-time half; `PayLifeCostResult::Prohibited` is the payment-time half).
     // Only the pay branch is refused; `PayUnlessCost { pay: false }` stays legal.
+    // The authority's fresh entry re-asks the same question on the same cost;
+    // for every arm below it is an idempotent backstop.
+    // CR 121.2b + CR 702.24a: judge the whole repeated payment compactly; the
+    // concrete legs are allocated only if the payer actually pays.
+    let check_cost = match repeat {
+        Some(count) if count > 0 => crate::game::effects::repeated_draw_check_cost(&cost, count),
+        _ => cost.clone(),
+    };
     if pay
         && costs::resolution_cost_includes_impossible_event(
             state,
             player,
-            &cost,
+            &check_cost,
             pending_effect.as_ref(),
         )
     {
@@ -1178,10 +1428,46 @@ pub(super) fn handle_unless_payment(
                 .to_string(),
         ));
     }
+    // CR 101.4 + CR 118.12a: an answer to an open choose-all-then-act poll is
+    // recorded, not paid; nothing happens until every seat has answered.
+    if effects::simultaneous_unless::binds(state, player, pending_effect.source_id) {
+        let event_start = events.len();
+        let waiting_for = match effects::simultaneous_unless::answer_branch(state, pay, &cost)
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+        {
+            effects::simultaneous_unless::WalkOutcome::Prompted => state.waiting_for.clone(),
+            effects::simultaneous_unless::WalkOutcome::Complete => {
+                settle_simultaneous_unless(state, events, SettlePipeline::RunFrom { event_start })?
+            }
+        };
+        return Ok(action_result(events, waiting_for));
+    }
 
     let mut payment_failed = !pay;
     let post_action_event_start = None;
+    let payment_event_start = events.len();
     if pay {
+        // CR 702.24a: a repeated draw cost is one printed instruction per age
+        // counter, paid one instruction at a time through the counter-addition
+        // payment owner, whatever the count.
+        if let Some(owed) = repeat.and_then(std::num::NonZeroU32::new) {
+            let payment = RepeatedDrawUnlessPayment {
+                payer: player,
+                cost,
+                pending_effect,
+                trigger_event,
+                effect_description,
+                remaining,
+            };
+            let waiting_for = pay_repeated_draw_unless_cost(
+                state,
+                payment,
+                owed,
+                Some(payment_event_start),
+                events,
+            )?;
+            return Ok(action_result(events, waiting_for));
+        }
         match cost {
             // CR 118.12: Pay the static mana component of the unless cost
             // through the single payment authority (cost-payment unification,
@@ -1318,7 +1604,11 @@ pub(super) fn handle_unless_payment(
                     // `resume_counter_addition_unless_payment`, which settles
                     // it through `finish_successful_unless_payment`) instead of
                     // leaving it orphaned at bare Priority.
-                    PaymentOutcome::Paused { .. } => {
+                    PaymentOutcome::Paused { remaining_cost } => {
+                        debug_assert!(
+                            state.pending_cost_move_resume.is_none(),
+                            "an unless payment parks over a live cost-move root"
+                        );
                         state.pending_cost_move_resume =
                             Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
                                 cost: poll_cost.clone(),
@@ -1326,6 +1616,8 @@ pub(super) fn handle_unless_payment(
                                 trigger_event: trigger_event.clone(),
                                 effect_description: effect_description.clone(),
                                 remaining: remaining.clone(),
+                                unpaid_suffix: remaining_cost
+                                    .map(|cost| UnpaidCostSuffix::legs(player, cost)),
                             });
                         return Ok(action_result(events, state.waiting_for.clone()));
                     }
@@ -1336,174 +1628,104 @@ pub(super) fn handle_unless_payment(
             // `remaining` re-prompt loop (one card per round-trip). Defers to the
             // unified `WardDiscardChoice` waiting state (the name predates the
             // fold and now covers both ward and counter unless-discard cases).
-            AbilityCost::Discard {
-                count,
-                filter,
-                selection,
-                self_scope: _,
-            } => {
-                let resolved = crate::game::quantity::resolve_quantity_with_targets(
-                    state,
-                    &count,
-                    pending_effect.as_ref(),
-                );
-                let count = u32::try_from(resolved.max(0)).unwrap_or(0);
-
-                let hand_cards = crate::game::casting::find_eligible_discard_targets(
+            AbilityCost::Discard { .. } => {
+                match prepare_unless_selection_payment(
                     state,
                     player,
-                    pending_effect.source_id,
-                    pending_effect.context.granting_object,
-                    filter.as_ref(),
-                );
-                // CR 702.24a: partial payments aren't allowed — if the controller
-                // can't produce the full count, the unless cost is unpayable and
-                // the effect happens.
-                if (hand_cards.len() as u32) < count {
-                    payment_failed = true;
-                } else if count == 0 {
-                    // Deliberately class-wide for every Discard unless-cost: a
-                    // resolved count of zero (a whole-hand discard with an empty
-                    // hand, per the Perplex 2005-10-01 ruling) needs no resource
-                    // to discard (cf. CR 118.3), so the cost is
-                    // paid with nothing to discard. Falls through to the paid
-                    // path; prompting `WardDiscardChoice` with no cards would
-                    // soft-lock the payer.
-                } else if selection.is_random() {
-                    // CR 701.9b: a RANDOM discard offers the payer no choice —
-                    // the game picks. Pay it inline through the shared
-                    // `discard_at_random` authority (same code the effect layer
-                    // uses, same seeded `state.rng`) instead of surfacing
-                    // `WardDiscardChoice`, which would let the payer select and
-                    // silently turn Balduvian Horde's cost into a cheaper one.
-                    //
-                    // Structural precedent: the `Mill` arm below — the other
-                    // unless-cost with no choice to offer pays inline and falls
-                    // through to the paid path.
-                    //
-                    // CR 118.12 + CR 601.2h: `DiscardCause::Cost`, NOT `Effect`.
-                    // This discard IS the payment, so an effect-caused
-                    // replacement (Library of Leng) must not apply to it — the
-                    // boundary `library_of_leng_does_not_apply_to_discard_cost`
-                    // pins.
-                    match crate::game::effects::discard::discard_at_random(
-                        state,
-                        crate::game::effects::discard::RandomDiscardRequest {
-                            player,
-                            source_id: pending_effect.source_id,
-                            count: count as usize,
-                            eligible: hand_cards,
-                            cause: crate::game::effects::discard::DiscardCause::Cost,
-                            discard_frame: None,
-                        },
-                        events,
-                    ) {
-                        crate::game::effects::discard::RandomDiscardOutcome::Completed { .. } => {}
-                        // CR 616.1: a replacement effect parked a choice. Unlike
-                        // the chosen-discard sibling there is no
-                        // `WardDiscardChoice` re-prompt loop to own the
-                        // remainder, and unlike the effect layer this caller
-                        // still owes an unless-payment. Persist BOTH the batch
-                        // cursor and the full payment payload so the drain can
-                        // settle the guarded ability, instead of returning and
-                        // leaving it neither paid nor unpaid at bare priority.
-                        crate::game::effects::discard::RandomDiscardOutcome::NeedsReplacementChoice {
-                            remaining_eligible,
-                            remaining_count,
-                            ..
-                        } => {
-                            state.pending_cost_move_resume =
-                                Some(PendingCostMoveResume::RandomDiscardUnlessPayment(Box::new(
-                                    crate::types::game_state::RandomDiscardUnlessPaymentResume {
-                                        source_id: pending_effect.source_id,
-                                        pending_effect: pending_effect.clone(),
-                                        trigger_event: trigger_event.clone(),
-                                        payer: player,
-                                        remaining_eligible,
-                                        remaining_count: remaining_count as u32,
-                                    },
-                                )));
-                            return Ok(action_result(events, state.waiting_for.clone()));
+                    &cost,
+                    pending_effect.as_ref(),
+                    trigger_event.as_ref(),
+                )? {
+                    UnlessSelectionPrep::Prompt(wf) => {
+                        state.waiting_for = *wf;
+                        return Ok(action_result(events, state.waiting_for.clone()));
+                    }
+                    UnlessSelectionPrep::ZeroDiscard => {}
+                    UnlessSelectionPrep::Unpayable => payment_failed = true,
+                    UnlessSelectionPrep::RandomDiscard {
+                        count,
+                        eligible: hand_cards,
+                    } => {
+                        // CR 701.9b: a RANDOM discard offers the payer no choice —
+                        // the game picks. Pay it inline through the shared
+                        // `discard_at_random` authority (same code the effect layer
+                        // uses, same seeded `state.rng`) instead of surfacing
+                        // `WardDiscardChoice`, which would let the payer select and
+                        // silently turn Balduvian Horde's cost into a cheaper one.
+                        //
+                        // Structural precedent: the `Mill` arm below — the other
+                        // unless-cost with no choice to offer pays inline and falls
+                        // through to the paid path.
+                        //
+                        // CR 118.12 + CR 601.2h: `DiscardCause::Cost`, NOT `Effect`.
+                        // This discard IS the payment, so an effect-caused
+                        // replacement (Library of Leng) must not apply to it — the
+                        // boundary `library_of_leng_does_not_apply_to_discard_cost`
+                        // pins.
+                        match crate::game::effects::discard::discard_at_random(
+                            state,
+                            crate::game::effects::discard::RandomDiscardRequest {
+                                player,
+                                source_id: pending_effect.source_id,
+                                count: count as usize,
+                                eligible: hand_cards,
+                                cause: crate::game::effects::discard::DiscardCause::Cost,
+                                discard_frame: None,
+                            },
+                            events,
+                        ) {
+                            crate::game::effects::discard::RandomDiscardOutcome::Completed { .. } => {}
+                            // CR 616.1: a replacement effect parked a choice. Unlike
+                            // the chosen-discard sibling there is no
+                            // `WardDiscardChoice` re-prompt loop to own the
+                            // remainder, and unlike the effect layer this caller
+                            // still owes an unless-payment. Persist BOTH the batch
+                            // cursor and the full payment payload so the drain can
+                            // settle the guarded ability, instead of returning and
+                            // leaving it neither paid nor unpaid at bare priority.
+                            crate::game::effects::discard::RandomDiscardOutcome::NeedsReplacementChoice {
+                                remaining_eligible,
+                                remaining_count,
+                                ..
+                            } => {
+                                state.pending_cost_move_resume =
+                                    Some(PendingCostMoveResume::RandomDiscardUnlessPayment(Box::new(
+                                        crate::types::game_state::RandomDiscardUnlessPaymentResume {
+                                            source_id: pending_effect.source_id,
+                                            pending_effect: pending_effect.clone(),
+                                            trigger_event: trigger_event.clone(),
+                                            payer: player,
+                                            remaining_eligible,
+                                            remaining_count: remaining_count as u32,
+                                        },
+                                    )));
+                                return Ok(action_result(events, state.waiting_for.clone()));
+                            }
                         }
                     }
-                } else {
-                    state.waiting_for = WaitingFor::WardDiscardChoice {
-                        player,
-                        cards: hand_cards,
-                        pending_effect: pending_effect.clone(),
-                        remaining: count,
-                        filter: filter.clone(),
-                    };
-                    return Ok(action_result(events, state.waiting_for.clone()));
                 }
             }
             // CR 118.12 + CR 701.21: Unless-sacrifice — collect eligible
             // permanents and surface the choice via `WardSacrificeChoice`.
-            AbilityCost::Sacrifice(cost) => match &cost.requirement {
-                SacrificeRequirement::Count { count } => {
-                    let filter = &cost.target;
-                    let eligible = eligible_unless_sacrifice_permanents(
-                        state,
-                        player,
-                        pending_effect.source_id,
-                        filter,
-                    );
-                    if eligible.len() < *count as usize {
-                        payment_failed = true;
-                    } else {
-                        state.waiting_for = WaitingFor::WardSacrificeChoice {
-                            player,
-                            permanents: eligible,
-                            pending_effect: pending_effect.clone(),
-                            remaining: *count,
-                            min_total_power: None,
-                        };
+            AbilityCost::Sacrifice(_) => {
+                match prepare_unless_selection_payment(
+                    state,
+                    player,
+                    &cost,
+                    pending_effect.as_ref(),
+                    trigger_event.as_ref(),
+                )? {
+                    UnlessSelectionPrep::Prompt(wf) => {
+                        state.waiting_for = *wf;
                         return Ok(action_result(events, state.waiting_for.clone()));
                     }
-                }
-                SacrificeRequirement::Aggregate {
-                    stat,
-                    comparator,
-                    value,
-                } => {
-                    // CR 118.12a + CR 701.21: Unless-sacrifice with an aggregate
-                    // constraint fails automatically when the pool cannot satisfy it.
-                    let filter = &cost.target;
-                    let eligible = eligible_unless_sacrifice_permanents(
-                        state,
-                        player,
-                        pending_effect.source_id,
-                        filter,
-                    );
-                    if !sacrifice_pool_meets_aggregate_constraint(
-                        state,
-                        &eligible,
-                        *stat,
-                        *comparator,
-                        *value,
-                    ) {
-                        payment_failed = true;
-                    } else {
-                        state.waiting_for = WaitingFor::WardSacrificeChoice {
-                            player,
-                            permanents: eligible,
-                            pending_effect: pending_effect.clone(),
-                            remaining: 0,
-                            min_total_power: matches!(
-                                (stat, comparator),
-                                (
-                                    crate::types::ability::SacrificeAggregateStat::TotalPower,
-                                    crate::types::ability::Comparator::GE
-                                )
-                            )
-                            .then_some(*value),
-                        };
-                        return Ok(action_result(events, state.waiting_for.clone()));
+                    UnlessSelectionPrep::Unpayable => payment_failed = true,
+                    UnlessSelectionPrep::ZeroDiscard
+                    | UnlessSelectionPrep::RandomDiscard { .. } => {
+                        unreachable!("sacrifice preparation never yields a discard outcome")
                     }
                 }
-                // No unless-cost producer emits "sacrifice all"; fail closed.
-                SacrificeRequirement::All => payment_failed = true,
-            },
+            }
             // CR 702.24a + CR 701.13: Thought Lash-style cumulative upkeep
             // pays by exiling the top N cards of the payer's library. This is
             // deterministic, so it does not need an object-selection prompt.
@@ -1667,6 +1889,41 @@ pub(super) fn handle_unless_payment(
                     // source owns the original `UnlessPayment` root. Do not
                     // treat a live replacement choice as declining payment.
                     PaymentOutcome::Paused { .. } => {
+                        return Ok(action_result(events, state.waiting_for.clone()));
+                    }
+                }
+            }
+            // CR 118.3: deterministic effect costs — source counters, fixed mana, a draw by the cost's context-ref player
+            // (Psychic Vortex, Decoy Gambit) — and CR 702.24a `Composite`s of them (cumulative upkeep over an effect-cost
+            // base) are paid by the single resolution payment authority without a prompt. A replacement choice on one
+            // leg parks the payment with the unpaid later legs (CR 118.12), which the resume pays.
+            AbilityCost::EffectCost { .. } | AbilityCost::Composite { .. }
+                if cost.supports_deterministic_effect_cost_payment() =>
+            {
+                match costs::pay_ability_cost_for_resolution(
+                    state,
+                    player,
+                    &cost,
+                    pending_effect.as_ref(),
+                    events,
+                )? {
+                    PaymentOutcome::Paid => {}
+                    PaymentOutcome::Failed { .. } => payment_failed = true,
+                    PaymentOutcome::Paused { remaining_cost } => {
+                        debug_assert!(
+                            state.pending_cost_move_resume.is_none(),
+                            "an unless payment parks over a live cost-move root"
+                        );
+                        state.pending_cost_move_resume =
+                            Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+                                cost: poll_cost.clone(),
+                                pending_effect: pending_effect.clone(),
+                                trigger_event: trigger_event.clone(),
+                                effect_description: effect_description.clone(),
+                                remaining: remaining.clone(),
+                                unpaid_suffix: remaining_cost
+                                    .map(|cost| UnpaidCostSuffix::legs(player, cost)),
+                            });
                         return Ok(action_result(events, state.waiting_for.clone()));
                     }
                 }
@@ -1860,32 +2117,6 @@ pub(super) fn handle_unless_payment(
             // CR 118.12a: "unless [target's controller] has [~] deal N damage to
             // them" — the payer takes damage from the ability source instead of
             // the primary effect (Blazing Salvo, Lava Blister, Barbarian Bully).
-            // CR 118.3: Deterministic effect-cost payments use the single
-            // resolution payment authority. Its shared support predicate
-            // covers source counters and fixed mana without a prompt.
-            AbilityCost::EffectCost { .. } if cost.supports_effect_cost_payment() => {
-                match costs::pay_ability_cost_for_resolution(
-                    state,
-                    player,
-                    &cost,
-                    pending_effect.as_ref(),
-                    events,
-                )? {
-                    PaymentOutcome::Paid => {}
-                    PaymentOutcome::Failed { .. } => payment_failed = true,
-                    PaymentOutcome::Paused { .. } => {
-                        state.pending_cost_move_resume =
-                            Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
-                                cost: poll_cost.clone(),
-                                pending_effect: pending_effect.clone(),
-                                trigger_event: trigger_event.clone(),
-                                effect_description: effect_description.clone(),
-                                remaining: remaining.clone(),
-                            });
-                        return Ok(action_result(events, state.waiting_for.clone()));
-                    }
-                }
-            }
             AbilityCost::EffectCost { effect } => match effect.as_ref() {
                 Effect::DealDamage { .. } => {
                     let mut damage_ability = pending_effect.as_ref().clone();
@@ -1896,25 +2127,6 @@ pub(super) fn handle_unless_payment(
                     if let Err(e) =
                         effects::deal_damage::resolve(state, &damage_ability, events)
                     {
-                        return Err(EngineError::InvalidAction(format!("{e:?}")));
-                    }
-                    if matches!(
-                        state.waiting_for,
-                        WaitingFor::ReplacementChoice { .. }
-                    ) {
-                        return Ok(action_result(events, state.waiting_for.clone()));
-                    }
-                }
-                // CR 118.12a + CR 121.3a: "unless its controller has you draw a
-                // card" (Decoy Gambit) — the payer has the spell's controller
-                // draw instead of the primary bounce. `OriginalController` on
-                // the inner `Draw` target survives via `pending_effect`.
-                Effect::Draw { .. } => {
-                    let mut draw_ability = pending_effect.as_ref().clone();
-                    draw_ability.effect = *effect.clone();
-                    draw_ability.unless_pay = None;
-                    draw_ability.sub_ability = None;
-                    if let Err(e) = effects::draw::resolve(state, &draw_ability, events) {
                         return Err(EngineError::InvalidAction(format!("{e:?}")));
                     }
                     if matches!(
@@ -1943,6 +2155,7 @@ pub(super) fn handle_unless_payment(
                 pending_effect.as_ref(),
                 &trigger_event,
                 events,
+                Some(payment_event_start),
             )?;
             return Ok(action_result(events, waiting_for));
         }
@@ -1957,6 +2170,7 @@ pub(super) fn handle_unless_payment(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
         post_action_event_start,
         events,
     )
@@ -1983,6 +2197,7 @@ fn finish_unless_payment(
     trigger_event: Option<GameEvent>,
     effect_description: Option<String>,
     remaining: Vec<PlayerId>,
+    affected_object: Option<ObjectId>,
     mut post_action_event_start: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
@@ -2017,6 +2232,8 @@ fn finish_unless_payment(
                 trigger_event: trigger_event.clone(),
                 effect_description: effect_description.clone(),
                 remaining: rest.to_vec(),
+                affected_object,
+                repeat: None,
             };
             return Ok(action_result(events, state.waiting_for.clone()));
         }
@@ -2058,6 +2275,465 @@ fn finish_unless_payment(
     Ok(action_result(events, state.waiting_for.clone()))
 }
 
+/// CR 702.24a + CR 118.12: a repeated draw unless-cost being paid — the
+/// printed instruction (`cost`) and the unless-payment it settles.
+struct RepeatedDrawUnlessPayment {
+    payer: PlayerId,
+    cost: AbilityCost,
+    pending_effect: Box<ResolvedAbility>,
+    trigger_event: Option<GameEvent>,
+    effect_description: Option<String>,
+    remaining: Vec<PlayerId>,
+}
+
+/// CR 702.24a + CR 118.12: pay `owed` copies of a repeated draw unless-cost
+/// ("Cumulative upkeep—Draw a card") one printed instruction at a time. An
+/// instruction that pauses on a draw replacement parks the payment as
+/// [`PendingCostMoveResume::CounterAdditionUnlessPayment`] with the
+/// instructions still owed, and its resume re-enters here; no player receives
+/// priority in between (CR 117.2e).
+///
+/// CR 118.11 + CR 614.1: each instruction is performed through the draw
+/// replacement authority, whatever replaces it, and the whole count is paid
+/// (CR 702.24a: "for each age counter on it"); nothing is refused. The work of
+/// one dispatch ends at:
+/// - a fixed point: an instruction that emits nothing a trigger can key on
+///   (`trigger_index::keys_from_event`) and leaves the game unchanged
+///   (Possessed Portal's mandatory skip, an attempt from an empty library
+///   already recorded, a draw a can't-draw effect clamps). The payment is
+///   deterministic, so every further instruction is the same identity and the
+///   rest of the count is paid at once. The journal keeps every instruction
+///   performed, the identity one that shows the fixed point included, so
+///   replaying it reproduces the state;
+/// - a replacement that ends the game (Laboratory Maniac, CR 104.1);
+/// - a pause on a replacement choice, which parks the exact owed cursor under
+///   this owner ([`park_owed_instructions`]);
+/// - the end of a work slice ([`WORK_SLICE_INSTRUCTIONS`] game-changing
+///   instructions): a continuation boundary. The exact owed cursor is parked
+///   under this owner as at a pause, and the payer is asked to continue
+///   ([`payment_continuation_prompt`]).
+///
+/// No instruction is refused and none is left unperformed (CR 702.24a: partial
+/// payments aren't allowed), and no player receives priority until the payment
+/// ends (CR 117.2e): a replacement that changes the game on every draw (Notion
+/// Thief, Hullbreacher's Treasure) is performed once per owed instruction,
+/// one work slice per dispatch.
+fn pay_repeated_draw_unless_cost(
+    state: &mut GameState,
+    payment: RepeatedDrawUnlessPayment,
+    owed: std::num::NonZeroU32,
+    payment_event_start: Option<usize>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let mut owed = owed.get();
+    let mut performed_in_slice = 0u32;
+    // The game before the current instruction, kept while the previous one
+    // emitted nothing a trigger can key on: only such an instruction can be a
+    // fixed point.
+    let mut quiet_before = Some(state.clone());
+    while owed > 0 {
+        owed -= 1;
+        let instruction_start = events.len();
+        match costs::resume_ability_cost_for_resolution(
+            state,
+            payment.payer,
+            &payment.cost,
+            &payment.pending_effect,
+            events,
+        )? {
+            PaymentOutcome::Paid => {}
+            PaymentOutcome::Paused { remaining_cost } => {
+                debug_assert!(
+                    remaining_cost.is_none(),
+                    "a printed draw instruction pauses as one event"
+                );
+                park_owed_instructions(state, payment, owed, payment_event_start, events);
+                return Ok(state.waiting_for.clone());
+            }
+            // CR 118.12: the payer chose to pay, and a latched draw is clamped
+            // as it happens (CR 118.11 + CR 614.17a), never refused.
+            PaymentOutcome::Failed { reason } => {
+                debug_assert!(false, "a latched draw instruction failed: {reason:?}");
+                tracing::warn!(?reason, "a latched draw instruction failed; settling PAID");
+            }
+        }
+        // CR 104.1: a replacement ended the game; nothing more is paid.
+        if state.game_end.is_some() {
+            return Ok(state.waiting_for.clone());
+        }
+        // CR 603.2: an event no trigger can key on (the replacement
+        // bookkeeping a replaced draw emits) is invisible to the game.
+        let quiet = events[instruction_start..]
+            .iter()
+            .all(|event| super::trigger_index::keys_from_event(event, state).is_empty());
+        if quiet
+            && quiet_before
+                .as_ref()
+                .is_some_and(|before| instruction_changed_nothing(before, state))
+        {
+            break;
+        }
+        // The work slice ends: a continuation boundary inside this owner. The
+        // exact owed cursor is parked as at a pause, the slice's triggers are
+        // collected, and the payer is asked only to continue; no player
+        // receives priority (CR 117.2e).
+        performed_in_slice += 1;
+        if owed > 0 && performed_in_slice == WORK_SLICE_INSTRUCTIONS {
+            park_owed_instructions(state, payment, owed, payment_event_start, events);
+            let prompt = payment_continuation_prompt(state)
+                .expect("the owed instructions were just parked under their owner");
+            state.waiting_for = prompt.clone();
+            return Ok(prompt);
+        }
+        quiet_before = quiet.then(|| state.clone());
+    }
+    finish_successful_unless_payment(
+        state,
+        &payment.pending_effect,
+        &payment.trigger_event,
+        events,
+        payment_event_start,
+    )
+}
+
+/// Park the instructions still owed under the counted owner
+/// ([`PendingCostMoveResume::CounterAdditionUnlessPayment`]), as a pause on a
+/// replacement choice leaves them.
+fn park_owed_instructions(
+    state: &mut GameState,
+    payment: RepeatedDrawUnlessPayment,
+    owed: u32,
+    payment_event_start: Option<usize>,
+    events: &mut [GameEvent],
+) {
+    // CR 603.2c: the reducer returns this answer without a later scan, so the
+    // draws paid before the pause are collected here.
+    if let Some(start) = payment_event_start {
+        super::triggers::collect_paused_exit_triggers(state, events, start);
+    }
+    let RepeatedDrawUnlessPayment {
+        payer,
+        cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+    } = payment;
+    debug_assert!(
+        state.pending_cost_move_resume.is_none(),
+        "an unless payment parks over a live cost-move root"
+    );
+    state.pending_cost_move_resume = Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+        cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+        unpaid_suffix: std::num::NonZeroU32::new(owed).map(|owed| {
+            Box::new(UnpaidCostSuffix {
+                payer,
+                remainder: UnpaidCostRemainder::Repeated(owed),
+            })
+        }),
+    });
+}
+
+/// CR 800.4a: retire a parked unless payment
+/// ([`PendingCostMoveResume::CounterAdditionUnlessPayment`]) that leaves with
+/// the players leaving the game, before the departure sweeps run.
+///
+/// - The payment settles the resolution of the ability it guards. When that
+///   ability's controller leaves, the ability ceases to exist with everything
+///   still to be done for it, and the payment is retired whether or not
+///   anything is still owed: a pause on the last instruction parks no
+///   remainder, and its owner must not outlive the resolution it belongs to.
+/// - When the payer of legs or instructions still owed leaves, they leave
+///   with that player: nothing more is performed for a player who is no
+///   longer in the game. (Psychic Vortex's upkeep is paid by the ability's
+///   controller, so both conditions name the same player there.)
+///
+/// A payment that stays (its controller and its payer are still in the game)
+/// keeps its prompt when the chooser is still there, and otherwise resumes at
+/// the concession's action boundary
+/// (`engine::reconcile_parked_unless_payment_after_departure`), before any
+/// player receives priority (CR 117.2e).
+pub(crate) fn retire_parked_unless_payment_of_departing_players(
+    state: &mut GameState,
+    leaving: &std::collections::HashSet<PlayerId>,
+) {
+    if matches!(
+        &state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+            pending_effect,
+            unpaid_suffix,
+            ..
+        }) if leaving.contains(&pending_effect.controller)
+            || unpaid_suffix
+                .as_ref()
+                .is_some_and(|suffix| leaving.contains(&suffix.payer))
+    ) {
+        state.pending_cost_move_resume = None;
+    }
+}
+
+/// CR 800.4a + CR 400.7: an accepted entry `MayCost` parked behind a
+/// replacement choice of one of its legs
+/// ([`PendingCostMoveResume::ReplacementMayCostInnerChoice`], or
+/// [`PendingCostMoveResume::ReplacementMayCost`] holding the outer
+/// replacement) leaves with the entry it would finish. When the player who
+/// accepted it or the owner of the entering object leaves the game, the object
+/// leaves with them and its entry event is over; the retained outer
+/// replacement must not be restored and answered on the board they left (Mox
+/// Diamond entering after its owner conceded at the discarded land's
+/// replacement order).
+pub(crate) fn retire_parked_entry_payment_of_departing_players(
+    state: &mut GameState,
+    leaving: &std::collections::HashSet<PlayerId>,
+) {
+    let outer = match &state.pending_cost_move_resume {
+        Some(PendingCostMoveResume::ReplacementMayCostInnerChoice { outer_replacement }) => {
+            outer_replacement
+        }
+        Some(PendingCostMoveResume::ReplacementMayCost {
+            outer_replacement: Some(outer_replacement),
+            ..
+        }) => outer_replacement,
+        _ => return,
+    };
+    let payer = super::replacement::pending_replacement_chooser(state, outer);
+    let owner = outer
+        .proposed
+        .affected_object_id()
+        .and_then(|id| state.objects.get(&id))
+        .map(|object| object.owner);
+    if leaving.contains(&payer) || owner.is_some_and(|owner| leaving.contains(&owner)) {
+        state.pending_cost_move_resume = None;
+    }
+}
+
+/// CR 800.4a + CR 121.6b: whether the replacement choice parked under a
+/// surviving draw unless payment is a draw by a player now leaving: a
+/// substitute draw (Notion Thief) interrupted on the leaver's own choice.
+/// The departure keeps that record instead of abandoning every active draw
+/// sequence with it (`elimination::do_eliminate`); the concession's action
+/// boundary settles it as a draw that can't happen, which lets the surviving
+/// sequences above it continue.
+pub(crate) fn departed_draw_settles_with_parked_payment(
+    state: &GameState,
+    leaving: &std::collections::HashSet<PlayerId>,
+) -> bool {
+    draw_payment_is_parked(state)
+        && state.pending_replacement.as_ref().is_some_and(|pending| {
+            matches!(
+                pending.proposed,
+                crate::types::proposed_event::ProposedEvent::Draw { player_id, .. }
+                    if leaving.contains(&player_id)
+            )
+        })
+}
+
+/// CR 104.3a + CR 118.12: retire a parked unless payment that a published
+/// departure leaves unreconciled, because the concession's follow-up failed
+/// (`engine::reject_or_publish_departure`).
+/// Its replacement choice, the draw in flight and the owner go together, and
+/// the active player (or the next player still in the game, CR 800.4j) gets
+/// the priority window: the payment is neither completed nor failed, as a
+/// staged payment's failed recovery is retired
+/// (`payment_transaction::abandon_failed_recovery`).
+pub(crate) fn retire_unreconcilable_parked_unless_payment(state: &mut GameState) {
+    state.pending_replacement = None;
+    super::replacement::abandon_post_replacement_continuation(state);
+    state.pending_cost_move_resume = None;
+    set_active_priority(state);
+}
+
+/// CR 117.2e + CR 800.4a: whether a parked unless payment has lost the prompt
+/// it waited on: no replacement choice is parked for it. Under a Priority
+/// result that is a payment a departure interrupted (the choice left with its
+/// chooser), still owed its resume before any player may act.
+pub(crate) fn parked_unless_payment_lost_its_prompt(state: &GameState) -> bool {
+    state.pending_replacement.is_none()
+        && matches!(
+            state.pending_cost_move_resume,
+            Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
+        )
+}
+
+/// The most game-changing instructions one dispatch of a repeated draw payment
+/// performs: one work slice. An engine work limit, not a rule: it sits far
+/// above a library's cards (the payments a game produces end inside one
+/// slice, at a fixed point or a game end) and keeps a replacement that creates
+/// an object for every draw of an enormous count (Hullbreacher's Treasure)
+/// from growing the board without bound inside one dispatch. The slice counts
+/// instructions, not objects: effects that multiply what one instruction
+/// creates (token doublers under Hullbreacher) multiply the objects of a
+/// slice by the same factor, still a fixed bound per dispatch.
+pub(crate) const WORK_SLICE_INSTRUCTIONS: u32 = 1_024;
+
+/// CR 702.24a + CR 117.2e: the continuation prompt of a repeated draw payment
+/// whose work slice ended with instructions still owed. It is derived from the
+/// parked owner ([`PendingCostMoveResume::CounterAdditionUnlessPayment`] with a
+/// repeated remainder), which keeps the exact owed cursor: the payer's
+/// unless-payment prompt for the instructions still owed. Its only answer is to
+/// continue ([`continue_repeated_draw_payment`]); the choice to pay was made
+/// when the payment began.
+pub(crate) fn payment_continuation_prompt(state: &GameState) -> Option<WaitingFor> {
+    let Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+        cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+        unpaid_suffix: Some(suffix),
+    }) = &state.pending_cost_move_resume
+    else {
+        return None;
+    };
+    let UnpaidCostRemainder::Repeated(owed) = &suffix.remainder else {
+        return None;
+    };
+    Some(WaitingFor::UnlessPayment {
+        player: suffix.payer,
+        repeat: Some(owed.get()),
+        cost: cost.clone(),
+        pending_effect: pending_effect.clone(),
+        trigger_event: trigger_event.clone(),
+        effect_description: effect_description.clone(),
+        remaining: remaining.clone(),
+        // The choice to pay is already made; this continuation only finishes it.
+        affected_object: None,
+    })
+}
+
+/// Whether the game waits on a repeated draw payment's continuation prompt.
+pub(crate) fn awaits_payment_continuation(state: &GameState) -> bool {
+    payment_continuation_prompt(state).is_some_and(|prompt| prompt == state.waiting_for)
+}
+
+/// CR 605.3a + CR 117.1d + CR 608.2g: whether the open unless-payment prompt
+/// asks for no mana: its cost includes no mana payment
+/// (`costs::cost_asks_for_mana`): a sacrifice (Bellowing Mauler), life
+/// (Dwarven Forge-Chanter's Ward—Pay 2 life), draws (Psychic Vortex's upkeep),
+/// a cost that adds mana (Braid of Fire's upkeep), at the offer and at the
+/// continuation of a repeated payment alike. A mana ability is activated with
+/// priority or when a rule or effect asks for a mana payment; the payer of
+/// such a cost has neither while the ability resolves. The one mana-window
+/// authority of an unless payment: the tap preflight, the tap and activation
+/// handlers and the legal-action lists (`ai_support::mana_action_player`) read
+/// it. Every unless cost that asks for mana keeps its window. Taking back an
+/// earlier tap (`UntapLandForMana`) activates nothing and is admitted at every
+/// unless payment, as before. The branch choice and pick prompts of an unless
+/// payment (CR 118.12a: `UnlessPaymentChooseCost`, `WardSacrificeChoice`,
+/// `WardDiscardChoice`, `UnlessBounceChoice`) have no mana arm in the reducer,
+/// the tap preflight or the legal-action lists, so they open no window.
+pub(crate) fn unless_prompt_asks_for_no_mana(state: &GameState) -> bool {
+    matches!(
+        &state.waiting_for,
+        WaitingFor::UnlessPayment { cost, .. } if !costs::cost_asks_for_mana(cost)
+    )
+}
+
+/// CR 605.3a: refuse a mana action at an unless payment that asks for no mana
+/// ([`unless_prompt_asks_for_no_mana`]). At the continuation of a repeated
+/// payment the refusal also protects the owed cursor: a mana ability that
+/// paused on a replacement choice would take the slot the cursor is parked in
+/// (`GameState::pending_cost_move_resume`), after which the prompt would read
+/// as a fresh choice.
+pub(crate) fn refuse_mana_where_none_is_asked(state: &GameState) -> Result<(), EngineError> {
+    if unless_prompt_asks_for_no_mana(state) {
+        return Err(EngineError::InvalidAction(
+            "CR 605.3a: this payment asks for no mana".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// CR 702.24a: answer a repeated draw payment's continuation prompt. "Partial
+/// payments aren't allowed": part of the payment is performed, so declining is
+/// not an answer; paying performs the next work slice of the owed instructions.
+fn continue_repeated_draw_payment(
+    state: &mut GameState,
+    pay: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    if !pay {
+        return Err(EngineError::InvalidAction(
+            "CR 702.24a: a repeated payment already begun is completed; partial payments \
+             aren't allowed"
+                .to_string(),
+        ));
+    }
+    let Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+        cost,
+        pending_effect,
+        trigger_event,
+        effect_description,
+        remaining,
+        unpaid_suffix: Some(suffix),
+    }) = state.pending_cost_move_resume.take()
+    else {
+        unreachable!("a continuation prompt is derived from its parked owner");
+    };
+    let UnpaidCostRemainder::Repeated(owed) = suffix.remainder else {
+        unreachable!("a continuation prompt is derived from a repeated remainder");
+    };
+    let payment_event_start = events.len();
+    let waiting_for = pay_repeated_draw_unless_cost(
+        state,
+        RepeatedDrawUnlessPayment {
+            payer: suffix.payer,
+            cost,
+            pending_effect,
+            trigger_event,
+            effect_description,
+            remaining,
+        },
+        owed,
+        Some(payment_event_start),
+        events,
+    )?;
+    Ok(action_result(events, waiting_for))
+}
+
+/// CR 603.2c: whether the action ended at a prompt inside an unless payment of
+/// draws — a parked counter-addition payment whose cost draws (small or
+/// repeated), or the prompt of a draw cost itself. These are the draw paths
+/// whose resumed events the paused-exit collector queues; other unless
+/// payments are not.
+pub(crate) fn paused_in_draw_payment(state: &GameState) -> bool {
+    let prompted = matches!(
+        &state.waiting_for,
+        WaitingFor::UnlessPayment { cost, .. } if costs::cost_includes_draw(cost)
+    );
+    draw_payment_is_parked(state) || prompted
+}
+
+/// CR 117.2e + CR 121.4: an unless payment of draws parked between its legs on
+/// a replacement choice. Its payer is still paying inside a resolution, so a
+/// draw from an empty library loses only at the next priority, after the
+/// payment's later prompts.
+pub(crate) fn draw_payment_is_parked(state: &GameState) -> bool {
+    matches!(
+        &state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::CounterAdditionUnlessPayment { cost, .. })
+            if costs::cost_includes_draw(cost)
+    )
+}
+
+/// CR 118.11: whether an instruction left the game exactly as it found it:
+/// the same position by the comparison loop detection confirms a loop with
+/// (`same_position`: every object's content and the live floating shields
+/// included), with volatile counters normalized and the instruction's own
+/// journal entries set aside.
+fn instruction_changed_nothing(before: &GameState, after: &GameState) -> bool {
+    let mut after = after.clone();
+    after.resolved_rules_journal = before.resolved_rules_journal.clone();
+    crate::types::game_state::same_position(
+        &before.normalize_for_loop(),
+        &after.normalize_for_loop(),
+    )
+}
+
 /// CR 118.12 + CR 616.1: Complete an already-paid unless cost without entering
 /// the cost authority again. Deferred life-payment substitutions use this
 /// after their replacement post-effects finish, because the mana and life
@@ -2067,6 +2743,7 @@ pub(crate) fn finish_successful_unless_payment(
     pending_effect: &ResolvedAbility,
     trigger_event: &Option<GameEvent>,
     events: &mut Vec<GameEvent>,
+    payment_event_start: Option<usize>,
 ) -> Result<WaitingFor, EngineError> {
     // CR 118.12: a completed successful payment owns this result even when
     // a previous instruction failed. Clear before every child/no-child route.
@@ -2087,6 +2764,12 @@ pub(crate) fn finish_successful_unless_payment(
     });
 
     let mut post_action_event_start = None;
+    // CR 603.2c: scan contract. Without a paid successor, the payment's own
+    // events are scanned from `payment_event_start`. With one, the scan starts
+    // at the successor's events: no printed unless cost both pays by drawing
+    // and has an "if they do" rider (Psychic Vortex's draw cost guards a
+    // sacrifice with no successor), so draw-owned payment events never sit
+    // before a successor's range.
     // CR 118.12 + CR 118.12a: "[Effect] unless [player] pays [cost]. If they
     // do, [alternative]." A paid cost suppresses the primary effect and runs
     // an `IfAPlayerDoes` alternative outcome.
@@ -2148,6 +2831,18 @@ pub(crate) fn finish_successful_unless_payment(
             false,
             false,
         )?;
+    } else if let Some(payment_start) = payment_event_start {
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            let default_wf = state.waiting_for.clone();
+            state.waiting_for = engine_priority::run_post_action_pipeline_from(
+                state,
+                events,
+                payment_start,
+                &default_wf,
+                false,
+                false,
+            )?;
+        }
     }
     Ok(state.waiting_for.clone())
 }
@@ -2155,6 +2850,15 @@ pub(crate) fn finish_successful_unless_payment(
 /// CR 118.12 + CR 605.3b + CR 616.1: Continue an unless payment after its
 /// leading mana component was committed and a Phyrexian-style life replacement
 /// finished. The exact suffix remains a payment, not a completed unless cost.
+///
+/// CR 118.12: a latched resume by rule. It re-enters `handle_unless_payment`
+/// with the suffix after the paid mana prefix of the whole unless cost. That
+/// function's entry re-check and the authority's fresh entry ask the same
+/// CR 614.17b question, which can answer `true` only for a draw or counter leg.
+/// No admitted unless cost puts a draw leg after a mana leaf
+/// (`supports_deterministic_effect_cost_payment`), and no printed or
+/// `expand_per_counter`-synthesized mana-led unless cost carries a counter leg,
+/// so fresh and latched coincide on every shape that reaches here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn continue_unless_payment_after_paid_mana_prefix(
     state: &mut GameState,
@@ -2164,6 +2868,8 @@ pub(crate) fn continue_unless_payment_after_paid_mana_prefix(
     trigger_event: Option<GameEvent>,
     effect_description: Option<String>,
     remaining: Vec<PlayerId>,
+    affected_object: Option<ObjectId>,
+    repeat: Option<u32>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let waiting_for = WaitingFor::UnlessPayment {
@@ -2173,6 +2879,8 @@ pub(crate) fn continue_unless_payment_after_paid_mana_prefix(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
+        repeat,
     };
     let result = handle_unless_payment(state, waiting_for, true, events)?;
     events.extend(result.events);
@@ -2206,7 +2914,7 @@ fn resolve_ability_chain_for_unless_payment(
 ///
 /// Exhaustive, with no wildcard: a new condition or outcome signal needs a
 /// deliberate decision about whether it reads the payment's outcome.
-fn payment_outcome_condition(condition: &AbilityCondition) -> bool {
+pub(crate) fn payment_outcome_condition(condition: &AbilityCondition) -> bool {
     use crate::types::ability::EffectOutcomeSignal;
 
     match condition {
@@ -2267,6 +2975,7 @@ fn payment_outcome_condition(condition: &AbilityCondition) -> bool {
         | AbilityCondition::ControllerControlledMatchingAsCast { .. }
         | AbilityCondition::IsYourTurn
         | AbilityCondition::WasStartingPlayer { .. }
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::FirstCombatPhaseOfTurn
         | AbilityCondition::FirstEndStepOfTurn
@@ -2312,6 +3021,7 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
     selection: &ManaSourceSelection,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    refuse_mana_where_none_is_asked(state)?;
     let WaitingFor::UnlessPayment {
         player,
         cost,
@@ -2319,6 +3029,8 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
+        repeat,
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -2338,6 +3050,8 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
             trigger_event: trigger_event.clone(),
             effect_description: effect_description.clone(),
             remaining: remaining.clone(),
+            affected_object,
+            repeat,
         },
         events,
     )?;
@@ -2360,6 +3074,8 @@ pub(super) fn handle_unless_payment_untap_land_for_mana(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
+        repeat,
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -2375,6 +3091,8 @@ pub(super) fn handle_unless_payment_untap_land_for_mana(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
+        repeat,
     })
 }
 
@@ -2386,6 +3104,7 @@ pub(super) fn handle_unless_payment_activate_ability(
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    refuse_mana_where_none_is_asked(state)?;
     let WaitingFor::UnlessPayment {
         player,
         cost,
@@ -2393,6 +3112,8 @@ pub(super) fn handle_unless_payment_activate_ability(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
+        repeat,
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -2437,6 +3158,8 @@ pub(super) fn handle_unless_payment_activate_ability(
             trigger_event,
             effect_description,
             remaining,
+            affected_object,
+            repeat,
         },
         None,
         payment_mode,
@@ -2449,6 +3172,16 @@ pub(super) fn handle_ward_discard_choice(
     chosen: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if let WaitingFor::WardDiscardChoice {
+        player,
+        pending_effect,
+        ..
+    } = &waiting_for
+    {
+        if effects::simultaneous_unless::binds(state, *player, pending_effect.source_id) {
+            return answer_simultaneous_unless_pick(state, &waiting_for, &chosen, events);
+        }
+    }
     let WaitingFor::WardDiscardChoice {
         player,
         cards: legal_cards,
@@ -2466,6 +3199,18 @@ pub(super) fn handle_ward_discard_choice(
         return Err(EngineError::InvalidAction(
             "Must select exactly one card to discard".to_string(),
         ));
+    }
+
+    if crate::game::scoped_unless_poll::owns_prompt(state, player, pending_effect.source_id) {
+        return crate::game::scoped_unless_poll::record_discard_pick(
+            state,
+            player,
+            chosen[0],
+            remaining,
+            filter,
+            pending_effect,
+            events,
+        );
     }
 
     if let effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
@@ -2516,7 +3261,174 @@ pub(super) fn handle_ward_discard_choice(
     Ok(state.waiting_for.clone())
 }
 
-fn eligible_unless_sacrifice_permanents(
+/// What paying a selection unless cost asks of its payer.
+pub(crate) enum UnlessSelectionPrep {
+    /// The payer chooses the objects through this prompt.
+    Prompt(Box<WaitingFor>),
+    /// The count resolved to zero, so the cost is paid with nothing to discard.
+    ZeroDiscard,
+    /// CR 701.9b: the game picks the cards; the payer makes no choice.
+    RandomDiscard { count: u32, eligible: Vec<ObjectId> },
+    /// CR 118.3: the payer can't pay the full cost.
+    Unpayable,
+}
+
+/// CR 118.12a + CR 701.9 + CR 701.21: Single typed preparation authority for
+/// selection-based unless payments (discard and sacrifice, including fixed
+/// counts and aggregate constraints). Used by both the immediate unless-payment
+/// handler and the APNAP scoped-unless poll.
+pub(crate) fn prepare_unless_selection_payment(
+    state: &GameState,
+    player: PlayerId,
+    cost: &AbilityCost,
+    pending_effect: &ResolvedAbility,
+    trigger_event: Option<&GameEvent>,
+) -> Result<UnlessSelectionPrep, EngineError> {
+    match cost {
+        AbilityCost::Discard {
+            count,
+            filter,
+            selection,
+            self_scope: _,
+        } => {
+            let resolved =
+                crate::game::quantity::resolve_quantity_with_targets(state, count, pending_effect);
+            let count = u32::try_from(resolved.max(0)).unwrap_or(0);
+            let hand_cards = crate::game::casting::find_eligible_discard_targets(
+                state,
+                player,
+                pending_effect.source_id,
+                pending_effect.context.granting_object,
+                filter.as_ref(),
+            );
+            // CR 702.24a: partial payments aren't allowed — if the payer can't
+            // produce the full count, the unless cost is unpayable.
+            if (hand_cards.len() as u32) < count {
+                Ok(UnlessSelectionPrep::Unpayable)
+            } else if count == 0 {
+                Ok(UnlessSelectionPrep::ZeroDiscard)
+            } else if selection.is_random() {
+                Ok(UnlessSelectionPrep::RandomDiscard {
+                    count,
+                    eligible: hand_cards,
+                })
+            } else {
+                Ok(UnlessSelectionPrep::Prompt(Box::new(
+                    WaitingFor::WardDiscardChoice {
+                        player,
+                        cards: hand_cards,
+                        pending_effect: Box::new(pending_effect.clone()),
+                        remaining: count,
+                        filter: filter.clone(),
+                    },
+                )))
+            }
+        }
+        AbilityCost::Sacrifice(sac_cost) => match &sac_cost.requirement {
+            SacrificeRequirement::Count { count } => {
+                let eligible = eligible_unless_sacrifice_permanents(
+                    state,
+                    player,
+                    pending_effect.source_id,
+                    &sac_cost.target,
+                );
+                if eligible.len() < *count as usize {
+                    Ok(UnlessSelectionPrep::Unpayable)
+                } else {
+                    Ok(UnlessSelectionPrep::Prompt(Box::new(
+                        WaitingFor::WardSacrificeChoice {
+                            player,
+                            permanents: eligible,
+                            pending_effect: Box::new(pending_effect.clone()),
+                            remaining: *count,
+                            min_total_power: None,
+                            trigger_event: trigger_event.cloned(),
+                        },
+                    )))
+                }
+            }
+            SacrificeRequirement::Aggregate {
+                stat,
+                comparator,
+                value,
+            } => {
+                let eligible = eligible_unless_sacrifice_permanents(
+                    state,
+                    player,
+                    pending_effect.source_id,
+                    &sac_cost.target,
+                );
+                if !sacrifice_pool_meets_aggregate_constraint(
+                    state,
+                    &eligible,
+                    *stat,
+                    *comparator,
+                    *value,
+                ) {
+                    Ok(UnlessSelectionPrep::Unpayable)
+                } else {
+                    Ok(UnlessSelectionPrep::Prompt(Box::new(
+                        WaitingFor::WardSacrificeChoice {
+                            player,
+                            permanents: eligible,
+                            pending_effect: Box::new(pending_effect.clone()),
+                            remaining: 0,
+                            min_total_power: matches!(
+                                (stat, comparator),
+                                (
+                                    crate::types::ability::SacrificeAggregateStat::TotalPower,
+                                    crate::types::ability::Comparator::GE
+                                )
+                            )
+                            .then_some(*value),
+                            trigger_event: trigger_event.cloned(),
+                        },
+                    )))
+                }
+            }
+            // No unless-cost producer emits "sacrifice all"; fail closed.
+            SacrificeRequirement::All => Ok(UnlessSelectionPrep::Unpayable),
+        },
+        // Not a choice of objects: each is paid by its own unless-payment arm.
+        // Exhaustive so a new selection cost needs a deliberate decision here.
+        AbilityCost::OneOf { .. }
+        | AbilityCost::Mana { .. }
+        | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::SayPhrase { .. }
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::Composite { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::PerCounter { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::Unimplemented { .. } => Err(EngineError::InvalidAction(format!(
+            "unless cost {cost:?} is not a selection payment"
+        ))),
+    }
+}
+
+pub(crate) fn eligible_unless_sacrifice_permanents(
     state: &GameState,
     player: PlayerId,
     sac_source: ObjectId,
@@ -2533,7 +3445,24 @@ fn eligible_unless_sacrifice_permanents(
                 .map(|obj| {
                     obj.controller == player
                         && !obj.is_emblem
+                        && !crate::game::static_abilities::object_has_static_other(
+                            state,
+                            **id,
+                            "CantBeSacrificed",
+                        )
                         && crate::game::filter::matches_target_filter(state, **id, filter, &ctx)
+                        // CR 118.3 + CR 701.21a: an object its payer is barred
+                        // from sacrificing (Call for Aid's "you can't sacrifice
+                        // those creatures", a printed bar) is not a legal
+                        // payment candidate. Offering it lets an impossible
+                        // full cost START: the Count/aggregate affordability
+                        // gates below count it, the first sacrifice spends,
+                        // and the payer strands at the Prohibited arm with the
+                        // spent permanent unrecoverable. The actor-aware
+                        // authority — not the actor-blind graft read — decides.
+                        && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                            state, player, **id,
+                        )
                 })
                 .unwrap_or(false)
         })
@@ -2570,11 +3499,13 @@ fn pause_ward_sacrifice_payment(
     pending_effect: Box<ResolvedAbility>,
     resume: WardSacrificePaymentResume,
     choice_player: PlayerId,
+    trigger_event: Option<GameEvent>,
 ) -> WaitingFor {
     state.pending_cost_move_resume = Some(PendingCostMoveResume::WardSacrificePayment {
         player,
         pending_effect,
         resume,
+        trigger_event,
     });
     if state.pending_replacement.is_some() {
         costs::pause_cost_payment_for_replacement_choice(state, choice_player);
@@ -2589,18 +3520,6 @@ fn finish_ward_sacrifice_payment(
     pending_effect: ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if state
-        .pending_player_scope_unless_payment
-        .as_ref()
-        .is_some_and(|pending| pending.pending_effect.source_id == pending_effect.source_id)
-    {
-        let player = state
-            .pending_player_scope_unless_payment
-            .as_ref()
-            .expect("aggregate payment checked above")
-            .current_player;
-        return advance_player_scope_token_unless_payment(state, player, true, events);
-    }
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&pending_effect.effect),
         source_id: pending_effect.source_id,
@@ -2609,6 +3528,82 @@ fn finish_ward_sacrifice_payment(
 
     set_active_priority(state);
     resume_pending_continuation_if_priority(state, events)?;
+    Ok(state.waiting_for.clone())
+}
+
+/// CR 702.21a + CR 118.3: Settle a Ward sacrifice payment its payer can no
+/// longer complete as UNPAID. The Ward cost fails and the pending effect
+/// resolves through the same unpaid-unless settlement a `PayUnlessCost { pay:
+/// false }` answer reaches (`finish_unless_payment`'s `!pay || payment_failed`
+/// branch), minus the any-player re-poll: Ward names a single payer, and the
+/// sacrifice prompt carries no poll cursor to re-emit. The trigger event the
+/// Ward counter reads "that spell" from rides on the prompt (and across
+/// pauses on the resume record), snapshot at offer like `UnlessPayment`'s.
+///
+/// Callers are the guards that fire only when NO selection can still pay the
+/// full remaining cost (pool shortfalls and pause-window bars). Returning
+/// `Err` there restores the same unpayable choice with no way out — the payer
+/// has no decline action on `WardSacrificeChoice` — so the shortfall settles
+/// instead of stranding.
+///
+/// Partial spends stand: a sacrifice committed before the world changed (a
+/// concession or bar landing mid-payment) cannot be rewound — paper Magic
+/// cannot un-sacrifice either — so the Ward fails with the spent permanent
+/// staying spent. The pre-spend guards keep the common case fully atomic
+/// (nothing spent); CR 118.3's full-payment rule is enforced there, at the
+/// decision to spend.
+///
+/// Retires the Ward payment continuation: the resume path consumed
+/// `pending_cost_move_resume` on entry (re-pauses re-install it; this path
+/// does not), and the answer path never installs one, so settling here
+/// leaves nothing parked.
+fn settle_ward_sacrifice_payment_unpaid(
+    state: &mut GameState,
+    player: PlayerId,
+    pending_effect: Box<ResolvedAbility>,
+    trigger_event: Option<GameEvent>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // Player-scope aggregate Ward shares this prompt (`finish_ward_sacrifice_
+    // payment` routes paid completions back to it); an unpaid shortfall
+    // advances the same aggregate as a decline. Currently unreachable — the
+    // aggregate gate admits exactly one sacrifice, which cannot shortfall —
+    // carried for symmetry with the paid path.
+    if state
+        .pending_player_scope_unless_payment
+        .as_ref()
+        .is_some_and(|pending| pending.pending_effect.source_id == pending_effect.source_id)
+    {
+        return advance_player_scope_token_unless_payment(state, player, false, events);
+    }
+    let ability = pending_effect.as_ref().clone();
+    clear_echo_due_for_echo_payment(state, &ability);
+    set_active_priority(state);
+    // CR 608.2k: the Ward counter reads "that spell" from the
+    // trigger event the prompt carried (the resolving trigger has left the
+    // stack by answer time, and the ambient event is gone once the payer
+    // elects to pay). Fall back to ambient for prompts constructed without
+    // one — matching a direct decline's `None` exactly when neither holds it.
+    let trigger_event = trigger_event.or_else(|| state.current_trigger_event.clone());
+    let event_start = Some(resolve_ability_chain_for_unless_payment(
+        state,
+        &ability,
+        events,
+        &trigger_event,
+        Some(AutoMayChoice::Decline),
+    )?);
+    resume_pending_continuation_if_priority(state, events)?;
+    if let Some(event_start) = event_start {
+        let default_wf = state.waiting_for.clone();
+        state.waiting_for = engine_priority::run_post_action_pipeline_from(
+            state,
+            events,
+            event_start,
+            &default_wf,
+            false,
+            false,
+        )?;
+    }
     Ok(state.waiting_for.clone())
 }
 
@@ -2623,6 +3618,7 @@ pub(super) fn resume_ward_sacrifice_payment(
         player,
         pending_effect,
         resume,
+        trigger_event,
     }) = state.pending_cost_move_resume.take()
     else {
         unreachable!("ward sacrifice payment resume requires its typed continuation")
@@ -2630,9 +3626,45 @@ pub(super) fn resume_ward_sacrifice_payment(
 
     match resume {
         WardSacrificePaymentResume::MultiSacrifice { remaining } => {
+            // CR 118.3 + CR 701.21a: the replacement pause is a live-board
+            // window — a bar granted while parked, or a listed permanent
+            // leaving the battlefield (concession, removal), fails the resume
+            // BEFORE the first resumed sacrifice spends. The replay list is
+            // fixed (no selection to retry), so the Ward settles unpaid
+            // rather than stranding.
+            if remaining.iter().any(|id| {
+                !state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Battlefield)
+                    || crate::game::static_abilities::object_cant_be_sacrificed_by(
+                        state, player, *id,
+                    )
+            }) {
+                return settle_ward_sacrifice_payment_unpaid(
+                    state,
+                    player,
+                    pending_effect,
+                    trigger_event,
+                    events,
+                );
+            }
             for (index, id) in remaining.iter().enumerate() {
                 match crate::game::sacrifice::sacrifice_permanent(state, *id, player, events)? {
                     crate::game::sacrifice::SacrificeOutcome::Complete => {}
+                    // CR 601.2h: a mid-replay bar fails the Ward cost instead
+                    // of recording an unsacrificed permanent as paid. The
+                    // replay list is fixed (no selection to retry), so the
+                    // Ward settles unpaid; earlier replayed spends stand.
+                    crate::game::sacrifice::SacrificeOutcome::Prohibited => {
+                        return settle_ward_sacrifice_payment_unpaid(
+                            state,
+                            player,
+                            pending_effect,
+                            trigger_event,
+                            events,
+                        );
+                    }
                     crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(
                         choice_player,
                     ) => {
@@ -2644,6 +3676,7 @@ pub(super) fn resume_ward_sacrifice_payment(
                                 remaining: remaining[index + 1..].to_vec(),
                             },
                             choice_player,
+                            trigger_event,
                         ));
                     }
                 }
@@ -2656,16 +3689,46 @@ pub(super) fn resume_ward_sacrifice_payment(
             remaining,
         } => {
             if remaining > 1 {
-                let eligible = permanents
+                // CR 118.3: same bar-aware re-derivation as the live
+                // re-prompt — the pause window can grant bars too.
+                let eligible: Vec<ObjectId> = permanents
                     .into_iter()
-                    .filter(|&id| id != sacrificed && state.objects.contains_key(&id))
+                    .filter(|&id| {
+                        id != sacrificed
+                            // CR 701.21a: only battlefield permanents can be
+                            // sacrificed — the offer leg scans `battlefield`,
+                            // while this snapshot predates leaves, so re-check
+                            // the zone (a row that left for the graveyard
+                            // still keys `objects`).
+                            && state
+                                .objects
+                                .get(&id)
+                                .is_some_and(|obj| obj.zone == Zone::Battlefield)
+                            && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                                state, player, id,
+                            )
+                    })
                     .collect();
+                // CR 118.3 + CR 601.2h: the pause window can also shrink the
+                // pool BELOW the still-owed count (leaves, bars) — installing
+                // the prompt then strands the payer at an unsatisfiable
+                // choice. Take the decline path (fail the Ward cost) instead.
+                if eligible.len() < (remaining - 1) as usize {
+                    return settle_ward_sacrifice_payment_unpaid(
+                        state,
+                        player,
+                        pending_effect,
+                        trigger_event,
+                        events,
+                    );
+                }
                 state.waiting_for = WaitingFor::WardSacrificeChoice {
                     player,
                     permanents: eligible,
                     pending_effect,
                     remaining: remaining - 1,
                     min_total_power: None,
+                    trigger_event,
                 };
                 Ok(state.waiting_for.clone())
             } else {
@@ -2717,14 +3780,31 @@ pub(super) fn resume_ward_sacrifice_payment(
 /// mana units rather than a `PaymentOutcome` and swallows `NeedsChoice` in its
 /// `_ =>` fallback.
 ///
+/// A draw leg parks only for a genuine CR 614.1 replacement on one of its draws: Dredge, an optional skip
+/// (CR 614.1b), or a CR 616.1 ordering. A can't-draw or per-turn draw limit is a static clamp that
+/// `draw::allowed_draw_count` applies to each draw and that the authority's fresh entry refuses at choice time
+/// through `costs::resolution_cost_includes_impossible_event` (every drawer's total across the cost's legs), so
+/// it never parks here.
+///
+/// CR 702.24a: each age counter's instruction is a `Composite` leg. A pause leaves the later legs unpaid; they
+/// travel in `unpaid_suffix` with their payer, and this root pays them through the authority's latched entry
+/// (`costs::resume_ability_cost_for_resolution`), parking again, with the checkpoint payload carried forward
+/// unchanged, if a later leg pauses in turn. The paused leg's own remaining draws belong to its active draw
+/// frame (CR 614.11a), never to the suffix. It calls the authority directly rather than re-entering
+/// `handle_unless_payment`, whose live CR 614.17b re-check would re-gate a choice CR 118.12 has already latched.
+///
+/// CR 614.11a: by the time this root runs, the paused instruction has completed.
+/// `engine_replacement` drives the active draw frame to completion before it
+/// drains this root at both the delivered and the prevented boundary, so the
+/// suffix is never issued on top of an unfinished instruction.
+///
 /// The exhaustive `match` on `CostMoveDrainBoundary` is kept as an ELIGIBILITY
-/// ASSERTION, not a verdict producer. It holds `PriorityBoundary` at
-/// `unreachable!` — `drain_pending_cost_move_resume` admits only
-/// a Delve-commit `Cast`, `ManaAbilityPayment`, and a counter-cost root whose
-/// replacement subtree has retired at that boundary, and dispatches each ahead of
-/// this root — and it turns any future widening of the boundary enum or
-/// of that eligibility table into a compile error at the one site whose rules
-/// reasoning would have to be re-derived.
+/// ASSERTION, not a verdict producer: every boundary resumes the payment the
+/// same way. `drain_pending_cost_move_resume` admits this root at
+/// `PriorityBoundary` too, once an interactive draw substitute's subtree has
+/// retired (CR 614.11a). The match turns any future widening of the boundary
+/// enum into a compile error at the one site whose rules reasoning would have
+/// to be re-derived.
 ///
 /// Interpreting the boundary here rather than at the dispatcher is deliberate: the
 /// sibling `resume_random_discard_unless_payment` maps the very same boundaries
@@ -2746,9 +3826,12 @@ pub(super) fn resume_counter_addition_unless_payment(
     boundary: CostMoveDrainBoundary,
 ) -> Result<WaitingFor, EngineError> {
     let Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+        cost,
         pending_effect,
         trigger_event,
-        ..
+        effect_description,
+        remaining,
+        unpaid_suffix,
     }) = state.pending_cost_move_resume.take()
     else {
         unreachable!("counter-addition unless-payment resume requires its typed continuation")
@@ -2760,12 +3843,74 @@ pub(super) fn resume_counter_addition_unless_payment(
     // fail to compile at this site rather than silently pick a verdict.
     match boundary {
         CostMoveDrainBoundary::ReplacementDelivered { .. }
-        | CostMoveDrainBoundary::ReplacementPrevented { .. } => {}
-        CostMoveDrainBoundary::PriorityBoundary => {
-            unreachable!("counter-addition unless-payment is not eligible at the priority boundary")
+        | CostMoveDrainBoundary::ReplacementPrevented { .. }
+        | CostMoveDrainBoundary::PriorityBoundary => {}
+    }
+    if let Some(suffix) = unpaid_suffix {
+        let UnpaidCostSuffix { payer, remainder } = *suffix;
+        let suffix_cost = match remainder {
+            UnpaidCostRemainder::Legs(suffix_cost) => suffix_cost,
+            UnpaidCostRemainder::Repeated(owed) => {
+                return pay_repeated_draw_unless_cost(
+                    state,
+                    RepeatedDrawUnlessPayment {
+                        payer,
+                        cost,
+                        pending_effect,
+                        trigger_event,
+                        effect_description,
+                        remaining,
+                    },
+                    owed,
+                    None,
+                    events,
+                );
+            }
+        };
+        match costs::resume_ability_cost_for_resolution(
+            state,
+            payer,
+            &suffix_cost,
+            &pending_effect,
+            events,
+        )? {
+            PaymentOutcome::Paid => {}
+            // CR 616.1 + CR 702.24a: a later leg paused on its own
+            // replacement choice. Park again with the legs still unpaid.
+            PaymentOutcome::Paused { remaining_cost } => {
+                state.pending_cost_move_resume =
+                    Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+                        cost,
+                        pending_effect,
+                        trigger_event,
+                        effect_description,
+                        remaining,
+                        unpaid_suffix: remaining_cost
+                            .map(|cost| UnpaidCostSuffix::legs(payer, cost)),
+                    });
+                return Ok(state.waiting_for.clone());
+            }
+            // The latched entry never applies the CR 614.17b choice gate, and
+            // every admitted deterministic leg completes on a latched resume: a
+            // draw is clamped as it happens (CR 118.11 + CR 614.17a), fixed mana
+            // deposits what the pipeline allows, and a prevented counter
+            // placement completes as paid (CR 118.11 + CR 118.12). So no admitted
+            // leg returns `Failed` here; one that does is a new leg shape that
+            // forgot the latched policy, hence the assertion. The choice
+            // CR 118.12 latched still stands: settle PAID, loudly.
+            PaymentOutcome::Failed { reason } => {
+                debug_assert!(
+                    false,
+                    "a resumed unless-cost suffix failed at resolution: {reason:?}"
+                );
+                tracing::warn!(
+                    ?reason,
+                    "resumed unless-cost suffix failed; settling PAID per CR 118.12"
+                );
+            }
         }
     }
-    finish_successful_unless_payment(state, &pending_effect, &trigger_event, events)
+    finish_successful_unless_payment(state, &pending_effect, &trigger_event, events, None)
 }
 
 /// CR 701.9b + CR 118.12 + CR 616.1: Resume a RANDOM unless-discard after the
@@ -2851,7 +3996,7 @@ pub(super) fn resume_random_discard_unless_payment(
     // silently skips `EffectResolved`, the `IfAPlayerDoes` alternative-outcome
     // sub, and the `SequentialSibling` chain. Balduvian Horde has none of
     // those, which is exactly why that mistake was invisible in its tests.
-    finish_successful_unless_payment(state, &pending_effect, &trigger_event, events)
+    finish_successful_unless_payment(state, &pending_effect, &trigger_event, events, None)
 }
 
 pub(super) fn handle_ward_sacrifice_choice(
@@ -2860,12 +4005,23 @@ pub(super) fn handle_ward_sacrifice_choice(
     chosen: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if let WaitingFor::WardSacrificeChoice {
+        player,
+        pending_effect,
+        ..
+    } = &waiting_for
+    {
+        if effects::simultaneous_unless::binds(state, *player, pending_effect.source_id) {
+            return answer_simultaneous_unless_pick(state, &waiting_for, &chosen, events);
+        }
+    }
     let WaitingFor::WardSacrificeChoice {
         player,
         permanents,
         pending_effect,
         remaining,
         min_total_power,
+        trigger_event,
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -2890,14 +4046,111 @@ pub(super) fn handle_ward_sacrifice_choice(
                 "Duplicate selections are not allowed".to_string(),
             ));
         }
+        // CR 118.3 + CR 701.21a: the prompt's `permanents` snapshot predates
+        // this action. Revalidate against the LIVE pool: nothing below may
+        // spend a departed or barred permanent, and a submission no live set
+        // can still satisfy settles the Ward unpaid (no successful answer
+        // exists) instead of stranding the payer.
+        let live_pool: Vec<ObjectId> = permanents
+            .iter()
+            .copied()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Battlefield)
+                    && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                        state, player, *id,
+                    )
+            })
+            .collect();
+        // `min_total_power` is `Some` only for TotalPower/GE (see the offer),
+        // so the threshold below is a total-power floor.
+        let no_live_set_meets_threshold = !sacrifice_pool_meets_aggregate_constraint(
+            state,
+            &live_pool,
+            crate::types::ability::SacrificeAggregateStat::TotalPower,
+            crate::types::ability::Comparator::GE,
+            threshold,
+        );
         if crate::game::sacrifice::selected_total_power(state, &chosen) < threshold {
+            if no_live_set_meets_threshold {
+                return settle_ward_sacrifice_payment_unpaid(
+                    state,
+                    player,
+                    pending_effect,
+                    trigger_event,
+                    events,
+                );
+            }
             return Err(EngineError::InvalidAction(format!(
                 "Selected permanents' total power must be at least {threshold}"
             )));
         }
+        // CR 118.3: revalidate the LIVE selection on submission — a bar
+        // granted (or a permanent lost) in the window must reject the
+        // submission BEFORE anything is spent. Settle unpaid only when no
+        // live set can still meet the threshold; otherwise the payer retries
+        // with a live set. (Membership in the offered snapshot was checked
+        // above, so anything missing from the live pool is dead or barred.)
+        if chosen.iter().any(|id| !live_pool.contains(id)) {
+            if no_live_set_meets_threshold {
+                return settle_ward_sacrifice_payment_unpaid(
+                    state,
+                    player,
+                    pending_effect,
+                    trigger_event,
+                    events,
+                );
+            }
+            return Err(EngineError::InvalidAction(
+                "A selected permanent can't be sacrificed by this player".to_string(),
+            ));
+        }
+        if crate::game::scoped_unless_poll::owns_prompt(state, player, pending_effect.source_id) {
+            return crate::game::scoped_unless_poll::record_sacrifice_set(state, &chosen, events);
+        }
         for (index, id) in chosen.iter().enumerate() {
             match crate::game::sacrifice::sacrifice_permanent(state, *id, player, events)? {
                 crate::game::sacrifice::SacrificeOutcome::Complete => {}
+                // CR 601.2h: a mid-batch bar fails the Ward cost instead of
+                // recording an unsacrificed permanent as paid. Settle unpaid
+                // when no live set can still meet the threshold (earlier
+                // batch spends stand); otherwise the payer retries with a
+                // different set.
+                crate::game::sacrifice::SacrificeOutcome::Prohibited => {
+                    let live_pool: Vec<ObjectId> = permanents
+                        .iter()
+                        .copied()
+                        .filter(|id| {
+                            state
+                                .objects
+                                .get(id)
+                                .is_some_and(|obj| obj.zone == Zone::Battlefield)
+                                && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                                    state, player, *id,
+                                )
+                        })
+                        .collect();
+                    if !sacrifice_pool_meets_aggregate_constraint(
+                        state,
+                        &live_pool,
+                        crate::types::ability::SacrificeAggregateStat::TotalPower,
+                        crate::types::ability::Comparator::GE,
+                        threshold,
+                    ) {
+                        return settle_ward_sacrifice_payment_unpaid(
+                            state,
+                            player,
+                            pending_effect,
+                            trigger_event,
+                            events,
+                        );
+                    }
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot sacrifice this permanent as a cost".to_string(),
+                    ));
+                }
                 crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                     return Ok(pause_ward_sacrifice_payment(
                         state,
@@ -2907,6 +4160,7 @@ pub(super) fn handle_ward_sacrifice_choice(
                             remaining: chosen[index + 1..].to_vec(),
                         },
                         choice_player,
+                        trigger_event,
                     ));
                 }
             }
@@ -2916,6 +4170,95 @@ pub(super) fn handle_ward_sacrifice_choice(
             return Err(EngineError::InvalidAction(
                 "Must select exactly one permanent to sacrifice".to_string(),
             ));
+        }
+        // CR 118.3 + CR 701.21a: same live-board submission revalidation as
+        // the aggregate branch — a departed or barred selection rejects
+        // before the sacrifice, never strands after it. Settle unpaid only
+        // when the live pool can no longer cover the remaining count;
+        // otherwise the payer retries with a live permanent.
+        let selection_dead_or_barred = !state
+            .objects
+            .get(&chosen[0])
+            .is_some_and(|obj| obj.zone == Zone::Battlefield)
+            || crate::game::static_abilities::object_cant_be_sacrificed_by(
+                state, player, chosen[0],
+            );
+        if selection_dead_or_barred {
+            let live_count = permanents
+                .iter()
+                .filter(|&id| {
+                    state
+                        .objects
+                        .get(id)
+                        .is_some_and(|obj| obj.zone == Zone::Battlefield)
+                        && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                            state, player, *id,
+                        )
+                })
+                .count();
+            if live_count < remaining as usize {
+                return settle_ward_sacrifice_payment_unpaid(
+                    state,
+                    player,
+                    pending_effect,
+                    trigger_event,
+                    events,
+                );
+            }
+            return Err(EngineError::InvalidAction(
+                "The selected permanent can't be sacrificed by this player".to_string(),
+            ));
+        }
+        // CR 118.3 + CR 601.2h + CR 702.21a (Ward atomicity): pre-validate
+        // the FULL remaining set before committing ANY sacrifice. A
+        // 2-remaining Ward whose second permanent is already barred (or gone)
+        // settles unpaid here with nothing spent. `payment_transaction`
+        // spans only Composite PayCost, so no replay restores a Ward
+        // sacrifice committed mid-round-trip — the only atomic seam is to
+        // refuse the first spend. Bars granted DURING the spend (replacement
+        // pause) settle unpaid at the resume below; nothing committed
+        // mid-round-trip is restorable.
+        if remaining > 1 {
+            let payable_others = permanents
+                .iter()
+                .filter(|&id| {
+                    *id != chosen[0]
+                        // CR 701.21a: only battlefield permanents can be
+                        // sacrificed (see the resume re-derivation above).
+                        && state
+                            .objects
+                            .get(id)
+                            .is_some_and(|obj| obj.zone == Zone::Battlefield)
+                        && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                            state, player, *id,
+                        )
+                })
+                .count();
+            if payable_others < (remaining - 1) as usize {
+                return settle_ward_sacrifice_payment_unpaid(
+                    state,
+                    player,
+                    pending_effect,
+                    trigger_event,
+                    events,
+                );
+            }
+        }
+
+        if crate::game::scoped_unless_poll::owns_prompt(state, player, pending_effect.source_id) {
+            return crate::game::scoped_unless_poll::record_sacrifice_pick(
+                state,
+                player,
+                chosen[0],
+                permanents,
+                remaining,
+                pending_effect,
+                events,
+            );
+        }
+        // The aggregate token poll admits exactly one sacrifice per seat.
+        if token_unless_poll_owns_prompt(state, player, pending_effect.source_id) {
+            return record_token_unless_sacrifice(state, player, chosen[0], events);
         }
 
         // CR 603.10a + CR 118.8: NOTE — sequential Ward multi-sacrifice is a separate
@@ -2927,6 +4270,13 @@ pub(super) fn handle_ward_sacrifice_choice(
         // Ward sacrifices into one action (like `handle_sacrifice_for_cost`) — out of scope.
         match crate::game::sacrifice::sacrifice_permanent(state, chosen[0], player, events)? {
             crate::game::sacrifice::SacrificeOutcome::Complete => {}
+            // CR 601.2h: a mid-payment bar fails the Ward cost instead
+            // of recording an unsacrificed permanent as paid.
+            crate::game::sacrifice::SacrificeOutcome::Prohibited => {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot sacrifice this permanent as a cost".to_string(),
+                ));
+            }
             crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
                 return Ok(pause_ward_sacrifice_payment(
                     state,
@@ -2938,22 +4288,51 @@ pub(super) fn handle_ward_sacrifice_choice(
                         remaining,
                     },
                     choice_player,
+                    trigger_event,
                 ));
             }
         }
 
         // If more sacrifices remain, re-prompt with updated eligible permanents
         if remaining > 1 {
+            // CR 118.3: re-derive through the same bar-aware authority as
+            // the offer — a bar granted mid-payment must not be re-offered.
             let eligible: Vec<ObjectId> = permanents
                 .into_iter()
-                .filter(|&id| id != chosen[0] && state.objects.contains_key(&id))
+                .filter(|&id| {
+                    id != chosen[0]
+                        // CR 701.21a: only battlefield permanents can be
+                        // sacrificed (see the resume re-derivation above).
+                        && state
+                            .objects
+                            .get(&id)
+                            .is_some_and(|obj| obj.zone == Zone::Battlefield)
+                        && !crate::game::static_abilities::object_cant_be_sacrificed_by(
+                            state, player, id,
+                        )
+                })
                 .collect();
+            // CR 118.3 + CR 601.2h: the spend (or a replacement post-effect
+            // it ran) can shrink the pool BELOW the still-owed count —
+            // installing the prompt then strands the payer at an
+            // unsatisfiable choice. Take the decline path (fail the Ward
+            // cost) instead; the just-spent sacrifice stands.
+            if eligible.len() < (remaining - 1) as usize {
+                return settle_ward_sacrifice_payment_unpaid(
+                    state,
+                    player,
+                    pending_effect,
+                    trigger_event,
+                    events,
+                );
+            }
             state.waiting_for = WaitingFor::WardSacrificeChoice {
                 player,
                 permanents: eligible,
                 pending_effect,
                 remaining: remaining - 1,
                 min_total_power: None,
+                trigger_event,
             };
             return Ok(state.waiting_for.clone());
         }
@@ -3087,10 +4466,103 @@ pub(super) fn resume_unless_bounce_cost_move(
 /// active player's priority. Once the active player has
 /// left the game, the next player in turn order still in the game receives it
 /// instead, and `priority_player` names the same seat.
-fn set_active_priority(state: &mut GameState) {
+pub(crate) fn set_active_priority(state: &mut GameState) {
     let player = living_priority_seat(state);
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
+}
+
+/// CR 101.4: a pick answering an open choose-all-then-act poll. The last
+/// answer settles the poll; the reducer epilogue runs this action's post-action
+/// pipeline when the settle leaves a priority wait (the ward-choice arms return
+/// their wait to it).
+fn answer_simultaneous_unless_pick(
+    state: &mut GameState,
+    prompt: &WaitingFor,
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let event_start = events.len();
+    match effects::simultaneous_unless::answer_pick(state, prompt, chosen)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+    {
+        effects::simultaneous_unless::WalkOutcome::Prompted => Ok(state.waiting_for.clone()),
+        effects::simultaneous_unless::WalkOutcome::Complete => settle_simultaneous_unless(
+            state,
+            events,
+            SettlePipeline::ReducerEpilogue { event_start },
+        ),
+    }
+}
+
+/// Who runs the post-action pipeline after a poll's last answer is settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettlePipeline {
+    /// The answering handler returns its result directly, so the settle runs
+    /// the pipeline over the action's events from `event_start`.
+    RunFrom { event_start: usize },
+    /// The answering handler returns its wait to the reducer, whose epilogue
+    /// runs the pipeline under a priority wait. Any other wait the settle leaves
+    /// gets no pipeline there, so the settle runs it over the action's events
+    /// from `event_start`, as `RunFrom` does.
+    ReducerEpilogue { event_start: usize },
+}
+
+/// CR 101.4 + CR 608.2f: the last answer of a choose-all-then-act poll is in;
+/// every chosen action happens together and the resolution continues.
+/// CR 117.3b + CR 800.4j: priority is provisionally the active player's (or the
+/// next living seat's), the seat the completed resolution's own grant names.
+/// Exactly one post-action pipeline runs for the answer (CR 603.3 triggers,
+/// CR 704.3 state-based actions). A delivery paused on a CR 616.1 replacement
+/// choice leaves that choice as the wait; its resume runs the rest.
+fn settle_simultaneous_unless(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    pipeline: SettlePipeline,
+) -> Result<WaitingFor, EngineError> {
+    // Taking the carrier releases the poll's hold on its resolution, so no
+    // priority wait ever coexists with a live carrier (CR 117.2e).
+    let carrier = state.pending_simultaneous_unless.take().ok_or_else(|| {
+        EngineError::InvalidAction("CR 101.4: no unless poll to settle".to_string())
+    })?;
+    set_active_priority(state);
+    match effects::simultaneous_unless::deliver(state, *carrier, events, 0)
+        .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?
+    {
+        effects::simultaneous_unless::DeliveryOutcome::Paused => {
+            return Ok(state.waiting_for.clone());
+        }
+        effects::simultaneous_unless::DeliveryOutcome::Delivered { .. } => {}
+    }
+    resume_pending_continuation_if_priority(state, events)?;
+    let pipeline_start = match pipeline {
+        SettlePipeline::RunFrom { event_start } => Some(event_start),
+        // CR 603.2 + CR 603.3 + CR 616.1: a delivery whose later work left a
+        // non-priority wait leaves the reducer epilogue no pipeline to run.
+        // A delivery paused on a step's or the batch's CR 616.1
+        // choice holds its completed events
+        // (`SimultaneousUnlessDelivery.held_events` / the batch's
+        // `deferred_events`), so no pipeline collects them before the delivery
+        // completes (CR 603.10). This pipeline collects the triggers of the
+        // events that remain in the buffer. The collected triggers wait in the
+        // deferred queue until a player would receive priority.
+        SettlePipeline::ReducerEpilogue { event_start } => {
+            (!matches!(state.waiting_for, WaitingFor::Priority { .. })).then_some(event_start)
+        }
+    };
+    if let Some(event_start) = pipeline_start {
+        let default_wf = state.waiting_for.clone();
+        let wf = engine_priority::run_post_action_pipeline_from(
+            state,
+            events,
+            event_start,
+            &default_wf,
+            false,
+            false,
+        )?;
+        state.waiting_for = wf;
+    }
+    Ok(state.waiting_for.clone())
 }
 
 fn action_result(events: &mut Vec<GameEvent>, waiting_for: WaitingFor) -> ActionResult {
@@ -3144,6 +4616,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining,
+            affected_object: None,
+            repeat: None,
         };
         state
     }
@@ -3386,6 +4860,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![],
             chosen: vec![],
+            affected_object: None,
         };
         crate::game::engine::apply_as_current(
             &mut state,
@@ -3478,6 +4953,8 @@ mod tests {
                         trigger_event: None,
                         effect_description: None,
                         remaining: vec![],
+                        affected_object: None,
+                        repeat: None,
                     };
                     let result = payment_action(&mut state, pay);
                     assert_eq!(
@@ -3635,6 +5112,7 @@ mod tests {
 
     fn redirect_to(destination: Zone) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination,
@@ -3695,6 +5173,8 @@ mod tests {
                 trigger_event: None,
                 effect_description: None,
                 remaining: vec![],
+                affected_object: None,
+                repeat: None,
             };
             payment_action(&mut state, pay);
             assert_eq!(
@@ -3735,6 +5215,8 @@ mod tests {
                 trigger_event: None,
                 effect_description: None,
                 remaining: vec![],
+                affected_object: None,
+                repeat: None,
             };
             payment_action(&mut state, true);
             let index = match &state.waiting_for {
@@ -3806,6 +5288,8 @@ mod tests {
                 trigger_event: None,
                 effect_description: None,
                 remaining: vec![],
+                affected_object: None,
+                repeat: None,
             };
             let mut events = payment_action(&mut state, true).events;
             let mut pauses = 0;
@@ -3911,6 +5395,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: vec![],
+            affected_object: None,
+            repeat: None,
         };
         let mut events = payment_action(&mut state, true).events;
         assert!(
@@ -4022,6 +5508,8 @@ mod tests {
                 trigger_event: None,
                 effect_description: None,
                 remaining: vec![],
+                affected_object: None,
+                repeat: None,
             };
             assert!(matches!(
                 &state.waiting_for,
@@ -4977,11 +6465,13 @@ mod tests {
         ability.optional = true;
         ability.optional_for = Some(crate::types::ability::OpponentMayScope::AnyPlayer);
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(ability),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OpponentMayChoice {
             player: PlayerId(0),
@@ -4991,6 +6481,302 @@ mod tests {
             remaining,
         };
         state
+    }
+
+    fn pay_five_life() -> Effect {
+        Effect::PayCost {
+            cost: crate::types::ability::AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        }
+    }
+
+    /// CR 101.4 + CR 608.2d: a self-funded acceptance leaves the offer standing
+    /// for everyone after it, so the poll outlives it. This is Dash Hopes' and
+    /// Temporal Extortion's printed ruling ("As soon as any player performs the
+    /// action ... the remaining players still get the option") asserted at the
+    /// building-block level, so it covers every card whose accepted action is
+    /// paid out of the responder's own resources rather than one card's text.
+    #[test]
+    fn a_self_funded_acceptance_leaves_the_poll_open_for_the_next_responder() {
+        let mut state = opponent_may_state(pay_five_life(), vec![PlayerId(1), PlayerId(2)]);
+
+        // Positive reach-guard: the first responder really is on the clock, so a
+        // later assertion about P1 cannot pass on an engine that offered nobody
+        // anything.
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, .. } if player == PlayerId(0)
+            ),
+            "the poll must open on the active player (CR 101.4), got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("a payable self-funded acceptance resolves");
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, .. } if player == PlayerId(1)
+            ),
+            "the acceptance answers one responder, not the poll: P1 must still be \
+             offered (CR 101.4), got {:?}",
+            state.waiting_for
+        );
+    }
+
+    /// The early-stop control, and the reason the re-offer is not unconditional.
+    ///
+    /// Sin Prodder's "any opponent may have YOU put that card into your
+    /// graveyard" is a one-shot action on a single object: once it is performed,
+    /// CR 608.2d makes the same choice impossible for every later responder,
+    /// which is why its printed ruling says "Once a player does so ... Sin
+    /// Prodder's trigger has no further action." Every effect whose subject is
+    /// not the responder takes this path, so the control is written at that
+    /// shape (a controller-scoped `GainLife`) rather than at one card.
+    ///
+    /// This row fails on an engine that re-offers after every acceptance.
+    #[test]
+    fn a_one_shot_acceptance_ends_the_poll_for_the_remaining_responders() {
+        let mut state = opponent_may_state(gain_life(1), vec![PlayerId(1), PlayerId(2)]);
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, .. } if player == PlayerId(0)
+            ),
+            "reach-guard: the poll must open on the active player, got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("the one-shot acceptance resolves");
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::OpponentMayChoice { .. }),
+            "the performed one-shot action leaves no legal choice for the \
+             remaining responders (CR 608.2d), so the poll must end, got {:?}",
+            state.waiting_for
+        );
+    }
+
+    /// Attach an "If no one does" rider to the poll frame `opponent_may_state`
+    /// just pushed — a `Not(OptionalEffectPerformed)`-gated sub that gains the
+    /// controller 3. This is Browbeat's shape ("Any player may have Browbeat deal
+    /// 5 damage to them. If no one does, target player draws three cards.") at the
+    /// building-block level, composed onto the existing helper rather than
+    /// duplicating it.
+    fn with_if_no_one_does_rider(state: &mut GameState) {
+        let mut rider = ResolvedAbility::new(gain_life(3), vec![], ObjectId(100), PlayerId(0));
+        rider.condition = Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        });
+        state
+            .active_optional_effect_frame_mut()
+            .expect("the poll frame the helper just pushed")
+            .ability
+            .sub_ability = Some(Box::new(rider));
+    }
+
+    /// CR 118.12 + CR 608.2d: a continuing poll SPENDS its "if no one does" rider
+    /// at the first acceptance, so a later responder's decline must not fire it.
+    /// Browbeat: one seat took the 5 damage, so nobody draws three cards.
+    ///
+    /// The row that was missing when round 3 added the guard this pins — the
+    /// suppression had no test of its own, so narrowing the guard could have
+    /// neutered it unnoticed. Paired with
+    /// `an_unspent_rider_fires_when_every_responder_declines` below: this one
+    /// fails on an engine that fires the rider regardless of the acceptance, that
+    /// one fails on an engine that suppresses it regardless, and neither can pass
+    /// vacuously because each asserts the opposite life total on the same board.
+    #[test]
+    fn a_spent_rider_does_not_fire_when_a_later_responder_declines() {
+        let mut state = opponent_may_state(pay_five_life(), vec![PlayerId(1), PlayerId(2)]);
+        with_if_no_one_does_rider(&mut state);
+        let life_before = state.players[0].life;
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("a payable self-funded acceptance resolves");
+
+        // Positive reach-guards: the acceptance really was performed (CR 118.12
+        // binds the payment to the accepting seat, so P0 is 5 life down), and the
+        // poll really did continue, so the decline below is a LATER one.
+        assert_eq!(
+            state.players[0].life,
+            life_before - 5,
+            "reach-guard: the accepting seat paid its own 5 life"
+        );
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, .. } if player == PlayerId(1)
+            ),
+            "reach-guard: the poll continues past the acceptance, got {:?}",
+            state.waiting_for
+        );
+
+        for seat in [PlayerId(1), PlayerId(2)] {
+            if matches!(state.waiting_for, WaitingFor::OpponentMayChoice { .. }) {
+                crate::game::engine::apply(
+                    &mut state,
+                    seat,
+                    GameAction::DecideOptionalEffect { accept: false },
+                )
+                .expect("a later responder declines");
+            }
+        }
+
+        assert_eq!(
+            state.players[0].life,
+            life_before - 5,
+            "a player DID pay, so the \"if no one does\" rider is spent and must \
+             not gain the controller 3 on a later decline (CR 118.12)"
+        );
+    }
+
+    /// CR 608.2d + CR 101.4: the unspent case. Nobody accepts a fresh poll, so
+    /// its rider fires once the last seat declines.
+    #[test]
+    fn an_unspent_rider_fires_when_every_responder_declines() {
+        let mut state = opponent_may_state(pay_five_life(), vec![PlayerId(1), PlayerId(2)]);
+        with_if_no_one_does_rider(&mut state);
+        let life_before = state.players[0].life;
+
+        for seat in [PlayerId(0), PlayerId(1), PlayerId(2)] {
+            assert!(
+                matches!(
+                    state.waiting_for,
+                    WaitingFor::OpponentMayChoice { player, .. } if player == seat
+                ),
+                "reach-guard: every seat is offered in turn, got {:?} for {seat:?}",
+                state.waiting_for
+            );
+            crate::game::engine::apply(
+                &mut state,
+                seat,
+                GameAction::DecideOptionalEffect { accept: false },
+            )
+            .expect("each responder declines");
+        }
+
+        assert_eq!(
+            state.players[0].life,
+            life_before + 3,
+            "no player paid, so the \"if no one does\" rider fires (CR 608.2d)"
+        );
+    }
+
+    /// CR 101.4 + CR 616.1: an acceptance whose own action suspends on a prompt
+    /// of its own still owes an offer to the responders after it.
+    ///
+    /// Two competing life-loss modifiers replace the accepted payment, which is
+    /// a CR 616.1 choice the paying player must answer mid-resolution: "If two
+    /// or more replacement and/or prevention effects are attempting to modify
+    /// the way an event affects an object or player, … the affected player
+    /// chooses one to apply." That rule cites CR 101.4 for its own ordering, so
+    /// the two rules here are the same poll seen from both ends. The poll cannot
+    /// own the prompt while that choice is live — only one frame may — so its
+    /// cursor parks beneath it and arms once the choice is answered.
+    ///
+    /// This is blocker 1 of the #10741 round-3 review. The engine before this
+    /// change gated the re-offer on an already-settled priority and so dropped
+    /// every remaining responder in exactly this case; reverting that gate makes
+    /// the final assertion below fail with `Priority`.
+    #[test]
+    fn a_poll_survives_a_child_prompt_raised_by_the_accepted_action() {
+        let mut state = opponent_may_state(pay_five_life(), vec![PlayerId(1), PlayerId(2)]);
+        // CR 616.1: two applicable LoseLife replacements on a permanent the
+        // payer controls, so the payment cannot settle until it is told which
+        // one applies first.
+        let modifiers = create_object(
+            &mut state,
+            CardId(903),
+            PlayerId(0),
+            "Competing Life-Loss Modifiers".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&modifiers)
+            .expect("the modifier permanent was just created")
+            .replacement_definitions = vec![
+            crate::types::ability::ReplacementDefinition::new(
+                crate::types::replacements::ReplacementEvent::LoseLife,
+            )
+            .quantity_modification(crate::types::ability::QuantityModification::DOUBLE)
+            .description("Double".to_string()),
+            crate::types::ability::ReplacementDefinition::new(
+                crate::types::replacements::ReplacementEvent::LoseLife,
+            )
+            .quantity_modification(crate::types::ability::QuantityModification::Plus { value: 1 })
+            .description("Plus one".to_string()),
+        ]
+        .into();
+
+        // Positive reach-guard: the first responder is on the clock.
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, .. } if player == PlayerId(0)
+            ),
+            "the poll must open on the active player (CR 101.4), got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("an acceptance whose payment defers to a replacement choice is legal");
+
+        // Positive reach-guard for this test's whole premise: the acceptance
+        // really did suspend on a child prompt. Without it the final assertion
+        // would also pass on an engine where the payment simply resolved to
+        // completion, which is the case the sibling test already covers.
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice { player, .. } if player == PlayerId(0)
+            ),
+            "the accepted payment must suspend on its own CR 616.1 ordering \
+             choice for this row to exercise the parked-cursor path, got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("the payer orders the competing replacements");
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, ref remaining, .. }
+                    if player == PlayerId(1) && remaining.as_slice() == [PlayerId(2)]
+            ),
+            "the responders after an acceptance that suspended must still be \
+             offered the option (CR 101.4), got {:?}",
+            state.waiting_for
+        );
     }
 
     #[test]
@@ -5028,6 +6814,10 @@ mod tests {
         assert!(state.active_optional_effect_frame().is_none());
     }
 
+    /// CR 608.2d + CR 701.21a: the accepting seat is judged again when it accepts.
+    /// P0 controls no creature, so its acceptance can't sacrifice one; the offer
+    /// advances to P1, who controls a creature and so passes its own offer-time
+    /// judgment, with the latched subject unchanged.
     #[test]
     fn opponent_may_infeasible_accept_reprompt_preserves_latched_subject() {
         let effect = Effect::Sacrifice {
@@ -5036,6 +6826,21 @@ mod tests {
             min_count: 0,
         };
         let mut state = opponent_may_state(effect, vec![PlayerId(1)]);
+        let p1_creature = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(7),
+            PlayerId(1),
+            "P1 Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let creature = state.objects.get_mut(&p1_creature).unwrap();
+            creature
+                .base_card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            creature.card_types = creature.base_card_types.clone();
+        }
 
         crate::game::engine::apply(
             &mut state,
@@ -5068,11 +6873,13 @@ mod tests {
         });
         optional.sub_ability = Some(Box::new(decline_branch));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -5102,11 +6909,13 @@ mod tests {
         });
         optional.sub_ability = Some(Box::new(decline_branch));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -5142,11 +6951,13 @@ mod tests {
         });
         optional.sub_ability = Some(Box::new(decline_branch));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -5179,11 +6990,13 @@ mod tests {
         )));
         optional.sub_ability = Some(Box::new(if_you_do));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -5214,11 +7027,13 @@ mod tests {
         continuation_sub.sub_link = SubAbilityLink::ContinuationStep;
         optional.sub_ability = Some(Box::new(continuation_sub));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -5248,11 +7063,13 @@ mod tests {
         });
         optional.sub_ability = Some(Box::new(decline_branch));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -5282,11 +7099,13 @@ mod tests {
         let mut optional = ResolvedAbility::new(gain_life(2), vec![], source_id, PlayerId(0));
         optional.optional = true;
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -5376,6 +7195,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
+            repeat: None,
         };
         (state, hand)
     }
@@ -5484,6 +7305,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
+            repeat: None,
         };
 
         let mut events = Vec::new();
@@ -5510,6 +7333,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
+            repeat: None,
         };
 
         let source = create_object(
@@ -5628,6 +7453,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
+            repeat: None,
         };
 
         let mut events = Vec::new();
@@ -5686,6 +7513,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
+            repeat: None,
         };
 
         let mut events = Vec::new();
@@ -5722,6 +7551,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: vec![PlayerId(1)],
+            affected_object: None,
+            repeat: None,
         };
 
         // P0 declines → P1 is prompted, poll list drained, effect not resolved.
@@ -5769,6 +7600,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
+            repeat: None,
         };
 
         // P1 pays 1 life → effect prevented; P0's life unchanged.
@@ -5795,6 +7628,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
+            repeat: None,
         };
 
         let mut events = Vec::new();
@@ -5835,6 +7670,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![],
             chosen: vec![],
+            affected_object: None,
         };
 
         let mut events = Vec::new();
@@ -5873,6 +7709,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![],
             chosen: vec![],
+            affected_object: None,
         };
 
         let mut events = Vec::new();
@@ -5908,6 +7745,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![],
             chosen: vec![],
+            affected_object: None,
         };
 
         crate::game::engine::apply_as_current(
@@ -5939,6 +7777,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![],
             chosen: vec![],
+            affected_object: None,
         };
 
         crate::game::engine::apply_as_current(
@@ -6002,6 +7841,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![second_costs.clone()],
             chosen: vec![],
+            affected_object: None,
         };
 
         // First pick: index 0 (PayLife{3}). Expected post-state: still in
@@ -6153,6 +7993,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![oneof_wu.clone()],
             chosen: vec![],
+            affected_object: None,
         };
 
         // First pick: {W} (index 0). State remains UnlessPaymentChooseCost.
@@ -6233,6 +8074,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![oneof_wu],
             chosen: vec![],
+            affected_object: None,
         };
 
         let mut events = Vec::new();
@@ -6301,6 +8143,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
+            repeat: None,
         };
 
         let mut events = Vec::new();
@@ -6454,6 +8298,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
+            repeat: None,
         };
 
         let mut events = Vec::new();
@@ -6500,6 +8346,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
+            repeat: None,
         };
 
         let mut events = Vec::new();
@@ -6538,6 +8386,7 @@ mod tests {
             ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
@@ -6558,6 +8407,7 @@ mod tests {
             ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
@@ -6620,6 +8470,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
+            repeat: None,
         };
 
         let mut events = Vec::new();
@@ -6678,6 +8530,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
+            repeat: None,
         };
 
         let mut events = Vec::new();
@@ -6764,6 +8618,8 @@ mod tests {
                 PlayerId(1),
                 PlayerCounterKind::Poison,
                 5,
+                // The unless-payment under test is a cost — fail closed.
+                crate::types::proposed_event::CounterCause::Other,
             )
             .is_prohibited(),
             "the `You`-scoped prohibition must bite its own controller"
@@ -6775,6 +8631,8 @@ mod tests {
                 PlayerId(0),
                 PlayerCounterKind::Poison,
                 5,
+                // The unless-payment under test is a cost — fail closed.
+                crate::types::proposed_event::CounterCause::Other,
             )
             .is_prohibited(),
             "the `You`-scoped prohibition must not bite P0"
@@ -6791,6 +8649,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: vec![PlayerId(1)],
+            affected_object: None,
+            repeat: None,
         };
 
         let mut events = Vec::new();
@@ -6833,6 +8693,8 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: vec![PlayerId(1)],
+            affected_object: None,
+            repeat: None,
         };
 
         let mut events = Vec::new();
@@ -6901,6 +8763,8 @@ mod tests {
                     PlayerId(0),
                     PlayerCounterKind::Poison,
                     5,
+                    // The unless-payment under test is a cost — fail closed.
+                    crate::types::proposed_event::CounterCause::Other,
                 )
                 .is_prohibited(),
                 "the prohibition must bite the prompted player"
@@ -6918,6 +8782,7 @@ mod tests {
                 effect_description: None,
                 remaining_choices: vec![vec![poison.clone(), life.clone()]],
                 chosen: vec![],
+                affected_object: None,
             };
             state
         };
@@ -6980,6 +8845,545 @@ mod tests {
             ),
             "the prompt must advance to the second round with the payable pick recorded, got {:?}",
             state.waiting_for
+        );
+    }
+
+    /// Ulamog, the Defiler (verbatim MTGJSON Oracle) — the 2-remaining Ward
+    /// shape every test below drives: "Ward—Sacrifice two permanents."
+    const ULAMOG_WARD_ORACLE: &str = "When you cast this spell, target opponent exiles the top half of their library, rounded up.\nWard\u{2014}Sacrifice two permanents.\nUlamog enters with a number of +1/+1 counters on it equal to the greatest mana value among cards in exile.\nUlamog has annihilator X, where X is the number of +1/+1 counters on it.";
+    /// Hithlain Rope (verbatim MTGJSON Oracle) — the object-level bar source:
+    /// "This artifact can't be sacrificed."
+    const HITHLAIN_ROPE_ORACLE: &str = "This artifact can't be sacrificed.\n{1}, {T}: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle. The player to your right gains control of this artifact.\n{2}, {T}: Draw a card. The player to your right gains control of this artifact.";
+
+    /// Reach-guard: Ulamog's verbatim Oracle parses to the Ward Sacrifice-2
+    /// shape the fixtures below stand in for.
+    fn assert_ulamog_parses_to_ward_sacrifice_two() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::keywords::WardCost;
+        let doc = parse_oracle_text(
+            ULAMOG_WARD_ORACLE,
+            "Ulamog, the Defiler",
+            &["Ward".to_string()],
+            &["Creature".to_string()],
+            &["Eldrazi".to_string()],
+        );
+        assert!(
+            doc.extracted_keywords.iter().any(|keyword| matches!(
+                keyword,
+                Keyword::Ward(WardCost::Sacrifice { count: 2, .. })
+            )),
+            "reach: Ulamog's verbatim Oracle must parse to Ward Sacrifice-2, got {:?}",
+            doc.extracted_keywords
+        );
+    }
+
+    fn ward_rock(state: &mut GameState, name: &str, card: u64) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.controller = PlayerId(0);
+        obj.card_types.core_types.push(CoreType::Creature);
+        id
+    }
+
+    fn ward_two_pending(source: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(gain_life(4), vec![], source, PlayerId(0))
+    }
+
+    fn ward_two_prompt(state: &mut GameState, permanents: Vec<ObjectId>, pending: ResolvedAbility) {
+        state.waiting_for = WaitingFor::WardSacrificeChoice {
+            player: PlayerId(0),
+            permanents,
+            pending_effect: Box::new(pending),
+            remaining: 2,
+            min_total_power: None,
+            trigger_event: None,
+        };
+    }
+
+    /// The bar the production static parser derives from Hithlain Rope's
+    /// verbatim printed line, granted on `victim`.
+    fn grant_rope_bar(state: &mut GameState, victim: ObjectId) {
+        use crate::parser::oracle::parse_oracle_text;
+        let doc = parse_oracle_text(HITHLAIN_ROPE_ORACLE, "Hithlain Rope", &[], &[], &[]);
+        assert!(
+            doc.statics.iter().any(|def| {
+                def.mode == crate::types::statics::StaticMode::Other("CantBeSacrificed".to_string())
+            }),
+            "reach: Hithlain Rope's verbatim Oracle must parse to a CantBeSacrificed static"
+        );
+        let obj = state.objects.get_mut(&victim).unwrap();
+        for def in doc.statics {
+            obj.static_definitions.push(def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+        assert!(
+            crate::game::static_abilities::object_cant_be_sacrificed_by(state, PlayerId(0), victim),
+            "reach: the granted bar must read through the live-bar authority"
+        );
+    }
+
+    /// CR 118.3 + CR 601.2h: a pool that shrinks below the still-owed count
+    /// settles the Ward unpaid — never an unsatisfiable prompt, never a
+    /// restored strand.
+    ///
+    /// Ulamog's "Ward—Sacrifice two permanents" prompt offers [rock_a,
+    /// rock_b]; rock_b leaves the battlefield before the payer submits
+    /// rock_a. The Ward settles unpaid with rock_a still on the battlefield,
+    /// no `WardSacrificeChoice` re-prompt is installed, and the payment
+    /// continuation is retired. The fully-payable control completes both
+    /// sacrifices.
+    ///
+    /// Revert-to-red: deleting the shortfall checks (and the pre-validation)
+    /// installs `WardSacrificeChoice { remaining: 1, permanents: [] }` — an
+    /// unsatisfiable prompt — and the no-reprompt assertion fails.
+    /// Restoring `Err` instead of settling strands the payer: the public
+    /// boundary would restore this same unpayable choice.
+    #[test]
+    fn ward_reprompt_declines_when_pool_shrinks_below_remaining() {
+        assert_ulamog_parses_to_ward_sacrifice_two();
+
+        // Shrunk leg: rock_b leaves before rock_a is submitted.
+        let mut state = GameState::new_two_player(42);
+        let rock_a = ward_rock(&mut state, "Rock A", 7_201);
+        let rock_b = ward_rock(&mut state, "Rock B", 7_202);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_two_prompt(&mut state, vec![rock_a, rock_b], pending);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, rock_b, Zone::Graveyard, &mut events);
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_a], &mut events);
+        assert!(
+            outcome.is_ok(),
+            "a pool shrunk below remaining-1 must settle (not error), got {outcome:?}"
+        );
+        assert_eq!(
+            state.objects[&rock_a].zone,
+            Zone::Battlefield,
+            "nothing may be spent when the Ward cost is unpayable"
+        );
+        assert!(
+            !matches!(&state.waiting_for, WaitingFor::WardSacrificeChoice { .. }),
+            "no Ward re-prompt may be installed after an unpaid settlement, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            state.pending_cost_move_resume.is_none(),
+            "the payment continuation must be retired, got {:?}",
+            state.pending_cost_move_resume
+        );
+
+        // Control: the fully-payable Ward completes both sacrifices.
+        let mut control = GameState::new_two_player(42);
+        let rock_a = ward_rock(&mut control, "Rock A", 7_201);
+        let rock_b = ward_rock(&mut control, "Rock B", 7_202);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_two_prompt(&mut control, vec![rock_a, rock_b], pending);
+        let mut events = Vec::new();
+        let waiting_for = control.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut control, waiting_for, vec![rock_a], &mut events);
+        match outcome {
+            Ok(WaitingFor::WardSacrificeChoice {
+                permanents,
+                remaining: 1,
+                ..
+            }) => assert_eq!(
+                permanents,
+                vec![rock_b],
+                "the re-prompt must offer only the remaining permanent"
+            ),
+            other => panic!("a payable first sacrifice must re-prompt, got {other:?}"),
+        }
+        let waiting_for = control.waiting_for.clone();
+        handle_ward_sacrifice_choice(&mut control, waiting_for, vec![rock_b], &mut events)
+            .expect("the second sacrifice must complete the Ward");
+        assert_eq!(control.objects[&rock_a].zone, Zone::Graveyard);
+        assert_eq!(control.objects[&rock_b].zone, Zone::Graveyard);
+    }
+
+    /// CR 118.3 + CR 601.2h + CR 702.21a (Ward atomicity): the full remaining
+    /// set is pre-validated before ANY sacrifice is committed.
+    ///
+    /// Ulamog's "Ward—Sacrifice two permanents" prompt offers [rock_a,
+    /// rock_b]; rock_b carries Hithlain Rope's "can't be sacrificed" bar.
+    /// Submitting rock_a settles the Ward unpaid with BOTH permanents still
+    /// on the battlefield — the first sacrifice is never committed, and no
+    /// unsatisfiable re-prompt strands the payer. The fully-payable mixed
+    /// control (no bar) pays in full.
+    ///
+    /// Revert-to-red: deleting the pre-validation spends rock_a, installs
+    /// the re-prompt, and the battlefield assertion fails.
+    #[test]
+    fn ward_sequential_sacrifice_prevalidates_full_remaining_set_before_spending() {
+        assert_ulamog_parses_to_ward_sacrifice_two();
+
+        // Barred leg: rock_b carries the bar (granted post-offer, pre-submit).
+        let mut state = GameState::new_two_player(42);
+        let rock_a = ward_rock(&mut state, "Rock A", 7_201);
+        let rock_b = ward_rock(&mut state, "Rock B", 7_202);
+        grant_rope_bar(&mut state, rock_b);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_two_prompt(&mut state, vec![rock_a, rock_b], pending);
+        let mut events = Vec::new();
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_a], &mut events);
+        assert!(
+            outcome.is_ok(),
+            "a Ward whose second permanent is barred must settle (not error), got {outcome:?}"
+        );
+        assert_eq!(
+            state.objects[&rock_a].zone,
+            Zone::Battlefield,
+            "the first permanent must still be on the battlefield"
+        );
+        assert_eq!(
+            state.objects[&rock_b].zone,
+            Zone::Battlefield,
+            "the barred permanent must still be on the battlefield"
+        );
+        assert!(
+            !matches!(&state.waiting_for, WaitingFor::WardSacrificeChoice { .. }),
+            "no Ward re-prompt may be installed after an unpaid settlement, got {:?}",
+            state.waiting_for
+        );
+
+        // Mixed control: both permanents payable, no bar — pays in full.
+        let mut control = GameState::new_two_player(42);
+        let rock_a = ward_rock(&mut control, "Rock A", 7_201);
+        let rock_b = ward_rock(&mut control, "Rock B", 7_202);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_two_prompt(&mut control, vec![rock_a, rock_b], pending);
+        let mut events = Vec::new();
+        let waiting_for = control.waiting_for.clone();
+        handle_ward_sacrifice_choice(&mut control, waiting_for, vec![rock_a], &mut events)
+            .expect("the first sacrifice of a fully-payable Ward must succeed");
+        let waiting_for = control.waiting_for.clone();
+        handle_ward_sacrifice_choice(&mut control, waiting_for, vec![rock_b], &mut events)
+            .expect("the second sacrifice of a fully-payable Ward must succeed");
+        assert_eq!(control.objects[&rock_a].zone, Zone::Graveyard);
+        assert_eq!(control.objects[&rock_b].zone, Zone::Graveyard);
+    }
+
+    /// CR 118.3 + CR 601.2h: the replacement-pause resume takes the same
+    /// decline path when its window shrinks the pool below the still-owed
+    /// count — the Ward settles unpaid, no unsatisfiable re-prompt, and the
+    /// consumed continuation is not re-installed.
+    ///
+    /// A Sequential resume owed one more sacrifice (`remaining: 2`, rock_a
+    /// spent pre-pause) whose survivor rock_b leaves during the pause settles
+    /// unpaid instead of installing `WardSacrificeChoice { remaining: 1,
+    /// permanents: [] }`. The pre-pause spend stands (paper cannot
+    /// un-sacrifice either).
+    ///
+    /// Revert-to-red: deleting the resume shortfall check installs the empty
+    /// prompt and the no-reprompt assertion fails.
+    #[test]
+    fn ward_sequential_resume_declines_when_pause_window_shrinks_pool() {
+        assert_ulamog_parses_to_ward_sacrifice_two();
+
+        let mut state = GameState::new_two_player(42);
+        let rock_a = ward_rock(&mut state, "Rock A", 7_201);
+        let rock_b = ward_rock(&mut state, "Rock B", 7_202);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, rock_a, Zone::Graveyard, &mut events);
+        // The pause window leaves the survivor too.
+        crate::game::zones::move_to_zone(&mut state, rock_b, Zone::Graveyard, &mut events);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::WardSacrificePayment {
+            player: PlayerId(0),
+            pending_effect: Box::new(ward_two_pending(ObjectId(100))),
+            resume: WardSacrificePaymentResume::Sequential {
+                permanents: vec![rock_a, rock_b],
+                sacrificed: rock_a,
+                remaining: 2,
+            },
+            trigger_event: None,
+        });
+        let outcome = resume_ward_sacrifice_payment(&mut state, &mut events);
+        assert!(
+            outcome.is_ok(),
+            "a resume whose pool shrank below remaining-1 must settle (not error), got {outcome:?}"
+        );
+        assert!(
+            !matches!(&state.waiting_for, WaitingFor::WardSacrificeChoice { .. }),
+            "no unsatisfiable re-prompt may be installed, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            state.pending_cost_move_resume.is_none(),
+            "the consumed continuation must not be re-installed, got {:?}",
+            state.pending_cost_move_resume
+        );
+    }
+
+    /// CR 118.3 + CR 701.21a: a MultiSacrifice resume whose fixed replay list
+    /// lost a member during the pause (concession, removal) settles unpaid
+    /// BEFORE replaying — replaying the departed member would error out of
+    /// the consumed continuation. The fully-live control replays to
+    /// completion.
+    ///
+    /// Revert-to-red: deleting the liveness pre-check replays rock_b off the
+    /// battlefield, `sacrifice_permanent` errors, and the first assertion
+    /// fails.
+    #[test]
+    fn ward_multi_resume_settles_unpaid_when_listed_permanent_left() {
+        assert_ulamog_parses_to_ward_sacrifice_two();
+
+        // Departed leg: rock_b leaves during the pause.
+        let mut state = GameState::new_two_player(42);
+        let rock_a = ward_rock(&mut state, "Rock A", 7_201);
+        let rock_b = ward_rock(&mut state, "Rock B", 7_202);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, rock_b, Zone::Graveyard, &mut events);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::WardSacrificePayment {
+            player: PlayerId(0),
+            pending_effect: Box::new(ward_two_pending(ObjectId(100))),
+            resume: WardSacrificePaymentResume::MultiSacrifice {
+                remaining: vec![rock_a, rock_b],
+            },
+            trigger_event: None,
+        });
+        let outcome = resume_ward_sacrifice_payment(&mut state, &mut events);
+        assert!(
+            outcome.is_ok(),
+            "a replay list that lost a member must settle (not error), got {outcome:?}"
+        );
+        assert_eq!(
+            state.objects[&rock_a].zone,
+            Zone::Battlefield,
+            "nothing may be spent when the replay list is unpayable"
+        );
+        assert!(
+            state.pending_cost_move_resume.is_none(),
+            "the consumed continuation must not be re-installed, got {:?}",
+            state.pending_cost_move_resume
+        );
+
+        // Live control: both replay and the payment completes.
+        let mut state = GameState::new_two_player(42);
+        let rock_a = ward_rock(&mut state, "Rock A", 7_201);
+        let rock_b = ward_rock(&mut state, "Rock B", 7_202);
+        let mut events = Vec::new();
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.pending_cost_move_resume = Some(PendingCostMoveResume::WardSacrificePayment {
+            player: PlayerId(0),
+            pending_effect: Box::new(ward_two_pending(ObjectId(100))),
+            resume: WardSacrificePaymentResume::MultiSacrifice {
+                remaining: vec![rock_a, rock_b],
+            },
+            trigger_event: None,
+        });
+        let outcome = resume_ward_sacrifice_payment(&mut state, &mut events);
+        assert!(
+            outcome.is_ok(),
+            "a fully-live replay list must complete, got {outcome:?}"
+        );
+        assert_eq!(
+            state.objects[&rock_a].zone,
+            Zone::Graveyard,
+            "the first replayed sacrifice must be spent"
+        );
+        assert_eq!(
+            state.objects[&rock_b].zone,
+            Zone::Graveyard,
+            "the second replayed sacrifice must be spent"
+        );
+    }
+
+    fn ward_one_prompt(state: &mut GameState, permanents: Vec<ObjectId>, pending: ResolvedAbility) {
+        state.waiting_for = WaitingFor::WardSacrificeChoice {
+            player: PlayerId(0),
+            permanents,
+            pending_effect: Box::new(pending),
+            remaining: 1,
+            min_total_power: None,
+            trigger_event: None,
+        };
+    }
+
+    /// CR 118.3 + CR 701.21a: selecting the departed permanent settles unpaid
+    /// when the live pool can no longer cover the remaining count — the
+    /// sequel to the concession regression one round trip later (the
+    /// `remaining: 1` re-prompt's only candidate leaves before the answer).
+    ///
+    /// Revert-to-red: without the liveness split the spend errors and the
+    /// first assertion fails.
+    #[test]
+    fn ward_sequential_answer_settles_unpaid_when_selection_departed_and_pool_short() {
+        assert_ulamog_parses_to_ward_sacrifice_two();
+
+        let mut state = GameState::new_two_player(42);
+        let rock_b = ward_rock(&mut state, "Rock B", 7_202);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_one_prompt(&mut state, vec![rock_b], pending);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, rock_b, Zone::Graveyard, &mut events);
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_b], &mut events);
+        assert!(
+            outcome.is_ok(),
+            "a departed selection with no live alternative must settle (not error), got {outcome:?}"
+        );
+        assert!(
+            !matches!(&state.waiting_for, WaitingFor::WardSacrificeChoice { .. }),
+            "no Ward re-prompt may be installed after an unpaid settlement, got {:?}",
+            state.waiting_for
+        );
+    }
+
+    /// CR 118.3 + CR 701.21a: a departed selection with a live alternative
+    /// stays a retryable rejection — failing the whole Ward on one stale
+    /// click would punish the payer for the window, not the board.
+    #[test]
+    fn ward_sequential_answer_rejects_departed_selection_when_live_alternative_exists() {
+        assert_ulamog_parses_to_ward_sacrifice_two();
+
+        let mut state = GameState::new_two_player(42);
+        let rock_a = ward_rock(&mut state, "Rock A", 7_201);
+        let rock_b = ward_rock(&mut state, "Rock B", 7_202);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_one_prompt(&mut state, vec![rock_a, rock_b], pending);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, rock_b, Zone::Graveyard, &mut events);
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_b], &mut events);
+        assert!(
+            matches!(outcome, Err(EngineError::InvalidAction(_))),
+            "a departed selection with a live alternative must stay retryable, got {outcome:?}"
+        );
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_a], &mut events);
+        assert!(
+            outcome.is_ok(),
+            "retrying with the live permanent must complete the Ward, got {outcome:?}"
+        );
+        assert_eq!(
+            state.objects[&rock_a].zone,
+            Zone::Graveyard,
+            "the live retry selection must be spent"
+        );
+    }
+
+    fn ward_rock_powered(state: &mut GameState, name: &str, card: u64, power: i32) -> ObjectId {
+        let id = ward_rock(state, name, card);
+        state.objects.get_mut(&id).unwrap().power = Some(power);
+        id
+    }
+
+    fn ward_aggregate_prompt(
+        state: &mut GameState,
+        permanents: Vec<ObjectId>,
+        pending: ResolvedAbility,
+        threshold: i32,
+    ) {
+        state.waiting_for = WaitingFor::WardSacrificeChoice {
+            player: PlayerId(0),
+            permanents,
+            pending_effect: Box::new(pending),
+            remaining: 0,
+            min_total_power: Some(threshold),
+            trigger_event: None,
+        };
+    }
+
+    /// CR 118.3 + CR 701.21a + CR 118.12a: an aggregate submission no live set
+    /// can satisfy settles unpaid — both when the chosen set is dead and when
+    /// the live pool shrank below the threshold.
+    ///
+    /// Revert-to-red: without the no-alternative settle, the dead selection
+    /// errors and the first assertion fails; without the threshold settle,
+    /// the under-threshold submission errors and the third assertion fails.
+    #[test]
+    fn ward_aggregate_answer_settles_unpaid_when_no_live_set_meets_threshold() {
+        // Dead-selection leg: the only candidate left the battlefield.
+        let mut state = GameState::new_two_player(42);
+        let rock_b = ward_rock_powered(&mut state, "Rock B", 7_202, 2);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_aggregate_prompt(&mut state, vec![rock_b], pending, 2);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, rock_b, Zone::Graveyard, &mut events);
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_b], &mut events);
+        assert!(
+            outcome.is_ok(),
+            "a dead selection with no live alternative must settle (not error), got {outcome:?}"
+        );
+        assert!(
+            !matches!(&state.waiting_for, WaitingFor::WardSacrificeChoice { .. }),
+            "no Ward re-prompt may be installed after an unpaid settlement, got {:?}",
+            state.waiting_for
+        );
+
+        // Shrunk-pool leg: the live pool totals below the threshold.
+        let mut state = GameState::new_two_player(42);
+        let rock_a = ward_rock_powered(&mut state, "Rock A", 7_201, 2);
+        let rock_b = ward_rock_powered(&mut state, "Rock B", 7_202, 2);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_aggregate_prompt(&mut state, vec![rock_a, rock_b], pending, 4);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, rock_b, Zone::Graveyard, &mut events);
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_a], &mut events);
+        assert!(
+            outcome.is_ok(),
+            "an unsatisfiable threshold must settle (not error), got {outcome:?}"
+        );
+        assert_eq!(
+            state.objects[&rock_a].zone,
+            Zone::Battlefield,
+            "nothing may be spent when no live set meets the threshold"
+        );
+    }
+
+    /// CR 118.3 + CR 118.12a: a dead aggregate selection with a live set
+    /// available stays retryable, and the retry completes the payment.
+    #[test]
+    fn ward_aggregate_answer_rejects_dead_selection_when_live_set_exists() {
+        let mut state = GameState::new_two_player(42);
+        let rock_a = ward_rock_powered(&mut state, "Rock A", 7_201, 2);
+        let rock_b = ward_rock_powered(&mut state, "Rock B", 7_202, 2);
+        let pending = ward_two_pending(ObjectId(100));
+        ward_aggregate_prompt(&mut state, vec![rock_a, rock_b], pending, 2);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, rock_b, Zone::Graveyard, &mut events);
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_b], &mut events);
+        assert!(
+            matches!(outcome, Err(EngineError::InvalidAction(_))),
+            "a dead selection with a live alternative must stay retryable, got {outcome:?}"
+        );
+        let waiting_for = state.waiting_for.clone();
+        let outcome =
+            handle_ward_sacrifice_choice(&mut state, waiting_for, vec![rock_a], &mut events);
+        assert!(
+            outcome.is_ok(),
+            "retrying with the live set must complete the Ward, got {outcome:?}"
+        );
+        assert_eq!(
+            state.objects[&rock_a].zone,
+            Zone::Graveyard,
+            "the live retry set must be spent"
         );
     }
 }
@@ -7051,6 +9455,8 @@ mod dandan_read_sweep_tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
+            repeat: None,
         };
 
         let waiting = state.waiting_for.clone();

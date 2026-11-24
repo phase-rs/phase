@@ -34,7 +34,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::game::combat::AttackTarget;
+use crate::game::combat::{live_transient_block_restrictions, AttackTarget};
 use crate::game::engine::SimulationProbeGuard;
 use crate::game::functioning_abilities::game_functioning_statics;
 use crate::game::layers::transient_effect_is_live;
@@ -105,6 +105,8 @@ pub trait CandidateFilter {
 /// - CR 601.2: casting/activation announcement steps (mode count, phyrexian
 ///   shard choices, modal bounds, target-set bounds).
 /// - CR 508/509: combat declarations (attackers/blockers must be valid).
+/// - CR 732.2b: a loop-shortcut responder's `Shorten` at a place `shorten_refusal`
+///   refuses.
 ///
 /// This is the current workhorse. A future follow-up should decompose it into
 /// the four named sub-filters originally planned: `ManaAvailabilityFilter`,
@@ -198,7 +200,7 @@ impl SimulationFilter {
         let mut sim = state.clone();
         // PR-3 Defect-2: mark the entire nested clone-and-apply as a legality probe so
         // the top-level-only loop-shortcut detection (`reconcile_terminal_result` §3)
-        // and ring accumulation (`pass_priority_once_with_pipeline` §2) are suppressed
+        // and play-trace recording are suppressed
         // inside it. The guard restores the previous flag on drop (panic-safe, nesting-
         // correct), terminating the §3→§9→legal_actions→SimulationFilter recursion.
         let _probe = SimulationProbeGuard::enter();
@@ -374,10 +376,11 @@ fn pending_spell_root(state: &GameState) -> Option<(SpellRootProvenance, Pending
 /// `phase-ai` projection fast path calls, so neither can drift.
 ///
 /// Skipping the clone-and-apply here is load-bearing: `PassPriority` is enumerated
-/// at every priority window (`candidates::priority_actions_with_probe`) and is never
-/// memoized (`legality_equivalence_key`'s catch-all), so before this hatch it paid a
-/// full `GameState` clone *per priority window* — plus the nested `boundary_snapshot`
-/// clone inside `apply_action_boundary_core` — to re-derive an O(1) answer.
+/// at every priority window whose pass `pass_priority_legality` admits
+/// (`candidates::priority_actions_with_probe`) and is never memoized
+/// (`legality_equivalence_key`'s catch-all), so before this hatch it paid a full `GameState`
+/// clone *per priority window* — plus the nested `boundary_snapshot` clone inside
+/// `apply_action_boundary_core` — to re-derive an O(1) answer.
 ///
 /// Conservative by design, mirroring `structurally_valid_search_selection`: this
 /// returns `false` — costing one simulation, never a wrong verdict — for every
@@ -682,6 +685,10 @@ struct ObjectFingerprint {
     face_down: bool,
     flipped: bool,
     transformed: bool,
+    /// CR 701.27g: `FilterProp::Transformed` (Incubation Triformer's target) reads
+    /// `transform::is_transformed_permanent`, which also reads `modal_back_face` and the stored
+    /// face; the raw `transformed` above does not carry them.
+    transformed_permanent: bool,
     defense: Option<u32>,
     class_level: Option<u8>,
     room_unlocks: Option<RoomUnlockState>,
@@ -821,6 +828,7 @@ fn object_fingerprint(state: &GameState, id: ObjectId) -> Option<ObjectFingerpri
         face_down: obj.face_down,
         flipped: obj.flipped,
         transformed: obj.transformed,
+        transformed_permanent: crate::game::transform::is_transformed_permanent(obj),
         defense: obj.defense,
         class_level: obj.class_level,
         room_unlocks: obj.room_unlocks,
@@ -1030,7 +1038,8 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         // ControllerChoseLabel reads the controller's per-player anchor state.
         // ControllerMatches reads live per-turn history (damage ledger, life
         // tallies) via the controller's inner PlayerFilter predicate.
-        FilterProp::ControllerChoseLabel { .. }
+        FilterProp::CastThisTurn { .. }
+        | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
@@ -1048,6 +1057,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::Another
@@ -1136,6 +1146,7 @@ fn condition_reads_only_memo_safe_state(c: &ParsedCondition) -> bool {
     match c {
         ParsedCondition::QuantityComparison { .. }
         | ParsedCondition::QuantityVsEachOpponent { .. }
+        | ParsedCondition::SourceMatchesFilter { .. }
         | ParsedCondition::SpellTargetsFilter { .. } => false,
 
         // Combinators read the union of their children: SAFE iff all children SAFE.
@@ -1409,6 +1420,12 @@ impl LegalityPoisonGates {
             g.has_declare_attacker = true;
         }
 
+        // CR 509.1b: A live blocker restriction can distinguish attackers
+        // whose object fingerprints match.
+        if !g.has_declare_blocker {
+            g.has_declare_blocker = live_transient_block_restrictions(state).next().is_some();
+        }
+
         // One battlefield scan: goaded creatures (CR 508.1d remote
         // discrimination) and activatable abilities whose condition / cost reads
         // non-memo-safe per-object state.
@@ -1520,15 +1537,17 @@ fn legality_equivalence_key(
             let mut key = LegalityKey::new(LegalityClass::ActivateAbility, fp);
             key.ability_index = Some(*ability_index);
             key.payment_mode = Some(*payment_mode);
-            key.activations_this_turn = state
-                .activated_abilities_this_turn
-                .get(&(*source_id, *ability_index))
-                .copied()
+            // CR 602.5c: fold the per-acquisition budget; an unresolvable
+            // slot reads a missing entry as count 0.
+            let usage =
+                crate::game::restrictions::ability_usage_key(state, *source_id, *ability_index);
+            key.activations_this_turn = usage
+                .as_ref()
+                .and_then(|usage| state.activated_abilities_this_turn.get(usage).copied())
                 .unwrap_or(0);
-            key.activations_this_game = state
-                .activated_abilities_this_game
-                .get(&(*source_id, *ability_index))
-                .copied()
+            key.activations_this_game = usage
+                .as_ref()
+                .and_then(|usage| state.activated_abilities_this_game.get(usage).copied())
                 .unwrap_or(0);
             key.source_attacked_this_turn = state.creatures_attacked_this_turn.contains(source_id);
             // CR 400.7: an activated ability's mode history is the live source's.
@@ -1554,15 +1573,17 @@ fn legality_equivalence_key(
             let ability_index = selection.ability_index;
             key.ability_index = ability_index;
             let lookup_index = ability_index.unwrap_or(0);
-            key.activations_this_turn = state
-                .activated_abilities_this_turn
-                .get(&(object_id, lookup_index))
-                .copied()
+            // CR 602.5c: fold the per-acquisition budget; an unresolvable
+            // slot reads a missing entry as count 0.
+            let usage =
+                crate::game::restrictions::ability_usage_key(state, object_id, lookup_index);
+            key.activations_this_turn = usage
+                .as_ref()
+                .and_then(|usage| state.activated_abilities_this_turn.get(usage).copied())
                 .unwrap_or(0);
-            key.activations_this_game = state
-                .activated_abilities_this_game
-                .get(&(object_id, lookup_index))
-                .copied()
+            key.activations_this_game = usage
+                .as_ref()
+                .and_then(|usage| state.activated_abilities_this_game.get(usage).copied())
                 .unwrap_or(0);
             key.source_attacked_this_turn = state.creatures_attacked_this_turn.contains(&object_id);
             key.is_attacking = crate::game::restrictions::is_source_attacking(state, object_id);
@@ -1602,7 +1623,7 @@ mod tests {
     use crate::ai_support::{candidate_actions, structurally_valid_named_choice_answer as hatch};
     use crate::analysis::decision_template::IterationCount;
     use crate::analysis::loop_check::{
-        CountedTake, OfferRoad, ShortcutProposal, ShortcutResponse, UnperformableCause,
+        CountedTake, ShortcutProposal, ShortcutResponse, UnperformableCause,
     };
     use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::layers::evaluate_layers;
@@ -1785,8 +1806,8 @@ mod tests {
     /// `SimulationProbeGuard` window, minus the perf counter.
     ///
     /// The guard is load-bearing, not ceremony. It suppresses top-level loop
-    /// reconciliation (`reconcile_terminal_result` §3) and ring accumulation
-    /// (`pass_priority_once_with_pipeline` §2) for the duration of the probe, so
+    /// reconciliation (`reconcile_terminal_result`) and play-trace recording
+    /// for the duration of the probe, so
     /// an oracle that omits it can return a verdict production legality
     /// filtering never produces. Every soundness assertion below is a comparison
     /// against this function; if it stops being `fallback_simulation`, those
@@ -1959,14 +1980,8 @@ mod tests {
         assert!(pass_oracle_accepts(&unblocked, &unblocked_candidate));
     }
 
-    /// T6b. The over-accept direction, at the public `legal_actions` boundary.
-    ///
-    /// This passes on the unfixed tree — today the expensive clone is what
-    /// removes the pass — so it is a no-drift guard, and the most important one
-    /// in the set: it is what goes red if the hatch is written without gate
-    /// (d)'s `blocks_pass` component. That omission is invisible to every
-    /// latch-free fixture, and it would be a live over-accept: `legal_actions`
-    /// would start offering an action the reducer rejects.
+    /// T6b. The over-accept direction, at the public `legal_actions` boundary:
+    /// a pass the CR 732.2c latch blocks is never offered.
     ///
     /// `must_diverge` is `pub(crate)`, so this cannot live in
     /// `tests/integration/` and stays here beside T6.
@@ -2553,7 +2568,44 @@ mod tests {
         );
     }
 
-    /// #9: per-(source, ability) activation count is folded into the key.
+    /// CR 701.27g: whether a permanent is a transformed permanent is part of the
+    /// fingerprint, so Incubation Triformer ("Choose target transformed Phyrexian token you
+    /// control.") never shares a memoized target verdict between a modal double-faced card
+    /// back face up and the same card front face up. The two objects store the same other
+    /// face and differ only in `modal_back_face`, which no other fingerprint field reads.
+    #[test]
+    fn fingerprint_membership_guards_transformed_permanent() {
+        use crate::game::game_object::BackFaceData;
+        use crate::types::card::LayoutKind;
+        let mut s = GameState::new_two_player(5);
+        let a = make_object(&mut s, 100, 0, "Lisette, Dean of the Root");
+        let b = make_object(&mut s, 100, 0, "Lisette, Dean of the Root");
+        for id in [a, b] {
+            s.objects.get_mut(&id).unwrap().back_face = Some(BackFaceData {
+                name: "Valentin, Dean of the Vein".to_string(),
+                layout_kind: Some(LayoutKind::Modal),
+                ..Default::default()
+            });
+        }
+        assert_eq!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "control: two equal fresh objects share a fingerprint"
+        );
+
+        s.objects.get_mut(&b).unwrap().modal_back_face = true;
+        assert!(
+            crate::game::transform::is_transformed_permanent(&s.objects[&b]),
+            "reach guard: the modal back face up is a transformed permanent"
+        );
+        assert_ne!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "whether it is a transformed permanent must be in the fingerprint"
+        );
+    }
+
+    /// #9: per-acquisition activation count is folded into the key.
     #[test]
     fn activation_count_is_folded_into_key() {
         let mut state = GameState::new_two_player(42);
@@ -2562,7 +2614,24 @@ mod tests {
         };
         let a = make_object(&mut state, 100, 0, "Squirrel");
         let b = make_object(&mut state, 100, 0, "Squirrel");
-        state.activated_abilities_this_turn.insert((a, 0), 1);
+        // CR 602.5c: the folded count is keyed by the resolved acquisition,
+        // so both objects hold the same printed ability and only `a`'s
+        // instance records a use.
+        for id in [a, b] {
+            std::sync::Arc::make_mut(
+                &mut state.objects.get_mut(&id).expect("just created").abilities,
+            )
+            .push(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+        let usage = crate::game::restrictions::ability_usage_key(&state, a, 0)
+            .expect("the printed ability resolves");
+        state.activated_abilities_this_turn.insert(usage, 1);
         let poison = LegalityPoisonGates::compute(&state);
         // Shared interner: a and b have identical fingerprints, so they intern
         // to the SAME class id — the keys must still differ purely on the folded
@@ -2591,7 +2660,7 @@ mod tests {
         assert!(ka.is_some() && kb.is_some());
         assert_ne!(
             ka, kb,
-            "activation count must be folded per (source, ability) into the key"
+            "activation count must be folded per acquisition into the key"
         );
     }
 
@@ -2773,6 +2842,11 @@ mod tests {
     /// #5/#6/#14: FilterProp SAFE/POISON partition and combinator propagation.
     #[test]
     fn filterprop_classifier_partition() {
+        assert!(!filterprop_reads_only_candidate_fp(
+            &FilterProp::CastThisTurn {
+                caster: crate::types::ability::ControllerRef::You,
+            }
+        ));
         assert!(filterprop_reads_only_candidate_fp(&FilterProp::Tapped));
         assert!(filterprop_reads_only_candidate_fp(&FilterProp::Named {
             name: "Squirrel".to_string()
@@ -3257,7 +3331,7 @@ mod tests {
                 max: None,
                 distinctness: NumberDistinctness::Repeatable,
             },
-            ChoiceType::CardName,
+            ChoiceType::card_name(),
         ] {
             let mut by_rule = melody.clone();
             if let WaitingFor::NamedChoice {
@@ -3564,7 +3638,6 @@ mod tests {
                     shortened_by: None,
                     published_declaration: None,
                     leading_aims: Vec::new(),
-                    road: OfferRoad::Ring,
                     counted_take: Default::default(),
                     period: Default::default(),
                 },
@@ -3614,10 +3687,13 @@ mod tests {
         }
     }
 
-    /// The refused half of the same authority: a row per `Shorten` shape the reducer rejects,
-    /// paired with the probe. `cheap ⊆ sim` is pinned here in the direction that would otherwise
-    /// OFFER a place the reducer refuses — the failure the hatch would produce by admitting a
-    /// place after skipping the clone that used to reject it.
+    /// The refused half of the same authority: a row per `Shorten` shape the reducer rejects on
+    /// a synthetic board from measured evidence (`NoDifferentChoice` is decided only by the take,
+    /// so the hatch admits it and the committed answer refuses it;
+    /// `loop_shortcut::a_shorten_by_a_seat_with_no_other_choice_at_its_place_is_refused` pins
+    /// both), paired with the probe. `cheap ⊆ sim` is pinned here in the direction that would
+    /// otherwise OFFER a place the reducer refuses — the failure the hatch would produce by
+    /// admitting a place after skipping the clone that used to reject it.
     #[test]
     fn shortcut_response_authority_refuses_every_reducer_refusal() {
         let state_with = |count: IterationCount, counted_take: CountedTake| {
@@ -3638,7 +3714,6 @@ mod tests {
                     shortened_by: None,
                     published_declaration: None,
                     leading_aims: Vec::new(),
-                    road: OfferRoad::Ring,
                     counted_take,
                     period: Default::default(),
                 },

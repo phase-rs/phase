@@ -1,3 +1,6 @@
+// The auto-trait (`Send`) proof for the im-backed `GameState` exceeds the default
+// recursion limit of 128 (a future-incompatibility error on newer toolchains).
+#![recursion_limit = "512"]
 pub mod ability_chain;
 pub mod auto_play;
 pub mod card_advantage;
@@ -22,10 +25,13 @@ pub mod draft_profile;
 pub mod duel_suite;
 pub mod eval;
 pub mod features;
+pub mod harness_combo_table;
 pub mod mana_colors;
 pub(crate) mod manland;
 pub mod plan;
 pub mod planner;
+pub mod pod;
+pub mod pod_selection;
 pub mod policies;
 pub mod projection;
 pub(crate) mod reach;

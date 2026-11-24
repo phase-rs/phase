@@ -203,6 +203,7 @@ fn reveals(events: &[GameEvent]) -> Vec<(PlayerId, Vec<ObjectId>, Vec<String>)> 
                 player,
                 card_ids,
                 card_names,
+                ..
             } => Some((*player, card_ids.clone(), card_names.clone())),
             _ => None,
         })

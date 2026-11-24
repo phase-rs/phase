@@ -26,6 +26,9 @@ use crate::types::zones::Zone;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ParsedEffectClause {
+    /// Lowering-only clause ownership; never part of the AST trace or gameplay data.
+    #[serde(skip)]
+    pub(crate) history: Vec<super::history_provenance::PendingHistory>,
     pub(crate) effect: Effect,
     pub(crate) duration: Option<Duration>,
     /// Compound "and" remainder parsed into a sub_ability chain.
@@ -74,6 +77,18 @@ pub(crate) struct ParsedEffectClause {
     /// resolved after line routing; see [`crate::types::ability::UnloweredGuard`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unlowered_guard: Option<UnloweredGuard>,
+    /// CR 607.2a: set when this clause returns "the exiled card(s)" bound to the bare
+    /// chain sentinel. Carried onto the assembled `AbilityDefinition` and decided on the
+    /// finished tree; see [`crate::types::ability::LinkedExileReturn`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) linked_exile_return: Option<crate::types::ability::LinkedExileReturn>,
+    /// CR 608.2c: the text the head instruction owns, when a compound split separated it
+    /// from its "and" continuation (`try_split_targeted_compound`), which is then its own
+    /// `sub_ability` checked against its own text there. `None` when the clause's text is
+    /// the head's alone. Parser bookkeeping for the block-history guard
+    /// (`instruction_drops_block_partner`); never lowered.
+    #[serde(skip)]
+    pub(crate) head_text: Option<String>,
     /// CR 611.2e + CR 608.2c: when this clause's continuous effect begins to apply to a
     /// permanent an earlier instruction of the same resolution put onto the battlefield.
     /// Stamped by the clause parser that recognized the verb form ("is/has" ⇒ `WithEntry`);
@@ -365,13 +380,19 @@ impl EntersUnderSpec {
     }
 }
 
-/// Grammatical number of an anaphoric pronoun that refers back to earlier
-/// instructions ("it" vs "they" / "those").
+/// Grammatical number of an anaphoric pronoun: one that refers back to
+/// earlier instructions ("it" vs "they" / "those"), or an object pronoun
+/// ("it" / "him" / "her" vs "them"). Each consumer documents what the number
+/// selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum AnaphorNumber {
-    /// "It" — the nearest antecedent instruction.
+    /// "It" (or "him" / "her"). CantRegenerate: the nearest antecedent
+    /// instruction. Copula goad: the single anaphor referent. Object pronoun: a
+    /// single object.
     Singular,
-    /// "They" / "those" — every instruction of the preceding run.
+    /// "They" / "those" / "them". CantRegenerate: every instruction of the
+    /// preceding run. Copula goad: every member of the anaphor's population.
+    /// Object pronoun: several objects.
     Plural,
 }
 
@@ -458,6 +479,13 @@ pub(crate) enum ContinuationAst {
     /// CR 701.15a + CR 701.15b: "The token(s) (is|are) goaded [duration]" after token
     /// creation — grants `StaticMode::Goaded` on `TargetFilter::LastCreated`.
     GoadLastCreated { duration: Option<Duration> },
+    /// CR 608.2c + CR 608.2d + CR 608.2f + CR 611.2a + CR 613.1b: "Each opponent/player
+    /// gains control of the <object> for which they were chosen" after a player
+    /// choice repeated once per member of a published population — after the last
+    /// choice, one application hands every object of the resolving ability's
+    /// object→player assignment to the player chosen for it, with no stated
+    /// duration (`TargetFilter::ChoiceAssignment`).
+    ChoiceAssignmentGainsControl,
     /// CR 702.34a / CR 702.128a / CR 702.180a: "The/Its [flashback|embalm|harmonize]
     /// cost is equal to its/that card's mana cost." after a self-cost graveyard
     /// keyword grant. Redundant reminder text — the grant already carries
@@ -1169,6 +1197,83 @@ pub(crate) enum ImperativeFamilyAst {
     },
 }
 
+impl ImperativeAst {
+    /// CR 607.2a: the "the exiled card(s)" mark a return carries to its lowered clause.
+    /// Only a targeted return carries one; every other family classifies to `None`.
+    pub(crate) fn linked_exile_return(&self) -> Option<crate::types::ability::LinkedExileReturn> {
+        match self {
+            Self::Targeted(targeted) => targeted.linked_exile_return(),
+            Self::Numeric(_)
+            | Self::SearchCreation(_)
+            | Self::HandReveal(_)
+            | Self::Choose(_)
+            | Self::Utility(_) => None,
+        }
+    }
+}
+
+impl ImperativeFamilyAst {
+    /// CR 607.2a: the "the exiled card(s)" mark a return carries to its lowered clause.
+    /// Only a structured targeted return carries one; every other imperative family
+    /// classifies to `None`.
+    pub(crate) fn linked_exile_return(&self) -> Option<crate::types::ability::LinkedExileReturn> {
+        match self {
+            Self::Structured(ast) => ast.linked_exile_return(),
+            Self::CostResource(..)
+            | Self::ZoneCounter(..)
+            | Self::Explore
+            | Self::Connive
+            | Self::Recruit
+            | Self::Assimilate { .. }
+            | Self::ForceBlock { .. }
+            | Self::ForceAttack { .. }
+            | Self::Goad
+            | Self::ExchangeControl { .. }
+            | Self::ExchangeLifeWithStat { .. }
+            | Self::ExchangeLifeTotals { .. }
+            | Self::RedistributeLifeTotals
+            | Self::MustBeBlocked
+            | Self::Investigate
+            | Self::Populate
+            | Self::Clash
+            | Self::Behold(..)
+            | Self::Learn
+            | Self::NoteManaSpent
+            | Self::NoteNumber { .. }
+            | Self::Manifest { .. }
+            | Self::ManifestDread
+            | Self::Cloak { .. }
+            | Self::TurnFaceUp { .. }
+            | Self::TurnFaceDown { .. }
+            | Self::BecomeMonarch
+            | Self::VentureIntoDungeon
+            | Self::VentureIntoUndercity
+            | Self::TakeTheInitiative
+            | Self::Planeswalk
+            | Self::AbandonScheme
+            | Self::OpenAttractions { .. }
+            | Self::RollToVisitAttractions
+            | Self::AssembleContraptions { .. }
+            | Self::AssembleContraptionsFromRollDifference
+            | Self::ReassembleContraption { .. }
+            | Self::Proliferate
+            | Self::TimeTravel
+            | Self::GainKeyword(..)
+            | Self::LoseKeyword(..)
+            | Self::LoseTheGame
+            | Self::WinTheGame
+            | Self::RollDie { .. }
+            | Self::FlipCoins { .. }
+            | Self::RemoveFromCombat(..)
+            | Self::Shuffle(..)
+            | Self::Put(..)
+            | Self::YouMay { .. }
+            | Self::GivePlayerCounter { .. }
+            | Self::Support { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum NumericImperativeAst {
     Draw {
@@ -1312,6 +1417,47 @@ impl TargetedImperativeAst {
             other => other,
         }
     }
+
+    /// CR 607.2a: the "the exiled card(s)" mark a return carries to its lowered clause.
+    pub(crate) fn linked_exile_return(&self) -> Option<crate::types::ability::LinkedExileReturn> {
+        match self {
+            Self::Return {
+                linked_exile_return,
+                ..
+            }
+            | Self::ReturnToBattlefield {
+                linked_exile_return,
+                ..
+            }
+            | Self::ReturnToZone {
+                linked_exile_return,
+                ..
+            }
+            | Self::ReturnAllToZone {
+                linked_exile_return,
+                ..
+            } => *linked_exile_return,
+            Self::Tap { .. }
+            | Self::Untap { .. }
+            | Self::TapAll { .. }
+            | Self::UntapAll { .. }
+            | Self::TapAggregate { .. }
+            | Self::Goad { .. }
+            | Self::GoadAll { .. }
+            | Self::SetRoomDoorLock { .. }
+            | Self::Sacrifice { .. }
+            | Self::Discard { .. }
+            | Self::DiscardCard { .. }
+            | Self::ReturnAll { .. }
+            | Self::Fight { .. }
+            | Self::GainControl { .. }
+            | Self::ControlNextTurn { .. }
+            | Self::Earthbend { .. }
+            | Self::Airbend { .. }
+            | Self::ZoneCounterProxy(..)
+            | Self::Unimplemented { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1414,6 +1560,9 @@ pub(crate) enum TargetedImperativeAst {
         /// eligible permanent at resolution via `EffectZoneChoice` rather than
         /// the targeting pipeline.
         selection: BounceSelection,
+        /// CR 607.2a: "the exiled card(s)" bound to the bare chain sentinel; carried
+        /// onto `ParsedEffectClause::linked_exile_return` at lowering.
+        linked_exile_return: Option<crate::types::ability::LinkedExileReturn>,
     },
     /// CR 400.7: Mass return-to-hand. Mirrors `TapAll`/`UntapAll`
     /// for "return all/each [filter] to their owners' hands" Oracle text.
@@ -1462,6 +1611,9 @@ pub(crate) enum TargetedImperativeAst {
         /// `forward_result` so the Aura enters attached and skips the CR 303.4f
         /// host-choice consult.
         attach_host: Option<TargetFilter>,
+        /// CR 607.2a: "the exiled card(s)" bound to the bare chain sentinel; carried
+        /// onto `ParsedEffectClause::linked_exile_return` at lowering.
+        linked_exile_return: Option<crate::types::ability::LinkedExileReturn>,
     },
     /// CR 400.6: Return to a specific non-hand, non-battlefield zone (zone change).
     ReturnToZone {
@@ -1482,6 +1634,9 @@ pub(crate) enum TargetedImperativeAst {
         /// / Forage precedent) — `Effect::ChangeZone` has no count slot of its
         /// own, so the quantity rides the clause's `MultiTargetSpec` instead.
         multi_target: Option<MultiTargetSpec>,
+        /// CR 607.2a: "the exiled card(s)" bound to the bare chain sentinel; carried
+        /// onto `ParsedEffectClause::linked_exile_return` at lowering.
+        linked_exile_return: Option<crate::types::ability::LinkedExileReturn>,
     },
     /// CR 400.7 + CR 608.2c: Mass return to a non-default zone. Lowers to
     /// `ChangeZoneAll` so the resolver scans every matching object instead of
@@ -1501,6 +1656,9 @@ pub(crate) enum TargetedImperativeAst {
         /// Threaded onto `Effect::ChangeZoneAll.enter_with_counters`. Empty for
         /// returns that carry no counters.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        /// CR 607.2a: "the exiled card(s)" bound to the bare chain sentinel; carried
+        /// onto `ParsedEffectClause::linked_exile_return` at lowering.
+        linked_exile_return: Option<crate::types::ability::LinkedExileReturn>,
     },
     Fight {
         target: TargetFilter,
@@ -1546,6 +1704,14 @@ pub(crate) enum TargetedImperativeAst {
     /// Proxy for zone-counter family (destroy/exile/put counter) used during
     /// compound splitting to unify targeted and zone-counter parsing.
     ZoneCounterProxy(Box<ZoneCounterImperativeAst>),
+    /// A targeted clause the parser recognized but must not execute (CR 201.4a: a
+    /// "with that name" discard after a name choice whose characteristic
+    /// `ChoiceType::CardName` cannot carry). Lowers to an honest `Effect::unimplemented`
+    /// named `gap` carrying the printed clause, mirroring `PutImperativeAst::Unimplemented`.
+    Unimplemented {
+        gap: &'static str,
+        fragment: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1777,7 +1943,16 @@ pub(crate) enum HandRevealImperativeAst {
     RevealAll {
         target: TargetFilter,
         card_filter: TargetFilter,
+        /// CR 608.2d + CR 107.1c: how many `card_filter` cards are selected
+        /// (`AnyNumber` for "reveal any number of [type] cards").
+        cardinality: crate::types::ability::ObjectSelectionCardinality,
     },
+    /// CR 107.1c + CR 701.20a: "reveal any number of [type] cards" whose card
+    /// type phrase the parser cannot read (Sacellum Godspeaker's "creature cards
+    /// with power 5 or greater", Rosheen's "cards with {X} in their mana cost").
+    /// Without a filter the selection could reveal nothing, so it lowers to an
+    /// explicit unimplemented gap rather than a silently empty reveal.
+    UnreadableAnyNumberFilter { fragment: String },
     /// CR 701.20a: a counted reveal from a hand — "reveals X cards from their
     /// hand, where X is …", "reveals a card at random from their hand". `target`
     /// is the hand's owner; `selection` is `Random` exactly when the text says
@@ -1924,9 +2099,13 @@ pub(crate) enum ChooseImperativeAst {
 pub(crate) enum PutImperativeAst {
     /// CR 701.17a: "put the top <count> cards of <owner> library into <owner>
     /// graveyard" — a mill whose owner and count are carried, never assumed.
+    /// CR 401.2: `position` names the library edge the clause reads, so the
+    /// "bottom card of <owner> library" class (Grenzo, Dungeon Warden; Cellar
+    /// Door) takes the bottommost card instead of a chosen one.
     Mill {
         count: QuantityExpr,
         target: TargetFilter,
+        position: LibraryPosition,
     },
     /// A put clause the engine cannot yet model (e.g. CR 404.1 "put the top
     /// card of <possessive> graveyard …", a graveyard-sourced move it cannot
@@ -2246,6 +2425,11 @@ pub(crate) enum ZoneCounterImperativeAst {
         counter_type: Option<CounterType>,
         count: QuantityExpr,
         target: TargetFilter,
+        /// CR 122.1 + CR 115.10a: `All` for a mass removal ("from all
+        /// permanents", "from each creature you control"); see
+        /// `Effect::RemoveCounter::scope`. Always `Single` when
+        /// `exact_selection` or `multi_target` is set.
+        scope: EffectScope,
         /// CR 115.1d + CR 122.1: A fixed `each of N <permanents>` phrase is
         /// an untargeted resolution-time selection, not N target slots.
         exact_selection: Option<u32>,
@@ -2372,6 +2556,8 @@ pub(crate) fn assert_no_compound_remainder(rem: &str, context: &str) {
 
 pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
     ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         effect,
         duration: None,
@@ -2382,6 +2568,7 @@ pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
         optional: false,
         unless_pay: None,
         unlowered_guard: None,
+        linked_exile_return: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     }
 }
@@ -3223,6 +3410,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
@@ -3443,6 +3631,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }

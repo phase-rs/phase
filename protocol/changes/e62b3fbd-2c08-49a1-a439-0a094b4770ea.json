@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Add position and destination to BatchCompletion::MilledDeliveryComplete"
+}

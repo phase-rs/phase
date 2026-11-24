@@ -8,6 +8,7 @@
 use serde::Serialize;
 
 use super::effect_chain::EffectChainIr;
+use super::history_provenance::HistoryProvenance;
 use crate::types::ability::ReplacementDefinition;
 
 /// Replacement effect IR: wraps the parsed `ReplacementDefinition` with
@@ -17,6 +18,8 @@ use crate::types::ability::ReplacementDefinition;
 /// to produce a `ReplacementDefinition`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ReplacementIr {
+    #[serde(skip)]
+    pub(crate) history: Vec<HistoryProvenance>,
     /// The parsed replacement definition.
     pub(crate) definition: ReplacementDefinition,
     /// Original oracle text for description/provenance.
@@ -35,6 +38,7 @@ impl ReplacementIr {
     /// owns the final replacement post-processing.
     pub(crate) fn from_definition(source_text: &str, definition: ReplacementDefinition) -> Self {
         Self {
+            history: Vec::new(),
             definition,
             source_text: source_text.to_string(),
             execute_ir: None,

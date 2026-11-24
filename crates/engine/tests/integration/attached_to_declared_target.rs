@@ -2119,7 +2119,8 @@ fn compound_subject_rider_with_an_intervening_declarer_fails_closed() {
     let parsed = parse_oracle_text(TEXT, "Probe", &[], &types("Instant"), &[]);
     assert!(
         unimplemented_names(&[&parsed.abilities[0]])
-            .contains(&"die_exile_rider_antecedent".to_string()),
+            .iter()
+            .any(|i| i == "die_exile_rider_antecedent"),
         "got {:?}",
         chain(&parsed.abilities[0])
     );
@@ -2476,6 +2477,67 @@ fn choose_new_targets_retains_a_target_whose_new_object_is_not_a_legal_choice() 
     runner.advance_until_stack_empty();
     assert!(!runner.state().objects[&artifact].tapped);
     assert_eq!(runner.life(P1), 19);
+}
+
+/// CR 115.1 + CR 115.7d: the flat retarget pool of a per-opponent fanout
+/// ("for each opponent, choose up to one target creature that player
+/// controls") is the union of each opponent's OWN creatures. Reading the
+/// printed anaphoric controller against the retargeting spell's controller
+/// would offer the CASTER's creatures, which no fanout slot can legally take.
+#[test]
+fn choose_new_targets_offers_each_opponents_own_creatures_for_a_fanout() {
+    const PER_OPPONENT_CHOICE: &str =
+        "For each opponent, choose up to one target creature that player controls.";
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let p2 = PlayerId(2);
+    let caster_creature = scenario.add_creature(P0, "Caster Bear", 2, 2).id();
+    let first = scenario.add_creature(P1, "First Bear", 2, 2).id();
+    let second = scenario.add_creature(p2, "Second Bear", 2, 2).id();
+    let spell = free_spell(
+        &mut scenario,
+        "Per-Opponent Choice",
+        false,
+        PER_OPPONENT_CHOICE,
+    );
+    let redirect = free_spell(&mut scenario, "Redirect", true, REDIRECT);
+    let mut runner = scenario.build();
+    runner.cast(spell).target_objects(&[first, second]).commit();
+    runner.cast(redirect).target_objects(&[spell]).commit();
+    drive_to_retarget_prompt(&mut runner);
+    let WaitingFor::RetargetChoice {
+        legal_new_targets,
+        current_targets,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected RetargetChoice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(
+        !current_targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Player(_))),
+        "the walk exposes only the object positions, got {current_targets:?}"
+    );
+    assert!(
+        legal_new_targets.contains(&TargetRef::Object(first))
+            && legal_new_targets.contains(&TargetRef::Object(second)),
+        "each opponent's own creature is a legal new target, got {legal_new_targets:?}"
+    );
+    assert!(
+        !legal_new_targets.contains(&TargetRef::Object(caster_creature)),
+        "the caster's creature is never a legal new target for a fanout slot, \
+         got {legal_new_targets:?}"
+    );
+    assert!(
+        !legal_new_targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Player(_))),
+        "the fanout's player headers are not retargetable positions, got {legal_new_targets:?}"
+    );
 }
 
 /// CR 115.7e: both the creature and its Equipment left and returned, and the

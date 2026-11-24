@@ -7,7 +7,7 @@
 //! CR 510.1c a blocked creature with no creatures blocking it assigns no combat
 //! damage — so the marked attacker deals no combat damage this turn.
 //!
-//! CR 509.3c: the `AttackerBecameBlockedByEffect` event is emitted only when the
+//! CR 509.3c: the `AttackerBecameBlocked` event is emitted only when the
 //! attacker was an *unblocked* creature at the instant the effect resolved — the
 //! precondition for "whenever ~ becomes blocked" triggers to fire from an effect.
 //! CR 509.3d: because this is a distinct event (not `BlockersDeclared`), the
@@ -49,6 +49,11 @@ fn resolve_object_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<O
     // CR 608.2c: a context ref (`ParentTarget`/`TriggeringSource`) resolves from
     // the trigger event; empty for a plain targeted effect, which falls through
     // to the announced targets below.
+    // CR 400.7 + CR 608.2k: an event subject binds only while it can be found.
+    if let Some(ids) = crate::game::targeting::bound_event_referent_objects(state, ability, target)
+    {
+        return ids;
+    }
     let event_targets =
         crate::game::targeting::resolve_event_context_targets(state, target, ability.source_id);
     if !event_targets.is_empty() {
@@ -72,7 +77,7 @@ fn resolve_object_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<O
 
 /// CR 509.1h: resolver for `Effect::BecomeBlocked` — the target attacking
 /// creature(s) become blocked with no blockers assigned. Emits
-/// `AttackerBecameBlockedByEffect` for each attacker that was unblocked at the
+/// `AttackerBecameBlocked` for each attacker that was unblocked at the
 /// instant of resolution (CR 509.3c), so "whenever ~ becomes blocked" triggers
 /// fire. An illegal target (no longer a current attacker) is a no-op: CR 608.2b
 /// fizzle is enforced upstream by `target_filter()`; a stale non-attacker id
@@ -91,7 +96,11 @@ pub fn resolve_become_blocked(
             .as_ref()
             .is_some_and(|c| c.attackers.iter().any(|a| a.object_id == oid && !a.blocked));
         if combat::mark_attacker_blocked(state, oid) && was_unblocked {
-            events.push(GameEvent::AttackerBecameBlockedByEffect { attacker: oid });
+            // CR 400.7: stamp the incarnation that became blocked.
+            events.push(GameEvent::AttackerBecameBlocked {
+                attacker: oid,
+                attacker_incarnation: state.objects.get(&oid).map(|obj| obj.incarnation),
+            });
         }
     }
     events.push(GameEvent::EffectResolved {
@@ -158,7 +167,7 @@ mod tests {
             .iter()
             .any(|a| a.object_id == attacker && a.blocked));
         assert!(events.iter().any(
-            |e| matches!(e, GameEvent::AttackerBecameBlockedByEffect { attacker: a } if *a == attacker)
+            |e| matches!(e, GameEvent::AttackerBecameBlocked { attacker: a, attacker_incarnation: Some(_) } if *a == attacker)
         ));
     }
 
@@ -181,7 +190,7 @@ mod tests {
         resolve_become_blocked(&mut state, &ability, &mut events).unwrap();
         assert!(!events
             .iter()
-            .any(|e| matches!(e, GameEvent::AttackerBecameBlockedByEffect { .. })));
+            .any(|e| matches!(e, GameEvent::AttackerBecameBlocked { .. })));
         // Reach-guard: the effect still ran (EffectResolved present) so the absence
         // of the block event is not vacuous.
         assert!(events.iter().any(|e| matches!(
@@ -217,6 +226,6 @@ mod tests {
         resolve_become_blocked(&mut state, &ability, &mut events).unwrap();
         assert!(!events
             .iter()
-            .any(|e| matches!(e, GameEvent::AttackerBecameBlockedByEffect { .. })));
+            .any(|e| matches!(e, GameEvent::AttackerBecameBlocked { .. })));
     }
 }

@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use engine::game::combat::AttackTarget;
 use engine::game::derived_views::ClientGameStateRef;
 use engine::game::effects::create_emblem;
+use engine::game::engine::EngineError;
 use engine::game::game_object::BackFaceData;
 use engine::game::merge::MergeSide;
 use engine::game::printed_cards::{
@@ -93,10 +94,7 @@ const VIEWERS: [Viewer; 4] = [
 ];
 
 fn sentinel(tag: &str) -> SharedPrinting {
-    SharedPrinting::new(CardPrinting {
-        set_code: format!("S{tag}"),
-        collector_number: "1".to_string(),
-    })
+    SharedPrinting::new(CardPrinting::owner(format!("S{tag}"), "1"))
 }
 
 fn carried(tag: &str) -> DisplayOnly<Option<SharedPrinting>> {
@@ -658,6 +656,13 @@ fn projection_clears_printing_with_the_name() {
     ];
     for (id, tag, _) in table {
         board.stamp(id, tag);
+        if [hand0, public, foretold].contains(&id) {
+            let object = board.state_mut().objects.get_mut(&id).unwrap();
+            let mut printing = sentinel(tag).as_ref().clone();
+            printing.automatic_art_catalog_version = std::num::NonZeroU8::new(1);
+            object.printing = DisplayOnly::new(Some(SharedPrinting::new(printing)));
+            object.base_printing = object.printing.clone();
+        }
     }
 
     for (id, tag, sees) in table {
@@ -677,6 +682,15 @@ fn projection_clears_printing_with_the_name() {
                     "{tag} {viewer:?}: the printing is shown beside the name"
                 );
                 assert_eq!(object["base_printing"]["set_code"], set_code);
+                if [hand0, public, foretold].contains(&id) {
+                    for carrier in ["printing", "base_printing"] {
+                        assert_eq!(
+                            object[carrier]["collector_number"],
+                            sentinel(tag).collector_number
+                        );
+                        assert_eq!(object[carrier]["automatic_art_catalog_version"], 1);
+                    }
+                }
             } else {
                 assert_eq!(
                     object["name"], HIDDEN,
@@ -1546,7 +1560,15 @@ fn debug_library_row_only_inside_its_gate() {
     let own = s.add_card_to_library_top(P0, "Own Library Card");
     let other = s.add_card_to_library_top(P1, "Other Library Card");
     let mut board = Board::new(s);
-    board.stamp(own, "LIBA");
+    let stamp = Some(SharedPrinting::new(
+        serde_json::from_value(serde_json::json!({
+            "set_code": "m21", "collector_number": "272", "automatic_art_catalog_version": 1
+        }))
+        .unwrap(),
+    ));
+    let object = board.state_mut().objects.get_mut(&own).unwrap();
+    object.printing = DisplayOnly::new(stamp.clone());
+    object.base_printing = DisplayOnly::new(stamp);
     board.stamp(other, "LIBB");
     {
         let state = board.state_mut();
@@ -1561,12 +1583,25 @@ fn debug_library_row_only_inside_its_gate() {
         1,
         "reach: the permitted viewer receives its library"
     );
-    assert_eq!(rows[0]["name"], "Own Library Card");
-    assert_eq!(rows[0]["printing"]["set_code"], "SLIBA");
+    let row = rows
+        .iter()
+        .find(|row| row["object_id"] == own.0)
+        .expect("own library row");
+    assert_eq!(row["name"], "Own Library Card");
+    assert_eq!(
+        row["printing"],
+        serde_json::json!({
+            "set_code": "m21", "collector_number": "272", "automatic_art_catalog_version": 1
+        })
+    );
     // The ordinary projection of the same card carries neither the name nor the printing.
     let p0 = board.forms(Viewer::Seat(P0));
     assert_eq!(projected_object(&p0[0].1, own)["name"], HIDDEN);
-    assert_eq!(count_set_code(&p0[0].1, "SLIBA"), 0);
+    assert_eq!(count_set_code(&p0[0].1, "m21"), 0);
+    assert!(!p0[0]
+        .1
+        .to_string()
+        .contains("automatic_art_catalog_version"));
     // The other player's library is never in the row set.
     assert_eq!(count_set_code(&p0[1].1, "SLIBB"), 0);
 
@@ -1580,7 +1615,11 @@ fn debug_library_row_only_inside_its_gate() {
     gated_out.push(("debug off".to_string(), board.forms(Viewer::Seat(P0))));
     for (label, forms) in gated_out {
         for (form_label, form) in forms {
-            for tag in ["SLIBA", "SLIBB"] {
+            assert!(!form.to_string().contains("automatic_art_catalog_version"));
+            assert!(form["derived"]["debug_library_cards"]
+                .as_array()
+                .is_none_or(|rows| { rows.iter().all(|row| row["object_id"] != own.0) }));
+            for tag in ["m21", "SLIBB"] {
                 assert_eq!(
                     count_set_code(&form, tag),
                     0,
@@ -2397,6 +2436,18 @@ fn face_down_permanent_owned_and_controlled_by_different_players() {
     let stolen = add_morph(&mut s, P0);
     let mut board = Board::new(s);
     board.stamp(stolen, "STLN");
+    {
+        let object = board.state_mut().objects.get_mut(&stolen).unwrap();
+        let mut printing = sentinel("STLN").as_ref().clone();
+        printing.automatic_art_catalog_version = std::num::NonZeroU8::new(1);
+        object.printing = DisplayOnly::new(Some(SharedPrinting::new(printing)));
+        object.base_printing = object.printing.clone();
+    }
+    assert_eq!(
+        projected_object(&board.forms(Viewer::Seat(P0))[0].1, stolen)["printing"]
+            ["automatic_art_catalog_version"],
+        1
+    );
     board.play_face_down(P0, stolen);
     {
         let state = board.state_mut();
@@ -2418,6 +2469,9 @@ fn face_down_permanent_owned_and_controlled_by_different_players() {
         "the owner who does not control it does not"
     );
     board.assert_nowhere("STLN", "owner and controller differ");
+    for (_, form) in p0.iter().chain(&p1) {
+        assert!(!form.to_string().contains("automatic_art_catalog_version"));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2757,9 +2811,10 @@ impl HiddenBoard {
     }
 }
 
-/// `GameAction::Transform` is accepted on the merged survivor and on an unmerged face-down
-/// permanent (a pre-existing rules defect, recorded elsewhere); the stored face it applies
-/// carries no printing. A never-hidden double-faced card transformed the same way keeps its
+/// `GameAction::Transform` is refused on the merged survivor and on an unmerged face-down
+/// permanent: neither is represented by a double-faced card or token (CR 701.27c), and the pile
+/// contains no double-faced component that could turn (CR 730.2i), so no stored face — and no
+/// concealed printing — is applied. A never-hidden double-faced card transformed the same way keeps its
 /// own printing, beside its back face's name.
 ///
 /// "Day Face" / "Night Face" are a textless body pair, NOT a printed card: neither face has
@@ -2773,17 +2828,17 @@ impl HiddenBoard {
 fn transform_cannot_write_a_concealed_printing_back() {
     let mut h = hidden_board();
     let (buried, lone) = (h.buried, h.lone);
-    h.board.act(GameAction::Transform { object_id: buried });
-    h.board.act(GameAction::Transform { object_id: lone });
-    assert!(
-        h.board.state().objects[&buried].transformed,
-        "reach: the survivor transformed"
-    );
-    assert!(
-        h.board.state().objects[&lone].transformed,
-        "reach: the lone card transformed"
-    );
-    h.assert_hidden_cards_stay_hidden("after Transform");
+    for object_id in [buried, lone] {
+        assert!(
+            matches!(
+                h.board.runner.act(GameAction::Transform { object_id }),
+                Err(EngineError::InvalidAction(msg)) if msg == "This permanent can't transform"
+            ),
+            "CR 701.27c: {object_id:?} isn't represented by a double-faced card or token"
+        );
+        assert!(!h.board.state().objects[&object_id].transformed);
+    }
+    h.assert_hidden_cards_stay_hidden("after a refused Transform");
 
     // Control: a never-hidden double-faced card keeps its sentinel through a transform.
     let mut s = scenario();

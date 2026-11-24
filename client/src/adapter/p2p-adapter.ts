@@ -30,7 +30,6 @@ import type {
   InteractionPreviewRequest,
   InteractionSubmission,
 } from "./generated/interaction";
-import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 
 import {
   AdapterError,
@@ -111,6 +110,7 @@ import {
   type P2PTerminalResult,
 } from "../services/p2pTerminalResult";
 import { NativeEngineSocket } from "../services/nativeEngineSocket";
+import { minimumDeckSizeOf } from "../services/draftFormatConfig";
 import i18n from "i18next";
 
 /**
@@ -3022,6 +3022,10 @@ export class P2PHostAdapter implements EngineAdapter {
           // and `[]` identically, so this is a contract-vocabulary choice, not
           // a rules one.)
           draft_set_codes: (this.hostDeckData as DeckListPayload).draft_set_codes,
+          // CR 100.2b + CR 702.139b: the room's own minimum deck size (a draft
+          // match carries its Cube's), which a "minimum deck size" companion
+          // condition reads. Absent for a fixed-size rule.
+          min_deck_size: minimumDeckSizeOf(this.formatConfig),
           selected_format: this.formatConfig!.format,
         }) as { compatible: boolean; reasons: string[] };
 
@@ -4495,14 +4499,6 @@ export class P2PHostAdapter implements EngineAdapter {
 
   restoreState(_state: PersistedGameState): void {
     throw new AdapterError("P2P_ERROR", "Undo not supported in P2P games", false);
-  }
-
-  estimateBracket(_deck: BracketDeckRequest): Promise<BracketEstimate | null> {
-    throw new AdapterError(
-      AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
-      "Bracket estimation is a local feature; not available in P2P sessions.",
-      false,
-    );
   }
 
   async sendConcede(): Promise<void> {
@@ -6244,14 +6240,6 @@ export class P2PGuestAdapter implements EngineAdapter {
 
   restoreState(_state: PersistedGameState): void {
     throw new AdapterError("P2P_ERROR", "Undo not supported in P2P games", false);
-  }
-
-  estimateBracket(_deck: BracketDeckRequest): Promise<BracketEstimate | null> {
-    throw new AdapterError(
-      AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
-      "Bracket estimation is a local feature; not available in P2P sessions.",
-      false,
-    );
   }
 
   sendConcede(): void {

@@ -72,7 +72,7 @@
   },
   "comboDetector": {
     "label": "组合技检测器（实验性）",
-    "title": "检测无限循环：自动结束强制循环并显示 ∞ 资源（默认关闭）",
+    "title": "检测无限循环：自动结束强制循环，为玩家可控的循环提供捷径，并显示 ∞ 资源（默认关闭）",
     "off": "关闭",
     "interactive": "交互式"
   },
@@ -330,6 +330,11 @@
     "heading": "出错了",
     "body": "应用遇到意外错误，无法在此界面继续。重新加载通常可以解决。",
     "reload": "重新加载"
+  },
+  "stateCodec": {
+    "actionInterrupted": "操作期间状态传输中断",
+    "submissionNotSent": "正在恢复状态传输；此次操作尚未发送。",
+    "reconnectSubmissionNotSent": "正在重新建立连接；此次操作尚未发送。"
   },
   "actionError": {
     "title": "{{action}}失败",

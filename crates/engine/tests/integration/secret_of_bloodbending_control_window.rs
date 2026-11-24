@@ -77,7 +77,9 @@ fn cast_secret(pay_waterbend: bool) -> GameRunner {
         match &runner.state().waiting_for {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: pay_waterbend })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay_waterbend { 0 } else { 1 },
+                    })
                     .expect("decide waterbend additional cost");
             }
             WaitingFor::ManaPayment { .. } => {

@@ -24,6 +24,7 @@ async function freshStore() {
 beforeEach(() => {
   vi.resetModules();
   localStorage.clear();
+  sessionStorage.clear();
 });
 
 describe("persisted store hydration", () => {
@@ -240,6 +241,7 @@ describe("persisted store hydration", () => {
     expect(profile?.baseUrl).toBeNull();
     expect(profile?.maxOutputTokens).toBeNull();
     expect(profile?.temperature).toBeNull();
+    expect(profile?.decisionContext).toBe("selfContained");
     // It claimed to be enabled but has no model, so it cannot be usable.
     expect(profile?.enabled).toBe(false);
   });
@@ -255,6 +257,7 @@ describe("persisted store hydration", () => {
           model: ["gpt-5"],
           maxOutputTokens: "many",
           temperature: Number.NaN,
+          decisionContext: true,
           enabled: "yes",
         },
       ],
@@ -274,7 +277,9 @@ describe("persisted store hydration", () => {
       model: "",
       maxOutputTokens: null,
       temperature: null,
+      decisionContext: "selfContained",
       enabled: false,
+      rememberApiKey: false,
     });
   });
 
@@ -333,6 +338,7 @@ describe("persisted store hydration", () => {
           model: "claude-sonnet-5",
           maxOutputTokens: 2048,
           temperature: 0.2,
+          decisionContext: "messageThread",
           enabled: true,
         },
       ],
@@ -352,8 +358,37 @@ describe("persisted store hydration", () => {
       model: "claude-sonnet-5",
       maxOutputTokens: 2048,
       temperature: 0.2,
+      decisionContext: "messageThread",
       enabled: true,
+      rememberApiKey: false,
     });
+  });
+
+  it("keeps a profile saved before message threads existed on self-contained requests", async () => {
+    seed({
+      profiles: [
+        {
+          id: "older",
+          name: "Claude",
+          provider: "Anthropic",
+          baseUrl: null,
+          model: "claude-sonnet-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+        // Only the exact opt-in value enables threads.
+        { id: "odd", provider: "Anthropic", model: "m", decisionContext: "MessageThread" },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+
+    const { useLlmStore } = await freshStore();
+
+    const contexts = useLlmStore.getState().profiles.map((profile) => profile.decisionContext);
+    expect(contexts).toEqual(["selfContained", "selfContained"]);
   });
 
   // ── The rest of the persisted slice ──────────────────────────────────────
@@ -458,5 +493,457 @@ describe("persisted store hydration", () => {
     expect(state.seatBindings).toEqual({});
     expect(state.draftEnabled).toBe(false);
     expect(state.draftProfileId).toBeNull();
+  });
+
+  // ── SessionStorage API key hydration ────────────────────────────────────────
+
+  it("rehydrates API key from sessionStorage when rememberApiKey is true and destination matches", async () => {
+    seed({
+      profiles: [
+        {
+          id: "p1",
+          name: "Claude",
+          provider: "Anthropic",
+          baseUrl: null,
+          model: "claude-sonnet-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+    sessionStorage.setItem("phase-llm-remember-api-keys", JSON.stringify(["p1"]));
+    sessionStorage.setItem(
+      "phase-llm-api-keys",
+      JSON.stringify({
+        p1: { apiKey: "sk-session-restored", provider: "Anthropic", endpoint: "" },
+      }),
+    );
+
+    const { useLlmStore } = await freshStore();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const profile = useLlmStore.getState().profiles.find((p) => p.id === "p1");
+    expect(profile?.apiKey).toBe("sk-session-restored");
+    expect(profile?.rememberApiKey).toBe(true);
+  });
+
+  it("starts with rememberApiKey off in a fresh tab even if localStorage contains it", async () => {
+    seed({
+      profiles: [
+        {
+          id: "p1",
+          name: "Claude",
+          provider: "Anthropic",
+          baseUrl: null,
+          model: "claude-sonnet-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+          rememberApiKey: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+
+    const { useLlmStore } = await freshStore();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const profile = useLlmStore.getState().profiles.find((p) => p.id === "p1");
+    expect(profile?.apiKey).toBe("");
+    expect(profile?.rememberApiKey).toBe(false);
+  });
+
+  it("does not rehydrate API key from sessionStorage when rememberApiKey is not opted in for this tab", async () => {
+    seed({
+      profiles: [
+        {
+          id: "p1",
+          name: "Claude",
+          provider: "Anthropic",
+          baseUrl: null,
+          model: "claude-sonnet-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+    sessionStorage.setItem(
+      "phase-llm-api-keys",
+      JSON.stringify({
+        p1: { apiKey: "sk-should-not-restore", provider: "Anthropic", endpoint: "" },
+      }),
+    );
+
+    const { useLlmStore } = await freshStore();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const profile = useLlmStore.getState().profiles.find((p) => p.id === "p1");
+    expect(profile?.apiKey).toBe("");
+    expect(profile?.rememberApiKey).toBe(false);
+    expect(sessionStorage.getItem("phase-llm-api-keys")).toBeNull();
+  });
+
+  it("rehydrates key on reload when explicit endpoint is unchanged, and refuses when edited", async () => {
+    seed({
+      profiles: [
+        {
+          id: "p1",
+          name: "Proxy",
+          provider: "OpenAi",
+          baseUrl: "https://proxy.a.example/v1",
+          model: "gpt-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+    sessionStorage.setItem("phase-llm-remember-api-keys", JSON.stringify(["p1"]));
+    sessionStorage.setItem(
+      "phase-llm-api-keys",
+      JSON.stringify({
+        p1: { apiKey: "sk-proxy", provider: "OpenAi", endpoint: "https://proxy.a.example/v1" },
+      }),
+    );
+
+    const { useLlmStore } = await freshStore();
+    expect(useLlmStore.getState().profiles[0]?.apiKey).toBe("sk-proxy");
+
+    // Simulate another tab editing the explicit endpoint before this tab reloads.
+    seed({
+      profiles: [
+        {
+          id: "p1",
+          name: "Proxy",
+          provider: "OpenAi",
+          baseUrl: "https://proxy.b.example/v1",
+          model: "gpt-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+    const { useLlmStore: reloaded } = await freshStore();
+    expect(reloaded.getState().profiles[0]?.apiKey).toBe("");
+    expect(sessionStorage.getItem("phase-llm-api-keys")).toBeNull();
+  });
+
+  it("rehydrates Jev key when relay origin is unchanged, and refuses when relay or endpoint changed", async () => {
+    localStorage.setItem(
+      "phase-multiplayer",
+      JSON.stringify({ state: { hostingServer: "wss://relay-a.example" }, version: 7 }),
+    );
+    seed({
+      profiles: [
+        {
+          id: "jev1",
+          name: "Jev",
+          provider: "Jev",
+          baseUrl: null,
+          model: "jev-latest",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+    sessionStorage.setItem("phase-llm-remember-api-keys", JSON.stringify(["jev1"]));
+    sessionStorage.setItem(
+      "phase-llm-api-keys",
+      JSON.stringify({
+        jev1: { apiKey: "jev-secret", provider: "Jev", endpoint: "https://relay-a.example" },
+      }),
+    );
+
+    const { useLlmStore } = await freshStore();
+    expect(useLlmStore.getState().profiles[0]?.apiKey).toBe("jev-secret");
+
+    // Another tab selects relay B in shared multiplayer settings before reload.
+    localStorage.setItem(
+      "phase-multiplayer",
+      JSON.stringify({ state: { hostingServer: "wss://relay-b.example" }, version: 7 }),
+    );
+    const { useLlmStore: afterRelayChange } = await freshStore();
+    expect(afterRelayChange.getState().profiles[0]?.apiKey).toBe("");
+    expect(sessionStorage.getItem("phase-llm-api-keys")).toBeNull();
+
+    // Another tab sets an explicit custom endpoint on the Jev profile while relay A is active.
+    localStorage.setItem(
+      "phase-multiplayer",
+      JSON.stringify({ state: { hostingServer: "wss://relay-a.example" }, version: 7 }),
+    );
+    seed({
+      profiles: [
+        {
+          id: "jev1",
+          name: "Jev",
+          provider: "Jev",
+          baseUrl: "https://custom-jev.example",
+          model: "jev-latest",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+    sessionStorage.setItem(
+      "phase-llm-api-keys",
+      JSON.stringify({
+        jev1: { apiKey: "jev-secret", provider: "Jev", endpoint: "https://relay-a.example" },
+      }),
+    );
+    const { useLlmStore: afterExplicitEdit } = await freshStore();
+    expect(afterExplicitEdit.getState().profiles[0]?.apiKey).toBe("");
+  });
+
+  it("refuses to restore a key if provider changed in another tab", async () => {
+    seed({
+      profiles: [
+        {
+          id: "p1",
+          name: "Changed",
+          provider: "Anthropic",
+          baseUrl: null,
+          model: "claude-sonnet-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+    sessionStorage.setItem("phase-llm-remember-api-keys", JSON.stringify(["p1"]));
+    sessionStorage.setItem(
+      "phase-llm-api-keys",
+      JSON.stringify({
+        p1: { apiKey: "sk-openai", provider: "OpenAi", endpoint: "" },
+      }),
+    );
+
+    const { useLlmStore } = await freshStore();
+    expect(useLlmStore.getState().profiles[0]?.apiKey).toBe("");
+  });
+
+  it("does not rehydrate API key from sessionStorage when key is absent", async () => {
+    seed({
+      profiles: [
+        {
+          id: "p1",
+          name: "Claude",
+          provider: "Anthropic",
+          baseUrl: null,
+          model: "claude-sonnet-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+    sessionStorage.setItem("phase-llm-remember-api-keys", JSON.stringify(["p1"]));
+
+    const { useLlmStore } = await freshStore();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const profile = useLlmStore.getState().profiles.find((p) => p.id === "p1");
+    expect(profile?.apiKey).toBe("");
+    expect(profile?.rememberApiKey).toBe(true);
+  });
+
+  it("survives malformed sessionStorage data", async () => {
+    seed({
+      profiles: [
+        {
+          id: "p1",
+          name: "Claude",
+          provider: "Anthropic",
+          baseUrl: null,
+          model: "claude-sonnet-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+    sessionStorage.setItem("phase-llm-remember-api-keys", JSON.stringify(["p1"]));
+    sessionStorage.setItem("phase-llm-api-keys", "not valid json");
+
+    const { useLlmStore } = await freshStore();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const profile = useLlmStore.getState().profiles.find((p) => p.id === "p1");
+    expect(profile?.apiKey).toBe("");
+    expect(profile?.rememberApiKey).toBe(true);
+  });
+
+  it("survives sessionStorage quota errors and removes stale stored key on write failure", async () => {
+    seed({
+      profiles: [
+        {
+          id: "p1",
+          name: "Claude",
+          provider: "Anthropic",
+          baseUrl: null,
+          model: "claude-sonnet-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+    sessionStorage.setItem("phase-llm-remember-api-keys", JSON.stringify(["p1"]));
+    sessionStorage.setItem(
+      "phase-llm-api-keys",
+      JSON.stringify({
+        p1: { apiKey: "sk-old", provider: "Anthropic", endpoint: "" },
+      }),
+    );
+
+    const { useLlmStore } = await freshStore();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(useLlmStore.getState().profiles.find((p) => p.id === "p1")?.apiKey).toBe("sk-old");
+
+    const setItemSpy = vi.spyOn(sessionStorage, "setItem").mockImplementation(() => {
+      throw new DOMException("Quota exceeded", "QuotaExceededError");
+    });
+    try {
+      expect(() =>
+        useLlmStore.getState().updateProfile("p1", { apiKey: "sk-new" }),
+      ).not.toThrow();
+      expect(setItemSpy).toHaveBeenCalled();
+      const profile = useLlmStore.getState().profiles.find((p) => p.id === "p1");
+      expect(profile?.apiKey).toBe("sk-new");
+      expect(profile?.rememberApiKey).toBe(true);
+      expect(sessionStorage.getItem("phase-llm-api-keys")).toBeNull();
+    } finally {
+      setItemSpy.mockRestore();
+    }
+  });
+
+  // ── F1 regression: cross-tab profile deletion ───────────────────────────────
+
+  it("prunes sessionStorage key and remember flag when profile was deleted in another tab", async () => {
+    // Tab A has profile p1 with remembered key
+    seed({
+      profiles: [
+        {
+          id: "p1",
+          name: "Claude",
+          provider: "Anthropic",
+          baseUrl: null,
+          model: "claude-sonnet-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+        {
+          id: "p2",
+          name: "Other",
+          provider: "OpenAi",
+          baseUrl: null,
+          model: "gpt-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+    sessionStorage.setItem("phase-llm-remember-api-keys", JSON.stringify(["p1", "p2"]));
+    sessionStorage.setItem(
+      "phase-llm-api-keys",
+      JSON.stringify({
+        p1: { apiKey: "sk-p1", provider: "Anthropic", endpoint: "" },
+        p2: { apiKey: "sk-p2", provider: "OpenAi", endpoint: "" },
+      }),
+    );
+
+    const { useLlmStore: tabA } = await freshStore();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Both keys restored
+    expect(tabA.getState().profiles.find((p) => p.id === "p1")?.apiKey).toBe("sk-p1");
+    expect(tabA.getState().profiles.find((p) => p.id === "p2")?.apiKey).toBe("sk-p2");
+    expect(tabA.getState().profiles.find((p) => p.id === "p1")?.rememberApiKey).toBe(true);
+    expect(tabA.getState().profiles.find((p) => p.id === "p2")?.rememberApiKey).toBe(true);
+
+    // Tab B removes profile p1 (simulated by re-seeding localStorage without p1)
+    seed({
+      profiles: [
+        {
+          id: "p2",
+          name: "Other",
+          provider: "OpenAi",
+          baseUrl: null,
+          model: "gpt-5",
+          maxOutputTokens: null,
+          temperature: null,
+          enabled: true,
+        },
+      ],
+      seatBindings: {},
+      draftEnabled: false,
+      draftProfileId: null,
+    });
+
+    // Tab A reloads — p1 should be gone from sessionStorage too
+    const { useLlmStore: tabAReloaded } = await freshStore();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const reloadedProfiles = tabAReloaded.getState().profiles;
+    expect(reloadedProfiles).toHaveLength(1);
+    expect(reloadedProfiles[0]?.id).toBe("p2");
+    expect(reloadedProfiles[0]?.apiKey).toBe("sk-p2");
+    expect(reloadedProfiles[0]?.rememberApiKey).toBe(true);
+
+    // Orphaned sessionStorage entries for p1 must be removed
+    expect(sessionStorage.getItem("phase-llm-api-keys")).not.toContain("p1");
+    expect(sessionStorage.getItem("phase-llm-remember-api-keys")).not.toContain("p1");
+    // p2's entries must survive
+    expect(sessionStorage.getItem("phase-llm-api-keys")).toContain("sk-p2");
+    expect(sessionStorage.getItem("phase-llm-remember-api-keys")).toContain("p2");
   });
 });

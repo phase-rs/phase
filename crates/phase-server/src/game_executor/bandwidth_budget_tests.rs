@@ -632,6 +632,7 @@ impl ScriptedGame {
             | WaitingFor::EnlistChoice { .. }
             | WaitingFor::GameOver { .. }
             | WaitingFor::ReplacementChoice { .. }
+            | WaitingFor::ReplacementDecisionOrder { .. }
             | WaitingFor::EntryControllerChoice { .. }
             | WaitingFor::OrderTriggers { .. }
             | WaitingFor::CopyTargetChoice { .. }
@@ -661,7 +662,7 @@ impl ScriptedGame {
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::BeholdChoice { .. }
             | WaitingFor::EmpowerJaceChoice { .. }
-            | WaitingFor::SpellCopyOrderChoice { .. }
+            | WaitingFor::MemberOrderChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }

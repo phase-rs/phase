@@ -143,6 +143,8 @@ fn transform_effect_in_place(effect: &mut Effect) {
         // overload corpus uses this only for hidden-zone exile where these
         // modifiers have no semantics.
         Effect::ChangeZone {
+            // CR 608.2c: the instruction's performer survives the promotion.
+            actor,
             origin,
             destination,
             target,
@@ -163,6 +165,7 @@ fn transform_effect_in_place(effect: &mut Effect) {
             face_down_profile: _, // dropped: overload corpus is hidden-zone exile, never face-down entry
             enters_modified_if: _, // dropped: hidden-zone exile, moved-object enter gate has no semantics (CR 614.12)
         } => Effect::ChangeZoneAll {
+            actor,
             origin,
             destination,
             target,
@@ -309,6 +312,7 @@ mod tests {
     fn change_zone_becomes_change_zone_all() {
         use crate::types::ability::ControllerRef;
         let mut def = leaf(Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Exile,
@@ -350,6 +354,41 @@ mod tests {
         }
     }
 
+    /// CR 702.96b + CR 608.2c: the promotion keeps the move's performer.
+    /// Synthetic actor: no printed overload move names a subject, so the
+    /// Winds of Abandon move above carries a non-controller performer here.
+    #[test]
+    fn change_zone_promotion_keeps_the_actor() {
+        use crate::types::ability::LibraryInstructionActor;
+        let actor = LibraryInstructionActor::Player {
+            player: TargetFilter::ParentTargetController,
+        };
+        let mut def = leaf(Effect::ChangeZone {
+            actor: actor.clone(),
+            library_shuffle: Default::default(),
+            origin: None,
+            destination: Zone::Exile,
+            target: creature_filter(),
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        });
+        transform_ability_def(&mut def);
+        match &*def.effect {
+            Effect::ChangeZoneAll {
+                actor: promoted, ..
+            } => assert_eq!(promoted, &actor),
+            other => panic!("expected ChangeZoneAll, got {other:?}"),
+        }
+    }
+
     /// CR 702.96a + CR 702.96c: Mizzix's Mastery's trailing "Exile Mizzix's
     /// Mastery" is a targetless, self-referential move (`ChangeZone { target:
     /// SelfRef }`). Overload's text change rewrites only the word "target", so
@@ -361,6 +400,7 @@ mod tests {
     #[test]
     fn change_zone_self_ref_not_promoted() {
         let mut def = leaf(Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Exile,
@@ -401,6 +441,7 @@ mod tests {
         use crate::types::ability::ControllerRef;
         use crate::types::mana::ManaCost;
         let self_exile = leaf(Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Exile,
@@ -430,6 +471,7 @@ mod tests {
         let mut root = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,

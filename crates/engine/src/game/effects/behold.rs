@@ -1,5 +1,5 @@
 use crate::game::casting_costs::eligible_behold_choices;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -42,30 +42,23 @@ pub fn resolve(
         }
     };
 
-    let choices = eligible_behold_choices(state, ability.controller, ability.source_id, &filter);
-
-    match choices.len() {
-        0 => {
+    match begin_behold(
+        state,
+        ability.controller,
+        ability.source_id,
+        &filter,
+        events,
+    ) {
+        BeholdStart::Unavailable => {
             // CR 701.4a + CR 608.2c: nothing to behold — the rider is suppressed
             // via `cost_payment_failed_flag`; no continuation is stashed so the
             // optional-accept clobber (`resolve_optional_effect_decision`) is a
             // no-op and the Token/rider is evaluated inline as false.
             state.cost_payment_failed_flag = true;
         }
-        1 => {
-            // CR 701.4a: a single beholdable object — no genuine choice. Auto-select
-            // it; reveal only if it is a hand card.
-            reveal_if_from_hand(state, ability.controller, choices[0], events);
-        }
-        _ => {
-            // CR 701.4a + CR 608.2d: the mode/object choice is a genuine decision
-            // (reveal-from-hand vs choose-on-battlefield, and which object). Park
-            // for the controller; the auto-stashed rider drains after the choice.
-            state.waiting_for = WaitingFor::BeholdChoice {
-                player: ability.controller,
-                choices,
-            };
-        }
+        // The sole candidate was auto-selected; the chain resolves any rider
+        // inline. The parked choice drains the auto-stashed rider after submit.
+        BeholdStart::Selected | BeholdStart::Parked => {}
     }
 
     events.push(GameEvent::EffectResolved {
@@ -75,6 +68,42 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// How a behold began: the single authority shared by the `Effect::Behold`
+/// resolver and the resolution-time `AbilityCost::Behold` payment arm.
+pub(crate) enum BeholdStart {
+    /// No candidate: the player cannot behold.
+    Unavailable,
+    /// Exactly one candidate (no genuine choice): auto-selected, and revealed
+    /// when it is a hand card.
+    Selected,
+    /// Two or more candidates: `WaitingFor::BeholdChoice` is parked.
+    Parked,
+}
+
+/// CR 701.4a + CR 608.2d: Begin a behold — zero candidates are unavailable, a
+/// sole candidate is auto-selected (revealing it if it is a hand card), and
+/// two or more park `WaitingFor::BeholdChoice` for the player.
+pub(crate) fn begin_behold(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    filter: &TargetFilter,
+    events: &mut Vec<GameEvent>,
+) -> BeholdStart {
+    let choices = eligible_behold_choices(state, player, source_id, filter);
+    match choices.as_slice() {
+        [] => BeholdStart::Unavailable,
+        [only] => {
+            reveal_if_from_hand(state, player, *only, events);
+            BeholdStart::Selected
+        }
+        _ => {
+            state.waiting_for = WaitingFor::BeholdChoice { player, choices };
+            BeholdStart::Parked
+        }
+    }
 }
 
 /// CR 701.4a: The reveal leg of behold. A chosen HAND card is revealed to all
@@ -103,6 +132,7 @@ pub(crate) fn reveal_if_from_hand(
         .unwrap_or_default();
     events.push(GameEvent::CardsRevealed {
         player,
+        occurrences: state.disclosed_occurrences(&[chosen_id]),
         card_ids: vec![chosen_id],
         card_names: vec![name],
     });

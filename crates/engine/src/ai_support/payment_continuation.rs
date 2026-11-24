@@ -87,6 +87,18 @@ pub struct AcceptedPaymentSuccessor {
     pub action: GameAction,
     pub state: GameState,
     pub step: PaymentContinuationStep,
+    /// The accepted edge's own reducer step, for consumers that read the step
+    /// rather than only its successor.
+    pub trace: WitnessedStepTrace,
+}
+
+/// What one reducer step left besides its successor state: the events it
+/// returned, and the deferred-trigger queue's length before it ran. The
+/// payment-surplus certificate's CR 603.2 trigger check reads both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WitnessedStepTrace {
+    pub events: Vec<GameEvent>,
+    pub deferred_triggers_before: usize,
 }
 
 /// What the accepted edge's own reducer step did to the payment root.
@@ -185,6 +197,10 @@ pub fn classify_payment_continuation(state: &GameState) -> PaymentContinuationSt
         | WaitingFor::PayAmountChoice {
             pending_mana_ability: Some(mana_ability),
             ..
+        }
+        | WaitingFor::RevealChoice {
+            pending_mana_ability: Some(mana_ability),
+            ..
         } => classify_pending_mana_ability(state, mana_ability),
         WaitingFor::ChooseManaColor {
             context: ManaChoiceContext::ManaAbility(mana_ability),
@@ -194,9 +210,9 @@ pub fn classify_payment_continuation(state: &GameState) -> PaymentContinuationSt
             CollectEvidenceResume::ManaAbility {
                 pending_mana_ability,
             } => classify_pending_mana_ability(state, pending_mana_ability),
-            CollectEvidenceResume::Casting { .. } | CollectEvidenceResume::Effect { .. } => {
-                PaymentContinuationState::NotAffiliated
-            }
+            CollectEvidenceResume::Casting { .. }
+            | CollectEvidenceResume::Effect { .. }
+            | CollectEvidenceResume::Resolution { .. } => PaymentContinuationState::NotAffiliated,
         },
         _ => classify_parked_cost_move_root(state),
     }
@@ -214,6 +230,23 @@ pub fn witness_payment_continuation(
 ) -> Option<AcceptedPaymentSuccessor> {
     let batch = witness_payment_continuations(state, std::slice::from_ref(action));
     batch.successors.into_iter().next().flatten()
+}
+
+/// CR 601.2h–i / CR 602.2b: apply `action` once to a copy of `state` and return
+/// the successor when that single reducer step finalizes the affiliated root
+/// in progress — the same finalization predicate the witness's root step uses,
+/// without its continuation search. `None` when `state` is not an affiliated
+/// payment, the action is rejected, or the root is not finalized by this step.
+pub fn finalizes_in_one_step(state: &GameState, action: &GameAction) -> Option<GameState> {
+    let PaymentContinuationState::Affiliated(root) = classify_payment_continuation(state) else {
+        return None;
+    };
+    let baseline = WitnessBaseline::capture(state, &root)?;
+    let mut successor = state.clone();
+    let result = apply_as_current_for_simulation(&mut successor, action.clone()).ok()?;
+    (!root_present(&successor, &root)
+        && finalized_root_matches(&successor, &root, &baseline, &result.events))
+    .then_some(successor)
 }
 
 /// Witness all raw actions for one exact payment decision with a shared bounded
@@ -588,6 +621,10 @@ fn witness_payment_continuations_inner(
                     action: action.clone(),
                     state: successor,
                     step: PaymentContinuationStep::Finalizes,
+                    trace: WitnessedStepTrace {
+                        events: result.events,
+                        deferred_triggers_before: state.deferred_triggers.len(),
+                    },
                 });
                 if let SearchPolicy::AnyRoot { .. } = policy {
                     return (
@@ -613,6 +650,7 @@ fn witness_payment_continuations_inner(
                 root_index: index,
                 root_action: action.clone(),
                 root_successor: successor.clone(),
+                root_events: result.events.clone(),
                 state: successor,
                 events: result.events,
                 remaining_actions: None,
@@ -667,6 +705,10 @@ fn witness_payment_continuations_inner(
                     action: node.root_action,
                     state: node.root_successor,
                     step: PaymentContinuationStep::Continues,
+                    trace: WitnessedStepTrace {
+                        events: node.root_events,
+                        deferred_triggers_before: state.deferred_triggers.len(),
+                    },
                 });
                 if let SearchPolicy::AnyRoot { .. } = policy {
                     return (
@@ -707,6 +749,7 @@ fn witness_payment_continuations_inner(
                 root_index: node.root_index,
                 root_action: node.root_action,
                 root_successor: node.root_successor,
+                root_events: node.root_events,
                 state: next_state,
                 events,
                 remaining_actions: None,
@@ -762,6 +805,8 @@ struct WitnessNode {
     root_index: usize,
     root_action: GameAction,
     root_successor: GameState,
+    /// The root step's own events (`events` accumulates the whole path).
+    root_events: Vec<GameEvent>,
     state: GameState,
     events: Vec<GameEvent>,
     remaining_actions: Option<(Vec<GameAction>, usize)>,
@@ -996,7 +1041,7 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
             CollectEvidenceResume::ManaAbility {
                 pending_mana_ability,
             } => classify_pending_mana_ability(state, pending_mana_ability),
-            CollectEvidenceResume::Casting { .. } | CollectEvidenceResume::Effect { .. } => {
+            CollectEvidenceResume::Casting { .. } | CollectEvidenceResume::Effect { .. } | CollectEvidenceResume::Resolution { .. } => {
                 PaymentContinuationState::NotAffiliated
             }
         },
@@ -1030,6 +1075,7 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
         | PendingCostMoveResume::CounterCostRemovalPayment { pending: None, .. }
         | PendingCostMoveResume::WardSacrificePayment { .. }
         | PendingCostMoveResume::ReplacementMayCost { .. }
+        | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
         | PendingCostMoveResume::Foretell { .. }
         | PendingCostMoveResume::UnlessBouncePayment { .. }
         | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
@@ -1038,6 +1084,7 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
         // input — so like its counter-addition sibling it affiliates with no
         // payment-continuation root.
         | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+        | PendingCostMoveResume::PlayerScopeUnlessSettlement(..)
         | PendingCostMoveResume::LoyaltyActivation { .. }
         | PendingCostMoveResume::TurnFaceUpCostMove { .. } => {
             PaymentContinuationState::NotAffiliated
@@ -1045,6 +1092,14 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
     }
 }
 
+/// Classify a parked `DeferredLifeCostResume` root.
+///
+/// A `Cast` root may be parked on a prompt answered by a non-payer (the
+/// recipient of a life-gain cost, CR 616.1). It is still `Affiliated` with the
+/// payer's root: the witness applies the non-payer's candidates as the current
+/// actor and accepts those that finalize the root. Unlike `ManaRoot`, no
+/// `PayerMismatch` is raised, because the non-payer's decision is part of
+/// completing the payer's cost. Pinned by `invigorate_alternative_cost::v9c_*`.
 fn classify_deferred_life_root(
     state: &GameState,
     deferred: &DeferredLifeCostResume,
@@ -1257,6 +1312,10 @@ fn waiting_for_contains_root(waiting_for: &WaitingFor, root: &PaymentContinuatio
         | WaitingFor::PayAmountChoice {
             pending_mana_ability: Some(mana_ability),
             ..
+        }
+        | WaitingFor::RevealChoice {
+            pending_mana_ability: Some(mana_ability),
+            ..
         } => pending_mana_contains_root(mana_ability, root),
         WaitingFor::ChooseManaColor {
             context: ManaChoiceContext::ManaAbility(mana_ability),
@@ -1269,7 +1328,9 @@ fn waiting_for_contains_root(waiting_for: &WaitingFor, root: &PaymentContinuatio
             CollectEvidenceResume::ManaAbility {
                 pending_mana_ability,
             } => pending_mana_contains_root(pending_mana_ability, root),
-            CollectEvidenceResume::Effect { .. } => false,
+            CollectEvidenceResume::Effect { .. } | CollectEvidenceResume::Resolution { .. } => {
+                false
+            }
         },
         _ => false,
     }
@@ -1305,18 +1366,20 @@ fn pending_cost_move_contains_root(
             CollectEvidenceResume::ManaAbility {
                 pending_mana_ability,
             } => pending_mana_contains_root(pending_mana_ability, root),
-            CollectEvidenceResume::Effect { .. } => false,
+            CollectEvidenceResume::Effect { .. } | CollectEvidenceResume::Resolution { .. } => false,
         },
         Some(PendingCostMoveResume::Cast { pending: None, .. })
         | Some(PendingCostMoveResume::SacrificeForCost { pending: None, .. })
         | Some(PendingCostMoveResume::CounterCostRemovalPayment { pending: None, .. })
         | Some(PendingCostMoveResume::WardSacrificePayment { .. })
         | Some(PendingCostMoveResume::ReplacementMayCost { .. })
+        | Some(PendingCostMoveResume::ReplacementMayCostInnerChoice { .. })
         | Some(PendingCostMoveResume::Foretell { .. })
         | Some(PendingCostMoveResume::UnlessBouncePayment { .. })
         | Some(PendingCostMoveResume::CounterAdditionUnlessPayment { .. })
         // CR 701.9b: holds no pending cast, so it can contain no root.
         | Some(PendingCostMoveResume::RandomDiscardUnlessPayment(..))
+        | Some(PendingCostMoveResume::PlayerScopeUnlessSettlement(..))
         | Some(PendingCostMoveResume::LoyaltyActivation { .. })
         | Some(PendingCostMoveResume::TurnFaceUpCostMove { .. })
         | None => false,
@@ -1456,6 +1519,7 @@ mod tests {
                 player: PlayerId(0),
                 card_ids: vec![ObjectId(1)],
                 card_names: vec!["Hidden".to_string()],
+                occurrences: Vec::new(),
             }]
         ));
         let _ = rand::RngCore::next_u32(state.rng.draw(RandomDraw::Placement));
@@ -1509,6 +1573,7 @@ mod tests {
             paused_at_index: 0,
             completion: PendingSacrificeCostCompletion::ResolutionOptionalPayment {
                 frame: Box::new(OptionalEffectFrame {
+                    parked_poll: None,
                     ability: Box::new(ResolvedAbility::new(
                         Effect::NoOp,
                         vec![],
@@ -1519,6 +1584,7 @@ mod tests {
                     trigger_events: Vec::new(),
                     trigger_match_count: None,
                     return_result_occurrence: None,
+                    replacement_action: None,
                 }),
                 selected: Vec::new(),
             },

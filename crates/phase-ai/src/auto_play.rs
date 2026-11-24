@@ -993,13 +993,8 @@ mod tests {
     }
 
     fn integration_db() -> engine::database::card_db::CardDatabase {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../engine/tests/fixtures/integration_cards.json.gz");
-        let file = std::fs::File::open(path).expect("integration fixture should open");
-        engine::database::card_db::CardDatabase::from_export_reader(flate2::read::GzDecoder::new(
-            std::io::BufReader::new(file),
-        ))
-        .expect("integration fixture should load")
+        engine::database::card_db::CardDatabase::from_integration_fixture()
+            .expect("integration fixture should load")
     }
 
     fn dandan_pile(
@@ -1012,6 +1007,7 @@ mod tests {
             .collect();
         resolve_deck_list(
             db,
+            &engine::database::ComboTable::default(),
             &DeckList {
                 player: PlayerDeckList {
                     main_deck,

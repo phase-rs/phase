@@ -3832,3 +3832,420 @@ fn roll_and_choose_header_refuses_honestly() {
         "both the damage and the Treasure clause must refuse on their result quantity, got {names:?}"
     );
 }
+
+#[test]
+fn essence_burn_ir_and_lowered() {
+    let (ir, lowered) = parse_two_layer(
+        "Essence Burn deals 5 damage to target black or green creature or planeswalker. If that permanent would die this turn, exile it instead.",
+        "Essence Burn",
+        &["Instant"],
+        &[],
+    );
+
+    assert!(
+        ir.diagnostics.is_empty(),
+        "the exact Oracle document must have no parser diagnostics: {:?}",
+        ir.diagnostics
+    );
+    assert_eq!(ir.items.len(), 1, "one printed spell item must parse");
+    assert!(
+        matches!(&ir.items[0].node, OracleNodeIr::Spell(_)),
+        "the document item must be the spell IR: {:?}",
+        ir.items[0].node
+    );
+    assert!(
+        lowered.parse_warnings.is_empty(),
+        "the full document must lower without parser warnings: {:?}",
+        lowered.parse_warnings
+    );
+    let [damage] = lowered.abilities.as_slice() else {
+        panic!(
+            "Essence Burn must lower to one spell ability, got {:?}",
+            lowered.abilities
+        );
+    };
+    let Effect::DealDamage { amount, target, .. } = damage.effect.as_ref() else {
+        panic!(
+            "the printed spell ability must deal damage, got {:?}",
+            damage.effect
+        );
+    };
+    assert_eq!(
+        amount,
+        &QuantityExpr::Fixed { value: 5 },
+        "the spell must preserve its five-damage instruction"
+    );
+    let TargetFilter::Or { filters } = target else {
+        panic!("the damage instruction must retain its target alternatives: {target:?}");
+    };
+    assert_eq!(
+        filters.len(),
+        4,
+        "all four color/type target legs must remain"
+    );
+
+    let rider = damage
+        .sub_ability
+        .as_deref()
+        .expect("the die-exile instruction must remain bound to the damage ability");
+    assert!(
+        rider.sub_ability.is_none(),
+        "the document must contain exactly one rider after the damage instruction"
+    );
+    assert!(
+        !ability_has_unimplemented(damage),
+        "neither the damage nor its target-bound rider may be unimplemented: {damage:#?}"
+    );
+    let Effect::AddTargetReplacement { replacement, .. } = rider.effect.as_ref() else {
+        panic!(
+            "the rider must lower to a target replacement, got {:?}",
+            rider.effect
+        );
+    };
+    assert_eq!(
+        replacement.event,
+        crate::types::replacements::ReplacementEvent::Moved
+    );
+    assert_eq!(replacement.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        replacement.expiry,
+        Some(crate::types::ability::RestrictionExpiry::EndOfTurn)
+    );
+    let exile = replacement
+        .execute
+        .as_deref()
+        .expect("the replacement must redirect the matching move");
+    assert!(matches!(
+        exile.effect.as_ref(),
+        Effect::ChangeZone {
+            origin: Some(crate::types::zones::Zone::Battlefield),
+            destination: crate::types::zones::Zone::Exile,
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    ));
+
+    insta::assert_json_snapshot!("essence_burn_ir", &ir);
+    insta::assert_json_snapshot!("essence_burn_lowered", &lowered);
+}
+
+#[test]
+fn yidaro_cycle_history_two_layer() {
+    use crate::types::ability::{
+        AbilityCondition, Comparator, CountScope, CyclingHistoryWindow, LibraryShuffleMode,
+    };
+    use crate::types::{triggers::TriggerMode, zones::Zone};
+
+    let (ir, lowered) = parse_two_layer_with_keywords(
+        "Trample, haste\nCycling {1}{R}\nWhen you cycle this card, shuffle it into your library from your graveyard. If you've cycled a card named Yidaro, Wandering Monster four or more times this game, put it onto the battlefield from your graveyard instead. (Do this before you draw.)",
+        "Yidaro, Wandering Monster",
+        &["Cycling", "Haste", "Trample"],
+        &["Creature"],
+        &["Dinosaur", "Turtle"],
+    );
+    use crate::parser::oracle_ir::effect_chain::{ClauseDisposition, ReplaceMeaningKind};
+    use crate::parser::oracle_ir::trigger::TriggerBody;
+
+    let trigger_ir = ir
+        .items
+        .iter()
+        .find_map(|item| match &item.node {
+            OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) => Some(trigger),
+            _ => None,
+        })
+        .expect("parsed trigger IR");
+    assert_eq!(trigger_ir.condition, TriggerMode::Cycled);
+    let Some(TriggerBody::EffectChain(chain)) = &trigger_ir.body else {
+        panic!("expected the printed effect chain");
+    };
+    let ir_branch = chain
+        .clauses
+        .iter()
+        .find_map(|clause| match &clause.disposition {
+            ClauseDisposition::ReplaceMeaning {
+                kind: ReplaceMeaningKind::Instead(body),
+            } => Some(body),
+            _ => None,
+        })
+        .expect("typed instead relationship");
+    assert!(
+        matches!(
+            ir_branch.effect.as_ref(),
+            Effect::ChangeZone {
+                target: TargetFilter::SelfRef,
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                ..
+            }
+        ),
+        "{ir_branch:#?}"
+    );
+
+    let [trigger] = lowered.triggers.as_slice() else {
+        panic!("expected one trigger, got {:?}", lowered.triggers);
+    };
+    assert_eq!(trigger.mode, TriggerMode::Cycled);
+    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    let root = trigger.execute.as_deref().expect("self-cycle effect");
+    assert!(
+        matches!(
+            root.effect.as_ref(),
+            Effect::ChangeZone {
+                target: TargetFilter::SelfRef,
+                origin: None,
+                destination: Zone::Library,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
+                ..
+            }
+        ),
+        "{root:#?}"
+    );
+    let branch = root.sub_ability.as_deref().expect("instead branch");
+    assert_eq!(
+        branch.condition,
+        Some(AbilityCondition::ConditionInstead {
+            inner: Box::new(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CardsCycled {
+                        scope: CountScope::Controller,
+                        window: CyclingHistoryWindow::ThisGame,
+                        name: Some("yidaro, wandering monster".into()),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            }),
+        })
+    );
+    assert!(
+        matches!(
+            branch.effect.as_ref(),
+            Effect::ChangeZone {
+                target: TargetFilter::SelfRef,
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                ..
+            }
+        ),
+        "{branch:#?}"
+    );
+    assert!(branch.sub_ability.is_none());
+    let shuffle = branch.else_ability.as_deref().expect("default shuffle");
+    assert_eq!(
+        shuffle.effect.as_ref(),
+        &Effect::Shuffle {
+            target: TargetFilter::Controller
+        }
+    );
+    assert!(shuffle.sub_ability.is_none() && shuffle.else_ability.is_none());
+    assert!(root.else_ability.is_none());
+    assert!(!ability_has_unimplemented(root));
+    assert!(
+        ir.diagnostics
+            .iter()
+            .all(|diag| !matches!(diag, OracleDiagnostic::SwallowedClause { .. })),
+        "{:?}",
+        ir.diagnostics
+    );
+
+    for definition in [root, branch, shuffle] {
+        assert!(definition.multi_target.is_none());
+        assert!(definition.target_constraints.is_empty());
+    }
+
+    // Grammar control: change only the window in the verified face.
+    let unsupported = ir.source_text.replace("times this game", "times this turn");
+    let (_, refused) = parse_two_layer_with_keywords(
+        &unsupported,
+        "Yidaro, Wandering Monster",
+        &["Cycling", "Haste", "Trample"],
+        &["Creature"],
+        &["Dinosaur", "Turtle"],
+    );
+    let [refused_trigger] = refused.triggers.as_slice() else {
+        panic!("expected the trigger envelope to survive refusal");
+    };
+    assert_eq!(refused_trigger.mode, TriggerMode::Cycled);
+    let refused_root = refused_trigger
+        .execute
+        .as_deref()
+        .expect("supported shuffle prefix");
+    assert!(matches!(
+        refused_root.effect.as_ref(),
+        Effect::ChangeZone {
+            target: TargetFilter::SelfRef,
+            destination: Zone::Library,
+            ..
+        }
+    ));
+    assert!(
+        ability_has_unimplemented(refused_root)
+            || refused
+                .parse_warnings
+                .iter()
+                .any(|diag| matches!(diag, OracleDiagnostic::SwallowedClause { .. })),
+        "{refused_root:#?}"
+    );
+
+    insta::assert_json_snapshot!("yidaro_cycle_history_ir", &ir);
+    insta::assert_json_snapshot!("yidaro_cycle_history_lowered", &lowered);
+}
+
+#[test]
+fn kogla_and_yidaro_discard_shuffle_draw_two_layer() {
+    use crate::types::{ability::LibraryShuffleMode, zones::Zone};
+
+    use crate::types::ability::DiscardSelfScope;
+
+    fn discards_source(cost: &AbilityCost) -> bool {
+        match cost {
+            AbilityCost::Discard {
+                self_scope: DiscardSelfScope::SourceCard,
+                ..
+            } => true,
+            AbilityCost::Composite { costs } => costs.iter().any(discards_source),
+            _ => false,
+        }
+    }
+
+    let (_, lowered) = parse_two_layer_with_keywords(
+        "When Kogla and Yidaro enters, choose one —\n• It gains trample and haste until end of turn.\n• It fights target creature you don't control.\n{2}{R}{G}, Discard this card: Destroy up to one target artifact or enchantment. Shuffle this card into your library from your graveyard, then draw a card.",
+        "Kogla and Yidaro",
+        &[],
+        &["Creature"],
+        &["Ape", "Dinosaur", "Turtle"],
+    );
+    let ability = lowered
+        .abilities
+        .iter()
+        .find(|ability| {
+            ability.cost.as_ref().is_some_and(discards_source)
+                && matches!(ability.effect.as_ref(), Effect::Destroy { .. })
+        })
+        .expect("discard activation");
+    assert_eq!(ability.activation_zone, Some(Zone::Hand));
+    let movement = ability.sub_ability.as_deref().expect("self move");
+    assert!(
+        matches!(
+            movement.effect.as_ref(),
+            Effect::ChangeZone {
+                target: TargetFilter::SelfRef,
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Library,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
+                ..
+            }
+        ),
+        "{movement:#?}"
+    );
+    let shuffle = movement.sub_ability.as_deref().expect("terminal shuffle");
+    assert_eq!(
+        shuffle.effect.as_ref(),
+        &Effect::Shuffle {
+            target: TargetFilter::Controller
+        }
+    );
+    let draw = shuffle.sub_ability.as_deref().expect("draw after shuffle");
+    assert!(matches!(
+        draw.effect.as_ref(),
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            ..
+        }
+    ));
+    assert!(draw.sub_ability.is_none());
+}
+
+#[test]
+fn spellpyre_phoenix_turn_history_two_layer() {
+    use crate::types::ability::{Comparator, CountScope, CyclingHistoryWindow};
+    use crate::types::{phase::Phase, triggers::TriggerMode, zones::Zone};
+
+    let (ir, lowered) = parse_two_layer_with_keywords(
+        "Flying\nWhen this creature enters, you may return target instant or sorcery card with a cycling ability from your graveyard to your hand.\nAt the beginning of each end step, if you cycled two or more cards this turn, return this card from your graveyard to your hand.",
+        "Spellpyre Phoenix",
+        &["Flying"],
+        &["Creature"],
+        &["Phoenix"],
+    );
+    let condition = Some(TriggerCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::CardsCycled {
+                scope: CountScope::Controller,
+                window: CyclingHistoryWindow::ThisTurn,
+                name: None,
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 2 },
+    });
+    let trigger_ir = ir
+        .items
+        .iter()
+        .find_map(|item| match &item.node {
+            OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger))
+                if trigger.condition == TriggerMode::Phase
+                    && trigger.partial_def.phase == Some(Phase::End) =>
+            {
+                Some(trigger)
+            }
+            _ => None,
+        })
+        .expect("parsed Phoenix end-step trigger");
+    assert_eq!(trigger_ir.modifiers.intervening_if, condition);
+
+    let end = lowered
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::Phase && trigger.phase == Some(Phase::End))
+        .expect("lowered Phoenix end-step trigger");
+    assert_eq!(end.condition, condition);
+    assert_eq!(end.trigger_zones, [Zone::Graveyard]);
+    assert!(end.valid_target.is_none());
+    assert!(!end.optional);
+    let execute = end.execute.as_deref().expect("printed self-return");
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Hand,
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    ));
+    assert!(execute.target_prompt.is_none());
+    assert!(execute.sub_ability.is_none() && execute.else_ability.is_none());
+    assert!(!ability_has_unimplemented(execute));
+
+    // No printed card has these malformed guard shapes. Spellpyre Phoenix is the
+    // nearest printed card (CR 603.4 intervening-if).
+    for guard in [
+        "you cycled two or more cards this turnip",
+        "you cycled two or more cards this game",
+        "you cycled two or more cards this turn with flying",
+    ] {
+        let (_, malformed) = parse_two_layer(
+            &format!("At the beginning of each end step, if {guard}, return this card from your graveyard to your hand."),
+            "Spellpyre Phoenix",
+            &["Creature"],
+            &["Phoenix"],
+        );
+        let trigger = malformed
+            .triggers
+            .iter()
+            .find(|trigger| trigger.mode == TriggerMode::Phase && trigger.phase == Some(Phase::End))
+            .expect("end-step trigger with rejected guard");
+        let execute = trigger.execute.as_deref().expect("strict failure body");
+        assert!(
+            matches!(execute.effect.as_ref(), Effect::Unimplemented { name, .. }
+            if name == "unparsed_condition"),
+            "{guard}: {execute:?}"
+        );
+        assert!(
+            execute.sub_ability.is_none() && execute.else_ability.is_none(),
+            "{guard}"
+        );
+    }
+    insta::assert_json_snapshot!("spellpyre_phoenix_turn_history_ir", &ir);
+    insta::assert_json_snapshot!("spellpyre_phoenix_turn_history_lowered", &lowered);
+}

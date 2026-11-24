@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "GameLogEntry gains game_number (serde default 1, skipped at game 1)"
+}

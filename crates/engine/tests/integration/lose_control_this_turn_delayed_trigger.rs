@@ -224,10 +224,12 @@ fn selfref_lose_control_this_turn_fires_at_cleanup() {
     let mut runner = scenario.build();
 
     make_artifact(&mut runner, permanent);
-    install_selfref_lose_control_draw(&mut runner, permanent);
     // P0 steals it until EOT: P0 controls it now; control reverts to owner P1 at
-    // cleanup, at which point P0 loses control (the self-ref loss event).
+    // cleanup, at which point P0 loses control (the self-ref loss event). The
+    // trigger is installed after the steal, which itself is a loss for P1
+    // (CR 603.10d) that this row is not about.
     gain_until_eot(&mut runner, permanent, P0, permanent);
+    install_selfref_lose_control_draw(&mut runner, permanent);
     assert_eq!(
         runner.state().objects[&permanent].controller,
         P0,
@@ -274,10 +276,12 @@ fn duplicate_control_reversions_emit_one_loss_event() {
 
     make_artifact(&mut runner, permanent);
     make_artifact(&mut runner, extra_source);
-    install_selfref_lose_control_draw(&mut runner, permanent);
 
     gain_until_eot(&mut runner, permanent, P0, permanent);
     gain_until_eot(&mut runner, extra_source, P0, permanent);
+    // Installed after the steal, which itself is a loss for P1 (CR 603.10d)
+    // that this row is not about.
+    install_selfref_lose_control_draw(&mut runner, permanent);
     assert_eq!(
         runner.state().objects[&permanent].controller,
         P0,

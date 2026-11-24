@@ -65,6 +65,10 @@ PROBE_PIN_TRIGGER = TRIGGER_MODE_AUTO if IS_LINUX else TRIGGER_MODE_MANUAL
 ENGINE_SRC = [
     'crates/engine/src/',
     'crates/engine/Cargo.toml',
+    # `database/bracket_lists.rs` `include_str!`s this file from the repo root.
+    'data/bracket_lists.json',
+    # `ai_deck_manifest.rs` `include_str!`s the bundled AI Commander deck feed from here.
+    'crates/engine/data/',
     'crates/phase-ast/src/',
     'crates/phase-ast/data/',
     'crates/phase-ast/build.rs',

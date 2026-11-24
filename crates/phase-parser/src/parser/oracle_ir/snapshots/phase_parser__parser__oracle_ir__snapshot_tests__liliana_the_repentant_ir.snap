@@ -198,15 +198,15 @@ expression: "&ir"
           "first_line": 1,
           "last_line": 1,
           "start_byte": 78,
-          "end_byte": 284,
+          "end_byte": 278,
           "precision": "Exact",
           "ordinal_within_span": 0
         },
-        "fragment": "Exhaust — {5}{B}: Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on Liliana. Activate only as a sorcery. (Activate each exhaust ability only once.)"
+        "fragment": "Exhaust — {5}{B}: Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on ~. Activate only as a sorcery. (Activate each exhaust ability only once.)"
       },
       "node": {
         "Spell": {
-          "source_text": "Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on Liliana",
+          "source_text": "Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on ~",
           "body": {
             "clauses": [
               {
@@ -305,11 +305,11 @@ expression: "&ir"
                     "first_line": 0,
                     "last_line": 0,
                     "start_byte": 84,
-                    "end_byte": 114,
+                    "end_byte": 108,
                     "precision": "ChainRelative",
                     "ordinal_within_span": 1
                   },
-                  "fragment": "Put a +1/+1 counter on Liliana"
+                  "fragment": "Put a +1/+1 counter on ~"
                 },
                 "disposition": {
                   "Emit": {
@@ -326,14 +326,7 @@ expression: "&ir"
                       "value": 1
                     },
                     "target": {
-                      "type": "Typed",
-                      "type_filters": [
-                        {
-                          "Subtype": "Liliana"
-                        }
-                      ],
-                      "controller": null,
-                      "properties": []
+                      "type": "SelfRef"
                     }
                   },
                   "duration": null,
@@ -389,7 +382,7 @@ expression: "&ir"
             "ability_tag": {
               "type": "Exhaust"
             },
-            "description": "Exhaust — {5}{B}: Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on Liliana. Activate only as a sorcery.",
+            "description": "Exhaust — {5}{B}: Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter on ~. Activate only as a sorcery.",
             "stages": [
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"

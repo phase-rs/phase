@@ -69,6 +69,11 @@ interface DeckCompatibilityRequest {
   companion: string[];
   /** CR 903.13f(3): set codes the draft contained, latched by the draft session. */
   draft_set_codes: string[];
+  /**
+   * CR 100.2b + CR 702.139b: the draft session's own minimum deck size, which a
+   * Cube may configure away from 40. Absent keeps the selected format's minimum.
+   */
+  min_deck_size?: number | null;
   selected_format?: GameFormat | null;
   selected_match_type?: MatchType | null;
   selected_challenge_deck?: ChallengeDeck | null;
@@ -79,6 +84,8 @@ interface DeckCompatibilityRequest {
 interface EvaluateOptions {
   selectedFormat?: GameFormat | null;
   draftSetCodes?: readonly string[];
+  /** The draft session's resolved minimum deck size (engine-published `min_deck_size`). */
+  minDeckSize?: number | null;
   selectedMatchType?: MatchType | null;
   /**
    * The Horde challenge deck to validate survivor requirements against, with
@@ -108,6 +115,7 @@ function buildRequest(deck: ParsedDeck, options: EvaluateOptions): DeckCompatibi
     player_count: options.playerCount ?? 2,
     summary_only: options.summaryOnly ?? false,
     draft_set_codes: [...(options.draftSetCodes ?? [])],
+    min_deck_size: options.minDeckSize ?? null,
   };
 }
 
@@ -134,6 +142,7 @@ function compatibilityCacheKey(request: DeckCompatibilityRequest): string {
     // run `cd client && npx vitest run --coverage.enabled=false
     // src/services/__tests__/deckCompatibility.test.ts`.
     draft_set_codes: request.draft_set_codes,
+    min_deck_size: request.min_deck_size ?? null,
   });
 }
 

@@ -26,7 +26,8 @@
   "home": {
     "resume": {
       "title": "Spiel fortsetzen",
-      "description": "Setze die zuletzt gespeicherte Partie mit ihrem aktuellen Zug und Spielzustand fort."
+      "description": "Setze die zuletzt gespeicherte Partie mit ihrem aktuellen Zug und Spielzustand fort.",
+      "viewResult": "Ergebnis ansehen"
     },
     "setup": {
       "title": "Gegen KI spielen",
@@ -157,6 +158,7 @@
     "subscribe": "Abonnieren",
     "unsubscribe": "Abbestellen",
     "lastRefreshed": "Zuletzt aktualisiert: {{date}}",
+    "dataProvidedBy": "Daten bereitgestellt von",
     "addCustomFeed": "Eigenen Feed hinzufügen",
     "add": "Hinzufügen",
     "offlineUnavailable": "Feed-Aktualisierungen sind offline nicht verfügbar.",

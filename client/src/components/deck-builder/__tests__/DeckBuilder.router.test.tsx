@@ -1,3 +1,4 @@
+import { deckEntryKey, type DeckEntry } from "../../../services/deckParser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useEffect } from "react";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
@@ -36,13 +37,13 @@ vi.mock("../DeckList", () => ({
     onRemoveCard,
   }: {
     deck: { main: Array<{ name: string; count: number }> };
-    onRemoveCard: (name: string, section: "main" | "sideboard") => void;
+    onRemoveCard: (entry: DeckEntry, section: "main" | "sideboard") => void;
   }) => (
     <div>
       {deck.main.map((entry) => (
-        <div key={entry.name}>
+        <div key={deckEntryKey(entry)}>
           <span>{entry.count} {entry.name}</span>
-          <button type="button" onClick={() => onRemoveCard(entry.name, "main")}>
+          <button type="button" onClick={() => onRemoveCard(entry, "main")}>
             remove-{entry.name}
           </button>
         </div>

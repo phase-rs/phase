@@ -173,6 +173,14 @@ describe("GameSetupPage — commander damage", () => {
     expect(await screen.findByLabelText("Starting Life")).toBeInTheDocument();
     expect(screen.queryByLabelText("Commander Damage")).not.toBeInTheDocument();
   });
+
+  // Brawl formats have no commander-damage threshold, so the editor is hidden.
+  it.each(["Brawl", "HistoricBrawl"])("offers no commander damage editor in %s", async (format) => {
+    renderSetup(`/game-setup?format=${format}`);
+
+    expect(await screen.findByLabelText("Starting Life")).toHaveValue(25);
+    expect(screen.queryByLabelText("Commander Damage")).not.toBeInTheDocument();
+  });
 });
 
 describe("GameSetupPage — poison counters", () => {

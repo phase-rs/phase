@@ -150,12 +150,9 @@ fn parse_restriction_only_condition(text: &str) -> Option<ParsedCondition> {
     // `ParsedCondition` models source predicates as FIXED leaves (`SourceIsColor`,
     // `SourceLacksKeyword`, `SourceUntappedAttachedTo`). `parse_inner_condition` models
     // the same predicates as the filter-carrying `StaticCondition::SourceMatchesFilter`
-    // (or, for the attached subject, as a recipient-relative condition). A
-    // `ParsedCondition` cannot hold a `TargetFilter` for its source, so
-    // `static_condition_to_restriction_condition` has nowhere to put one — and
-    // destructuring individual filter shapes back into the fixed leaves would build for
-    // the card, not the class. Until the two condition vocabularies are aligned, the
-    // restriction reading of a source predicate must be produced here.
+    // (or, for the attached subject, as a recipient-relative condition).
+    // The shared restriction conversion admits the suspended-card filter. These
+    // other readings retain their specialized grammar and subject binding.
     //   positive: "~ is blue" -> SourceIsColor { Blue }
     //   hostile:  "~ is quixotic" -> None (unknown predicate stays unsupported)
     if let Some(condition) = parse_source_condition(text) {
@@ -245,6 +242,17 @@ fn static_condition_to_restriction_condition(
             .map(static_condition_to_restriction_condition)
             .collect::<Option<Vec<_>>>()
             .map(|conditions| ParsedCondition::And { conditions }),
+        // CR 602.5: This exact pair has a shared live-source restriction
+        // predicate even though the standalone blocking leaf has no equivalent.
+        StaticCondition::Or { conditions }
+            if matches!(
+                conditions.as_slice(),
+                [StaticCondition::SourceIsAttacking, StaticCondition::SourceIsBlocking]
+                    | [StaticCondition::SourceIsBlocking, StaticCondition::SourceIsAttacking]
+            ) =>
+        {
+            Some(ParsedCondition::SourceIsAttackingOrBlocking)
+        }
         StaticCondition::Or { conditions } => conditions
             .into_iter()
             .map(static_condition_to_restriction_condition)
@@ -288,6 +296,9 @@ fn static_condition_to_restriction_condition(
             Some(ParsedCondition::ControlsCommander { ownership })
         }
         // Source zone/state leaves with an exact restriction evaluator.
+        StaticCondition::SourceMatchesFilter { filter } if filter == TargetFilter::suspended_card(None) => {
+            Some(ParsedCondition::SourceMatchesFilter { filter })
+        }
         StaticCondition::SourceInZone { zone } => Some(ParsedCondition::SourceInZone { zone }),
         StaticCondition::SourceIsAttacking => Some(ParsedCondition::SourceIsAttacking),
         StaticCondition::SourceIsBlocked => Some(ParsedCondition::SourceIsBlocked),
@@ -322,6 +333,11 @@ fn static_condition_to_restriction_condition(
         StaticCondition::OpponentPoisonAtLeast { count } => {
             Some(ParsedCondition::OpponentPoisonAtLeast { count })
         }
+        // CR 122.1f + CR 109.5: "player is poisoned" — no `ParsedCondition`
+        // variant exists for this player-scoped poison check. The trigger-side
+        // bridge handles it via `TriggerCondition::IsPoisoned`, but the
+        // restriction surface (cast/activation gates) has no equivalent.
+        | StaticCondition::PlayerIsPoisoned { .. } => None,
         // CR 122.1: source-counter activation gate — "Activate only if it has no time
         // counters on it" (Temple of Cyclical Time) and the counter-threshold restriction
         // class generally. Adopted from #5677 (the L02 condition lane), which solved this
@@ -381,10 +397,8 @@ fn static_condition_to_restriction_condition(
         // the shared grammar understands, but `ParsedCondition` has no variant that
         // means the same thing, and approximating it would change what the card does.
         //
-        // `SourceMatchesFilter` / `IsTapped` / `DefendingPlayerControls` carry an
-        // arbitrary `TargetFilter`; `ParsedCondition`'s source predicates are fixed
-        // leaves (`SourceIsCreature`, `SourceIsColor`, …) that cannot hold one. Picking
-        // off individual filter shapes would build for the card, not the class.
+        // The source-filter conversion above admits the suspended-card predicate.
+        // Other filters and subjects still need an exact restriction interpretation.
         //
         // Closing any of these gaps means aligning the two vocabularies (a separate
         // migration), NOT adding a fallback here.
@@ -409,7 +423,7 @@ fn static_condition_to_restriction_condition(
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -449,6 +463,12 @@ fn static_condition_to_restriction_condition(
         // you), the same failure mode this match rejects for
         // `TopOfLibraryMatches` above.
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        // CR 508.6: retrospective this-turn player-pair attack test -- a
+        // delayed-resolution predicate, not a cast/activation restriction,
+        // and with no `ParsedCondition` counterpart (same vocabulary
+        // asymmetry as `AnyPlayerAttackedYouLastTurn` above). Lowering
+        // returns `None`.
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::CastingAsVariant { .. } => None,
     }
 }
@@ -514,8 +534,8 @@ fn counters_threshold_to_parsed_condition(
 /// "this card is suspended") are now parsed by `parse_inner_condition` and converted
 /// exactly, so they are gone from here. What remains are the leaves the conversion has
 /// nowhere to land: `parse_inner_condition` reads "~ is blue" / "~ doesn't have defender"
-/// as `StaticCondition::SourceMatchesFilter { filter }`, and `ParsedCondition` has no
-/// filter-carrying source variant to receive it.
+/// as `StaticCondition::SourceMatchesFilter { filter }`, and the restriction conversion admits
+/// only the suspended-card shape from that general filter family.
 fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
     // Subjects: "~"/"this <noun>" (self-reference), "enchanted <noun>" (Aura-attached),
     // "from your <zone>" (zone predicate).
@@ -992,6 +1012,34 @@ mod tests {
         }
     }
 
+    /// CR 701.14a: Boxing Ring's "Activate only if you control a creature that fought
+    /// this turn" — the relative clause rides inside the presence filter.
+    #[test]
+    fn fought_this_turn_presence_condition() {
+        match parse_restriction_condition("you control a creature that fought this turn") {
+            Some(ParsedCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(tf),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert!(tf.properties.contains(&FilterProp::FoughtThisTurn));
+            }
+            other => panic!("expected ObjectCount(creature that fought) >= 1, got {other:?}"),
+        }
+        assert_eq!(
+            parse_restriction_condition("you control a creature that fights this turn"),
+            None
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Compound conditions are parsed by the shared grammar, not by string splitting
     // -----------------------------------------------------------------------
@@ -1088,8 +1136,8 @@ mod tests {
     /// let the restriction-only grammar produce a weaker reading of the same words.
     ///
     /// "~ is a creature" is the witness: the shared grammar reads it as the
-    /// filter-carrying `SourceMatchesFilter`, which `ParsedCondition` has no variant to
-    /// hold.
+    /// filter-carrying `SourceMatchesFilter`; restriction lowering admits only the
+    /// suspended-card filter from that family.
     ///
     /// Fail-on-revert: routing `Unsupported` back into `parse_restriction_only_condition`
     /// makes this `Some(..)` again.
@@ -1107,7 +1155,7 @@ mod tests {
         }
 
         // "~ is a creature" is read by the shared grammar as the filter-carrying
-        // SourceMatchesFilter, which `ParsedCondition` has no variant to hold.
+        // SourceMatchesFilter outside the suspended-card restriction grammar.
         let creature = shared_static("~ is a creature");
         assert!(matches!(
             creature,
@@ -1353,7 +1401,6 @@ mod tests {
     fn legacy_misparses_are_now_honest_gaps() {
         for text in [
             // Dumped the whole qualifier into a stringly-typed subtype no permanent has.
-            "you control a creature that fought this turn",
             "you control two or more green permanents that share an artist",
             "you control an urza's mine, an urza's power-plant, and an urza's tower",
             // Compared "creatures you control" against ITSELF.
@@ -1421,7 +1468,7 @@ mod tests {
     }
 
     /// Source predicates `ParsedCondition` models as fixed leaves. The shared grammar
-    /// reads these as `SourceMatchesFilter`, which the conversion cannot receive, so the
+    /// reads these as `SourceMatchesFilter` outside the admitted suspended-card shape, so the
     /// restriction-only parser remains the authority.
     #[test]
     fn retained_source_predicates() {
@@ -1577,15 +1624,16 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::SpellsCastThisTurn {
+                            QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(TargetFilter::Or { .. }),
+                                window: crate::types::ability::TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 3 },
             } => {}
-            other => panic!("expected filtered SpellsCastThisTurn >= 3, got {other:?}"),
+            other => panic!("expected filtered SpellsCast >= 3, got {other:?}"),
         }
     }
 
@@ -1802,9 +1850,8 @@ mod retained_family_gate {
     const PINNED_RETAINED_FAMILIES: [&str; 4] = [
         // (a) restriction-context referent — the in-flight spell (CR 601.3d). PERMANENT.
         "parse_spell_targets_filter",
-        // (b) vocabulary gap — ParsedCondition has no filter-carrying source predicate,
-        //     so StaticCondition::SourceMatchesFilter cannot be converted. Root fix is a
-        //     vocabulary alignment, not a parser edit.
+        // (b) The restriction filter conversion admits the suspended-card family.
+        //     Other previously supported source predicates use their fixed leaves.
         "parse_source_condition",
         // (b) vocabulary gap — OWNER-relative count in a HIDDEN zone. TargetFilter has no
         //     owner axis and the ObjectCount path discriminates by CONTROLLER, so the

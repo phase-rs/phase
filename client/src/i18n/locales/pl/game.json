@@ -31,7 +31,6 @@
     "accept": "Accept",
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
-    "untilLethal": "Repeat until the game ends.",
     "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
@@ -51,16 +50,13 @@
     "allocationSum": "Przydzielono {{allocated}} z {{total}} powtórzeń.",
     "evenSplit": "Przywróć równy podział",
     "customDistribution": "Własny podział — silnik nie przygotował podglądu tego podziału.",
-    "announceTitle": "Wybierz cel ogłaszany w każdym powtórzeniu:",
-    "announce": "Ogłoś",
-    "announceAria": "Ogłoś {{subject}}",
     "mayTitle": "Zdolność opcjonalna {{group}} — powtórzyć ten wybór w każdej iteracji?",
     "mayTake": "Skorzystaj",
     "mayDecline": "Odrzuć",
     "mayTakeAria": "Skorzystaj ze zdolności opcjonalnej {{group}}",
     "mayDeclineAria": "Odrzuć zdolność opcjonalną {{group}}",
     "winKind": {
-      "LethalDamage": "This loop deals lethal damage.",
+      "LethalDamage": "This loop reduces an opponent's life total to 0 or less.",
       "PoisonLoss": "This loop gives lethal poison counters.",
       "Decking": "This loop decks an opponent.",
       "ImmediateWin": "This loop wins the game.",
@@ -70,6 +66,7 @@
     "respondDeclaredTitle": "Proponowana deklaracja:",
     "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. Efekt zastępujący: {{subject}}",
     "respondDecision": {
       "take": "{{subject}} — wykorzystanie w każdej iteracji",
       "decline": "{{subject}} — odrzucenie w każdej iteracji"
@@ -155,7 +152,8 @@
     "loading": "Wczytywanie {{name}}",
     "unimplemented": "Niezaimplementowane: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Obrócona"
+    "tapped": "Obrócona",
+    "reloadArt": "Dotknij, aby ponownie wczytać grafikę"
   },
   "preview": {
     "holdCtrlBack": "Przytrzymaj Ctrl, aby zobaczyć tylną stronę",
@@ -164,6 +162,8 @@
     "flip": "Odwróć",
     "report": "Zgłoś problem",
     "reported": "Zgłoszono ✓",
+    "reportNotSent": "Nie wysłano",
+    "reloadArt": "Wczytaj grafikę ponownie",
     "altParsedAbilities": "Alt: przeanalizowane zdolności",
     "debugId": "ID: {{id}}",
     "engineParse": "Analiza silnika",
@@ -673,6 +673,8 @@
     "commander": "Dowódca",
     "commanderTitle": "Dowódca: {{name}}",
     "commanderTitleTax": "Dowódca: {{name}} (Podatek: +{{tax}})",
+    "boss": "Boss",
+    "bossTitle": "Boss: {{name}}",
     "castCommander": "Rzuć {{name}} — kliknij dwukrotnie lub przeciągnij, aby zagrać",
     "castCommanderTax": "Rzuć {{name}} (Podatek: +{{tax}}) — kliknij dwukrotnie lub przeciągnij, aby zagrać",
     "ninjutsuCommander": "Ninjutsu dowódcy: {{name}} — kliknij, aby zwrócić niezablokowanego atakującego do ręki i umieścić tego dowódcę na polu bitwy przekręconego i atakującego",
@@ -836,7 +838,14 @@
     "lethalBadge": "Śmiertelne",
     "planeswalkerLoyalty": "Wędrowiec (lojalność: {{loyalty}})",
     "defendingPlayerTrample": "Broniący gracz (Tratowanie)",
+    "attackTargetTrample": "{{name}} (Tratowanie)",
     "pwControllerTrample": "Kontroler wędrowca (Tratowanie przez wędrowca)",
+    "lethalButton": "Śmiertelne",
+    "clearButton": "Wyczyść",
+    "assignLethalTo": "Przydziel śmiertelne obrażenia celowi {{target}}",
+    "clearDamageFor": "Wyczyść obrażenia przydzielone celowi {{target}}",
+    "lethalFirstButton": "Najpierw śmiertelne obrażenia",
+    "lethalFirstTitle": "Przydziel po kolei śmiertelne obrażenia każdemu blokującemu, a potem przydziel resztę",
     "assignRemainingButton": "+{{amount}}",
     "assignRemainingTo_few": "Przydziel pozostałe {{count}} obrażenia do: {{target}}",
     "assignRemainingTo_many": "Przydziel pozostałych {{count}} obrażeń do: {{target}}",
@@ -1241,6 +1250,7 @@
       "draw": "REMIS",
       "victory": "ZWYCIĘSTWO",
       "defeat": "PORAŻKA",
+      "complete": "KONIEC GRY",
       "lifeSummary": "Ty: <player>{{playerLife}}</player> <sep>/</sep> Przeciwnik: <opponent>{{opponentLife}}</opponent>",
       "turns": "Tury: {{count}}",
       "duration": "Czas trwania: {{time}}",
@@ -1337,7 +1347,10 @@
         "Ticket": "biletu"
       },
       "generic": "koszt",
-      "pay": "Zapłać {{cost}}"
+      "pay": "Zapłać {{cost}}",
+      "draw": "dobierz kartę",
+      "drawCount_one": "dobierz {{count}} kartę",
+      "drawCount_other": "dobierz {{count}} karty"
     },
     "unlessPayment": {
       "defaultEffect": "Skontruj, chyba że zapłacisz",
@@ -1345,7 +1358,8 @@
       "title": "{{effect}}, chyba że zapłacisz",
       "titleChooseOne": "{{effect}}, chyba że zapłacisz jeden",
       "dontPay": "Nie płać",
-      "takeEffect": "Przyjmij efekt"
+      "takeEffect": "Przyjmij efekt",
+      "priorChoice": "Gracz {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "Połącz z Arcane?",
@@ -1543,7 +1557,9 @@
       "titleReveal": "Ujawnij z ręki",
       "titleOpponentHand": "Ręka przeciwnika",
       "subtitleReveal": "Wybierz kartę do ujawnienia lub odmów",
-      "subtitleChoose": "Wybierz kartę"
+      "subtitleChoose": "Wybierz kartę",
+      "subtitleRevealAnyNumber": "Wybierz dowolną liczbę kart do ujawnienia",
+      "subtitleChooseCount": "Wybierz {{count}} kart"
     },
     "search": {
       "title": "Przeszukaj bibliotekę",
@@ -1807,6 +1823,10 @@
       "title": "Ustal kolejność kopii",
       "subtitle": "Wybierz czar, którego kopia trafi teraz na stos"
     },
+    "memberOrder": {
+      "title": "Ustal kolejność kart",
+      "subtitle": "Wybierz kartę, która zostanie rozpatrzona jako następna"
+    },
     "collectEvidence": {
       "title": "Zbierz dowody",
       "subtitle": "Wygnaj karty ze swojego cmentarza o łącznej wartości many {{minimum}} lub większej"
@@ -1847,6 +1867,13 @@
       "titleExact_one": "Odrzuć kartę",
       "titleExact_other": "Odrzuć {{count}} kart",
       "titleWard": "Ward — Odrzuć kartę",
+      "instructionWithReason": "{{reason}}: {{instruction}}",
+      "reason": {
+        "ward": "Ward",
+        "connive": "Connive",
+        "additionalCost": "Koszt dodatkowy",
+        "manaAbility": "Zdolność manowa"
+      },
       "subtitleUpTo_one": "Wybierz do {{count}} karty do odrzucenia",
       "subtitleUpTo_other": "Wybierz do {{count}} kart do odrzucenia",
       "subtitleUnless": "Wybierz {{count}} kart lub 1 pasującą kartę do odrzucenia",
@@ -2006,7 +2033,8 @@
     "scrollLeft": "Przewiń w lewo",
     "scrollRight": "Przewiń w prawo",
     "confirm": "Potwierdź",
-    "cancel": "Anuluj"
+    "cancel": "Anuluj",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Adventure",
@@ -2130,9 +2158,20 @@
     "title": "Wybierz odbiorcę prezentu",
     "subtitle": "Wybierz przeciwnika, który otrzyma obiecany prezent."
   },
+  "costRecipient": {
+    "title": "Wybierz przeciwnika",
+    "subtitle": "Wybierz przeciwnika dla tego kosztu: {{cost}}."
+  },
   "entryController": {
     "title": "Wybierz kontrolującego przy wejściu",
     "subtitle": "Wybierz przeciwnika, który kontroluje ten permanent, gdy wchodzi na pole bitwy."
+  },
+  "replacementDecisionOrder": {
+    "title": "Wybierz, którą decyzję podjąć najpierw",
+    "subtitle": "Te wybory zastąpienia zachodzą jednocześnie. Wybierz, którego dokonasz najpierw.",
+    "unknownObject": "Nieznany obiekt",
+    "attachedTo": "Na: {{host}}",
+    "attachments": "Z: {{names}}"
   },
   "optionalCost": {
     "gift": {
@@ -2300,6 +2339,13 @@
     "creatureFallback": "Stwór {{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Przydziel pozostałe {{count}} punkty celowi {{target}}",
+    "assignRemainingTo_many": "Przydziel {{count}} pozostałych punktów celowi {{target}}",
+    "assignRemainingTo_one": "Przydziel pozostały {{count}} punkt celowi {{target}}",
+    "assignRemainingTo_other": "Przydziel {{count}} pozostałych punktów celowi {{target}}",
+    "clearButton": "Wyczyść",
+    "clearTarget": "Wyczyść przydział dla celu {{target}}",
     "unitCounter": "znacznik {{counter}}",
     "unitDamage": "obrażeń",
     "unitLife": "życia",
@@ -2428,6 +2474,9 @@
     "optionalTriggers": "Opcjonalne zdolności wyzwalane ({{count, number}})",
     "replacementChoices": "Wybory zastępowania ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Przytrzymaj, aby zobaczyć całą kartę"
+  },
   "optionalEffect": {
     "sourceFallback": "Efekt",
     "title": "{{name}} - Efekt opcjonalny",
@@ -2484,6 +2533,8 @@
       "zoneHand": "twojej ręki",
       "discard": "Odrzuć {{count}} {{cards}}",
       "exile": "Wygnaj {{count}} {{cards}} z {{zone}}",
+      "haveOpponentGainLife": "Pozwól przeciwnikowi zyskać {{amount}} życia",
+      "haveEachOtherPlayerGainLife": "Pozwól każdemu innemu graczowi zyskać {{amount}} życia",
       "reveal": "Ujawnij {{count}} {{cards}} z {{zone}}"
     }
   },
@@ -2540,7 +2591,7 @@
     "appliedLast": "Zastosowany ostatni — ten zadziała",
     "resultLabel": "Wynik: {{outcome}}",
     "confirmOrder": "Potwierdź kolejność",
-    "dragHint": "Przeciągnij, aby zmienić kolejność, lub użyj strzałek.",
+    "dragHint": "Przeciągnij uchwyt <grip>⠿</grip>, aby zmienić kolejność, lub użyj strzałek.",
     "chooseSubtitle": "Wybierz, który efekt zastępujący zastosować.",
     "candidateFallback": "Efekt zastępujący {{number}}",
     "orderSubtitleComposing": "Wszystkie te efekty zmieniają przebieg tego zdarzenia. Przeciągnij, aby ustawić kolejność ich zastosowania — każdy zostanie zastosowany, więc kolejność zmienia wynik (CR 616.1).",
@@ -2549,6 +2600,7 @@
     "composesNote": "Każdy efekt zostaje zastosowany — kolejność zmienia sposób ich połączenia.",
     "moveUpNamed": "Przenieś {{name}} wcześniej",
     "moveDownNamed": "Przenieś {{name}} później",
+    "dragHandleNamed": "Przeciągnij {{name}}, aby zmienić kolejność",
     "positionAnnounce": "Pozycja {{position}} z {{total}}"
   },
   "retargetChoice": {
@@ -2568,6 +2620,9 @@
     "partitionSubtitle": "Rozdziel swoje stwory na dwa stosy. {{chooser}} wybierze jeden.",
     "partitionSubtitleRemaining_one": "Rozdziel swoje stwory na dwa stosy. {{chooser}} wybierze jeden. ({{count}} gracz więcej po tobie)",
     "partitionSubtitleRemaining_other": "Rozdziel swoje stwory na dwa stosy. {{chooser}} wybierze jeden. ({{count}} graczy więcej po tobie)",
+    "partitionInstruction": "{{chooser}} wybiera jeden",
+    "partitionInstructionRemaining_one": "{{chooser}} wybiera jeden ({{count}} gracz więcej po tobie)",
+    "partitionInstructionRemaining_other": "{{chooser}} wybiera jeden ({{count}} graczy więcej po tobie)",
     "pileALabel": "Stos A:",
     "pileBLabel": "Stos B:",
     "pileAria": "{{name}} — stos {{pile}}",
@@ -2649,6 +2704,7 @@
   },
   "outsideGame": {
     "fromExile": "Z wygnania",
+    "fromCompanion": "Z towarzysza",
     "fromSideboard": "Z zaplecza",
     "fromBoosterPack": "Z boostera {{setCode}}",
     "fromCubeBoosterPack": "Z boostera cube"
@@ -2673,6 +2729,20 @@
     "EndCombat": "Koniec walki",
     "PostCombatMain": "Główna faza 2",
     "End": "Krok końcowy",
+    "Cleanup": "Sprzątanie"
+  },
+  "phaseShortName": {
+    "Untap": "Odwracanie",
+    "Upkeep": "Utrzymanie",
+    "Draw": "Dobieranie",
+    "PreCombatMain": "Główna 1",
+    "BeginCombat": "Walka",
+    "DeclareAttackers": "Atakujący",
+    "DeclareBlockers": "Blokujący",
+    "CombatDamage": "Obrażenia",
+    "EndCombat": "Koniec walki",
+    "PostCombatMain": "Główna 2",
+    "End": "Koniec",
     "Cleanup": "Sprzątanie"
   },
   "counterMoveDistribution": {

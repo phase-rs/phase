@@ -18,19 +18,24 @@
 //!   - CR 608.2h: Last-known information is the authority once the object has moved.
 //!   - CR 704.3: State-based actions are checked in one pass before priority.
 //!   - CR 704.5m: An Aura attached to an illegal player is put into its owner's graveyard.
+//!
+//! The look-back is the departure's latched pre-loss game: `PlayerLost` is matched against
+//! the observers as they were immediately before the loss (`triggers.rs`,
+//! `departure_event_looks_back`). "The admission arm" below names that path.
 
 use std::collections::HashMap;
 
 use engine::game::effects::attach::attach_to_player;
 use engine::game::layers::evaluate_layers;
-use engine::game::sba::check_state_based_actions;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::trigger_index::reindex_object_triggers;
-use engine::game::triggers::{drain_order_triggers_with_identity, process_triggers};
+use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{AbilityDefinition, Effect, TargetFilter};
+use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -89,7 +94,7 @@ fn live_attached_to(
 fn player_lost_emitted(events: &[GameEvent], player: PlayerId) -> bool {
     events
         .iter()
-        .any(|e| matches!(e, GameEvent::PlayerLost { player_id } if *player_id == player))
+        .any(|e| matches!(e, GameEvent::PlayerLost { player_id, .. } if *player_id == player))
 }
 
 /// Stage `count` spite counters on `id`.
@@ -389,14 +394,20 @@ fn run_player_loss_pass(specs: &[CurseSpec]) -> RuntimeFixture {
         .map(|id| (*id, live_attached_to(&runner, *id)))
         .collect();
 
-    // Drive the REAL CR 104.3b state-based loss.
+    // Drive the REAL CR 104.3b state-based loss through the production entry.
     runner.state_mut().players[2].life = 0;
-
-    let mut events = Vec::new();
-    check_state_based_actions(runner.state_mut(), &mut events);
-    process_triggers(runner.state_mut(), &events);
-    drain_order_triggers_with_identity(runner.state_mut());
-    runner.advance_until_stack_empty();
+    let events = runner.act(GameAction::PassPriority).expect("pass").events;
+    for _ in 0..40 {
+        match runner.state().waiting_for {
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            _ => break,
+        }
+    }
 
     RuntimeFixture {
         runner,
@@ -625,17 +636,15 @@ fn a3_hostile_two_curses_on_the_losing_player_pay_their_own_controllers() {
 ///   1. CR 104.3b eliminates P2 at 0 life.
 ///   2. CR 704.5m sweeps the now-illegally-attached Aura to its owner's graveyard.
 ///   3. CR 704.5d then makes the token CEASE TO EXIST, removing it from
-///      `state.objects` outright — all before `process_triggers` runs.
+///      `state.objects` outright — all before triggers are collected.
 ///
-/// The admission arm's guard therefore sees an ABSENT object, not an
-/// off-battlefield one. CR 603.10f still requires the trigger to fire, with the
-/// departure record's CR 608.2h last-known information supplying both the
-/// attachment identity and the spite count.
+/// The live game therefore holds no such object. CR 603.10f still requires the
+/// trigger to fire: the observers latched immediately before the loss still
+/// hold the token Aura attached to P2, with its spite counters.
 ///
-/// REVERT-FAILING ASSERTIONS: `P0 life == 20 + 4` and `P0 hand == 4`. With the
-/// pre-fix guard (`!...is_some_and(|o| o.zone != Zone::Battlefield)`) an absent
-/// object returns `false` from `is_some_and`, the `!` turns that into
-/// `continue`, and the token Curse is SKIPPED — measured `+0/+0`.
+/// REVERT-FAILING ASSERTIONS: `P0 life == 20 + 4` and `P0 hand == 4`. A
+/// collection that read the live game after the pass skips the token Curse —
+/// measured `+0/+0`.
 ///
 /// REACH-GUARDS (so a `+0/+0` can never be blamed on a dead fixture):
 ///   - `PlayerLost{P2}` was emitted by the real SBA pass;

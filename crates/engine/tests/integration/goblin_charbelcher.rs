@@ -9,8 +9,13 @@
 //! included, goes to the library bottom.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
+use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::visibility::{
+    filter_events_for_viewer, filter_state_for_unseated_viewer, filter_state_for_viewer,
+    HIDDEN_CARD_NAME,
+};
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -316,9 +321,32 @@ fn replacement_child_reveal_does_not_replace_the_parents_pile() {
         .id();
     let spell = scenario.add_spell_to_library_top(P0, "Spell A", false).id();
     let mut runner = scenario.build();
+    let forest_incarnation_before = runner.state().objects[&forest].incarnation;
 
     let source = charbelcher(&runner);
     runner.activate(source, 0).target_object(swans).resolve();
+
+    // CR 701.20a: the Forest is still revealed to every audience while the
+    // intervening prompts of the same resolution are open. It is still relevant
+    // to Charbelcher's pending "put the revealed cards on the bottom"
+    // instruction, so hiding it now would also leave its old occurrence for
+    // that reorder to retire.
+    let forest_visible_to =
+        |runner: &GameRunner, viewer: Option<engine::types::player::PlayerId>| {
+            let projected = match viewer {
+                Some(viewer) => filter_state_for_viewer(runner.state(), viewer),
+                None => filter_state_for_unseated_viewer(runner.state()),
+            };
+            projected.objects[&forest].name != HIDDEN_CARD_NAME
+        };
+    let assert_forest_revealed_at = |runner: &GameRunner, prompt: &str| {
+        for (label, viewer) in [("P0", Some(P0)), ("P1", Some(P1)), ("unseated", None)] {
+            assert!(
+                forest_visible_to(runner, viewer),
+                "{label}: the Forest is still revealed at the {prompt} prompt"
+            );
+        }
+    };
 
     // Reach guards: the interactive replacement path actually ran.
     let mut saw_replacement_choice = false;
@@ -327,12 +355,14 @@ fn replacement_child_reveal_does_not_replace_the_parents_pile() {
         match runner.state().waiting_for.clone() {
             WaitingFor::ReplacementChoice { .. } => {
                 saw_replacement_choice = true;
+                assert_forest_revealed_at(&runner, "replacement");
                 runner
                     .act(GameAction::ChooseReplacement { index: 0 })
                     .expect("accept Abundance's optional replacement");
             }
             WaitingFor::NamedChoice { .. } => {
                 saw_kind_choice = true;
+                assert_forest_revealed_at(&runner, "named");
                 runner
                     .act(GameAction::ChooseOption {
                         choice: "Nonland".to_string(),
@@ -354,6 +384,19 @@ fn replacement_child_reveal_does_not_replace_the_parents_pile() {
         "Abundance's optional replacement was offered"
     );
     assert!(saw_kind_choice, "the land-or-nonland choice was made");
+
+    // CR 701.20d: the Forest was reordered to the bottom by Charbelcher's own
+    // placement, so it stops being revealed and becomes a new object. Without
+    // the reveal surviving the prompts above there is no membership to retire
+    // and the old occurrence would survive the move.
+    assert!(
+        runner.state().objects[&forest].incarnation > forest_incarnation_before,
+        "the reordered Forest is a new object, not its pre-reorder occurrence"
+    );
+    assert!(
+        !runner.state().revealed_cards.contains(&forest),
+        "the reordered Forest stops being revealed"
+    );
 
     let state = runner.state();
     let hand: Vec<ObjectId> = state.players[P0.0 as usize].hand.iter().copied().collect();
@@ -536,4 +579,183 @@ fn nested_ordering_pauses_arrange_each_pile_separately() {
         vec![d1, d2, d3, a, b],
         "the parent's arrangement [A, B], not the child's [B, A], decides the bottom"
     );
+}
+
+/// CR 701.20d + CR 400.7: a card that a later reveal in the same action
+/// reorders is a new object, and the knowledge published at that action's
+/// boundary binds to the occurrence each reveal disclosed — never to the new
+/// object holding the same storage id.
+///
+/// P0's library is Grizzly Bears, Lightning Bolt, Forest, then two deeper cards.
+/// Goblin Charbelcher reveals the top three and deals 2 damage to P1's Swans of
+/// Bryn Argoll, which prevents it, so P0 draws two cards. The first draw is
+/// ordinary (Grizzly Bears). Abundance replaces the second: choosing land, it
+/// reveals Lightning Bolt — still revealed by Charbelcher, so its reveal is not
+/// re-recorded — and the Forest, puts the Forest into P0's hand and the Bolt on
+/// the bottom below the deeper cards. That reorder retires the Bolt's revealed
+/// occurrence. Every viewer keeps the reveals' names and the Forest's identity
+/// in hand; nobody learns which object now sits on the bottom.
+#[test]
+fn reordered_reveal_is_not_republished_at_its_new_occurrence() {
+    let db = crate::support::shared_card_db().expect("the fixture contains the printed cards");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let charbelcher = scenario.add_real_card(P0, "Goblin Charbelcher", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Abundance", Zone::Battlefield, db);
+    let swans = scenario.add_real_card(P1, "Swans of Bryn Argoll", Zone::Battlefield, db);
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    // `add_real_card` appends to the library, so the first card added is on top.
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Library, db);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Library, db);
+    let forest = scenario.add_real_card(P0, "Forest", Zone::Library, db);
+    let island = scenario.add_real_card(P0, "Island", Zone::Library, db);
+    let counterspell = scenario.add_real_card(P0, "Counterspell", Zone::Library, db);
+    for _ in 0..3 {
+        scenario.add_real_card(P1, "Plains", Zone::Library, db);
+    }
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![bears, bolt, forest, island, counterspell],
+        "reach guard: the staged library order"
+    );
+
+    runner
+        .activate(charbelcher, 0)
+        .target_object(swans)
+        .resolve();
+    let bolt_disclosed = runner.state().objects[&bolt].incarnation;
+    assert!(
+        runner.state().revealed_cards.contains(&bolt),
+        "reach guard: Charbelcher's reveal of the Bolt is still open at Swans' draws"
+    );
+
+    let mut events: Vec<GameEvent> = Vec::new();
+    let mut replacement_offers = 0;
+    let mut kind_choices = 0;
+    for _ in 0..16 {
+        let result = match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { candidates, .. } => {
+                let descriptions: Vec<&str> =
+                    candidates.iter().map(|c| c.description.as_str()).collect();
+                assert_eq!(descriptions, vec!["Accept", "Decline"]);
+                replacement_offers += 1;
+                // Decline the first draw, replace the second.
+                let index = if replacement_offers == 1 { 1 } else { 0 };
+                runner.act(GameAction::ChooseReplacement { index })
+            }
+            WaitingFor::NamedChoice { .. } => {
+                kind_choices += 1;
+                runner.act(GameAction::ChooseOption {
+                    choice: "Land".to_string(),
+                })
+            }
+            WaitingFor::RevealUntilBottomOrder { cards, .. }
+            | WaitingFor::EffectZoneChoice { cards, .. } => {
+                runner.act(GameAction::SelectCards { cards })
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                runner.act(GameAction::PassPriority)
+            }
+            _ => break,
+        };
+        events.extend(result.expect("the prompt accepts the answer").events);
+    }
+    assert_eq!(
+        replacement_offers, 2,
+        "Abundance was offered for both draws"
+    );
+    assert_eq!(kind_choices, 1, "only the replaced draw chose a kind");
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+
+    let state = runner.state();
+    let hand: Vec<ObjectId> = state.players[P0.0 as usize].hand.iter().copied().collect();
+    assert_eq!(
+        hand,
+        vec![bears, forest],
+        "the ordinary draw, then Abundance's land"
+    );
+    let library: Vec<ObjectId> = state.players[P0.0 as usize]
+        .library
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(
+        library,
+        vec![island, counterspell, bolt],
+        "Abundance bottomed the Bolt below the deeper cards"
+    );
+    assert!(
+        state.objects[&bolt].incarnation > bolt_disclosed,
+        "CR 701.20d: the reordered Bolt is a new object"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::CardsRevealed { card_ids, .. } if card_ids == &vec![bolt, forest]
+        )),
+        "reach guard: Abundance's reveal disclosed the Bolt and the Forest"
+    );
+
+    // The table was never shown the Bolt's new occurrence.
+    assert!(!state.revealed_cards.contains(&bolt));
+    assert!(!state.public_revealed_cards.contains(&bolt));
+    assert!(
+        !state.viewer_knows_card_identity(P1, bolt),
+        "the opponent learned no fact about the bottomed Bolt"
+    );
+    for (label, projected) in [
+        ("P1", filter_state_for_viewer(state, P1)),
+        ("unseated", filter_state_for_unseated_viewer(state)),
+    ] {
+        assert_eq!(
+            projected.objects[&bolt].name, HIDDEN_CARD_NAME,
+            "{label}: the bottomed Bolt is concealed"
+        );
+        // CR 701.20a: the table saw which revealed card was put into the hand.
+        assert_eq!(
+            projected.objects[&forest].name, "Forest",
+            "{label}: the Forest put into hand stays identified"
+        );
+    }
+
+    // The reveal history keeps its names; only the hidden object's id is gone.
+    for (label, viewer) in [("P1", P1), ("unseated", engine::types::player::PlayerId(9))] {
+        let filtered = filter_events_for_viewer(&events, state, viewer);
+        let abundance_reveal = filtered
+            .iter()
+            .find_map(|event| match event {
+                GameEvent::CardsRevealed {
+                    card_ids,
+                    card_names,
+                    ..
+                } if card_names.iter().any(|i: &String| i == "Forest") => {
+                    Some((card_ids.clone(), card_names.clone()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label}: Abundance's reveal reaches the viewer"));
+        assert_eq!(
+            abundance_reveal,
+            (
+                vec![forest],
+                vec!["Lightning Bolt".to_string(), "Forest".to_string()]
+            ),
+            "{label}: the revealed names survive; the bottomed Bolt's id does not"
+        );
+    }
 }

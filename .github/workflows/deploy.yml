@@ -323,11 +323,14 @@ jobs:
         # The publication job runs on a fresh runner. Transfer only its
         # generated inputs so the preview-server matrix can overlap Scryfall,
         # audit, compression, and R2 work instead of re-generating card data.
+        # card-data.provenance.json travels with data/card-data.json because
+        # the card-data job's coverage-report refuses an export without it.
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: preview-inputs
           path: |
             data/card-data.json
+            data/card-data.provenance.json
             client/public/card-data-*.json
             client/public/card-data.*.json
             !client/public/card-data.json

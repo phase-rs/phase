@@ -79,10 +79,64 @@ use super::oracle_effect::conditions::{
 use super::oracle_effect::strip_trailing_duration;
 use super::oracle_ir::ast::is_play_from_exile_lifetime_duration;
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::effect_chain::RepeatCount;
 use super::oracle_nom::bridge::nom_on_lower;
 use crate::types::ability::{
-    AbilityCondition, Duration, OpponentMayScope, PlayerFilter, QuantityExpr,
+    AbilityCondition, AbilityDefinition, Duration, Effect, OpponentMayScope, PlayerFilter,
+    PlayerScope, QuantityExpr,
 };
+
+/// CR 118.12 + CR 115.10a: bind the possessive in an *offered* payment's amount
+/// to the player being offered it, at the point where the shell's subject is
+/// known.
+///
+/// "Any player may pay half their life, rounded up" — the "their" is the
+/// responder's, because the shell's own subject is the responder. A
+/// third-person possessive otherwise lowers to [`PlayerScope::Target`], which is
+/// the right encoding when the ability really does announce a player target
+/// (Astarion's "life they lost this turn" resolves against its target), but in
+/// this shell there is no such target and the anaphor would dangle — resolving
+/// to 0, making the cost free and firing the "If a player does" rider for
+/// nothing.
+///
+/// This is the single authority for that binding, and it lives here rather than
+/// at runtime deliberately. The runtime cannot tell the two cases apart: it read
+/// "no player in `ability.targets`" as proof that no player target was
+/// announced, but `ability_with_event_context_targets` also populates those
+/// slots from the triggering event, and CR 115.10a distinguishes an affected
+/// object or player from a target. So an event-hydrated slot made the runtime
+/// skip a rebind it owed. The shell knows the answer unambiguously; the event
+/// does not.
+///
+/// Visits BOTH operands, matching the where-X pass in
+/// `oracle_effect/lower.rs`, which already binds `scale` before `cost`. The
+/// previous runtime rewrite destructured `Effect::PayCost { payer, cost, .. }`
+/// and so silently skipped `scale` — a per-object scaled amount kept its
+/// dangling anaphor.
+pub(crate) fn bind_offered_payment_possessive(def: &mut AbilityDefinition) {
+    let Effect::PayCost { cost, scale, .. } = def.effect.as_mut() else {
+        return;
+    };
+    if let Some(times) = scale.as_mut() {
+        rebind_dangling_possessive_to_responder(times);
+    }
+    cost.for_each_quantity_expr_mut(&mut rebind_dangling_possessive_to_responder);
+}
+
+/// CR 118.12: rewrite a dangling third-person possessive onto the scoped player.
+///
+/// Goes through the traversal authorities (`each_ref_mut` -> `player_scope_mut`)
+/// rather than matching one cost shape, so every quantity-bearing cost in the
+/// class is covered.
+fn rebind_dangling_possessive_to_responder(expr: &mut QuantityExpr) {
+    expr.each_ref_mut(&mut |qty| {
+        if let Some(scope) = qty.player_scope_mut() {
+            if *scope == PlayerScope::Target {
+                *scope = PlayerScope::ScopedPlayer;
+            }
+        }
+    });
+}
 
 /// Synthesized attributes accumulated by `peel_clause` as it strips
 /// structural slots off the head of a clause.
@@ -118,7 +172,8 @@ pub(crate) struct ClauseContext {
     pub(crate) may_implicit_player_scope: Option<PlayerFilter>,
     /// CR 608.2c: `for each [qty], ` prefix or trailing `twice` / `N times` — the
     /// controller follows the instruction as written, once per counted iteration.
-    pub(crate) repeat_for: Option<QuantityExpr>,
+    /// The timing comes from the peel (`RepeatCount::for_each_prefix`).
+    pub(crate) repeat_for: Option<RepeatCount>,
     /// CR 109.5: `each opponent` / `each player` subject-prefix iteration scope.
     pub(crate) player_scope: Option<PlayerFilter>,
     /// CR 608.2c + CR 109.4: gates the "each of your other opponents" subject
@@ -253,9 +308,9 @@ fn peel_inner(text: String, mut ctx: ClauseContext) -> (String, ClauseContext) {
     }
 
     // Repeat-for: "for each [qty], " leading prefix (CR 608.2c: the instruction is
-    // followed as written, once per counted iteration). CR 102.2: "for each
-    // opponent, choose … that player controls" is a per-opponent choice, not a
-    // repeat count, and keeps its prefix.
+    // followed as written, once per counted iteration). "for each opponent,
+    // choose … that player controls" is a per-opponent choice, not a repeat
+    // count, and keeps its prefix.
     if ctx.repeat_for.is_none()
         && !super::oracle_effect::is_for_each_opponent_choose_controlled(&text.to_lowercase())
         && !super::oracle_effect::is_object_exiler_play_grant(&text.to_lowercase())
@@ -305,8 +360,9 @@ enum YouMayBlocklist {
 
 /// CR 608.2c: Peel a leading `for each [qty], ` repeat prefix — the controller
 /// follows the instruction as written, once per counted iteration.
-/// Delegates to the existing `strip_for_each_prefix` building block.
-pub(crate) fn peel_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
+/// Delegates to the existing `strip_for_each_prefix` building block. The timing
+/// comes from the peel (`RepeatCount::for_each_prefix`).
+pub(crate) fn peel_for_each_prefix(text: &str) -> (Option<RepeatCount>, String) {
     super::oracle_effect::lower::strip_for_each_prefix(text)
 }
 
@@ -741,6 +797,7 @@ fn is_specialized_put_body(rest_lower: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::RepeatForTiming;
 
     #[test]
     fn peel_optional_prefix_strips_you_may() {
@@ -1191,6 +1248,11 @@ mod tests {
     fn peel_for_each_prefix_strips_repeat_quantity() {
         let (qty, rest) = peel_for_each_prefix("for each creature you control, draw a card");
         assert!(qty.is_some());
+        // CR 608.2c + CR 101.4: the peel carries the for-each timing.
+        assert_eq!(
+            qty.as_ref().map(RepeatCount::timing),
+            Some(RepeatForTiming::SimultaneousInstances)
+        );
         assert_eq!(rest, "draw a card");
     }
 
@@ -1198,6 +1260,10 @@ mod tests {
     fn peel_clause_combines_for_each_and_player_scope() {
         let (peeled, ctx) = peel_clause("for each opponent, each opponent loses 1 life");
         assert!(ctx.repeat_for.is_some());
+        assert_eq!(
+            ctx.repeat_for.as_ref().map(RepeatCount::timing),
+            Some(RepeatForTiming::SimultaneousInstances)
+        );
         assert_eq!(ctx.player_scope, Some(PlayerFilter::Opponent));
         assert_eq!(peeled, "lose 1 life");
     }

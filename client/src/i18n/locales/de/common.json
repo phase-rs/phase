@@ -72,7 +72,7 @@
   },
   "comboDetector": {
     "label": "Combo-Detektor (experimentell)",
-    "title": "Unendliche Schleifen erkennen: Pflichtschleifen automatisch beenden und ∞-Ressourcen anzeigen (standardmäßig aus)",
+    "title": "Unendliche Schleifen erkennen: Pflichtschleifen automatisch beenden, Abkürzungen für Schleifen anbieten, die ein Spieler steuert, und ∞-Ressourcen anzeigen (standardmäßig aus)",
     "off": "Aus",
     "interactive": "Interaktiv"
   },
@@ -330,6 +330,11 @@
     "heading": "Etwas ist schiefgelaufen",
     "body": "Die App ist auf einen unerwarteten Fehler gestoßen und kann auf diesem Bildschirm nicht fortfahren. Ein Neuladen behebt das meist.",
     "reload": "Neu laden"
+  },
+  "stateCodec": {
+    "actionInterrupted": "Die Übertragung des Spielzustands wurde während der Aktion unterbrochen",
+    "submissionNotSent": "Die Übertragung des Spielzustands wird wiederhergestellt; diese Aktion wurde nicht gesendet.",
+    "reconnectSubmissionNotSent": "Die Verbindung wird wiederhergestellt; diese Aktion wurde nicht gesendet."
   },
   "actionError": {
     "title": "{{action}} fehlgeschlagen",

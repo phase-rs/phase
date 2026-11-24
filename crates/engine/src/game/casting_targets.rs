@@ -171,6 +171,7 @@ pub(crate) fn handle_select_modes(
         pending_x.declared_mana_additions = pending.declared_mana_additions.clone();
         pending_x.target_constraints = pending.target_constraints;
         pending_x.casting_variant = pending.casting_variant;
+        pending_x.alternative_cost_keyword = pending.alternative_cost_keyword.clone();
         pending_x.casting_permission_index = pending.casting_permission_index;
         pending_x.cast_timing_permission = pending.cast_timing_permission;
         pending_x.distribute = pending.distribute;
@@ -292,6 +293,7 @@ pub(crate) fn handle_select_modes(
         pending_sel.declared_mana_additions = pending.declared_mana_additions.clone();
         pending_sel.target_constraints = pending.target_constraints;
         pending_sel.casting_variant = pending.casting_variant;
+        pending_sel.alternative_cost_keyword = pending.alternative_cost_keyword.clone();
         pending_sel.casting_permission_index = pending.casting_permission_index;
         pending_sel.origin_zone = pending.origin_zone;
         pending_sel.additional_cost_flow = pending.additional_cost_flow;
@@ -804,6 +806,9 @@ pub(crate) fn emit_ability_activated(
 /// CR 702.142b + CR 702.177a: If the activated ability at `ability_index` on
 /// the source object has a keyword ability tag, emit the matching activation
 /// event so "whenever you activate a [keyword] ability" triggers can see it.
+/// CR 702.29c + CR 702.29f: Stack placement publishes `Cycled` from the
+/// announced activation. CR 702.29d: The discard cost's `Discarded` event
+/// supplies the single occurrence for "cycle or discard" triggers.
 pub(crate) fn emit_keyword_ability_event_if_tagged(
     state: &GameState,
     source_id: ObjectId,
@@ -819,20 +824,12 @@ pub(crate) fn emit_keyword_ability_event_if_tagged(
         return;
     };
     if let Some(ability_tag) = def.ability_tag {
-        // CR 702.29c: Cycling does not use the generic `KeywordAbilityActivated`
-        // path — activating it emits a dedicated `GameEvent::Cycled` so "When you
-        // cycle this card" triggers fire. The card has already been discarded to
-        // the graveyard as the cycling cost (the zone the trigger fires from).
-        // The cost also emitted a `Discarded` event, so "whenever you discard"
-        // and "cycle or discard" (CR 702.29d, matched on `Discarded`) still fire
-        // exactly once.
+        // CR 702.29c + CR 702.29f: Cycling uses the dedicated placement event.
         if ability_tag == AbilityTag::Cycling {
-            events.push(GameEvent::Cycled {
-                player_id: player,
-                object_id: source_id,
-            });
             return;
         }
+        // CR 702.177a + CR 605.1a + CR 605.3b: Keep the mana route's Exhaust
+        // event distinguishable from activation of an Exhaust stack ability.
         let is_mana_ability =
             ability_tag == AbilityTag::Exhaust && super::mana_abilities::is_mana_ability(def);
         events.push(GameEvent::KeywordAbilityActivated {

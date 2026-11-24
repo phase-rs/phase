@@ -6,6 +6,7 @@ use draft_core::types::{
     PackDistribution, PairingStatus,
 };
 use draft_core::view::DraftPlayerView;
+use engine::database::ComboTable;
 use engine::types::player::PlayerId;
 use rand::Rng;
 use tracing::{info, warn};
@@ -205,6 +206,10 @@ pub struct DraftSessionManager {
     pub reconnect: ReconnectManager,
     /// Maps player_token -> draft_code for O(1) token-based lookups.
     token_to_draft: HashMap<String, String>,
+    /// The card data this server hosts the engine with. A deck submission's
+    /// companion designation is checked against it (CR 702.139a/b); without it
+    /// a designation fails closed.
+    card_db: Option<std::sync::Arc<engine::database::CardDatabase>>,
 }
 
 impl DraftSessionManager {
@@ -213,7 +218,15 @@ impl DraftSessionManager {
             sessions: HashMap::new(),
             reconnect: ReconnectManager::default(),
             token_to_draft: HashMap::new(),
+            card_db: None,
         }
+    }
+
+    /// Supply the server's card database so deck submissions can be checked
+    /// against the engine's companion eligibility authority.
+    pub fn with_card_db(mut self, db: std::sync::Arc<engine::database::CardDatabase>) -> Self {
+        self.card_db = Some(db);
+        self
     }
 
     /// Create a new draft session. Returns (draft_code, player_token, seat_index).
@@ -379,6 +392,7 @@ impl DraftSessionManager {
         // auto-report), so bot/auto picks are unaffected.
         let action = authorize_client_draft_action(seat, action)?;
         admit_dormant_action(&session.session, &action)?;
+        check_submit_companion(&session.session, self.card_db.as_deref(), &action)?;
 
         let clears_lobby = matches!(action, DraftAction::StartDraft);
 
@@ -413,6 +427,7 @@ impl DraftSessionManager {
             .get_mut(draft_code)
             .ok_or_else(|| format!("Draft not found: {}", draft_code))?;
         admit_dormant_action(&session.session, &action)?;
+        check_submit_companion(&session.session, self.card_db.as_deref(), &action)?;
 
         let clears_lobby = matches!(action, DraftAction::StartDraft);
 
@@ -754,6 +769,7 @@ impl DraftSessionManager {
         draft_code: &str,
         game_mgr: &mut SessionManager,
         db: &std::sync::Arc<engine::database::CardDatabase>,
+        combos: &ComboTable,
         round: u8,
     ) -> Result<Vec<DraftMatchSpawn>, String> {
         let session = self
@@ -789,7 +805,7 @@ impl DraftSessionManager {
                             seat, pairing.match_id
                         )
                     })?;
-                    deck_payload_from_submission(db, submission)
+                    deck_payload_from_submission(db, combos, submission)
                 })
                 .collect();
             let decks = match deck_payloads {
@@ -934,6 +950,7 @@ pub struct DraftMatchPlayer {
 
 fn deck_payload_from_submission(
     db: &engine::database::CardDatabase,
+    combos: &ComboTable,
     submission: &DraftDeckSubmission,
 ) -> Result<engine::game::deck_loading::PlayerDeckPayload, String> {
     let deck = DeckData {
@@ -959,12 +976,13 @@ fn deck_payload_from_submission(
         //
         // A Commander pod launches client-side; see the pod launch path.
         commander: Vec::new(),
+        companion: submission.companion.clone().into_iter().collect(),
         attraction_deck: Vec::new(),
         signature_spell: Vec::new(),
         printings: submission.printings.clone(),
         ..Default::default()
     };
-    deck_resolve::resolve_deck(db, &deck)
+    deck_resolve::resolve_deck(db, combos, &deck)
 }
 
 impl Default for DraftSessionManager {
@@ -996,6 +1014,45 @@ fn admit_dormant_action(
         return Err(draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME.to_string());
     }
     Ok(())
+}
+
+/// CR 702.139a/b: a native deck submission's companion designation is checked
+/// by the engine's Limited eligibility authority BEFORE the reducer mutates, so
+/// the server never acknowledges a deck that match admission would refuse. Every
+/// other action passes through untouched.
+fn check_submit_companion(
+    session: &draft_core::types::DraftSession,
+    db: Option<&engine::database::CardDatabase>,
+    action: &DraftAction,
+) -> Result<(), String> {
+    let DraftAction::SubmitDeck {
+        main_deck,
+        commanders,
+        companion,
+        ..
+    } = action
+    else {
+        return Ok(());
+    };
+    draft_core::session::check_submission_companion(
+        session,
+        db,
+        main_deck,
+        commanders,
+        companion.as_deref(),
+    )
+    .map_err(|e| match e {
+        // Carry the refusal's own reason, as the wasm submit path does.
+        draft_core::types::DraftError::ValidationFailed { errors } => format!(
+            "Draft error: {}",
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        other => format!("Draft error: {other}"),
+    })
 }
 
 /// Authorize a client-originated draft action against the authenticated seat.
@@ -1041,16 +1098,19 @@ fn authorize_client_draft_action(seat: usize, action: DraftAction) -> Result<Dra
             card_instance_ids,
         }),
         // The seat is table authority and is overwritten with the authenticated
-        // one; designations and owner printings are carried through untouched.
+        // one; the designation, companion and owner printings are player data and are carried
+        // through untouched.
         DraftAction::SubmitDeck {
             main_deck,
             commanders,
+            companion,
             printings,
             ..
         } => Ok(DraftAction::SubmitDeck {
             seat: seat as u8,
             main_deck,
             commanders,
+            companion,
             printings,
         }),
         // The seat is table authority and is overwritten with the
@@ -1195,6 +1255,87 @@ mod tests {
             unreachable!()
         };
         mgr.handle_draft_action(&draft_code, token, action, None)
+    }
+
+    /// CR 702.139a/b: the native submission path runs the engine's companion
+    /// check before the reducer mutates, so a Gyruda-class designation whose
+    /// starting deck holds an odd-mana-value card is refused (and nothing is
+    /// recorded), while the corrected submission proceeds. With no card
+    /// database the designation fails closed.
+    #[test]
+    fn native_submission_refuses_a_companion_the_starting_deck_makes_ineligible() {
+        use engine::database::CardDatabase;
+        use engine::types::card::CardFace;
+        use engine::types::keywords::{CompanionCondition, Keyword};
+        use engine::types::mana::ManaCost;
+
+        let (mgr, code, tokens) = printing_pod(DraftKind::Premier);
+        let pool: Vec<String> = mgr.sessions[&code].session.pools[1]
+            .iter()
+            .map(|card| card.name.clone())
+            .collect();
+        let (companion, odd) = (pool[0].clone(), pool[1].clone());
+        let mut faces = std::collections::BTreeMap::new();
+        for name in &pool {
+            let face = CardFace {
+                name: name.clone(),
+                mana_cost: ManaCost::generic(if *name == odd { 3 } else { 2 }),
+                keywords: if *name == companion {
+                    vec![Keyword::Companion(CompanionCondition::EvenManaValues)]
+                } else {
+                    Vec::new()
+                },
+                ..CardFace::default()
+            };
+            faces.insert(name.to_lowercase(), serde_json::to_value(&face).unwrap());
+        }
+        let db = std::sync::Arc::new(
+            CardDatabase::from_json_str(&serde_json::to_string(&faces).unwrap()).unwrap(),
+        );
+        let submit = |mgr: &mut DraftSessionManager, main: Vec<String>| {
+            mgr.handle_draft_action(
+                &code,
+                &tokens[1],
+                DraftAction::SubmitDeck {
+                    seat: 1,
+                    main_deck: main,
+                    commanders: Vec::new(),
+                    companion: Some(companion.clone()),
+                    printings: Vec::new(),
+                },
+                None,
+            )
+        };
+        let mut with_odd: Vec<String> = vec!["Plains".to_string(); 39];
+        with_odd.push(odd.clone());
+        let fixed: Vec<String> = vec!["Plains".to_string(); 40];
+
+        // No card database: a designation cannot be verified.
+        let (mut bare, bare_code, bare_tokens) = printing_pod(DraftKind::Premier);
+        let bare_companion = bare.sessions[&bare_code].session.pools[1][0].name.clone();
+        let error = bare
+            .handle_draft_action(
+                &bare_code,
+                &bare_tokens[1],
+                DraftAction::SubmitDeck {
+                    seat: 1,
+                    main_deck: fixed.clone(),
+                    commanders: Vec::new(),
+                    companion: Some(bare_companion),
+                    printings: Vec::new(),
+                },
+                None,
+            )
+            .unwrap_err();
+        assert!(error.contains("cannot be verified"), "{error}");
+
+        let mut mgr = mgr.with_card_db(db);
+        let error = submit(&mut mgr, with_odd).unwrap_err();
+        assert!(error.contains("not a legal companion"), "{error}");
+        assert!(mgr.sessions[&code].session.submitted_decks.is_empty());
+
+        let views = submit(&mut mgr, fixed).expect("the corrected submission proceeds");
+        assert!(views[1].seats[1].has_submitted_deck);
     }
 
     #[test]
@@ -1432,7 +1573,7 @@ mod tests {
     ) -> Vec<String> {
         let mut games = SessionManager::new();
         let spawns = mgr
-            .spawn_match_games_for_round(code, &mut games, db, round)
+            .spawn_match_games_for_round(code, &mut games, db, &ComboTable::default(), round)
             .unwrap();
         let (spawn, player) = spawns
             .iter()
@@ -1558,6 +1699,7 @@ mod tests {
                     seat: 7,
                     main_deck: vec!["Plains".into(); 40],
                     commanders: vec![],
+                    companion: None,
                     printings: vec![],
                 },
                 None,
@@ -1585,7 +1727,7 @@ mod tests {
             }
             let mut games = SessionManager::new();
             let spawns = restored
-                .spawn_match_games_for_round(&code, &mut games, &db, 1)
+                .spawn_match_games_for_round(&code, &mut games, &db, &ComboTable::default(), 1)
                 .unwrap();
             assert_eq!(spawns.len(), 4, "every complete pairing starts a real game");
             for spawn in spawns {
@@ -1620,15 +1762,7 @@ mod tests {
                     };
                     let expected: Vec<_> = sets
                         .iter()
-                        .map(|set| {
-                            (
-                                "Plains".to_string(),
-                                CardPrinting {
-                                    set_code: (*set).into(),
-                                    collector_number: "001".into(),
-                                },
-                            )
-                        })
+                        .map(|set| ("Plains".to_string(), CardPrinting::owner(*set, "001")))
                         .collect();
                     assert_eq!(actual, expected,
                         "pairing objects retain the authenticated owner's exact printing budget: pod seat {}",
@@ -1737,7 +1871,7 @@ mod tests {
         // than dropping it.
         let (active, expected_pool_before) = {
             let state = session.shared_stack.as_mut().unwrap();
-            let mut orphaned: Vec<_> = state.main_stack.drain(..).collect();
+            let mut orphaned: Vec<_> = std::mem::take(&mut state.main_stack);
             orphaned.append(&mut state.piles[0]);
             state.inspected[0] = 0;
             assert!(state.piles[0].is_empty());
@@ -2687,6 +2821,7 @@ mod tests {
                 &code,
                 &mut game_mgr,
                 &std::sync::Arc::new(CardDatabase::default()),
+                &ComboTable::default(),
                 1,
             )
             .expect("missing deck submissions should skip only the incomplete pairing");
@@ -3027,6 +3162,7 @@ mod tests {
                 seat: 0,
                 main_deck: vec!["x".to_string()],
                 commanders: vec!["x".to_string()],
+                companion: Some("Yorion, Sky Nomad".to_string()),
                 printings: Vec::new(),
             },
         )
@@ -3037,6 +3173,7 @@ mod tests {
                 seat: 3,
                 main_deck: vec!["x".to_string()],
                 commanders: vec!["x".to_string()],
+                companion: Some("Yorion, Sky Nomad".to_string()),
                 printings: Vec::new(),
             }
         );

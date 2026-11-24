@@ -725,7 +725,7 @@ fn a_milled_grist_repeats_the_plus_one_and_counts_at_minus_five() {
 }
 
 // Production CardDB consumers. The direct-body rows above are supplementary
-// building-block tests. Regenerate integration_cards.json.gz from the fresh
+// building-block tests. Regenerate integration_cards/ from the fresh
 // production export with scripts/gen-test-fixture.py (including canonical gzip).
 fn colossus_scenario(
     hand_lands: usize,
@@ -861,7 +861,9 @@ fn colossus_real_etb_remembered_accept_26_puts() {
 
 #[test]
 fn colossus_real_etb_prompted_inner_pause_and_decline() {
-    for (lands, answers, expected_puts) in [(2, "AD", 1), (1, "AAD", 2), (1, "D", 0), (0, "D", 0)] {
+    // CR 608.2d: with no land card in hand, "you may put a land card from your
+    // hand" is impossible, so the zero-hand case has no prompt to answer.
+    for (lands, answers, expected_puts) in [(2, "AD", 1), (1, "AAD", 2), (1, "D", 0), (0, "", 0)] {
         let (scenario, source, hand, library) =
             colossus_scenario(lands, &["Forest", "Forest", "Shock"]);
         let mut runner = scenario.build();

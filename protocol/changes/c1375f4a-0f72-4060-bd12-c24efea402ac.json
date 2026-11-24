@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "WaitingFor::UnlessPayment / UnlessPaymentChooseCost and ManaAbilityResume::UnlessPayment gain optional affected_object naming the object the unless payment decides"
+}

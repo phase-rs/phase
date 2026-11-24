@@ -32,7 +32,23 @@ export interface LlmProviderCatalogEntry {
   requiresApiKey: boolean;
   apiKeyUrl: string;
   models: LlmModelOption[];
+  /**
+   * Every decision context the engine honours for this provider, so the
+   * message-thread toggle appears exactly where it is honoured.
+   */
+  decisionContexts: LlmDecisionContext[];
 }
+
+/**
+ * Matches `phase_llm::provider::DecisionContext`: how an endpoint carries one
+ * seat's game from one decision to the next.
+ *
+ * - `selfContained` (the default): every decision is a complete request.
+ * - `messageThread`: each seat's game is one Anthropic message thread, so the
+ *   model keeps its earlier turns. The engine ignores it for any provider whose
+ *   catalog row does not list it in `decisionContexts`.
+ */
+export type LlmDecisionContext = "selfContained" | "messageThread";
 
 /** Matches `phase_llm::provider::LlmEndpointConfig`. */
 export interface LlmEndpointConfig {
@@ -42,6 +58,7 @@ export interface LlmEndpointConfig {
   model: string;
   maxOutputTokens: number | null;
   temperature: number | null;
+  decisionContext: LlmDecisionContext;
 }
 
 /** Matches `phase_llm::provider::HttpRequestSpec` — executed verbatim. */
@@ -63,7 +80,10 @@ export interface LlmHttpRequestSpec {
 export interface LlmDecisionRequest {
   fingerprint: string;
   optionCount: number;
-  /** Characters of prompt the request carries (system + user). */
+  /**
+   * Characters of prompt the request carries: system and user for a full
+   * request, the one update message for a message-thread continue.
+   */
   promptChars: number;
   request: LlmHttpRequestSpec;
 }
@@ -87,6 +107,8 @@ export interface LlmTokenUsage {
   inputTokens?: number | null;
   outputTokens?: number | null;
   cachedInputTokens?: number | null;
+  /** Input tokens written to the provider's prompt cache (Anthropic). */
+  cacheCreationInputTokens?: number | null;
 }
 
 /** What the engine did with one seat's draft response. */
@@ -104,6 +126,10 @@ export interface LlmDraftOutcome {
  *
  * `apiKey` lives in this record and is deliberately excluded from backup export
  * and cloud sync — see `LLM_ENDPOINTS_KEY` in `constants/storage.ts`.
+ * `rememberApiKey` is a tab-scoped opt-in preference stored in `sessionStorage`;
+ * when on, the key is copied to `sessionStorage` alongside its destination so it
+ * survives a tab reload while that destination is unchanged. Neither `apiKey`
+ * nor `rememberApiKey` is written to `localStorage`.
  */
 export interface LlmProfile extends LlmEndpointConfig {
   id: string;
@@ -111,6 +137,8 @@ export interface LlmProfile extends LlmEndpointConfig {
   name: string;
   /** Off by default and off after any edit that invalidates the config. */
   enabled: boolean;
+  /** Opt-in: keep the API key in sessionStorage for this tab only. Off by default. */
+  rememberApiKey: boolean;
 }
 
 /** The engine-described endpoint half of a profile, without the UI fields. */
@@ -122,6 +150,7 @@ export function endpointOf(profile: LlmProfile): LlmEndpointConfig {
     model: profile.model,
     maxOutputTokens: profile.maxOutputTokens,
     temperature: profile.temperature,
+    decisionContext: profile.decisionContext,
   };
 }
 

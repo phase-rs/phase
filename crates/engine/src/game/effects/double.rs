@@ -7,6 +7,7 @@ use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{GameState, PendingCounterAddition, PendingEffectResolved};
 use crate::types::mana::{ManaColor, ManaType, ManaUnit};
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::CounterCause;
 
 /// CR 701.10d-f: Double counters on a permanent, a player's life total, or mana pool.
 /// Dispatches on `DoubleTarget` variant.
@@ -101,6 +102,8 @@ fn resolve_double_counters(
                 object_id: obj_id,
                 counter_type: ct,
                 count: current_count,
+                // CR 614.16: the double instruction is a resolving effect.
+                cause: CounterCause::ResolvingEffect,
             });
         }
     }
@@ -112,6 +115,7 @@ fn resolve_double_counters(
             object_id,
             counter_type,
             count,
+            cause,
         } = addition
         else {
             continue;
@@ -122,6 +126,7 @@ fn resolve_double_counters(
             object_id,
             counter_type,
             count,
+            cause,
             events,
         ) {
             super::counters::stash_pending_counter_additions(
@@ -357,6 +362,7 @@ mod tests {
             target_chooser: None,
             source_id: ObjectId(100),
             cast_occurrence: None,
+            cycling_occurrence: None,
             source_incarnation: None,
             announced_source_incarnation: None,
             trigger_source: None,
@@ -370,6 +376,7 @@ mod tests {
             illegal_target_slots: Vec::new(),
             unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
+            declared_player_target_slots: Vec::new(),
             targets,
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -398,6 +405,7 @@ mod tests {
             selected_mode_labels: Vec::new(),
             modal_instruction_ordinal: None,
             repeat_for: None,
+            repeat_timing: crate::types::ability::RepeatForTiming::Sequential,
             min_x_value: 0,
             announced_x: None,
             cant_be_copied: false,
@@ -415,11 +423,13 @@ mod tests {
             target_reads: Default::default(),
             entry_onset: crate::types::ability::ContinuousEffectOnset::WhenFollowed,
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
+            instruction_join: crate::types::ability::InstructionJoin::Own,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,
             activation_cost_reduction: None,
             activation_record: None,
+            announced_usage_key: None,
             control_change_instruction: None,
         }
     }
