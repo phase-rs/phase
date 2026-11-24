@@ -38,6 +38,7 @@ use super::oracle_nom::primitives::{
     parse_loyalty_symbol_delta, scan_contains, scan_preceded, split_sentence_units,
 };
 use super::oracle_nom::quantity::parse_using_mana_produced_by_head;
+use super::oracle_nom::target::parse_supertype_word;
 use super::oracle_target::{
     parse_block_history_clause, parse_block_pairing_clause, restricting_block_pairings,
     BlockPairingForm, CombatRelationSubjectWord,
@@ -77,7 +78,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_until, take_while1},
     character::complete::{digit1, multispace0},
-    combinator::{all_consuming, eof, map, opt, peek, value},
+    combinator::{all_consuming, eof, map, opt, peek, value, verify},
     sequence::{preceded, terminated},
     Parser,
 };
@@ -2883,7 +2884,10 @@ fn copy_cast_exile_quantifier<'a>(cleaned: &'a str, parsed: &ParsedAbilities) ->
         .parse(tail)
         .ok()?;
     all_consuming((
-        tag::<_, _, OracleError<'_>>("you may cast the copy without paying its mana cost"),
+        tag::<_, _, OracleError<'_>>("you may "),
+        tag("cast "),
+        tag("the copy "),
+        tag("without paying its mana cost"),
         opt(tag(".")),
     ))
     .parse(cast)
@@ -5097,7 +5101,12 @@ fn copied_spell_legendary_guard(sentence: &str, def: &AbilityDefinition) -> Opti
         return None;
     }
     all_consuming((
-        tag::<_, _, OracleError<'_>>(" if the spell is legendary"),
+        tag(" if "),
+        tag("the spell "),
+        tag("is "),
+        verify(parse_supertype_word, |supertype| {
+            *supertype == Supertype::Legendary
+        }),
         opt(tag(".")),
     ))
     .parse(guard)
@@ -19803,6 +19812,11 @@ mod typed_carrier_tests {
         assert!(!warned(&parsed.parse_warnings, "Condition_If"));
         for changed in [
             text.replace("spell is legendary", "spell is red"),
+            text.replace("spell is legendary", "spell is snow"),
+            text.replace(
+                "spell is legendary",
+                "spell is legendary and you control it",
+            ),
             text.replace("the spell is", "another spell is"),
             text.replace("legendary if", "legendary and it has flying if"),
             format!("{text} if you have seven cards in hand, draw a card."),
@@ -19928,8 +19942,11 @@ mod typed_carrier_tests {
             text.replace(" copy it,", " choose one, copy it,"),
             text.replace("copy it", "copy it twice"),
             text.replace("cast the copy", "cast up to one copy"),
+            text.replace("cast the copy", "cast the copies"),
             text.replace("you may cast", "cast"),
             text.replace(" without paying its mana cost", ""),
+            text.replace("mana cost.", "mana cost if you control an artifact."),
+            text.replace("mana cost.", "mana cost unless you pay {1}."),
             text.replace(
                 ". for each",
                 ". exile the top card of your library. for each",
