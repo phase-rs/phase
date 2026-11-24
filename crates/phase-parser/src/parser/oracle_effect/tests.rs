@@ -107117,45 +107117,45 @@ fn immortal_obligation_parses_return_then_duty_counter_bound_restrictions() {
     );
     assert_eq!(parsed.abilities.len(), 1, "{:#?}", parsed.abilities);
     let root = &parsed.abilities[0];
-    match &*root.effect {
-        Effect::ChangeZone {
-            destination,
-            target,
-            enters_under,
-            enter_with_counters,
-            ..
-        } => {
-            assert_eq!(*destination, Zone::Battlefield);
-            assert_eq!(*enters_under, Some(ControllerRef::ParentTargetOwner));
-            assert_eq!(
-                *enter_with_counters,
-                vec![(
-                    crate::types::counter::CounterType::Generic("duty".to_string()),
-                    QuantityExpr::Fixed { value: 1 }
-                )]
-            );
-            let TargetFilter::Typed(typed) = target else {
-                panic!("expected a typed creature-card target, got {target:?}");
-            };
-            assert!(
-                typed.type_filters.contains(&TypeFilter::Creature),
-                "{typed:?}"
-            );
-            assert!(
-                typed.properties.contains(&FilterProp::Owned {
-                    controller: ControllerRef::Opponent
-                }),
-                "{typed:?}"
-            );
-            assert!(
-                typed.properties.contains(&FilterProp::InZone {
-                    zone: Zone::Graveyard
-                }),
-                "{typed:?}"
-            );
-        }
-        other => panic!("expected the ChangeZone return, got {other:?}"),
-    }
+    let effect = &*root.effect;
+    let Effect::ChangeZone {
+        destination,
+        target,
+        enters_under,
+        enter_with_counters,
+        ..
+    } = effect
+    else {
+        panic!("expected the ChangeZone return, got {effect:?}");
+    };
+    assert_eq!(*destination, Zone::Battlefield);
+    assert_eq!(*enters_under, Some(ControllerRef::ParentTargetOwner));
+    assert_eq!(
+        *enter_with_counters,
+        vec![(
+            crate::types::counter::CounterType::Generic("duty".to_string()),
+            QuantityExpr::Fixed { value: 1 }
+        )]
+    );
+    let TargetFilter::Typed(typed) = target else {
+        panic!("expected a typed creature-card target, got {target:?}");
+    };
+    assert!(
+        typed.type_filters.contains(&TypeFilter::Creature),
+        "{typed:?}"
+    );
+    assert!(
+        typed.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::Opponent
+        }),
+        "{typed:?}"
+    );
+    assert!(
+        typed.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }),
+        "{typed:?}"
+    );
     assert!(root.forward_result, "the return must forward its permanent");
     let sub = root
         .sub_ability
@@ -107190,18 +107190,17 @@ fn immortal_obligation_parses_return_then_duty_counter_bound_restrictions() {
             mode: StaticMode::Goaded,
         }]
     );
-    match static_abilities[1].modifications.as_slice() {
-        [ContinuousModification::GrantStaticAbility { definition }] => {
-            assert_eq!(definition.mode, StaticMode::CantAttack);
-            assert_eq!(definition.origin, DefinitionOrigin::Resolution);
-            assert_eq!(definition.affected, Some(TargetFilter::SelfRef));
-            assert_eq!(
-                definition.attack_defended,
-                Some(crate::types::triggers::AttackTargetFilter::PlayerOrPermanents)
-            );
-        }
-        other => panic!("expected the CantAttack grant, got {other:?}"),
-    }
+    let modifications = static_abilities[1].modifications.as_slice();
+    let [ContinuousModification::GrantStaticAbility { definition }] = modifications else {
+        panic!("expected the CantAttack grant, got {modifications:?}");
+    };
+    assert_eq!(definition.mode, StaticMode::CantAttack);
+    assert_eq!(definition.origin, DefinitionOrigin::Resolution);
+    assert_eq!(definition.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        definition.attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::PlayerOrPermanents)
+    );
     assert_eq!(
         static_abilities[2].modifications,
         vec![ContinuousModification::AddStaticMode {

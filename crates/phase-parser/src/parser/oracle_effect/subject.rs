@@ -14624,16 +14624,15 @@ mod tests {
                 mode: StaticMode::Goaded,
             }]
         );
-        match static_abilities[1].modifications.as_slice() {
-            [ContinuousModification::GrantStaticAbility { definition }] => {
-                assert_eq!(definition.mode, StaticMode::CantAttack);
-                assert_eq!(
-                    definition.attack_defended,
-                    Some(crate::types::triggers::AttackTargetFilter::PlayerOrPermanents)
-                );
-            }
-            other => panic!("expected the CantAttack grant, got {other:?}"),
-        }
+        let modifications = static_abilities[1].modifications.as_slice();
+        let [ContinuousModification::GrantStaticAbility { definition }] = modifications else {
+            panic!("expected the CantAttack grant, got {modifications:?}");
+        };
+        assert_eq!(definition.mode, StaticMode::CantAttack);
+        assert_eq!(
+            definition.attack_defended,
+            Some(crate::types::triggers::AttackTargetFilter::PlayerOrPermanents)
+        );
         assert_eq!(
             static_abilities[2].modifications,
             vec![ContinuousModification::AddStaticMode {
