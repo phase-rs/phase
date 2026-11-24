@@ -119,6 +119,7 @@ mod selenia_vigilance_grant;
 mod selesnya_loft_gardens_mixed_mana_choice;
 mod self_attached_aura_token_host;
 mod self_copy_last_known_values;
+mod self_cycle_trigger_redirected_discard;
 mod self_destruct_target_power;
 mod self_exile_at_resolution_8721;
 mod self_name_of_short_name_rules_words;
