@@ -783,6 +783,23 @@ pub(crate) fn emit_ability_activated(
     announced_zone: crate::types::zones::Zone,
     events: &mut Vec<GameEvent>,
 ) -> usize {
+    let loyalty_counters_removed = if kind == crate::types::events::ActivatedAbilityKind::Loyalty {
+        stack_entry
+            .and_then(|placed| {
+                state.stack.iter().find_map(|entry| {
+                    (entry.id == placed).then_some(match &entry.kind {
+                        crate::types::game_state::StackEntryKind::ActivatedAbility {
+                            ability,
+                            ..
+                        } => ability.context.loyalty_counters_removed,
+                        _ => None,
+                    })
+                })
+            })
+            .flatten()
+    } else {
+        None
+    };
     let departed = announced_zone == Zone::Battlefield
         && state
             .objects
@@ -799,6 +816,7 @@ pub(crate) fn emit_ability_activated(
         trigger_state: crate::types::events::ActivationTriggerState::Pending,
         stack_entry,
         activation_cost,
+        loyalty_counters_removed,
     });
     events.len() - 1
 }

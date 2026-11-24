@@ -1029,6 +1029,7 @@ fn proposed_events(
                         object_id: object.id,
                         counter_type,
                         count: 1,
+                        loyalty_cost_root: None,
                         applied: Default::default(),
                     })
             })

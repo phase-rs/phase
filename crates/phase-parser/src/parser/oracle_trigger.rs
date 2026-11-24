@@ -8746,12 +8746,35 @@ fn extract_if_condition_with_card_name(
     head_enters_battlefield: bool,
     attack_scope: Option<&AttackHeadScope>,
 ) -> IfExtraction {
+    use super::oracle_nom::condition::parse_ge_threshold;
+
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     // Only a proven self-trigger may use the source-bound "it's on the
     // battlefield" shorthand. On a non-self zone-change trigger, "it" is
     // the event object, so the simple source-condition table must not steal it.
     let source_is_self = matches!(dying_subject, Some(TargetFilter::SelfRef));
+
+    // CR 606.4 + CR 603.4: bind the payment-specific threshold to the
+    // activation event. Reuse the shared grammar for both threshold forms;
+    // the clause itself is consumed completely before it is hoisted.
+    let leading_if_start = lower.len() - lower.trim_start().len();
+    let loyalty_threshold = map(
+        delimited(
+            tag("if you removed "),
+            verify(parse_ge_threshold, |minimum| *minimum > 0),
+            (tag("loyalty counters to activate it"), peek(tag(", "))),
+        ),
+        |minimum| TriggerCondition::LoyaltyCountersRemovedAtLeast { minimum },
+    )
+    .parse(&lower[leading_if_start..]);
+    if let Ok((rest, condition)) = loyalty_threshold {
+        let consumed = lower.len() - leading_if_start - rest.len();
+        return IfExtraction::hoisted(
+            strip_condition_clause(text, leading_if_start, consumed),
+            condition,
+        );
+    }
 
     // CR 603.4: Only a true intervening-if is hoisted to the trigger-level condition.
     // A trigger-level `if` is one that IMMEDIATELY follows the trigger condition

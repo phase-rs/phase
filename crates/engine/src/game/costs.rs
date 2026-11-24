@@ -1199,10 +1199,37 @@ pub fn pay_ability_cost_for_activation(
         cost,
         ability_index,
         cost_removed_counters,
+        None,
         events,
     )
 }
 
+/// CR 606.4: activation payment entry that separately tracks loyalty counters
+/// while preserving the existing all-counter aggregate ledger.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pay_ability_cost_for_activation_with_loyalty_tally(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    ability_index: Option<usize>,
+    cost_removed_counters: &mut Option<u32>,
+    loyalty_counters_removed: &mut Option<u32>,
+    events: &mut Vec<GameEvent>,
+) -> Result<PaymentOutcome, EngineError> {
+    pay_ability_cost_for_activation_with_cost_move_replacement(
+        state,
+        player,
+        source_id,
+        cost,
+        ability_index,
+        cost_removed_counters,
+        Some(loyalty_counters_removed),
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn pay_ability_cost_for_activation_with_cost_move_replacement(
     state: &mut GameState,
     player: PlayerId,
@@ -1210,6 +1237,7 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
     cost: &AbilityCost,
     ability_index: Option<usize>,
     cost_removed_counters: &mut Option<u32>,
+    loyalty_counters_removed: Option<&mut Option<u32>>,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
@@ -1224,6 +1252,7 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
             ability_index,
         },
         Some(cost_removed_counters),
+        loyalty_counters_removed,
         None,
         false,
     )?;
@@ -1364,6 +1393,7 @@ pub(crate) fn pay_ability_cost_for_turn_face_up(
             cost_source,
         },
         None,
+        None,
         Some(cost),
         false,
     )?;
@@ -1420,6 +1450,7 @@ fn pay_ability_cost_for_resolution_with_cost_move_root(
         },
         // CR 118.12: a resolution-time PayCost has no activation to own a count.
         None,
+        None,
         Some(cost),
         false,
     )
@@ -1443,22 +1474,19 @@ pub(crate) fn credit_cost_removed_counters(ledger: &mut Option<u32>, removed: u3
     *total = total.saturating_add(removed);
 }
 
-/// CR 118.3 + CR 122.1 + CR 601.2h + CR 616.1: the applier of planned
-/// counter-removal costs (the Loyalty arm and the resolution-time unless
-/// payments remove their counters directly). Makes each planned removal in order through the
-/// replacement pipeline and credits each completed removal's actual count to
-/// the paying activation's ledger (`None` for a spell's cost, a resolution-time
-/// payment and the `can_pay` dry run). A removal that waits on a replacement
-/// choice stops the payment: nothing is credited for it until its owner
-/// settles it, and the later removals wait for it (CR 601.2h: partial payments
-/// are not allowed, so the owner finishes them before the payment proceeds).
-/// Only a completed removal materializes the ledger, so a completed cost that
-/// removed none reads `Some(0)`, and a cost paused on its first removal still
-/// reads `None`.
+/// CR 118.3 + CR 122.1 + CR 601.2h + CR 616.1: applies planned counter removals
+/// in payment order through the replacement pipeline. A pending replacement
+/// choice holds the remaining removals until its owner resumes payment.
+/// The ordinary activation aggregate stays `None` until the first removal
+/// settles. A completed zero-removal cost records `Some(0)`.
+/// Fixed negative loyalty costs use this applier with aggregate credit disabled.
+/// A tracked loyalty activation starts at `Some(0)` and credits the actual
+/// loyalty counters removed by its own root proposal when that result is delivered.
 pub(crate) fn pay_counter_cost_removals(
     state: &mut GameState,
     removals: Vec<PendingCounterRemoval>,
     mut cost_removed_counters: Option<&mut Option<u32>>,
+    mut loyalty_counters_removed: Option<&mut Option<u32>>,
     events: &mut Vec<GameEvent>,
 ) -> CounterCostRemovalProgress {
     // CR 616.1 + CR 608.2c: everything a removal's replacement installs sits
@@ -1467,16 +1495,36 @@ pub(crate) fn pay_counter_cost_removals(
     let mut removals = removals.into_iter();
     while let Some(removal) = removals.next() {
         let in_flight = super::effects::counters::begin_in_flight_counter_removal(state, removal);
-        match super::effects::counters::remove_counter_with_replacement(
-            state,
-            in_flight.removal.object_id,
-            in_flight.removal.counter_type.clone(),
-            in_flight.removal.count,
-            events,
-        ) {
+        let is_loyalty =
+            in_flight.removal.counter_type == crate::types::counter::CounterType::Loyalty;
+        let tracks_known_loyalty_tally = loyalty_counters_removed
+            .as_deref()
+            .is_some_and(Option::is_some);
+        let outcome = if is_loyalty && tracks_known_loyalty_tally {
+            super::effects::counters::remove_loyalty_cost_counter_with_replacement(
+                state,
+                in_flight.removal.object_id,
+                in_flight.removal.count,
+                events,
+            )
+        } else {
+            super::effects::counters::remove_counter_with_replacement(
+                state,
+                in_flight.removal.object_id,
+                in_flight.removal.counter_type.clone(),
+                in_flight.removal.count,
+                events,
+            )
+        };
+        match outcome {
             super::effects::counters::CounterRemovalOutcome::Removed(removed) => {
                 if let Some(ledger) = cost_removed_counters.as_deref_mut() {
                     credit_cost_removed_counters(ledger, removed);
+                }
+                if is_loyalty && tracks_known_loyalty_tally {
+                    if let Some(ledger) = loyalty_counters_removed.as_deref_mut() {
+                        credit_cost_removed_counters(ledger, removed);
+                    }
                 }
             }
             super::effects::counters::CounterRemovalOutcome::AwaitingReplacementChoice => {
@@ -1484,6 +1532,11 @@ pub(crate) fn pay_counter_cost_removals(
                     PausedCounterCostRemoval {
                         in_flight,
                         remaining: removals.collect(),
+                        aggregate_credit: if cost_removed_counters.is_some() {
+                            crate::types::game_state::CounterRemovalAggregateCredit::Credit
+                        } else {
+                            crate::types::game_state::CounterRemovalAggregateCredit::Skip
+                        },
                         replacement_subtree,
                     },
                 );
@@ -1512,6 +1565,7 @@ fn pay_ability_cost_inner(
     events: &mut Vec<GameEvent>,
     scope: &PaymentScope,
     mut cost_removed_counters: Option<&mut Option<u32>>,
+    mut loyalty_counters_removed: Option<&mut Option<u32>>,
     resume_cost: Option<&AbilityCost>,
     dry_run: bool,
 ) -> Result<PaymentOutcome, EngineError> {
@@ -1833,6 +1887,7 @@ fn pay_ability_cost_inner(
                     events,
                     scope,
                     cost_removed_counters.as_deref_mut(),
+                    loyalty_counters_removed.as_deref_mut(),
                     matches!(scope, PaymentScope::Resolution { .. }).then_some(&sub_resume_cost),
                     false,
                 )?;
@@ -2796,13 +2851,35 @@ fn pay_ability_cost_inner(
                     }
                 }
                 std::cmp::Ordering::Less => {
-                    super::effects::counters::remove_counter_with_replacement(
+                    let removal = PendingCounterRemoval {
+                        object_id: source_id,
+                        counter_type: crate::types::counter::CounterType::Loyalty,
+                        count: amount.unsigned_abs(),
+                    };
+                    match pay_counter_cost_removals(
                         state,
-                        source_id,
-                        crate::types::counter::CounterType::Loyalty,
-                        (-amount) as u32,
+                        vec![removal],
+                        None,
+                        loyalty_counters_removed.as_deref_mut(),
                         events,
-                    );
+                    ) {
+                        CounterCostRemovalProgress::Complete => {}
+                        CounterCostRemovalProgress::AwaitingReplacementChoice(removal) => {
+                            if matches!(scope, PaymentScope::Activation { .. }) {
+                                state.pending_cost_move_resume =
+                                    Some(PendingCostMoveResume::CounterCostRemovalPayment {
+                                        player,
+                                        pending: None,
+                                        removal: Box::new(removal),
+                                        cost_paid_object: None,
+                                        completion: PendingCostMoveCompletion::FinishPending,
+                                    });
+                            }
+                            return Ok(PaymentOutcome::Paused {
+                                remaining_cost: None,
+                            });
+                        }
+                    }
                 }
                 std::cmp::Ordering::Equal => {}
             }
@@ -2906,6 +2983,7 @@ fn pay_ability_cost_inner(
                 state,
                 removals,
                 cost_removed_counters,
+                loyalty_counters_removed,
                 events,
             ) {
                 CounterCostRemovalProgress::Complete => {}
@@ -3415,6 +3493,7 @@ pub(crate) fn can_pay(
                     cost,
                     &mut Vec::new(),
                     scope,
+                    None,
                     None,
                     None,
                     true,
@@ -5375,6 +5454,7 @@ mod tests {
                 &scope,
                 None,
                 None,
+                None,
                 true,
             )
             .unwrap();
@@ -5407,6 +5487,7 @@ mod tests {
             &scope,
             None,
             None,
+            None,
             false,
         )
         .unwrap();
@@ -5425,6 +5506,7 @@ mod tests {
             &cost,
             &mut events,
             &scope,
+            None,
             None,
             None,
             false,
@@ -6286,6 +6368,7 @@ mod tests {
             &scope,
             None,
             None,
+            None,
             false,
         )
         .unwrap();
@@ -6303,6 +6386,7 @@ mod tests {
             &AbilityCost::Tap,
             &mut Vec::new(),
             &scope,
+            None,
             None,
             None,
             false,
@@ -7134,6 +7218,7 @@ mod tests {
             },
             None,
             None,
+            None,
             false,
         )
         .expect("resolution-time tap-creatures payment must not error")
@@ -7684,5 +7769,42 @@ mod dandan_read_sweep_tests {
         );
 
         assert_eq!(eligible, vec![creature]);
+    }
+}
+
+#[cfg(test)]
+mod loyalty_cost_magnitude_tests {
+    use super::{pay_ability_cost_for_activation_with_loyalty_tally, AbilityCost, PaymentOutcome};
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::counter::CounterType;
+
+    #[test]
+    fn negative_loyalty_payment_magnitude_handles_i32_min() {
+        let magnitude = 1_u32 << 31;
+        let mut scenario = GameScenario::new();
+        let walker = scenario
+            .add_planeswalker_from_oracle(P0, "Jace", "Jace", magnitude + 1, "[−3]: Draw a card.")
+            .id();
+        let mut aggregate = None;
+        let mut loyalty_tally = Some(0);
+        let paid = pay_ability_cost_for_activation_with_loyalty_tally(
+            &mut scenario.state,
+            P0,
+            walker,
+            &AbilityCost::Loyalty { amount: i32::MIN },
+            Some(0),
+            &mut aggregate,
+            &mut loyalty_tally,
+            &mut Vec::new(),
+        )
+        .expect("the walker has enough loyalty to pay the full fixed cost");
+        assert_eq!(paid, PaymentOutcome::Paid);
+        assert_eq!(
+            scenario.state.objects[&walker].counters[&CounterType::Loyalty],
+            1
+        );
+        assert_eq!(scenario.state.objects[&walker].loyalty, Some(1));
+        assert_eq!(loyalty_tally, Some(magnitude));
+        assert_eq!(aggregate, None);
     }
 }

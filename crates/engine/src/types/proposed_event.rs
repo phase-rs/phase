@@ -26,6 +26,12 @@ pub use super::token_spec::{
 };
 pub use super::zones::{ChainReferentIntent, EtbTapState};
 
+/// CR 602.2b + CR 606.4: marks only the initiating loyalty-cost removal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoyaltyCostRoot {
+    InitiatingRemoval,
+}
+
 /// CR 616.1: identity of one replacement candidate: the source object plus a
 /// per-source ordinal — or, for virtual protection candidates, the quality's
 /// full 64-bit minor word. `u64`, never `usize`: the index rides in
@@ -983,6 +989,10 @@ pub enum ProposedEvent {
         object_id: ObjectId,
         counter_type: CounterType,
         count: u32,
+        /// CR 602.2b + CR 606.4: identifies this exact root proposal. Child
+        /// removals and legacy proposals omit the marker.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loyalty_cost_root: Option<LoyaltyCostRoot>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -2130,6 +2140,52 @@ mod tests {
     use crate::types::attack_target::AttackTarget;
     use crate::types::card_type::CoreType;
     use crate::types::mana::ManaColor;
+
+    #[test]
+    fn loyalty_cost_root_marker_round_trips_and_defaults_for_legacy_removals() {
+        let root = ProposedEvent::RemoveCounter {
+            object_id: ObjectId(7),
+            counter_type: CounterType::Loyalty,
+            count: 3,
+            loyalty_cost_root: Some(LoyaltyCostRoot::InitiatingRemoval),
+            applied: HashSet::new(),
+        };
+        let wire = serde_json::to_value(&root).unwrap();
+        assert_eq!(
+            wire["RemoveCounter"]["loyalty_cost_root"],
+            "InitiatingRemoval"
+        );
+
+        let mut legacy = wire.clone();
+        legacy["RemoveCounter"]
+            .as_object_mut()
+            .unwrap()
+            .remove("loyalty_cost_root");
+        assert_eq!(
+            serde_json::from_value::<ProposedEvent>(legacy).unwrap(),
+            ProposedEvent::RemoveCounter {
+                object_id: ObjectId(7),
+                counter_type: CounterType::Loyalty,
+                count: 3,
+                loyalty_cost_root: None,
+                applied: HashSet::new(),
+            }
+        );
+
+        let unmarked = ProposedEvent::RemoveCounter {
+            object_id: ObjectId(8),
+            counter_type: CounterType::Loyalty,
+            count: 1,
+            loyalty_cost_root: None,
+            applied: HashSet::new(),
+        };
+        assert!(
+            serde_json::to_value(unmarked).unwrap()["RemoveCounter"]
+                .get("loyalty_cost_root")
+                .is_none(),
+            "unmarked proposals omit the provenance marker"
+        );
+    }
 
     #[test]
     fn zone_change_library_placement_wire_preserves_presence_and_values() {
