@@ -147,6 +147,8 @@ export function useDeckBuilder({
   }, []);
   // Bumped whenever the editor switches to another deck: a Load, or a Clone that opens its copy.
   const deckIdentityRevision = useRef(0);
+  // A pending Load yields to deck switches outside handleLoad.
+  const nonLoadIdentityRevision = useRef(0);
   // Tickets preserve the order in which Load calls start.
   const loadTickets = useRef(0);
   // Only Loads whose targets exist can advance this ticket.
@@ -680,6 +682,7 @@ export function useDeckBuilder({
     const changed = editorChangedSince(captured);
     if (changed.reloaded || changed.edited) return;
     deckIdentityRevision.current += 1;
+    nonLoadIdentityRevision.current += 1;
     setDeckName(cloneName);
     setJustSaved(true);
     setDirty(false);
@@ -696,9 +699,13 @@ export function useDeckBuilder({
   // so it knows whether to continue a pending action.
   const handleLoad = useCallback(async (name: string): Promise<boolean> => {
     const ticket = ++loadTickets.current;
-    // Captured before the resolveCommander await below: a committed Load/Clone (reloaded) or any edit
-    // that marks the deck dirty, including an Import (edited), must win over this Load.
-    const captured = captureEditor();
+    const identityAtStart = nonLoadIdentityRevision.current;
+    const editAtStart = editRevision.current;
+    // Tickets account for competing Loads. Edits and other deck switches independently veto this Load.
+    const canCommit = () =>
+      ticket === latestProceedingLoad.current &&
+      identityAtStart === nonLoadIdentityRevision.current &&
+      editAtStart === editRevision.current;
     const parsed = loadSavedDeck(name);
     const stored = captureSavedDeck(name);
     if (!parsed || stored.raw === null) {
@@ -709,10 +716,7 @@ export function useDeckBuilder({
       latestProceedingLoad.current = Math.max(latestProceedingLoad.current, ticket);
       const [deckId, deckEntry] = found;
       const resolved = await resolveCommander(preconDeckEntryToParsedDeck(deckEntry));
-      const changedAfterPrecon = editorChangedSince(captured);
-      if (ticket !== latestProceedingLoad.current || changedAfterPrecon.reloaded || changedAfterPrecon.edited) {
-        return false;
-      }
+      if (!canCommit()) return false;
       applyDeckToEditor(resolved);
       setActiveSurface("deck");
       deckIdentityRevision.current += 1;
@@ -733,10 +737,7 @@ export function useDeckBuilder({
     });
     try {
       const resolved = await resolveCommander(parsed);
-      const changedAfterLoad = editorChangedSince(captured);
-      if (ticket !== latestProceedingLoad.current || changedAfterLoad.reloaded || changedAfterLoad.edited) {
-        return false;
-      }
+      if (!canCommit()) return false;
       const savedFormat = persisted.format
         ? DECK_CONSTRUCTION_FORMATS.find(
             (metadata) => metadata.format.toLowerCase() === persisted.format!.toLowerCase(),
@@ -759,7 +760,7 @@ export function useDeckBuilder({
     setBracket(loadSavedDeckBracket(name));
     setComboDeclaration(loadSavedDeckComboDeclaration(name));
     return true;
-  }, [applyDeckToEditor, onFormatChange, captureEditor, editorChangedSince]);
+  }, [applyDeckToEditor, onFormatChange]);
 
   // Returns the "keepMine" save's outcome, `"loaded"` once "load" actually replaced the editor,
   // or undefined for "dismiss" or a "load" that bailed, so a caller that resolved a conflict

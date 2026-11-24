@@ -648,6 +648,68 @@ describe("useDeckBuilder — counted Commander inference", () => {
     expect(result.current.deckName).toBe(name);
   });
 
+  it("opens a newer precon found after an older saved Load commits", async () => {
+    const name = "Loaded Plains";
+    const preconName = "Precon Forest (TST)";
+    const forest = [{ name: "Forest", count: 60 }];
+    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(unmarked));
+    const { result } = openBuilder();
+    const plainsAnswer = deferred<string | null>();
+    const catalog = deferred<DeckMap>();
+    inference.mockReturnValueOnce(plainsAnswer.promise);
+    vi.mocked(loadPreconDeckMap).mockReturnValueOnce(catalog.promise);
+
+    const plainsLoad = result.current.handleLoad(name);
+    const preconLoad = result.current.handleLoad(`[Pre-built] ${preconName}`);
+    expect(inference.mock.calls).toEqual([[plains]]);
+    expect(loadPreconDeckMap).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      plainsAnswer.resolve(null);
+      expect(await plainsLoad).toBe(true);
+    });
+    expect(result.current.deckName).toBe(name);
+    expect(result.current.deck.main).toEqual(plains);
+
+    let preconLoaded: boolean | undefined;
+    await act(async () => {
+      catalog.resolve({
+        forest: { name: "Precon Forest", code: "TST", type: "Commander Deck", coveragePct: 100, mainBoard: forest },
+      });
+      preconLoaded = await preconLoad;
+    });
+    expect(inference.mock.calls).toEqual([[plains], [forest]]);
+    expect(preconLoaded).toBe(true);
+    expect(result.current.deckName).toBe(preconName);
+    expect(result.current.deck.main).toEqual(forest);
+  });
+
+  it("keeps a Clone opened while a saved Load is pending", async () => {
+    const name = "Loaded Plains";
+    const source = { main: [{ name: "Forest", count: 2 }], sideboard: [] };
+    localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(unmarked));
+    const { result } = openBuilder();
+    await act(async () => {
+      result.current.handleImport(source);
+      result.current.handleDeckNameChange("Source");
+    });
+    const plainsAnswer = deferred<string | null>();
+    inference.mockReturnValueOnce(plainsAnswer.promise);
+
+    const pending = result.current.handleLoad(name);
+    expect(inference.mock.calls).toEqual([[plains]]);
+    await act(async () => result.current.handleClone());
+    expect(result.current.deckName).toBe("Source copy");
+    expect(loadSavedDeck("Source copy")?.main).toEqual(source.main);
+
+    await act(async () => {
+      plainsAnswer.resolve(null);
+      expect(await pending).toBe(false);
+    });
+    expect(result.current.deckName).toBe("Source copy");
+    expect(result.current.deck.main).toEqual(source.main);
+  });
+
   it("discards a stale inference answer and commits a current Load", async () => {
     const name = "Unmarked Commander";
     const commander = "Isamaru, Hound of Konda";
