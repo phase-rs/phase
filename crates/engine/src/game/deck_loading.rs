@@ -589,9 +589,10 @@ struct PrintingSpan<'a> {
 /// given the copies each holds this game (`capacities`, indexed like
 /// `PLAYABLE_PRINTING_SECTIONS`). A section binds its own registered rows first, in row
 /// order, up to its capacity. The rows that clamp cuts off then fill the other section's
-/// remaining copies, in the donor's row order. So while a face's copies are conserved
-/// across the two sections, so are its registered printings, and the original partition
-/// reproduces the original binding. Display-only: no rules path reads the result.
+/// remaining copies, in the donor's row order. Every registered playable row of a face
+/// binds when their total fits its effective main-plus-sideboard capacity for this game.
+/// Returning to the original partition restores section-local bindings when each
+/// original stream fits its section. Display-only: no rules path reads the result.
 fn allocate_playable_printings<'a>(
     record: &'a DeckPrintingRecord,
     face: &CardFace,
@@ -682,6 +683,10 @@ fn bind_continuation_printings(
     let mut bindings = Vec::new();
     let mut allocations = HashMap::new();
     for (index, (section, entries)) in sections.into_iter().zip(lists).enumerate() {
+        let local_names: HashSet<_> = entries
+            .iter()
+            .filter_map(|entry| record.lookup_name(section, &entry.card))
+            .collect();
         for entry in entries {
             let identity = deck_face_identity(&entry.card);
             let Some(entry_indexes) = indexes[index].remove(&identity) else {
@@ -694,10 +699,20 @@ fn bind_continuation_printings(
             if stream.is_empty() {
                 continue;
             }
-            let name = record
-                .lookup_name(section, &entry.card)
-                .or_else(|| record.lookup_name(sections[1 - index], &entry.card))
-                .expect("allocated stream has a retained key");
+            let name = if let Some(name) = record.lookup_name(section, &entry.card) {
+                name
+            } else {
+                let donor_name = record
+                    .lookup_name(sections[1 - index], &entry.card)
+                    .expect("allocated stream has a retained key");
+                // A hand-built resolved payload can give distinct faces the same key
+                // across sections. Ingress cannot: round_trip_name depends only on the
+                // database and face. Preserve the local stream when a donor key collides.
+                if local_names.contains(donor_name) {
+                    continue;
+                }
+                donor_name
+            };
             bindings.extend(
                 entry_indexes
                     .into_iter()
@@ -4817,6 +4832,62 @@ mod tests {
                 (deck_face_identity(loser), Some(&first)),
                 (deck_face_identity(winner), Some(&middle)),
                 (deck_face_identity(loser), Some(&last)),
+            ]
+        );
+    }
+
+    #[test]
+    fn playable_continuation_skips_carried_rows_with_colliding_retained_keys() {
+        let db = twin_database();
+        let face_a = db.get_face_by_name("Twin").expect("bare Twin");
+        let face_b = db.get_face_by_name("twin [loser]").expect("qualified Twin");
+        let entry = |face, count| DeckEntry::from_resolved_face(&db, face, count);
+        let original = PlayerDeckPayload {
+            main_deck: vec![entry(face_a, 2)],
+            sideboard: vec![entry(face_b, 1)],
+            printings: vec![
+                twin_row("shared", 1, "face-a"),
+                DeckPrinting {
+                    section: DeckSection::Sideboard,
+                    ..twin_row("shared", 1, "face-b")
+                },
+            ],
+            printing_entry_names: PLAYABLE_PRINTING_SECTIONS
+                .into_iter()
+                .map(|section| DeckEntryLookupName {
+                    section,
+                    entry_index: 0,
+                    name: "shared".to_string(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        validate_printing_bindings(&original);
+        let record = retained_printing_record(&original);
+        let mut moved = PlayerDeckPayload {
+            main_deck: vec![entry(face_a, 2), entry(face_b, 1)],
+            ..Default::default()
+        };
+        bind_continuation_printings(
+            &mut moved,
+            record.get().as_deref(),
+            FormatConfig::standard().sideboard_policy,
+        );
+        validate_printing_bindings(&moved);
+        let copies = entry_copies(&moved, DeckSection::MainDeck, None);
+        let actual: Vec<_> = copies
+            .iter()
+            .map(|copy| (deck_face_identity(copy.face), copy.printing.as_deref()))
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                (
+                    deck_face_identity(face_a),
+                    Some(&CardPrinting::owner("face-a", "1"))
+                ),
+                (deck_face_identity(face_a), None),
+                (deck_face_identity(face_b), None),
             ]
         );
     }

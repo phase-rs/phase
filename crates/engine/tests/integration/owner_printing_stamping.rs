@@ -3039,12 +3039,18 @@ mod post_load_creators {
                 2,
                 (rows == OwnerRows::Chosen).then_some(one),
             );
-            let second = wish_for(
-                &mut runner,
-                "Forest",
-                1,
-                (rows == OwnerRows::Chosen).then_some(dmu),
+            let persisted =
+                serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap();
+            let mut restored = GameRunner::from_state(
+                serde_json::from_value::<PersistedGameState>(persisted)
+                    .unwrap()
+                    .into_game_state()
+                    .expect("restore is valid"),
             );
+            let expected = (rows == OwnerRows::Chosen).then_some(dmu);
+            let restored_second = wish_for(&mut restored, "Forest", 1, expected.clone());
+            let second = wish_for(&mut runner, "Forest", 1, expected);
+            assert_eq!(restored_second, second);
             (runner, [first, second])
         };
         let (with, with_ids) = run(OwnerRows::Chosen);
