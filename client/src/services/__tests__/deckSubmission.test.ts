@@ -36,7 +36,6 @@ function pin(printing: PrintingEntry): CardArtOverride {
 function row(section: DeckSection, name: string, count: number, printing: PrintingEntry): DeckPrinting {
   return { section, name, count, printing: { set_code: printing.set, collector_number: printing.collector_number } };
 }
-/** Separate entry contexts are valid ParsedDeck input, unlike normalized imports. */
 function separateSources(): ParsedDeck {
   return {
     main: [
@@ -240,11 +239,17 @@ describe("submission selection and source contexts (V1)", () => {
     expect((await submitParsedDeck(deck)).printings).toEqual([row("main_deck", "Forest", 2, D)]);
   });
 
-  it("characterizes the inherited import limit: the first source owns all merged same-name copies", async () => {
-    // d-15-10: this observes importer loss, not preservation of every imported choice.
-    const deck = detectAndParseDeck("Deck\n2 Forest (AAA) 001\n3 Forest (BBB) 002");
-    expect(deck.main).toEqual([{ name: "Forest", count: 5, sourcePrinting: { setCode: "aaa", collectorNumber: "001" } }]);
-    expect((await submitParsedDeck(deck)).printings).toEqual([row("main_deck", "Forest", 5, A)]);
+  it("submits three imported Forest printings in main deck order", async () => {
+    const one = { ...A, set: "one", collector_number: "276" };
+    const dmu = { ...B, set: "dmu", collector_number: "277" };
+    const neo = { ...C, set: "neo", collector_number: "292" };
+    io.printings.mockResolvedValue([neo, dmu, one]);
+    const deck = detectAndParseDeck("Deck\n4 Forest (ONE) 276\n3 Forest (DMU) 277\n5 Forest (NEO) 292");
+    expect((await submitParsedDeck(deck)).printings).toEqual([
+      row("main_deck", "Forest", 4, one),
+      row("main_deck", "Forest", 3, dmu),
+      row("main_deck", "Forest", 5, neo),
+    ]);
   });
 
   it("uses valid pins rather than the pin's descriptive set and collector fields", async () => {

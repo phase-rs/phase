@@ -60,7 +60,7 @@ describe("canonicalizeDeckNames", () => {
     expect(result.sticker_sheets).toEqual(["SHEET-CANON"]);
   });
 
-  it("merges entries that canonicalize to one name", async () => {
+  it("keeps a named printing separate from an unspecified printing after canonicalization", async () => {
     canonicalCardNamesMock.mockImplementation(
       renameTo({ "Revival/Revenge": "Revival // Revenge" }),
     );
@@ -80,10 +80,11 @@ describe("canonicalizeDeckNames", () => {
 
     expect(result.main).toEqual([
       {
-        count: 4,
+        count: 2,
         name: "Revival // Revenge",
         sourcePrinting: { setCode: "MH2", collectorNumber: "1" },
       },
+      { count: 2, name: "Revival // Revenge" },
     ]);
   });
 
@@ -235,6 +236,23 @@ describe("canonicalizeDeckNames", () => {
 });
 
 describe("deckCardNames / canonicalNameMap / applyCanonicalNames", () => {
+  it("merges canonical names only within the same printing", () => {
+    const one = { setCode: "one", collectorNumber: "276" };
+    const dmu = { setCode: "dmu", collectorNumber: "277" };
+    const renamed = applyCanonicalNames({
+      main: [
+        { name: "forest", count: 2, sourcePrinting: one },
+        { name: "Forest", count: 3, sourcePrinting: dmu },
+        { name: "Forest", count: 4, sourcePrinting: { ...one, setCode: "ONE" } },
+      ],
+      sideboard: [],
+    }, new Map([["forest", "Forest"]]));
+    expect(renamed.main).toEqual([
+      { name: "Forest", count: 6, sourcePrinting: one },
+      { name: "Forest", count: 3, sourcePrinting: dmu },
+    ]);
+  });
+
   it("collects every name field", () => {
     const deck: ParsedDeck = {
       main: [{ count: 1, name: "A" }],
