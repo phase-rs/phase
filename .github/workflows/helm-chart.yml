@@ -11,17 +11,23 @@ name: Helm chart
 # router-only change is exactly the case that assertion exists to catch, so
 # without this path the check would not run when it matters most. The script
 # asserts its own inputs are listed here, so the two cannot drift apart.
+# `client/deploy/phase-web/**` is here for the same reason: it holds the web
+# image's own nginx.conf and config.js renderer, which
+# tests/assert-web-image-defaults.sh holds to the chart's, and it asserts that
+# path is listed.
 on:
   pull_request:
     paths:
       - 'deploy/helm/**'
       - 'crates/phase-server/src/main.rs'
+      - 'client/deploy/phase-web/**'
       - '.github/workflows/helm-chart.yml'
   push:
     branches: [main]
     paths:
       - 'deploy/helm/**'
       - 'crates/phase-server/src/main.rs'
+      - 'client/deploy/phase-web/**'
       - '.github/workflows/helm-chart.yml'
 
 permissions:
@@ -51,6 +57,12 @@ jobs:
         # that independence is structural — reordering or breaking them cannot
         # stop this assertion running.
         run: deploy/helm/phase-server/tests/assert-web-routing.sh
+
+      - name: assert web image defaults
+        # The web image's standalone nginx.conf and config.js renderer must
+        # serve the site the way this chart's ConfigMap does. Renders what it
+        # needs itself, like the step above; node evaluates both config.js files.
+        run: deploy/helm/phase-server/tests/assert-web-image-defaults.sh
 
       - name: helm lint (default values)
         run: helm lint deploy/helm/phase-server
