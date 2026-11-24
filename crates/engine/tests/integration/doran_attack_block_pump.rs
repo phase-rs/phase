@@ -32,10 +32,11 @@ use engine::types::ability::ContinuousModification;
 use engine::types::actions::GameAction;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{StackEntryKind, WaitingFor};
-use engine::types::identifiers::{ObjectId, PlayerId};
+use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
+use engine::types::PlayerId;
 
 use super::rules::AttackTarget;
 use super::support::shared_card_db;
