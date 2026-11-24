@@ -395,7 +395,6 @@ face = [
   { key = "codecracker hound", class = "wrong_zone", clauses = ["Put one into your hand and the other into your graveyard."] },
   { key = "cogwork librarian", class = "missing_effect", clauses = ["Draft this card face up.", "As you draft a card, you may draft an additional card from that booster pack.", "If you do, put this card into that booster pack."] },
   { key = "coils of the medusa", class = "dropped_qualifier", clauses = ["Sacrifice this Aura: Destroy all non-Wall creatures blocking enchanted creature."] },
-  { key = "colfenor, the last yew", class = "dropped_qualifier", clauses = ["Whenever Colfenor or another creature you control dies, return up to one other target creature card with lesser toughness from your graveyard to your hand."] },
   { key = "collected conjuring", class = "dropped_qualifier", clauses = ["Put the exiled cards not cast this way on the bottom of your library in a random order."] },
   { key = "comet storm", class = "wrong_count", clauses = ["then choose another target for each time this spell was kicked.", "Comet Storm deals X damage to each of them."] },
   { key = "commander mustard", class = "extra_effect", clauses = ["Vigilance"] },

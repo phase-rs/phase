@@ -212,7 +212,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Cloudstone Curio
 - Coiling Stalker
 - Coils of the Medusa
-- Colfenor, the Last Yew
 - Commencement of Festivities
 - Compound Fracture
 - Consulate Surveillance

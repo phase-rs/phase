@@ -8608,7 +8608,7 @@ fn replacement_condition_quantity_ctx(
     source_id: ObjectId,
     affected_object_id: Option<ObjectId>,
     event: &ProposedEvent,
-) -> crate::game::quantity::QuantityContext {
+) -> crate::game::quantity::QuantityContext<'static> {
     let scoped_player = match event {
         // CR 400.7: Connive's subject may have left and returned while a
         // replacement ordering choice was pending. Its controller-relative
