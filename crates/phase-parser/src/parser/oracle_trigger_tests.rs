@@ -47482,3 +47482,69 @@ fn proft_eidetic_memory_hoists_draw_gate_and_binds_counter_quantity() {
         }
     );
 }
+
+// CR 608.2c + CR 119.4 (issue #11294, SHAPE): Niv-Mizzet, Ghost Counsel's
+// "you may pay that much life" binds the payment to the triggering life-gain
+// amount; the "draw that many cards" continuation reads the same event amount.
+#[test]
+fn trigger_niv_mizzet_ghost_counsel_pay_that_much_life_shape() {
+    let def = parse_trigger_line(
+        "Whenever you gain life, you may pay that much life. If you do, draw that many cards.",
+        "Niv-Mizzet, Ghost Counsel",
+    );
+    assert_eq!(def.mode, TriggerMode::LifeGained);
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(execute.optional, "the pay clause is a 'you may'");
+    assert_eq!(
+        execute.effect.as_ref(),
+        &Effect::PayCost {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        }
+    );
+    let continuation = execute
+        .sub_ability
+        .as_deref()
+        .expect("If-you-do continuation");
+    assert_eq!(
+        continuation.effect.as_ref(),
+        &Effect::Draw {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            target: TargetFilter::Controller,
+        }
+    );
+    assert_no_unimplemented(execute);
+}
+
+// Issue #11295: Verrak, Warped Sengir's "pay that much life again" must stay
+// honestly Unimplemented until the paid-life condition + activation paid-life
+// binding land — the event-bound pay-life arm is full-consumption and declines
+// the "again" rider rather than dropping it.
+#[test]
+fn trigger_verrak_pay_that_much_life_again_stays_unimplemented() {
+    let def = parse_trigger_line(
+        "Whenever you activate an ability that isn't a mana ability, if life was paid to activate it, you may pay that much life again. If you do, copy that ability. You may choose new targets for the copy.",
+        "Verrak, Warped Sengir",
+    );
+    // Positive reach-guard: the trigger routed and the copy continuation built,
+    // so the pay clause below is genuinely reached, not skipped upstream.
+    assert_eq!(def.mode, TriggerMode::AbilityActivated);
+    let execute = def.execute.as_deref().expect("trigger execute");
+    assert!(
+        execute.sub_ability.is_some(),
+        "copy continuation reached past the pay clause"
+    );
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::Unimplemented { name, description }
+            if name == "unparsed_verb_arguments"
+                && description.as_deref() == Some("pay that much life again")
+    ));
+}
