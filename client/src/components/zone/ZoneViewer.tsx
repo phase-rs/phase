@@ -315,7 +315,14 @@ function ZoneCard({
           let see the real card. */}
       <CardImage {...objectImageProps(obj)} size="normal" faceDown={hiddenFromViewer} />
       {showTimeCounter && timeCounter && (
-        <CounterTooltip type={timeCounter.counter} count={timeCounter.count}>
+        <CounterTooltip
+          type={timeCounter.counter}
+          count={timeCounter.count}
+          // An interactive card's tap targets, casts or delves it, or opens the
+          // debug menu; an inert card's tap does nothing, so a tap opens the
+          // counter's explanation instead.
+          touch={interactive ? "ignore" : "toggle"}
+        >
           <span
             aria-label={String(timeCounter.count)}
             className="absolute -right-1 -top-1 z-20 rounded-full border border-sky-100/70 bg-sky-700 px-1.5 py-0.5 text-xs font-bold leading-none text-white shadow"

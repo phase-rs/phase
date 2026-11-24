@@ -110,7 +110,7 @@ export function TurnStatusLine({ compact = false }: { compact?: boolean } = {}) 
         </>
       )}
       {reasonText && (
-        <GameplayTooltip className="w-56">
+        <GameplayTooltip className="w-56" touch="toggle">
           {canIActNow ? (
             t("status.yourPriorityReason", { reason: reasonText })
           ) : (

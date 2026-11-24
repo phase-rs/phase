@@ -279,15 +279,6 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         game_state,
         "GameState",
         None,
-        "post_replacement_token_choice_applied",
-        "Option<HashSet>",
-        Classification::Canonical(OPTION_HASH_SET),
-    );
-    add_spec(
-        &mut specs,
-        game_state,
-        "GameState",
-        None,
         "creature_types_dealt_combat_damage_this_turn",
         "im::HashSet",
         Classification::Canonical(IM_HASH_SET),
@@ -1014,6 +1005,15 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             Classification::Canonical(HASH_SET),
         );
     }
+    add_spec(
+        &mut specs,
+        "src/types/proposed_event.rs",
+        "TokenBatch",
+        None,
+        "applied",
+        "HashSet",
+        Classification::Canonical(HASH_SET),
+    );
 
     for owner in NUMERIC_MAP_ROUND_TRIP_OWNERS {
         let spec = specs.get_mut(owner.id).unwrap_or_else(|| {
