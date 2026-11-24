@@ -10354,7 +10354,7 @@ pub(super) fn handle_resolution_choice(
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             }
         }
-        // CR 101.4 + CR 701.21a: An exact-cardinality keeper choice. The
+        // CR 101.4 + CR 701.21a: An exact or up-to keeper choice. The
         // collected protected sets are handed to the shared scope-sacrifice
         // queue only once every scoped player has chosen, so replacement
         // choices cannot bypass later sacrifices or the parked continuation.
@@ -10364,6 +10364,7 @@ pub(super) fn handle_resolution_choice(
                 target_player: _,
                 eligible,
                 required_count,
+                minimum_count,
                 keeper_counter,
                 choose_filter,
                 sacrifice_filter,
@@ -10376,9 +10377,11 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::ChooseKeptPermanents { kept },
         ) => {
-            if kept.len() != required_count {
+            // CR 101.4 + CR 701.21a: keep between the published bounds; `None` is exact.
+            let minimum = minimum_count.unwrap_or(required_count);
+            if !(minimum..=required_count).contains(&kept.len()) {
                 return Err(EngineError::InvalidAction(format!(
-                    "Must keep exactly {required_count} permanent(s), got {}",
+                    "Must keep between {minimum} and {required_count} permanent(s), got {}",
                     kept.len()
                 )));
             }
@@ -10400,7 +10403,7 @@ pub(super) fn handle_resolution_choice(
 
             let events_before_sacrifice = events.len();
             set_priority(state, player);
-            effects::choose_and_sacrifice_rest::step_exact_count(
+            effects::choose_and_sacrifice_rest::step_keeper_count(
                 state,
                 source_id,
                 source_controller,
@@ -10410,6 +10413,7 @@ pub(super) fn handle_resolution_choice(
                 &choose_filter,
                 &sacrifice_filter,
                 required_count,
+                minimum_count,
                 keeper_counter.as_ref(),
                 &scoped_players,
                 events,

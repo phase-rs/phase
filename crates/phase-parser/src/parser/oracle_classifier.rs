@@ -265,8 +265,8 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
     // permanent. Defer it to the effect-chain parser, whose keeper-dispose
     // recognizer owns the sentence. The predicate is that recognizer's own head
     // combinator INCLUDING its supported-combination gate — the parser is the
-    // detector — so a line the recognizer would refuse (Covetous Elegy, Divine
-    // Reckoning) keeps its current routing.
+    // detector — so a line the recognizer would refuse (Divine Reckoning)
+    // keeps its current routing.
     if super::oracle_effect::is_keeper_dispose_head(lower) {
         return true;
     }

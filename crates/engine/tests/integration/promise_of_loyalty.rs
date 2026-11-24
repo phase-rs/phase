@@ -247,7 +247,7 @@ fn promise_of_loyalty_each_player_keeps_one_creature() {
 
 /// V1's hostile fixture — CR 609.3: a seat with at most the printed count of
 /// eligible creatures is never prompted; it keeps what it has. Reaching this
-/// branch (`step_exact_count`'s `eligible.len() <= count` auto-keep) is what
+/// branch (`step_keeper_count`'s `eligible.len() <= count` auto-keep) is what
 /// proves the prompt loop is not simply skipped when a seat is empty.
 #[test]
 fn promise_of_loyalty_auto_keeps_a_seat_that_cannot_choose() {
@@ -719,7 +719,7 @@ fn razias_purification_sacrifices_the_unchosen_not_the_keeper() {
 /// V7's hostile fixture — CR 609.3: "If an effect attempts to do something
 /// impossible, it does only as much as possible." A seat that controls FEWER
 /// permanents than the printed count keeps every one of them and sacrifices
-/// nothing, and is never prompted — `step_exact_count`'s
+/// nothing, and is never prompted — `step_keeper_count`'s
 /// `eligible.len() <= count` auto-keep arm.
 ///
 /// `promise_of_loyalty_auto_keeps_a_seat_that_cannot_choose` reaches the same
@@ -1484,7 +1484,7 @@ fn promise_of_loyalty_sentence_two_binds_to_the_keepers_on_every_pause_path() {
 /// pre-existing baseline, on every pause shape.
 ///
 /// MEASURED: a real interactive exact-keeper choice emits TWO such events
-/// even at BASE_SHA — `step_exact_count` pushes one when it first raises
+/// even at BASE_SHA — `step_keeper_count` pushes one when it first raises
 /// `WaitingFor::KeepExactPermanentsChoice`, and
 /// `perform_player_scope_sacrifices`'s completion tail pushes a second when
 /// the sacrifice actually finishes. BASELINE = 2 on

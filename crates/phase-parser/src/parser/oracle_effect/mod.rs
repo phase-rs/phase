@@ -20595,8 +20595,8 @@ fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead>
 
     // The supported-combination gate. Exhaustive on (scope, head, quantifier,
     // verb) with NO wildcard arm, so a future per-player keeper-and-destroy
-    // primitive or a `KeeperConstraint` range variant becomes a compile error
-    // here rather than a silently wrong parse.
+    // primitive or a new keeper head becomes a compile error here rather than
+    // a silently wrong parse.
     match (scope, &head, quantifier, verb) {
         // CR 701.8a: the controller-scope "choose up to N, then destroy the
         // rest" form. Duneblast, Mount Doom.
@@ -20606,13 +20606,30 @@ fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead>
             KeeperQuantifier::UpTo(_),
             KeeperDisposalVerb::Destroy,
         ) => {}
-        // CR 101.4 + CR 701.21a: the per-player keeper-and-sacrifice class.
+        // CR 101.4 + CR 701.21a: per-player keeper-and-sacrifice, exact count.
         (
             KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent,
             _,
             KeeperQuantifier::Exact(_),
             KeeperDisposalVerb::Sacrifice,
         ) => {}
+        // CR 101.4 + CR 701.21a: per-player "chooses up to N … sacrifices the rest"
+        // (Covetous Elegy). The count is a maximum; a seat may keep fewer.
+        (
+            KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent,
+            KeeperHead::Choose,
+            KeeperQuantifier::UpTo(_),
+            KeeperDisposalVerb::Sacrifice,
+        ) => {}
+        // Zero-card axis: no printed card nominates a per-player keeper by placing
+        // counters on "up to N" permanents (census: `puts? [^.]*counters? on up to
+        // [^.]*the rest` over MTGJSON AtomicCards returns no card).
+        (
+            KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent,
+            KeeperHead::Counter { .. },
+            KeeperQuantifier::UpTo(_),
+            KeeperDisposalVerb::Sacrifice,
+        ) => return Err(oracle_err(start)),
         // Zero-card axis: no printed card nominates a controller-scope keeper
         // BY placing a counter. CR 122.1's counter is what nominates the
         // keeper, and the controller-scope lowering
@@ -20639,34 +20656,19 @@ fn parse_keeper_dispose_head(input: &str) -> OracleResult<'_, KeeperDisposeHead>
         (KeeperChooserScope::Controller, _, KeeperQuantifier::Exact(_), _) => {
             return Err(oracle_err(start))
         }
-        // Zero-card axis: no printed card reaches this combination. A `jq -r
-        // 'to_entries[] | select(.value.oracle_text != null) |
-        // select(.value.oracle_text | test("choose[s]? up to"; "i")) |
-        // select(.value.oracle_text | test("sacrifices? the rest"; "i")) |
-        // .key' client/public/card-data.json` census over "choose(s) up to
-        // ... sacrifice(s) the rest" finds three cards: Archfiend of
-        // Depravity's "that player chooses" declines earlier, at the
+        // Zero-card axis: the printed "chooses up to … sacrifices the rest"
+        // class is Covetous Elegy (per-player, accepted above) and Archfiend of
+        // Depravity, whose "that player chooses" declines earlier, at the
         // head-verb step, on its unmodelled subject
         // (`keeper_dispose_head_declines_an_unmodelled_subject`). The
-        // controller-scope lowering is also `DestroyAll` over the
-        // tracked-set complement; no controller-scope sacrifice primitive
-        // with that complement exists.
+        // controller-scope lowering is `DestroyAll` over the tracked-set
+        // complement; no controller-scope sacrifice primitive with that
+        // complement exists.
         (
             KeeperChooserScope::Controller,
             _,
             KeeperQuantifier::UpTo(_),
             KeeperDisposalVerb::Sacrifice,
-        ) => return Err(oracle_err(start)),
-        // Deferred axis: the "up to N" per-player keeper cardinality. Covetous
-        // Elegy is its only card. `KeeperConstraint` has exactly one variant,
-        // `ExactCount`; a range form pulls `WaitingFor::KeepExactPermanentsChoice`'s
-        // `required_count`, the client adapter and the AI candidate seam into
-        // scope, so it is a separate unit.
-        (
-            KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent,
-            _,
-            KeeperQuantifier::UpTo(_),
-            _,
         ) => return Err(oracle_err(start)),
         // Deferred axis: the per-player keeper-and-DESTROY form. Divine
         // Reckoning is its only card. CR 701.8a destroy and CR 701.21a sacrifice
@@ -20824,12 +20826,16 @@ fn parse_keeper_dispose_rest_ir(
             }
         },
         KeeperChooserScope::EachPlayer | KeeperChooserScope::EachOpponent => {
-            // The gate admits only `Exact` on this subject; `UpTo` is the
-            // deferred Covetous Elegy axis, so this cannot be reached.
-            let KeeperQuantifier::Exact(printed_count) = head.quantifier else {
-                return None;
+            // CR 101.4 + CR 701.21a: an exact count, or a maximum the seat may keep
+            // fewer of (Covetous Elegy). CR 609.3 clamps an exact count at resolution.
+            let count = match head.quantifier {
+                KeeperQuantifier::Exact(n) => QuantityExpr::Fixed {
+                    value: i32::try_from(n).ok()?,
+                },
+                KeeperQuantifier::UpTo(n) => QuantityExpr::up_to(QuantityExpr::Fixed {
+                    value: i32::try_from(n).ok()?,
+                }),
             };
-            let keep_count = i32::try_from(printed_count).ok()?;
             // CR 101.4: every player in scope nominates, in APNAP order. The
             // effect iterates players itself, so the keeper filter carries NO
             // controller and the printed control clause is expressed here.
@@ -20872,11 +20878,7 @@ fn parse_keeper_dispose_rest_ir(
                         choose_filter: head.filter.clone(),
                         sacrifice_filter: head.filter,
                         total_power_cap: None,
-                        // CR 609.3: a player with fewer eligible permanents than
-                        // the printed count keeps as many as they can.
-                        keeper_constraint: Some(KeeperConstraint::ExactCount {
-                            count: QuantityExpr::Fixed { value: keep_count },
-                        }),
+                        keeper_constraint: Some(KeeperConstraint::Count { count }),
                         keeper_counter,
                     }),
                     remainder_source.map(|_| ClauseBoundary::Sentence),
@@ -21411,7 +21413,7 @@ fn parse_threshold_land_balance_ir(
                 choose_filter: land.clone(),
                 sacrifice_filter: land,
                 total_power_cap: None,
-                keeper_constraint: Some(KeeperConstraint::ExactCount {
+                keeper_constraint: Some(KeeperConstraint::Count {
                     count: QuantityExpr::Fixed { value: keep_count },
                 }),
                 keeper_counter: None,

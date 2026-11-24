@@ -431,7 +431,6 @@ face = [
   { key = "court of locthwain", class = "wrong_duration", clauses = ["At the beginning of your upkeep, exile the top card of target opponent's library.", "You may play that card for as long as it remains exiled, and mana of any type can be spent to cast it."] },
   { key = "court of vantress", class = "condition_wrong", clauses = ["If you're not the monarch, you may have this enchantment become a copy of it, except it has this ability."] },
   { key = "coveted falcon", class = "dropped_qualifier", clauses = ["Whenever this creature attacks, gain control of target permanent you own but don't control."] },
-  { key = "covetous elegy", class = "wrong_object", clauses = ["Each player chooses up to two creatures they control, then sacrifices the rest."] },
   { key = "covetous urge", class = "wrong_duration", clauses = ["You may cast that card for as long as it remains exiled"] },
   { key = "crackleburr", class = "wrong_count", clauses = ["{U/R}{U/R}, {Q}, Untap two tapped blue creatures you control: Return target creature to its owner's hand."] },
   { key = "crackling doom", class = "wrong_player", clauses = ["Each opponent sacrifices a creature with the greatest power among creatures that player controls."] },

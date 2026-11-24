@@ -71339,7 +71339,7 @@ fn threshold_land_balance_lowers_exact_keeper_and_scoped_search_chain() {
         }) if matches!(count.as_ref(), QuantityExpr::Fixed { value: 7 })
     ));
     let Effect::ChooseAndSacrificeRest {
-        keeper_constraint: Some(KeeperConstraint::ExactCount { count }),
+        keeper_constraint: Some(KeeperConstraint::Count { count }),
         choose_filter,
         sacrifice_filter,
         ..
@@ -71349,6 +71349,7 @@ fn threshold_land_balance_lowers_exact_keeper_and_scoped_search_chain() {
     };
     assert_eq!(choose_filter, sacrifice_filter);
     assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
+    assert!(!count.is_up_to(), "an exact keeper count is not an up-to");
     assert_eq!(
         def.sub_link,
         crate::types::ability::SubAbilityLink::ContinuationStep,
@@ -86372,21 +86373,129 @@ fn keeper_dispose_head_declines_a_complement_domain_tail() {
     );
 }
 
-/// N6 — the gate's `(EachPlayer | EachOpponent, UpTo, _)` arm. Covetous Elegy
-/// is its only card: `KeeperConstraint` has exactly one variant, `ExactCount`.
-/// Minimal pair on the quantifier alone.
+/// N6 — CR 101.4 + CR 701.21a: the gate's per-player
+/// `(EachPlayer | EachOpponent, Choose, UpTo, Sacrifice)` arm accepts Covetous
+/// Elegy, while its zero-card `(EachPlayer | EachOpponent, Counter, UpTo,
+/// Sacrifice)` sibling declines. The counter rows are a minimal pair on the
+/// quantifier alone, so widening the accept arm to any head reddens the
+/// synthetic negative.
 #[test]
-fn keeper_dispose_gate_declines_a_per_player_up_to_keeper_count() {
+fn keeper_dispose_gate_accepts_a_per_player_up_to_choose_keeper() {
     // Covetous Elegy, verbatim first sentence.
+    let covetous = keeper_head(
+        "each player chooses up to two creatures they control, then sacrifices the rest.",
+    )
+    .expect("Covetous Elegy's per-player up-to keeper must be accepted");
+    assert_eq!(covetous.quantifier, KeeperQuantifier::UpTo(2));
+    assert_eq!(covetous.scope, KeeperChooserScope::EachPlayer);
+    assert_eq!(covetous.verb, KeeperDisposalVerb::Sacrifice);
+    assert_eq!(covetous.head, KeeperHead::Choose);
+
+    // Paired positive: Promise of Loyalty's exact counter head is accepted, so
+    // the decline below is the gate on the quantifier.
+    assert!(
+        keeper_head(
+            "each player puts a vow counter on a creature they control and sacrifices the rest."
+        )
+        .is_some(),
+        "the printed exact counter head must be accepted"
+    );
+
+    // Synthetic — no printed card nominates a per-player keeper by counter with an up-to count.
     assert!(keeper_head(
-        "each player chooses up to two creatures they control, then sacrifices the rest."
+        "each player puts a +1/+1 counter on up to two creatures they control, then sacrifices the rest."
     )
     .is_none());
+
+    // Synthetic — no printed card nominates a per-player keeper by counter with an up-to count.
+    // Exact twin of the negative above: only the quantifier differs.
+    let exact_twin = keeper_head(
+        "each player puts a +1/+1 counter on two creatures they control, then sacrifices the rest.",
+    )
+    .expect("the exact-count counter twin must be accepted");
+    assert_eq!(exact_twin.quantifier, KeeperQuantifier::Exact(2));
+    assert!(matches!(exact_twin.head, KeeperHead::Counter { .. }));
+    assert_eq!(exact_twin.scope, KeeperChooserScope::EachPlayer);
+    assert_eq!(exact_twin.verb, KeeperDisposalVerb::Sacrifice);
+}
+
+const COVETOUS_ELEGY_ORACLE: &str = "Each player chooses up to two creatures they control, then sacrifices the rest. Then you create a tapped Treasure token for each creature your opponents control.";
+
+/// V8 — CR 101.4 + CR 701.21a + CR 111.10a: Covetous Elegy lowers to an
+/// up-to-two per-player keeper root whose following sentence is a tapped
+/// Treasure sibling counting the caster's opponents' creatures. Reverting the
+/// gate's per-player up-to arm returns the base `TargetOnly` root.
+#[test]
+fn covetous_elegy_lowers_to_an_up_to_keeper_and_a_treasure_sibling() {
+    let parsed = sorcery(COVETOUS_ELEGY_ORACLE, "Covetous Elegy");
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(parsed.statics.is_empty(), "{:?}", parsed.statics);
     assert!(
-        keeper_head("each player chooses two creatures they control, then sacrifices the rest.")
-            .is_some(),
-        "the exact-count minimal pair must be accepted"
+        parsed.parse_warnings.is_empty(),
+        "no clause may be swallowed: {:?}",
+        parsed.parse_warnings
     );
+
+    let root = &parsed.abilities[0];
+    let Effect::ChooseAndSacrificeRest {
+        keeper_constraint: Some(KeeperConstraint::Count { count }),
+        keeper_counter: None,
+        choose_filter: TargetFilter::Typed(filter),
+        ..
+    } = root.effect.as_ref()
+    else {
+        panic!("expected an up-to keeper root, got {:?}", root.effect);
+    };
+    assert_eq!(
+        *count,
+        QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 })
+    );
+    assert_eq!(*filter, TypedFilter::creature());
+    assert!(filter.controller.is_none());
+    assert_eq!(root.player_scope, Some(PlayerFilter::All));
+
+    let token = root
+        .sub_ability
+        .as_deref()
+        .expect("the Treasure sentence must chain as a sub-ability");
+    assert_eq!(
+        token.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling
+    );
+    assert_eq!(token.player_scope, None);
+    let Effect::Token {
+        name,
+        tapped,
+        count,
+        owner,
+        ..
+    } = token.effect.as_ref()
+    else {
+        panic!("expected a Treasure token sub, got {:?}", token.effect);
+    };
+    assert_eq!(name, "Treasure");
+    assert!(*tapped);
+    assert_eq!(*owner, TargetFilter::Controller);
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::Opponent)
+                ),
+            },
+        }
+    );
+
+    let mut chain = Some(root);
+    while let Some(def) = chain {
+        assert!(
+            !matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+            "no clause may lower to Unimplemented: {:?}",
+            def.effect
+        );
+        chain = def.sub_ability.as_deref();
+    }
 }
 
 /// N7 — the gate's `(EachPlayer | EachOpponent, _, Destroy)` arm. CR 701.8a
@@ -86652,7 +86761,7 @@ fn promise_of_loyalty_binds_outer_tracked_set_inner_selfref() {
         matches!(
             keeper.effect.as_ref(),
             Effect::ChooseAndSacrificeRest {
-                keeper_constraint: Some(KeeperConstraint::ExactCount {
+                keeper_constraint: Some(KeeperConstraint::Count {
                     count: QuantityExpr::Fixed { value: 1 }
                 }),
                 keeper_counter: Some(KeeperCounterMark {
@@ -87351,7 +87460,7 @@ fn keeper_dispose_trigger_entry_points_scope_to_the_printed_players() {
         matches!(
             limited_body.effect.as_ref(),
             Effect::ChooseAndSacrificeRest {
-                keeper_constraint: Some(KeeperConstraint::ExactCount {
+                keeper_constraint: Some(KeeperConstraint::Count {
                     count: QuantityExpr::Fixed { value: 5 }
                 }),
                 choose_filter: TargetFilter::Typed(filter),

@@ -1909,7 +1909,8 @@ pub fn candidate_actions_broad_with_probe(
             required_count,
             ..
         } => {
-            // CR 101.4 + CR 701.21a: any distinct exact-size subset is legal.
+            // CR 101.4 + CR 701.21a: the first required_count eligible
+            // permanents are within min..=max for exact and up-to prompts alike.
             // Enumerate a compact deterministic baseline and leave richer board
             // evaluation to the tactical policy layer.
             let kept = eligible.iter().copied().take(*required_count).collect();
